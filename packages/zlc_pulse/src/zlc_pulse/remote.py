@@ -10,6 +10,8 @@ can use the same connection at any time.
 
 from __future__ import annotations
 
+from .endpoint import DEFAULT_BIND_HOST, DEFAULT_HOST, DEFAULT_PORT
+
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 import argparse
@@ -52,17 +54,6 @@ UART_PROBE_TIMEOUT = 0.5
 DEFAULT_CLIENT_IDLE_TIMEOUT = 300.0
 BUSY_REQUEST_TIMEOUT = 1.0
 BACKEND_CHOICES = ("auto", "uart", "jtag-axi", "memory")
-#: Where a pulse server listens, and where a client looks for one.
-#:
-#: Said once.  It was said in the server default, the client default, the CLI
-#: default, a widget's placeholder and an apparatus form default -- five copies
-#: of one number, in four packages, and changing the port meant finding them.
-DEFAULT_PORT = 18861
-#: What a server binds by default: every interface, because the board is often
-#: on a different machine from the operator.
-DEFAULT_BIND_HOST = "0.0.0.0"
-#: Where a client looks by default: this machine, because it usually is.
-DEFAULT_HOST = "127.0.0.1"
 
 REMOTE_METHODS = (
     "open",
