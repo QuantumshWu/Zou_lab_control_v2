@@ -42,6 +42,7 @@ EXPECTED_FACADE = (
     "open_figure_viewer",
     "open_pulse_editor",
     "open_task_console",
+    "use_panel_display_sizes",
 )
 EXPECTED_PUBLIC = frozenset(name for name in EXPECTED_FACADE if not name.startswith("_"))
 MAX_PUBLIC_NAMES = 27

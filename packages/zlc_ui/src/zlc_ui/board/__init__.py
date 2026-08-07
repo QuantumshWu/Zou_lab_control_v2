@@ -13,6 +13,7 @@ from .panel_geometry import (
     DEFAULT_PANEL_SIZE,
     PANEL_SIZES,
     panel_display_size,
+    use_panel_display_sizes,
     panel_size_cells,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "DEFAULT_PANEL_SIZE",
     "PANEL_SIZES",
     "panel_display_size",
+    "use_panel_display_sizes",
     "panel_size_cells",
 ]

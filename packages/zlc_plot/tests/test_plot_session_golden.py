@@ -57,6 +57,7 @@ _GOLDEN_ROOT = Path(__file__).with_name("goldens")
 def test_headless_plot_kinds_have_stable_rgba_goldens(
     snapshot: DatasetSnapshot,
     kind: str,
+    logical_shape,
 ) -> None:
     selected_snapshot = image_snapshot() if kind == "image" else snapshot
     factory = {
@@ -68,7 +69,9 @@ def test_headless_plot_kinds_have_stable_rgba_goldens(
     try:
         first = session.rgba()
         second = session.rgba()
-        assert first.shape == (357, 480, 4)
+        # Derived, not restated: the plan owns the size, this owns the
+        # question of whether the raster matches its plan.
+        assert first.shape == logical_shape()
         assert np.array_equal(first, second)
         expected = np.asarray(
             Image.open(_GOLDEN_ROOT / f"{kind}.png").convert("RGBA"),

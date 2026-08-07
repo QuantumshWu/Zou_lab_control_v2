@@ -232,7 +232,20 @@ DEFAULT_LAYOUT = PlotLayoutConfig(
     display_scale=0.7,
     export_dpi=600.0,
     panel_unit=PixelSize(240, 180),
-    panel_margins=Margins(110, 96, 80, 70),
+    # (left, right, bottom, top).  The horizontal pair is the instrument these
+    # figures are modelled on: Confocal-GUIv2 live_plot/plot_strategy.py sets
+    # fixed_data_px (480, 360) with margins_px (110, 110, 100, 40) under a
+    # "canvas area (700, 500)" -- self-proving, since 110+480+110 = 700.  This
+    # tree had carried 96 on the right, which is nobody's chosen number and
+    # made the canvas 686 wide.  Symmetry restored.
+    #
+    # The VERTICAL pair is this project's, deliberately: 80 bottom and 70 top
+    # rather than the reference's 100/40.  These panels carry a title where
+    # the reference had none and sit in a grid where a tall bottom margin
+    # doubles as the row gap, so the room is spent differently.  Kept on the
+    # owner's call, and recorded here so the difference reads as a decision
+    # rather than as the drift the 96 turned out to be.
+    panel_margins=Margins(110, 110, 80, 70),
     pulse_left_margin_px=122,
     image_split=ImageSplit(0.75, 0.10, 0.10, 0.025, 0.025),
     rolling_split=RollingSplit(0.825, 0.025, 0.15),

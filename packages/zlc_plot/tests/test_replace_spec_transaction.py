@@ -74,7 +74,7 @@ def test_layout_rejected_replace_rolls_back_completely() -> None:
         session.close()
 
 
-def test_projection_rejected_replace_is_untouched_precommit() -> None:
+def test_projection_rejected_replace_is_untouched_precommit(logical_shape) -> None:
     session = _grid_session()
     try:
         # x=repeat leaves the authored 100-row point domain unreferenced;
@@ -85,6 +85,7 @@ def test_projection_rejected_replace_is_untouched_precommit() -> None:
         assert description.semantics.kind is PlotKind.CURVE
         assert description.semantics.x == AxisRef.point("x")
         session.set_labels(title="alive")
-        assert session.rgba().shape == (357, 480, 4)
+        # Derived from the plan, so a geometry correction is not a puzzle.
+        assert session.rgba().shape == logical_shape()
     finally:
         session.close()

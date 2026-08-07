@@ -268,31 +268,62 @@ def test_the_apparatus_form_offers_the_port_a_server_actually_listens_on() -> No
     assert fields["host"] == remote.DEFAULT_HOST
 
 
-# ------------------------------------------------------- panel geometry mirror
+def test_the_card_does_not_own_a_second_copy_of_the_figure_geometry() -> None:
+    """A card is a frame around a picture; the picture's size is the drawer's.
 
-def test_a_card_is_sized_for_the_figure_that_goes_in_it() -> None:
-    """The nine presets and their pixel geometry are written in two packages.
+    zlc_ui used to restate the margins, the cell unit and the display scale,
+    and the test here stood over the two copies checking they still agreed --
+    a guard whose existence admits there are two of something.  Correcting the
+    panel margins against the instrument these figures descend from made the
+    copy drift, and this is what noticed.  Now the size is SUPPLIED by the
+    composition layer, which is the only one that may import both, so the two
+    cannot disagree.
 
-    zlc_plot draws the figure and zlc_ui sizes the card that holds it, and
-    neither may import the other -- zlc_ui carries no domain dependency at all.
-    So the constants are a forced mirror, and if they drift the operator gets a
-    card with the wrong-sized picture in it, at every preset.
+    What is left to check is that nobody quietly copies it back.
     """
 
+    from pathlib import Path
+
+    import zlc_ui.board.panel_geometry as geometry
     from zlc_plot import DEFAULTS
     from zlc_plot.kinds import PlotKind
     from zlc_plot.layout import resolve_surface
     from zlc_ui.board import PANEL_SIZES, panel_display_size
 
     for name in PANEL_SIZES:
-        surface = resolve_surface(
+        plan = resolve_surface(
             name, PlotKind.CURVE, layout=DEFAULTS.layout, style=DEFAULTS.style
         )
-        assert tuple(surface.logical_size) == panel_display_size(name), name
+        assert panel_display_size(name) == tuple(plan.logical_size), name
 
     assert PANEL_SIZES == tuple(
         preset.name for preset in DEFAULTS.layout.presets
     ), "the two packages offer different panel sizes"
+
+    # No margins, no cell unit, no scale: the numbers live in one package.
+    source = Path(geometry.__file__).read_text(encoding="utf-8")
+    for copied in ("_PANEL_MARGINS_PX", "_PANEL_UNIT_PX", "_PANEL_DISPLAY_SCALE"):
+        assert copied not in source, f"{copied} is a second copy of zlc_plot's geometry"
+
+
+def test_with_nobody_drawing_a_card_is_sized_as_the_empty_frame_it_is() -> None:
+    """zlc_ui must stay usable alone -- its gallery and demos are real users.
+
+    So an unsupplied board falls back to its OWN cell, which copies nothing:
+    the fallback is proportional to the preset's grid and carries no margin
+    and no scale.  That is the difference between a default and a duplicate.
+    """
+
+    import zlc_ui.board.panel_geometry as geometry
+
+    supplied = geometry._measure
+    geometry._measure = None
+    try:
+        cell_width, cell_height = geometry.PLACEHOLDER_CELL_PX
+        assert geometry.panel_display_size("2x2") == (2 * cell_width, 2 * cell_height)
+        assert geometry.panel_display_size("8x4") == (4 * cell_width, 8 * cell_height)
+    finally:
+        geometry._measure = supplied
 
 
 def test_the_two_content_name_rules_agree() -> None:

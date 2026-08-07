@@ -14,6 +14,14 @@ from __future__ import annotations
 
 from pathlib import Path as _Path
 
+# Supplied on import of the composition layer, because that is the moment both
+# halves exist: the drawing package knows how big a panel's picture is, the
+# window package frames it, and neither may import the other.  Importing this
+# one at all means a window is about to be built.
+from . import panel_sizes as _panel_sizes
+
+_panel_sizes.install()
+
 __version__ = "0.1.0"
 _PACKAGE_DIR = _Path(__file__).resolve().parent
 if _PACKAGE_DIR.name != "zlc_workbench" or __package__ != "zlc_workbench":

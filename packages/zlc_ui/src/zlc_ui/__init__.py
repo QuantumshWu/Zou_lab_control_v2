@@ -14,6 +14,11 @@ _EXPORTS = {
     "FormSpec": ("zlc_ui.form", "FormSpec"),
     "FormRuntimeContext": ("zlc_ui.form", "FormRuntimeContext"),
     "BoardMetrics": ("zlc_ui.board", "BoardMetrics"),
+    # How big each named panel's picture is, which the DRAWING package
+    # knows and this one may not import.  Supplied once by whoever
+    # composes a window; the alternative was a second copy of the
+    # geometry here, kept in step by a test.
+    "use_panel_display_sizes": ("zlc_ui.board", "use_panel_display_sizes"),
     # One call per window.  What comes back is a handle -- see zlc_ui.windows
     # for why the outside is never handed a widget tree.
     # The one UI-acceptance capture, and the screen fraction every window is

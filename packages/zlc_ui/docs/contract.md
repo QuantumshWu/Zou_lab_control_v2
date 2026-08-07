@@ -35,6 +35,7 @@ __all__ = (
     "open_figure_viewer",
     "open_pulse_editor",
     "open_task_console",
+    "use_panel_display_sizes",
 )
 ```
 

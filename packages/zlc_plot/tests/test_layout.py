@@ -90,3 +90,61 @@ def test_a_pulse_gets_the_smallest_preset_that_draws_it_legibly() -> None:
     width, height = plan.logical_size
     assert (box.bottom - box.top) * height >= 22 * DEFAULT_LAYOUT.pulse_row_min_px
     assert (box.right - box.left) * width >= 6 * DEFAULT_LAYOUT.pulse_period_min_px
+
+
+def test_the_base_figure_is_the_instrument_it_is_modelled_on() -> None:
+    """The margins are not free parameters; they are quoted, and they add up.
+
+    Confocal-GUIv2 live_plot/plot_strategy.py declares the figure these panels
+    descend from:
+
+        self.fixed_data_px = (480, 360)
+        # canvas area (700, 500)
+        # left 220, 140
+        self.margins_px    = (110, 110, 100, 40)   # (L, R, B, T)
+
+    Those numbers are self-proving -- 110+480+110 = 700 and 100+360+40 = 500 --
+    which is what makes a typo in them detectable at all.  This tree had
+    carried (110, 96, 80, 70): 686x510, reproducing neither the reference nor
+    anything else, with three of four values altered.  It survived every
+    review because a margin looks like a taste, and nobody re-derived the
+    canvas it is supposed to produce.  So the derivation is the test.
+    """
+
+    from zlc_plot.layout import DEFAULT_LAYOUT
+
+    margins = DEFAULT_LAYOUT.panel_margins
+    unit = DEFAULT_LAYOUT.panel_unit
+    preset = DEFAULT_LAYOUT.preset("2x2")
+
+    data_width = preset.columns * unit.width
+    data_height = preset.rows * unit.height
+    assert (data_width, data_height) == (480, 360), "the reference data box"
+
+    # Horizontal: the reference's, exactly -- and symmetric, which is what
+    # made the stray 96 detectable.  Its own comment says "left 220".
+    assert margins.left == margins.right == 110
+    assert margins.left + data_width + margins.right == 700, "the reference canvas width"
+
+    # Vertical: deliberately NOT the reference's 100/40.  These panels carry a
+    # title the reference had none of and tile into a grid, so the room is
+    # spent differently.  Pinned anyway, because the point of this test is
+    # that every one of these four numbers is a decision somebody can name.
+    assert (margins.bottom, margins.top) == (80, 70)
+
+
+def test_the_side_panel_splits_are_the_reference_ratios() -> None:
+    """Checked in the same sweep that found the margins wrong; these are right.
+
+    live_plot/plot_strategy.py:
+        Live1DDis  layout_split([0.825, 0.15], [0.025])
+        Live2DDis  layout_split([0.75, 0.1, 0.1], [0.025, 0.025])
+    """
+
+    from zlc_plot.layout import DEFAULT_LAYOUT
+
+    rolling = DEFAULT_LAYOUT.rolling_split
+    image = DEFAULT_LAYOUT.image_split
+    assert (rolling.history, rolling.gap, rolling.distribution) == (0.825, 0.025, 0.15)
+    assert (image.image, image.distribution, image.colorbar) == (0.75, 0.10, 0.10)
+    assert (image.image_distribution_gap, image.distribution_colorbar_gap) == (0.025, 0.025)

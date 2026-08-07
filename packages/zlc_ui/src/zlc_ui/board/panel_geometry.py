@@ -1,32 +1,68 @@
-"""The v1 panel-size vocabulary and display geometry used by the board.
+"""The panel-size vocabulary the board lays cards out with.
 
-This is the small, Qt-free portion of v1's ``panel_size`` and ``plot_layout``
-that the UI board needs.  The names and constants are kept here so the board,
-cards, and any future preview do not invent separate size presets.
+A card is a frame around a picture, so the card's size is the picture's size
+plus chrome.  Who knows the picture's size is the package that draws it, and
+this package may not import that one -- zlc_ui carries no domain dependency at
+all.  So the sizes are SUPPLIED: whoever composes a window owns both halves and
+tells this one what the drawing package said.
+
+They used to be copied.  Margins, cell units and a display scale were all
+restated here, with a test standing over the two copies checking they still
+agreed -- which is a guard admitting there are two of something.  It caught
+the drift the moment the margins were corrected against the instrument these
+figures descend from, and a guard that has to catch a class of bug is worse
+than that class of bug being impossible.  A card asks for the size; with
+nobody drawing -- a gallery, a demo -- it sizes itself as the empty frame it
+is, from a cell of its own that copies nothing.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 __all__ = [
     "DEFAULT_PANEL_SIZE",
     "PANEL_SIZES",
     "panel_display_size",
+    "PLACEHOLDER_CELL_PX",
     "panel_size_cells",
+    "use_panel_display_sizes",
 ]
 
 
+#: The names only.  A name is this package's own vocabulary -- it is what a
+#: combo box offers and what a saved layout records -- while what each one
+#: MEASURES belongs to the drawing package.
 PANEL_SIZES = ("1x2", "2x2", "4x2", "1x4", "2x4", "4x4", "4x8", "8x4", "8x8")
 DEFAULT_PANEL_SIZE = "2x2"
 
-# v1 plot-layout facts.  ``panel_display_size`` is the logical Qt data region;
-# Fluent chrome is added by ``ConsoleBoardView.card_size``.
-_PANEL_DISPLAY_SCALE = 0.7
-_PANEL_UNIT_PX = (180, 240)  # row height, column width in design pixels
-_PANEL_MARGINS_PX = (110, 96, 80, 70)  # left, right, bottom, title
+#: What an EMPTY card measures, in logical pixels per grid cell.  This is
+#: this package's own number and not a copy of anything: a frame with no
+#: picture in it still needs a size, and how big that is is a UI decision.
+#: What is deliberately NOT here is the figure geometry -- margins, the design
+#: cell and the display scale were all restated in this file, kept in step
+#: with the drawing package by a test, and they drifted the moment those
+#: margins were corrected.
+PLACEHOLDER_CELL_PX = (168, 126)  # width, height
+
+_measure: Callable[[str], tuple[int, int]] | None = None
+
+
+def use_panel_display_sizes(measure: Callable[[str], tuple[int, int]]) -> None:
+    """Tell this package how big each named panel's picture is.
+
+    Called once by whoever composes a window, from the drawing package's own
+    plan.  One source, injected across a seam neither side may cross.
+    """
+
+    global _measure
+    if not callable(measure):
+        raise TypeError("panel display sizes must come from a callable")
+    _measure = measure
 
 
 def panel_size_cells(size: str) -> tuple[int, int]:
-    """Parse one v1 ``rows x columns`` panel preset."""
+    """Parse one ``rows x columns`` panel preset."""
 
     key = str(size).strip().lower().replace(" ", "")
     if key not in PANEL_SIZES:
@@ -38,13 +74,14 @@ def panel_size_cells(size: str) -> tuple[int, int]:
 
 
 def panel_display_size(size: str = DEFAULT_PANEL_SIZE) -> tuple[int, int]:
-    """Return v1's logical Qt data-region size for a named panel."""
+    """The logical Qt data region for a named panel, as the drawer measured it."""
 
-    rows, columns = panel_size_cells(size)
-    left, right, bottom, top = _PANEL_MARGINS_PX
-    design_width = columns * _PANEL_UNIT_PX[1] + left + right
-    design_height = rows * _PANEL_UNIT_PX[0] + bottom + top
-    return (
-        round(design_width * _PANEL_DISPLAY_SCALE),
-        round(design_height * _PANEL_DISPLAY_SCALE),
-    )
+    key = str(size).strip().lower().replace(" ", "")
+    rows, columns = panel_size_cells(key)
+    if _measure is None:
+        # Nobody is drawing: a gallery, a demo, this package's own tests.  The
+        # card is sized as the frame it is, from this package's own cell.
+        cell_width, cell_height = PLACEHOLDER_CELL_PX
+        return columns * cell_width, rows * cell_height
+    width, height = _measure(key)
+    return int(width), int(height)
