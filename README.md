@@ -3,13 +3,39 @@
 Neutral-atom experiment control: one repository, one distribution, eight layers.
 
 ```
-bin\experiment.bat        the apparatus, then the console, then the pulse editor
-bin\pulse_editor.bat      the pulse window on its own
+bin\install_requirements.bat   once per machine: numpy, matplotlib, PyQt5, ...
+bin\experiment.bat             the apparatus, then the console, then the pulse editor
+bin\pulse_editor.bat           the pulse window on its own
+bin\update.bat                 git pull, re-check dependencies, prove it still imports
 ```
 
 Run them from your experiment folder — the one holding `pulses\`, `data\` and
 `apparatus.json`. They are deliberately not passed a workspace: a
 double-clicked launcher starts in `bin\`, which is nobody's experiment.
+
+## Nothing is installed, and that is deliberate
+
+This checkout is not `pip install`ed.  The code is reached by PATH: every
+launcher puts this folder on `PYTHONPATH` and runs
+`python -m zou_lab_control_v2 <window>`, and importing that package is what
+puts all eight layers ahead of anything else.  A notebook does the same with
+one line:
+
+```python
+import zou_lab_control_v2   # first, before any zlc_* import
+import zlc_workbench
+```
+
+The reason is a failure this project has already paid for.  Install the same
+names twice -- once from here, once from somewhere else -- and `import
+zlc_data` answers with whichever pip wired up, so a change made here appears
+to do nothing, repeatedly, with nothing on screen to say why.  So
+`zou_lab_control_v2` refuses out loud if a `zlc_*` module was imported before
+it: arriving second is exactly the case that used to pass silently.
+
+On the experiment machine the update is therefore just a pull.
+`bin\update.bat` does it, re-checks the dependency list, and proves the code
+still imports -- before you find out during a run.
 
 ## The eight layers, and what each is allowed to know
 
