@@ -1614,7 +1614,10 @@ def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequenc
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
 
     presenter.view.scan_run_requested.emit(
-        "import numpy as np\nscan_table = np.linspace(100, 200, 7).reshape(-1, 1)\n"
+        # In the unit the bound period is written in -- this pulse is authored
+        # in seconds -- and inside what a 25-bit slot operand can hold.
+        "import numpy as np\n"
+        "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
 
     assert len(presenter._scan_rows) == 7

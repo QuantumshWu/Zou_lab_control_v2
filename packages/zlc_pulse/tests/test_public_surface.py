@@ -195,6 +195,12 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 6_650 -> 6_700 for the separation between where a generated sweep is
+    # SEEDED and what the board will actually accept.  They were one pair of
+    # numbers, so the only thing that knew a slot cannot exceed a 25-bit
+    # operand was the device -- which said so in ticks, at load time, after
+    # compiling.  A column now carries its own legal range, the template
+    # prints it, and a table is refused in the unit its author wrote it in.
     # 6_515 -> 6_580 for the scan crossing: a scan column now describes itself
     # in the unit the EDITOR shows for the field it scans, and carries the
     # scale and offset that reach the wire, so scan_rows_to_wire/from_wire can
@@ -207,14 +213,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 6_650
+    assert counted <= 6_700
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_830
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_880
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

@@ -49,6 +49,16 @@ class ScanColumnSpec:
     #: field had two number systems, the author had to know which side of the
     #: window they were on, and nothing on screen said so.
     unit: str = "ns"
+    #: The widest this column may go, in its own unit.  SEPARATE from lo/hi,
+    #: which is where a generated sweep is seeded: a template brackets the
+    #: value the field currently holds, while the limit is what the hardware
+    #: can actually be given.  Conflating them either seeds a sweep across the
+    #: board's entire reach or lets a table past that the board will refuse --
+    #: and it refused in ITS units, at load time, having already compiled:
+    #: "scan slot 0 value 50000000000 does not fit the board's 25-bit signed
+    #: multiplier operand".
+    limit_lo: float = 0.0
+    limit_hi: float = 0.0
     #: How this column reaches the wire: ``wire = value * scale + offset``.
     #: Carried on the column because the column is what knows which field it
     #: scans, so the conversion has exactly one description and both
@@ -89,19 +99,25 @@ def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
                     float(high),
                     True,
                     "DAC code (0 = 0 V)",
+                    limit_lo=float(low),
+                    limit_hi=float(high),
                     wire_offset=float(-low),
                 )
             )
         else:
             unit = _field_unit(sequence, reference)
             nominal = _nominal_value(sequence, reference, unit)
+            quantum = _quantum(sequence, unit)
+            longest = _longest_slot_ticks() / _ticks_per(sequence, unit)
             columns.append(
                 ScanColumnSpec(
                     slot.slot_id,
-                    max(_quantum(sequence, unit), nominal * 0.5),
-                    max(2.0 * _quantum(sequence, unit), nominal * 1.5),
+                    max(quantum, nominal * 0.5),
+                    min(longest, max(2.0 * quantum, nominal * 1.5)),
                     False,
                     unit,
+                    limit_lo=quantum,
+                    limit_hi=longest,
                     wire_scale=_ticks_per(sequence, unit),
                 )
             )
@@ -147,6 +163,19 @@ def scan_rows_from_wire(
         )
         for row in rows
     )
+
+
+def _longest_slot_ticks() -> float:
+    """The largest tick count a slot can hold, from the board's own width.
+
+    Asked of the compiler rather than written down again: the multiplier
+    operand width is a fact of the design, and a second copy of it here would
+    drift the moment the design changed.
+    """
+
+    from .compile import slot_operand_width
+
+    return float((1 << (slot_operand_width() - 1)) - 1)
 
 
 def _field_unit(sequence: PulseSequence, reference: object) -> str:
@@ -246,13 +275,11 @@ def validate_scan_table(
     # wire's rule applied one layer too early.
     for index, spec in enumerate(tuple(columns)):
         column = values[:, index]
-        if spec.is_dac and (column < spec.lo).any() or spec.is_dac and (column > spec.hi).any():
+        if (column < spec.limit_lo).any() or (column > spec.limit_hi).any():
             raise ValueError(
-                f"{spec.name}: {spec.unit} must be within [{spec.lo:g}..{spec.hi:g}]"
-            )
-        if not spec.is_dac and (column * spec.wire_scale < 1.0).any():
-            raise ValueError(
-                f"{spec.name}: a duration must be at least one device tick"
+                f"{spec.name}: {spec.unit} must be within "
+                f"[{spec.limit_lo:g} .. {spec.limit_hi:g}], and this table asks for "
+                f"{column.min():g} .. {column.max():g}"
             )
     return tuple(
         tuple(int(round(v)) if spec.is_dac else float(v)
@@ -278,9 +305,16 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
         return f"{base}.round().astype(int)" if spec.is_dac else base
 
     def _note(spec: ScanColumnSpec) -> str:
+        # The LEGAL range, not the seeded one.  What the board will accept is
+        # the thing worth knowing while writing the sweep; the numbers below
+        # are only a starting bracket around what the field holds now.
+        legal = f"{spec.limit_lo:g} .. {spec.limit_hi:g}"
         if spec.is_dac:
-            return f"{spec.name}: {spec.unit}, range [{spec.lo:g}..{spec.hi:g}]"
-        return f"{spec.name}: duration in {spec.unit}, the unit its period is in"
+            return f"{spec.name}: {spec.unit}, {legal}"
+        return (
+            f"{spec.name}: duration in {spec.unit}, the unit its period is in "
+            f"({legal})"
+        )
 
     if str(kind) == "grid":
         sizes = [5, 4, 3] + [2] * max(0, count - 3)

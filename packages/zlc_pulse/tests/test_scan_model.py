@@ -7,7 +7,12 @@ import pytest
 
 from zlc_pulse import PulsePeriod, PulseSequence, pulse_target_from_xdc
 from zlc_pulse.model import PulseFieldRef, PulseSlot
-from zlc_pulse.scan import ScanColumnSpec, scan_columns_for, scan_table_template
+from zlc_pulse.scan import (
+    ScanColumnSpec,
+    scan_columns_for,
+    scan_table_template,
+    validate_scan_table,
+)
 
 
 def _sequence(slots=()):
@@ -59,6 +64,35 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     assert duration.wire_scale == 1e6 / 20.0
     # The sweep brackets the value the field actually holds: 5 ms.
     assert duration.lo < 5 < duration.hi
+
+
+def test_a_column_says_what_the_board_will_accept_not_only_what_to_try() -> None:
+    """The seeded sweep and the legal range are different questions.
+
+    They were one pair of numbers, so the only thing that knew a duration slot
+    cannot exceed a 25-bit multiplier operand was the device -- which said so
+    in ticks, at load time, having already compiled:
+
+        scan slot 0 value 50000000000 does not fit the board's 25-bit signed
+        multiplier operand ([-16777216, 16777215])
+
+    ...for a table whose author had written milliseconds.
+    """
+
+    from zlc_pulse.compile import slot_operand_width
+
+    sequence = _sequence(
+        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ms"),)
+    )
+    column, = scan_columns_for(sequence)
+
+    longest = ((1 << (slot_operand_width() - 1)) - 1) * 20.0 / 1e6
+    assert column.limit_hi == pytest.approx(longest)
+    # Seeded around the 5 ms the field holds, not across the board's reach.
+    assert column.lo < 5 < column.hi < column.limit_hi
+
+    with pytest.raises(ValueError, match="ms must be within"):
+        validate_scan_table(np.linspace(1e6, 10e6, 5).reshape(-1, 1), (column,))
 
 
 def test_the_starter_program_builds_one_table_of_the_right_width() -> None:
