@@ -1565,6 +1565,8 @@ class PulseEditorPresenter:
         waiting would hang the window on its own success.
         """
 
+        if not self._board_ready_for_a_program():
+            return False
         if not self.load_into_sequencer():
             return False
         if forever is None:
@@ -1590,6 +1592,38 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(f"firing stopped: {error}")
             self.stop()
+            return False
+        return True
+
+    def _board_ready_for_a_program(self) -> bool:
+        """Bring the board to a state that can accept one, which may mean off.
+
+        On Pulse is not "start from idle": it is "play THIS, now", and at the
+        bench it is pressed most often while something is already playing --
+        that is how an edit reaches a running experiment.  Off-then-on is what
+        the gesture means, so the off belongs here.
+
+        The device is right to refuse the alternative.  Loading a program into
+        a firing streamer would rewrite the tables under the engine, so
+        ``load``, ``write_slots``, ``write_scan_table`` and ``fire`` all demand
+        an idle board; a device that silently stopped a running experiment
+        because someone called ``load`` would be a far worse thing to own.
+        What was missing is that nobody was doing the stopping.
+
+        Asked first, because the answer may be several minutes old -- and only
+        stopped if the answer is yes, so an On Pulse on an idle board does not
+        drive the outputs safe on the way to driving them.
+        """
+
+        if self.sequencer is None:
+            return True
+        self._poll_board()
+        if not self.running:
+            return True
+        self.stop()
+        self._poll_board()
+        if self.running:
+            self._warn("the board is still playing and would not stop; not loading over it")
             return False
         return True
 
@@ -2250,6 +2284,10 @@ class PulseEditorPresenter:
         if not self._scan_rows:
             return
         row = self._scan_rows[min(self._held_point, len(self._scan_rows) - 1)]
+        # Holding a scan point writes the slots, and writing the slots needs an
+        # idle board for the same reason firing a new program does.
+        if not self._board_ready_for_a_program():
+            return
         try:
             self.sequencer.write_slots(tuple(int(value) for value in row))
         except Exception as error:

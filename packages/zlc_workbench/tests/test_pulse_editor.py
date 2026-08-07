@@ -2229,11 +2229,41 @@ def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
         assert presenter.fire() is True
         assert board.events == ["load", "fire forever"], board.events
 
-        # And asking explicitly still wins over what the document says.
+        # And asking explicitly still wins over what the document says.  The
+        # board is playing forever by now, so this press is the ordinary bench
+        # case: On Pulse over a running pulse, which is off THEN on.  A program
+        # cannot be loaded into a firing streamer -- the device refuses, and is
+        # right to -- so the stop belongs to the gesture that needs it.
         board.events.clear()
         presenter.set_repeat(ids[0], ids[-1], 3)
         assert presenter.fire(forever=True) is True
-        assert board.events == ["load", "fire forever"], board.events
+        assert board.events == ["safe", "load", "fire forever"], board.events
+    finally:
+        presenter.close()
+
+
+
+def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:
+    """The complaint in one test: "cannot load this pulse: already firing".
+
+    On Pulse is how an edit reaches an experiment that is already running, so
+    it is pressed most often while the board is busy.  The device refuses to
+    load over a firing streamer -- rewriting the tables under the engine is
+    exactly what it should refuse -- so the gesture that means "play this now"
+    is what has to turn it off first.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, dial=lambda _m, _e: board)
+    try:
+        presenter.connect_to("virtual", "")
+        assert presenter.fire(forever=True) is True
+        assert presenter.running is True
+
+        board.events.clear()
+        assert presenter.fire(forever=True) is True, "a second On Pulse must work"
+        assert board.events == ["safe", "load", "fire forever"], board.events
     finally:
         presenter.close()
 
