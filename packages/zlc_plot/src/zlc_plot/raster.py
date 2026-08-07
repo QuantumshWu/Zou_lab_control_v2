@@ -567,6 +567,10 @@ class RasterPlotHost:
         self._front: RasterFront | None = None
         #: Built on demand by :meth:`qt_widget`; a headless host never has one.
         self._qt_widget = None
+        #: Whether dragging on this plot is allowed.  Held here rather than
+        #: only on the widget, because the decision can be made before the
+        #: widget exists and must survive until it does.
+        self._interaction_enabled = True
         self._front_callbacks: list[Callable[[RasterFront], None]] = []
         self._last_front_callback_error: Exception | None = None
         self._thread = Thread(
@@ -706,7 +710,35 @@ class RasterPlotHost:
 
             widget = Qt5PlotWidget(self)
             self._qt_widget = widget
+            # Whatever was decided before there was a widget to decide it for.
+            if not self._interaction_enabled:
+                widget.set_interaction_enabled(False)
         return widget
+
+    def set_interaction_enabled(self, enabled: bool) -> None:
+        """Allow or suspend dragging on this plot -- selectors, zoom, pan.
+
+        The one control a host outside this package needs over interaction, and
+        it belongs on the host rather than on the widget: whoever holds the
+        host is deliberately not holding a widget, so without this the answer
+        to "let the operator drag on it" was unreachable and the console's
+        Selectors switch ended up greying out its own dropdowns instead.
+
+        A host that has not been shown has nothing to gate: interaction is a
+        property of the widget, made when the widget is, so this is remembered
+        and applied to the widget the moment there is one.
+        """
+
+        self._interaction_enabled = bool(enabled)
+        widget = self._qt_widget
+        if widget is not None:
+            widget.set_interaction_enabled(bool(enabled))
+
+    @property
+    def interaction_enabled(self) -> bool:
+        """Whether dragging on this plot is allowed."""
+
+        return self._interaction_enabled
 
     def wait_for_front(self, timeout: float | None = None) -> RasterFront:
         """Wait for the first complete raster before exposing a new window."""

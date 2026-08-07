@@ -882,6 +882,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         super().__init__(text, parent)
         self._res_step: float | None = None
         self._allow_any = True
+        self._numeric_bounds: tuple[float | None, float | None, str] = (None, None, "float")
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self._apply_style()
         self.setText(str(text))
@@ -934,8 +935,20 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         (scientific notation); ``kind="int"`` accepts only an integer.  Optional
         ``bottom``/``top`` bound the value (an int field with a ``top`` also blocks
         clearly-too-big entries as you type).  Other characters are simply rejected at
-        the keystroke, so the field can never hold non-numeric junk."""
+        the keystroke, so the field can never hold non-numeric junk.
 
+        A bound field also CORRECTS itself when the operator leaves it, and
+        that correction is what makes the field commit at all.  A Qt validator
+        alone is worse than none here: 700 typed into a -512..511 field
+        validates as Intermediate -- no more digits than 511, so it could still
+        be on its way to something legal -- Qt lets Intermediate text sit in
+        the box, AND refuses to emit ``editingFinished`` for it.  The value is
+        then neither accepted nor refused nor reported: the operator types 700,
+        presses the button, and nothing happens at all.  Clamping before Qt
+        decides whether to emit means the field always leaves in a state it can
+        commit."""
+
+        self._numeric_bounds = (bottom, top, kind)
         if kind == "int":
             validator: QtGui.QValidator = QtGui.QIntValidator(self)
             if bottom is not None:
@@ -953,6 +966,44 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         # Force a dot decimal separator regardless of the system locale.
         validator.setLocale(QtCore.QLocale.c())
         self.setValidator(validator)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        # BEFORE super(), which is what decides whether editingFinished is
+        # emitted: an out-of-range entry that is corrected first is acceptable
+        # by the time Qt looks at it, so the field both shows the right number
+        # and tells its consumer about it.
+        self._clamp_to_numeric_bounds()
+        super().focusOutEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._clamp_to_numeric_bounds()
+        super().keyPressEvent(event)
+
+    def _clamp_to_numeric_bounds(self) -> None:
+        """Pull an out-of-range entry back to the nearest end of the range."""
+
+        bottom, top, kind = self._numeric_bounds
+        if bottom is None and top is None:
+            return
+        text = self.text().strip()
+        if not text:
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            # Non-numeric text is the validator's business, not this one's, and
+            # a field carrying a scan binding ("s2") is deliberately not a
+            # number at all.
+            return
+        clamped = value
+        if bottom is not None:
+            clamped = max(clamped, float(bottom))
+        if top is not None:
+            clamped = min(clamped, float(top))
+        if clamped == value:
+            return
+        self.setText(str(int(clamped)) if kind == "int" else str(clamped))
 
     def _snap_to_resolution(self) -> None:
         if not self._res_step:

@@ -47,6 +47,9 @@ class PulseEditorHandle(QtCore.QObject):
     duration_committed = QtCore.pyqtSignal(str, object, str)
     digital_committed = QtCore.pyqtSignal(str, str, bool)
     analog_committed = QtCore.pyqtSignal(str, str, str, object)
+    #: The page the operator turned to.  What a page costs is only worth
+    #: paying while it is being looked at.
+    page_changed = QtCore.pyqtSignal(str)
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
     insert_period_requested = QtCore.pyqtSignal(object)
@@ -96,6 +99,7 @@ class PulseEditorHandle(QtCore.QObject):
 
         view.clear_all_requested.connect(self.clear_all_requested)
         view.close_requested.connect(self.close_requested)
+        view.page_changed.connect(self.page_changed)
         for name in (
             "document_name_committed", "port_label_committed",
             "period_name_committed", "duration_committed", "digital_committed",
@@ -173,6 +177,12 @@ class PulseEditorHandle(QtCore.QObject):
     def show_warning(self, text: str) -> None:
         self._view.show_warning(text)
 
+    @property
+    def current_page(self) -> str:
+        """Which page is on screen, for a host wired after the window was built."""
+
+        return self._view.current_page
+
     def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
         return self._view.ask_open_path(caption, start_dir, filter)
 
@@ -217,9 +227,10 @@ class PulseEditorHandle(QtCore.QObject):
         file_dirty: bool,
         *,
         can_run: bool,
+        can_stop: bool,
     ) -> None:
         self._view.schedule_view.set_control_state(
-            running, synchronized, file_dirty, can_run=can_run
+            running, synchronized, file_dirty, can_run=can_run, can_stop=can_stop
         )
 
     def set_connection(self, mode: str, endpoint: str, status: str) -> None:

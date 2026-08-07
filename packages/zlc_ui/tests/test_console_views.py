@@ -35,14 +35,25 @@ from zlc_ui.console import PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
 card.set_signal_choices((('source', (('Temperature', 'temperature'),)),))
-surface = QtWidgets.QLabel('fake surface')
+class _GatedSurface(QtWidgets.QLabel):
+    # What a plot widget is, as far as this card is concerned: something you
+    # can stop the operator dragging on.
+    interaction = True
+    def set_interaction_enabled(self, enabled):
+        self.interaction = bool(enabled)
+surface = _GatedSurface('fake surface')
 card.set_surface(surface)
 card.set_status('ready', error=False)
 card.set_selectors_enabled(False)
 assert card.panel_id == 'panel-1'
 assert card.signal_combo.count() == 2
 assert surface.parentWidget() is not None
-assert not card.signal_combo.isEnabled()
+# The switch is about dragging on the PLOT, not about the card's own controls:
+# turning it off used to grey out this combo and never reach the plot at all.
+assert surface.interaction is False
+assert card.signal_combo.isEnabled()
+card.set_selectors_enabled(True)
+assert surface.interaction is True
 card.set_surface(None)
 assert not card._placeholder.isHidden()
 card.set_panel_size('1x4')

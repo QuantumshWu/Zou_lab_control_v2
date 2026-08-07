@@ -4,59 +4,77 @@ The implementation remains available from its owning submodules.  Only the
 names in ``__all__`` are the supported convenience surface; backend, raster,
 fit-engine and semantic implementation details are intentionally not flattened
 into this namespace.
+
+The facade RESOLVES those names, it does not import them.  Importing every
+submodule to publish a name pulled matplotlib -- and its font cache -- into
+the cost of the word ``import zlc_plot``, so a window that had not drawn
+anything yet, and a notebook cell that only wanted a constant, each paid about
+1.9 s before doing anything at all.  Nothing here is optional-dependency
+defensive: it is the difference between a package you may mention and a
+package you must load.
 """
 
-from .api import curve, facet_grid, histogram, image, pulse_timeline, rolling, show
-from .backends import (
-    BackendUnavailableError,
-    ensure_qt5_application,
-)
-from .config import DEFAULTS
-from .fit import FitCancelled, FitModelSpec, FitTarget
-from .kinds import AxisRef, PlotKind
-from .live import LiveDataRevision, LivePlotController
-from .primitives import (
-    ImageFrame,
-    ImagePointOverlay,
-    PointStatus,
-    PulseAnalogTrace,
-    PulseBlock,
-    PulseChannel,
-    PulseDacScanSegment,
-    PulseRepeatMarker,
-    PulseScanRegion,
-    PulseTimelineData,
-)
-from ._kinds import fitting_spec, panel_kinds
-# What sizes a panel may be, and which one suits a pulse of a given shape.
-# The window offers the first in a box and the second is what it offers when
-# nobody has chosen -- neither is something a host can work out for itself
-# without re-deriving this package's layout rules.
-from .layout import PANEL_SIZE_NAMES, recommended_pulse_preset
-from .data_contract import image_axes
-from .raster import RasterPlotHost
-from .selectors import NumericRange, SelectorKind
-from .session import (
-    FitEvent,
-    PlotSession,
-    PulseTimelineSelectionData,
-    SelectionChange,
-    SelectorData,
-)
-from .semantics import describe_semantics, schema_summary, updated_spec
-from .specs import (
-    CurvePlot,
-    FacetGridPlot,
-    HistogramPlot,
-    ImagePlot,
-    PlotLabels,
-    PlotSpec,
-    PulseTimelinePlot,
-    Reduction,
-    RollingPlot,
-)
-from .ui import parameter_controls
-from .units import DEFAULT_UNITS, Unit, UnitRegistry, resolve_unit
+from importlib import import_module as _import_module
+
+_EXPORTS = {
+    "curve": ("zlc_plot.api", "curve"),
+    "facet_grid": ("zlc_plot.api", "facet_grid"),
+    "histogram": ("zlc_plot.api", "histogram"),
+    "image": ("zlc_plot.api", "image"),
+    "pulse_timeline": ("zlc_plot.api", "pulse_timeline"),
+    "rolling": ("zlc_plot.api", "rolling"),
+    "show": ("zlc_plot.api", "show"),
+    "BackendUnavailableError": ("zlc_plot.backends", "BackendUnavailableError"),
+    "ensure_qt5_application": ("zlc_plot.backends", "ensure_qt5_application"),
+    "DEFAULTS": ("zlc_plot.config", "DEFAULTS"),
+    "FitCancelled": ("zlc_plot.fit", "FitCancelled"),
+    "FitModelSpec": ("zlc_plot.fit", "FitModelSpec"),
+    "FitTarget": ("zlc_plot.fit", "FitTarget"),
+    "AxisRef": ("zlc_plot.kinds", "AxisRef"),
+    "PlotKind": ("zlc_plot.kinds", "PlotKind"),
+    "LiveDataRevision": ("zlc_plot.live", "LiveDataRevision"),
+    "LivePlotController": ("zlc_plot.live", "LivePlotController"),
+    "ImageFrame": ("zlc_plot.primitives", "ImageFrame"),
+    "ImagePointOverlay": ("zlc_plot.primitives", "ImagePointOverlay"),
+    "PointStatus": ("zlc_plot.primitives", "PointStatus"),
+    "PulseAnalogTrace": ("zlc_plot.primitives", "PulseAnalogTrace"),
+    "PulseBlock": ("zlc_plot.primitives", "PulseBlock"),
+    "PulseChannel": ("zlc_plot.primitives", "PulseChannel"),
+    "PulseDacScanSegment": ("zlc_plot.primitives", "PulseDacScanSegment"),
+    "PulseRepeatMarker": ("zlc_plot.primitives", "PulseRepeatMarker"),
+    "PulseScanRegion": ("zlc_plot.primitives", "PulseScanRegion"),
+    "PulseTimelineData": ("zlc_plot.primitives", "PulseTimelineData"),
+    "fitting_spec": ("zlc_plot._kinds", "fitting_spec"),
+    "panel_kinds": ("zlc_plot._kinds", "panel_kinds"),
+    "PANEL_SIZE_NAMES": ("zlc_plot.layout", "PANEL_SIZE_NAMES"),
+    "recommended_pulse_preset": ("zlc_plot.layout", "recommended_pulse_preset"),
+    "image_axes": ("zlc_plot.data_contract", "image_axes"),
+    "RasterPlotHost": ("zlc_plot.raster", "RasterPlotHost"),
+    "NumericRange": ("zlc_plot.selectors", "NumericRange"),
+    "SelectorKind": ("zlc_plot.selectors", "SelectorKind"),
+    "FitEvent": ("zlc_plot.session", "FitEvent"),
+    "PlotSession": ("zlc_plot.session", "PlotSession"),
+    "PulseTimelineSelectionData": ("zlc_plot.session", "PulseTimelineSelectionData"),
+    "SelectionChange": ("zlc_plot.session", "SelectionChange"),
+    "SelectorData": ("zlc_plot.session", "SelectorData"),
+    "describe_semantics": ("zlc_plot.semantics", "describe_semantics"),
+    "schema_summary": ("zlc_plot.semantics", "schema_summary"),
+    "updated_spec": ("zlc_plot.semantics", "updated_spec"),
+    "CurvePlot": ("zlc_plot.specs", "CurvePlot"),
+    "FacetGridPlot": ("zlc_plot.specs", "FacetGridPlot"),
+    "HistogramPlot": ("zlc_plot.specs", "HistogramPlot"),
+    "ImagePlot": ("zlc_plot.specs", "ImagePlot"),
+    "PlotLabels": ("zlc_plot.specs", "PlotLabels"),
+    "PlotSpec": ("zlc_plot.specs", "PlotSpec"),
+    "PulseTimelinePlot": ("zlc_plot.specs", "PulseTimelinePlot"),
+    "Reduction": ("zlc_plot.specs", "Reduction"),
+    "RollingPlot": ("zlc_plot.specs", "RollingPlot"),
+    "parameter_controls": ("zlc_plot.ui", "parameter_controls"),
+    "DEFAULT_UNITS": ("zlc_plot.units", "DEFAULT_UNITS"),
+    "Unit": ("zlc_plot.units", "Unit"),
+    "UnitRegistry": ("zlc_plot.units", "UnitRegistry"),
+    "resolve_unit": ("zlc_plot.units", "resolve_unit"),
+}
 
 
 __version__ = "1.1.0"
@@ -71,7 +89,14 @@ MAX_PUBLIC_NAMES = 61
 
 
 def __getattr__(name: str) -> object:
-    """Load optional Qt classes only when the caller explicitly requests one."""
+    """Resolve one facade name, importing only what that name lives in.
+
+    Every public name arrives through here, so the cost of a name is the cost
+    of its own module: ``PANEL_SIZE_NAMES`` loads the layout rules and nothing
+    else, while ``RasterPlotHost`` loads the drawing stack because drawing is
+    what it does.  Resolved names are cached in ``globals()``, so this runs at
+    most once each.
+    """
 
     if name == "Qt5PlotWidget":
         from .backends import _qt5_plot_widget_class
@@ -84,7 +109,11 @@ def __getattr__(name: str) -> object:
     elif name == "edit_plot_display":
         from .qt_controls import edit_plot_display as value
     else:
-        raise AttributeError(name)
+        where = _EXPORTS.get(name)
+        if where is None:
+            raise AttributeError(name)
+        module, attribute = where
+        value = getattr(_import_module(module), attribute)
     globals()[name] = value
     return value
 

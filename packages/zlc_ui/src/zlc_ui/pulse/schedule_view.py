@@ -206,10 +206,20 @@ class PeriodCard(FluentGroupBox):
                 combo.addItems(["Edge", "Ramp", "Hold"])
                 combo.setCurrentText(str(mode).title())
                 combo.setFixedWidth(bus_mode_combo_width())
+                # The port's own code range, enforced where it is typed.  It
+                # was carried all the way here on the row and then read by
+                # nobody, so a 10-bit signed DAC accepted 700: refused later by
+                # the model, on a path the operator had already left.  A limit
+                # that exists must be the limit the box has.
                 edit = FluentScanLineEdit(
                     field.text,
-                    tooltip="Click the dot to cycle off → Scan → API → off",
+                    tooltip=(
+                        f"{port.label}: signed integer {port.lo}..{port.hi} "
+                        "(0 = 0 V)\n"
+                        "Click the dot to cycle off → Scan → API → off"
+                    ),
                 )
+                edit.set_numeric_validator("int", bottom=port.lo, top=port.hi)
                 edit.setFixedHeight(channel_row_height())
                 _apply_field(edit, field)
                 combo.currentTextChanged.connect(lambda _text, key=port.key: self._commit_analog(key))
@@ -1334,24 +1344,36 @@ class PulseScheduleView(QtWidgets.QWidget):
         file_dirty: bool,
         *,
         can_run: bool,
+        can_stop: bool,
     ) -> None:
-        """What is happening, and whether running is possible at all.
+        """What is happening, and which controls that leaves possible.
 
-        ``can_run`` has no default on purpose.  Enablement used to follow only
+        Neither flag has a default on purpose.  Enablement used to follow only
         from ``running``, so an editor with no pulse open and no board attached
         still offered On Pulse -- a control that looks available and cannot be
         is the failure this shell keeps being audited for, and a default would
         let the next caller reintroduce it silently.
+
+        On Pulse is NOT gated on running, and the correction matters: On Pulse
+        means "put this on the board and play it", which is off-then-on.  It is
+        how an operator applies an edit to a pulse that is already running --
+        the single most frequent thing done at the bench -- and disabling it
+        while running removed exactly that.  What running changes is the
+        LABEL: the asterisk says the board is playing something other than
+        what is on screen.
+
+        Stop is gated on a board alone.  Going safe must work from any state,
+        including one this window has misread, so it does not additionally
+        require a pulse to be open or the board to look busy.
         """
 
-        available = bool(can_run) and not bool(running)
-        self.run_button.setEnabled(available)
-        self.stop_button.setEnabled(bool(can_run) and bool(running))
-        self.sync_button.setEnabled(available and self._capabilities["can_sync"])
+        self.run_button.setEnabled(bool(can_run))
+        self.run_button.setText(
+            "On Pulse" if bool(running) and bool(synchronized) else "On Pulse*"
+        )
+        self.stop_button.setEnabled(bool(can_stop))
+        self.sync_button.setEnabled(bool(can_run) and self._capabilities["can_sync"])
         self.save_button.set_dirty(bool(file_dirty))
-        self.save_button.setEnabled(not bool(running))
-        self.add_button.setEnabled(not bool(running))
-        self.remove_button.setEnabled(not bool(running))
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         """Apply presenter-advertised command availability without probing a controller."""

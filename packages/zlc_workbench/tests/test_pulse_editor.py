@@ -169,10 +169,17 @@ class _ScheduleView:
         self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
 
     def set_control_state(
-        self, running: bool, synchronized: bool, file_dirty: bool, *, can_run: bool
+        self,
+        running: bool,
+        synchronized: bool,
+        file_dirty: bool,
+        *,
+        can_run: bool,
+        can_stop: bool,
     ) -> None:
         self.control_state = (bool(running), bool(synchronized), bool(file_dirty))
         self.can_run = bool(can_run)
+        self.can_stop = bool(can_stop)
 
 
 class _PreviewView:
@@ -321,7 +328,7 @@ class _EditorView:
     """
 
     _SIGNALS = (
-        "clear_all_requested", "close_requested",
+        "clear_all_requested", "close_requested", "page_changed",
         "document_name_committed", "port_label_committed",
         "period_name_committed", "duration_committed", "digital_committed",
         "analog_committed", "delay_committed", "binding_cycle_requested",
@@ -371,6 +378,14 @@ class _EditorView:
 
     def set_status_color(self, token: str) -> None:
         self.status_token = str(token)
+
+    #: The real window opens on Edit, and the presenter asks rather than
+    #: assumes -- so the double has to be able to answer.
+    page = "Edit"
+
+    @property
+    def current_page(self) -> str:
+        return self.page
 
     def show_warning(self, text: str) -> None:
         self.warnings.append(str(text))
@@ -424,9 +439,10 @@ class _EditorView:
         file_dirty: bool,
         *,
         can_run: bool,
+        can_stop: bool,
     ) -> None:
         self.schedule_view.set_control_state(
-            running, synchronized, file_dirty, can_run=can_run
+            running, synchronized, file_dirty, can_run=can_run, can_stop=can_stop
         )
 
     def set_connection(self, mode: str, endpoint: str, status: str) -> None:
@@ -517,6 +533,9 @@ def sequence():
 def presenter(sequence):
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence, make_preview=lambda data, **_options: _PreviewHost(data))
+    # Turned to Preview, because that is now what asks for a drawing: a window
+    # opens on Edit and does not build a render worker for a page behind it.
+    presenter.show_page("Preview")
     try:
         yield presenter
     finally:
@@ -1359,6 +1378,7 @@ def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
     dac = next(port for port in sequence.target.ports if port.kind == "dac")
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence, make_preview=lambda data, **_o: _PreviewHost(data))
+    presenter.show_page("Preview")
     try:
         period_id = sequence.periods[1].period_id
         view.analog_committed.emit(period_id, dac.key, "edge", 250)
@@ -2084,6 +2104,7 @@ def test_showing_every_row_grows_the_preview_widget_too(sequence) -> None:
     presenter = PulseEditorPresenter(
         view, sequence, make_preview=_make, update_preview=_update
     )
+    presenter.show_page("Preview")
     try:
         presenter.view.preview_view._include_off = False
         presenter.refresh_preview()

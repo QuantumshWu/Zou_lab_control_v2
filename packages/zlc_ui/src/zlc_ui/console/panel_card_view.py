@@ -34,6 +34,19 @@ from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FormRuntimeContext, FluentParameterForm
 
 
+def _set_interaction(surface: object | None, enabled: bool) -> None:
+    """Let the operator drag on a surface, when the surface has dragging.
+
+    Duck-typed on purpose: a plot widget owns an interaction gate, and a label
+    standing in for one in a demo does not.  Asking is how one switch can drive
+    both without either knowing about the other.
+    """
+
+    gate = getattr(surface, "set_interaction_enabled", None)
+    if callable(gate):
+        gate(bool(enabled))
+
+
 class PanelCardView(FluentGroupBox):
     """A v1 titled card with a replaceable QWidget surface."""
 
@@ -118,6 +131,7 @@ class PanelCardView(FluentGroupBox):
         )
 
         self.setCursor(QtCore.Qt.OpenHandCursor)
+        self._selectors_on = True
         self._apply_card_size(DEFAULT_PANEL_SIZE)
         self.set_status("", error=False)
         self.set_selectors_enabled(True)
@@ -206,6 +220,9 @@ class PanelCardView(FluentGroupBox):
 
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("surface must be QWidget or None")
+        if widget is not None:
+            # The switch may have been thrown while this card was empty.
+            _set_interaction(widget, self._selectors_on)
         if self._surface is not None:
             self._surface_layout.removeWidget(self._surface)
             self._surface.hide()
@@ -265,14 +282,16 @@ class PanelCardView(FluentGroupBox):
         self.status_label.setToolTip(value)
 
     def set_selectors_enabled(self, enabled: bool) -> None:
-        value = bool(enabled)
-        for widget in (
-            self.signal_combo,
-            self.size_combo,
-            self.update_spin,
-            self.settings_button,
-        ):
-            widget.setEnabled(value)
+        """Allow or suspend dragging on this panel's plot.
+
+        On the PLOT.  This disabled the card's own dropdowns and settings
+        button instead -- a different question that happens to have a similar
+        name -- so the switch appeared to work, greyed out some controls, and
+        never reached the one thing it is named after.
+        """
+
+        self._selectors_on = bool(enabled)
+        _set_interaction(self._surface, self._selectors_on)
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()

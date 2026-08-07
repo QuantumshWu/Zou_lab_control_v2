@@ -110,6 +110,10 @@ HOLD_MODE = "hold"
 #: as one pixel, so a legal pulse looks like no pulse.  1 us is the established
 #: PulseGUI's answer and reads on the timeline at its default zoom.
 NEW_PULSE_PERIOD_NS = 1000.0
+#: The page whose contents cost something to produce.  Drawing a timeline
+#: starts a render worker and a drawing session, and doing that for a page
+#: nobody has turned to is most of what a window spends before it appears.
+PREVIEW_PAGE = "Preview"
 
 
 def _connection_name(mode: str, endpoint: str) -> str:
@@ -720,8 +724,13 @@ class BoardState:
     firing: bool = False
     forever: bool = False
     loaded: bool = False
-    #: The board is holding exactly the program the editor is showing.
-    holds_shown: bool = False
+    #: What the board is holding, as the board named it.  NOT "is it what the
+    #: editor shows" -- that is a comparison, and a comparison between a board
+    #: fact and a local one belongs wherever the local one is known.  Keeping
+    #: it here meant every answer to "does this still match?" had to be bought
+    #: with a round trip, which is how typing in a box came to talk to a
+    #: server.
+    applied_digest: str = ""
     fault: str = ""
 
 
@@ -762,6 +771,12 @@ class PulseEditorPresenter:
         #: The plotting host behind the preview.  Built once and updated,
         #: and the thing a save actually goes through.
         self._preview_host: Any = None
+        #: Whether the page that draws is the page on screen.  Asked of the
+        #: window rather than assumed, so a host wired to an already-open
+        #: window agrees with what the operator is actually looking at.
+        self._preview_on_screen = (
+            str(getattr(view, "current_page", "")) == PREVIEW_PAGE
+        )
         #: A size the operator picked, which sticks until the content changes
         #: shape; None means the content chooses.
         self._pinned_size: str | None = None
@@ -832,6 +847,7 @@ class PulseEditorPresenter:
         # clear_all_requested that nothing ever emitted, and this listened to
         # that one -- so the toolbar's Clear All did nothing at all.
         view.clear_all_requested.connect(self.clear_all)
+        view.page_changed.connect(self.show_page)
         view.binding_cycle_requested.connect(self.cycle_binding)
         view.scan_array_load_requested.connect(self.load_scan_array)
         view.scan_source_committed.connect(self.set_scan_source)
@@ -1260,6 +1276,7 @@ class PulseEditorPresenter:
         if mode == "offline":
             self.connection = (mode, endpoint)
             self._show_connection("edit only")
+            self._done("disconnected - this editor is now edit only")
             # Hanging up changes the whole window, not just its status line:
             # the board's ports are gone, the Target page is authorable again,
             # and the run buttons have nothing to fire on.
@@ -1322,12 +1339,18 @@ class PulseEditorPresenter:
             self.start_new_pulse()
         else:
             self._align_sequence_to(board)
-        self._show_connection(
+        # One round trip, here, because attaching is exactly when what the
+        # board is doing is unknown.  After this the answer is kept until
+        # something this editor does to the board could have changed it.
+        self._poll_board()
+        where = (
             f"{_connection_name(*self.connection)} - {len(board.target.ports)} ports, "
             f"{len(board.target.raw_lanes)} lanes, "
             f"{board.clock_hz / 1e6:g} MHz"
         )
+        self._show_connection(where)
         self.refresh()
+        self._done(f"connected to {where}")
         return True
 
     def _apply_board_only(self, board) -> None:
@@ -1452,7 +1475,7 @@ class PulseEditorPresenter:
         mode, endpoint = self.connection
         self._connection_status = str(status)
         self.view.set_connection(mode, endpoint, status)
-        self._show_run_state()
+        self._render_run_state()
 
     def sync_from_sequencer(self) -> bool:
         """Bring what the BOARD is holding back into the editor.
@@ -1490,6 +1513,9 @@ class PulseEditorPresenter:
         if rows:
             self._scan_rows = rows
         self.refresh()
+        # What came back IS what the board holds, so the dot must stop saying
+        # the board is playing something older the moment it no longer is.
+        self._poll_board()
         self._done(
             f"synced from the board - {len(source.periods)} period(s)"
             + (f", {len(rows)} scan point(s)" if rows else "")
@@ -1515,9 +1541,10 @@ class PulseEditorPresenter:
                 self.sequencer.write_scan_table(self._scan_rows)
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
-            self._show_run_state()
+            self._poll_board()
             return False
-        self._show_run_state()
+        self._poll_board()
+        self._done(f"loaded onto the board - {len(self.sequence.periods)} period(s)")
         return True
 
     def fire(self, *, forever: bool | None = None, shots: int = 1, timeout: float = 5.0) -> bool:
@@ -1546,7 +1573,8 @@ class PulseEditorPresenter:
         try:
             if forever:
                 self.sequencer.fire(forever=True)
-                self._show_run_state()
+                self._poll_board()
+                self._done("On Pulse - running until Stop")
                 return True
             for shot in range(max(1, int(shots))):
                 self.sequencer.fire()
@@ -1565,6 +1593,10 @@ class PulseEditorPresenter:
             self._warn(f"firing stopped: {error}")
             self.stop()
             return False
+        self._done(
+            f"On Pulse - played {max(1, int(shots))} shot(s) of "
+            f"{self.sequence.whole_pulse_repeat} repeat(s)"
+        )
         return True
 
     def stop(self) -> None:
@@ -1587,7 +1619,8 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(f"the board did not go safe: {error}")
         finally:
-            self._show_run_state()
+            self._poll_board()
+            self._done("stopped - outputs are in their safe state")
 
     @property
     def running(self) -> bool:
@@ -1597,9 +1630,15 @@ class PulseEditorPresenter:
 
     @property
     def synchronized(self) -> bool:
-        """Is the board holding what this editor shows?  Also its answer."""
+        """Is the board holding what this editor shows?
 
-        return self._board_state.holds_shown
+        A comparison of two facts, one from each side: the digest the board
+        last reported, and the digest of what is on screen right now.  Local,
+        so an edit re-answers it without anyone being asked anything.
+        """
+
+        shown = self._shown_digest()
+        return bool(shown and self._board_state.applied_digest == shown)
 
     def board_state(self) -> BoardState:
         """Ask the board what it is doing, in one round trip.
@@ -1622,10 +1661,7 @@ class PulseEditorPresenter:
             firing=bool(reported.get("firing")),
             forever=bool(reported.get("forever")),
             loaded=bool(reported.get("loaded")),
-            holds_shown=bool(
-                self._shown_digest()
-                and reported.get("applied_digest") == self._shown_digest()
-            ),
+            applied_digest=str(reported.get("applied_digest") or ""),
         )
 
     def _shown_digest(self) -> str:
@@ -1647,6 +1683,18 @@ class PulseEditorPresenter:
             self._digest_revision = self.revision
         return self._digest
 
+    def show_page(self, page: str) -> None:
+        """The operator turned to a page.  Anything deferred for it happens now.
+
+        Only the Preview defers anything today, which is why it is the only
+        page named here: a page that costs nothing to fill does not need to be
+        told it is visible.
+        """
+
+        self._preview_on_screen = str(page) == PREVIEW_PAGE
+        if self._preview_on_screen:
+            self.refresh_preview()
+
     def refresh_run_state(self) -> None:
         """Ask the board again and show the answer.
 
@@ -1655,10 +1703,28 @@ class PulseEditorPresenter:
         standing in for the operator who walked back to the bench.
         """
 
-        self._show_run_state()
+        self._poll_board()
 
-    def _show_run_state(self) -> None:
-        """Tell the window what is running, so Stop is the live control.
+    def _poll_board(self) -> None:
+        """Go and ask the board, then show what it said.
+
+        The ONLY path that talks to the sequencer to find out what it is
+        doing, and it is called only after this editor has done something to
+        the board -- loaded, fired, stopped, attached -- or when something
+        explicitly asks for the question to be re-put.
+
+        It used to be called from every redraw, and every edit redraws, so
+        ticking a checkbox or typing a digit made an RPyC round trip to the
+        pulse server.  A local edit cannot change what the board is doing; it
+        can only change whether what the board is doing still matches what is
+        on screen, and that comparison is local.
+        """
+
+        self._board_state = self.board_state()
+        self._render_run_state()
+
+    def _render_run_state(self) -> None:
+        """Tell the window what is running, from what the board last said.
 
         The status dot is the same answer at a glance: green while the board is
         playing what the editor shows, orange while it is playing something
@@ -1666,13 +1732,16 @@ class PulseEditorPresenter:
         dot and the buttons cannot disagree.
         """
 
-        self._board_state = self.board_state()
         live = self.sequencer is not None and self.sequence is not None
         self.view.set_control_state(
             running=bool(self.running),
             synchronized=bool(self.synchronized),
             file_dirty=False,
             can_run=live,
+            # Going safe needs a board and nothing else.  Requiring a pulse to
+            # be open, or the window to believe the board is busy, makes Stop
+            # unavailable in exactly the situations it exists for.
+            can_stop=self.sequencer is not None,
         )
         # Capabilities go through the shell, which also gates the Scan page's
         # hold and step -- those need a board just as much as Sync does.
@@ -1695,7 +1764,7 @@ class PulseEditorPresenter:
             # answer instead is how a window sits green over a dead server.
             return "unreachable"
         if state.firing:
-            return "running-synced" if state.holds_shown else "running-stale"
+            return "running-synced" if self.synchronized else "running-stale"
         return "dirty-ready" if self.sequence is not None else "idle"
 
     def save_pulse(self) -> str:
@@ -1979,7 +2048,7 @@ class PulseEditorPresenter:
         view = self.view
         if self.sequence is None:
             view.set_scan_page(ScanPageRecord(slots_text="No pulse is open."))
-            self._show_run_state()
+            self._render_run_state()
             return
         columns = scan_columns_for(self.sequence)
         if not self._scan_source:
@@ -2004,7 +2073,7 @@ class PulseEditorPresenter:
         )
         # A table appearing is a change in what the controls can do: stepping
         # through a scan needs one to step through.
-        self._show_run_state()
+        self._render_run_state()
 
     def _template(self, kind: str) -> str:
         from zlc_pulse import scan_columns_for, scan_table_template
@@ -2353,16 +2422,25 @@ class PulseEditorPresenter:
         )
 
     def refresh_preview(self) -> None:
-        """Redraw the preview from what is on screen.
+        """Redraw the preview from what is on screen, IF it is on screen.
 
         The host is built once and updated after that.  Rebuilding it per edit
         spawned a render worker and a matplotlib session for every keystroke,
         blocked the GUI thread waiting for the new one's first frame, and never
         closed the old -- an afternoon of editing left hundreds of live threads
         behind a window that felt slower with every change.
+
+        And it is not built at all until the Preview page is looked at.  A
+        window opens on Edit; building the drawing stack to fill a tab behind
+        it was over a third of the time between double-click and a window, and
+        the operator who never opens Preview paid it every time.  Turning to
+        the page is what asks for the drawing -- and it stays built after that,
+        because turning away does not mean the answer stopped being wanted.
         """
 
         if self._make_preview is None or self.sequence is None:
+            return
+        if self._preview_host is None and not self._preview_on_screen:
             return
         view = self.view
         size = self.preview_size()
@@ -2562,7 +2640,7 @@ class PulseEditorPresenter:
             if row is not None:
                 schedule.set_delay_row(row)
         self._refresh_summary()
-        self._show_run_state()
+        self._render_run_state()
         self.refresh_preview()
 
     def _refresh_summary(self) -> None:
