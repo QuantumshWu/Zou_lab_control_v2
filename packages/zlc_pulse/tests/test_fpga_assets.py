@@ -115,8 +115,11 @@ def test_deployed_config_is_the_default_geometry_source(monkeypatch) -> None:
 
 
 def test_fpga_launchers_use_the_package_wire_cli() -> None:
-    build = (ROOT / "fpga/build_and_program.bat").read_text(encoding="utf-8")
-    estimate = (ROOT / "estimate_resources.bat").read_text(encoding="utf-8")
+    # In bin\, with everything else a human clicks.  They still drive THIS
+    # layer's board, which is why this layer is what checks them.
+    launchers = ROOT.parents[1] / "bin"
+    build = (launchers / "build_and_program.bat").read_text(encoding="utf-8")
+    estimate = (launchers / "estimate_resources.bat").read_text(encoding="utf-8")
     assert "fpga.pulse_streamer.host" not in build
     assert "zlc_pulse.fpga" in build
     assert "fpga.pulse_streamer.host" not in estimate

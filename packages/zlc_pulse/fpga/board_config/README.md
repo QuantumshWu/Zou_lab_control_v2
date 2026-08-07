@@ -28,7 +28,7 @@ diagnostic tools all consume the same board mapping and cannot silently use
 different geometry.
 
 The parser accepts an explicit `path=` for tests or a separately managed board
-description. The normal notebook and `fpga/run_server.bat` use the checked-in
+description. The normal notebook and `binun_server.bat` use the checked-in
 `fpga/board_config/board.xdc`; a client machine never needs a local XDC.
 
 The XDC is also consumed by the Vivado project scripts. Those scripts may use
@@ -53,7 +53,7 @@ The host reads this file to validate the deployed geometry and to estimate
 capacity. Editing JSON cannot alter a programmed FPGA; a hardware change needs
 an approved rebuild and qualification.
 
-Run `estimate_resources.bat` from the repository root for the capacity report.
+Run `bin\estimate_resources.bat` for the capacity report.
 It is an estimator, not permission to replace the frozen bitstream.
 
 ## Who reads this directory

@@ -27,7 +27,11 @@ if /I not "%~1"=="--inner" (
 )
 shift /1
 
-set "FPGA_DIR=%~dp0"
+rem This launcher lives in bin\ -- one folder for everything a human clicks --
+rem while what it drives is zlc_pulse's own fpga tree: its RTL, its board
+rem config, its build.  The path is derived from the repository root rather
+rem than from %~dp0, so moving the launcher does not move the board.
+set "FPGA_DIR=%~dp0..\packages\zlc_pulse\fpga\"
 for %%I in ("%FPGA_DIR%..") do set "REPO_ROOT=%%~fI"
 set "STREAMER_DIR=%FPGA_DIR%pulse_streamer"
 set "ZLC_REPO_ROOT=%REPO_ROOT%"

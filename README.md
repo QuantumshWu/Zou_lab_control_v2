@@ -7,7 +7,15 @@ bin\install_requirements.bat   once per machine: numpy, matplotlib, PyQt5, ...
 bin\experiment.bat             the apparatus, then the console, then the pulse editor
 bin\pulse_editor.bat           the pulse window on its own
 bin\update.bat                 git pull, re-check dependencies, prove it still imports
+bin\run_server.bat             the pulse server, on the machine wired to the board
+bin\build_and_program.bat      synthesise the bitstream and load it onto the FPGA
+bin\estimate_resources.bat     what the current board geometry costs on the part
 ```
+
+Everything a human clicks is in `bin\`, the three FPGA scripts included. They
+operate on `packages\zlc_pulse\fpga`, where the RTL, the board config and the
+build tree live: being clickable and being owned are different questions, and
+only the first one is about where a file sits.
 
 Run them from your experiment folder — the one holding `pulses\`, `data\` and
 `apparatus.json`. They are deliberately not passed a workspace: a

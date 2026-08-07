@@ -7,7 +7,9 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = ROOT / "fpga" / "run_server.bat"
+# In bin/, with everything else a human clicks -- it still drives THIS layer's
+# board, which is why this layer is what checks it.
+LAUNCHER = ROOT.parents[1] / "bin" / "run_server.bat"
 
 
 def _fake_python(path: Path) -> Path:

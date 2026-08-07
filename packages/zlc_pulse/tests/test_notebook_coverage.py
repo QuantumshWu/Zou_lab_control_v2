@@ -173,7 +173,7 @@ def test_board_signal_names_are_confined_to_the_xdc() -> None:
     roots = (
         ROOT / "src", ROOT / "tests", ROOT / "notebooks", ROOT / "examples", ROOT / "docs",
         ROOT / "README.md", ROOT / "fpga" / "README.md", ROOT / "fpga" / "board_config" / "README.md",
-        ROOT / "fpga" / "pulse_streamer" / "README.md", ROOT / "fpga" / "run_server.bat",
+        ROOT / "fpga" / "pulse_streamer" / "README.md", ROOT.parents[1] / "bin" / "run_server.bat",
     )
     files = []
     for root in roots:
@@ -194,7 +194,7 @@ def test_board_signal_names_are_confined_to_the_xdc() -> None:
 
 
 def test_run_server_reports_connection_and_listener_state() -> None:
-    launcher = (ROOT / "fpga/run_server.bat").read_text(encoding="utf-8")
+    launcher = (ROOT.parents[1] / "bin" / "run_server.bat").read_text(encoding="utf-8")
     remote = (ROOT / "src/zlc_pulse/remote.py").read_text(encoding="utf-8")
     assert "HARDWARE CONNECTED" in launcher and "RPC LISTENING" in launcher
     assert "JTAG-to-AXI" in launcher and "JTAG-to-AXI" in remote

@@ -1544,7 +1544,6 @@ class PulseEditorPresenter:
             self._poll_board()
             return False
         self._poll_board()
-        self._done(f"loaded onto the board - {len(self.sequence.periods)} period(s)")
         return True
 
     def fire(self, *, forever: bool | None = None, shots: int = 1, timeout: float = 5.0) -> bool:
@@ -1574,7 +1573,6 @@ class PulseEditorPresenter:
             if forever:
                 self.sequencer.fire(forever=True)
                 self._poll_board()
-                self._done("On Pulse - running until Stop")
                 return True
             for shot in range(max(1, int(shots))):
                 self.sequencer.fire()
@@ -1593,10 +1591,6 @@ class PulseEditorPresenter:
             self._warn(f"firing stopped: {error}")
             self.stop()
             return False
-        self._done(
-            f"On Pulse - played {max(1, int(shots))} shot(s) of "
-            f"{self.sequence.whole_pulse_repeat} repeat(s)"
-        )
         return True
 
     def stop(self) -> None:
@@ -1620,7 +1614,6 @@ class PulseEditorPresenter:
             self._warn(f"the board did not go safe: {error}")
         finally:
             self._poll_board()
-            self._done("stopped - outputs are in their safe state")
 
     @property
     def running(self) -> bool:
@@ -2677,8 +2670,16 @@ class PulseEditorPresenter:
     def _done(self, text: str) -> None:
         """Say that something the operator asked for has happened.
 
-        v1 confirmed its actions and this only ever spoke up to refuse, so a
-        Save that worked and a Save that did nothing looked identical.
+        Only ever spoke up to refuse, so a Save that worked and a Save that
+        did nothing looked identical.
+
+        For the OCCASIONAL actions only.  This modal blocks, and On Pulse,
+        Stop and load-onto-board are pressed over and over at the bench: a
+        dialog in that path is not confirmation, it is something to dismiss
+        before the next press.  Connecting, saving a file and running a scan
+        program are done once and are worth a sentence; running a pulse says
+        what it did through the status dot and the On Pulse label, which are
+        already there and do not have to be clicked away.
         """
 
         done = getattr(self.view, "show_done", None)

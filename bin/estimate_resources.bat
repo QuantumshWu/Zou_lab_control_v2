@@ -26,7 +26,9 @@ if /I not "%~1"=="--inner" (
 )
 shift /1
 
-set "REPO_ROOT=%~dp0"
+rem Clicked from bin\, run against zlc_pulse: the layer that owns the board
+rem geometry this estimates against.
+set "REPO_ROOT=%~dp0..\packages\zlc_pulse\"
 if "%REPO_ROOT:~-1%"=="\" set "REPO_ROOT=%REPO_ROOT:~0,-1%"
 
 call "%REPO_ROOT%\fpga\_resolve_tools.bat" python "%REPO_ROOT%"

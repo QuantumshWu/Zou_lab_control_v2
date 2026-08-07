@@ -75,7 +75,7 @@ Default profile (from `zlc_pulse.wire.StreamerParams` / `solve_capacity` on the 
 bank-local resident slots), `TICK_WIDTH=32`, `COEFF_WIDTH=16`, `COEFF_FRAC_BITS=8`,
 `RD_LAT=2`, `FIFO_DEPTH=4`, `EVT_FIFO_DEPTH=64`, `BUS_EVT_FIFO_DEPTH=64`,
 `CLOCK_HZ=50 MHz` (20 ns tick). Vivado `report_utilization` is the final
-resource authority; the conservative host-side estimate (`estimate_resources.bat`)
+resource authority; the conservative host-side estimate (`bin\estimate_resources.bat`)
 is RAMB36 78%, LUT ~97%, FF ~22%, DSP ~58% --- tight on LUTs but the real
 implementation closes (the estimate overcounts distributed RAM).
 
