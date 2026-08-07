@@ -51,7 +51,15 @@ from .wire import StreamerParams, load_streamer_config
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 _FRAME_HEADER = struct.Struct("!I")
 UART_PROBE_TIMEOUT = 0.5
-DEFAULT_CLIENT_IDLE_TIMEOUT = 300.0
+#: Idle before the kernel starts probing the peer, gap between probes, and how
+#: many go unanswered before the socket fails.  See ``_enable_keepalive``.
+KEEPALIVE_IDLE_SECONDS = 20.0
+KEEPALIVE_INTERVAL_SECONDS = 5.0
+KEEPALIVE_FAILED_PROBES = 4
+#: How often the handler wakes to notice the server is shutting down.  It is a
+#: poll interval and nothing else; a client is never disconnected for having
+#: been quiet for it.
+HANDLER_POLL_SECONDS = 1.0
 BUSY_REQUEST_TIMEOUT = 1.0
 BACKEND_CHOICES = ("auto", "uart", "jtag-axi", "memory")
 
@@ -153,6 +161,34 @@ def _forget_polls(client: str) -> None:
     with _POLL_LOCK:
         for key in [key for key in _LAST_POLL if key[0] == str(client)]:
             del _LAST_POLL[key]
+
+
+def _enable_keepalive(connection: socket.socket) -> None:
+    """Ask the kernel to notice when the peer stops existing.
+
+    An owner that is merely QUIET -- somebody editing a pulse for ten minutes,
+    which is the normal way this window is used -- looks exactly like a dead one
+    if request traffic is all there is to go on.  It does not look that way to
+    TCP: probes are answered by the peer's network stack whether or not the
+    program has anything to say, and a peer that has gone away fails the socket,
+    which is the disconnect path this server already handles.  Windows takes the
+    same numbers through an ioctl rather than TCP_KEEPIDLE/TCP_KEEPINTVL.
+    """
+
+    connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    idle_ms = int(KEEPALIVE_IDLE_SECONDS * 1000)
+    interval_ms = int(KEEPALIVE_INTERVAL_SECONDS * 1000)
+    if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        connection.ioctl(socket.SIO_KEEPALIVE_VALS, (1, idle_ms, interval_ms))
+        return
+    for option, value in (
+        ("TCP_KEEPIDLE", int(KEEPALIVE_IDLE_SECONDS)),
+        ("TCP_KEEPINTVL", int(KEEPALIVE_INTERVAL_SECONDS)),
+        ("TCP_KEEPCNT", KEEPALIVE_FAILED_PROBES),
+    ):
+        number = getattr(socket, option, None)
+        if number is not None:
+            connection.setsockopt(socket.IPPROTO_TCP, number, value)
 
 
 def _program_summary(program: object, *, source: object = None) -> str:
@@ -565,19 +601,19 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
         _server_log("CLIENT CONNECTED", client=client, detail="status=OWNER")
         disconnect_reason = "client disconnect"
         try:
-            self.request.settimeout(server.client_idle_timeout)
+            # The kernel watches whether the peer still exists; this timeout
+            # only lets the loop notice a server shutdown.  An owner is NEVER
+            # disconnected for being quiet: editing a pulse sends nothing for
+            # minutes at a time and is the normal way this window is used.
+            _enable_keepalive(self.request)
+            self.request.settimeout(HANDLER_POLL_SECONDS)
             while True:
                 try:
                     request = _recv_frame(self.request)
                 except socket.timeout:
-                    if server.client_idle_expired(client):
-                        disconnect_reason = "idle timeout; SAFE released"
-                        _server_log("CLIENT IDLE TIMEOUT", client=client, detail=_log_fields(timeout_s=server.client_idle_timeout))
-                        return
                     continue
                 if request is None:
                     return
-                server.touch_client(client)
                 request_id = request.get("id") if isinstance(request, dict) else None
                 method = "<invalid>"
                 try:
@@ -659,19 +695,13 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self,
         address: tuple[str, int],
         streamer: PulseStreamer,
-        *,
-        client_idle_timeout: float = DEFAULT_CLIENT_IDLE_TIMEOUT,
     ) -> None:
         if not isinstance(streamer, PulseStreamer):
             raise TypeError("streamer must be a PulseStreamer")
-        if isinstance(client_idle_timeout, bool) or not math.isfinite(float(client_idle_timeout)) or client_idle_timeout <= 0:
-            raise ValueError("client_idle_timeout must be finite and positive")
         self.streamer = streamer
-        self.client_idle_timeout = float(client_idle_timeout)
         self._client_lock = threading.RLock()
         self._owner_client: str | None = None
         self._owner_started = 0.0
-        self._owner_last_activity = 0.0
         super().__init__(address, _RemoteHandler)
 
     def handle_error(self, request, client_address) -> None:
@@ -686,23 +716,9 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         with self._client_lock:
             if self._owner_client is not None:
                 return False
-            now = time.monotonic()
             self._owner_client = client
-            self._owner_started = now
-            self._owner_last_activity = now
+            self._owner_started = time.monotonic()
             return True
-
-    def touch_client(self, client: str) -> None:
-        with self._client_lock:
-            if self._owner_client == client:
-                self._owner_last_activity = time.monotonic()
-
-    def client_idle_expired(self, client: str) -> bool:
-        with self._client_lock:
-            return (
-                self._owner_client == client
-                and time.monotonic() - self._owner_last_activity >= self.client_idle_timeout
-            )
 
     def owner_status(self) -> tuple[str | None, float]:
         with self._client_lock:
@@ -715,7 +731,6 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             if force or client is None or self._owner_client == client:
                 self._owner_client = None
                 self._owner_started = 0.0
-                self._owner_last_activity = 0.0
 
     def _link_health(self) -> str:
         """Frames that had to be sent again, when there have been any.
@@ -1070,12 +1085,10 @@ def serve(
     streamer: PulseStreamer,
     host: str = DEFAULT_BIND_HOST,
     port: int = DEFAULT_PORT,
-    *,
-    client_idle_timeout: float = DEFAULT_CLIENT_IDLE_TIMEOUT,
 ) -> None:
     """Serve one supplied device until interrupted."""
 
-    with PulseRemoteServer((host, int(port)), streamer, client_idle_timeout=client_idle_timeout) as server:
+    with PulseRemoteServer((host, int(port)), streamer) as server:
         listen_host = host or "0.0.0.0"
         actual_port = int(server.server_address[1])
         if listen_host == "0.0.0.0":
@@ -1113,12 +1126,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", default="fpga/build/state")
     parser.add_argument("--uart-port", default=None, help="probe only this UART port")
     parser.add_argument("--uart-baud", type=int, default=3_000_000)
-    parser.add_argument(
-        "--client-idle-timeout",
-        type=float,
-        default=DEFAULT_CLIENT_IDLE_TIMEOUT,
-        help="seconds without an RPC request before the server AUTO-SAFEs and releases the client",
-    )
     parser.add_argument("--check-config", action="store_true")
     return parser
 
@@ -1132,7 +1139,6 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"backend={args.backend}")
         print(f"uart_port={args.uart_port or 'auto-discover'}")
         print(f"listen_bind={args.host}:{args.port}")
-        print(f"client_idle_timeout_s={args.client_idle_timeout:g}")
         normalized_host = str(args.host).strip().lower()
         same_host = (
             "127.0.0.1"
@@ -1258,7 +1264,7 @@ def _main(argv: list[str] | None = None) -> int:
                 clock_enable_words=_compact_tuple(initial_safe.clock_enable_words),
             ),
         )
-        serve(streamer, args.host, args.port, client_idle_timeout=args.client_idle_timeout)
+        serve(streamer, args.host, args.port)
     except KeyboardInterrupt:
         _server_log("SERVER STOPPING", detail=_log_fields(reason="keyboard interrupt"))
         return 0
@@ -1280,7 +1286,6 @@ __all__ = [
     "BACKEND_CHOICES",
     "BackendResolution",
     "BackendResolutionError",
-    "DEFAULT_CLIENT_IDLE_TIMEOUT",
     "MAX_FRAME_BYTES",
     "REMOTE_METHODS",
     "PulseRemoteServer",

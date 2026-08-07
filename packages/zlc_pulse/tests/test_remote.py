@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+import socket
 import threading
 import time
 
@@ -57,8 +58,8 @@ def _sequence(*, slotted: bool = False) -> PulseSequence:
 
 
 @contextmanager
-def _server(streamer: PulseStreamer, *, client_idle_timeout: float = 300.0):
-    server = PulseRemoteServer(("127.0.0.1", 0), streamer, client_idle_timeout=client_idle_timeout)
+def _server(streamer: PulseStreamer):
+    server = PulseRemoteServer(("127.0.0.1", 0), streamer)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -185,39 +186,50 @@ def test_second_client_gets_owner_and_hold_duration_in_busy_reply() -> None:
             contender.disconnect()
 
 
-def test_idle_client_is_safe_before_owner_release(monkeypatch, capsys) -> None:
+def test_quiet_owner_keeps_the_board_and_stays_connected(monkeypatch) -> None:
+    """Sending nothing is what editing looks like, not what dying looks like.
+
+    The handler's read timeout only lets the loop notice a shutdown, so it is
+    shortened here to run many of them in a moment.  Every one of them used to
+    be counted towards an idle deadline that eventually SAFEd the outputs and
+    evicted the owner mid-edit; none of them may do anything now.
+    """
+
+    monkeypatch.setattr(remote_module, "HANDLER_POLL_SECONDS", 0.02)
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=False)
     streamer = PulseStreamer(transport, geom, 50e6)
-    with _server(streamer, client_idle_timeout=0.05) as server:
-        events: list[str] = []
-        original_safe = streamer.safe
-        original_release = server._release_client
-
-        def safe_with_trace():
-            events.append("safe")
-            return original_safe()
-
-        def release_with_trace(client, *, force=False):
-            events.append("release")
-            return original_release(client, force=force)
-
-        monkeypatch.setattr(streamer, "safe", safe_with_trace)
-        monkeypatch.setattr(server, "_release_client", release_with_trace)
+    with _server(streamer) as server:
         client = _client(server)
-        client.load(program)
-        client.fire(forever=True)
-        time.sleep(0.15)
-        assert streamer.snapshot()["firing"] is False
-        assert transport.status == 0
-        replacement = _client(server)
-        replacement.close()
-        client.disconnect()
-        assert events[:2] == ["safe", "release"]
-    output = capsys.readouterr().out
-    assert "ZLC CLIENT IDLE TIMEOUT" in output
-    assert "idle timeout; SAFE released" in output
+        try:
+            client.load(program)
+            client.fire(forever=True)
+            time.sleep(0.3)  # a dozen read timeouts, and not one word from us
+            assert streamer.snapshot()["firing"] is True
+            assert server.owner_status()[0] is not None
+            assert client.snapshot()["firing"] is True
+        finally:
+            client.close()
+            client.disconnect()
+
+
+def test_keepalive_asks_the_kernel_to_notice_a_vanished_peer() -> None:
+    """The one liveness question the server does ask, asked where it is free."""
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    peer = socket.create_connection(listener.getsockname())
+    accepted, _ = listener.accept()
+    try:
+        assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 0
+        remote_module._enable_keepalive(accepted)
+        assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+    finally:
+        accepted.close()
+        peer.close()
+        listener.close()
 
 
 def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, capsys) -> None:
@@ -553,8 +565,8 @@ def test_server_cli_defaults_to_auto_and_accepts_explicit_backends() -> None:
     assert parser.parse_args([]).backend == "auto"
     assert parser.parse_args(["--backend", "jtag-axi"]).backend == "jtag-axi"
     assert parser.parse_args(["--backend", "uart", "--uart-port", "COM3"]).uart_port == "COM3"
-    assert parser.parse_args([]).client_idle_timeout == 300.0
-    assert parser.parse_args(["--client-idle-timeout", "12.5"]).client_idle_timeout == 12.5
+    # No knob decides when a quiet client is disconnected, because nothing does.
+    assert not hasattr(parser.parse_args([]), "client_idle_timeout")
 
 
 def test_main_logs_final_backend_reason_attempts_and_jtag_note(monkeypatch, capsys, tmp_path) -> None:
