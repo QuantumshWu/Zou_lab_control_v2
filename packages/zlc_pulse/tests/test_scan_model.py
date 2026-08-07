@@ -150,3 +150,36 @@ def test_a_table_is_played_many_times_without_being_sent_many_times() -> None:
 
     assert slot0(1) == [10, 20, 30]
     assert slot0(3) == [10, 20, 30, 10, 20, 30, 10, 20, 30]
+
+
+def test_a_repeated_table_is_seamless_across_a_bank_boundary() -> None:
+    """The hard case: a table length that does NOT divide the bank size.
+
+    The end of one sweep then falls in the MIDDLE of a chunk.  It stays
+    seamless because a finite sweep count does not wrap anything: the board is
+    given one stream of N*len points and the host fills chunks 0,1,2,... into
+    alternating banks, exactly as it does for any long scan.  The boundary
+    between two sweeps is the boundary between two points and nothing else --
+    no re-arm, no bank-parity wrap, no gap.
+
+    (repeat_forever is the other path, where the RTL itself re-sweeps and
+    toggles scan_bank_base by n_chunks & 1.  That one is untouched.)
+    """
+
+    from dataclasses import replace
+
+    from zlc_pulse import load_streamer_config
+    from zlc_pulse.wire import pack_scan_rows
+
+    geometry = replace(load_streamer_config()["params"], bank_size=4)
+    rows = [(10,), (20,), (30,)]
+
+    played: list[int] = []
+    for chunk in range(4):
+        words = pack_scan_rows(rows, geometry, chunk & 1, chunk, 3)
+        if not words:
+            break
+        ordered = [words[key] for key in sorted(words)]
+        played.extend(ordered[:: geometry.num_slots])
+
+    assert played == [10, 20, 30] * 3
