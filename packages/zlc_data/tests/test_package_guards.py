@@ -135,11 +135,20 @@ WITHDRAWN_PUBLIC_API = {
 
 
 def _import_report() -> dict[str, object]:
+    # Through the one entry, the way every consumer of this checkout arrives.
+    # A bare subprocess finds whatever is INSTALLED, and eight of these layers
+    # are also installed from their standalone repositories -- so the probe
+    # would faithfully report a copy nobody is editing.  The snapshot is taken
+    # after the entry, so what it measures is still "what does importing
+    # zlc_data pull in", and nothing else.
     code = """
 import importlib
 import json
 import pkgutil
 import sys
+
+sys.path.insert(0, ENTRY)
+import zou_lab_control_v2
 
 before = set(sys.modules)
 import zlc_data
@@ -159,8 +168,10 @@ print(json.dumps({
     "new_modules": new_modules,
 }))
 """
+    entry = ROOT.parents[1]
+    preamble = "ENTRY = {0!r}\n".format(str(entry))
     completed = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", preamble + code],
         cwd=ROOT,
         env=os.environ.copy(),
         check=True,

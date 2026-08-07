@@ -31,7 +31,13 @@ zlc-task-console = "zlc_workbench.apps.task_console:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = "-q"
+# pytest configuration deliberately does NOT live here any more.
+#
+# In the merged checkout every layer's tests run from the repository root, and
+# a [tool.pytest.ini_options] table here would make pytest treat THIS folder as
+# the rootdir whenever a single file is run from it -- which skips the root
+# conftest, and with it the one entry that puts every layer on the path.  Each
+# layer would then see only its own src and fall back to whatever is installed
+# for its siblings: the failure with no symptom.
+#
+# The root pyproject.toml lists every layer's tests.
