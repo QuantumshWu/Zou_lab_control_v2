@@ -105,6 +105,28 @@ FOREVER_NOTATION = "x∞"
 #: model has -- ANALOG_MODES is edge and ramp -- and the one place both the
 #: projection and the commit have to agree on the word.
 HOLD_MODE = "hold"
+#: How long each period of a brand-new pulse is.  A duration has to be chosen
+#: and the board's tick is the wrong choice: at 20 ns the two periods are drawn
+#: as one pixel, so a legal pulse looks like no pulse.  1 us is the established
+#: PulseGUI's answer and reads on the timeline at its default zoom.
+NEW_PULSE_PERIOD_NS = 1000.0
+
+
+def _connection_name(mode: str, endpoint: str) -> str:
+    """What this editor is attached to, named by what was dialled.
+
+    Not by whichever field happened to be non-empty.  This read
+    ``endpoint or mode``, and the address box keeps the server's address
+    whether or not remote is the selected mode -- so connecting to the
+    simulated board reported "127.0.0.1:18861 - 26 ports, 62 lanes, 50 MHz",
+    the same line a real board gives, and nothing on screen said which one had
+    answered.  Which board is talking is the single most consequential fact in
+    this window: it decides whether pressing On Pulse moves atoms.
+    """
+
+    if str(mode) == "remote":
+        return f"remote {endpoint}" if endpoint else "remote"
+    return str(mode)
 
 
 EMPTY_SCHEDULE = ScheduleVM(
@@ -920,6 +942,13 @@ class PulseEditorPresenter:
         deployed board's own pin map rather than from an invented default: a
         pulse authored against an imaginary board compiles and then does
         nothing recognisable.
+
+        The shape is the one the established PulseGUI opens with, and it is a
+        starting point rather than a minimum: one period is not something an
+        operator can look at, because a pulse is made of the CHANGES between
+        periods and one period has none.  A single tick-long period is worse
+        still -- 20 ns is below anything the timeline can show, so the window
+        was legal and looked empty.
         """
 
         from zlc_pulse import PulsePeriod, PulseSequence, pulse_target_from_xdc
@@ -930,12 +959,25 @@ class PulseEditorPresenter:
             # nothing recognisable.
             target = self._board_target or pulse_target_from_xdc()
             step_ns = self._board_step_ns or 20.0
+            safe = (0,) * len(target.raw_lanes)
+            # The first digital output high in P1, everything safe in P2: the
+            # smallest thing that is actually a pulse, so the preview draws an
+            # edge and the operator can see what an edit does to it.
+            driven = list(safe)
+            first_digital = next(
+                (port for port in target.ports if port.kind == "digital"), None
+            )
+            if first_digital is not None:
+                driven[target.raw_lanes.index(first_digital.lanes[0])] = 1
             self.sequence = self.original = PulseSequence(
                 name="untitled",
                 target=target,
                 time_step_ns=step_ns,
                 periods=(
-                    PulsePeriod("period1", step_ns, "ns", (0,) * len(target.raw_lanes)),
+                    PulsePeriod(
+                        "period1", NEW_PULSE_PERIOD_NS, "ns", tuple(driven)
+                    ),
+                    PulsePeriod("period2", NEW_PULSE_PERIOD_NS, "ns", safe),
                 ),
             )
         except Exception as error:
@@ -1228,7 +1270,7 @@ class PulseEditorPresenter:
         except Exception as error:
             self.connection = ("offline", endpoint)
             self._show_connection(f"failed: {error}")
-            self._warn(f"cannot connect to {endpoint or mode}: {error}")
+            self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {error}")
             return False
         self._owns_sequencer = True
         self.connection = (mode, endpoint)
@@ -1273,12 +1315,15 @@ class PulseEditorPresenter:
         self.revision += 1
         if self.sequence is None:
             self._apply_board_only(board)
+            # A board is the one thing a new pulse was missing, so having one
+            # IS the moment to open a pulse on it.  Attaching and then showing
+            # a schedule with no periods left the operator holding a window
+            # whose only reading was "nothing happened".
+            self.start_new_pulse()
         else:
             self._align_sequence_to(board)
-        mode, endpoint = self.connection
-        where = endpoint or mode
         self._show_connection(
-            f"{where} - {len(board.target.ports)} ports, "
+            f"{_connection_name(*self.connection)} - {len(board.target.ports)} ports, "
             f"{len(board.target.raw_lanes)} lanes, "
             f"{board.clock_hz / 1e6:g} MHz"
         )

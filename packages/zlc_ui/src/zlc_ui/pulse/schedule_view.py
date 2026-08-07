@@ -1097,6 +1097,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.hide_off_button.clicked.connect(self._request_hide_off_ports)
         self.show_all_button.clicked.connect(self._request_show_all_ports)
         self.connection_button.clicked.connect(lambda: self.connection_requested.emit(self.connection_combo.currentData() or "virtual", self.connection_endpoint.text()))
+        self.connection_combo.currentIndexChanged.connect(self._sync_endpoint_enabled)
+        self._sync_endpoint_enabled()
 
     def set_schedule(self, vm: ScheduleVM) -> bool:
         if not isinstance(vm, ScheduleVM):
@@ -1309,8 +1311,21 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_combo.setCurrentIndex(max(0, self.connection_combo.findData(str(mode))))
         if str(endpoint):
             self.connection_endpoint.setText(str(endpoint))
+        self._sync_endpoint_enabled()
         self.connection_status.setText(str(status))
         self.connection_status.setToolTip(str(status))
+
+    def _sync_endpoint_enabled(self) -> None:
+        """An address that will not be dialled must not look like an input.
+
+        Only the remote mode reads this field.  Left live, it kept the server
+        address on screen next to a virtual connection, which is half of why
+        the two modes were indistinguishable once connected.
+        """
+
+        self.connection_endpoint.setEnabled(
+            (self.connection_combo.currentData() or "virtual") == "remote"
+        )
 
     def set_control_state(
         self,

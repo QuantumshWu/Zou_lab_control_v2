@@ -1120,7 +1120,13 @@ def test_opening_something_that_is_not_a_pulse_says_which_file(tmp_path) -> None
 
 
 def test_add_period_with_nothing_open_starts_a_pulse_on_this_board() -> None:
-    """Asking for a period IS asking for a pulse: one period is what makes it legal."""
+    """Asking for a period IS asking for a pulse, and a pulse is two periods.
+
+    One period cannot show anything: a pulse is the CHANGES between periods,
+    and one period has none.  A new editor therefore opens on the shape the
+    established PulseGUI opens on -- one output high, then everything safe --
+    which is the smallest thing that draws an edge to edit.
+    """
 
     view = _EditorView()
     presenter = PulseEditorPresenter(view)
@@ -1128,18 +1134,26 @@ def test_add_period_with_nothing_open_starts_a_pulse_on_this_board() -> None:
         view.insert_period_requested.emit(None)
 
         assert presenter.sequence is not None
-        assert len(presenter.sequence.periods) == 1
+        first, second = presenter.sequence.periods
         # The board's own pin map, not an invented default.
         from zlc_pulse import pulse_target_from_xdc
 
         assert presenter.sequence.target == pulse_target_from_xdc()
-        assert all(state == 0 for state in presenter.sequence.periods[0].states)
+        assert sum(first.states) == 1, "exactly one output is driven to start"
+        assert all(state == 0 for state in second.states), "and then everything is safe"
+        # Long enough to see.  At the 20 ns tick both cards are one pixel wide.
+        assert first.duration == second.duration > 100
     finally:
         presenter.close()
 
 
 def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence) -> None:
-    """Either one missing is a button that cannot work, shown as one."""
+    """Either one missing is a button that cannot work, shown as one.
+
+    Only one of the two halves can now go missing on its own: connecting is
+    what opens a pulse when none is, so "a board with nothing to fire" is a
+    state the editor no longer passes through.
+    """
 
     view = _EditorView()
     board = _Sequencer()
@@ -1148,7 +1162,7 @@ def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence) -> None:
         assert view.schedule_view.can_run is False           # neither
 
         view.connection_requested.emit("virtual", "")
-        assert view.schedule_view.can_run is False           # a board, no pulse
+        assert view.schedule_view.can_run is True            # board, and the pulse it opened
 
         presenter.open_pulse(str(ATOM_ROOT / "pulses" / "calibration.py"))
         assert view.schedule_view.can_run is True            # both
@@ -1787,27 +1801,32 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     assert validate_scan_table(np.zeros((4, len(columns))), columns)
 
 
-def test_a_board_with_no_pulse_shows_its_delays_beside_its_channels() -> None:
-    """One projection, whether or not a pulse is open.
+def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
+    """The two halves of "I connected and cannot tell what happened".
 
-    The board-only view used to be a separate function, and a separate function
-    is a partial copy: it built the channel-name column and never built the
-    delay column at all, so an editor freshly connected to a 22-output board
-    showed 22 names beside nothing.
+    Attaching used to leave the schedule with no periods, so a successful
+    connection and a failed one looked the same; and the status line was built
+    from ``endpoint or mode``, which reads the address box -- and the box keeps
+    the remote server's address whichever mode is selected.  So the simulated
+    board reported the same line a real one gives, next to an empty schedule.
     """
 
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, None, dial=lambda _m, _e: board)
     try:
-        assert presenter.connect_to("virtual", "") is True
+        assert presenter.connect_to("virtual", "127.0.0.1:18861") is True
         schedule = view.schedule_view.schedule
         assert schedule.ports, "an attached board must show its ports"
+        assert len(schedule.periods) == 2, "and a pulse to edit on it"
         assert len(schedule.delay_rows) == len(
             [port for port in schedule.ports if port.kind in ("digital", "dac")]
-        ), "every delayable output gets a row, pulse or no pulse"
-        assert all(not row.value.editable for row in schedule.delay_rows), (
-            "a delay lives in the pulse that carries it, and there is none yet"
+        ), "every delayable output gets a row"
+
+        status = view.schedule_view.connection[2]
+        assert status.startswith("virtual"), status
+        assert "127.0.0.1" not in status, (
+            "the address box is not what this editor dialled"
         )
     finally:
         presenter.close()

@@ -84,6 +84,7 @@ call :zlc_emit_geom
 if errorlevel 1 exit /b 1
 call :zlc_print_capacity_estimate
 
+
 rem Skip the (slow) synth+impl when a bitstream already exists and NONE of the sources that go
 rem into it changed since it was built -- just program the existing .bit.  Only in the default
 rem (build+program) mode, and only when --force-build / --rebuild was NOT given.
@@ -252,13 +253,27 @@ exit /b 1
 rem Hash the files that go into the bitstream (engine + top + build tcl + program tcl + XDC +
 rem board config + the generated geom tcl).  Failure leaves ZLC_SRC_HASH empty, so the
 rem skip is disabled (always rebuild), never a wrong skip.
+rem
+rem Each file is identified by its path RELATIVE to the repository root, so WHICH files went in is
+rem part of the hash without WHERE the checkout sits being part of it.  Absolute paths made the
+rem cache non-relocatable: moving this tree changed every path, so a bitstream built from
+rem byte-for-byte identical sources was reported out of date and the honest answer to "what
+rem changed?" was "nothing did".
 set "ZLC_SRC_HASH="
 set "ZLC_HASH_GEOM="
 if defined ZLC_PS_GEOM_TCL if exist "%ZLC_PS_GEOM_TCL%" set "ZLC_HASH_GEOM=%ZLC_PS_GEOM_TCL%"
 rem Hash EVERY synthesized HDL create_project.tcl reads -- INCLUDING zlc_uart_bridge.v.  Omitting it
 rem meant a UART-bridge edit did not invalidate the build cache, so the bat "skipped build" and
 rem re-programmed a stale bitstream (the byte-mux fix silently never made it onto the board).
-  for /f "delims=" %%H in ('%ZLC_PY_CMD% -c "import hashlib,os,sys;h=hashlib.sha256();[(h.update(p.replace(chr(92),chr(47)).encode('utf-8')),h.update(open(p,'rb').read())) for p in sys.argv[1:] if p and os.path.exists(p)];print(h.hexdigest())" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "%STREAMER_DIR%\!ZLC_PROGRAM_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" 2^>nul') do set "ZLC_SRC_HASH=%%H"
+rem NOT through `for /f ('...')`: cmd strips the outer quotes of a piped command line, so a
+rem quoted interpreter followed by a quoted -c script came back as `'python" -c "import' is not
+rem recognized` -- on stderr, which the loop swallowed.  The hash was therefore ALWAYS empty:
+rem every run rebuilt from scratch and no build was ever recorded, silently, for as long as the
+rem interpreter path has been quoted.  A plain redirect parses the command line the normal way.
+set "ZLC_HASH_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_src_hash.tmp"
+%ZLC_PY_CMD% -c "import hashlib,os,sys;r=sys.argv[1];h=hashlib.sha256();[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode('utf-8')),h.update(open(p,'rb').read())) for p in sys.argv[2:] if p and os.path.exists(p)];print(h.hexdigest())" "%REPO_ROOT%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "%STREAMER_DIR%\!ZLC_PROGRAM_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%" 2>nul
+if exist "%ZLC_HASH_TMP%" set /p ZLC_SRC_HASH=<"%ZLC_HASH_TMP%"
+del "%ZLC_HASH_TMP%" >nul 2>nul
 exit /b 0
 
 :zlc_check_prebuilt
@@ -280,8 +295,15 @@ exit /b 0
 rem Record the current source hash next to the freshly built bitstream so the next default-mode
 rem run can skip the build when nothing changed.
 call :zlc_compute_src_hash
-if not defined ZLC_SRC_HASH exit /b 0
-if not exist "%ZLC_PS_PROJECT_DIR%\" exit /b 0
+if not defined ZLC_SRC_HASH (
+  rem Silence here used to mean "the next run rebuilds from scratch", with nothing said about why.
+  echo WARNING: the sources could not be hashed, so this build cannot be recognised next time.
+  exit /b 0
+)
+if not exist "%ZLC_PS_PROJECT_DIR%\" (
+  echo WARNING: no project dir at %ZLC_PS_PROJECT_DIR%, so there is nowhere to record the build.
+  exit /b 0
+)
 > "%ZLC_PS_PROJECT_DIR%\.zlc_src_hash" echo %ZLC_SRC_HASH%
 exit /b 0
 
