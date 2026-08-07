@@ -195,6 +195,12 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 6_780 -> 6_830 for a UART deadline that scales with the transfer, and a
+    # timeout that says what was in flight.  One constant covered a register
+    # read and a whole register image alike, so it was either too generous to
+    # report a dead link quickly or too tight for a slow host -- and "UART
+    # reply timed out" was the same sentence whether the board answered
+    # nothing, answered half, or answered in bytes that never formed a frame.
     # 6_740 -> 6_780 for playing a table N times without sending it N times:
     # the RTL has no sweep register, so a finite scan is N*len(rows) points and
     # which row a point takes is decided when a bank is refilled.
@@ -220,14 +226,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 6_780
+    assert counted <= 6_830
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_960
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_010
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

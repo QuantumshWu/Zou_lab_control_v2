@@ -19,6 +19,11 @@ OFF_OP = 2
 CRC_LEN = 2
 MASK32 = 0xFFFFFFFF
 MAX_FRAME_WORDS = 256
+#: Bytes one register word costs on the wire once framed: four data bytes
+#: plus this frame's share of header, CRC and separator.  Used to budget
+#: how long a transfer may take at a given baud, which is the only place
+#: an estimate is honest -- a deadline is an upper bound, not a length.
+BYTES_PER_WORD_ESTIMATE = 6
 
 
 class FrameError(ValueError):

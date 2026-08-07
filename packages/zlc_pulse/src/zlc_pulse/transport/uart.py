@@ -80,12 +80,16 @@ class PySerialLink:
         serial_port = self._require_open()
         buffer = bytearray()
         replies: list[bytes] = []
+        started = time.monotonic()
+        read_bytes = 0
         while len(replies) < count and time.monotonic() < deadline:
             if stop is not None and stop.is_set():
                 raise TransportAborted("UART read cancelled")
             available = serial_port.in_waiting
             if available:
-                buffer.extend(serial_port.read(available))
+                chunk = serial_port.read(available)
+                read_bytes += len(chunk)
+                buffer.extend(chunk)
                 while True:
                     frame = _extract_reply(buffer)
                     if frame is None:
@@ -96,7 +100,17 @@ class PySerialLink:
             else:
                 time.sleep(min(0.0005, max(0.0, deadline - time.monotonic())))
         if len(replies) != count:
-            raise TimeoutError("UART reply timed out")
+            # WHAT was in flight, not just that something was.  A lost reply on
+            # this link is machine-dependent and recurring, and "UART reply
+            # timed out" is the same sentence whether the board answered
+            # nothing, answered half, or answered in bytes that never formed a
+            # frame -- three different faults with three different causes.
+            raise TimeoutError(
+                f"UART reply timed out on {self.port} at {self.baud} baud: "
+                f"{len(replies)} of {count} replies in {time.monotonic() - started:.2f}s "
+                f"({read_bytes} byte(s) read, {len(buffer)} unparsed: "
+                f"{bytes(buffer[:16]).hex(' ') or 'none'})"
+            )
         return replies
 
     def _require_open(self):
@@ -124,6 +138,11 @@ class UartRegisterTransport:
         if isinstance(action_timeout, bool) or not isinstance(action_timeout, (int, float)) or not math.isfinite(float(action_timeout)) or action_timeout <= 0:
             raise ValueError("action_timeout must be positive and finite")
         self.action_timeout = float(action_timeout)
+        #: What one request/reply round trip may cost beyond the bytes: a USB
+        #: serial adapter's latency timer is 16 ms by default and the board
+        #: answers within microseconds, so this is the host's cost, not the
+        #: board's, and it is per FRAME because every frame is acknowledged.
+        self.round_trip_allowance = 0.05
         self.max_frame_words = max(1, min(int(max_frame_words), framing.MAX_FRAME_WORDS))
         self._link = link or PySerialLink(str(port or ""), baud)
         self._lock = threading.RLock()
@@ -142,7 +161,6 @@ class UartRegisterTransport:
             self._closed = True
 
     def write_words(self, rows: Sequence[tuple[int, int]], *, stop: threading.Event | None = None, deadline: float | None = None) -> None:
-        absolute = self._deadline(deadline)
         with self._lock:
             self._require_open()
             pending = tuple((int(address), int(value) & 0xFFFFFFFF) for address, value in rows)
@@ -150,6 +168,9 @@ class UartRegisterTransport:
                 framing.encode_write(base, values, seq=self._next_sequence())
                 for base, values in framing.coalesce_runs(pending, max_words=self.max_frame_words)
             ]
+            # Budgeted AFTER the frames exist, because how long this may take is
+            # a fact about how much there is to send.
+            absolute = self._deadline(deadline, frames=len(frames), words=len(pending))
             replies = self._link.write_batch(frames, deadline=absolute, stop=stop)
             if len(replies) != len(frames):
                 raise UartError("UART reply count differs from frame count")
@@ -202,11 +223,41 @@ class UartRegisterTransport:
         except OSError:
             pass
 
-    def _deadline(self, value: float | None) -> float:
-        result = time.monotonic() + self.action_timeout if value is None else float(value)
+    def _deadline(self, value: float | None, *, frames: int = 1, words: int = 1) -> float:
+        """When this transaction has waited long enough.
+
+        Scaled by what is being sent.  ``action_timeout`` was one constant for
+        every transaction -- a single register read and a whole register image
+        alike -- so it was either generous enough to make a dead link take five
+        seconds to say so, or tight enough that a slow host, a slow USB latency
+        timer or a longer program turned a working link into a timeout.  Both
+        halves of that were reported the same way.
+
+        The budget is the time the bytes physically take at this baud, plus one
+        round trip per frame, plus ``action_timeout`` of slack for the host and
+        its driver.  Small transactions therefore still fail fast.
+        """
+
+        if value is not None:
+            result = float(value)
+        else:
+            bytes_out = max(1, int(words)) * framing.BYTES_PER_WORD_ESTIMATE
+            on_the_wire = bytes_out * 10.0 / max(1.0, float(self.baud))
+            result = (
+                time.monotonic()
+                + self.action_timeout
+                + on_the_wire
+                + max(1, int(frames)) * self.round_trip_allowance
+            )
         if not math.isfinite(result) or result <= time.monotonic():
             raise TimeoutError("UART transaction deadline expired")
         return result
+
+    @property
+    def baud(self) -> int:
+        """The link's baud, for anything that budgets time by how long bytes take."""
+
+        return int(getattr(self._link, "baud", 3_000_000))
 
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) & 0xFF
