@@ -1651,7 +1651,7 @@ class PulseEditorPresenter:
             # it means, and reading a saved run then depends on whoever was at
             # the keyboard.
             self.sequencer.load(self.compile(), source=self.sequence)
-            if self._scan_rows and self.sequence.slots:
+            if self._scan_armed():
                 # The table once, and how many times to play it.  The board
                 # streams it and refills behind the cursor, so a sweep count is
                 # a number it can be given -- sending the rows again to say
@@ -1695,7 +1695,7 @@ class PulseEditorPresenter:
             # already contains every point that will be played, so wrapping it
             # in an endless outer loop would repeat the whole scan for ever and
             # the count would mean nothing.
-            finite_scan = bool(self._scan_rows) and int(self._scan_repeats) > 0
+            finite_scan = self._scan_armed() and int(self._scan_repeats) > 0
             forever = self.sequence.whole_pulse_repeat is None and not finite_scan
         try:
             if forever:
@@ -2391,8 +2391,8 @@ class PulseEditorPresenter:
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
-        if not self._scan_rows:
-            self._warn("there is no scan table to hold a point of")
+        if not self._scan_armed():
+            self._warn("there is no scan to hold a point of")
             return False
         cursor = self._scan_cursor()
         return self._hold(0 if cursor is None else int(cursor))
@@ -2400,7 +2400,7 @@ class PulseEditorPresenter:
     def step_scan_point(self, delta: int) -> bool:
         """Move the held point by one, and keep playing the new one."""
 
-        if self.sequencer is None or not self._scan_rows:
+        if self.sequencer is None or not self._scan_armed():
             self._warn("nothing is held to step")
             return False
         held = 0 if self._held_point is None else self._held_point
@@ -2443,6 +2443,23 @@ class PulseEditorPresenter:
 
         self._scan_rows = tuple(tuple(value for value in row) for row in rows)
         self.refresh()
+
+    def _scan_armed(self) -> bool:
+        """A scan exists only when there is a table AND fields for it to drive.
+
+        Both halves, because each can outlive the other: unbinding the last
+        field leaves yesterday's rows in memory, and a bound field can exist
+        before any table is generated.  The upload gate and the run-length
+        decision read THIS, together -- they used to disagree, so a stale
+        table changed what On Pulse MEANS: a pulse with no scan left in it
+        played once and stopped, its own repeat overwritten by a ghost.
+        Scan repeats is a statement about a scan; without one it governs
+        nothing.
+        """
+
+        return bool(self._scan_rows) and bool(
+            self.sequence is not None and self.sequence.slots
+        )
 
     def _wire_rows(self, rows: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:
         """The author's table as the slots will hold it.

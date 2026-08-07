@@ -2437,6 +2437,41 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     assert "fire forever" in board.events, board.events
 
 
+
+def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -> None:
+    """Scan repeats is a statement about a scan; without one it is silence.
+
+    Bind a field, run a table, set repeats, then UNBIND: yesterday's rows are
+    still in memory but no field carries them.  The upload gate already knew
+    that and sent no table -- while the run-length decision looked only at the
+    rows, so a pulse with no scan left in it fired ONCE and stopped, its own
+    repeat-forever overwritten by a ghost table.
+    """
+
+    board = _Sequencer()
+    presenter.sequencer = board
+    view = presenter.view
+    period = sequence.periods[3].period_id
+
+    view.binding_cycle_requested.emit("duration", period, None)
+    view.scan_run_requested.emit(
+        "import numpy as np\n"
+        "scan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
+    )
+    view.scan_repeats_committed.emit(3)
+    # scan -> api -> off: the field is unbound again.
+    view.binding_cycle_requested.emit("duration", period, None)
+    view.binding_cycle_requested.emit("duration", period, None)
+    assert not presenter.sequence.slots
+
+    board.events.clear()
+    assert presenter.fire() is True
+    assert "write_scan_table" not in board.events
+    assert "fire forever" in board.events, (
+        "with no scan, the pulse's own repeat meaning governs: " + str(board.events)
+    )
+
+
 def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:
     """The complaint in one test: "cannot load this pulse: already firing".
 
