@@ -54,7 +54,7 @@ echo.
 echo [3/3] checking the windows still open...
 %ZLC_PY_CMD% -c "import zou_lab_control_v2, zlc_workbench, inspect; print('   code in use:', inspect.getfile(zlc_workbench))"
 if errorlevel 1 goto zlc_broken
-%ZLC_PY_CMD% -m zlc_workbench.tools.check_environment
+%ZLC_PY_CMD% -m zou_lab_control_v2 check
 if errorlevel 1 goto zlc_broken
 
 echo.

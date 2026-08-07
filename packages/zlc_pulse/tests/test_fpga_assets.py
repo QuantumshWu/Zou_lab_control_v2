@@ -121,6 +121,10 @@ def test_fpga_launchers_use_the_package_wire_cli() -> None:
     build = (launchers / "build_and_program.bat").read_text(encoding="utf-8")
     estimate = (launchers / "estimate_resources.bat").read_text(encoding="utf-8")
     assert "fpga.pulse_streamer.host" not in build
-    assert "zlc_pulse.fpga" in build
     assert "fpga.pulse_streamer.host" not in estimate
-    assert "zlc_pulse.fpga" in estimate
+    # Through the one entry, not at the layer.  "python -m zlc_pulse.fpga" with
+    # this layer's folder on PYTHONPATH does not find the package at all -- the
+    # source is under src/ -- so it ran only where a standalone repository was
+    # pip-installed, and then it derived the board geometry from that tree.
+    assert "zou_lab_control_v2 fpga" in build
+    assert "zou_lab_control_v2 fpga" in estimate

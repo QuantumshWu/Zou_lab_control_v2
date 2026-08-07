@@ -32,6 +32,7 @@ rem while what it drives is zlc_pulse's own fpga tree: its RTL, its board
 rem config, its build.  The path is derived from the repository root rather
 rem than from %~dp0, so moving the launcher does not move the board.
 set "FPGA_DIR=%~dp0..\packages\zlc_pulse\fpga\"
+for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"
 for %%I in ("%FPGA_DIR%..") do set "REPO_ROOT=%%~fI"
 set "STREAMER_DIR=%FPGA_DIR%pulse_streamer"
 set "ZLC_REPO_ROOT=%REPO_ROOT%"
@@ -234,12 +235,22 @@ rem the SYNTHESIZED bitstream (IP depths + every RTL geometry param + the connec
 rem no hand edits.  This routine is called only for a real build/check and fails closed: synthesis
 rem must never proceed with a stale header or a partially generated geometry file.
 pushd "%REPO_ROOT%"
-set "PYTHONPATH=%CD%;%PYTHONPATH%"
-%ZLC_PY_CMD% -m zlc_pulse.fpga --config "%ZLC_CFG_JSON%" --emit-geometry-vh "%STREAMER_DIR%\zlc_geometry.vh" >nul 2>nul
+rem THIS checkout, through its one entry.  "%CD%" was packages\zlc_pulse,
+rem which does not contain the package -- the source is under src/ -- so
+rem "python -m zou_lab_control_v2 fpga" only worked where the standalone repositories
+rem happen to be pip-installed, and it ran THEIR code, not this tree's.  On a
+rem machine that only has this clone it was ModuleNotFoundError, thrown away
+rem by >nul 2>nul and reported as "failed to derive FPGA geometry".
+set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
+rem NOT >nul 2>nul.  The generic "failed to derive FPGA geometry" below is
+rem worth nothing on its own -- the reason is whatever Python printed, and
+rem throwing it away is the same mistake that hid "python is not recognized"
+rem behind an empty source hash for months.
+%ZLC_PY_CMD% -m zou_lab_control_v2 fpga --config "%ZLC_CFG_JSON%" --emit-geometry-vh "%STREAMER_DIR%\zlc_geometry.vh" >nul
 if errorlevel 1 goto zlc_emit_geom_fail
 if "%ZLC_PS_GEOM_TCL%"=="" (
   set "ZLC_GEOM_OUT=%ZLC_PS_BUILD_ROOT%\geom.tcl"
-  %ZLC_PY_CMD% -m zlc_pulse.fpga --config "%ZLC_CFG_JSON%" --emit-geom-tcl "!ZLC_GEOM_OUT!" >nul 2>nul
+  %ZLC_PY_CMD% -m zou_lab_control_v2 fpga --config "%ZLC_CFG_JSON%" --emit-geom-tcl "!ZLC_GEOM_OUT!" >nul
   if errorlevel 1 goto zlc_emit_geom_fail
   set "ZLC_PS_GEOM_TCL=!ZLC_GEOM_OUT!"
 )
@@ -249,8 +260,12 @@ if not "%ZLC_PS_GEOM_TCL%"=="" echo ZLC geometry tcl: %ZLC_PS_GEOM_TCL% (from st
 exit /b 0
 
 :zlc_emit_geom_fail
-popd
+echo.
 echo ERROR: failed to derive FPGA geometry from streamer_config.json.
+echo   config: %ZLC_CFG_JSON%
+echo   header: %STREAMER_DIR%\zlc_geometry.vh
+echo   geom tcl: %ZLC_PS_BUILD_ROOT%\geom.tcl
+echo   The reason is printed above, from zlc_pulse.fpga.
 exit /b 1
 
 :zlc_compute_src_hash
@@ -275,7 +290,7 @@ rem recognized` -- on stderr, which the loop swallowed.  The hash was therefore 
 rem every run rebuilt from scratch and no build was ever recorded, silently, for as long as the
 rem interpreter path has been quoted.  A plain redirect parses the command line the normal way.
 set "ZLC_HASH_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_src_hash.tmp"
-%ZLC_PY_CMD% -c "import hashlib,os,sys;r=sys.argv[1];h=hashlib.sha256();[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode('utf-8')),h.update(open(p,'rb').read())) for p in sys.argv[2:] if p and os.path.exists(p)];print(h.hexdigest())" "%REPO_ROOT%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "%STREAMER_DIR%\!ZLC_PROGRAM_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%" 2>nul
+%ZLC_PY_CMD% -c "import hashlib,os,sys;r=sys.argv[1];h=hashlib.sha256();[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode('utf-8')),h.update(open(p,'rb').read())) for p in sys.argv[2:] if p and os.path.exists(p)];print(h.hexdigest())" "%REPO_ROOT%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "%STREAMER_DIR%\!ZLC_PROGRAM_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
 if exist "%ZLC_HASH_TMP%" set /p ZLC_SRC_HASH=<"%ZLC_HASH_TMP%"
 del "%ZLC_HASH_TMP%" >nul 2>nul
 exit /b 0
@@ -315,8 +330,14 @@ exit /b 0
 set "ZLC_EST_PART=%ZLC_PS_FPGA_PART%"
 if "%ZLC_EST_PART%"=="" set "ZLC_EST_PART=xc7a35tfgg484-2"
 pushd "%REPO_ROOT%"
-set "PYTHONPATH=%CD%;%PYTHONPATH%"
-%ZLC_PY_CMD% -m zlc_pulse.fpga --part "%ZLC_EST_PART%"
+rem THIS checkout, through its one entry.  "%CD%" was packages\zlc_pulse,
+rem which does not contain the package -- the source is under src/ -- so
+rem "python -m zou_lab_control_v2 fpga" only worked where the standalone repositories
+rem happen to be pip-installed, and it ran THEIR code, not this tree's.  On a
+rem machine that only has this clone it was ModuleNotFoundError, thrown away
+rem by >nul 2>nul and reported as "failed to derive FPGA geometry".
+set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
+%ZLC_PY_CMD% -m zou_lab_control_v2 fpga --part "%ZLC_EST_PART%"
 popd
 exit /b 0
 

@@ -23,6 +23,7 @@ rem while what it drives is zlc_pulse's own fpga tree: its RTL, its board
 rem config, its build.  The path is derived from the repository root rather
 rem than from %~dp0, so moving the launcher does not move the board.
 set "FPGA_DIR=%~dp0..\packages\zlc_pulse\fpga\"
+for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"
 for %%I in ("%FPGA_DIR%..") do set "REPO_ROOT=%%~fI"
 
 if /I "%~1"=="/?" goto zlc_help
@@ -41,10 +42,14 @@ if not defined ZLC_PS_PORT set "ZLC_PS_PORT=18861"
 if not defined ZLC_PS_STATE_DIR set "ZLC_PS_STATE_DIR=%FPGA_DIR%build\state"
 if not defined ZLC_PS_CONFIG set "ZLC_PS_CONFIG=%REPO_ROOT%\fpga\board_config\streamer_config.json"
 
-set "PYTHONPATH=%REPO_ROOT%\src;%REPO_ROOT%;%PYTHONPATH%"
+rem THIS checkout, through its one entry -- the same path a window takes.
+rem Naming packages\zlc_pulse\src directly reached the package but not the
+rem tree around it, so a layer it depends on could still come from a
+rem standalone repository that happened to be installed.
+set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
 pushd "%REPO_ROOT%"
 if /I "%~1"=="--help" (
-  %ZLC_PY_CMD% -m zlc_pulse.remote %ZLC_FORWARD_ARGS%
+  %ZLC_PY_CMD% -m zou_lab_control_v2 pulse_server %ZLC_FORWARD_ARGS%
   set "ZLC_STATUS=!ERRORLEVEL!"
   call :zlc_help
   popd
@@ -57,7 +62,7 @@ if /I "%~1"=="--check-config" (
   ) else (
     echo remote_server endpoint: %ZLC_PS_HOST%:%ZLC_PS_PORT%
   )
-  %ZLC_PY_CMD% -m zlc_pulse.remote --host "%ZLC_PS_HOST%" --port "%ZLC_PS_PORT%" %ZLC_FORWARD_ARGS%
+  %ZLC_PY_CMD% -m zou_lab_control_v2 pulse_server --host "%ZLC_PS_HOST%" --port "%ZLC_PS_PORT%" %ZLC_FORWARD_ARGS%
   set "ZLC_STATUS=!ERRORLEVEL!"
   popd
   endlocal & exit /b !ZLC_STATUS!
@@ -86,7 +91,7 @@ echo The Python process will report HARDWARE CONNECTED and RPC LISTENING
 echo only after the geometry handshake and SAFE readback succeed.
 echo After that it prints exact SERVER ADDRESS and copyable CLIENT CONNECT EXAMPLE lines.
 
-%ZLC_PY_CMD% -m zlc_pulse.remote --state-dir "%ZLC_PS_STATE_DIR%" --host "%ZLC_PS_HOST%" --port "%ZLC_PS_PORT%" %ZLC_FORWARD_ARGS%
+%ZLC_PY_CMD% -m zou_lab_control_v2 pulse_server --state-dir "%ZLC_PS_STATE_DIR%" --host "%ZLC_PS_HOST%" --port "%ZLC_PS_PORT%" %ZLC_FORWARD_ARGS%
 set "ZLC_STATUS=!ERRORLEVEL!"
 popd
 endlocal & exit /b !ZLC_STATUS!
