@@ -1,0 +1,2258 @@
+"""Editing a pulse, with zlc_pulse still deciding what a legal pulse is.
+
+The editor's whole risk is that it becomes a second opinion about what the
+hardware can play.  So every test here checks one of two things:
+
+* the projection shows what the sequence actually contains -- lanes, levels,
+  durations, delays -- rather than something reassembled from the display;
+* an edit that would produce an illegal sequence is refused BY THE MODEL, and
+  the editor keeps the last good one instead of holding something that will
+  fail at compile time.
+
+Driven against the real calibration pulse the experiment fires, because a
+hand-made two-lane sequence would not exercise a DAC, a clock port, or the
+62-lane target the bench actually has.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+import importlib.util
+import os
+from pathlib import Path
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+from zlc_workbench.pulse_editor import (
+    PulseEditorPresenter,
+    project_schedule,
+    replace_sequence,
+    timeline_of,
+)
+
+ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+
+
+class _Signal:
+    def __init__(self) -> None:
+        self._listeners: list = []
+
+    def connect(self, listener) -> None:
+        self._listeners.append(listener)
+
+    def emit(self, *args) -> None:
+        for listener in list(self._listeners):
+            listener(*args)
+
+
+class _ScheduleView:
+    """Every intent the real schedule page raises, with Qt taken out."""
+
+    _INTENTS = (
+        "document_name_committed",
+        "port_label_committed",
+        "period_name_committed",
+        "duration_committed",
+        "digital_committed",
+        "analog_committed",
+        "delay_committed",
+        "insert_period_requested",
+        "move_period_requested",
+        "remove_period_requested",
+        "repeat_committed",
+        "visible_ports_committed",
+        "clear_port_requested",
+        "binding_cycle_requested",
+        "scan_array_load_requested",
+        "scan_source_committed",
+        "feedback_requested",
+        "run_requested",
+        "stop_requested",
+        "sync_requested",
+        "save_requested",
+        "load_requested",
+        "connection_requested",
+    )
+
+    def __init__(self) -> None:
+        for name in self._INTENTS:
+            setattr(self, name, _Signal())
+        self.schedule = None
+        self._version = (-1, -1)
+        self.rebuilds = 0
+        self.updated_periods: list = []
+        self.updated_delays: list = []
+        self.updated_labels: list = []
+        self.summary: dict = {}
+        self.scan_source = None
+
+        self.connection = None
+        self.capabilities = None
+        self.control_state = None
+        self.can_run = None
+
+    def set_visible_ports(self, ports) -> None:
+        """The value path, mirrored: the real view re-flags its own rows."""
+
+        from dataclasses import replace
+
+        if self.schedule is None:
+            return
+        shown = {str(key) for key in ports}
+        self.schedule = replace(
+            self.schedule,
+            ports=tuple(
+                replace(port, visible=port.key in shown) for port in self.schedule.ports
+            ),
+            visible_text=f"{len(shown)}/{len(self.schedule.ports)}",
+        )
+
+    def set_schedule(self, vm) -> bool:
+        # The real view refuses two different models under one revision, and a
+        # double that accepts anything lets exactly that defect through: this
+        # test passed while the window raised.
+        version = (int(vm.document_generation), int(vm.revision))
+        if version == self._version and self.schedule is not None and vm != self.schedule:
+            raise ValueError("one schedule revision cannot identify two view models")
+        if version < self._version:
+            return False
+        self._version = version
+        self.schedule = vm
+        self.rebuilds += 1
+        return True
+
+    def set_period(self, period) -> None:
+        # Targeted update: one card, not a rebuild.  Recorded so a test can
+        # tell the two paths apart, which is the whole point of the split.
+        self.updated_periods.append(period)
+        if self.schedule is not None:
+            periods = tuple(
+                period if item.period_id == period.period_id else item
+                for item in self.schedule.periods
+            )
+            self.schedule = replace(self.schedule, periods=periods)
+
+    def set_delay_row(self, row) -> None:
+        self.updated_delays.append(row)
+
+    def set_port_label(self, key: str, label: str) -> None:
+        self.updated_labels.append((str(key), str(label)))
+
+    def set_summary(
+        self,
+        total_text: str,
+        total_tooltip: str,
+        period_count: int,
+        visible_text: str,
+        summary_text: str,
+        scan_summary_text: str,
+    ) -> None:
+        self.summary = {
+            "total_text": total_text,
+            "total_tooltip": total_tooltip,
+            "period_count": period_count,
+            "visible_text": visible_text,
+            "summary_text": summary_text,
+            "scan_summary_text": scan_summary_text,
+        }
+
+    def set_scan_source(self, use_loaded: bool, path: str) -> None:
+        self.scan_source = (bool(use_loaded), str(path))
+
+    def set_connection(self, mode: str, endpoint: str, status: str) -> None:
+        self.connection = (str(mode), str(endpoint), str(status))
+
+    def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
+        self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
+
+    def set_control_state(
+        self, running: bool, synchronized: bool, file_dirty: bool, *, can_run: bool
+    ) -> None:
+        self.control_state = (bool(running), bool(synchronized), bool(file_dirty))
+        self.can_run = bool(can_run)
+
+
+class _PreviewView:
+    """The preview page's whole contract, with Qt taken out."""
+
+    def __init__(self) -> None:
+        self.include_off_toggled = _Signal()
+        self.size_committed = _Signal()
+        self.selectors_toggled = _Signal()
+        self.save_requested = _Signal()
+        self.size_names: tuple = ()
+        self.size = ""
+        self.pinned = None
+        self.content = None
+        self.logical_size = None
+        self.placeholder = ""
+        self.status = ""
+        self._include_off = False
+
+    @property
+    def include_off_rows(self) -> bool:
+        # A property, exactly as the real view declares it.  It was a method
+        # here once, and the presenter called it: two doubles agreeing with
+        # each other while the window raised "'bool' object is not callable".
+        return self._include_off
+
+    def mount_content(self, widget, *, logical_size=None, wheel_target=None) -> None:
+        self.content = widget
+        self.logical_size = logical_size
+        self.wheel_target = wheel_target
+        self.placeholder = ""
+
+    def show_placeholder(self, text: str) -> None:
+        self.placeholder = str(text)
+        self.content = None
+
+    def set_status(self, text: str) -> None:
+        self.status = str(text)
+
+    def set_size_names(self, names) -> None:
+        self.size_names = tuple(names)
+
+    def set_preview_size(self, size: str, *, pinned=None) -> None:
+        self.size = str(size)
+        if pinned is not None:
+            self.pinned = bool(pinned)
+
+
+class _TargetView:
+    """The wiring page's contract, with Qt taken out."""
+
+    def __init__(self) -> None:
+        self.apply_requested = _Signal()
+        self.feedback_requested = _Signal()
+        self.records: tuple = ()
+        self.editable = None
+        self.status = ""
+        self.feedback = ""
+        self.width_rules = None
+
+    def set_ports(self, records, editable, status_text) -> None:
+        self.records = tuple(records)
+        self.editable = bool(editable)
+        self.status = str(status_text)
+
+    def set_width_rules(self, digital, dac) -> None:
+        self.width_rules = (digital, dac)
+
+    def set_feedback(self, text: str) -> None:
+        self.feedback = str(text)
+
+
+class _ScanView:
+    """The Scan page's contract, with Qt taken out."""
+
+    _INTENTS = (
+        "repeats_committed",
+        "hold_requested",
+        "step_requested",
+        "load_program_requested",
+        "template_requested",
+        "run_requested",
+        "save_array_requested",
+        "progress_refresh_requested",
+    )
+
+    def __init__(self) -> None:
+        for name in self._INTENTS:
+            setattr(self, name, _Signal())
+        self.page = None
+        self.draft = ""
+        self.acknowledged = None
+        self.progress = ""
+
+    def set_page(self, record) -> None:
+        self.page = record
+
+    def replace_scan_draft(self, source: str) -> None:
+        self.draft = str(source)
+
+    def acknowledge_scan_draft(self, *, dirty: bool, source_revision: int) -> None:
+        self.acknowledged = (bool(dirty), int(source_revision))
+
+    def set_progress_text(self, text: str) -> None:
+        self.progress = str(text)
+
+
+class _PreviewHost:
+    """What a drawing package hands over: the host, and never its widget.
+
+    A double has to declare what the real collaborator declares, and a real
+    host answers for its own size, saves itself, and closes itself.  The fakes
+    here used to answer with the timeline data instead, which passed only
+    because the window then held the WIDGET and asked the host for nothing.
+    """
+
+    def __init__(self, data=None, logical_size=None) -> None:
+        self.data = data
+        self.logical_size = logical_size
+        self.closed = False
+        self.saved = None
+
+    def qt_widget(self):
+        raise AssertionError("a test never mounts a real widget")
+
+    def update_data(self, data):
+        """A standing host takes new data rather than being rebuilt."""
+
+        self.data = data
+        return None
+
+    def save(self, path):
+        self.saved = path
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _EditorView:
+    """The double stands in for the HANDLE, so it is flat like the handle.
+
+    A double that mirrors the old widget tree lets the presenter go on reaching
+    through pages that no longer exist on the real thing; the sub-doubles below
+    survive only as recorders the assertions read.
+    """
+
+    _SIGNALS = (
+        "clear_all_requested", "close_requested",
+        "document_name_committed", "port_label_committed",
+        "period_name_committed", "duration_committed", "digital_committed",
+        "analog_committed", "delay_committed", "binding_cycle_requested",
+        "insert_period_requested", "move_period_requested",
+        "remove_period_requested", "repeat_committed",
+        "visible_ports_committed", "clear_port_requested",
+        "feedback_requested", "connection_requested", "fire_requested",
+        "stop_requested", "sync_requested", "save_requested", "load_requested",
+        "scan_array_load_requested", "scan_source_committed",
+        "scan_repeats_committed", "scan_hold_requested", "scan_step_requested",
+        "scan_program_load_requested", "scan_template_requested",
+        "scan_run_requested", "scan_array_save_requested",
+        "scan_progress_refresh_requested",
+        "preview_include_off_toggled", "preview_size_committed",
+        "preview_selectors_toggled", "preview_save_requested",
+        "target_apply_requested",
+    )
+
+    def __init__(self) -> None:
+        self.schedule_view = _ScheduleView()
+        self.scan_view = _ScanView()
+        self.preview_view = _PreviewView()
+        self.target_view = _TargetView()
+        self.title = ""
+        self.summary = ""
+        self.capabilities = None
+        self.status_token = ""
+        self.warnings: list[str] = []
+        self.done: list[str] = []
+        #: What the file dialog would answer; "" is the operator cancelling.
+        self.open_answer = ""
+        self.save_answer = ""
+        for name in self._SIGNALS:
+            setattr(self, name, _Signal())
+
+    # -- the document ----------------------------------------------------
+
+    def set_title(self, text: str) -> None:
+        self.title = str(text)
+
+    def set_summary(self, text: str) -> None:
+        self.summary = str(text)
+
+    def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
+        self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
+        self.schedule_view.set_capabilities(can_sync, can_hold, can_step)
+
+    def set_status_color(self, token: str) -> None:
+        self.status_token = str(token)
+
+    def show_warning(self, text: str) -> None:
+        self.warnings.append(str(text))
+
+    def show_done(self, text: str) -> None:
+        self.done.append(str(text))
+
+    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
+        self.asked = (str(caption), str(start_dir), str(filter))
+        return self.save_answer
+
+    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
+        self.asked = (str(caption), str(start_dir), str(filter))
+        return self.open_answer
+
+    # -- the schedule ----------------------------------------------------
+
+    def set_schedule(self, schedule) -> None:
+        self.schedule_view.set_schedule(schedule)
+
+    def set_period(self, period) -> None:
+        self.schedule_view.set_period(period)
+
+    def set_delay_row(self, row) -> None:
+        self.schedule_view.set_delay_row(row)
+
+    def set_port_label(self, key: str, label: str) -> None:
+        self.schedule_view.set_port_label(key, label)
+
+    def set_schedule_summary(
+        self,
+        total_text: str,
+        total_tooltip: str,
+        period_count: int,
+        visible_text: str,
+        summary_text: str,
+        scan_summary_text: str,
+    ) -> None:
+        self.schedule_view.set_summary(
+            total_text, total_tooltip, period_count, visible_text,
+            summary_text, scan_summary_text,
+        )
+
+    def set_visible_ports(self, ports) -> None:
+        self.schedule_view.set_visible_ports(ports)
+
+    def set_control_state(
+        self,
+        running: bool,
+        synchronized: bool,
+        file_dirty: bool,
+        *,
+        can_run: bool,
+    ) -> None:
+        self.schedule_view.set_control_state(
+            running, synchronized, file_dirty, can_run=can_run
+        )
+
+    def set_connection(self, mode: str, endpoint: str, status: str) -> None:
+        self.schedule_view.set_connection(mode, endpoint, status)
+
+    def set_scan_busy(self, busy: bool) -> None:
+        self.schedule_view.set_scan_busy(busy)
+
+    def set_scan_source(self, use_loaded: bool, path: str) -> None:
+        self.schedule_view.set_scan_source(use_loaded, path)
+
+    # -- the scan --------------------------------------------------------
+
+    def set_scan_page(self, record) -> None:
+        self.scan_view.set_page(record)
+
+    def replace_scan_draft(self, text: str) -> None:
+        self.scan_view.replace_scan_draft(text)
+
+    def acknowledge_scan_draft(self, *, dirty: bool, source_revision: int) -> None:
+        self.scan_view.acknowledge_scan_draft(
+            dirty=dirty, source_revision=source_revision
+        )
+
+    def set_scan_progress_text(self, text: str) -> None:
+        self.scan_view.set_progress_text(text)
+
+    # -- the preview -----------------------------------------------------
+
+    @property
+    def preview_include_off_rows(self) -> bool:
+        return bool(self.preview_view.include_off_rows)
+
+    @property
+    def preview_size(self) -> str:
+        return str(self.preview_view.preview_size)
+
+    @property
+    def preview_size_pinned(self) -> bool:
+        return bool(self.preview_view.preview_size_pinned)
+
+    def set_preview_size(self, size: str, *, pinned=None) -> None:
+        self.preview_view.set_preview_size(size, pinned=pinned)
+
+    def set_preview_size_names(self, names) -> None:
+        self.preview_view.set_size_names(names)
+
+    def reset_preview_size_pin(self) -> None:
+        self.preview_view.reset_preview_size_pin()
+
+    def set_preview_status(self, text: str) -> None:
+        self.preview_view.set_status(text)
+
+    def show_preview_placeholder(self, text: str) -> None:
+        self.preview_view.show_placeholder(text)
+
+    def show_preview(self, host) -> None:
+        self.preview_view.mount_content(
+            host, logical_size=getattr(host, "logical_size", None)
+        )
+
+    # -- the target ------------------------------------------------------
+
+    def set_target_ports(self, records, editable: bool, status_text: str) -> None:
+        self.target_view.set_ports(records, editable, status_text)
+
+    def set_target_width_rules(self, digital, dac) -> None:
+        self.target_view.set_width_rules(digital, dac)
+
+    def set_target_feedback(self, text: str) -> None:
+        self.target_view.set_feedback(text)
+
+
+@pytest.fixture
+def sequence():
+    """The real calibration pulse, as the experiment builds it."""
+
+    spec = importlib.util.spec_from_file_location(
+        "calibration_pulse", ATOM_ROOT / "pulses" / "calibration.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _program, metadata = module.build()
+    return metadata["sequence"]
+
+
+@pytest.fixture
+def presenter(sequence):
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence, make_preview=lambda data, **_options: _PreviewHost(data))
+    try:
+        yield presenter
+    finally:
+        presenter.close()
+
+
+def test_the_projection_shows_what_the_sequence_contains(presenter, sequence) -> None:
+    vm = presenter.view.schedule_view.schedule
+    assert vm.document_name == sequence.name
+    assert vm.period_count == len(sequence.periods)
+    # A DAC is one output: its data lanes and the clock that latches them are
+    # one bundle, and the clock is not something a pulse drives.
+    latched = {
+        port.latch_clock
+        for port in sequence.target.ports
+        if port.kind == "dac" and port.latch_clock
+    }
+    assert {row.key for row in vm.ports} == {
+        port.key for port in sequence.target.ports if port.key not in latched
+    }
+    assert latched, "this board has no DAC latch clock to fold in"
+    assert not any(row.kind == "clock" for row in vm.ports)
+
+    first = vm.periods[0]
+    original = sequence.periods[0]
+    assert first.duration.text == f"{original.duration:g}"
+    assert first.unit == original.unit
+
+    lanes = sequence.target.raw_lanes
+    for port_key, high in first.digital:
+        port = sequence.target.by_key[port_key]
+        assert high == bool(original.states[lanes.index(port.lanes[0])])
+
+
+def test_turning_a_lane_on_changes_that_lane_and_nothing_else(presenter, sequence) -> None:
+    period = sequence.periods[0]
+    port = next(port for port in sequence.target.ports if port.kind == "digital")
+    index = sequence.target.raw_lanes.index(port.lanes[0])
+    before = period.states
+
+    presenter.view.digital_committed.emit(
+        period.period_id, port.key, not bool(before[index])
+    )
+
+    after = presenter.sequence.periods[0].states
+    assert after[index] != before[index]
+    assert [
+        value for position, value in enumerate(after) if position != index
+    ] == [value for position, value in enumerate(before) if position != index]
+
+
+def test_a_duration_off_the_clock_grid_is_refused_by_the_model(presenter) -> None:
+    """The rule belongs to zlc_pulse and is not copied here.
+
+    A period that is not a whole number of ticks cannot be played.  The editor
+    finds that out by trying, which is what keeps one answer to the question --
+    and shows the model's own words rather than letting them out of a Qt slot,
+    where PyQt5 ends the process and the window simply vanishes.
+    """
+
+    period_id = presenter.sequence.periods[0].period_id
+    kept = presenter.sequence
+
+    presenter.view.duration_committed.emit(period_id, 3.7, "ns")
+
+    assert presenter.sequence is kept, "an illegal edit was kept"
+    assert presenter.view.warnings, "the operator was told nothing"
+
+
+def test_an_analog_level_outside_the_dac_range_is_refused(presenter, sequence) -> None:
+    dac = next((port for port in sequence.target.ports if port.kind == "dac"), None)
+    if dac is None:
+        pytest.skip("this target has no DAC port")
+    low, high = dac.signed_range
+    period_id = presenter.sequence.periods[0].period_id
+    kept = presenter.sequence
+
+    presenter.view.analog_committed.emit(
+        period_id, dac.key, "edge", high + 1
+    )
+    assert presenter.sequence is kept
+    assert presenter.view.warnings, "the operator was told nothing"
+
+    presenter.view.analog_committed.emit(period_id, dac.key, "edge", high)
+    step = next(
+        item
+        for item in presenter.sequence.periods[0].analog_steps
+        if item.port == dac.key
+    )
+    assert step.value == high
+
+
+def test_removing_the_last_period_is_refused_with_a_reason(presenter) -> None:
+    for period in list(presenter.sequence.periods)[:-1]:
+        presenter.view.remove_period_requested.emit(period.period_id)
+    remaining = presenter.sequence.periods[0].period_id
+
+    presenter.view.remove_period_requested.emit(remaining)
+
+    assert len(presenter.sequence.periods) == 1
+    assert any("at least one period" in text for text in presenter.view.warnings)
+
+
+def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
+    """A new period that zeroes every lane inserts a silent gap mid-sequence."""
+
+    before = presenter.sequence.periods
+    presenter.view.insert_period_requested.emit(before[1].period_id)
+
+    after = presenter.sequence.periods
+    assert len(after) == len(before) + 1
+    assert after[1].states == before[0].states
+    assert len({period.period_id for period in after}) == len(after)
+
+
+def test_clearing_a_port_leaves_the_others_alone(presenter, sequence) -> None:
+    ports = [port for port in sequence.target.ports if port.kind == "digital"]
+    cleared, kept = ports[0], ports[1]
+    lanes = sequence.target.raw_lanes
+    cleared_index = lanes.index(cleared.lanes[0])
+    kept_index = lanes.index(kept.lanes[0])
+    kept_before = [period.states[kept_index] for period in presenter.sequence.periods]
+
+    presenter.view.clear_port_requested.emit(cleared.key)
+
+    assert all(period.states[cleared_index] == 0 for period in presenter.sequence.periods)
+    assert [period.states[kept_index] for period in presenter.sequence.periods] == kept_before
+
+
+def test_clear_all_returns_to_the_sequence_as_opened(presenter, sequence) -> None:
+    """Not to an empty one, which would discard the target and the file."""
+
+    period_id = presenter.sequence.periods[0].period_id
+    presenter.view.period_name_committed.emit(period_id, "edited")
+    assert presenter.sequence != sequence
+
+    # From the toolbar button that raises it.  The schedule page also declared
+    # this command and never emitted it, and the presenter listened to that
+    # one -- so Clear All was a button that did nothing.
+    presenter.view.clear_all_requested.emit()
+    assert presenter.sequence == sequence
+
+
+def test_the_preview_is_built_from_the_periods_that_will_be_played(presenter, sequence) -> None:
+    data = presenter.view.preview_view.content.data
+    assert data is not None, presenter.view.preview_view.placeholder
+
+    expected = sum(
+        float(period.duration) * {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}[period.unit]
+        for period in sequence.periods
+    )
+    assert data.total_duration == pytest.approx(expected)
+    assert data.channels, "no channel was drawn"
+    for block in data.blocks:
+        assert 0.0 <= block.start < block.stop <= expected + 1e-12
+
+
+def test_the_preview_follows_an_edit(presenter, sequence) -> None:
+    """A preview that does not move is a preview of the last pulse."""
+
+    period = sequence.periods[0]
+    lanes = sequence.target.raw_lanes
+    # A lane that is already high in this period would add no block, so the
+    # test would prove nothing; pick one that is actually low.
+    port = next(
+        port
+        for port in sequence.target.ports
+        if port.kind == "digital" and not period.states[lanes.index(port.lanes[0])]
+    )
+    before = len(presenter.view.preview_view.content.data.blocks)
+
+    presenter.view.digital_committed.emit(period.period_id, port.key, True)
+
+    assert len(presenter.view.preview_view.content.data.blocks) > before
+
+
+def test_a_timeline_can_be_drawn_for_a_pulse_with_nothing_high(sequence) -> None:
+    """Which is how a pulse being written starts."""
+
+    quiet = replace_sequence(
+        sequence,
+        periods=tuple(
+            type(period)(
+                period_id=period.period_id,
+                duration=period.duration,
+                unit=period.unit,
+                states=(0,) * len(sequence.target.raw_lanes),
+                analog_steps=(),
+                name=period.name,
+            )
+            for period in sequence.periods
+        ),
+        slots=(),
+        repeat=None,
+    )
+    data = timeline_of(quiet)
+    assert data.channels and not data.blocks
+
+
+def test_the_projection_holds_no_pulse_objects() -> None:
+    """The rule that keeps zlc_ui from learning what a PulseSequence is."""
+
+    vm = None
+    import zlc_workbench.pulse_editor as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "ScheduleVM(" in source
+    del vm
+
+    import inspect
+
+    signature = inspect.signature(project_schedule)
+    assert "sequence" in signature.parameters
+
+
+def _board_description():
+    """A real board description, from the deployed config.
+
+    The double describes itself the way a board does, because "what board is
+    this" is part of the streamer contract now; a double that cannot answer
+    would let the presenter's board-adoption path go untested while the window
+    depends on it entirely.
+    """
+
+    from zlc_pulse import load_streamer_config
+    from zlc_pulse.device import PulseStreamer
+    from zlc_pulse.transport import MemoryRegisterTransport
+
+    config = load_streamer_config()
+    geometry = config["params"]
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geometry, auto_done=True),
+        geometry,
+        config["clock_hz"],
+    )
+    streamer.open()
+    try:
+        return streamer.describe()
+    finally:
+        streamer.close()
+
+
+@dataclass(frozen=True)
+class _AppliedEcho:
+    """What the board is holding, in the shape the real one reports it."""
+
+    source: object
+    scan_rows: tuple
+
+
+class _Sequencer:
+    """A board, with the register writes taken out.
+
+    It keeps state rather than only recording calls, because what the editor
+    asks a board is not "did I send load" but "what are you holding, and are you
+    playing it".  A double that answers those from a list of past calls is a
+    double that agrees with whatever the editor already believed -- which is the
+    exact bug this stopped being able to hide.
+    """
+
+    def __init__(self, *, fail_on_fire: bool = False, never_done: bool = False) -> None:
+        self.events: list[str] = []
+        self.fail_on_fire = fail_on_fire
+        self.never_done = never_done
+        self._digest = ""
+        self._firing = False
+        self._forever = False
+        self._applied = None
+        self.scan_rows: tuple[tuple[int, ...], ...] = ()
+
+    def applied(self):
+        self.events.append("applied")
+        return self._applied
+
+    def describe(self):
+        self.events.append("describe")
+        return _board_description()
+
+    def load(self, prog, *, source=None) -> None:
+        self.events.append("load")
+        self._digest = prog.digest
+        self._firing = False
+        # The real board keeps what it was handed, which is what Sync reads
+        # back; a double that forgets it answers "nothing applied" forever.
+        self._applied = _AppliedEcho(source, self.scan_rows)
+
+    def write_scan_table(self, rows) -> None:
+        self.events.append("write_scan_table")
+        self.scan_rows = tuple(tuple(int(value) for value in row) for row in rows)
+
+    def fire(self, *, forever: bool = False) -> None:
+        self.events.append("fire forever" if forever else "fire")
+        if self.fail_on_fire:
+            raise RuntimeError("board refused the shot")
+        self._firing = True
+        self._forever = bool(forever)
+
+    def wait_done(self, timeout=None) -> object | None:
+        self.events.append("wait_done")
+        # None means "no shot finished", exactly as the real device reports it.
+        if self.never_done:
+            return None
+        self._firing = False
+        return object()
+
+    def safe(self):
+        self.events.append("safe")
+        self._firing = False
+        return None
+
+    def snapshot(self) -> dict:
+        return {
+            "opened": True,
+            "loaded": bool(self._digest),
+            "firing": self._firing,
+            "forever": self._forever,
+            "applied_digest": self._digest,
+        }
+
+
+def test_on_pulse_runs_until_stop(sequence) -> None:
+    """A pulse is a cycle an experiment holds running, not a single shot.
+
+    And a forever run is deliberately not waited on: it never reports done, so
+    waiting would hang the window on its own success.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    try:
+        assert presenter.fire() is True
+        assert board.events == ["load", "fire forever"]
+        assert presenter.running is True
+        # Stop is the live control now, and Run is not offered twice.
+        running, _synchronized, _dirty = view.schedule_view.control_state
+        assert running is True
+
+        presenter.stop()
+        assert board.events[-1] == "safe"
+        assert presenter.running is False
+    finally:
+        presenter.close()
+
+
+def test_a_finite_run_is_asked_for_explicitly_and_waits(sequence) -> None:
+    """The diagnostic path: one shot, waited on, the way a scan point runs."""
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    try:
+        assert presenter.fire(forever=False) is True
+        assert board.events == ["load", "fire", "wait_done"]
+        assert presenter.running is False
+    finally:
+        presenter.close()
+
+
+def test_a_shot_that_fails_leaves_the_outputs_safe(sequence) -> None:
+    view = _EditorView()
+    board = _Sequencer(fail_on_fire=True)
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    try:
+        assert presenter.fire() is False
+        assert board.events[-1] == "safe"
+        assert any("firing stopped" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_a_shot_that_never_reports_done_is_not_a_shot_that_succeeded(sequence) -> None:
+    """Firing over an unfinished shot is the failure this project has paid for.
+
+    The board takes the second command while the first is still playing and the
+    scan quietly returns one point, with every report looking normal.
+    """
+
+    view = _EditorView()
+    board = _Sequencer(never_done=True)
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    try:
+        assert presenter.fire(forever=False, shots=3) is False
+        assert board.events.count("fire") == 1, "it fired again over an unfinished shot"
+        assert board.events[-1] == "safe"
+        assert any("did not report done" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_without_a_sequencer_the_editor_says_so_rather_than_pretending(sequence) -> None:
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        assert presenter.fire() is False
+        assert any("not connected to a sequencer" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
+    """An editor that cannot keep an edit is not an editor.
+
+    Save was wired to a refusal whose stated reason -- a pulse is a Python
+    module, do not overwrite the author's file -- was true and answered a
+    different question.  v1 saved a pulse as JSON beside the module.
+    """
+
+    written = tmp_path / "mine.json"
+    view = _EditorView()
+    view.save_answer = str(written)
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        presenter.set_document_name("kept")
+        presenter.insert_period(None)
+        expected = len(presenter.sequence.periods)
+
+        assert presenter.save_pulse() == str(written)
+        assert written.exists() and written.stat().st_size > 0
+
+        presenter.clear_all()
+        view.open_answer = str(written)
+        assert presenter.ask_for_pulse() is True
+        assert presenter.sequence.name == "kept"
+        assert len(presenter.sequence.periods) == expected
+    finally:
+        presenter.close()
+
+
+def test_saving_never_writes_over_a_pulse_module(sequence, tmp_path) -> None:
+    """A generated file over an author's module loses the reasoning with it."""
+
+    module = tmp_path / "calibration.py"
+    module.write_text("# an author wrote this" + chr(10), encoding="utf-8")
+    view = _EditorView()
+    view.save_answer = str(module)
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        assert presenter.save_pulse() == ""
+        assert module.read_text(encoding="utf-8") == "# an author wrote this" + chr(10)
+        assert any("MODULE" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_connecting_attaches_a_sequencer_and_shows_it(sequence) -> None:
+    """The Connect button, which used to be attached to nothing."""
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(
+        view, sequence, dial=lambda _mode, _endpoint: board
+    )
+    try:
+        assert view.schedule_view.connection[2] == "not connected"
+        assert view.schedule_view.capabilities == (False, False, False)
+
+        view.connection_requested.emit("remote", "127.0.0.1:18861")
+
+        assert presenter.sequencer is board
+        # The status says what was attached, not merely that something was.
+        mode, endpoint, status = view.schedule_view.connection
+        assert (mode, endpoint) == ("remote", "127.0.0.1:18861")
+        assert "127.0.0.1:18861" in status and "ports" in status and "MHz" in status
+        # Sync and hold need a board; stepping also needs a table to step
+        # through, and offering it without one is a button that cannot work.
+        assert view.schedule_view.capabilities == (True, True, False)
+        assert view.status_token == "dirty-ready"
+        assert presenter.fire() is True
+        assert view.status_token == "running-synced"
+    finally:
+        presenter.close()
+
+
+def test_a_refused_connection_says_so_and_stays_offline(sequence) -> None:
+    """A window that looks connected after a failure is worse than one that does not."""
+
+    view = _EditorView()
+
+    def _refuse(_mode, _endpoint):
+        raise ConnectionRefusedError("no server there")
+
+    presenter = PulseEditorPresenter(view, sequence, dial=_refuse)
+    try:
+        view.connection_requested.emit("remote", "10.0.0.9:18861")
+
+        assert presenter.sequencer is None
+        assert "failed" in view.schedule_view.connection[2]
+        assert view.schedule_view.capabilities == (False, False, False)
+        assert any("cannot connect" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_reconnecting_releases_the_previous_board(sequence) -> None:
+    """Two open connections to one board is not a state anything can reason about."""
+
+    closed: list[str] = []
+
+    class _Closable(_Sequencer):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    boards = [_Closable("first"), _Closable("second")]
+    view = _EditorView()
+    presenter = PulseEditorPresenter(
+        view, sequence, dial=lambda _mode, _endpoint: boards.pop(0)
+    )
+    try:
+        view.connection_requested.emit("virtual", "")
+        view.connection_requested.emit("remote", "127.0.0.1:18861")
+        assert closed == ["first"]
+    finally:
+        presenter.close()
+    assert closed == ["first", "second"], "closing the editor left a board connected"
+
+
+def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
+    """It belongs to whoever passed it in -- usually a session that is still using it."""
+
+    class _Watched(_Sequencer):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    board = _Watched()
+    presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
+    presenter.close()
+    assert board.closed is False
+
+
+def test_the_editor_opens_with_no_pulse_at_all() -> None:
+    """An editor opens before it has a subject.
+
+    Requiring a named pulse to start was backwards: the window's job when it
+    has nothing open is to say how to get something, not to refuse to appear.
+    """
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view)
+    try:
+        assert presenter.sequence is None
+        vm = view.schedule_view.schedule
+        assert vm.periods == () and vm.ports == ()
+        assert "Load a pulse" in vm.summary_text
+        assert "Load a pulse" in view.summary, "the guidance landed nowhere visible"
+        assert "Load a pulse" in view.preview_view.placeholder
+        assert view.schedule_view.can_run is False, "Run offered with no pulse"
+
+        # And it refuses the things that need a pulse, by name.
+        assert presenter.fire() is False
+        assert any("no pulse is open" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_load_opens_a_pulse_file_rather_than_refusing(sequence) -> None:
+    """Load was wired to the refusal meant for Save.  Loading writes nothing."""
+
+    view = _EditorView()
+    view.open_answer = str(ATOM_ROOT / "pulses" / "calibration.py")
+    presenter = PulseEditorPresenter(view)
+    try:
+        view.load_requested.emit()
+
+        assert presenter.sequence is not None
+        assert presenter.sequence.name == sequence.name
+        assert view.schedule_view.schedule.period_count == len(sequence.periods)
+    finally:
+        presenter.close()
+
+
+def test_declining_the_open_dialog_leaves_the_editor_as_it_was(sequence) -> None:
+    view = _EditorView()
+    view.open_answer = ""
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        assert presenter.ask_for_pulse() is False
+        assert presenter.sequence is sequence
+        assert view.warnings == []
+    finally:
+        presenter.close()
+
+
+def test_opening_something_that_is_not_a_pulse_says_which_file(tmp_path) -> None:
+    stray = tmp_path / "notes.py"
+    stray.write_text("value = 1\n", encoding="utf-8")
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view)
+    try:
+        assert presenter.open_pulse(str(stray)) is False
+        assert presenter.sequence is None
+        assert any("notes.py" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_add_period_with_nothing_open_starts_a_pulse_on_this_board() -> None:
+    """Asking for a period IS asking for a pulse: one period is what makes it legal."""
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view)
+    try:
+        view.insert_period_requested.emit(None)
+
+        assert presenter.sequence is not None
+        assert len(presenter.sequence.periods) == 1
+        # The board's own pin map, not an invented default.
+        from zlc_pulse import pulse_target_from_xdc
+
+        assert presenter.sequence.target == pulse_target_from_xdc()
+        assert all(state == 0 for state in presenter.sequence.periods[0].states)
+    finally:
+        presenter.close()
+
+
+def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence) -> None:
+    """Either one missing is a button that cannot work, shown as one."""
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, dial=lambda _mode, _endpoint: board)
+    try:
+        assert view.schedule_view.can_run is False           # neither
+
+        view.connection_requested.emit("virtual", "")
+        assert view.schedule_view.can_run is False           # a board, no pulse
+
+        presenter.open_pulse(str(ATOM_ROOT / "pulses" / "calibration.py"))
+        assert view.schedule_view.can_run is True            # both
+
+        presenter.connect_to("offline", "")
+        assert view.schedule_view.can_run is False           # a pulse, no board
+    finally:
+        presenter.close()
+
+
+def test_connecting_with_no_pulse_open_still_shows_the_board() -> None:
+    """The complaint in one test: connected, and the editor showed nothing.
+
+    An editor attached to a board knows its ports, its pins and its clock
+    before any pulse is open.  Hiding that leaves an operator unable to tell a
+    connected editor from a disconnected one -- and with nothing to edit.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, dial=lambda _mode, _endpoint: board)
+    try:
+        assert view.schedule_view.schedule.ports == ()
+
+        view.connection_requested.emit("remote", "127.0.0.1:18861")
+
+        vm = view.schedule_view.schedule
+        described = _board_description()
+        from zlc_workbench.pulse_editor import programmable_ports
+
+        assert len(vm.ports) == len(programmable_ports(described.target))
+        assert len(vm.ports) < len(described.target.ports), "no clock was folded in"
+        assert vm.clock_text == f"{described.time_step_ns:g} ns/tick"
+        # The pin an operator wires into, not only the compiler's lane name.
+        first = programmable_ports(described.target)[0]
+        assert vm.ports[0].endpoint_text == described.target.package_pins[first.lanes[0]]
+        assert first.lanes[0] in vm.ports[0].endpoint_tooltip
+    finally:
+        presenter.close()
+
+
+def test_a_new_pulse_starts_on_the_attached_board(sequence) -> None:
+    """Not on this machine's files: a different board makes that pulse a fiction."""
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, dial=lambda _mode, _endpoint: board)
+    try:
+        presenter.connect_to("remote", "127.0.0.1:18861")
+        view.insert_period_requested.emit(None)
+
+        described = _board_description()
+        assert presenter.sequence.target == described.target
+        assert presenter.sequence.time_step_ns == described.time_step_ns
+    finally:
+        presenter.close()
+
+
+def test_an_open_pulse_is_moved_onto_the_board_by_lane_name(sequence) -> None:
+    """Matched by name, not position.
+
+    Two boards exposing the same lane in different slots must not silently swap
+    what a period drives; that is a pulse that compiles and fires the wrong
+    outputs.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, dial=lambda _mode, _endpoint: board)
+    try:
+        before = {
+            lane: [period.states[index] for period in sequence.periods]
+            for index, lane in enumerate(sequence.target.raw_lanes)
+        }
+
+        presenter.connect_to("remote", "127.0.0.1:18861")
+
+        described = _board_description()
+        assert presenter.sequence.target == described.target
+        after = {
+            lane: [period.states[index] for period in presenter.sequence.periods]
+            for index, lane in enumerate(presenter.sequence.target.raw_lanes)
+        }
+        for lane, states in before.items():
+            if lane in after:
+                assert after[lane] == states, lane
+        # The operator's work survives the move.
+        assert [period.name for period in presenter.sequence.periods] == [
+            period.name for period in sequence.periods
+        ]
+        assert [period.duration for period in presenter.sequence.periods] == [
+            period.duration for period in sequence.periods
+        ]
+    finally:
+        presenter.close()
+
+
+def test_a_board_that_will_not_describe_itself_is_reported(sequence) -> None:
+    """Connected is not the same as usable, and the status must not blur them."""
+
+    class _Mute(_Sequencer):
+        def describe(self):
+            raise RuntimeError("this server is older than describe()")
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence, dial=lambda *_args: _Mute())
+    try:
+        presenter.connect_to("remote", "127.0.0.1:18861")
+        assert "cannot read the board" in view.schedule_view.connection[2]
+        assert any("would not describe itself" in text for text in view.warnings)
+    finally:
+        presenter.close()
+
+
+def test_the_preview_offers_its_sizes_and_the_content_picks_one(presenter) -> None:
+    """The Size box was empty: nothing ever told the page what the sizes are.
+
+    And the default is not a constant -- a busy pulse needs a bigger surface,
+    which is the rule zlc_plot owns so every pulse is drawn comparably.
+    """
+
+    from zlc_plot.layout import PANEL_SIZE_NAMES, recommended_pulse_preset
+
+    view = presenter.view.preview_view
+    assert view.size_names == PANEL_SIZE_NAMES
+    assert view.size == recommended_pulse_preset(
+        presenter._preview_rows(), len(presenter.sequence.periods)
+    )
+    assert view.pinned is False
+
+
+def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> None:
+    """Otherwise the plot snaps back on the next edit and the choice reads as a bug."""
+
+    view = presenter.view.preview_view
+    presenter.view.preview_size_committed.emit("8x8")
+    assert presenter.preview_size() == "8x8"
+    assert view.pinned is True
+
+    # An edit keeps the pin: the pulse is the same shape.
+    period_id = presenter.sequence.periods[0].period_id
+    presenter.view.period_name_committed.emit(period_id, "edited")
+    assert presenter.preview_size() == "8x8"
+
+    # Showing every channel changes how many rows are drawn, so the pin goes.
+    view._include_off = True
+    presenter.view.preview_include_off_toggled.emit(True)
+    assert presenter._pinned_size is None
+    assert view.pinned is False
+
+
+def test_show_all_channels_draws_the_ones_that_are_always_off(presenter, sequence) -> None:
+    """"Show off rows" has to actually add rows, or it is a switch that lies."""
+
+    view = presenter.view.preview_view
+    lean = presenter._preview_rows()
+
+    view._include_off = True
+    presenter.view.preview_include_off_toggled.emit(True)
+
+    from zlc_workbench.pulse_editor import programmable_ports
+
+    assert presenter._preview_rows() > lean
+    assert presenter._preview_rows() == len(programmable_ports(sequence.target))
+    assert str(lean) not in view.status or "channel" in view.status
+
+
+def test_saving_the_preview_writes_the_picture_that_is_shown(presenter, tmp_path) -> None:
+    class _Savable(_PreviewHost):
+        """A host that really writes, declaring everything a host declares."""
+
+        def save(self, path):
+            self.saved = path
+            path.write_bytes(b"png")
+
+    presenter.path = str(tmp_path / "calibration.py")
+    presenter._preview_host = _Savable()
+    written = presenter.save_preview_image()
+
+    assert written and Path(written).exists()
+    assert Path(written).parent == tmp_path
+
+
+def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
+    """A step trace is N values over N+1 boundaries.
+
+    Passing equal-length arrays meant no DAC trace could ever be built -- and
+    it stayed invisible because the calibration pulse drives no DAC, so the
+    error only appeared the moment someone asked to see every channel.
+    """
+
+    from zlc_pulse import AnalogStep
+
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence, make_preview=lambda data, **_o: _PreviewHost(data))
+    try:
+        period_id = sequence.periods[1].period_id
+        view.analog_committed.emit(period_id, dac.key, "edge", 250)
+
+        data = view.preview_view.content.data
+        assert data is not None, view.preview_view.placeholder
+        trace = next(item for item in data.analog_traces if item.name == dac.key)
+        assert len(trace.starts) == len(trace.values) + 1
+        assert trace.starts[-1] == data.total_duration
+        # The level holds from the period it was set in.
+        assert trace.values[0] == 0.0 and trace.values[1] == 250.0
+    finally:
+        presenter.close()
+
+
+def test_the_target_page_says_which_pins_an_output_reaches(presenter, sequence) -> None:
+    """The page had no listener at all, so it showed nothing.
+
+    A pulse names outputs; the Target page is the only place saying which
+    physical pins those names reach.  Without it an operator has the pulse and
+    the breakout and no way to relate them.
+    """
+
+    view = presenter.view.target_view
+    assert view.records, "the target page was never filled"
+
+    from zlc_workbench.pulse_editor import programmable_ports
+
+    assert len(view.records) == len(programmable_ports(sequence.target))
+    digital = next(r for r in view.records if r.kind == "digital")
+    port = sequence.target.by_key[digital.key]
+    assert digital.endpoints == (sequence.target.package_pins[port.lanes[0]],)
+
+    dac = next(r for r in view.records if r.kind == "dac")
+    spec = sequence.target.by_key[dac.key]
+    assert len(dac.endpoints) == spec.width
+    # The one wire of the bundle a pulse never drives, and an operator still
+    # has to find on the board.
+    assert dac.clock_key == spec.latch_clock
+    assert dac.clock_endpoint and dac.clock_endpoint not in dac.endpoints
+
+
+def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence) -> None:
+    board = _Sequencer()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("remote", "127.0.0.1:18861")
+    view = presenter.view.target_view
+
+    assert view.editable is False, "an attached board's topology was offered for editing"
+    assert "board's" in view.status
+    assert view.width_rules is not None
+
+    from zlc_ui import TargetPortRecord
+
+    edited = tuple(
+        TargetPortRecord(
+            key=record.key,
+            kind=record.kind,
+            signal="renamed" if record.kind == "digital" else record.signal,
+            endpoints=record.endpoints,
+            clock_key=record.clock_key,
+            clock_endpoint=record.clock_endpoint,
+            lane_order=record.lane_order,
+        )
+        for record in view.records
+    )
+    presenter.view.target_apply_requested.emit(edited)
+
+    renamed = [
+        port for port in presenter.sequence.target.ports if port.label == "renamed"
+    ]
+    assert renamed, presenter.view.target_view.feedback
+    # A rename is metadata: the wiring and its fingerprint do not move.
+    assert presenter.sequence.target.raw_lanes == sequence.target.raw_lanes
+    assert presenter.sequence.target.package_pins == sequence.target.package_pins
+
+
+def test_dropping_a_port_while_a_board_is_attached_is_refused(presenter) -> None:
+    """Re-wiring a board from a window would only surface as wrong outputs."""
+
+    board = _Sequencer()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("remote", "127.0.0.1:18861")
+    view = presenter.view.target_view
+    before = presenter.sequence.target
+
+    presenter.view.target_apply_requested.emit(view.records[:-1])
+
+    assert presenter.sequence.target is before
+    assert "cannot be added or removed" in view.feedback
+
+
+def test_offline_the_target_is_the_pulse_file_and_is_editable(presenter) -> None:
+    view = presenter.view.target_view
+    assert view.editable is True
+    assert "Offline" in view.status
+
+
+def test_toggling_one_lane_updates_one_card_and_rebuilds_nothing(presenter, sequence) -> None:
+    """Clicking a checkbox is not a change of shape.
+
+    The card already shows the new state -- that is what the widget IS -- so
+    re-projecting the whole board rebuilds every card to arrive back where the
+    screen already was, throwing away the scroll position and any partly-typed
+    field on the way.
+    """
+
+    schedule = presenter.view.schedule_view
+    period = sequence.periods[0]
+    port = next(port for port in sequence.target.ports if port.kind == "digital")
+    before = schedule.rebuilds
+
+    presenter.view.digital_committed.emit(period.period_id, port.key, True)
+
+    assert schedule.rebuilds == before, "one checkbox rebuilt the whole board"
+    assert [vm.period_id for vm in schedule.updated_periods] == [period.period_id]
+    # And the model really changed.
+    index = sequence.target.raw_lanes.index(port.lanes[0])
+    assert presenter.sequence.periods[0].states[index] == 1
+
+
+def test_a_duration_edit_moves_the_totals_without_a_rebuild(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    period_id = sequence.periods[0].period_id
+    before = schedule.rebuilds
+
+    presenter.view.duration_committed.emit(period_id, 0.004, "s")
+
+    assert schedule.rebuilds == before
+    assert schedule.updated_periods[-1].period_id == period_id
+    # The header total is a consequence of the edit and must follow it.
+    assert schedule.summary["period_count"] == len(sequence.periods)
+    assert schedule.summary["total_text"] != ""
+
+
+def test_a_delay_edit_updates_its_row_only(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    port = next(port for port in sequence.target.ports if port.kind == "digital")
+    before = schedule.rebuilds
+
+    presenter.view.delay_committed.emit(port.key, 40, "ns")
+
+    assert schedule.rebuilds == before
+    assert [row.port_key for row in schedule.updated_delays] == [port.key]
+    assert any(delay.port == port.key for delay in presenter.sequence.delays)
+
+
+def test_renaming_an_output_touches_the_label_and_nothing_else(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    port = next(port for port in sequence.target.ports if port.kind == "digital")
+    before = schedule.rebuilds
+
+    presenter.view.port_label_committed.emit(port.key, "MOT cooling")
+
+    assert schedule.rebuilds == before
+    assert schedule.updated_labels == [(port.key, "MOT cooling")]
+    assert presenter.sequence.target.by_key[port.key].label == "MOT cooling"
+
+
+def test_a_change_of_shape_does_rebuild(presenter, sequence) -> None:
+    """The other half of the rule: adding a period IS a change of shape."""
+
+    schedule = presenter.view.schedule_view
+    before = schedule.rebuilds
+
+    presenter.view.insert_period_requested.emit(sequence.periods[1].period_id)
+
+    assert schedule.rebuilds == before + 1
+    assert len(presenter.sequence.periods) == len(sequence.periods) + 1
+
+
+def _dac_port(sequence):
+    return next(port for port in sequence.target.ports if port.kind == "dac")
+
+
+def test_a_dot_binds_a_field_into_a_scan_column(presenter, sequence) -> None:
+    """The whole Scan page had no listener; this is where it starts.
+
+    Bound, a field stops being a constant in the pulse and becomes a value the
+    device writes per point.
+    """
+
+    schedule = presenter.view.schedule_view
+    period_id = sequence.periods[3].period_id
+
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+
+    assert [slot.field_ref.period_id for slot in presenter.sequence.slots] == [period_id]
+    assert presenter.view.scan_view.page is not None
+    assert "Bound" in presenter.view.scan_view.page.slots_text
+
+
+def test_the_dot_cycles_off_scan_api_off(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    period_id = sequence.periods[3].period_id
+
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    assert not presenter.sequence.slots[0].slot_id.startswith("api_")
+
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    assert presenter.sequence.slots[0].slot_id.startswith("api_")
+
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    assert presenter.sequence.slots == ()
+
+
+def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    scan = presenter.view.scan_view
+    period_id = sequence.periods[3].period_id
+    dac = _dac_port(sequence)
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    presenter.view.binding_cycle_requested.emit("analog", period_id, dac.key)
+
+    presenter.view.scan_template_requested.emit("column_stack")
+
+    assert "np.column_stack" in scan.draft
+    # One column per bound slot, each seeded by its own kind.
+    assert scan.draft.count("np.linspace") == 2
+    assert "DAC code" in scan.draft
+
+
+def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    scan = presenter.view.scan_view
+    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+
+    presenter.view.scan_run_requested.emit(
+        "import numpy as np\nscan_table = np.linspace(100, 200, 7).reshape(-1, 1)\n"
+    )
+
+    assert len(presenter._scan_rows) == 7
+    assert scan.acknowledged == (False, presenter.revision)
+    assert "7 scan point" in scan.page.progress_text
+    assert "more point" not in scan.page.table_text
+
+
+def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
+    """A column per bound slot: anything else would write the wrong field."""
+
+    schedule = presenter.view.schedule_view
+    scan = presenter.view.scan_view
+    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+
+    presenter.view.scan_run_requested.emit(
+        "import numpy as np\nscan_table = np.zeros((5, 3))\n"
+    )
+
+    assert presenter._scan_rows == ()
+    assert any("3 column" in text for text in presenter.view.warnings)
+
+
+def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, sequence) -> None:
+    schedule = presenter.view.schedule_view
+    scan = presenter.view.scan_view
+    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.scan_run_requested.emit("import numpy as np\nscan_table = np.arange(4).reshape(-1, 1)\n")
+    kept = presenter._scan_rows
+
+    presenter.view.scan_run_requested.emit("raise RuntimeError('bad sweep')")
+
+    assert presenter._scan_rows == kept
+    assert any("bad sweep" in text for text in presenter.view.warnings)
+
+
+def test_holding_a_point_stops_the_board_and_writes_that_row(presenter, sequence) -> None:
+    """Holding is how a scan is inspected: one row, outputs steady."""
+
+    board = _Sequencer()
+    written: list = []
+    board.write_slots = lambda values: written.append(tuple(values))
+    presenter.sequencer = board
+    schedule = presenter.view.schedule_view
+    scan = presenter.view.scan_view
+    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.scan_run_requested.emit("import numpy as np\nscan_table = np.arange(5).reshape(-1, 1) * 100\n")
+
+    presenter.view.scan_hold_requested.emit()
+    assert "safe" in board.events
+
+    presenter.view.scan_step_requested.emit(1)
+    assert written[-1] == (100,)
+    presenter.view.scan_step_requested.emit(-1)
+    assert written[-1] == (0,)
+    # It cannot step off either end of the table.
+    for _ in range(10):
+        presenter.view.scan_step_requested.emit(-1)
+    assert written[-1] == (0,)
+
+
+def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
+    uploaded: list = []
+    board = _Sequencer()
+    board.write_scan_table = lambda rows: uploaded.append(tuple(rows))
+    presenter.sequencer = board
+    schedule = presenter.view.schedule_view
+    scan = presenter.view.scan_view
+    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.scan_run_requested.emit("import numpy as np\nscan_table = np.arange(3).reshape(-1, 1) + 40\n")
+
+    assert presenter.load_into_sequencer() is True
+    assert uploaded == [((40,), (41,), (42,))]
+
+
+def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> None:
+    """The same answer as the buttons, at a glance, decided in one place."""
+
+    view = presenter.view
+    assert view.status_token == "idle", "no board, yet something looked ready"
+
+    board = _Sequencer()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("virtual", "")
+    assert view.status_token == "dirty-ready"
+
+    presenter.fire()
+    assert view.status_token == "running-synced"
+
+    # Editing while it runs means the board is playing something older.
+    view.duration_committed.emit(sequence.periods[0].period_id, "7", "us")
+    assert view.status_token == "running-stale"
+
+    presenter.stop()
+    assert view.status_token == "dirty-ready"
+
+
+def test_renaming_a_period_does_not_make_the_board_stale(presenter, sequence) -> None:
+    """Stale means the board is playing something else, not that a name moved.
+
+    The board is asked what it holds, and what it holds is a compiled program.
+    A period's name never reaches it.  Lighting the stale lamp for an edit that
+    changes nothing the board plays is how an operator learns to ignore it --
+    and then misses the edit that did matter.
+    """
+
+    board = _Sequencer()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("virtual", "")
+    presenter.fire()
+
+    presenter.view.period_name_committed.emit(
+        sequence.periods[0].period_id, "MOT load"
+    )
+
+    assert presenter.view.status_token == "running-synced"
+
+
+def test_the_window_never_reports_a_board_that_did_not_answer(presenter) -> None:
+    """Attached and silent is its own state, and has to look like one.
+
+    Keeping the last good answer on screen is how a window sits lit green over a
+    server that died two minutes ago.
+    """
+
+    class _Mute(_Sequencer):
+        def snapshot(self):
+            raise ConnectionResetError("the server went away")
+
+    board = _Mute()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("virtual", "")
+    presenter.fire()
+
+    assert presenter.view.status_token == "unreachable"
+    assert presenter.running is False
+    assert presenter.synchronized is False
+
+
+def test_a_board_someone_else_loaded_reads_as_stale(presenter) -> None:
+    """Nobody tells this window when a notebook takes the board.
+
+    Which is why the window does not keep a copy: it asks, and the board says
+    it is holding something this editor did not put there.
+    """
+
+    board = _Sequencer()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("virtual", "")
+    presenter.fire()
+    assert presenter.synchronized is True
+
+    # A notebook loads its own pulse over the top and runs it.
+    board._digest = "0123456789abcdef"
+    presenter.refresh_run_state()
+
+    assert presenter.synchronized is False
+    assert presenter.view.status_token == "running-stale"
+
+
+def test_stepping_is_offered_only_once_there_is_a_table(presenter, sequence) -> None:
+    board = _Sequencer()
+    presenter._dial = lambda *_args: board
+    presenter.connect_to("virtual", "")
+    assert presenter.view.capabilities[2] is False
+
+    presenter.view.binding_cycle_requested.emit(
+        "duration", sequence.periods[3].period_id, None
+    )
+    presenter.view.scan_run_requested.emit(
+        "import numpy as np\nscan_table = np.arange(4).reshape(-1, 1)\n"
+    )
+    assert presenter.view.capabilities[2] is True
+
+
+def test_a_pulse_authored_in_the_units_zlc_pulse_accepts_can_be_opened() -> None:
+    """The window used to declare its own four units and leave one out.
+
+    A period authored in ticks then raised KeyError inside the projection --
+    from a Qt slot, which ends the process rather than drawing anything.
+    """
+
+    from zlc_pulse.model import TIME_UNIT_CHOICES
+
+    from zlc_workbench.pulse_editor import _TIME_UNITS, _nanoseconds
+
+    assert set(_TIME_UNITS) == set(TIME_UNIT_CHOICES)
+    for unit in TIME_UNIT_CHOICES:
+        assert _nanoseconds(1.0, unit) > 0.0
+
+
+def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp_path) -> None:
+    """The loader used to skip the width check the generated path made.
+
+    So a table with the wrong number of columns reached the board from a file
+    and was refused from a program -- two answers to what a legal table is.
+    """
+
+    import numpy as np
+
+    from zlc_pulse.scan import scan_columns_for, validate_scan_table
+
+    presenter.view.binding_cycle_requested.emit(
+        "duration", presenter.sequence.periods[3].period_id, None
+    )
+    columns = scan_columns_for(presenter.sequence)
+    assert columns, "no slot was bound"
+
+    with pytest.raises(ValueError, match="column"):
+        validate_scan_table(np.zeros((4, len(columns) + 1)), columns)
+    assert validate_scan_table(np.zeros((4, len(columns))), columns)
+
+
+def test_a_board_with_no_pulse_shows_its_delays_beside_its_channels() -> None:
+    """One projection, whether or not a pulse is open.
+
+    The board-only view used to be a separate function, and a separate function
+    is a partial copy: it built the channel-name column and never built the
+    delay column at all, so an editor freshly connected to a 22-output board
+    showed 22 names beside nothing.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, None, dial=lambda _m, _e: board)
+    try:
+        assert presenter.connect_to("virtual", "") is True
+        schedule = view.schedule_view.schedule
+        assert schedule.ports, "an attached board must show its ports"
+        assert len(schedule.delay_rows) == len(
+            [port for port in schedule.ports if port.kind in ("digital", "dac")]
+        ), "every delayable output gets a row, pulse or no pulse"
+        assert all(not row.value.editable for row in schedule.delay_rows), (
+            "a delay lives in the pulse that carries it, and there is none yet"
+        )
+    finally:
+        presenter.close()
+
+
+def test_hanging_up_retires_what_the_board_had_said_about_itself(sequence) -> None:
+    """Offline authoring survives having once been connected.
+
+    ``board``/``pins`` are facts of a CONNECTION, not properties of the editor.
+    Keeping them past the disconnect left the editor believing it was attached
+    forever, so the Target page stayed read-only and Offline -- the one mode
+    whose point is authoring a target -- could never author one again.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, dial=lambda _m, _e: board)
+    try:
+        presenter.connect_to("virtual", "")
+        assert presenter.board is not None and presenter.pins is not None
+        assert view.target_view.editable is False, "a board's topology is the board's"
+
+        assert presenter.connect_to("offline", "") is True
+
+        assert presenter.board is None, "the description belonged to the connection"
+        assert presenter.pins == {}
+        assert presenter.sequencer is None
+        assert view.target_view.editable is True, "Offline authors the target"
+    finally:
+        presenter.close()
+
+
+def test_hide_off_keeps_what_the_pulse_drives_and_show_all_brings_it_back(sequence) -> None:
+    """Two defects behind one pair of buttons.
+
+    "Hide Off" read a PortRowVM.active flag that was hardcoded True, so it hid
+    nothing, ever.  Whether a lane is driven is edited constantly while the
+    port rows are only re-pushed on a structural change, so a flag was always
+    going to be stale -- the view computes it from the periods it holds.
+
+    Then Hide Off followed by Show All produced two different models under one
+    revision.  The view refuses that, correctly, and the refusal came out of a
+    Qt slot: the real window aborted with no traceback at all.
+    """
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        schedule = view.schedule_view.schedule
+        assert sum(1 for port in schedule.ports if port.visible) == len(schedule.ports)
+
+        # The pulse drives some subset; hiding leaves exactly that.
+        driven = {
+            key
+            for period in schedule.periods
+            for key, on in period.digital
+            if on
+        } | {
+            key
+            for period in schedule.periods
+            for key, _mode, field in period.analog
+            if field.text.strip()
+        }
+        assert driven, "this fixture drives at least one output"
+
+        # Visibility is a VALUE, so it goes the value way: the rows are
+        # re-flagged in place and the revision stands, because the SHAPE of
+        # what is shown -- which periods, which ports exist -- has not moved.
+        rebuilds = view.schedule_view.rebuilds
+        presenter.set_visible_ports(tuple(driven))
+        hidden = view.schedule_view.schedule
+        assert {p.key for p in hidden.ports if p.visible} == driven
+        assert view.schedule_view.rebuilds == rebuilds, "a value change is not a rebuild"
+
+        presenter.set_visible_ports(tuple(port.key for port in schedule.ports))
+        assert all(port.visible for port in view.schedule_view.schedule.ports)
+
+        # And a real structural change afterwards is still recognised as one.
+        presenter.insert_period(None)
+        assert view.schedule_view.rebuilds > rebuilds
+        assert view.schedule_view.schedule.revision != schedule.revision
+    finally:
+        presenter.close()
+
+
+def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence) -> None:
+    """Add Bracket silently undid itself.
+
+    The view model carried default_repeat_count=1 and the presenter reads a
+    count below the domain's minimum as "no repeat" -- correctly, because a
+    region that plays its periods once IS the sequence.  So the button
+    committed a count-1 region and the presenter cleared it, every time.  The
+    minimum is the domain's to state, and now does.
+    """
+
+    from zlc_pulse import MINIMUM_REPEAT_COUNT
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        vm = view.schedule_view.schedule
+        assert vm.default_repeat_count == MINIMUM_REPEAT_COUNT
+        assert vm.min_repeat_count == MINIMUM_REPEAT_COUNT
+
+        first, last = vm.periods[0].period_id, vm.periods[-1].period_id
+        presenter.set_repeat(first, last, vm.default_repeat_count)
+        repeat = presenter.sequence.repeat
+        assert repeat is not None and repeat.count == MINIMUM_REPEAT_COUNT
+
+        presenter.set_repeat(None, None, 0)
+        assert presenter.sequence.repeat is None
+    finally:
+        presenter.close()
+
+
+def test_a_repeat_of_one_is_refused_by_the_model_itself(sequence) -> None:
+    """One encoding per pulse: the redundant one cannot be built at all."""
+
+    import pytest as _pytest
+    from zlc_pulse import RepeatRegion
+
+    with _pytest.raises(ValueError, match="once is not a repeat"):
+        RepeatRegion(sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
+
+
+def test_the_preview_always_says_what_the_outer_level_repeats(sequence) -> None:
+    """On Pulse is a cycle an experiment holds running.
+
+    So the OUTER level of a pulse repeats forever unless a bracket spans the
+    whole thing and says how many times instead; a bracket over PART repeats
+    that part with the outer level still forever around it.  Neither was drawn.
+    A pulse with no bracket showed no marker at all -- the one thing that is
+    always true of a running pulse was the one thing the preview never said --
+    and a bracketed pulse could not be previewed at all, because the count was
+    handed to a marker field that takes a label and raised TypeError.
+    """
+
+    from zlc_workbench.pulse_editor import FOREVER_NOTATION, timeline_of
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        while len(presenter.sequence.periods) < 4:
+            presenter.insert_period(None)
+        ids = [period.period_id for period in presenter.sequence.periods]
+        total = timeline_of(presenter.sequence).total_duration
+
+        # Nothing bracketed: the whole pulse, forever.
+        plain = timeline_of(presenter.sequence)
+        assert plain.repeat_notation == FOREVER_NOTATION
+        assert [(m.start, m.stop, m.label) for m in plain.repeat_markers] == [
+            (0.0, total, FOREVER_NOTATION)
+        ]
+
+        # A bracket over everything IS the outer level, so it replaces forever.
+        presenter.set_repeat(ids[0], ids[-1], 3)
+        whole = timeline_of(presenter.sequence)
+        assert whole.repeat_notation == "x3"
+        assert [marker.label for marker in whole.repeat_markers] == ["x3"]
+
+        # A bracket over part repeats the part; the outer level is still forever.
+        presenter.set_repeat(ids[1], ids[2], 5)
+        part = timeline_of(presenter.sequence)
+        assert part.repeat_notation == FOREVER_NOTATION
+        assert [marker.label for marker in part.repeat_markers] == ["x5", FOREVER_NOTATION]
+        inner, outer = part.repeat_markers
+        assert 0.0 < inner.start and inner.stop < total
+        assert (outer.start, outer.stop) == (0.0, total)
+    finally:
+        presenter.close()
+
+
+def test_every_bindable_field_shows_the_slot_it_is_bound_to(sequence) -> None:
+    """The dot has always been able to say which column a field became.
+
+    FluentScanLineEdit takes a binding and a number and paints an orange s1 or
+    a violet API mark, and nothing ever told it: the projection built every
+    field as a bare value, so a duration bound to a slot looked exactly like
+    one that was not bound at all.  The bind took; the screen never said so.
+    """
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        period = presenter.sequence.periods[0].period_id
+        dac = next(
+            port.key
+            for port in presenter.sequence.target.ports
+            if port.kind == "dac"
+        )
+        delayable = next(
+            port.key
+            for port in presenter.sequence.target.ports
+            if port.kind == "digital"
+        )
+
+        presenter.cycle_binding("duration", period, None)      # -> scan
+        presenter.cycle_binding("analog", period, dac)         # -> scan
+        presenter.cycle_binding("delay", None, delayable)      # -> api
+
+        schedule = view.schedule_view.schedule
+        card = next(item for item in schedule.periods if item.period_id == period)
+        assert card.duration.binding_kind == "scan"
+        assert card.duration.binding_number >= 1
+
+        analog = {key: field for key, _mode, field in card.analog}
+        assert analog[dac].binding_kind == "scan"
+        assert analog[dac].binding_number >= 1
+        assert not analog[dac].value_is_typed if hasattr(analog[dac], "value_is_typed") else True
+
+        row = next(item for item in schedule.delay_rows if item.port_key == delayable)
+        assert row.value.binding_kind == "api"
+
+        # Numbers are the slot positions, so no two bound fields share one.
+        numbers = {card.duration.binding_number, analog[dac].binding_number,
+                   row.value.binding_number}
+        assert len(numbers) == 3, numbers
+
+        # Cycling off takes the mark away again.
+        presenter.cycle_binding("duration", period, None)      # scan -> api
+        presenter.cycle_binding("duration", period, None)      # api  -> off
+        card = next(
+            item
+            for item in view.schedule_view.schedule.periods
+            if item.period_id == period
+        )
+        assert card.duration.binding_kind == ""
+    finally:
+        presenter.close()
+
+
+def test_showing_every_row_grows_the_preview_widget_too(sequence) -> None:
+    """The canvas was sized once, at mount, and never again.
+
+    So a pulse that GREW -- two rows becoming twenty-two the moment Show off
+    rows is switched on -- was drawn in full into a widget still shaped for the
+    old one: the operator saw the top three channels and blank space below.
+    The host knows its new size; the update now hands it back and the widget
+    is re-sized with it.
+    """
+
+    sizes: list[tuple[int, int]] = []
+    view = _EditorView()
+
+    def _make(data, *, size, selectors):
+        sizes.append((len(data.channels), 0))
+        return _PreviewHost(data, (100, 50 * max(1, len(data.channels))))
+
+    def _update(host, data, *, size):
+        # What the real composition root does: ask the host to re-plan.  The
+        # host is what knows the new size, so it is the host that is updated.
+        host.logical_size = (100, 50 * max(1, len(data.channels)))
+        return host.logical_size
+
+    presenter = PulseEditorPresenter(
+        view, sequence, make_preview=_make, update_preview=_update
+    )
+    try:
+        presenter.view.preview_view._include_off = False
+        presenter.refresh_preview()
+        narrow = view.preview_view.logical_size
+
+        presenter.view.preview_view._include_off = True
+        presenter.refresh_preview()
+        wide = view.preview_view.logical_size
+
+        assert narrow is not None and wide is not None
+        assert wide[1] > narrow[1], (
+            f"more rows must mean a taller widget: {narrow} -> {wide}"
+        )
+    finally:
+        presenter.close()
+
+
+def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
+    """That is what Sync means, and the direction it has to run.
+
+    A notebook or a raw API call changes the device behind this window's back,
+    and nothing else lets the window catch up.  It used to push the other way
+    -- editor onto board -- which is what On Pulse does anyway, so the button
+    duplicated one action and left the one nobody else performs undone.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, dial=lambda _m, _e: board)
+    try:
+        presenter.connect_to("virtual", "")
+
+        # Sync needs a BOARD, not a pulse: an editor with nothing open is
+        # exactly when reading what the hardware holds is worth doing.
+        assert view.schedule_view.capabilities[0] is True
+        presenter.sequence = None
+        presenter.refresh()
+        assert view.schedule_view.capabilities[0] is True
+
+        assert presenter.sync_from_sequencer() is False
+        assert any("nothing to sync" in text for text in view.warnings)
+
+        presenter.sequence = sequence
+        presenter.load_into_sequencer()
+        held = len(sequence.periods)
+
+        presenter.insert_period(None)
+        assert len(presenter.sequence.periods) == held + 1
+
+        assert presenter.sync_from_sequencer() is True
+        assert len(presenter.sequence.periods) == held, (
+            "the editor shows what the board is holding, not what it had drifted to"
+        )
+        assert any("synced from the board" in text for text in view.done)
+    finally:
+        presenter.close()
+
+
+def test_the_scan_page_says_what_to_do_before_it_says_what_failed(sequence) -> None:
+    """v1 told the operator their next move; this named a symptom.
+
+    A scan table has one column per bound field, so with nothing bound there
+    is no table to make or read at all -- and the answer is a click on a dot
+    in the Edit tab, not a column count from a validator.  The file dialog is
+    also asked for AFTER that check, because picking a file and then being
+    told the slots were never bound wastes the choice just made.
+    """
+
+    view = _EditorView()
+    view.open_answer = "/nowhere/table.npy"
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        assert not presenter.sequence.slots, "this fixture starts unbound"
+
+        assert presenter.run_scan_program("scan_table = [[1]]") is False
+        assert any("click a dot" in text for text in view.warnings)
+
+        view.warnings.clear()
+        view.asked = None
+        assert presenter.load_scan_array() is False
+        assert any("click a dot" in text for text in view.warnings)
+        assert view.asked is None, "the dialog must not open before the check"
+
+        # And "use the loaded file" with no file loaded says so, and stays off.
+        view.warnings.clear()
+        presenter.set_scan_source(True)
+        assert any("Load Array first" in text for text in view.warnings)
+        assert presenter._scan_use_loaded is False
+    finally:
+        presenter.close()
+
+
+def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
+    """The preview said "x3" and the board was told "forever" anyway.
+
+    A bracket over the whole pulse replaces the outer level -- that rule was
+    drawn in the preview and enforced nowhere, so the outermost bracket was
+    the one bracket with no effect on the hardware, while an inner one worked.
+    N times, over and over, is indistinguishable from over and over.
+
+    The count itself never needed carrying: the compiler already encodes the
+    span as the program's one loop region, so ONE fire plays it N times.  All
+    that was missing was not wrapping that in a forever run.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    try:
+        while len(presenter.sequence.periods) < 3:
+            presenter.insert_period(None)
+        ids = [period.period_id for period in presenter.sequence.periods]
+
+        presenter.set_repeat(ids[0], ids[-1], 3)
+        assert presenter.fire() is True
+        assert board.events == ["load", "fire", "wait_done"], board.events
+        assert presenter.compile().loop_count == 3
+
+        # A bracket over PART leaves the outer level alone: still until Stop.
+        board.events.clear()
+        presenter.set_repeat(ids[1], ids[2], 5)
+        assert presenter.fire() is True
+        assert board.events == ["load", "fire forever"], board.events
+
+        # And asking explicitly still wins over what the document says.
+        board.events.clear()
+        presenter.set_repeat(ids[0], ids[-1], 3)
+        assert presenter.fire(forever=True) is True
+        assert board.events == ["load", "fire forever"], board.events
+    finally:
+        presenter.close()
+
+
+def test_every_dac_in_one_period_can_be_bound(presenter, sequence) -> None:
+    """A slot name has to carry all of what identifies the field it names.
+
+    The model says what a field IS: a duration is a period, a delay is a port,
+    a DAC is a period AND a port.  The name was built from "the first part that
+    happens to be set", so every DAC in one period got the same one and binding
+    a second was refused with "slot ids must be unique" -- one scannable field
+    per period, and every other dot on that card answering for a rule the
+    operator had not broken.
+    """
+
+    period_id = presenter.sequence.periods[0].period_id
+    dacs = [port for port in sequence.target.ports if port.kind == "dac"]
+    assert len(dacs) >= 2, "this board has only one DAC to bind"
+
+    for port in dacs:
+        presenter.cycle_binding("analog", period_id, port.key)
+
+    bound = {
+        (slot.field_ref.period_id, slot.field_ref.port)
+        for slot in presenter.sequence.slots
+        if slot.field_ref.kind == "dac"
+    }
+    assert bound == {(period_id, port.key) for port in dacs}, presenter.view.warnings
+    assert not [text for text in presenter.view.warnings if "unique" in text]
+
+    ids = [slot.slot_id for slot in presenter.sequence.slots]
+    assert len(ids) == len(set(ids)), ids
+
+
+def test_choosing_hold_puts_the_dac_back_to_holding(presenter, sequence) -> None:
+    """Hold is not a third mode; it is what no step already means.
+
+    The projection reads it that way -- a period with no step for a DAC leaves
+    the output where the period before it put it -- and the card offers it in
+    the same box as Edge and Ramp.  Coming back, it was built into an
+    AnalogStep("hold"), which the model refuses because ANALOG_MODES is edge
+    and ramp.  The refusal left a Qt slot, and PyQt5 ends the process on that:
+    choosing Hold in the shipped window closed it with no traceback at all.
+    """
+
+    from zlc_workbench.pulse_editor import HOLD_MODE, _analog_mode
+
+    period_id = presenter.sequence.periods[0].period_id
+    port = next(port for port in sequence.target.ports if port.kind == "dac")
+
+    presenter.view.analog_committed.emit(period_id, port.key, "edge", 120)
+    period = presenter.sequence.period_by_id[period_id]
+    assert _analog_mode(period, port) == "edge"
+
+    presenter.view.analog_committed.emit(period_id, port.key, HOLD_MODE, 120)
+
+    period = presenter.sequence.period_by_id[period_id]
+    assert _analog_mode(period, port) == HOLD_MODE, "Hold has to survive the round trip"
+    assert not any(step.port == port.key for step in period.analog_steps), (
+        "holding is the absence of a step, not a step that says 'hold'"
+    )
+    assert presenter.view.warnings == [], presenter.view.warnings

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zlc-workbench"
+version = "0.1.0"
+description = "Composition root and presenters: the only package that may know all the others."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "zlc-data",
+    "zlc-runtime",
+    "zlc-plot",
+    "zlc-pulse",
+    "zlc-atom",
+    "zlc-ui",
+    "zlc-durable",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+zlc-check-environment = "zlc_workbench.tools.check_environment:main"
+zlc-task-console = "zlc_workbench.apps.task_console:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

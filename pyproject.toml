@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zou-lab-control"
+version = "2.0.0"
+description = "Neutral-atom experiment control: one distribution, eight layers"
+requires-python = ">=3.11"
+dependencies = [
+    # The union of what the eight layers need.  Pinned where a layer pinned it:
+    # a plot that renders differently between two machines is not a record.
+    "matplotlib==3.10.8",
+    "numpy",
+    "Pillow",
+    "PyQt5",
+    "PyQt5-Frameless-Window",
+    "pyserial>=3.5",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "jupyter"]
+
+[project.scripts]
+zlc-pulse-editor = "zlc_workbench.apps.pulse_editor:main"
+zlc-task-console = "zlc_workbench.apps.task_console:main"
+zlc-figure-viewer = "zlc_workbench.apps.figure_viewer:main"
+zlc-device-manager = "zlc_workbench.apps.device_manager:main"
+
+[tool.setuptools]
+# Every layer lives under packages/ and keeps its own root -- src/, tests/,
+# docs/, notebooks/.  Under packages/ rather than at the top because a folder
+# named zlc_data beside the repo root SHADOWS the package inside it: with the
+# root on sys.path, "import zlc_data" finds the empty layer folder as a
+# namespace package and every submodule import fails.  Measured, not feared.
+#
+# Each layer keeps its own root because
+# 55 tests locate their fixtures relative to it and six test filenames repeat
+# across layers.  Flattening them would have meant rewriting all of that to
+# gain nothing: what makes this ONE thing is the git repo and the distribution,
+# not the shape of the folders inside it.
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = [
+    "packages/zlc_data/src",
+    "packages/zlc_durable/src",
+    "packages/zlc_runtime/src",
+    "packages/zlc_plot/src",
+    "packages/zlc_ui/src",
+    "packages/zlc_pulse/src",
+    "packages/zlc_atom/src",
+    "packages/zlc_workbench/src",
+]
+
+[tool.pytest.ini_options]
+# importlib, because six test filenames repeat across the layers and the
+# default mode derives a module name from the basename alone.  See conftest.py
+# for why renaming them would have been the worse trade.
+addopts = "--import-mode=importlib"
+# Every layer's suite, from the top.  A change that crosses two layers is
+# checked by both in one run, which is the whole point of merging them.
+testpaths = [
+    "packages/zlc_data/tests",
+    "packages/zlc_durable/tests",
+    "packages/zlc_runtime/tests",
+    "packages/zlc_plot/tests",
+    "packages/zlc_ui/tests",
+    "packages/zlc_pulse/tests",
+    "packages/zlc_atom/tests",
+    "packages/zlc_workbench/tests",
+]

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zlc-atom"
+version = "0.1.0"
+description = "Headless atom-device and logic-node skeleton for Zou Lab Control."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "zlc-runtime",
+    "zlc-durable",
+    "numpy==2.4.2",
+    "scipy==1.17.1",
+    "zlc-data",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

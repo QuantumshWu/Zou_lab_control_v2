@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+/static_fit.png
+/zlc_plot_usage.png
+/notebooks/zlc_plot_usage.png
+/notebooks/curve.png
+.browser_check/
+.claude/

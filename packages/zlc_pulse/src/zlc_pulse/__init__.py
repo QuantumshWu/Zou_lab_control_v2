@@ -1,0 +1,106 @@
+"""Minimal host package for the frozen pulse-streamer device."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+__version__ = "0.1.0"
+_PACKAGE_DIR = Path(__file__).resolve().parent
+if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
+    raise ImportError(f"unexpected zlc_pulse installation path: {_PACKAGE_DIR}")
+
+from .codec import PULSE_TREE_FORMAT, sequence_from_tree, sequence_to_tree
+from .model import (
+    MINIMUM_REPEAT_COUNT,  # noqa: E402
+    TIME_UNIT_CHOICES,
+    TIME_UNIT_TO_NS,
+    AnalogStep,
+    OutputDelay,
+    PulseFieldRef,
+    PulsePeriod,
+    PulsePortSpec,
+    PulseSequence,
+    PulseSlot,
+    PulseTarget,
+    RepeatRegion,
+)
+from .compile import compile_sequence  # noqa: E402
+from .wire import load_streamer_config  # noqa: E402
+from .manifest import pulse_target_from_xdc  # noqa: E402
+from .device import PulseStreamer  # noqa: E402
+from .remote import DEFAULT_HOST, DEFAULT_PORT  # noqa: E402
+from .scan import (  # noqa: E402
+    scan_columns_for,
+    scan_table_template,
+    validate_scan_table,
+)
+from .transport import (  # noqa: E402
+    MemoryRegisterTransport,
+    UartError,
+    UartRegisterTransport,
+    VivadoAxiRegisterTransport,
+)
+
+# This is the final user-facing package surface.  Keep implementation types
+# and test transports importable from their owning submodules, not this file.
+__all__ = [
+    "PulseStreamer",
+    "RemotePulseStreamer",
+    "connect",
+    "serve",
+    "PulseSequence",
+    "PulsePeriod",
+    "AnalogStep",
+    "PulsePortSpec",
+    "PulseTarget",
+    "PulseSlot",
+    "PulseFieldRef",
+    "OutputDelay",
+    "MINIMUM_REPEAT_COUNT",
+    "PULSE_TREE_FORMAT",
+    "sequence_from_tree",
+    "sequence_to_tree",
+    "RepeatRegion",
+    "compile_sequence",
+    "pulse_target_from_xdc",
+    "load_streamer_config",
+    "UartRegisterTransport",
+    "VivadoAxiRegisterTransport",
+    "MemoryRegisterTransport",
+    "DEFAULT_HOST",
+    "DEFAULT_PORT",
+    "TIME_UNIT_CHOICES",
+    "TIME_UNIT_TO_NS",
+    "scan_columns_for",
+    "scan_table_template",
+    "validate_scan_table",
+    "RemoteError",
+    "UartError",
+    "BackendResolutionError",
+    "__version__",
+]
+
+
+def __getattr__(name: str):
+    if name in {
+        "RemotePulseStreamer", "RemoteError", "BackendResolutionError", "serve", "connect",
+    }:
+        from .remote import (
+            BackendResolutionError,
+            RemoteError,
+            RemotePulseStreamer,
+            connect,
+            serve,
+        )
+
+        globals().update(
+            {
+                "RemotePulseStreamer": RemotePulseStreamer,
+                "RemoteError": RemoteError,
+                "BackendResolutionError": BackendResolutionError,
+                "serve": serve,
+                "connect": connect,
+            }
+        )
+        return globals()[name]
+    raise AttributeError(name)

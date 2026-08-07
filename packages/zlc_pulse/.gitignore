@@ -1,0 +1,15 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Vivado build output: 116 MB of regenerable artifacts.  geom.tcl is the one
+# exception -- it is a generated file pinned by SHA-256 in tests/test_fpga_assets.py,
+# so it stays under version control as the geometry anchor.
+fpga/build/*
+!fpga/build/geom.tcl
+fpga/.Xil/
+
+# Jupyter
+.ipynb_checkpoints/

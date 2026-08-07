@@ -1,0 +1,1448 @@
+"""Numeric selection-to-signal bridging over an existing signal publication.
+
+The bridge accepts only canonical selector coordinates and fit values.  Plot
+adapters own the conversion from their interaction objects to these values;
+this module never imports a frontend, GUI, or fit engine.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+import math
+from numbers import Real
+from threading import Event, RLock
+from types import MappingProxyType
+from typing import Protocol, runtime_checkable
+
+import numpy as np
+
+from zlc_data import (
+    AxisId,
+    AxisSpec,
+    BlockId,
+    CoordinateFrameId,
+    CellValidity,
+    DatasetRevision,
+    DatasetRevisionRef,
+    DatasetSchema,
+    GridTopology,
+    OwnedSnapshot,
+    PointColumn,
+    PointTable,
+    REPEAT,
+    SCAN_POINT,
+    Selection,
+    ValueSchema,
+    compact_dataset_validity,
+    expand_dataset_validity,
+    materialize_derived_dataset,
+    materialize_scalar_dataset,
+)
+from zlc_data import SelectionChange, resolve_selection_indices
+from zlc_data import take_indices
+from zlc_data import canonical_text
+
+from .dataset import MonitorCoverage
+from .dataset_output import (
+    DatasetOutputDeclaration,
+    FinalDatasetOutput,
+    LiveDatasetOutput,
+)
+from .plane import SignalDataPlane, SignalPublication, SignalValue
+
+__all__ = [
+    "FacetCondition",
+    "FitEventValue",
+    "SelectionBridge",
+    "SelectionChange",
+    "SelectionDataReader",
+    "SelectionEventSource",
+    "SelectionRange",
+    "SelectionState",
+]
+
+
+def _finite(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{field} must be a finite real number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise ValueError(f"{field} must be a finite real number")
+    return normalized
+
+
+def _nonnegative_integer(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionRange:
+    """One canonical closed coordinate range over an upstream axis."""
+
+    axis: str
+    lower: float
+    upper: float
+    coordinate_frame: str | None = None
+
+    def __post_init__(self) -> None:
+        axis = canonical_text(self.axis, "selection axis")
+        lower = _finite(self.lower, "selection lower")
+        upper = _finite(self.upper, "selection upper")
+        if lower > upper:
+            lower, upper = upper, lower
+        frame = self.coordinate_frame
+        if frame is not None:
+            frame = canonical_text(frame, "selection coordinate_frame")
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "lower", lower)
+        object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "coordinate_frame", frame)
+
+
+@dataclass(frozen=True, slots=True)
+class FacetCondition:
+    """One numeric facet-axis condition carried across the bridge."""
+
+    axis: str
+    value: int | float | str
+
+    def __post_init__(self) -> None:
+        axis = canonical_text(self.axis, "facet axis")
+        value = self.value
+        if isinstance(value, bool):
+            raise TypeError("facet value must not be bool")
+        if isinstance(value, str):
+            value = canonical_text(value, "facet value")
+        elif isinstance(value, Real):
+            value = _finite(value, "facet value")
+        else:
+            raise TypeError("facet value must be text or a finite real number")
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "value", value)
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionState:
+    """Pure numeric selector state supplied by a plot adapter."""
+
+    plot_kind: str
+    selector_kind: str
+    ranges: tuple[SelectionRange, ...]
+    facets: tuple[FacetCondition, ...] = ()
+    revision: int = 0
+
+    def __post_init__(self) -> None:
+        plot_kind = canonical_text(self.plot_kind, "selection plot_kind")
+        if plot_kind not in {"image", "curve", "histogram"}:
+            raise ValueError("selection plot_kind must be image, curve, or histogram")
+        selector_kind = canonical_text(self.selector_kind, "selection selector_kind")
+        if selector_kind not in {"area", "x_range"}:
+            raise ValueError("selection selector_kind must be area or x_range")
+        ranges = tuple(self.ranges)
+        if not ranges or any(not isinstance(item, SelectionRange) for item in ranges):
+            raise ValueError("selection ranges must contain SelectionRange values")
+        facets = tuple(self.facets)
+        if any(not isinstance(item, FacetCondition) for item in facets):
+            raise TypeError("selection facets must contain FacetCondition values")
+        if len({item.axis for item in facets}) != len(facets):
+            raise ValueError("selection facet axes must be unique")
+        object.__setattr__(self, "plot_kind", plot_kind)
+        object.__setattr__(self, "selector_kind", selector_kind)
+        object.__setattr__(self, "ranges", ranges)
+        object.__setattr__(self, "facets", facets)
+        object.__setattr__(
+            self,
+            "revision",
+            _nonnegative_integer(self.revision, "selection revision"),
+        )
+
+
+def _immutable_float_vector(value: object, field: str) -> np.ndarray:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{field} must be a float64 array") from error
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError(f"{field} must be a non-empty one-dimensional array")
+    if np.any(np.isinf(array)):
+        raise ValueError(f"{field} must not contain infinity")
+    # A bytes-backed array cannot be made writable by changing its flags.  Fit
+    # results cross an asynchronous callback boundary, so retaining a mutable
+    # producer buffer here would make the event non-deterministic.
+    payload = np.array(array, dtype=np.float64, copy=True).tobytes(order="C")
+    return np.frombuffer(payload, dtype=np.float64).reshape(array.shape)
+
+
+def _immutable_bool_vector(value: object, field: str) -> np.ndarray:
+    array = np.asarray(value)
+    if array.dtype != np.dtype(np.bool_):
+        raise TypeError(f"{field} must be a bool array")
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError(f"{field} must be a non-empty one-dimensional array")
+    payload = np.array(array, dtype=np.bool_, copy=True).tobytes(order="C")
+    return np.frombuffer(payload, dtype=np.bool_).reshape(array.shape)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class FitEventValue:
+    """One fit parameter table with an optional sample axis.
+
+    A scalar fit is represented by the same table with one sample.  Arrays
+    and mappings are copied into immutable values at this boundary so a
+    solver or plot callback cannot mutate a result after publication.
+    """
+
+    parameter_names: tuple[str, ...]
+    parameter_units: Mapping[str, str]
+    parameter_values: Mapping[str, np.ndarray]
+    parameter_errors: Mapping[str, np.ndarray]
+    success: np.ndarray
+    sample_axis_name: str
+    sample_coordinates: np.ndarray
+    sample_unit: str
+    sample_labels: tuple[str, ...] | None
+    source_revision: int
+    batch_revision: int
+
+    def __post_init__(self) -> None:
+        names = tuple(self.parameter_names)
+        if not names:
+            raise ValueError("fit parameter_names must be non-empty")
+        normalized_names: list[str] = []
+        for name in names:
+            normalized = canonical_text(name, "fit parameter name")
+            if "/" in normalized or normalized.startswith("@"):
+                raise ValueError("fit parameter names must be bare")
+            normalized_names.append(normalized)
+        names = tuple(normalized_names)
+        if len(set(names)) != len(names):
+            raise ValueError("fit parameter names must be unique")
+
+        if not isinstance(self.parameter_units, Mapping):
+            raise TypeError("fit parameter_units must be a mapping")
+        units = dict(self.parameter_units)
+        if set(units) != set(names):
+            raise ValueError("fit parameter_units keys must match parameter_names")
+        units = {
+            name: canonical_text(units[name], f"fit parameter unit {name!r}", empty=True)
+            for name in names
+        }
+
+        if not isinstance(self.parameter_values, Mapping):
+            raise TypeError("fit parameter_values must be a mapping")
+        if not isinstance(self.parameter_errors, Mapping):
+            raise TypeError("fit parameter_errors must be a mapping")
+        raw_values = dict(self.parameter_values)
+        raw_errors = dict(self.parameter_errors)
+        if set(raw_values) != set(names):
+            raise ValueError("fit parameter_values keys must match parameter_names")
+        if set(raw_errors) != set(names):
+            raise ValueError("fit parameter_errors keys must match parameter_names")
+
+        values: dict[str, np.ndarray] = {}
+        errors: dict[str, np.ndarray] = {}
+        sample_count: int | None = None
+        for name in names:
+            parameter_values = _immutable_float_vector(
+                raw_values[name],
+                f"fit parameter_values[{name!r}]",
+            )
+            parameter_errors = _immutable_float_vector(
+                raw_errors[name],
+                f"fit parameter_errors[{name!r}]",
+            )
+            if sample_count is None:
+                sample_count = int(parameter_values.size)
+            if parameter_values.size != sample_count:
+                raise ValueError("all fit parameter value arrays must have one length")
+            if parameter_errors.size != sample_count:
+                raise ValueError("all fit parameter error arrays must match value length")
+            finite_errors = np.isfinite(parameter_errors)
+            if np.any(parameter_errors[finite_errors] < 0.0):
+                raise ValueError("fit parameter errors must be non-negative or NaN")
+            values[name] = parameter_values
+            errors[name] = parameter_errors
+        assert sample_count is not None
+
+        success = _immutable_bool_vector(self.success, "fit success")
+        if success.size != sample_count:
+            raise ValueError("fit success must match the parameter table length")
+
+        for name in names:
+            values_for_name = values[name]
+            if np.any(success & ~np.isfinite(values_for_name)):
+                raise ValueError(
+                    f"successful fit values for {name!r} must be finite"
+                )
+            if np.any(~success & np.isfinite(values_for_name)):
+                raise ValueError(
+                    f"failed fit values for {name!r} must be NaN"
+                )
+
+        sample_axis_name = canonical_text(
+            self.sample_axis_name,
+            "fit sample_axis_name",
+            empty=True,
+        )
+        if sample_count > 1 and not sample_axis_name:
+            raise ValueError("a batch fit must have a sample_axis_name")
+        sample_coordinates = _immutable_float_vector(
+            self.sample_coordinates,
+            "fit sample_coordinates",
+        )
+        if sample_coordinates.size != sample_count:
+            raise ValueError("fit sample_coordinates must match the parameter table length")
+        if not np.all(np.isfinite(sample_coordinates)):
+            raise ValueError("fit sample_coordinates must be finite")
+        sample_unit = canonical_text(self.sample_unit, "fit sample_unit", empty=True)
+
+        labels = self.sample_labels
+        if labels is not None:
+            labels = tuple(labels)
+            if len(labels) != sample_count:
+                raise ValueError("fit sample_labels must match the parameter table length")
+            if sample_count == 1 and not sample_axis_name:
+                raise ValueError("a scalar fit must not have sample_labels")
+            labels = tuple(
+                canonical_text(label, "fit sample label")
+                for label in labels
+            )
+            if sample_unit:
+                raise ValueError("text sample coordinates cannot declare a unit")
+            expected = np.arange(sample_count, dtype=np.float64)
+            if not np.array_equal(sample_coordinates, expected):
+                raise ValueError(
+                    "text sample coordinates must use numeric indices 0..N-1"
+                )
+
+        object.__setattr__(self, "parameter_names", names)
+        object.__setattr__(self, "parameter_units", MappingProxyType(units))
+        object.__setattr__(self, "parameter_values", MappingProxyType(values))
+        object.__setattr__(self, "parameter_errors", MappingProxyType(errors))
+        object.__setattr__(self, "success", success)
+        object.__setattr__(self, "sample_axis_name", sample_axis_name)
+        object.__setattr__(self, "sample_coordinates", sample_coordinates)
+        object.__setattr__(self, "sample_unit", sample_unit)
+        object.__setattr__(self, "sample_labels", labels)
+        object.__setattr__(
+            self,
+            "source_revision",
+            _nonnegative_integer(self.source_revision, "fit source_revision"),
+        )
+        object.__setattr__(
+            self,
+            "batch_revision",
+            _nonnegative_integer(self.batch_revision, "fit batch_revision"),
+        )
+
+
+@runtime_checkable
+class SelectionEventSource(Protocol):
+    def subscribe_selection(
+        self,
+        callback: Callable[[SelectionChange, SelectionState], object],
+    ) -> Callable[[], None]: ...
+
+    def subscribe_fit(
+        self,
+        callback: Callable[[FitEventValue], object],
+    ) -> Callable[[], None]: ...
+
+
+@runtime_checkable
+class SelectionDataReader(Protocol):
+    def selector_data(self, kind: str) -> SelectionState: ...
+
+
+class _TriggeredOutputs(dict[str, LiveDatasetOutput]):
+    def __init__(
+        self,
+        values: Mapping[str, LiveDatasetOutput],
+        trigger: tuple[str, int],
+    ) -> None:
+        super().__init__(values)
+        self.trigger = trigger
+
+
+class _StaleFit(RuntimeError):
+    def __init__(self, trigger_revision: int) -> None:
+        super().__init__("fit result is stale for the current source publication")
+        self.trigger_revision = trigger_revision
+
+
+class _BridgeProcessor:
+    def __init__(
+        self,
+        bridge: "SelectionBridge",
+        role: str,
+        instance_id: str,
+        output_names: tuple[str, ...],
+    ) -> None:
+        self._bridge = bridge
+        self._role = role
+        self.instance_id = instance_id
+        self.dataset_output_declarations = tuple(
+            DatasetOutputDeclaration(name, bridge._contract_id(role, name))
+            for name in output_names
+        )
+
+    def signal_key(self, output_name: str) -> str:
+        return self._bridge._signal_key(output_name)
+
+    def validate_processor_source(self, source: SignalValue) -> None:
+        if not isinstance(source, SignalValue):
+            raise TypeError("SelectionBridge processor source must be SignalValue")
+        if not isinstance(source.snapshot, OwnedSnapshot):
+            raise TypeError("SelectionBridge processor source must own a snapshot")
+
+    def evaluate_processor(self, source: SignalValue) -> Mapping[str, LiveDatasetOutput]:
+        return self._bridge._evaluate_processor(self, source)
+
+    def accept_processor_result(
+        self,
+        source: SignalValue,
+        source_publication: SignalPublication,
+        result: Mapping[str, LiveDatasetOutput],
+    ) -> None:
+        self._bridge._accept_processor_result(
+            self,
+            source,
+            source_publication,
+            result,
+        )
+
+    def accept_processor_failure(self, error: Exception) -> None:
+        self._bridge._accept_processor_failure(self, error)
+
+    def accept_processor_cancelled(self) -> None:
+        self._bridge._accept_processor_cancelled(self)
+
+    def request_processor_owner_wake(self) -> None:
+        self._bridge._processor_wake()
+
+
+class SelectionBridge:
+    """Turn committed numeric selector/fit events into derived signals."""
+
+    def __init__(
+        self,
+        plane: SignalDataPlane,
+        source_signal: str,
+        selection_source: SelectionEventSource,
+        selection_data: SelectionDataReader,
+        *,
+        bridge_id: str,
+    ) -> None:
+        if not isinstance(plane, SignalDataPlane):
+            raise TypeError("plane must be SignalDataPlane")
+        if not isinstance(selection_source, SelectionEventSource):
+            raise TypeError("selection_source must implement SelectionEventSource")
+        if not isinstance(selection_data, SelectionDataReader):
+            raise TypeError("selection_data must implement SelectionDataReader")
+        source_signal = canonical_text(source_signal, "SelectionBridge source_signal")
+        bridge_id = canonical_text(bridge_id, "SelectionBridge bridge_id")
+        if "/" in bridge_id or bridge_id.startswith("@"):
+            raise ValueError("SelectionBridge bridge_id must be bare")
+        self._plane = plane
+        self._source_signal = source_signal
+        self._selection_source = selection_source
+        self._selection_data = selection_data
+        self.bridge_id = bridge_id
+        self._lock = RLock()
+        self._wake_event = Event()
+        self._started = False
+        self._closed = False
+        self._selection: SelectionState | None = None
+        self._selection_processor: _BridgeProcessor | None = None
+        self._fit_processor: _BridgeProcessor | None = None
+        self._fit_event: FitEventValue | None = None
+        self._fit_trigger_revision = 0
+        self._last_fit_batch_revision: int | None = None
+        self._processor_revision = 0
+        self._block_revision = 0
+        self._subscriptions: list[Callable[[], None]] = []
+        self._last_error: Exception | None = None
+
+    @property
+    def started(self) -> bool:
+        with self._lock:
+            return self._started and not self._closed
+
+    @property
+    def selection(self) -> SelectionState | None:
+        with self._lock:
+            return self._selection
+
+    @property
+    def last_error(self) -> Exception | None:
+        with self._lock:
+            return self._last_error
+
+    def wait_for_wake(self, timeout: float | None = None) -> bool:
+        """Wait for one completed processor callback, then clear the wake."""
+
+        notified = self._wake_event.wait(timeout)
+        if notified:
+            self._wake_event.clear()
+        return notified
+
+    def signal_keys(self) -> tuple[str, ...]:
+        with self._lock:
+            processors = tuple(
+                item
+                for item in (self._selection_processor, self._fit_processor)
+                if item is not None
+            )
+            return tuple(
+                declaration_name
+                for processor in processors
+                for declaration_name in (
+                    self._signal_key(item.name)
+                    for item in processor.dataset_output_declarations
+                )
+            )
+
+    def start(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("SelectionBridge is closed")
+            if self._started:
+                return
+            self._started = True
+        subscriptions: list[Callable[[], None]] = []
+        try:
+            subscriptions.append(
+                self._selection_source.subscribe_selection(self._on_selection)
+            )
+            subscriptions.append(
+                self._selection_source.subscribe_fit(self._on_fit)
+            )
+        except BaseException:
+            for unsubscribe in reversed(subscriptions):
+                unsubscribe()
+            with self._lock:
+                self._started = False
+            raise
+        with self._lock:
+            self._subscriptions.extend(subscriptions)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            subscriptions, self._subscriptions = self._subscriptions, []
+            processors = tuple(
+                item
+                for item in (self._selection_processor, self._fit_processor)
+                if item is not None
+            )
+            self._selection_processor = None
+            self._fit_processor = None
+            self._selection = None
+        for unsubscribe in subscriptions:
+            unsubscribe()
+        for processor in processors:
+            self._withdraw_processor(processor)
+
+    def _on_selection(
+        self,
+        change: SelectionChange,
+        state: SelectionState,
+    ) -> None:
+        if not isinstance(change, SelectionChange):
+            try:
+                change = SelectionChange(change)
+            except ValueError as error:
+                raise ValueError(f"unknown selection change {change!r}") from error
+        if not isinstance(state, SelectionState):
+            raise TypeError("selection callback state must be SelectionState")
+        if change in {SelectionChange.ADDED, SelectionChange.UPDATED}:
+            return
+        if change is SelectionChange.REMOVED:
+            with self._lock:
+                self._selection = None
+                processors = tuple(
+                    item
+                    for item in (self._selection_processor, self._fit_processor)
+                    if item is not None
+                )
+                self._selection_processor = None
+                self._fit_processor = None
+                self._fit_event = None
+            for processor in processors:
+                self._withdraw_processor(processor)
+            return
+        current = self._selection_data.selector_data(state.selector_kind)
+        if not isinstance(current, SelectionState):
+            raise TypeError("selector_data must return SelectionState")
+        if current != state:
+            if (
+                current.plot_kind != state.plot_kind
+                or current.selector_kind != state.selector_kind
+                or current.ranges != state.ranges
+                or current.facets != state.facets
+                or current.revision != state.revision
+            ):
+                raise ValueError("selector_data disagrees with committed selection state")
+        self._commit_selection(current)
+
+    def _on_fit(self, event: FitEventValue) -> None:
+        if not isinstance(event, FitEventValue):
+            raise TypeError("fit callback event must be FitEventValue")
+        with self._lock:
+            if self._closed or not self._started:
+                return
+        publication = self._current_source_publication()
+        if publication is None:
+            self._record_error(RuntimeError("fit event arrived before source publication"))
+            return
+        source = publication.value(self._source_signal)
+        assert source is not None
+        if source.snapshot.ref.revision.value != event.source_revision:
+            self._record_error(
+                ValueError(
+                    "fit event source_revision does not match the current source snapshot"
+                )
+            )
+            return
+        with self._lock:
+            if (
+                self._last_fit_batch_revision is not None
+                and event.batch_revision <= self._last_fit_batch_revision
+            ):
+                self._record_error(
+                    ValueError("fit batch_revision must increase for every accepted batch")
+                )
+                return
+            if self._fit_event is not None and self._fit_schema_key(
+                self._fit_event
+            ) != self._fit_schema_key(event):
+                raise ValueError("fit parameter/sample schema changed inside one bridge")
+            self._fit_event = event
+            self._last_fit_batch_revision = event.batch_revision
+            self._fit_trigger_revision += 1
+            trigger_revision = self._fit_trigger_revision
+            processor = self._fit_processor
+            output_names = self._fit_output_names(event)
+            if processor is None:
+                processor = self._new_processor("fit", output_names)
+                self._fit_processor = processor
+                self._plane.attach_latest_only_processor(
+                    processor,
+                    source_name=self._source_signal,
+                    initial_publication=publication,
+                )
+            elif tuple(item.name for item in processor.dataset_output_declarations) != output_names:
+                raise ValueError("fit parameter/error vocabulary changed inside one bridge")
+            outputs = self._materialize_fit_outputs(source.snapshot, event)
+            try:
+                self._publish_processor(
+                    processor,
+                    outputs,
+                    publication,
+                    trigger=("fit", trigger_revision),
+                )
+            except RuntimeError as error:
+                if "obsolete parent" in str(error):
+                    return
+                raise
+
+    def _commit_selection(self, state: SelectionState) -> None:
+        with self._lock:
+            if self._closed or not self._started:
+                return
+            previous = self._selection
+            if previous is not None and state.revision <= previous.revision:
+                raise ValueError("selection revisions must increase")
+            output_names = self._selection_output_names(state)
+            publication = self._current_source_publication()
+            if publication is None:
+                raise RuntimeError(
+                    "committed selection arrived before source publication"
+                )
+            source = publication.value(self._source_signal)
+            if source is None:
+                raise RuntimeError("current source publication has no selected signal")
+            outputs = self._materialize_selection_outputs(source.snapshot, state)
+
+            # A committed image selection may change the derived sub-box
+            # schema.  The plane deliberately freezes schemas per generation,
+            # so every committed selection starts a fresh latest-only
+            # generation while upstream publications still re-cut it in place.
+            old_processor = self._selection_processor
+            self._selection_processor = None
+            self._selection = state
+
+        if old_processor is not None:
+            self._withdraw_processor(old_processor)
+
+        # A box drawn on a run that has already finished is not a live
+        # derivation and cannot be one: no further parent publication will ever
+        # arrive to re-cut it.  It is still a real question with a real answer,
+        # so it is answered once, terminally, instead of being refused because
+        # the only machinery on offer was the live kind.
+        if not self._plane.is_generation_live(self._source_signal):
+            self._publish_final_selection(state, outputs)
+            return
+
+        with self._lock:
+            if self._closed or not self._started:
+                return
+            latest = self._current_source_publication()
+            if latest is None:
+                raise RuntimeError(
+                    "committed selection arrived before source publication"
+                )
+            if latest is not publication:
+                publication = latest
+                source = publication.value(self._source_signal)
+                if source is None:
+                    raise RuntimeError(
+                        "current source publication has no selected signal"
+                    )
+                outputs = self._materialize_selection_outputs(
+                    source.snapshot,
+                    state,
+                )
+            processor = self._new_processor("selection", output_names)
+            self._selection_processor = processor
+            try:
+                self._plane.attach_latest_only_processor(
+                    processor,
+                    source_name=self._source_signal,
+                    initial_publication=publication,
+                )
+            except BaseException:
+                if self._selection_processor is processor:
+                    self._selection_processor = None
+                raise
+
+        try:
+            self._publish_processor(
+                processor,
+                outputs,
+                publication,
+                trigger=("selection", state.revision),
+            )
+        except RuntimeError as error:
+            if "obsolete parent" in str(error):
+                return
+            with self._lock:
+                if self._selection_processor is processor:
+                    self._selection_processor = None
+            self._withdraw_processor(processor)
+            raise
+
+    def _publish_final_selection(
+        self,
+        state: SelectionState,
+        outputs: Mapping[str, LiveDatasetOutput],
+    ) -> None:
+        """Answer one selection over a finished parent, once.
+
+        The cut is identical to the live one -- the same materialization, under
+        the same names -- and only its lifetime differs: it is published as a
+        terminal generation of its own, because there is no stream left to
+        follow and a value that claims to be live would be lying about it.
+        """
+
+        with self._lock:
+            if self._closed or not self._started:
+                return
+            owner = self._new_processor("selection", tuple(outputs))
+            self._selection_processor = owner
+        try:
+            self._plane.reserve(owner)
+            self._plane.publish_final(
+                owner,
+                {
+                    name: FinalDatasetOutput(output.declaration, output.snapshot)
+                    for name, output in outputs.items()
+                },
+            )
+        except BaseException:
+            with self._lock:
+                if self._selection_processor is owner:
+                    self._selection_processor = None
+            self._withdraw_processor(owner)
+            raise
+        self._processor_wake()
+
+    def _evaluate_processor(
+        self,
+        processor: _BridgeProcessor,
+        source: SignalValue,
+    ) -> Mapping[str, LiveDatasetOutput]:
+        with self._lock:
+            if processor._role == "selection":
+                state = self._selection
+                if state is None:
+                    raise RuntimeError("SelectionBridge has no committed selection")
+                return _TriggeredOutputs(
+                    self._materialize_selection_outputs(source.snapshot, state),
+                    ("selection", state.revision),
+                )
+            event = self._fit_event
+            trigger_revision = self._fit_trigger_revision
+            if event is None:
+                raise RuntimeError("SelectionBridge has no accepted fit event")
+            if source.snapshot.ref.revision.value != event.source_revision:
+                raise _StaleFit(trigger_revision)
+            return _TriggeredOutputs(
+                self._materialize_fit_outputs(source.snapshot, event),
+                ("fit", trigger_revision),
+            )
+
+    def _accept_processor_result(
+        self,
+        processor: _BridgeProcessor,
+        _source: SignalValue,
+        source_publication: SignalPublication,
+        result: Mapping[str, LiveDatasetOutput],
+    ) -> None:
+        trigger = getattr(result, "trigger", None)
+        if not isinstance(trigger, tuple) or len(trigger) != 2:
+            self._record_error(RuntimeError("SelectionBridge processor lost its trigger"))
+            return
+        with self._lock:
+            if processor._role == "selection":
+                current = self._selection
+                expected = (
+                    None
+                    if current is None
+                    else ("selection", current.revision)
+                )
+            else:
+                expected = (
+                    None
+                    if self._fit_event is None
+                    else ("fit", self._fit_trigger_revision)
+                )
+        # A worker may finish after a newer control event has already issued
+        # the same source publication.  Do not let that older result overwrite
+        # the newer trigger merely because both parents are otherwise exact.
+        if expected is None or trigger != expected:
+            return
+        try:
+            self._publish_processor(
+                processor,
+                result,
+                source_publication,
+                trigger=trigger,
+            )
+        except RuntimeError as error:
+            if "obsolete parent" in str(error) or "generation is no longer active" in str(error):
+                return
+            self._accept_processor_failure(processor, error)
+
+    def _accept_processor_failure(
+        self,
+        processor: _BridgeProcessor,
+        error: Exception,
+    ) -> None:
+        if isinstance(error, _StaleFit):
+            with self._lock:
+                if self._fit_processor is not processor:
+                    return
+                if error.trigger_revision != self._fit_trigger_revision:
+                    return
+                self._fit_processor = None
+            self._record_error(error)
+            self._withdraw_processor(processor)
+            return
+        self._record_error(error)
+        with self._lock:
+            if self._selection_processor is processor:
+                self._selection_processor = None
+            if self._fit_processor is processor:
+                self._fit_processor = None
+        self._withdraw_processor(processor)
+
+    def _accept_processor_cancelled(self, processor: _BridgeProcessor) -> None:
+        return None
+
+    def _publish_processor(
+        self,
+        processor: _BridgeProcessor,
+        outputs: Mapping[str, LiveDatasetOutput],
+        publication: SignalPublication,
+        *,
+        trigger: tuple[str, int],
+    ) -> None:
+        self._plane.publish_processor(
+            processor,
+            outputs,
+            source_publication=publication,
+            trigger=trigger,
+        )
+
+    def _withdraw_processor(self, processor: _BridgeProcessor) -> None:
+        try:
+            self._plane.cancel_latest_only_processor(processor)
+        finally:
+            self._plane.withdraw_processor(processor)
+
+    def _new_processor(
+        self,
+        role: str,
+        output_names: tuple[str, ...],
+    ) -> _BridgeProcessor:
+        self._processor_revision += 1
+        return _BridgeProcessor(
+            self,
+            role,
+            f"{self.bridge_id}:{role}:{self._processor_revision}",
+            output_names,
+        )
+
+    def _current_source_publication(self) -> SignalPublication | None:
+        return self._plane.latest_publication(self._source_signal)
+
+    def _record_error(self, error: Exception) -> None:
+        with self._lock:
+            self._last_error = error
+
+    def _processor_wake(self) -> None:
+        self._wake_event.set()
+
+    def _signal_key(self, name: str) -> str:
+        return f"@logic/{self.bridge_id}/{name}"
+
+    @staticmethod
+    def _contract_id(role: str, name: str) -> str:
+        if role == "selection":
+            return f"zlc.selection.{name}.v1"
+        if name.endswith("_error"):
+            return "zlc.selection.fit.error.v2"
+        return "zlc.selection.fit.parameter.v2"
+
+    def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
+        if state.plot_kind == "image":
+            return ("roi_frame", "roi_value")
+        return ("roi_value",)
+
+    @staticmethod
+    def _fit_output_names(event: FitEventValue) -> tuple[str, ...]:
+        names: list[str] = []
+        for parameter in event.parameter_names:
+            names.append(f"fit_{parameter}")
+            names.append(f"fit_{parameter}_error")
+        if len(set(names)) != len(names):
+            raise ValueError("fit output names must be unique")
+        return tuple(names)
+
+    @staticmethod
+    def _fit_schema_key(
+        event: FitEventValue,
+    ) -> tuple[object, ...]:
+        return (
+            event.parameter_names,
+            tuple(
+                (name, event.parameter_units[name])
+                for name in event.parameter_names
+            ),
+            event.sample_axis_name,
+            tuple(float(value) for value in event.sample_coordinates),
+            event.sample_unit,
+            event.sample_labels,
+        )
+
+    def _axis_catalog(
+        self,
+        schema: DatasetSchema,
+    ) -> tuple[tuple[str, AxisId, AxisSpec, str], ...]:
+        catalog: list[tuple[str, AxisId, AxisSpec, str]] = []
+        catalog.append(
+            (schema.repeat_axis.name, schema.repeat_axis.axis_id, schema.repeat_axis, "repeat")
+        )
+        catalog.append(
+            (schema.repeat_axis.axis_id.value, schema.repeat_axis.axis_id, schema.repeat_axis, "repeat")
+        )
+        for column in schema.point_table.columns:
+            axis = AxisSpec(
+                column.coordinate_id,
+                column.name,
+                column.role,
+                schema.point_table.row_count,
+                column.values,
+                column.unit,
+                column.coordinate_frame,
+            )
+            catalog.extend(
+                (
+                    (column.name, column.coordinate_id, axis, "point"),
+                    (column.coordinate_id.value, column.coordinate_id, axis, "point"),
+                )
+            )
+        for axis in schema.cell_schema.data_axes:
+            catalog.extend(
+                (
+                    (axis.name, axis.axis_id, axis, "data"),
+                    (axis.axis_id.value, axis.axis_id, axis, "data"),
+                )
+            )
+        return tuple(catalog)
+
+    def _resolve_axis(
+        self,
+        schema: DatasetSchema,
+        name: str,
+    ) -> tuple[AxisId, AxisSpec, str]:
+        matches = {
+            (axis_id, axis, kind)
+            for label, axis_id, axis, kind in self._axis_catalog(schema)
+            if label == name
+        }
+        if len(matches) != 1:
+            raise ValueError(
+                f"selection axis {name!r} is not uniquely present in the source snapshot"
+            )
+        return next(iter(matches))
+
+    def _build_selection(
+        self,
+        schema: DatasetSchema,
+        state: SelectionState,
+    ) -> Selection:
+        if state.plot_kind == "image":
+            if state.selector_kind != "area" or len(state.ranges) != 2:
+                raise ValueError("image SelectionBridge requires a two-axis area")
+            first, second = state.ranges
+            first_id, _first_axis, first_kind = self._resolve_axis(schema, first.axis)
+            second_id, _second_axis, second_kind = self._resolve_axis(schema, second.axis)
+            if first_kind != "data" or second_kind != "data":
+                raise ValueError("image area axes must be source data axes")
+            if first.coordinate_frame != second.coordinate_frame:
+                raise ValueError("image area axes must use one coordinate frame")
+            frame = (
+                None
+                if first.coordinate_frame is None
+                else CoordinateFrameId(first.coordinate_frame)
+            )
+            selection = Selection.rectangle(
+                first_id,
+                second_id,
+                first.lower,
+                first.upper,
+                second.lower,
+                second.upper,
+                coordinate_frame=frame,
+            )
+        else:
+            if len(state.ranges) != 1:
+                raise ValueError("curve/histogram SelectionBridge requires one x range")
+            selected = state.ranges[0]
+            axis_id, _axis, _kind = self._resolve_axis(schema, selected.axis)
+            frame = (
+                None
+                if selected.coordinate_frame is None
+                else CoordinateFrameId(selected.coordinate_frame)
+            )
+            selection = Selection.coordinate_range(
+                axis_id,
+                selected.lower,
+                selected.upper,
+                coordinate_frame=frame,
+            )
+        terms = list(selection.terms)
+        for facet in state.facets:
+            axis_id, axis, kind = self._resolve_axis(schema, facet.axis)
+            if isinstance(facet.value, str):
+                if kind != "point" or axis.coordinates is None:
+                    raise ValueError(
+                        f"text facet {facet.axis!r} is not an indexed point axis"
+                    )
+                indices = tuple(
+                    index
+                    for index, value in enumerate(axis.coordinates)
+                    if value == facet.value
+                )
+                if len(indices) != 1:
+                    raise ValueError(
+                        f"text facet {facet.axis!r} must identify one source point"
+                    )
+                from zlc_data import IndexSelection
+
+                terms.append(IndexSelection(axis_id, indices[0]))
+            else:
+                frame = axis.coordinate_frame
+                terms.append(
+                    Selection.coordinate_range(
+                        axis_id,
+                        float(facet.value),
+                        float(facet.value),
+                        coordinate_frame=frame,
+                    ).terms[0]
+                )
+        return Selection(tuple(terms))
+
+    def _selection_indices(
+        self,
+        schema: DatasetSchema,
+        selection: Selection,
+    ) -> tuple[
+        range | tuple[int, ...],
+        tuple[int, ...],
+        dict[AxisId, range | tuple[int, ...]],
+    ]:
+        catalog = {
+            axis_id: (axis, kind)
+            for _label, axis_id, axis, kind in self._axis_catalog(schema)
+        }
+        terms = {term.axis_id: term for term in selection.terms}
+
+        def indices_for(axis_id: AxisId, default_size: int) -> range | tuple[int, ...]:
+            """Which indices of one axis survive -- as a RANGE where it can be.
+
+            resolve_selection_indices returns a range precisely so a contiguous
+            run does not have to be expanded, and this used to flatten it to a
+            tuple immediately: every axis then became a gather, a full copy, even
+            the axes nobody selected.  A 512x512 box on a 1200x1920 frame cost
+            7.3 ms of pure copying per frame where a slice costs 0.09.
+            """
+
+            selected = terms.get(axis_id)
+            if selected is None:
+                return range(default_size)
+            axis, _kind = catalog[axis_id]
+            resolved, _removes_axis = resolve_selection_indices(axis, selected)
+            if not len(resolved):
+                raise ValueError(f"selection for axis {axis_id} is empty")
+            return resolved
+
+        repeat = indices_for(schema.repeat_axis.axis_id, schema.repeat_axis.size)
+        points_set = set(range(schema.point_table.row_count))
+        point_ids = {column.coordinate_id for column in schema.point_table.columns}
+        for axis_id in point_ids:
+            if axis_id in terms:
+                axis, _kind = catalog[axis_id]
+                resolved, _removes_axis = resolve_selection_indices(axis, terms[axis_id])
+                points_set.intersection_update(resolved)
+        ordered = sorted(points_set)
+        if not ordered:
+            raise ValueError("selection removed every source point row")
+        # A contiguous run of point rows -- which is every run when nothing
+        # selected on a point axis, the common case -- indexes as a slice.  A
+        # tuple here made the point axis a gather, and a gather of one axis
+        # copies the whole frame behind it.
+        points = (
+            range(ordered[0], ordered[-1] + 1)
+            if ordered[-1] - ordered[0] + 1 == len(ordered)
+            else tuple(ordered)
+        )
+        data: dict[AxisId, range | tuple[int, ...]] = {}
+        for axis in schema.cell_schema.data_axes:
+            data[axis.axis_id] = indices_for(axis.axis_id, axis.size)
+        for axis_id in terms:
+            if axis_id not in catalog:
+                raise ValueError(f"selection axis {axis_id} is absent from source schema")
+        return repeat, points, data
+
+    @staticmethod
+    def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
+        if isinstance(indices, range) and axis.coordinates is None:
+            # An implicit axis cropped to a contiguous run is still implicit:
+            # it starts later.  Writing the coordinates out here undid, one
+            # layer down, the very thing the producer stopped doing -- build a
+            # tuple, validate every element, and digest all of it per frame.
+            return replace(
+                axis,
+                size=len(indices),
+                index_origin=axis.index_origin + indices.start,
+            )
+        coordinates = tuple(axis.coordinate_at(index) for index in indices)
+        return AxisSpec(
+            axis.axis_id,
+            axis.name,
+            axis.role,
+            len(indices),
+            coordinates,
+            axis.unit,
+            axis.coordinate_frame,
+        )
+
+    @staticmethod
+    def _subset_point_table(
+        point_table: PointTable,
+        indices: tuple[int, ...],
+    ) -> PointTable:
+        return PointTable(
+            len(indices),
+            tuple(
+                PointColumn(
+                    column.coordinate_id,
+                    column.name,
+                    column.role,
+                    column.value_kind,
+                    tuple(column.values[index] for index in indices),
+                    column.unit,
+                    column.coordinate_frame,
+                )
+                for column in point_table.columns
+            ),
+        )
+
+    def _derived_schema(
+        self,
+        schema: DatasetSchema,
+        repeat_indices: tuple[int, ...],
+        point_indices: tuple[int, ...],
+        data_indices: Mapping[AxisId, tuple[int, ...]],
+    ) -> DatasetSchema:
+        repeat_axis = self._subset_axis(schema.repeat_axis, repeat_indices)
+        point_table = self._subset_point_table(schema.point_table, point_indices)
+        cell_axes = tuple(
+            self._subset_axis(axis, data_indices[axis.axis_id])
+            for axis in schema.cell_schema.data_axes
+        )
+        cell_schema = ValueSchema(
+            cell_axes,
+            schema.cell_schema.validity_contract,
+            schema.cell_schema.dtype,
+            schema.cell_schema.value_unit,
+        )
+        grid_topology = schema.grid_topology
+        if grid_topology is not None and point_indices != tuple(range(schema.point_table.row_count)):
+            grid_topology = GridTopology(
+                grid_topology.dimension_ids,
+                grid_topology.coordinate_domains,
+                tuple(grid_topology.row_to_cell[index] for index in point_indices),
+            )
+        return DatasetSchema(repeat_axis, point_table, grid_topology, cell_schema)
+
+    @staticmethod
+    def _take(
+        values: np.ndarray,
+        repeat_indices: tuple[int, ...],
+        point_indices: tuple[int, ...],
+        data_indices: Mapping[AxisId, tuple[int, ...]],
+        schema: DatasetSchema,
+    ) -> np.ndarray:
+        # Views where the selection is contiguous, through the rule zlc_data
+        # already owns for exactly this.
+        result = take_indices(values, repeat_indices, axis=0)
+        result = take_indices(result, point_indices, axis=1)
+        for position, axis in enumerate(schema.cell_schema.data_axes):
+            result = take_indices(
+                result, data_indices[axis.axis_id], axis=2 + position
+            )
+        return result
+
+    def _next_reference(
+        self,
+        source: OwnedSnapshot,
+        label: str,
+        schema: DatasetSchema,
+        *,
+        revision: DatasetRevision | None = None,
+    ) -> DatasetRevisionRef:
+        self._block_revision += 1
+        output_revision = source.ref.revision if revision is None else revision
+        return DatasetRevisionRef(
+            BlockId(
+                f"{self.bridge_id}:{label}:{output_revision.value}:{self._block_revision}"
+            ),
+            source.ref.stream_generation,
+            schema.fingerprint,
+            output_revision,
+        )
+
+    def _materialize_selection_outputs(
+        self,
+        source: OwnedSnapshot,
+        state: SelectionState,
+    ) -> Mapping[str, LiveDatasetOutput]:
+        source_schema = source.block.schema
+        selection = self._build_selection(source_schema, state)
+        repeat_indices, point_indices, data_indices = self._selection_indices(
+            source_schema,
+            selection,
+        )
+        valid = expand_dataset_validity(source.block.validity, source_schema)
+        values = self._take(
+            source.block.values,
+            repeat_indices,
+            point_indices,
+            data_indices,
+            source_schema,
+        )
+        valid_values = self._take(
+            valid,
+            repeat_indices,
+            point_indices,
+            data_indices,
+            source_schema,
+        )
+        derived_schema = self._derived_schema(
+            source_schema,
+            repeat_indices,
+            point_indices,
+            data_indices,
+        )
+        output: dict[str, LiveDatasetOutput] = {}
+        if state.plot_kind == "image":
+            roi_frame = materialize_derived_dataset(
+                source.ref,
+                values,
+                schema=derived_schema,
+                validity=compact_dataset_validity(valid_values, derived_schema),
+                reference_for=lambda schema: self._next_reference(
+                    source,
+                    "roi_frame",
+                    schema,
+                ),
+            )
+            declaration = DatasetOutputDeclaration(
+                "roi_frame",
+                "zlc.selection.roi_frame.v1",
+            )
+            total = derived_schema.repeat_axis.size * derived_schema.point_table.row_count
+            output["roi_frame"] = LiveDatasetOutput(
+                declaration,
+                roi_frame,
+                MonitorCoverage(total, total, 0, False),
+            )
+        finite = valid_values & np.isfinite(values)
+        scalar_value = float(np.mean(values[finite])) if np.any(finite) else 0.0
+        scalar = materialize_scalar_dataset(
+            source.ref,
+            scalar_value,
+            valid=bool(np.any(finite)),
+            unit=source_schema.cell_schema.value_unit,
+            reference_for=lambda schema: self._next_reference(
+                source,
+                "roi_value",
+                schema,
+            ),
+        )
+        output["roi_value"] = LiveDatasetOutput(
+            DatasetOutputDeclaration("roi_value", "zlc.selection.roi_value.v1"),
+            scalar,
+            MonitorCoverage(1, 1, 0, False),
+        )
+        return output
+
+    def _materialize_fit_outputs(
+        self,
+        source: OwnedSnapshot,
+        event: FitEventValue,
+    ) -> Mapping[str, LiveDatasetOutput]:
+        output: dict[str, LiveDatasetOutput] = {}
+        sample_count = int(event.success.size)
+        sample_name = event.sample_axis_name or "sample"
+        sample_column = PointColumn(
+            AxisId(sample_name),
+            sample_name,
+            SCAN_POINT,
+            PointColumn.NUMERIC,
+            tuple(float(value) for value in event.sample_coordinates),
+            event.sample_unit or None,
+        )
+        point_columns = [sample_column]
+        if event.sample_labels is not None:
+            label_name = f"{sample_name}_label"
+            point_columns.append(
+                PointColumn(
+                    AxisId(label_name),
+                    label_name,
+                    SCAN_POINT,
+                    PointColumn.TEXT,
+                    tuple(event.sample_labels),
+                )
+            )
+        schema_repeat = AxisSpec(
+            AxisId("fit.repeat"),
+            "repeat",
+            REPEAT,
+            1,
+            (0,),
+        )
+        schema_point_table = PointTable(sample_count, tuple(point_columns))
+        value_validity = CellValidity(event.success.reshape(1, sample_count))
+        error_validity = {
+            parameter: CellValidity(
+                (event.success & np.isfinite(event.parameter_errors[parameter])).reshape(
+                    1,
+                    sample_count,
+                )
+            )
+            for parameter in event.parameter_names
+        }
+        fit_source_ref = DatasetRevisionRef(
+            source.ref.block_id,
+            source.ref.stream_generation,
+            source.ref.schema_fingerprint,
+            DatasetRevision(event.batch_revision),
+        )
+        coverage = MonitorCoverage(sample_count, sample_count, 0, False)
+
+        for parameter in event.parameter_names:
+            unit = event.parameter_units[parameter] or None
+            schema = DatasetSchema(
+                schema_repeat,
+                schema_point_table,
+                None,
+                ValueSchema.scalar(np.dtype("float64"), unit),
+            )
+            for suffix, values, contract_id, validity in (
+                (
+                    "",
+                    event.parameter_values[parameter],
+                    "zlc.selection.fit.parameter.v2",
+                    value_validity,
+                ),
+                (
+                    "_error",
+                    event.parameter_errors[parameter],
+                    "zlc.selection.fit.error.v2",
+                    error_validity[parameter],
+                ),
+            ):
+                name = f"fit_{parameter}{suffix}"
+                output[name] = self._materialize_fit_vector(
+                    source,
+                    fit_source_ref,
+                    name,
+                    values,
+                    schema,
+                    validity,
+                    contract_id,
+                    coverage,
+                )
+        return output
+
+    def _materialize_fit_vector(
+        self,
+        source: OwnedSnapshot,
+        fit_source_ref: DatasetRevisionRef,
+        name: str,
+        values: np.ndarray,
+        schema: DatasetSchema,
+        validity: CellValidity,
+        contract_id: str,
+        coverage: MonitorCoverage,
+    ) -> LiveDatasetOutput:
+        sample_count = schema.point_table.row_count
+        derived = materialize_derived_dataset(
+            fit_source_ref,
+            values.reshape(1, sample_count, 1),
+            schema=schema,
+            validity=validity,
+            reference_for=lambda derived_schema: self._next_reference(
+                source,
+                name,
+                derived_schema,
+                revision=fit_source_ref.revision,
+            ),
+        )
+        return LiveDatasetOutput(
+            DatasetOutputDeclaration(name, contract_id),
+            derived,
+            coverage,
+        )

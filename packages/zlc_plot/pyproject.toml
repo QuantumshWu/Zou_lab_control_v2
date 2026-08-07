@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zlc-plot"
+version = "1.1.0"
+description = "Zou Lab multidimensional data contracts and interactive plotting."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib==3.10.8",
+    "numpy",
+    "Pillow",
+    "scipy",
+    "zlc-data>=0.1.0",
+]
+
+[project.optional-dependencies]
+qt = ["PyQt5"]
+notebook = ["anywidget>=0.9", "ipykernel", "ipython", "ipywidgets", "jupyterlab"]
+profile = ["psutil"]
+all = [
+    "PyQt5",
+    "anywidget>=0.9",
+    "ipykernel",
+    "ipython",
+    "ipywidgets",
+    "jupyterlab",
+    "psutil",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["zlc_plot*"]
+
+[tool.setuptools.package-data]
+zlc_plot = ["assets/*.ttf", "py.typed"]

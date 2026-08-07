@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+
+# Vivado build output: regenerable, and large.  geom.tcl is the exception --
+# it is pinned by digest in zlc_pulse/tests/test_fpga_assets.py, so it stays
+# under version control as the geometry anchor.
+zlc_pulse/fpga/build/*
+!zlc_pulse/fpga/build/geom.tcl
+zlc_pulse/fpga/.Xil/
+
+# A workspace is somebody's experiment, not part of the product.
+**/notebooks/workspace/
