@@ -206,6 +206,6 @@ def test_run_server_reports_connection_and_listener_state() -> None:
     assert 'resolve_tools.bat" vivado' in launcher and "/optional" in launcher
     assert "--uart-port explicitly" in launcher
     assert "0.0.0.0 is listen-only" in remote and "same_computer_client=" in remote
-    assert "KEEPALIVE_IDLE_SECONDS" in remote and "RemoteBusyError" in remote
+    assert "CLIENT REPLACED" in remote and "AUTO-SAFE" in remote
     assert "ZLC_PS_SERVER_BACKEND" not in launcher and "%ZLC_FORWARD_ARGS%" in launcher
     assert "default=\"auto\"" in remote and "resolve_backend" in remote

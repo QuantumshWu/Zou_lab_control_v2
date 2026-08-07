@@ -51,16 +51,13 @@ from .wire import StreamerParams, load_streamer_config
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 _FRAME_HEADER = struct.Struct("!I")
 UART_PROBE_TIMEOUT = 0.5
-#: Idle before the kernel starts probing the peer, gap between probes, and how
-#: many go unanswered before the socket fails.  See ``_enable_keepalive``.
-KEEPALIVE_IDLE_SECONDS = 20.0
-KEEPALIVE_INTERVAL_SECONDS = 5.0
-KEEPALIVE_FAILED_PROBES = 4
-#: How often the handler wakes to notice the server is shutting down.  It is a
-#: poll interval and nothing else; a client is never disconnected for having
-#: been quiet for it.
-HANDLER_POLL_SECONDS = 1.0
-BUSY_REQUEST_TIMEOUT = 1.0
+#: What a client is told when its connection ends under it.  The board goes
+#: to whoever connected last, so this is the ordinary way an editor finds out
+#: that a newer one took over -- and it must not read like a protocol defect.
+_CONNECTION_ENDED = (
+    "the connection to the pulse server ended; if another editor has connected "
+    "since, that one now holds the board"
+)
 BACKEND_CHOICES = ("auto", "uart", "jtag-axi", "memory")
 
 REMOTE_METHODS = (
@@ -163,32 +160,18 @@ def _forget_polls(client: str) -> None:
             del _LAST_POLL[key]
 
 
-def _enable_keepalive(connection: socket.socket) -> None:
-    """Ask the kernel to notice when the peer stops existing.
+def _drop_connection(connection: socket.socket) -> None:
+    """End a connection nobody wants any more, from this side.
 
-    An owner that is merely QUIET -- somebody editing a pulse for ten minutes,
-    which is the normal way this window is used -- looks exactly like a dead one
-    if request traffic is all there is to go on.  It does not look that way to
-    TCP: probes are answered by the peer's network stack whether or not the
-    program has anything to say, and a peer that has gone away fails the socket,
-    which is the disconnect path this server already handles.  Windows takes the
-    same numbers through an ioctl rather than TCP_KEEPIDLE/TCP_KEEPINTVL.
+    Shutting down our own half unblocks whatever handler is waiting on it, and
+    it works on a peer that is no longer there at all -- the kernel does not
+    have to reach anybody to stop listening.
     """
 
-    connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    idle_ms = int(KEEPALIVE_IDLE_SECONDS * 1000)
-    interval_ms = int(KEEPALIVE_INTERVAL_SECONDS * 1000)
-    if hasattr(socket, "SIO_KEEPALIVE_VALS"):
-        connection.ioctl(socket.SIO_KEEPALIVE_VALS, (1, idle_ms, interval_ms))
-        return
-    for option, value in (
-        ("TCP_KEEPIDLE", int(KEEPALIVE_IDLE_SECONDS)),
-        ("TCP_KEEPINTVL", int(KEEPALIVE_INTERVAL_SECONDS)),
-        ("TCP_KEEPCNT", KEEPALIVE_FAILED_PROBES),
-    ):
-        number = getattr(socket, option, None)
-        if number is not None:
-            connection.setsockopt(socket.IPPROTO_TCP, number, value)
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
 
 
 def _program_summary(program: object, *, source: object = None) -> str:
@@ -594,24 +577,18 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
         assert isinstance(server, PulseRemoteServer)
         client = f"{self.client_address[0]}:{self.client_address[1]}"
         # Keep the human-facing "client CONNECTED" wording recognizable in the server log.
-        if not server.claim_client(client):
-            _server_log("CLIENT CONNECTED", client=client, detail="status=BUSY")
-            self._reject_busy(server, client)
-            return
+        server.claim_client(client, self.request)
         _server_log("CLIENT CONNECTED", client=client, detail="status=OWNER")
         disconnect_reason = "client disconnect"
         try:
-            # The kernel watches whether the peer still exists; this timeout
-            # only lets the loop notice a server shutdown.  An owner is NEVER
-            # disconnected for being quiet: editing a pulse sends nothing for
-            # minutes at a time and is the normal way this window is used.
-            _enable_keepalive(self.request)
-            self.request.settimeout(HANDLER_POLL_SECONDS)
+            # A blocking read, with no deadline of any kind.  Nothing here ever
+            # asks whether the client is still alive, because nothing needs the
+            # answer: an owner that has gone away is displaced by the next one
+            # to connect, and until somebody wants the board nobody cares.
+            # Sending nothing is what editing a pulse looks like for minutes at
+            # a time, and it must remain indistinguishable from anything else.
             while True:
-                try:
-                    request = _recv_frame(self.request)
-                except socket.timeout:
-                    continue
+                request = _recv_frame(self.request)
                 if request is None:
                     return
                 request_id = request.get("id") if isinstance(request, dict) else None
@@ -642,8 +619,9 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                         "error": {"type": type(exc).__name__, "message": str(exc)},
                     }
                 _send_frame(self.request, response)
-        except ConnectionError as exc:
-            # Disconnect/RST ends this client session; it is not a server defect.
+        except OSError as exc:
+            # Closed, reset, or dropped by a newer client taking the board.
+            # Each of those ends this session; none is a server defect.
             disconnect_reason = f"client connection dropped: {type(exc).__name__}"
         finally:
             outputs_safe = server.client_disconnected(client=client, reason=disconnect_reason)
@@ -654,37 +632,22 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                 detail=_log_fields(outputs="SAFE" if outputs_safe else "NOT_VERIFIED", reason=disconnect_reason),
             )
 
-    def _reject_busy(self, server: "PulseRemoteServer", client: str) -> None:
-        """Reply to the first request so the client sees a useful busy error."""
-
-        try:
-            self.request.settimeout(BUSY_REQUEST_TIMEOUT)
-            request = _recv_frame(self.request)
-            request_id = request.get("id") if isinstance(request, dict) else None
-            owner, held = server.owner_status()
-            message = (
-                f"server is busy; current owner={owner or 'unknown'}, "
-                f"held_for={held:.1f}s; wait for that client to disconnect and retry"
-            )
-            _send_frame(
-                self.request,
-                {
-                    "id": request_id,
-                    "ok": False,
-                    "error": {"type": "RemoteBusyError", "message": message},
-                },
-            )
-            _server_log("CLIENT BUSY REJECTED", client=client, detail=_log_fields(owner=owner, held_s=f"{held:.1f}"))
-        except (OSError, ConnectionError, socket.timeout, ValueError) as exc:
-            _server_log(
-                "CLIENT BUSY REJECTED",
-                client=client,
-                detail=_log_fields(error=f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')}"),
-            )
-
 
 class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    """A serialized, one-client-at-a-time RPC façade over one PulseStreamer."""
+    """An RPC façade over one PulseStreamer, held by whoever connected last.
+
+    One board cannot take two conversations at once, so one connection owns it.
+    Which one is decided by arrival: a new client takes the board and the
+    previous connection is dropped.  That is the whole ownership policy, and it
+    is what lets the server never ask whether a client is still alive.
+
+    The question used to matter because the FIRST client held the board until
+    it went away, so a connection that died without saying so -- a pulled
+    cable, a sleeping laptop -- locked the hardware until the server was
+    restarted.  Guarding that with an idle timer then disconnected people for
+    editing quietly.  Nobody cares whether a silent client is alive until
+    somebody else wants the board, and at that moment the newcomer settles it.
+    """
 
     allow_reuse_address = True
     daemon_threads = True
@@ -701,6 +664,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.streamer = streamer
         self._client_lock = threading.RLock()
         self._owner_client: str | None = None
+        self._owner_connection: socket.socket | None = None
         self._owner_started = 0.0
         super().__init__(address, _RemoteHandler)
 
@@ -712,13 +676,25 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         _server_log("HANDLER ERROR", client=client, detail=detail)
         super().handle_error(request, client_address)
 
-    def claim_client(self, client: str) -> bool:
+    def claim_client(self, client: str, connection: socket.socket) -> None:
+        """Give the board to the newest connection and drop the previous one.
+
+        Ending the old session first is what makes this safe: its outputs go
+        SAFE and it stops owning anything before the newcomer is told it may
+        start, so the two never overlap.  The old handler then unwinds on its
+        own -- its own release is a no-op, because it is no longer the owner.
+        """
+
         with self._client_lock:
-            if self._owner_client is not None:
-                return False
+            previous, connection_to_drop = self._owner_client, self._owner_connection
+            if previous is not None:
+                _server_log("CLIENT REPLACED", client=previous, detail=_log_fields(by=client))
+                self.client_disconnected(client=previous, reason=f"replaced by {client}")
+                if connection_to_drop is not None:
+                    _drop_connection(connection_to_drop)
             self._owner_client = client
+            self._owner_connection = connection
             self._owner_started = time.monotonic()
-            return True
 
     def owner_status(self) -> tuple[str | None, float]:
         with self._client_lock:
@@ -730,6 +706,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         with self._client_lock:
             if force or client is None or self._owner_client == client:
                 self._owner_client = None
+                self._owner_connection = None
                 self._owner_started = 0.0
 
     def _link_health(self) -> str:
@@ -1052,9 +1029,21 @@ class RemotePulseStreamer:
         try:
             _send_frame(self._socket, request)
             response = _recv_frame(self._socket)
-        except (OSError, ConnectionError, TimeoutError):
+        except TimeoutError as exc:
             self._disconnect_locked()
-            raise
+            raise ConnectionError(
+                f"the pulse server did not answer within {self.request_timeout:g}s"
+            ) from exc
+        except OSError as exc:
+            self._disconnect_locked()
+            raise ConnectionError(f"{_CONNECTION_ENDED} ({type(exc).__name__})") from exc
+        if response is None:
+            # End of stream: the same thing, arriving as silence rather than as
+            # an error.  It used to be reported as "the response is not an
+            # object", which describes the shape of nothing instead of saying
+            # what happened.
+            self._disconnect_locked()
+            raise ConnectionError(_CONNECTION_ENDED)
         if not isinstance(response, Mapping):
             raise ConnectionError("remote response is not an object")
         if response.get("id") != self._request_id:

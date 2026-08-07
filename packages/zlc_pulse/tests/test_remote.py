@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+import inspect
 import socket
 import threading
 import time
@@ -170,32 +171,48 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "AnalogStep" not in output
 
 
-def test_second_client_gets_owner_and_hold_duration_in_busy_reply() -> None:
+def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) -> None:
+    """Arrival decides ownership, which is why nothing has to detect death.
+
+    The client being replaced here is perfectly alive, and it is still the one
+    that loses -- because the case that actually happens in the lab is a
+    reconnect after a sleeping laptop, where the incumbent is a ghost that no
+    amount of asking can be relied on to unmask.
+    """
+
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     streamer = PulseStreamer(MemoryRegisterTransport(geom=geom), geom, 50e6)
     with _server(streamer) as server:
-        owner = _client(server)
-        contender = RemotePulseStreamer("127.0.0.1", server.server_address[1], request_timeout=1.0)
+        previous = _client(server)
+        previous_address = server.owner_status()[0]
+        newcomer = _client(server)
         try:
-            with pytest.raises(RemoteError, match=r"server is busy.*current owner=.*held_for=") as error:
-                contender.open()
-            assert error.value.remote_type == "RemoteBusyError"
-            assert owner.snapshot()["opened"] is True
+            assert server.owner_status()[0] not in {None, previous_address}
+            assert newcomer.snapshot()["opened"] is True
+            # The dropped connection learns it lost the next time it speaks,
+            # and is told what happened rather than that a reply was malformed.
+            with pytest.raises(OSError, match="that one now holds the board"):
+                previous.snapshot()
         finally:
-            owner.close()
-            contender.disconnect()
+            newcomer.close()
+            previous.disconnect()
+            newcomer.disconnect()
+
+    output = capsys.readouterr().out
+    assert "ZLC CLIENT REPLACED" in output
+    assert "replaced by" in output
 
 
-def test_quiet_owner_keeps_the_board_and_stays_connected(monkeypatch) -> None:
-    """Sending nothing is what editing looks like, not what dying looks like.
+def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
+    """Sending nothing is what editing looks like, and it must cost nothing.
 
-    The handler's read timeout only lets the loop notice a shutdown, so it is
-    shortened here to run many of them in a moment.  Every one of them used to
-    be counted towards an idle deadline that eventually SAFEd the outputs and
-    evicted the owner mid-edit; none of them may do anything now.
+    An idle timer used to SAFE the outputs and release the board after five
+    minutes without a request, which is a description of somebody editing a
+    pulse.  Nothing in the handler measures silence any more -- there is no
+    deadline on the read at all -- so this asserts what the socket sees: no
+    request, no reply, and the board still firing and still owned.
     """
 
-    monkeypatch.setattr(remote_module, "HANDLER_POLL_SECONDS", 0.02)
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=False)
@@ -205,31 +222,30 @@ def test_quiet_owner_keeps_the_board_and_stays_connected(monkeypatch) -> None:
         try:
             client.load(program)
             client.fire(forever=True)
-            time.sleep(0.3)  # a dozen read timeouts, and not one word from us
+            owner = server.owner_status()[0]
+            time.sleep(0.3)  # not one word from us
             assert streamer.snapshot()["firing"] is True
-            assert server.owner_status()[0] is not None
+            assert server.owner_status()[0] == owner
             assert client.snapshot()["firing"] is True
         finally:
             client.close()
             client.disconnect()
 
 
-def test_keepalive_asks_the_kernel_to_notice_a_vanished_peer() -> None:
-    """The one liveness question the server does ask, asked where it is free."""
+def test_the_handler_reads_without_any_deadline() -> None:
+    """The mechanical form of the rule above: silence is not measured anywhere.
 
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    peer = socket.create_connection(listener.getsockname())
-    accepted, _ = listener.accept()
-    try:
-        assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 0
-        remote_module._enable_keepalive(accepted)
-        assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
-    finally:
-        accepted.close()
-        peer.close()
-        listener.close()
+    A read deadline is how the old defect was built, and it is also how it
+    would come back -- ``socket.timeout`` cannot distinguish "nobody has spoken
+    yet" from "the peer is gone", so a handler that polls by deadline must
+    guess.  This one blocks, and the only thing that ends the wait is the
+    connection itself.
+    """
+
+    source = inspect.getsource(remote_module._RemoteHandler.handle)
+    assert "settimeout" not in source
+    assert "socket.timeout" not in source
+    assert "select" not in source
 
 
 def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, capsys) -> None:
