@@ -64,7 +64,17 @@ class PySerialLink:
         serial_port.write_timeout = _remaining(deadline, "UART write")
         serial_port.write(request)
         serial_port.flush()
-        return self._read_replies(1, deadline=deadline, stop=stop)[0]
+        self.last_shortfall = ""
+        replies = self._read_replies(1, deadline=deadline, stop=stop)
+        if not replies:
+            # _read_replies reports rather than judges, so the judging is here:
+            # one request, no reply, and the caller may only retry if the
+            # request is idempotent -- which is its decision, not the line's.
+            raise TimeoutError(
+                f"UART reply timed out on {self.port} at {self.baud} baud: "
+                f"{self.last_shortfall or 'no reply'}"
+            )
+        return replies[0]
 
     def write_batch(self, requests: Sequence[bytes], *, deadline: float, stop: threading.Event | None = None) -> list[bytes]:
         if stop is not None and stop.is_set():
@@ -149,6 +159,10 @@ class UartRegisterTransport:
         #: More than one because losing a frame is normal on a line with no
         #: flow control; few, because a link that needs many is not working.
         self.resend_attempts = 3
+        #: Host-side slack per retry attempt: the USB adapter's latency timer
+        #: (~16 ms) plus scheduler jitter, with a wide margin.  Deliberately
+        #: far below action_timeout, because it is paid per retry.
+        self.retry_slack = 0.5
         #: How many frames have had to be sent again, so a link that is quietly
         #: degrading can be seen before it fails.
         self.resends = 0
@@ -207,70 +221,201 @@ class UartRegisterTransport:
             # Budgeted AFTER the frames exist, because how long this may take is
             # a fact about how much there is to send.
             absolute = self._deadline(deadline, frames=len(frames), words=len(pending))
-            outstanding = list(frames)
             attempts = self.resend_attempts if resend else 1
-            for attempt in range(attempts):
-                replies = self._link.write_batch(outstanding, deadline=absolute, stop=stop)
-                answered = self._checked_acknowledgements(outstanding, replies)
-                outstanding = [
-                    frame for frame in outstanding if frame[3] not in answered
-                ]
-                if not outstanding:
-                    return
-                if attempt + 1 < attempts:
-                    # Counted when they are actually SENT again, not when they
-                    # are found missing: a link that gives up is not a link
-                    # that retried.
-                    self.resends += len(outstanding)
-            raise TimeoutError(
-                f"UART reply timed out on {self.port} at {self.baud} baud after "
-                f"{attempts} attempt(s): {len(outstanding)} of {len(frames)} frame(s) "
-                f"unanswered ({getattr(self._link, 'last_shortfall', '') or 'no detail'})"
-            )
+            # In groups that cannot exhaust the 8-bit SEQ space: replies are
+            # matched by SEQ, and 256 frames in flight would give two of them
+            # the same one -- an acknowledgement that answers both answers
+            # neither.
+            for start in range(0, len(frames), 255):
+                self._deliver(frames[start:start + 255], attempts, absolute, stop)
 
-    def _checked_acknowledgements(
+    def _deliver(
+        self,
+        frames: list[bytes],
+        attempts: int,
+        absolute: float,
+        stop: threading.Event | None,
+    ) -> None:
+        """Send one SEQ-distinct group until every frame is acknowledged.
+
+        Every attempt but the last waits only as long as these bytes need plus
+        host slack -- NOT the whole deadline.  One shared deadline was what
+        made the first resend implementation theatre: a genuinely lost frame
+        kept attempt one waiting until the deadline itself, so the retry began
+        with no time left and died in the write path without retransmitting.
+        The last attempt inherits whatever remains, which preserves the old
+        patience for a link that is merely slow.
+
+        A frame the board REJECTED (ST_CRC_FAIL: the request arrived damaged)
+        is provably unexecuted, so retrying it is safe even when ``resend`` was
+        refused -- that refusal exists for the ambiguous case, a command whose
+        acknowledgement went missing after it may have run.
+        """
+
+        outstanding = list(frames)
+        attempt = 0
+        limit = attempts
+        rejected: set[int] = set()
+        while attempt < limit:
+            attempt += 1
+            final = attempt >= limit
+            now = time.monotonic()
+            attempt_deadline = (
+                absolute
+                if final
+                else min(absolute, now + self._attempt_budget(outstanding))
+            )
+            if attempt_deadline <= now:
+                break
+            try:
+                replies = self._link.write_batch(
+                    outstanding, deadline=attempt_deadline, stop=stop
+                )
+            except TimeoutError:
+                if final:
+                    raise
+                replies = []
+            answered, rejected = self._classify(outstanding, replies)
+            outstanding = [
+                frame for frame in outstanding if frame[3] not in answered
+            ]
+            if not outstanding:
+                return
+            if all(frame[3] in rejected for frame in outstanding):
+                # Everything still missing was explicitly refused, none of it
+                # ran: even a strobe may go again.
+                limit = max(limit, self.resend_attempts)
+            if attempt < limit:
+                # Counted when they are actually SENT again, not when they are
+                # found missing: a link that gives up is not a link that
+                # retried.
+                self.resends += len(outstanding)
+        if outstanding and all(frame[3] in rejected for frame in outstanding):
+            # The board answered every time and refused every time: our
+            # requests keep arriving damaged.  That is a CRC verdict about the
+            # host-to-board direction, and naming it is what separates a bad
+            # cable from a dead one.
+            raise UartError(
+                f"UART write rejected as damaged (request CRC) on {self.port} at "
+                f"{self.baud} baud after {attempt} attempt(s): "
+                f"{len(outstanding)} of {len(frames)} frame(s)"
+            )
+        raise TimeoutError(
+            f"UART reply timed out on {self.port} at {self.baud} baud after "
+            f"{attempt} attempt(s): {len(outstanding)} of {len(frames)} frame(s) "
+            f"unanswered ({getattr(self._link, 'last_shortfall', '') or 'no detail'})"
+        )
+
+    def _attempt_budget(self, frames: "Sequence[bytes]") -> float:
+        """How long one attempt may reasonably take for THESE frames.
+
+        The bytes' own time on the wire, both directions, plus flat host
+        slack.  Small on purpose: this is what a retry costs, and three of
+        them are still well under one old five-second wait.
+        """
+
+        payload = sum(len(frame) + 8 for frame in frames)
+        payload += framing.reply_frame_len(0) * len(frames)
+        return payload * 10.0 / max(1.0, float(self.baud)) + self.retry_slack
+
+    def _classify(
         self,
         frames: Sequence[bytes],
         replies: Sequence[bytes],
-    ) -> set[int]:
-        """The SEQs that came back clean; anything else is refused or absent.
+    ) -> tuple[set[int], set[int]]:
+        """Sort acknowledgements into answered and refused, dropping noise.
 
-        A reply that arrives and says something went wrong is NOT a candidate
-        for resending -- the board understood and objected, and repeating the
-        frame would only repeat the objection.
+        Three verdicts per reply.  Clean ST_OK: answered.  ST_CRC_FAIL: the
+        REQUEST arrived damaged and committed nothing -- refused, and provably
+        safe to send again.  A reply that itself arrived damaged, or answers a
+        SEQ nobody in this group sent (a late duplicate of an earlier
+        exchange): noise on a noisy line, dropped, leaving its frame
+        unanswered so the caller resends it.  Only a well-formed reply with a
+        WRONG answer -- bad opcode, address range, unexpected payload -- still
+        raises, because that is a protocol bug and no amount of retrying fixes
+        a disagreement about the protocol.
         """
 
         expected = {frame[3] for frame in frames}
         answered: set[int] = set()
+        rejected: set[int] = set()
         for reply in replies:
-            sequence, status, words = framing.decode_reply(reply)
+            try:
+                sequence, status, words = framing.decode_reply(reply)
+            except framing.FrameError:
+                continue
             if sequence not in expected:
-                raise UartError(
-                    f"UART acknowledged a frame nobody sent (seq={sequence})"
-                )
+                continue
             if status == framing.ST_CRC_FAIL:
-                raise UartError("UART CRC error status in write acknowledgement")
+                rejected.add(sequence)
+                continue
             if status != framing.ST_OK or words:
                 raise UartError(
                     f"UART write acknowledgement was invalid (status=0x{status:02X})"
                 )
             answered.add(sequence)
-        return answered
+        return answered, rejected
 
     def read_word(self, word_offset: int, *, stop: threading.Event | None = None, deadline: float | None = None) -> int:
         absolute = self._deadline(deadline)
         with self._lock:
             self._require_open()
             request = framing.encode_read(int(word_offset), 1, seq=self._next_sequence())
-            reply = self._link.exchange(request, deadline=absolute, stop=stop)
+            return self._read_with_retry(request, absolute, stop)
+
+    def _read_with_retry(
+        self,
+        request: bytes,
+        absolute: float,
+        stop: threading.Event | None,
+    ) -> int:
+        """Ask once, and ask again if the answer is missing, stale or damaged.
+
+        A read is idempotent, so the SAME frame goes again -- if the first
+        answer was merely late, its duplicate says the same thing.  This is
+        what kept Stop from stalling: the safe path reads back status and
+        clock words, and every one of those reads used to wait out the whole
+        deadline over a single lost byte.
+        """
+
+        last = ""
+        for attempt in range(self.resend_attempts):
+            final = attempt + 1 == self.resend_attempts
+            now = time.monotonic()
+            attempt_deadline = (
+                absolute
+                if final
+                else min(absolute, now + self._attempt_budget((request,)))
+            )
+            if attempt_deadline <= now:
+                attempt_deadline, final = absolute, True
+            try:
+                reply = self._link.exchange(request, deadline=attempt_deadline, stop=stop)
+            except TimeoutError as error:
+                last = str(error)
+                if final:
+                    raise
+                self.resends += 1
+                continue
             sequence, status, words = framing.decode_reply(reply)
-            if sequence != request[3]:
-                raise UartError("UART read reply sequence mismatch")
-            if status == framing.ST_CRC_FAIL:
-                raise UartError("UART CRC error status in read reply")
+            if sequence != request[3] or status == framing.ST_CRC_FAIL:
+                # A stale answer to an earlier question, or our question
+                # arrived damaged.  Either way, ask again -- and if the board
+                # keeps refusing, say CRC out loud: that verdict is what
+                # separates a corrupting cable from a dead one.
+                last = (
+                    "the board rejected the request as damaged (CRC error)"
+                    if status == framing.ST_CRC_FAIL
+                    else f"stale reply seq={sequence}, expected {request[3]}"
+                )
+                if final:
+                    raise UartError(f"UART read failed after retries: {last}")
+                self.resends += 1
+                continue
             if status != framing.ST_OK or len(words) != 1:
                 raise UartError(f"UART read reply was invalid (status=0x{status:02X})")
             return int(words[0]) & 0xFFFFFFFF
+        raise UartError(f"UART read failed ({last or 'no attempt ran'})")
 
     def rewrite_scan_bank(
         self,
@@ -349,17 +494,38 @@ class UartRegisterTransport:
 
 
 def _extract_reply(buffer: bytearray) -> bytes | None:
-    while len(buffer) >= 2 and buffer[:2] != bytes((framing.SYNC0, framing.SYNC1)):
-        del buffer[0]
-    if len(buffer) < 7:
-        return None
-    count = int.from_bytes(buffer[5:7], "little")
-    length = framing.reply_frame_len(count)
-    if len(buffer) < length:
-        return None
-    frame = bytes(buffer[:length])
-    del buffer[:length]
-    return frame
+    """The next VERIFIED reply in the buffer, resynchronising past damage.
+
+    The CRC is checked here, not later, because a damaged frame does not only
+    lie about its contents -- a corrupted COUNT slices the wrong number of
+    bytes and misaligns every frame behind it.  On any damage the stream is
+    re-hunted from one byte later, which is what the board's own bridge does
+    with damage in the other direction.
+    """
+
+    sync = bytes((framing.SYNC0, framing.SYNC1))
+    while True:
+        while len(buffer) >= 2 and buffer[:2] != sync:
+            del buffer[0]
+        if len(buffer) < 7:
+            return None
+        count = int.from_bytes(buffer[5:7], "little")
+        if count > framing.MAX_FRAME_WORDS:
+            # An impossible length: this sync pair was noise, or the frame is
+            # damaged beyond trusting anything it says.
+            del buffer[0]
+            continue
+        length = framing.reply_frame_len(count)
+        if len(buffer) < length:
+            return None
+        frame = bytes(buffer[:length])
+        try:
+            framing.decode_reply(frame)
+        except framing.FrameError:
+            del buffer[0]
+            continue
+        del buffer[:length]
+        return frame
 
 
 def _remaining(deadline: float, action: str) -> float:

@@ -195,6 +195,17 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 6_950 -> 7_110 for surviving a noisy line in all three of its fault
+    # shapes, found by review and by the rig in the same afternoon: a LOST
+    # reply resends the frame with a fresh time slice per attempt (one shared
+    # deadline had made the first resend implementation inert -- attempt one
+    # waited the whole budget out); a CORRUPTED reply is dropped at extraction
+    # with a one-byte resync, so it neither kills the write (the rig's
+    # "method=fire FrameError: CRC mismatch") nor misaligns the frames behind
+    # it; a REJECTED request (ST_CRC_FAIL) is provably unexecuted, so even a
+    # command strobe may go again, while a strobe whose acknowledgement is
+    # simply missing still refuses to guess.  Reads retry the same way, which
+    # is what stopped Stop from stalling five seconds per lost byte.
     # 6_830 -> 6_950 for resending a frame the board never answered.  Its
     # bridge is a single-frame state machine: one mis-sampled stop bit makes it
     # abandon the frame it was reading, and that frame is never acknowledged.
@@ -233,14 +244,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 6_950
+    assert counted <= 7_110
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_130
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_290
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:
