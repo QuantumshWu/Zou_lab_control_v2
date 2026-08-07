@@ -358,9 +358,15 @@ def project_period(
             binding_kind=duration_binding or "",
             binding_number=duration_number or 0,
             validator_kind=VALIDATOR_FLOAT,
-            validator_lo=sequence.time_step_ns,
+            # One tick, and the shortest legal period, EXPRESSED IN THE UNIT
+            # THIS BOX IS IN.  The grid the hardware plays on is 20 ns; the
+            # number in the box is milliseconds.  Passing the raw 20 snapped a
+            # 5 ms period to a multiple of 20 MILLISECONDS and refused anything
+            # under 20 ms -- a device rule applied to a number that is not in
+            # the device's unit, which is arithmetic nobody asked for.
+            validator_lo=_tick_in(sequence, period.unit),
             validator_hi=0.0,
-            resolution=sequence.time_step_ns,
+            resolution=_tick_in(sequence, period.unit),
             allow_any=False,
         ),
         unit=period.unit,
@@ -388,6 +394,7 @@ def project_schedule(
     revision: int = 0,
     visible_ports: Sequence[str] | None = None,
     pins: Mapping[str, str] | None = None,
+    scan_points: int = 0,
 ) -> ScheduleVM:
     """The schedule page: one pulse, or the bare board it would run on.
 
@@ -478,8 +485,14 @@ def project_schedule(
             for port in programmable_ports(target)
             if port.kind in ("digital", "dac")
         ),
+        # Slots AND points.  How many fields are bound is half the question --
+        # the other half is how many points will actually be played, which is
+        # the number an operator checks before pressing On Pulse.
         scan_summary_text=(
-            f"{len(slots)} scan slot(s)" if slots else "no scan slots"
+            f"{len(slots)} slot{'' if len(slots) == 1 else 's'} - "
+            f"{scan_points} pt{'' if scan_points == 1 else 's'}"
+            if slots
+            else "no scan slots"
         ),
         scan_source_loaded=bool(slots),
         scan_file_path=str(path),
@@ -588,6 +601,17 @@ def _analog_field(sequence: PulseSequence, period: PulsePeriod, port: Any) -> Fi
         validator_hi=float(high),
         allow_any=True,
     )
+
+
+def _tick_in(sequence: PulseSequence, unit: str) -> float:
+    """One device tick, in the unit a field is written in.
+
+    The only conversion between "what the board can resolve" and "what the box
+    says", so a period card, a delay row and a scan column cannot disagree
+    about how fine an edit may be.
+    """
+
+    return float(sequence.time_step_ns) / TIME_UNIT_TO_NS[str(unit)]
 
 
 def _delay_of(sequence: PulseSequence, port_key: str) -> tuple[float, str]:
@@ -1017,8 +1041,11 @@ class PulseEditorPresenter:
         visible = session.get("visible_ports")
         self._visible = None if visible is None else {str(key) for key in visible}
         self._scan_source = str(session.get("scan_source", "") or "")
+        # Floats: a saved table is in the author's units, where 2.5 us is a
+        # point.  Coercing to int here rounded every fractional sweep the
+        # moment its pulse was reopened.
         self._scan_rows = tuple(
-            tuple(int(value) for value in row) for row in session.get("scan_rows", ())
+            tuple(float(value) for value in row) for row in session.get("scan_rows", ())
         )
         self._scan_use_loaded = bool(session.get("scan_use_loaded", False))
         self._scan_repeats = int(session.get("scan_repeats", 1) or 1)
@@ -1591,7 +1618,7 @@ class PulseEditorPresenter:
             # the same fields.
             from zlc_pulse import scan_columns_for, scan_rows_from_wire
 
-            self._scan_rows = scan_rows_from_wire(rows, scan_columns_for(source))
+            self._take_scan_rows(scan_rows_from_wire(rows, scan_columns_for(source)))
         self.refresh()
         # What came back IS what the board holds, so the dot must stop saying
         # the board is playing something older the moment it no longer is.
@@ -2229,8 +2256,8 @@ class PulseEditorPresenter:
         # used to decide it here and again on the file-load path, and the two
         # did not agree: the loader skipped the width check entirely.
         try:
-            self._scan_rows = validate_scan_table(
-                table, scan_columns_for(self.sequence)
+            self._take_scan_rows(
+                validate_scan_table(table, scan_columns_for(self.sequence))
             )
         except Exception as error:
             self._warn(str(error))
@@ -2288,8 +2315,8 @@ class PulseEditorPresenter:
         try:
             path = Path(chosen)
             data = np.load(path) if path.suffix == ".npy" else np.loadtxt(path, delimiter=",")
-            self._scan_rows = validate_scan_table(
-                data, scan_columns_for(self.sequence)
+            self._take_scan_rows(
+                validate_scan_table(data, scan_columns_for(self.sequence))
             )
         except Exception as error:
             self._warn(f"cannot read {Path(chosen).name}: {error}")
@@ -2355,6 +2382,18 @@ class PulseEditorPresenter:
         self._scan_progress = f"held at scan point {self._held_point}"
         self._refresh_scan_page()
         return True
+
+    def _take_scan_rows(self, rows: Sequence[Sequence[float]]) -> None:
+        """Hold a new table, and tell both pages that show it.
+
+        The Scan page shows the table; the EDIT page shows how many points it
+        has, beside the slots that will carry them -- which is the number an
+        operator checks before pressing On Pulse.  One place assigns the rows,
+        so the two cannot disagree about what is loaded.
+        """
+
+        self._scan_rows = tuple(tuple(value for value in row) for row in rows)
+        self.refresh()
 
     def _wire_rows(self, rows: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:
         """The author's table as the slots will hold it.
@@ -2470,6 +2509,7 @@ class PulseEditorPresenter:
                 revision=self.revision,
                 visible_ports=self._visible,
                 pins=self.pins,
+                scan_points=len(self._scan_rows),
             )
         )
         self.view.set_title(f"PulseGUI - {self.sequence.name}")
@@ -2599,7 +2639,7 @@ class PulseEditorPresenter:
             self._show_preview_state(size)
             return
         try:
-            host = self._make_preview(data, size=size, selectors=True)
+            host = self._make_preview(data, size=size)
         except Exception as error:
             view.show_preview_placeholder(f"cannot draw this pulse: {error}")
             return

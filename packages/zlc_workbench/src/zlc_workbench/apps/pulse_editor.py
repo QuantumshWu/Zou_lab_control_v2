@@ -120,7 +120,7 @@ def build(
 
     from ..pulse_editor import PulseEditorPresenter
 
-    def make_preview(timeline, *, size: str = "2x2", selectors: bool = False):
+    def make_preview(timeline, *, size: str = "2x2"):
         # The host, and only the host.  It is what a save writes through, what
         # the next edit updates rather than replaces, and -- since it can be
         # asked for its own widget and its own size -- the whole of what the
@@ -129,10 +129,11 @@ def build(
         host = plot.RasterPlotHost.from_plot(
             timeline, plot.PulseTimelinePlot(), size=str(size)
         )
-        if selectors:
-            # Measuring on the timeline: a range the operator drags reads back
-            # in the pulse's own time units.
-            host.set_x_selector(0.0, float(timeline.total_duration or 1.0))
+        # No selector is placed here.  A selection is something the operator
+        # drags onto the picture; putting one there at build time gave every
+        # preview a full-width band it had not asked for and could not remove,
+        # because the Selectors switch says whether one may be DRAWN, not
+        # whether one exists.
         # The preview page lays content out at its natural size rather than
         # stretching it, so nothing may be mounted before a front exists: a
         # raster host has no size until it has painted one.

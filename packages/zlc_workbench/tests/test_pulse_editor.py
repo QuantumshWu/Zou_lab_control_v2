@@ -2112,7 +2112,7 @@ def test_showing_every_row_grows_the_preview_widget_too(sequence) -> None:
     sizes: list[tuple[int, int]] = []
     view = _EditorView()
 
-    def _make(data, *, size, selectors):
+    def _make(data, *, size):
         sizes.append((len(data.channels), 0))
         return _PreviewHost(data, (100, 50 * max(1, len(data.channels))))
 
@@ -2305,6 +2305,47 @@ def test_a_bound_field_is_drawn_where_it_happens(presenter, sequence) -> None:
     # which is what the second press means and what the colour will say.
     assert segment.trace_name == dac.key and segment.kind == "api"
     assert segment.value == 200.0
+
+
+
+def test_the_grid_a_field_is_snapped_to_is_in_that_field_s_unit(sequence) -> None:
+    """The board's grid is 20 ns.  The box is in milliseconds.
+
+    Passing the raw 20 snapped a 5 ms period to a multiple of 20 MILLISECONDS
+    and refused anything under 20 ms -- a device rule applied to a number that
+    is not in the device's unit.
+    """
+
+    from zlc_pulse import PulsePeriod, PulseSequence
+    from zlc_workbench.pulse_editor import project_schedule
+
+    safe = (0,) * len(sequence.target.raw_lanes)
+    for unit, expected in (("ns", 20.0), ("us", 0.02), ("ms", 2e-5)):
+        one = PulseSequence(
+            name="t",
+            target=sequence.target,
+            time_step_ns=20.0,
+            periods=(PulsePeriod("p1", 1000.0 if unit == "ns" else 5.0, unit, safe),),
+        )
+        field = project_schedule(one).periods[0].duration
+        assert field.resolution == pytest.approx(expected), unit
+        assert field.validator_lo == pytest.approx(expected), unit
+
+
+def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) -> None:
+    """Slots is half the question; the other half is what will actually run."""
+
+    view = presenter.view
+    assert view.schedule_view.schedule.scan_summary_text == "no scan slots"
+
+    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    assert view.schedule_view.schedule.scan_summary_text == "1 slot - 0 pts"
+
+    view.scan_run_requested.emit(
+        "import numpy as np\n"
+        "scan_table = (np.arange(21) + 1).reshape(-1, 1) * 0.001\n"
+    )
+    assert view.schedule_view.schedule.scan_summary_text == "1 slot - 21 pts"
 
 
 def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:
