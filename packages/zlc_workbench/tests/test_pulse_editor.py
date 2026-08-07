@@ -2407,6 +2407,13 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
 
+    # The default is until Stop, which is what On Pulse means everywhere else
+    # in this window -- and the alternative is a finite run the client waits
+    # out by asking the server every 10 ms whether it is done.
+    board.events.clear()
+    assert presenter.fire() is True
+    assert "fire forever" in board.events, board.events
+
     view.scan_repeats_committed.emit(3)
     board.events.clear()
     assert presenter.fire() is True

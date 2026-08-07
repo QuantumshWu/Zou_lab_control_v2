@@ -195,6 +195,10 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 6_700 -> 6_740 for logging a POLLED answer only when it changes.  A poll
+    # is a question, not an event: wait_done is asked every 10 ms by a client
+    # that owns its own poll loop, and printing a line per ask buried the run
+    # in four hundred identical ones.
     # 6_650 -> 6_700 for the separation between where a generated sweep is
     # SEEDED and what the board will actually accept.  They were one pair of
     # numbers, so the only thing that knew a slot cannot exceed a 25-bit
@@ -213,14 +217,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 6_700
+    assert counted <= 6_740
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_880
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_920
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

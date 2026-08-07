@@ -698,3 +698,44 @@ def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
             time.sleep(0.01)
 
     assert seen == [], f"a dropped client reached handle_error: {seen}"
+
+
+def test_a_poll_is_logged_only_when_its_answer_changes(capsys) -> None:
+    """A poll is a question, not an event.
+
+    wait_done is asked every 10 ms by a client that owns its own poll loop, so
+    one five-second shot printed four hundred identical "state=PENDING" lines
+    and buried the run they were about.  The same rule makes CURSOR useful for
+    the first time: a cursor that stays at 3 says nothing, and a cursor that
+    becomes 4 is the scan advancing.
+    """
+
+    from zlc_pulse.remote import _forget_polls, _server_log_change
+
+    client = "127.0.0.1:9"
+    _forget_polls(client)
+    try:
+        for _ in range(400):
+            _server_log_change("WAIT DONE", client=client, detail="state=PENDING")
+        printed = capsys.readouterr().out.splitlines()
+        assert len(printed) == 1, printed[:3]
+
+        _server_log_change("WAIT DONE", client=client, detail="state=DONE")
+        assert len(capsys.readouterr().out.splitlines()) == 1
+
+        for value in (3, 3, 3, 4, 4, 5):
+            _server_log_change("CURSOR", client=client, detail=f"value={value}")
+        assert len(capsys.readouterr().out.splitlines()) == 3, "3, 4, 5"
+    finally:
+        _forget_polls(client)
+
+
+def test_a_client_that_leaves_takes_its_poll_memory_with_it() -> None:
+    """Otherwise a server that runs for months grows one entry per connection."""
+
+    from zlc_pulse.remote import _LAST_POLL, _forget_polls, _server_log_change
+
+    _server_log_change("CURSOR", client="10.0.0.1:1", detail="value=1")
+    assert any(key[0] == "10.0.0.1:1" for key in _LAST_POLL)
+    _forget_polls("10.0.0.1:1")
+    assert not any(key[0] == "10.0.0.1:1" for key in _LAST_POLL)

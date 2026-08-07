@@ -110,6 +110,13 @@ HOLD_MODE = "hold"
 #: as one pixel, so a legal pulse looks like no pulse.  1 us is the established
 #: PulseGUI's answer and reads on the timeline at its default zoom.
 NEW_PULSE_PERIOD_NS = 1000.0
+#: How many sweeps a scan runs when nobody has said: none, meaning until Stop.
+#: On Pulse is a cycle an experiment holds running, and a scan is no different
+#: -- and the alternative is a finite run, which the client waits out by asking
+#: the server every 10 ms whether it is done yet.  The default was 1 here and 0
+#: in the control that shows it, so every scan silently became that finite run
+#: and one five-second shot printed four hundred lines of "state=PENDING".
+SCAN_UNTIL_STOP = 0
 #: The page whose contents cost something to produce.  Drawing a timeline
 #: starts a render worker and a drawing session, and doing that for a page
 #: nobody has turned to is most of what a window spends before it appears.
@@ -884,7 +891,7 @@ class PulseEditorPresenter:
         self._scan_rows: tuple[tuple[int, ...], ...] = ()
         self._scan_shape = None
         self._scan_dirty = True
-        self._scan_repeats = 1
+        self._scan_repeats = SCAN_UNTIL_STOP
         self._scan_use_loaded = False
         self._scan_path = ""
         self._scan_progress = ""
@@ -1048,7 +1055,7 @@ class PulseEditorPresenter:
             tuple(float(value) for value in row) for row in session.get("scan_rows", ())
         )
         self._scan_use_loaded = bool(session.get("scan_use_loaded", False))
-        self._scan_repeats = int(session.get("scan_repeats", 1) or 1)
+        self._scan_repeats = int(session.get("scan_repeats", SCAN_UNTIL_STOP))
         self._scan_dirty = not self._scan_source
 
     def start_new_pulse(self) -> bool:

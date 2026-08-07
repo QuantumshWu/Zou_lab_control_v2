@@ -124,6 +124,37 @@ def _server_log(event: str, *, client: str | None = None, detail: str = "") -> N
     print(f"[{timestamp}] ZLC {event}{suffix}", flush=True)
 
 
+#: The last line each client got for each POLLED event.  A poll is a question,
+#: not an event: wait_done is asked every 10 ms by a client that owns its own
+#: poll loop, so one five-second shot printed four hundred identical lines and
+#: buried the run around them.  A log narrates what HAPPENED.
+_LAST_POLL: dict[tuple[str, str], str] = {}
+_POLL_LOCK = threading.Lock()
+
+
+def _server_log_change(event: str, *, client: str = "", detail: str = "") -> None:
+    """Log a polled answer only when it differs from the last one.
+
+    Which is also what makes the interesting ones visible: a cursor that stays
+    at 3 says nothing, and a cursor that becomes 4 is the scan advancing.
+    """
+
+    key = (str(client), str(event))
+    with _POLL_LOCK:
+        if _LAST_POLL.get(key) == detail:
+            return
+        _LAST_POLL[key] = detail
+    _server_log(event, client=client, detail=detail)
+
+
+def _forget_polls(client: str) -> None:
+    """Drop one client's poll memory when it goes away."""
+
+    with _POLL_LOCK:
+        for key in [key for key in _LAST_POLL if key[0] == str(client)]:
+            del _LAST_POLL[key]
+
+
 def _program_summary(program: object, *, source: object = None) -> str:
     """Describe a loaded program without printing its full edge or DAC data."""
 
@@ -580,6 +611,7 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
             disconnect_reason = f"client connection dropped: {type(exc).__name__}"
         finally:
             outputs_safe = server.client_disconnected(client=client, reason=disconnect_reason)
+            _forget_polls(client)
             _server_log(
                 "CLIENT DISCONNECTED",
                 client=client,
@@ -779,11 +811,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     ),
                 )
             else:
-                _server_log("WAIT DONE", client=client, detail="state=PENDING")
+                _server_log_change("WAIT DONE", client=client, detail="state=PENDING")
             return result
         if method == "cursor":
             result = self.streamer.cursor()
-            _server_log("CURSOR", client=client, detail=_log_fields(value=result))
+            _server_log_change("CURSOR", client=client, detail=_log_fields(value=result))
             return result
         if method == "safe":
             result = self.streamer.safe()
@@ -799,7 +831,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return result
         if method == "snapshot":
             result = self.streamer.snapshot()
-            _server_log("SNAPSHOT", client=client, detail=_log_fields(**{key: result.get(key) for key in ("opened", "loaded", "firing", "forever", "cursor")}))
+            _server_log_change("SNAPSHOT", client=client, detail=_log_fields(**{key: result.get(key) for key in ("opened", "loaded", "firing", "forever", "cursor")}))
             return result
         result = self.streamer.applied()
         _server_log("APPLIED", client=client, detail=_log_fields(present=result is not None, slots=len(result.slot_values) if result is not None else None, scan_rows=len(result.scan_rows) if result is not None else None, forever=result.forever if result is not None else None))
