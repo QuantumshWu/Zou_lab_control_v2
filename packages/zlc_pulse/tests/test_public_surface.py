@@ -195,6 +195,13 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 7_170 -> 7_200 for stating which lines can LOSE things.  The strobe
+    # verify-and-retry is sound only where a timeout means nothing is still in
+    # flight -- true of a UART frame, false of a Vivado TCL that may execute
+    # after its deadline -- so each transport declares its loss semantics and
+    # the machinery runs only where the declaration holds.  Found by review:
+    # the courtesy window would have made every JTAG fire time out spuriously,
+    # and the verify race could have doubled one.
     # 7_110 -> 7_170 for resolving a lost FIRE acknowledgement by observation
     # instead of by guessing.  Blind resending is two shots and blind failing
     # killed every sixth On Pulse on a line losing a byte per hundred; the
@@ -251,14 +258,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 7_170
+    assert counted <= 7_200
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_350
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_380
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

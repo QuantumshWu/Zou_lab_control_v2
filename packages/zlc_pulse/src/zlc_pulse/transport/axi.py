@@ -55,6 +55,10 @@ class VivadoAxiRegisterTransport:
     """Ordered 32-bit register/BRAM access through one persistent Vivado Tcl owner."""
 
     transport_id = "vivado-axi"
+    #: Nothing on this transport is ever lost -- it may be slow, and a
+    #: timed-out action may still complete later, which is exactly why the
+    #: strobe verify-and-retry machinery must NOT run here.
+    lossy_line = False
     observer_interval = JTAG_AXI_OBSERVER_INTERVAL
 
     def __init__(

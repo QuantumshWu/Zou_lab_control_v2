@@ -429,6 +429,10 @@ def test_a_fire_whose_acknowledgement_dies_is_verified_not_guessed() -> None:
     geom = StreamerParams()
 
     class _AckLosingOnce(_Recorder):
+        #: This double SIMULATES a lossy line, so it declares one --
+        #: the verify machinery is gated on that declaration.
+        lossy_line = True
+
         def __init__(self, **kwargs) -> None:
             super().__init__(**kwargs)
             self.lost = False
@@ -465,6 +469,10 @@ def test_a_fire_that_provably_never_ran_is_strobed_again() -> None:
     geom = StreamerParams()
 
     class _AckAndCommandLosingOnce(_Recorder):
+        #: This double SIMULATES a lossy line, so it declares one --
+        #: the verify machinery is gated on that declaration.
+        lossy_line = True
+
         def __init__(self, **kwargs) -> None:
             super().__init__(**kwargs)
             self.dropped = False
@@ -535,6 +543,10 @@ def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> N
     geom = StreamerParams()
 
     class _DeadlineRecorder(_Recorder):
+        #: This double SIMULATES a lossy line, so it declares one --
+        #: the verify machinery is gated on that declaration.
+        lossy_line = True
+
         def __init__(self, **kwargs) -> None:
             super().__init__(**kwargs)
             self.fire_windows: list[float] = []
@@ -557,3 +569,41 @@ def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> N
 
     assert transport.fire_windows, "the FIRE strobe must carry its short window"
     assert all(window < 1.0 for window in transport.fire_windows), transport.fire_windows
+
+
+def test_a_transport_that_never_loses_anything_gets_no_verify_machinery() -> None:
+    """On JTAG a timed-out TCL may still execute later.
+
+    Verify-and-retry there is the double-fire it exists to prevent: the
+    status read races the still-queued write, reads idle, strobes again, and
+    the late original makes it two shots.  A transport that does not declare
+    a lossy line therefore keeps the old contract -- no courtesy window on
+    the strobe, and a timeout stays fatal.
+    """
+
+    geom = StreamerParams()
+
+    class _NotLossyRecorder(_Recorder):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.fire_deadlines: list[object] = []
+
+        def write_words(self, words, **kwargs):  # type: ignore[override]
+            if any(
+                address == CtrlWords.COMMAND and value == CMD_FIRE
+                for address, value in words
+            ):
+                self.fire_deadlines.append(kwargs.get("deadline"))
+            return super().write_words(words, **kwargs)
+
+    transport = _NotLossyRecorder(geom=geom, auto_done=True)
+    assert getattr(transport, "lossy_line", False) is False
+    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer.open()
+    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
+    streamer.fire()
+    assert streamer.wait_done(1.0) is not None
+
+    assert transport.fire_deadlines == [None], (
+        "a non-lossy transport must not be handed the UART courtesy window"
+    )

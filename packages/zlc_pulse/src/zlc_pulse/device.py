@@ -820,10 +820,19 @@ class PulseStreamer:
         """
 
         rows = self._command(code)
-        attempts = 3 if took_effect is not None else 1
+        # Verification-by-status is sound only on a line that LOSES things: a
+        # UART frame either executes within microseconds or is gone forever,
+        # so after a timeout nothing is still in flight.  A Vivado TCL that
+        # timed out may still execute later -- verify would read "idle", the
+        # strobe would go again, and the late original would make it two
+        # shots.  The transport declares which world it lives in.
+        verified = took_effect is not None and bool(
+            getattr(self.transport, "lossy_line", False)
+        )
+        attempts = 3 if verified else 1
         for attempt in range(attempts):
             options: dict = {} if deadline is None else {"deadline": deadline}
-            if took_effect is not None and deadline is None:
+            if verified and deadline is None:
                 # The acknowledgement gets a short window, because it is not
                 # the authority -- the status read below is.
                 options = {"deadline": time.monotonic() + STROBE_VERIFY_AFTER}
@@ -831,7 +840,7 @@ class PulseStreamer:
                 self.transport.write_words(rows, resend=repeatable, **options)
                 return
             except TimeoutError:
-                if took_effect is None:
+                if not verified:
                     raise
                 if took_effect():
                     return

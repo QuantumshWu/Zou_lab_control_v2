@@ -134,6 +134,9 @@ class PySerialLink:
 class UartRegisterTransport:
     transport_id = "uart"
     observer_interval = UART_OBSERVER_INTERVAL
+    #: A frame on this line either executes within microseconds of arriving or
+    #: is gone forever -- the property that makes verify-and-retry sound.
+    lossy_line = True
 
     def __init__(
         self,

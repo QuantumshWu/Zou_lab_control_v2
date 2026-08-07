@@ -23,6 +23,10 @@ from .base import DEFAULT_OBSERVER_INTERVAL
 
 class MemoryRegisterTransport:
     transport_id = "memory"
+    #: Nothing on this transport is ever lost -- it may be slow, and a
+    #: timed-out action may still complete later, which is exactly why the
+    #: strobe verify-and-retry machinery must NOT run here.
+    lossy_line = False
     observer_interval = DEFAULT_OBSERVER_INTERVAL
 
     def __init__(

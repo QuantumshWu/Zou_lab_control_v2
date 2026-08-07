@@ -19,6 +19,13 @@ class TransportAborted(RuntimeError):
 class RegisterTransport(Protocol):
     transport_id: str
     observer_interval: float
+    #: Whether this line can LOSE a request or its acknowledgement outright.
+    #: True only for the UART: a frame either executes within microseconds of
+    #: arriving or is gone forever, so a timeout implies nothing is still in
+    #: flight -- which is the precondition for verify-and-retry on a command
+    #: strobe.  A Vivado TCL that timed out may still execute later, so on
+    #: that transport the same retry would risk firing twice.
+    lossy_line: bool
 
     def start(self) -> None: ...
 
