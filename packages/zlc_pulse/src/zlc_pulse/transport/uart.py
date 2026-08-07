@@ -159,10 +159,14 @@ class UartRegisterTransport:
         #: More than one because losing a frame is normal on a line with no
         #: flow control; few, because a link that needs many is not working.
         self.resend_attempts = 3
-        #: Host-side slack per retry attempt: the USB adapter's latency timer
-        #: (~16 ms) plus scheduler jitter, with a wide margin.  Deliberately
-        #: far below action_timeout, because it is paid per retry.
-        self.retry_slack = 0.5
+        #: Host-side slack per retry attempt, beyond the bytes' own wire time:
+        #: the USB adapter's latency timer (~16 ms) plus scheduler jitter.
+        #: Waiting too LITTLE here is benign -- a write is idempotent, and a
+        #: reply that was merely late arrives as a duplicate the classifier
+        #: drops by SEQ -- while waiting too much is a stall the operator
+        #: feels on every lost frame.  It started at half a second and a lossy
+        #: cycle cost visible over-a-second hangs; the physics needs ~20 ms.
+        self.retry_slack = 0.08
         #: How many frames have had to be sent again, so a link that is quietly
         #: degrading can be seen before it fails.
         self.resends = 0

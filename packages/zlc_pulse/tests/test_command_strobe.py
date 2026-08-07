@@ -520,3 +520,40 @@ def test_safe_and_load_strobes_ride_the_resending_line() -> None:
     other_flags = [resend for code, resend in strobes if code in (CMD_SAFE, CMD_LOAD)]
     assert other_flags and all(other_flags)
     assert fire_flags and not any(fire_flags)
+
+
+def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> None:
+    """The acknowledgement is a courtesy; the status read is the authority.
+
+    Waiting the full action timeout for the courtesy stalled every lost FIRE
+    acknowledgement for five seconds before the verification that settles it
+    in one read.  The acknowledgement window is pinned short here.
+    """
+
+    import time as _time
+
+    geom = StreamerParams()
+
+    class _DeadlineRecorder(_Recorder):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.fire_windows: list[float] = []
+
+        def write_words(self, words, **kwargs):  # type: ignore[override]
+            fire = any(
+                address == CtrlWords.COMMAND and value == CMD_FIRE
+                for address, value in words
+            )
+            if fire and kwargs.get("deadline") is not None:
+                self.fire_windows.append(kwargs["deadline"] - _time.monotonic())
+            return super().write_words(words, **kwargs)
+
+    transport = _DeadlineRecorder(geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer.open()
+    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
+    streamer.fire()
+    assert streamer.wait_done(1.0) is not None
+
+    assert transport.fire_windows, "the FIRE strobe must carry its short window"
+    assert all(window < 1.0 for window in transport.fire_windows), transport.fire_windows

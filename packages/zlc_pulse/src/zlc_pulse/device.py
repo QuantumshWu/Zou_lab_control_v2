@@ -36,6 +36,11 @@ from .wire import (
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
 SAFE_RETRY_AFTER = 0.05
+#: How long a VERIFIED strobe waits for its acknowledgement before asking the
+#: status register instead.  Short on purpose: the read is the arbiter, the
+#: acknowledgement is a courtesy, and waiting the full action timeout for a
+#: courtesy stalled every lost FIRE ack for five seconds.
+STROBE_VERIFY_AFTER = 0.3
 SAFE_POLL_INTERVAL = 0.001
 
 
@@ -815,9 +820,13 @@ class PulseStreamer:
         """
 
         rows = self._command(code)
-        options: dict = {} if deadline is None else {"deadline": deadline}
         attempts = 3 if took_effect is not None else 1
         for attempt in range(attempts):
+            options: dict = {} if deadline is None else {"deadline": deadline}
+            if took_effect is not None and deadline is None:
+                # The acknowledgement gets a short window, because it is not
+                # the authority -- the status read below is.
+                options = {"deadline": time.monotonic() + STROBE_VERIFY_AFTER}
             try:
                 self.transport.write_words(rows, resend=repeatable, **options)
                 return

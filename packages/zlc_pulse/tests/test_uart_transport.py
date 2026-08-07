@@ -254,3 +254,30 @@ def test_extraction_walks_past_a_damaged_frame_to_the_good_one_behind_it() -> No
     buffer = bytearray(bytes(damaged) + good)
     assert _extract_reply(buffer) == good
     assert _extract_reply(buffer) is None
+
+
+def test_a_retry_costs_milliseconds_not_seconds() -> None:
+    """The stall the operator feels IS the attempt budget.
+
+    Every lost frame charges one budget before its resend, so an On Pulse over
+    a lossy line hangs by exactly this number times the losses.  It began life
+    at half a second and a normal cycle stalled for over a second; the physics
+    -- wire time plus a ~16 ms USB latency timer -- needs tens of
+    milliseconds.  Waiting too little is benign (writes are idempotent and a
+    late duplicate is dropped by SEQ), so this pins the ceiling.
+    """
+
+    from zlc_pulse.transport import uart_frame as framing
+    from zlc_pulse.transport.uart import UartRegisterTransport
+
+    class _Idle:
+        port = "COM-TEST"
+        baud = 3_000_000
+
+        def open(self) -> None: ...
+
+        def close(self) -> None: ...
+
+    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=_Idle())
+    ten_frames = [framing.encode_write(index * 4, (0,), seq=index) for index in range(10)]
+    assert transport._attempt_budget(ten_frames) < 0.2
