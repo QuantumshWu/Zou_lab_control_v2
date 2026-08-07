@@ -30,7 +30,12 @@ from zlc_pulse.remote import REMOTE_METHODS, RemotePulseStreamer
 #: reaching into a submodule for something this list does not name is the same
 #: surface with the declaration skipped, which is worse than a wide facade --
 #: nobody can see how wide it really is.
-MAX_PUBLIC_NAMES = 34
+#: 34 -> 36 for the scan crossing.  A table is written in the units the editor
+#: shows and held in the units the wire uses, and until now the difference was
+#: the author's problem: the template offered offset-binary codes and device
+#: ticks for fields whose own boxes are signed codes and microseconds.  Naming
+#: both directions makes the conversion a place instead of an instruction.
+MAX_PUBLIC_NAMES = 36
 EXPECTED_PUBLIC_NAMES = (
     "PulseStreamer",
     "RemotePulseStreamer",
@@ -62,6 +67,8 @@ EXPECTED_PUBLIC_NAMES = (
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
+    "scan_rows_to_wire",
+    "scan_rows_from_wire",
     "RemoteError",
     "UartError",
     "BackendResolutionError",
@@ -188,19 +195,26 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 6_515 -> 6_580 for the scan crossing: a scan column now describes itself
+    # in the unit the EDITOR shows for the field it scans, and carries the
+    # scale and offset that reach the wire, so scan_rows_to_wire/from_wire can
+    # be one place instead of an instruction to the person writing the table.
+    # Before this the template offered offset-binary codes and device ticks for
+    # fields whose own boxes are signed codes and microseconds -- one output,
+    # two number systems, and nothing on screen saying which.
     # 6_440 -> 6_465 for whole_pulse_repeat, because "does this bracket replace
     # the outer level" was worked out by whoever happened to be reading the
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 6_515
+    assert counted <= 6_650
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_690
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 7_830
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

@@ -8,13 +8,11 @@ clobbering text a person is currently editing.
 
 from __future__ import annotations
 
-import sys
-
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCodeEdit,
-    FluentDoubleSpinBox, FluentFrame, FluentGroupBox, FluentLabel, signals_blocked,
+    FluentSpinBox, FluentFrame, FluentGroupBox, FluentLabel, signals_blocked,
 )
 
 from ._layout import px, row_height
@@ -51,9 +49,11 @@ class PulseScanView(QtWidgets.QWidget):
         run_row.setContentsMargins(0, 0, 0, 0)
         run_row.setSpacing(px(6, minimum=4))
         run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
-        self.scan_repeats_spin = FluentDoubleSpinBox(length=5, allow_minus=False)
-        self.scan_repeats_spin.setDecimals(0)
-        self.scan_repeats_spin.setMaximum(sys.float_info.max)
+        # An integer control for an integer.  A double spin box told to show no
+        # decimals is still a float field: it accepts 2.5, formats what it
+        # holds, and offers a count of repeats that cannot be a count.
+        self.scan_repeats_spin = FluentSpinBox()
+        self.scan_repeats_spin.setMaximum(2**31 - 1)
         self._minimum_repeats = 0
         self._committed_repeats = 0
         self.set_repeats_range(0, 0)

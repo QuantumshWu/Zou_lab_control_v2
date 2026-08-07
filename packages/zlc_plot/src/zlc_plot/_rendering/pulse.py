@@ -233,17 +233,27 @@ def update_pulse_timeline(
         "fontsize": style.fonts.pulse_scan_annotation_pt,
         "color": style.artists.pulse_scan_annotation_color,
     }
-    badge = {
-        "boxstyle": f"circle,pad={pulse.scan_badge_pad:g}",
-        "facecolor": style.artists.pulse_scan_region_color,
-        "edgecolor": "none",
-    }
+    def _slot_color(record) -> str:
+        """One colour per kind of slot, asked once and used by every artist."""
+
+        return (
+            style.artists.pulse_api_region_color
+            if getattr(record, "kind", "scan") == "api"
+            else style.artists.pulse_scan_region_color
+        )
+
+    def _badge(record) -> dict:
+        return {
+            "boxstyle": f"circle,pad={pulse.scan_badge_pad:g}",
+            "facecolor": _slot_color(record),
+            "edgecolor": "none",
+        }
     for index, region in enumerate(payload.scan_regions):
         rectangle = scan_rectangles[index]
         rectangle.set_xy((region.start, area_bottom))
         rectangle.set_width(region.stop - region.start)
         rectangle.set_height(area_top - area_bottom)
-        rectangle.set_facecolor(style.artists.pulse_scan_region_color)
+        rectangle.set_facecolor(_slot_color(region))
         rectangle.set_edgecolor("none")
         rectangle.set_alpha(pulse.scan_region_alpha)
         rectangle.set_zorder(pulse.scan_region_zorder)
@@ -254,7 +264,7 @@ def update_pulse_timeline(
         text.set_ha("center")
         text.set_va("center")
         text.set_zorder(pulse.annotation_zorder)
-        text.set_bbox(badge)
+        text.set_bbox(_badge(region))
         text.update(scan_text)
         text.set_visible(show_scan)
 
@@ -280,7 +290,7 @@ def update_pulse_timeline(
         value = segment.value
         y = row_base + row_height * float(np.clip((value - minimum) / value_span, 0.0, 1.0))
         line.set_data((start, stop), (y, y))
-        line.set_color(style.artists.pulse_scan_region_color)
+        line.set_color(_slot_color(segment))
         line.set_linewidth(pulse.scan_dac_linewidth)
         line.set_alpha(pulse.scan_dac_alpha)
         line.set_solid_capstyle("butt")
@@ -292,7 +302,7 @@ def update_pulse_timeline(
         text.set_ha("center")
         text.set_va("center")
         text.set_zorder(pulse.annotation_zorder)
-        text.set_bbox(badge)
+        text.set_bbox(_badge(segment))
         text.update(scan_text)
         text.set_visible(show_scan and number is not None)
 

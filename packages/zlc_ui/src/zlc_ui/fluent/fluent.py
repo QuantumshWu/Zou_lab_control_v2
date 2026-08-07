@@ -2852,6 +2852,73 @@ class FluentInputDialog(QtWidgets.QDialog):
         return "", False
 
 
+class _PythonHighlighter(QtGui.QSyntaxHighlighter):
+    """Python colouring for the code editors this package hands out.
+
+    One highlighter, because there is one code editor: the scan generator, the
+    table view and the source popups are all FluentCodeEdit, and a page whose
+    whole job is to be read was rendering comments in the same colour as the
+    code that they explain.
+
+    Comments first and unconditionally: a generated program leads with the
+    sentence that says what its columns MEAN, and that sentence is the part a
+    physicist reads.  Everything else is deliberately thin -- this is a code
+    field in an instrument window, not an IDE.
+    """
+
+    KEYWORDS = (
+        "and as assert async await break class continue def del elif else except "
+        "finally for from global if import in is lambda nonlocal not or pass raise "
+        "return try while with yield None True False"
+    ).split()
+
+    def __init__(self, document) -> None:
+        super().__init__(document)
+
+        def _format(colour: str, *, italic: bool = False, bold: bool = False):
+            fmt = QtGui.QTextCharFormat()
+            fmt.setForeground(QtGui.QColor(colour))
+            fmt.setFontItalic(italic)
+            if bold:
+                fmt.setFontWeight(QtGui.QFont.DemiBold)
+            return fmt
+
+        self._comment = _format(GREEN, italic=True)
+        self._string = _format(ORANGE_DARK)
+        self._number = _format(ORANGE)
+        self._keyword = _format(ACCENT, bold=True)
+        self._rules = (
+            (re.compile(r"\b(" + "|".join(self.KEYWORDS) + r")\b"), self._keyword),
+            (re.compile(r"\b\d+\.?\d*([eE][-+]?\d+)?\b"), self._number),
+            (re.compile(r"'[^'\n]*'|\"[^\"\n]*\""), self._string),
+        )
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt naming
+        for pattern, fmt in self._rules:
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(), fmt)
+        # Last, and it wins: a # inside a string is not a comment, but a string
+        # inside a comment is still a comment.
+        hash_at = _comment_start(text)
+        if hash_at is not None:
+            self.setFormat(hash_at, len(text) - hash_at, self._comment)
+
+
+def _comment_start(text: str) -> int | None:
+    """Where a Python comment begins on this line, ignoring quoted hashes."""
+
+    quote = ""
+    for index, character in enumerate(text):
+        if quote:
+            if character == quote:
+                quote = ""
+        elif character in "'\"":
+            quote = character
+        elif character == "#":
+            return index
+    return None
+
+
 class FluentCodeEdit(QtWidgets.QPlainTextEdit):
     """A monospace code/expression editor with the house Fluent chrome (white card, light
     border, Consolas font, Fluent scrollbars).  ONE source for the look so every code editor
@@ -2869,6 +2936,7 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
             f'border-radius: {scaled_px(4)}px; font: {fluent_font_size()}pt "Consolas", "Courier New", '
             f'monospace; padding: {pad}px; }}')
         apply_fluent_scrollbars(self)
+        self._highlighter = _PythonHighlighter(self.document())
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)   # Fluent right-click (undo/cut/copy/paste), not the native menu

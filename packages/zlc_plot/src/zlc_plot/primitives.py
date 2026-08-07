@@ -219,13 +219,29 @@ class PulseBlock:
         object.__setattr__(self, "label", _text(self.label, "pulse label"))
 
 
+SLOT_KINDS = ("scan", "api")
+
+
+def _slot_kind(value: object) -> str:
+    kind = str(value)
+    if kind not in SLOT_KINDS:
+        raise ValueError(f"slot kind must be one of {SLOT_KINDS}")
+    return kind
+
+
 @dataclass(frozen=True, slots=True)
 class PulseScanRegion:
-    """One highlighted scan interval with a positive integer badge."""
+    """One highlighted scan interval with a positive integer badge.
+
+    ``kind`` says who writes the slot -- a table that sweeps it, or a host
+    that sets it a row at a time.  It is the same slot and the same badge; the
+    drawing colours it so a glance answers which.
+    """
 
     start: float
     stop: float
     number: int
+    kind: str = "scan"
 
     def __post_init__(self) -> None:
         start = _nonnegative_time(self.start, "scan-region start")
@@ -239,6 +255,7 @@ class PulseScanRegion:
             "number",
             _scan_number(self.number, "scan-region number", optional=False),
         )
+        object.__setattr__(self, "kind", _slot_kind(self.kind))
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +315,7 @@ class PulseDacScanSegment:
     stop: float
     value: float
     number: int | None = None
+    kind: str = "scan"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trace_name", _text(self.trace_name, "DAC trace name"))
@@ -313,6 +331,7 @@ class PulseDacScanSegment:
             "number",
             _scan_number(self.number, "DAC scan number", optional=True),
         )
+        object.__setattr__(self, "kind", _slot_kind(self.kind))
 
 
 @dataclass(frozen=True, slots=True)

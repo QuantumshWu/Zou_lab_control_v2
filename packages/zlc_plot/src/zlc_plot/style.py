@@ -256,6 +256,11 @@ class ArtistStyleConfig:
     fit_ellipse_ring_alpha: float
     side_distribution_linewidth: float
     pulse_scan_region_color: str
+    #: An API slot is written one row at a time by whoever is driving the
+    #: experiment rather than swept from a table.  Same mechanism, same
+    #: badge, different author -- so the drawing says which by colour and
+    #: nothing else has to.
+    pulse_api_region_color: str
     pulse_scan_annotation_color: str
     point_unknown: PointRingToken
     point_empty: PointRingToken
@@ -335,6 +340,7 @@ class ArtistStyleConfig:
             "fit_failure_color",
             "fit_ellipse_color",
             "pulse_scan_region_color",
+            "pulse_api_region_color",
             "pulse_scan_annotation_color",
         ):
             object.__setattr__(self, field, _color(getattr(self, field), field))
@@ -741,6 +747,7 @@ def build_plot_style() -> PlotStyleConfig:
         fit_ellipse_ring_alpha=0.5,
         side_distribution_linewidth=3.25,
         pulse_scan_region_color="#D69A6E",
+        pulse_api_region_color="#B08BD6",
         pulse_scan_annotation_color="#FFFFFF",
         point_unknown=PointRingToken("#FFFFFF", 0.85, 0.6),
         point_empty=PointRingToken("#FFFFFF", 0.85, 0.6),

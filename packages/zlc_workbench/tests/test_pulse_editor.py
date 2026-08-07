@@ -301,9 +301,16 @@ class _PreviewHost:
         self.logical_size = logical_size
         self.closed = False
         self.saved = None
+        #: Whether the operator may drag on it.  A real host gates this, so a
+        #: double that could not would let the Selectors switch go back to
+        #: doing nothing without a test noticing.
+        self.interaction = True
 
     def qt_widget(self):
         raise AssertionError("a test never mounts a real widget")
+
+    def set_interaction_enabled(self, enabled):
+        self.interaction = bool(enabled)
 
     def update_data(self, data):
         """A standing host takes new data rather than being rebuilt."""
@@ -1635,7 +1642,9 @@ def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, seque
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    presenter.view.scan_run_requested.emit("import numpy as np\nscan_table = np.arange(4).reshape(-1, 1)\n")
+    presenter.view.scan_run_requested.emit(
+        "import numpy as np\nscan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
+    )
     kept = presenter._scan_rows
 
     presenter.view.scan_run_requested.emit("raise RuntimeError('bad sweep')")
@@ -1654,19 +1663,23 @@ def test_holding_a_point_stops_the_board_and_writes_that_row(presenter, sequence
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    presenter.view.scan_run_requested.emit("import numpy as np\nscan_table = np.arange(5).reshape(-1, 1) * 100\n")
+    presenter.view.scan_run_requested.emit(
+        "import numpy as np\nscan_table = (np.arange(5) + 1).reshape(-1, 1) * 0.001\n"
+    )
 
     presenter.view.scan_hold_requested.emit()
     assert "safe" in board.events
 
     presenter.view.scan_step_requested.emit(1)
-    assert written[-1] == (100,)
+    # 0.002 s at 20 ns per tick.  A held row crosses the same boundary the
+    # uploaded table does, because it is the same number.
+    assert written[-1] == (100_000,)
     presenter.view.scan_step_requested.emit(-1)
-    assert written[-1] == (0,)
+    assert written[-1] == (50_000,)
     # It cannot step off either end of the table.
     for _ in range(10):
         presenter.view.scan_step_requested.emit(-1)
-    assert written[-1] == (0,)
+    assert written[-1] == (50_000,)
 
 
 def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
@@ -1677,10 +1690,16 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    presenter.view.scan_run_requested.emit("import numpy as np\nscan_table = np.arange(3).reshape(-1, 1) + 40\n")
+    # Written in the unit the period is in -- this pulse is authored in
+    # seconds -- and converted once, at the boundary, into what a slot holds:
+    # device ticks at 20 ns.  The author never sees a tick; the board never
+    # sees a second.
+    presenter.view.scan_run_requested.emit(
+        "import numpy as np\nscan_table = np.array([0.004, 0.005, 0.006]).reshape(-1, 1)\n"
+    )
 
     assert presenter.load_into_sequencer() is True
-    assert uploaded == [((40,), (41,), (42,))]
+    assert uploaded == [((200_000,), (250_000,), (300_000,))]
 
 
 def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> None:
@@ -1778,7 +1797,7 @@ def test_stepping_is_offered_only_once_there_is_a_table(presenter, sequence) -> 
         "duration", sequence.periods[3].period_id, None
     )
     presenter.view.scan_run_requested.emit(
-        "import numpy as np\nscan_table = np.arange(4).reshape(-1, 1)\n"
+        "import numpy as np\nscan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
     )
     assert presenter.view.capabilities[2] is True
 
@@ -1818,7 +1837,9 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
 
     with pytest.raises(ValueError, match="column"):
         validate_scan_table(np.zeros((4, len(columns) + 1)), columns)
-    assert validate_scan_table(np.zeros((4, len(columns))), columns)
+    # One tick is the floor for a duration column, in whatever unit that
+    # column is written in -- a zero-length period is not a scan point.
+    assert validate_scan_table(np.full((4, len(columns)), 0.001), columns)
 
 
 def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
@@ -2241,6 +2262,49 @@ def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
     finally:
         presenter.close()
 
+
+
+
+def test_the_selectors_switch_reaches_the_plot_in_both_directions(presenter) -> None:
+    """It set a flag that was read in one place: the arguments a host is BUILT
+    with.  After the first draw the switch did nothing, either way."""
+
+    host = presenter._preview_host
+    assert host is not None, "the Preview page is open, so there is a plot"
+
+    presenter.view.preview_selectors_toggled.emit(False)
+    assert host.interaction is False
+    presenter.view.preview_selectors_toggled.emit(True)
+    assert host.interaction is True
+
+
+
+def test_a_bound_field_is_drawn_where_it_happens(presenter, sequence) -> None:
+    """Binding is the most consequential edit on this page, and the picture
+    did not show it: zlc_plot has drawn numbered scan regions and coloured DAC
+    segments all along, and nothing ever built one, so a bound pulse and an
+    unbound one previewed identically."""
+
+    from zlc_workbench.pulse_editor import timeline_of
+
+    view = presenter.view
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
+    presenter.set_analog(sequence.periods[1].period_id, dac.key, "edge", 200)
+
+    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    view.binding_cycle_requested.emit("dac", sequence.periods[1].period_id, dac.key)
+    view.binding_cycle_requested.emit("dac", sequence.periods[1].period_id, dac.key)
+
+    data = timeline_of(presenter.sequence, include_off=True)
+    region = next(iter(data.scan_regions))
+    segment = next(iter(data.scan_dac_segments))
+    # Over the period whose duration is swept, badged with the column an
+    # operator will find it in.
+    assert region.number == 1 and region.kind == "scan"
+    # And on the trace whose level is written -- by a host, one row at a time,
+    # which is what the second press means and what the colour will say.
+    assert segment.trace_name == dac.key and segment.kind == "api"
+    assert segment.value == 200.0
 
 
 def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:

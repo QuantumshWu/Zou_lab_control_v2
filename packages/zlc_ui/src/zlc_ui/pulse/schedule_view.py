@@ -1106,8 +1106,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.add_port_button.clicked.connect(self._request_add_port)
         self.hide_off_button.clicked.connect(self._request_hide_off_ports)
         self.show_all_button.clicked.connect(self._request_show_all_ports)
-        self.connection_button.clicked.connect(lambda: self.connection_requested.emit(self.connection_combo.currentData() or "virtual", self.connection_endpoint.text()))
-        self.connection_combo.currentIndexChanged.connect(self._sync_endpoint_enabled)
+        self.connection_button.clicked.connect(self._request_connection)
         self._sync_endpoint_enabled()
 
     def set_schedule(self, vm: ScheduleVM) -> bool:
@@ -1324,6 +1323,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._sync_endpoint_enabled()
         self.connection_status.setText(str(status))
         self.connection_status.setToolTip(str(status))
+
+    def _request_connection(self) -> None:
+        """Dial what the combo says, with the address only remote will use."""
+
+        mode = str(self.connection_combo.currentData() or "virtual")
+        self.connection_requested.emit(mode, self.connection_endpoint.text())
 
     def _sync_endpoint_enabled(self) -> None:
         """An address that will not be dialled must not look like an input.

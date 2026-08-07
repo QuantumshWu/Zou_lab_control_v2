@@ -292,19 +292,36 @@ def project_target(
     return tuple(records)
 
 
-def _scan_table_text(rows: Sequence[Sequence[int]], columns: Sequence[object]) -> str:
+def _scan_table_text(rows: Sequence[Sequence[float]], columns: Sequence[object]) -> str:
     """The scan table as a person reads it: a header, then the first rows.
 
     Truncated on purpose.  A thousand-point scan is not read line by line, and
     a page that pastes all of it hides the shape it was supposed to show.
+
+    Shown in the units its author wrote, with its units in the header: a DAC
+    column is a whole signed code, a duration keeps the fraction that made it
+    worth sweeping.  Formatting every column as an integer was the wire's rule
+    reaching a page that is not about the wire.
     """
 
     if not rows:
         return "(no scan table yet -- write a program and press Run)"
-    header = "  ".join(f"{getattr(column, 'name', index):>12}" for index, column in enumerate(columns))
-    lines = [header] if columns else []
+    specs = list(columns)
+    header = "  ".join(
+        f"{getattr(column, 'name', index):>14}" for index, column in enumerate(specs)
+    )
+    units = "  ".join(f"{getattr(column, 'unit', ''):>14}" for column in specs)
+    lines = [header, units] if specs else []
     shown = list(rows[:40])
-    lines.extend("  ".join(f"{value:>12d}" for value in row) for row in shown)
+    lines.extend(
+        "  ".join(
+            f"{int(round(value)):>14d}"
+            if getattr(spec, "is_dac", False)
+            else f"{float(value):>14g}"
+            for value, spec in zip(row, specs, strict=False)
+        )
+        for row in shown
+    )
     if len(rows) > len(shown):
         lines.append(f"... {len(rows) - len(shown)} more point(s)")
     return "\n".join(lines)
@@ -440,7 +457,7 @@ def project_schedule(
                 port_key=port.key,
                 value=FieldVM(
                     text=(
-                        f"{_delay_of(sequence, port.key):g}"
+                        f"{_delay_of(sequence, port.key)[0]:g}"
                         if sequence is not None
                         else "0"
                     ),
@@ -453,7 +470,9 @@ def project_schedule(
                     editable=sequence is not None,
                     allow_any=False,
                 ),
-                unit="ns",
+                unit=(
+                    _delay_of(sequence, port.key)[1] if sequence is not None else "ns"
+                ),
                 unit_quantums=tuple((unit, TIME_UNIT_TO_NS[unit]) for unit in _TIME_UNITS),
             )
             for port in programmable_ports(target)
@@ -571,9 +590,19 @@ def _analog_field(sequence: PulseSequence, period: PulsePeriod, port: Any) -> Fi
     )
 
 
-def _delay_of(sequence: PulseSequence, port_key: str) -> float:
+def _delay_of(sequence: PulseSequence, port_key: str) -> tuple[float, str]:
+    """One output's delay as the PAIR it is stored as: a number and its unit.
+
+    Flattened to nanoseconds, and the row then hardcoded "ns", so a delay
+    stored as 5 us showed as 5000 next to a combo reading ns -- consistent
+    until the operator touched the combo, at which point the 5000 was re-sent
+    with the new unit and a 5 us delay silently became 5 ms.  A period card
+    displays the pair it stores; a delay row is the same widget answering the
+    same question, and now does the same.
+    """
+
     delay = next((item for item in sequence.delays if item.port == port_key), None)
-    return 0.0 if delay is None else _nanoseconds(delay.value, delay.unit)
+    return (0.0, "ns") if delay is None else (float(delay.value), str(delay.unit))
 
 
 def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
@@ -588,7 +617,9 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         PulseAnalogTrace,
         PulseBlock,
         PulseChannel,
+        PulseDacScanSegment,
         PulseRepeatMarker,
+        PulseScanRegion,
         PulseTimelineData,
     )
 
@@ -686,12 +717,55 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     if not spans_everything and total > 0:
         markers.append(PulseRepeatMarker(0.0, total, FOREVER_NOTATION))
 
+    # WHICH fields the device writes per point, drawn where they happen.
+    #
+    # zlc_plot has been able to draw these all along -- a numbered badge over
+    # the period whose duration is swept, a coloured segment on the DAC trace
+    # whose level is -- and nothing ever built one, so a bound pulse and an
+    # unbound one previewed identically.  Binding is the single most
+    # consequential edit on this page and it was the one the picture did not
+    # show.
+    #
+    # A delay slot is deliberately not drawn: it shifts a channel's edges
+    # rather than occupying an interval, and a badge over the whole timeline
+    # would say something that is not true of any part of it.
+    regions: list[Any] = []
+    segments: list[Any] = []
+    stops = {
+        period.period_id: starts[position]
+        + _nanoseconds(period.duration, period.unit) * 1e-9
+        for position, period in enumerate(sequence.periods)
+    }
+    positions = {period.period_id: index for index, period in enumerate(sequence.periods)}
+    for (kind, period_id, port_key), (slot_kind, number) in bindings_of(sequence).items():
+        if period_id is None or period_id not in positions:
+            continue
+        start, stop = starts[positions[period_id]], stops[period_id]
+        if stop <= start:
+            continue
+        if kind == "duration":
+            regions.append(PulseScanRegion(start, stop, number, slot_kind))
+        elif kind == "dac" and any(trace.name == port_key for trace in traces):
+            held = next(
+                (
+                    float(step.value)
+                    for step in sequence.periods[positions[period_id]].analog_steps
+                    if step.port == port_key
+                ),
+                0.0,
+            )
+            segments.append(
+                PulseDacScanSegment(port_key, start, stop, held, number, slot_kind)
+            )
+
     return PulseTimelineData(
         channels=tuple(channels),
         blocks=tuple(blocks),
         time_unit="s",
         total_duration=total,
         analog_traces=tuple(traces),
+        scan_regions=tuple(regions),
+        scan_dac_segments=tuple(segments),
         repeat_markers=tuple(markers),
         repeat_notation=(
             f"x{sequence.repeat.count}"
@@ -1511,7 +1585,13 @@ class PulseEditorPresenter:
         self.revision += 1
         rows = tuple(getattr(state, "scan_rows", ()) or ())
         if rows:
-            self._scan_rows = rows
+            # Back into the units this window writes tables in.  The board
+            # holds offset-binary codes and device ticks; showing those in the
+            # table view is showing the operator a different number system for
+            # the same fields.
+            from zlc_pulse import scan_columns_for, scan_rows_from_wire
+
+            self._scan_rows = scan_rows_from_wire(rows, scan_columns_for(source))
         self.refresh()
         # What came back IS what the board holds, so the dot must stop saying
         # the board is playing something older the moment it no longer is.
@@ -1538,7 +1618,7 @@ class PulseEditorPresenter:
             # the keyboard.
             self.sequencer.load(self.compile(), source=self.sequence)
             if self._scan_rows and self.sequence.slots:
-                self.sequencer.write_scan_table(self._scan_rows)
+                self.sequencer.write_scan_table(self._wire_rows(self._scan_rows))
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
             self._poll_board()
@@ -2276,6 +2356,20 @@ class PulseEditorPresenter:
         self._refresh_scan_page()
         return True
 
+    def _wire_rows(self, rows: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:
+        """The author's table as the slots will hold it.
+
+        The one crossing between the two number systems, taken here because
+        here is the boundary: everything above writes what the editor shows,
+        everything below writes what the wire holds.  zlc_pulse owns the
+        arithmetic -- each column carries its own scale and offset -- so this
+        is a place, not a calculation.
+        """
+
+        from zlc_pulse import scan_columns_for, scan_rows_to_wire
+
+        return scan_rows_to_wire(rows, scan_columns_for(self.sequence))
+
     def _write_held_point(self) -> None:
         """Put one scan row on the board, as the values the slots take."""
 
@@ -2289,7 +2383,7 @@ class PulseEditorPresenter:
         if not self._board_ready_for_a_program():
             return
         try:
-            self.sequencer.write_slots(tuple(int(value) for value in row))
+            self.sequencer.write_slots(self._wire_rows((row,))[0])
         except Exception as error:
             self._warn(f"cannot hold that point: {error}")
 
@@ -2411,10 +2505,18 @@ class PulseEditorPresenter:
         self.refresh_preview()
 
     def set_preview_selectors(self, enabled: bool) -> None:
-        """Whether the preview accepts measuring gestures."""
+        """Whether the operator may drag on the preview.
+
+        The same question the console's switch asks, answered the same way:
+        the host gates interaction.  This only set a flag and redrew, and the
+        flag was read in ONE place -- the arguments the host is BUILT with --
+        so after the first draw the switch did nothing at all, in either
+        direction.
+        """
 
         self._preview_selectors = bool(enabled)
-        self.refresh_preview()
+        if self._preview_host is not None:
+            self._preview_host.set_interaction_enabled(self._preview_selectors)
 
     def preview_size(self) -> str:
         """The preset this pulse should be drawn at.
@@ -2497,9 +2599,7 @@ class PulseEditorPresenter:
             self._show_preview_state(size)
             return
         try:
-            host = self._make_preview(
-                data, size=size, selectors=self._preview_selectors
-            )
+            host = self._make_preview(data, size=size, selectors=True)
         except Exception as error:
             view.show_preview_placeholder(f"cannot draw this pulse: {error}")
             return
@@ -2509,6 +2609,8 @@ class PulseEditorPresenter:
         # which is a composition root assembling a UI.  The host knows all
         # three; the window is the only place that unwraps it.
         self._preview_host = host
+        # A host that has just been made does not know what the switch says.
+        host.set_interaction_enabled(self._preview_selectors)
         view.show_preview(host)
         self._show_preview_state(size)
 

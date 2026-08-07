@@ -50,7 +50,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_size_label = FluentLabel("Size")
         self.preview_size_combo = FluentComboBox()
         self.preview_size_combo.setFixedSize(px(80, minimum=66), control_h)
-        self.preview_size_combo.activated.connect(self._size_picked)
+        self.preview_size_combo.activated[int].connect(self._size_picked)
         self.preview_save_figure_button = FluentButton("Save Figure", color=ACCENT)
         self.preview_save_figure_button.setFixedSize(px(124, minimum=108), control_h)
         self.preview_save_figure_button.clicked.connect(self.save_requested)

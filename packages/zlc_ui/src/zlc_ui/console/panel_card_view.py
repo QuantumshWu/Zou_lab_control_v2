@@ -116,13 +116,13 @@ class PanelCardView(FluentGroupBox):
 
         self.signal_combo = FluentComboBox(parent=self)
         self.signal_combo.hide()
-        self.signal_combo.currentIndexChanged.connect(self._signal_changed)
+        self.signal_combo.currentIndexChanged[int].connect(self._signal_changed)
         self.size_combo = FluentComboBox(parent=self)
         for value in PANEL_SIZES:
             self.size_combo.addItem(value, value)
         self.size_combo.setCurrentIndex(self.size_combo.findData(DEFAULT_PANEL_SIZE))
         self.size_combo.hide()
-        self.size_combo.currentIndexChanged.connect(self._size_changed)
+        self.size_combo.currentIndexChanged[int].connect(self._size_changed)
         self.update_spin = FluentSpinBox(parent=self)
         self.update_spin.setRange(1, 60_000)
         self.update_spin.hide()

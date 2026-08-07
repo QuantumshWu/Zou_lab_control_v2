@@ -55,7 +55,7 @@ class _DeviceCard(FluentFrame):
         self.role_edit.editingFinished.connect(
             lambda: self.role_committed.emit(self.instance_id, self.role_edit.text())
         )
-        self.type_combo.currentIndexChanged.connect(self._type_changed)
+        self.type_combo.currentIndexChanged[int].connect(self._type_changed)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self.instance_id))
 
     def set_record(self, role: str, type_key: str) -> None:

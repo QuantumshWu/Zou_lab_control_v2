@@ -42,12 +42,19 @@ class ScanColumnSpec:
     lo: float
     hi: float
     is_dac: bool = False
-    #: The unit the numbers in this column are in.  A time column is in DEVICE
-    #: TICKS, because that is what a slot value on the wire IS -- the compiler
-    #: writes exact_ticks() into it and the affine tick adds it straight to an
-    #: edge.  Generating nanoseconds here made every scan run twenty times long
-    #: at 50 MHz, and the "one tick" floor was really fifty.
-    unit: str = "ticks"
+    #: The unit the numbers in this column are in, and it is the unit the
+    #: EDITOR shows for the field this column scans: a signed DAC code where 0
+    #: is 0 V, a duration in the period's own ns/us/ms.  It used to be the
+    #: unit the WIRE holds -- offset-binary codes and device ticks -- so one
+    #: field had two number systems, the author had to know which side of the
+    #: window they were on, and nothing on screen said so.
+    unit: str = "ns"
+    #: How this column reaches the wire: ``wire = value * scale + offset``.
+    #: Carried on the column because the column is what knows which field it
+    #: scans, so the conversion has exactly one description and both
+    #: directions read it.
+    wire_scale: float = 1.0
+    wire_offset: float = 0.0
 
     def __post_init__(self) -> None:
         if not str(self.name).strip():
@@ -67,32 +74,115 @@ def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
     for slot in sequence.slots:
         reference = slot.field_ref
         if slot.kind == FIELD_DAC:
-            # Offset-binary, which is what a DAC slot value on the wire IS:
-            # the compiler writes `value - signed_range[0]` and the engine reads
-            # the raw code.  This offered the SIGNED range and told the author
-            # that 0 meant 0 V, so a table written from the template put the
-            # most negative voltage where zero was meant and wrapped the bottom
-            # half of the sweep.
+            # The SIGNED code, which is what the operator types into that same
+            # DAC's box three tabs away.  The wire holds offset-binary -- the
+            # compiler writes `value - signed_range[0]` -- and that offset is
+            # recorded here rather than demanded of the author.
             port = sequence.target.by_key.get(reference.port)
-            width = port.width if port is not None else 10
-            zero = port.safe_value if port is not None else (1 << (width - 1))
-            columns.append(
-                ScanColumnSpec(
-                    slot.slot_id, 0.0, float((1 << width) - 1), True, f"code (0 V = {zero})"
-                )
+            low, high = (
+                port.signed_range if port is not None and port.signed_range else (-512, 511)
             )
-        else:
-            nominal = _nominal_ticks(sequence, reference)
             columns.append(
                 ScanColumnSpec(
                     slot.slot_id,
-                    max(1.0, nominal * 0.5),
-                    max(2.0, nominal * 1.5),
+                    float(low),
+                    float(high),
+                    True,
+                    "DAC code (0 = 0 V)",
+                    wire_offset=float(-low),
+                )
+            )
+        else:
+            unit = _field_unit(sequence, reference)
+            nominal = _nominal_value(sequence, reference, unit)
+            columns.append(
+                ScanColumnSpec(
+                    slot.slot_id,
+                    max(_quantum(sequence, unit), nominal * 0.5),
+                    max(2.0 * _quantum(sequence, unit), nominal * 1.5),
                     False,
-                    "ticks",
+                    unit,
+                    wire_scale=_ticks_per(sequence, unit),
                 )
             )
     return tuple(columns)
+
+
+def scan_rows_to_wire(
+    rows: Sequence[Sequence[float]],
+    columns: Sequence[ScanColumnSpec],
+) -> tuple[tuple[int, ...], ...]:
+    """Author's numbers -> what each slot holds on the wire.
+
+    The one crossing.  Every column carries its own scale and offset, so this
+    does not know what a DAC or a duration is -- which is why there is one of
+    it rather than one per caller who happens to be writing to a board.
+    """
+
+    specs = tuple(columns)
+    return tuple(
+        tuple(
+            int(round(float(value) * spec.wire_scale + spec.wire_offset))
+            for value, spec in zip(row, specs, strict=True)
+        )
+        for row in rows
+    )
+
+
+def scan_rows_from_wire(
+    rows: Sequence[Sequence[float]],
+    columns: Sequence[ScanColumnSpec],
+) -> tuple[tuple[float, ...], ...]:
+    """What a board is holding -> the numbers its author wrote.
+
+    The same crossing backwards, so a table pulled off a board reads in the
+    units the window shows rather than in the ones the wire happens to use.
+    """
+
+    specs = tuple(columns)
+    return tuple(
+        tuple(
+            (float(value) - spec.wire_offset) / spec.wire_scale
+            for value, spec in zip(row, specs, strict=True)
+        )
+        for row in rows
+    )
+
+
+def _field_unit(sequence: PulseSequence, reference: object) -> str:
+    """The unit the editor shows for the field this column scans."""
+
+    if reference.period_id is not None:
+        period = next(
+            (item for item in sequence.periods if item.period_id == reference.period_id),
+            None,
+        )
+        if period is not None:
+            return str(period.unit)
+    delay = next(
+        (item for item in sequence.delays if item.port == reference.port), None
+    )
+    return str(delay.unit) if delay is not None else "ns"
+
+
+def _ticks_per(sequence: PulseSequence, unit: str) -> float:
+    """How many device ticks one of that unit is worth."""
+
+    from .model import TIME_UNIT_TO_NS
+
+    return TIME_UNIT_TO_NS[str(unit)] / float(sequence.time_step_ns)
+
+
+def _quantum(sequence: PulseSequence, unit: str) -> float:
+    """One tick, expressed in the column's unit: the floor a sweep may reach."""
+
+    return 1.0 / _ticks_per(sequence, unit)
+
+
+def _nominal_value(sequence: PulseSequence, reference: object, unit: str) -> float:
+    """What the bound field currently is, in the column's own unit."""
+
+    return _nominal_ticks(sequence, reference) / _ticks_per(sequence, unit)
 
 
 def _nominal_ticks(sequence: PulseSequence, reference: object) -> float:
@@ -124,8 +214,8 @@ def _nominal_ticks(sequence: PulseSequence, reference: object) -> float:
 def validate_scan_table(
     rows: object,
     columns: Sequence[ScanColumnSpec],
-) -> tuple[tuple[int, ...], ...]:
-    """One scan table, as integer rows of the right width, or a refusal.
+) -> tuple[tuple[float, ...], ...]:
+    """One scan table, in the author's own units, or a refusal.
 
     What a legal table IS belongs here, beside what its columns are.  It was
     decided in three places -- the generated-program path, the file-load path
@@ -146,10 +236,28 @@ def validate_scan_table(
         )
     if not array.shape[0]:
         raise ValueError("a scan table needs at least one point")
-    if not np.all(np.isfinite(array.astype(float))):
+    values = array.astype(float)
+    if not np.all(np.isfinite(values)):
         raise ValueError("a scan table cannot hold a non-finite value")
+    # In the author's units, so a DAC column is checked against the same signed
+    # range its box on the Edit page enforces -- one limit for one output,
+    # wherever it is written -- and a duration column keeps its fraction: 2.5 us
+    # is a legal sweep point, and rounding every column to an integer was the
+    # wire's rule applied one layer too early.
+    for index, spec in enumerate(tuple(columns)):
+        column = values[:, index]
+        if spec.is_dac and (column < spec.lo).any() or spec.is_dac and (column > spec.hi).any():
+            raise ValueError(
+                f"{spec.name}: {spec.unit} must be within [{spec.lo:g}..{spec.hi:g}]"
+            )
+        if not spec.is_dac and (column * spec.wire_scale < 1.0).any():
+            raise ValueError(
+                f"{spec.name}: a duration must be at least one device tick"
+            )
     return tuple(
-        tuple(int(round(float(value))) for value in row) for row in array
+        tuple(int(round(v)) if spec.is_dac else float(v)
+              for v, spec in zip(row, tuple(columns), strict=True))
+        for row in values
     )
 
 
@@ -171,8 +279,8 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
 
     def _note(spec: ScanColumnSpec) -> str:
         if spec.is_dac:
-            return f"{spec.name}: DAC {spec.unit}, range [{spec.lo:g}..{spec.hi:g}]"
-        return f"{spec.name}: duration in device ticks, >= 1"
+            return f"{spec.name}: {spec.unit}, range [{spec.lo:g}..{spec.hi:g}]"
+        return f"{spec.name}: duration in {spec.unit}, the unit its period is in"
 
     if str(kind) == "grid":
         sizes = [5, 4, 3] + [2] * max(0, count - 3)
@@ -183,7 +291,12 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
             "# every combination of the per-slot axes.",
         ]
         for index, spec in enumerate(cols):
-            lines.append(f"a{index} = {_sweep(spec, sizes[index])}        # axis for {_note(spec)}")
+            # The note ABOVE the line it describes.  Trailing it pushed the
+            # code off to the left of a comment nobody could read without
+            # scrolling, in the one editor whose whole job is to be read.
+            lines.append("")
+            lines.append(f"# {_note(spec)}")
+            lines.append(f"a{index} = {_sweep(spec, sizes[index])}")
         mesh = ", ".join(f"A{index}" for index in range(count))
         axes = ", ".join(f"a{index}" for index in range(count))
         ravel = ", ".join(f"A{index}.ravel()" for index in range(count))
@@ -198,13 +311,19 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
     lines = [
         "import numpy as np",
         "",
-        f"# {count} bound slot(s) {cols[0].name}..{cols[-1].name}: an (N x {count}) array --",
-        "# one row per scan point, one column per slot, each in its OWN unit.",
+        f"# {count} bound slot(s), {cols[0].name}..{cols[-1].name}.",
+        f"# scan_table is (N x {count}): one row per scan point, one column per slot,",
+        "# each column in the unit the editor shows for the field it scans.",
         "# The columns advance together.",
-        "N = 21        # number of scan points",
+        "",
+        "# number of scan points",
+        "N = 21",
     ]
     for spec in cols:
-        lines.append(f"{spec.name} = {_sweep(spec, 'N')}        # {_note(spec)}")
+        lines.append("")
+        lines.append(f"# {_note(spec)}")
+        lines.append(f"{spec.name} = {_sweep(spec, 'N')}")
+    lines.append("")
     lines.append(
         "scan_table = np.column_stack([" + ", ".join(spec.name for spec in cols) + "])"
     )

@@ -41,18 +41,24 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     )
     duration, dac = scan_columns_for(sequence)
 
-    # Offset-binary, which is what a DAC slot value on the wire IS: the
-    # compiler writes value - signed_range[0].  Offering the SIGNED range and
-    # calling 0 "0 V" put the most negative voltage where zero was meant.
-    assert dac.is_dac and (dac.lo, dac.hi) == (0.0, float((1 << dac_port.width) - 1))
-    assert str(dac_port.safe_value) in dac.unit
-    # A time column is in DEVICE TICKS, which is what a slot value on the wire
-    # IS.  It was generated in nanoseconds and labelled "ns", so every sweep
-    # ran twenty times long at 50 MHz and the "one tick" floor was fifty.
-    assert not duration.is_dac and duration.unit == "ticks"
-    # The sweep brackets the value the field actually holds: 5 ms = 250 000
-    # ticks at the sequence's 20 ns step.
-    assert duration.lo < 250_000 < duration.hi
+    # The SIGNED code, which is what the operator types into that same DAC's
+    # box on the Edit page.  The wire holds offset-binary, and the column says
+    # how to get there rather than making the author do it: describing the
+    # column in wire units gave one output two number systems, and only the
+    # window knew which one it was showing.
+    low, high = dac_port.signed_range
+    assert dac.is_dac and (dac.lo, dac.hi) == (float(low), float(high))
+    assert (dac.wire_scale, dac.wire_offset) == (1.0, float(-low))
+    # A time column is in the unit its period is written in, and carries the
+    # ticks-per-unit that gets it onto the wire.  Generated in ticks, it asked
+    # the author to convert; generated in nanoseconds and labelled "ns" while
+    # meaning ticks, it ran twenty times long at 50 MHz.
+    # This period is written in ms, so its column is too -- one unit for one
+    # field, whichever page it is edited on.
+    assert not duration.is_dac and duration.unit == "ms"
+    assert duration.wire_scale == 1e6 / 20.0
+    # The sweep brackets the value the field actually holds: 5 ms.
+    assert duration.lo < 5 < duration.hi
 
 
 def test_the_starter_program_builds_one_table_of_the_right_width() -> None:

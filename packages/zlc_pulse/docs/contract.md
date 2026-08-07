@@ -40,6 +40,8 @@ __all__ = (
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
+    "scan_rows_to_wire",
+    "scan_rows_from_wire",
     "RemoteError",
     "UartError",
     "BackendResolutionError",
