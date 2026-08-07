@@ -1,0 +1,14 @@
+# A .bat with bare LF line endings is not a portable batch file: cmd.exe seeks
+# through the file to resolve `goto`, and where that seek lands depends on the
+# byte offsets, so a label the file plainly contains is reported missing --
+# "The system cannot find the batch label specified" -- while the parts of the
+# same file that do not jump run fine.  It therefore fails per-label, not
+# per-file, which is why it reads as "this launcher is broken today".
+#
+# Git is the thing most likely to reintroduce it: whoever clones next may have
+# core.autocrlf=input, and the experiment machine gets its code by pull.  So
+# the checkout rule is stated here rather than left to each machine's config.
+*.bat text eol=crlf
+
+# Verilog constraints and sources are read by Vivado on Windows only.
+*.xdc text eol=crlf
