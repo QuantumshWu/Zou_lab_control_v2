@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import math
 import threading
 import time
@@ -292,7 +292,7 @@ class PulseStreamer:
                 tuple(sorted(words.items()))
                 + ((CtrlWords.BANK_READY, 0b11),)
             )
-            self._strobe(CMD_LOAD)
+            self._strobe(CMD_LOAD, repeatable=True)
             self._await_loaded(); self._hardware_loaded = True; self._program = prog
             self._loaded = True
             self._scan_rows = tuple(prog.scan_points)
@@ -379,7 +379,7 @@ class PulseStreamer:
             self._last_fire_reloaded = not self._hardware_loaded
             if self._last_fire_reloaded:
                 self._write(self._scan_bank_arming())
-                self._strobe(CMD_LOAD)
+                self._strobe(CMD_LOAD, repeatable=True)
                 self._await_loaded(); self._hardware_loaded = True
             self._firing = True; self._hardware_loaded = False
             self._done.clear()
@@ -399,7 +399,7 @@ class PulseStreamer:
                     ((CtrlWords.REPEAT_FOREVER, int(self._forever)),)
                     + self._scan_bank_arming()
                 )
-                self._strobe(CMD_FIRE)
+                self._strobe(CMD_FIRE, took_effect=self._fire_took_effect)
             except BaseException:
                 self._stop_worker()
                 raise
@@ -589,7 +589,7 @@ class PulseStreamer:
             self._terminal_status = second_status
     def _enter_safe(self, *, deadline: float) -> tuple[int, int]:
         self._write(((CtrlWords.STATUS, STATUS_ERROR),), deadline=deadline)
-        self._strobe(CMD_SAFE, deadline=deadline)
+        self._strobe(CMD_SAFE, deadline=deadline, repeatable=True)
         retry_at = time.monotonic() + min(
             SAFE_RETRY_AFTER,
             max(SAFE_POLL_INTERVAL, (deadline - time.monotonic()) / 2),
@@ -602,7 +602,7 @@ class PulseStreamer:
             if stable_zero >= 2:
                 return (0, 0)
             if not retried and time.monotonic() >= retry_at:
-                self._strobe(CMD_SAFE, deadline=deadline)
+                self._strobe(CMD_SAFE, deadline=deadline, repeatable=True)
                 retried = True
             remaining = deadline - time.monotonic()
             # Once zero is observed, take the adjacent confirming read
@@ -779,18 +779,68 @@ class PulseStreamer:
         else:
             self.transport.write_words(normalized, deadline=deadline)
 
-    def _strobe(self, code: int, *, deadline: float | None = None) -> None:
-        """Fire one command, once, and never a second time by accident.
+    def _strobe(
+        self,
+        code: int,
+        *,
+        deadline: float | None = None,
+        repeatable: bool = False,
+        took_effect: "Callable[[], bool] | None" = None,
+    ) -> None:
+        """Fire one command, and never a second time BLINDLY.
 
         Sent after the data it acts on has been acknowledged, so the board is
         never asked to act on a program that is still arriving.
+
+        Three kinds of command, three policies, because "may this be sent
+        again?" has three honest answers:
+
+        * ``repeatable=True`` -- SAFE and LOAD.  Their effect is idempotent
+          (safing a safe board is safe, reloading the resident image is the
+          same image), so a lost acknowledgement is handled like any lost data
+          frame: the line resends it.
+
+        * ``took_effect`` given -- FIRE.  Running twice is two shots, so a
+          lost acknowledgement may not be resolved by guessing.  It does not
+          have to be: the board KNOWS whether it fired -- accepting FIRE
+          consumes the LOADED gate and raises RUNNING -- so the ambiguity is
+          resolved by reading the status.  Executed: done, nobody mourns the
+          acknowledgement.  Provably not executed: strobing again is exactly
+          as safe as the first attempt was.  On a line that loses one byte in
+          a hundred, this is the difference between an experiment that runs
+          and one that dies every sixth On Pulse.
+
+        * Neither -- an unanswered strobe stays fatal, because guessing is
+          the one thing this path must never do.
         """
 
         rows = self._command(code)
-        if deadline is None:
-            self.transport.write_words(rows, resend=False)
-        else:
-            self.transport.write_words(rows, resend=False, deadline=deadline)
+        options: dict = {} if deadline is None else {"deadline": deadline}
+        attempts = 3 if took_effect is not None else 1
+        for attempt in range(attempts):
+            try:
+                self.transport.write_words(rows, resend=repeatable, **options)
+                return
+            except TimeoutError:
+                if took_effect is None:
+                    raise
+                if took_effect():
+                    return
+                if attempt + 1 == attempts:
+                    raise
+
+    def _fire_took_effect(self) -> bool:
+        """Did the board hear CMD_FIRE?  Its status register is the witness.
+
+        Accepting FIRE consumes the RTL's LOADED gate and raises RUNNING; a
+        short program may already be DONE by the time anyone looks.  A board
+        still advertising LOADED with none of that happened did not hear the
+        command.
+        """
+
+        status = self._read(CtrlWords.STATUS)
+        heard = bool(status & (STATUS_RUNNING | STATUS_DONE))
+        return heard or not bool(status & STATUS_LOADED)
 
     def _initial_ready(self, count: int) -> int:
         return (1 if count > 0 else 0) | (2 if count > self.geom.bank_size else 0)

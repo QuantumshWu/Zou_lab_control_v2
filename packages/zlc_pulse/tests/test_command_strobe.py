@@ -414,3 +414,109 @@ def test_the_memory_twin_drops_a_repeated_command_the_way_the_board_does() -> No
     transport.write_words(((CtrlWords.COMMAND, 0),))
     transport.write_words(((CtrlWords.COMMAND, CMD_FIRE),))
     assert transport.dropped_commands == 1, "a re-armed strobe was refused"
+
+
+def test_a_fire_whose_acknowledgement_dies_is_verified_not_guessed() -> None:
+    """The rig's stalemate, resolved by observation.
+
+    On a line losing one byte in a hundred, the two-frame FIRE strobe loses
+    its acknowledgement every sixth press or so.  Blind resending is forbidden
+    -- two shots -- and blind failing killed the experiment.  Neither guess is
+    needed: accepting FIRE consumes the RTL's LOADED gate and raises RUNNING,
+    so the status register says which world we are in.
+    """
+
+    geom = StreamerParams()
+
+    class _AckLosingOnce(_Recorder):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.lost = False
+
+        def write_words(self, words, **kwargs):  # type: ignore[override]
+            fire = any(
+                address == CtrlWords.COMMAND and value == CMD_FIRE
+                for address, value in words
+            )
+            if fire and not self.lost:
+                self.lost = True
+                # The command COMMITTED -- the memory model executes it -- and
+                # only the acknowledgement is lost, which is exactly the
+                # ambiguous case.
+                super().write_words(words, **kwargs)
+                raise TimeoutError("UART reply timed out (simulated lost ack)")
+            return super().write_words(words, **kwargs)
+
+    transport = _AckLosingOnce(geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer.open()
+    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
+
+    streamer.fire()
+    assert streamer.wait_done(1.0) is not None
+    # Verified as executed: CMD_FIRE was strobed exactly once.
+    assert transport.commands.count(CMD_FIRE) == 1
+
+
+def test_a_fire_that_provably_never_ran_is_strobed_again() -> None:
+    """The other verdict: the board still says LOADED, so firing again is as
+    safe as the first attempt was."""
+
+    geom = StreamerParams()
+
+    class _AckAndCommandLosingOnce(_Recorder):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.dropped = False
+            self.fire_attempts = 0
+
+        def write_words(self, words, **kwargs):  # type: ignore[override]
+            fire = any(
+                address == CtrlWords.COMMAND and value == CMD_FIRE
+                for address, value in words
+            )
+            if fire:
+                self.fire_attempts += 1
+            if fire and not self.dropped:
+                self.dropped = True
+                # The frame itself is lost: nothing committed, no reply.
+                raise TimeoutError("UART reply timed out (simulated lost frame)")
+            return super().write_words(words, **kwargs)
+
+    transport = _AckAndCommandLosingOnce(geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer.open()
+    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
+
+    streamer.fire()
+    assert streamer.wait_done(1.0) is not None
+    # Two attempts on the wire, one commit: the drop, then the verified retry.
+    assert transport.fire_attempts == 2, "verified idle, so strobed again"
+    assert transport.commands.count(CMD_FIRE) == 1
+
+
+def test_safe_and_load_strobes_ride_the_resending_line() -> None:
+    """Their effect is idempotent, so a lost acknowledgement is the line's
+    problem, handled the way any lost data frame is."""
+
+    streamer, transport, program = _streamer()
+    strobes: list[tuple[int, bool]] = []
+    original = transport.write_words
+
+    def _watch(words, **kwargs):
+        for address, value in words:
+            if address == CtrlWords.COMMAND and value:
+                strobes.append((int(value), bool(kwargs.get("resend", True))))
+        return original(words, **kwargs)
+
+    transport.write_words = _watch
+    streamer.load(program)
+    streamer.fire()
+    assert streamer.wait_done(1.0) is not None
+    streamer.safe()
+
+    # Every SAFE/LOAD strobe rode the resending line; only FIRE refused it.
+    fire_flags = [resend for code, resend in strobes if code == CMD_FIRE]
+    other_flags = [resend for code, resend in strobes if code in (CMD_SAFE, CMD_LOAD)]
+    assert other_flags and all(other_flags)
+    assert fire_flags and not any(fire_flags)
