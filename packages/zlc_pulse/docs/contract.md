@@ -97,7 +97,7 @@ config = load_streamer_config()
 compile_sequence(sequence, config["params"], config["clock_hz"]) -> CompiledProgram
     # 产物含边表/仿射系数/总线段/延时/clk_enable + slot 声明;不含 scan 表、不含任何触发调度
 pack_program(program, params=None) -> dict[int, int]             # (addr, word) 稀疏表; wire image serializer
-pack_scan_rows(rows: ndarray, geom, bank, chunk) -> dict[int, int]
+pack_scan_rows(rows: ndarray, geom, bank, chunk, sweeps=1) -> dict[int, int]
 trigger_times(prog, channel: str, table: ndarray | None) -> ndarray
     # 触发时刻推导纯函数;编排层自取自算,设备/协议零参与
 ```

@@ -829,9 +829,12 @@ class _Sequencer:
         # back; a double that forgets it answers "nothing applied" forever.
         self._applied = _AppliedEcho(source, self.scan_rows)
 
-    def write_scan_table(self, rows) -> None:
+    def write_scan_table(self, rows, *, sweeps: int = 1) -> None:
         self.events.append("write_scan_table")
         self.scan_rows = tuple(tuple(int(value) for value in row) for row in rows)
+        #: A table is given once and played this many times; the double has to
+        #: declare that, or a caller could go back to duplicating rows unseen.
+        self.scan_sweeps = int(sweeps)
 
     def fire(self, *, forever: bool = False) -> None:
         self.events.append("fire forever" if forever else "fire")
@@ -1688,7 +1691,7 @@ def test_holding_a_point_stops_the_board_and_writes_that_row(presenter, sequence
 def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     uploaded: list = []
     board = _Sequencer()
-    board.write_scan_table = lambda rows: uploaded.append(tuple(rows))
+    board.write_scan_table = lambda rows, sweeps=1: uploaded.append(tuple(rows))
     presenter.sequencer = board
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
@@ -2398,7 +2401,7 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
 
     uploaded: list = []
     board = _Sequencer()
-    board.write_scan_table = lambda rows: uploaded.append(len(rows))
+    board.write_scan_table = lambda rows, sweeps=1: uploaded.append((len(rows), sweeps))
     presenter.sequencer = board
     view = presenter.view
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
@@ -2417,7 +2420,11 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     view.scan_repeats_committed.emit(3)
     board.events.clear()
     assert presenter.fire() is True
-    assert uploaded[-1] == 21, "three sweeps of seven points"
+    # The table ONCE, and how many times to play it.  There is no sweep
+    # register in the RTL, but there is no reason to send the same numbers
+    # three times to say so: which row a point takes is decided when a bank
+    # is refilled.
+    assert uploaded[-1] == (7, 3), "seven rows, played three times"
     # And a counted number of sweeps is a finite run: wrapping it in the outer
     # forever would repeat the whole scan endlessly and the count would mean
     # nothing.
@@ -2426,7 +2433,7 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     view.scan_repeats_committed.emit(0)
     board.events.clear()
     assert presenter.fire() is True
-    assert uploaded[-1] == 7, "zero means until Stop, so one sweep is uploaded"
+    assert uploaded[-1] == (7, 1), "zero means until Stop: one sweep, forever"
     assert "fire forever" in board.events, board.events
 
 

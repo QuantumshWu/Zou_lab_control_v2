@@ -346,7 +346,7 @@ def _bus_mode_name(v: int) -> str:
 
 # --------------------------------------------------------------------------- pack
 def scan_bank_words(program, p: StreamerParams, chunk_index: int,
-                    target_bank: int | None = None) -> dict[int, int]:
+                    target_bank: int | None = None, sweeps: int = 1) -> dict[int, int]:
     """Words to (re)load scan chunk ``chunk_index`` into a ping-pong bank.
 
     Chunk c = scan_points[c*bank_size:(c+1)*bank_size].  By default it lands in bank
@@ -354,7 +354,15 @@ def scan_bank_words(program, p: StreamerParams, chunk_index: int,
     chunks 0,1,..,K-1,0,1,.. into the ALTERNATING bank by MONOTONIC position, so it
     passes ``target_bank = mono % 2`` (which need not equal c%2 across a wrap) -- this
     matches the engine's scan_bank_base parity so the wrap is seamless.  Returns a
-    sparse ``{word_offset: value}`` for just that bank.  Empty if the chunk is out of range."""
+    sparse ``{word_offset: value}`` for just that bank.  Empty if the chunk is out of range.
+
+    ``sweeps`` plays the same table that many times.  The RTL has no sweep
+    counter -- ``scan_count`` is a point count and ``repeat_forever`` is a bit --
+    so a finite number of sweeps is N*len(points) points, and WHICH row a point
+    takes is decided here, where the chunk-to-point mapping already lives.  The
+    alternative is to hand the device a table with the rows duplicated, which
+    sends the same numbers across the wire N times and holds N copies in memory
+    to describe a repeat."""
     bases = region_bases(p)
     points = [list(pt) for pt in (getattr(program, "scan_points", None) or [])]
     slot_count = int(getattr(program, "slot_count", 0) or 0)
@@ -363,19 +371,21 @@ def scan_bank_words(program, p: StreamerParams, chunk_index: int,
     if any(len(point) != slot_count for point in points):
         raise ValueError("program scan row width differs from slot count")
     first = chunk_index * p.bank_size
+    total = len(points) * max(1, int(sweeps))
 
-    if first >= len(points):
+    if first >= total:
         return {}
     bank = (chunk_index % 2) if target_bank is None else (int(target_bank) & 1)
     base = bases["scan"] + bank * p.bank_size * p.scan_words
     words: dict[int, int] = {}
     for off in range(p.bank_size):
         idx = first + off
-        if idx >= len(points):
+        if idx >= total:
             break
+        point = points[idx % len(points)]
         row = base + off * p.scan_words
         for j in range(p.num_slots):
-            val = points[idx][j] if j < slot_count else 0
+            val = point[j] if j < slot_count else 0
             words[row + j] = _checked_unsigned(val, p.tick_width, f"scan row {idx} slot {j}")
     return words
 
@@ -1168,8 +1178,13 @@ def _main(argv: Sequence[str] | None = None) -> int:
 if __name__ == "__main__":
     raise SystemExit(_main())
 
-def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[int, int]:
-    """Pack one bank-sized chunk of slot rows into a resident scan bank."""
+def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, sweeps: int = 1) -> dict[int, int]:
+    """Pack one bank-sized chunk of slot rows into a resident scan bank.
+
+    ``sweeps`` repeats the table without repeating the rows: the chunk a bank
+    is being filled with decides which point it holds, and a point past the end
+    of the table is that table again.
+    """
 
     if not isinstance(geom, StreamerParams):
         raise TypeError("geom must be StreamerParams")
@@ -1188,4 +1203,4 @@ def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[in
     if slot_count > geom.num_slots:
         raise ValueError("scan row has more slots than the wire geometry")
     program = type("_Rows", (), {"scan_points": points, "slot_count": slot_count})()
-    return scan_bank_words(program, geom, chunk, target_bank=bank)
+    return scan_bank_words(program, geom, chunk, target_bank=bank, sweeps=sweeps)

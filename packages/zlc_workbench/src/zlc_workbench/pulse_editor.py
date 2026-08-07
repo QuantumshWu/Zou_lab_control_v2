@@ -1652,7 +1652,14 @@ class PulseEditorPresenter:
             # the keyboard.
             self.sequencer.load(self.compile(), source=self.sequence)
             if self._scan_rows and self.sequence.slots:
-                self.sequencer.write_scan_table(self._wire_rows(self._swept_rows()))
+                # The table once, and how many times to play it.  The board
+                # streams it and refills behind the cursor, so a sweep count is
+                # a number it can be given -- sending the rows again to say
+                # "again" was the same numbers over the wire N times.
+                self.sequencer.write_scan_table(
+                    self._wire_rows(self._scan_rows),
+                    sweeps=max(1, int(self._scan_repeats)),
+                )
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
             self._poll_board()
@@ -2436,24 +2443,6 @@ class PulseEditorPresenter:
 
         self._scan_rows = tuple(tuple(value for value in row) for row in rows)
         self.refresh()
-
-    def _swept_rows(self) -> tuple[tuple[float, ...], ...]:
-        """The table as many times as it is to be played, in sweep order.
-
-        The board streams ONE table, so "play it three times" is a table three
-        times as long -- there is no separate sweep counter down there, and
-        inventing one here would be a second mechanism for a thing the wire
-        already does.
-
-        Scan repeats was read by nothing at all: it was stored, shown and
-        saved, and the number of rows uploaded never changed.  Zero means until
-        Stop, which is the outer forever the pulse already has, so it uploads
-        one sweep and lets the run be endless.
-        """
-
-        rows = tuple(self._scan_rows)
-        sweeps = max(0, int(self._scan_repeats))
-        return rows if sweeps <= 1 else rows * sweeps
 
     def _wire_rows(self, rows: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:
         """The author's table as the slots will hold it.

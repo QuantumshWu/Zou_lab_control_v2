@@ -11,7 +11,9 @@ from zlc_pulse.wire import pack_program, pack_scan_rows
 def test_pure_function_signatures_match_contract() -> None:
     assert tuple(inspect.signature(compile_sequence).parameters) == ("sequence", "geom", "clock_hz")
     assert tuple(inspect.signature(pack_program).parameters) == ("program", "params")
-    assert tuple(inspect.signature(pack_scan_rows).parameters) == ("rows", "geom", "bank", "chunk")
+    assert tuple(inspect.signature(pack_scan_rows).parameters) == (
+        "rows", "geom", "bank", "chunk", "sweeps",
+    )
     assert tuple(inspect.signature(trigger_times).parameters) == ("prog", "channel", "table")
 
 

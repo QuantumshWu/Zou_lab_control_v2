@@ -777,8 +777,13 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return None
         if method == "write_scan_table":
             rows = tuple(tuple(int(value) for value in row) for row in params.get("rows", ()))
-            self.streamer.write_scan_table(rows)
-            _server_log("WRITE SCAN TABLE", client=client, detail=_log_fields(rows=len(rows)))
+            sweeps = max(1, int(params.get("sweeps", 1)))
+            self.streamer.write_scan_table(rows, sweeps=sweeps)
+            _server_log(
+                "WRITE SCAN TABLE",
+                client=client,
+                detail=_log_fields(rows=len(rows), sweeps=sweeps, points=len(rows) * sweeps),
+            )
             return None
         if method == "fire":
             forever = bool(params.get("forever", False))
@@ -938,10 +943,13 @@ class RemotePulseStreamer:
     def write_slots(self, values) -> None:
         self._call("write_slots", {"values": tuple(int(value) for value in values)})
 
-    def write_scan_table(self, rows) -> None:
+    def write_scan_table(self, rows, *, sweeps: int = 1) -> None:
         self._call(
             "write_scan_table",
-            {"rows": tuple(tuple(int(value) for value in row) for row in rows)},
+            {
+                "rows": tuple(tuple(int(value) for value in row) for row in rows),
+                "sweeps": int(sweeps),
+            },
         )
 
     def fire(self, *, forever: bool = False) -> None:

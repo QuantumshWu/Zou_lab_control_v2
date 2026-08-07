@@ -126,3 +126,27 @@ def test_a_grid_sweeps_every_combination_and_says_its_shape() -> None:
 def test_a_column_needs_a_range_to_sweep() -> None:
     with pytest.raises(ValueError):
         ScanColumnSpec("a", 1.0, 1.0)
+
+
+def test_a_table_is_played_many_times_without_being_sent_many_times() -> None:
+    """The RTL has no sweep register.
+
+    ``scan_count`` is a point count, ``repeat_forever`` is a bit, and
+    ``loop_count`` is the pulse timeline's own loop INSIDE each point.  So a
+    finite number of sweeps is N*len(rows) points -- but which row a point
+    takes is decided when a bank is refilled, so the rows cross the wire once.
+    """
+
+    from zlc_pulse import load_streamer_config
+    from zlc_pulse.wire import pack_scan_rows
+
+    geometry = load_streamer_config()["params"]
+    rows = [(10,), (20,), (30,)]
+
+    def slot0(sweeps):
+        words = pack_scan_rows(rows, geometry, 0, 0, sweeps)
+        ordered = [words[key] for key in sorted(words)]
+        return ordered[:: geometry.num_slots]
+
+    assert slot0(1) == [10, 20, 30]
+    assert slot0(3) == [10, 20, 30, 10, 20, 30, 10, 20, 30]

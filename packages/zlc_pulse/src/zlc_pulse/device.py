@@ -209,6 +209,8 @@ class PulseStreamer:
         self._scan_ready = 0
         self._scan_armed = False
         self._scan_count = 0
+        #: How many times the table is played.  One table, many sweeps.
+        self._scan_sweeps = 1
         self._cursor_value: int | None = None
         self._underflow = False
         self._terminal_status_reads: tuple[int, int] = ()
@@ -284,7 +286,7 @@ class PulseStreamer:
             self._clear_safe_readback_locked()
             self._loaded = self._hardware_loaded = False; self._program = None; self._applied = None
             self._applied_digest = ""
-            self._scan_rows = (); self._scan_count = 0; self._scan_armed = False
+            self._scan_rows = (); self._scan_count = 0; self._scan_sweeps = 1; self._scan_armed = False
             words = pack_program(prog, self.geom)
             self._write(
                 tuple(sorted(words.items()))
@@ -329,7 +331,17 @@ class PulseStreamer:
             )
             assert self._applied is not None
             self._applied = replace(self._applied, slot_values=values, scan_rows=())
-    def write_scan_table(self, rows: Sequence[Sequence[int]]) -> None:
+    def write_scan_table(self, rows: Sequence[Sequence[int]], *, sweeps: int = 1) -> None:
+        """Give the board one scan table, played ``sweeps`` times.
+
+        The table crosses the wire ONCE.  There is no sweep register in the
+        RTL -- scan_count is a point count, repeat_forever is a bit, and
+        loop_count is the pulse timeline's own loop inside each point -- so N
+        sweeps is N*len(rows) points, and which row a point takes is decided
+        when a bank is refilled.  Duplicating the rows to say "again" would
+        send the same numbers N times and hold N copies of them here.
+        """
+
         with self._lock:
             self._require_open()
             self._require_loaded()
@@ -343,10 +355,12 @@ class PulseStreamer:
             for row in normalized:
                 self._validate_slot_row(row)
             self._scan_rows = normalized
-            self._scan_count = len(normalized); self._scan_armed = False
+            self._scan_sweeps = max(1, int(sweeps))
+            self._scan_count = len(normalized) * self._scan_sweeps
+            self._scan_armed = False
             self._write(
                 (
-                    (CtrlWords.SCAN_COUNT, len(normalized)),
+                    (CtrlWords.SCAN_COUNT, self._scan_count),
                     (CtrlWords.SCAN_ENABLE, 1),
                 )
                 + self._scan_bank_arming()
@@ -685,7 +699,9 @@ class PulseStreamer:
         rows: list[tuple[int, int]] = []
         for chunk in (0, 1):
             if chunk * self.geom.bank_size < self._scan_count:
-                rows.extend(sorted(pack_scan_rows(self._scan_rows, self.geom, chunk & 1, chunk).items()))
+                rows.extend(sorted(pack_scan_rows(
+                    self._scan_rows, self.geom, chunk & 1, chunk, self._scan_sweeps
+                ).items()))
         rows.append((CtrlWords.BANK0_CHUNK, 0))
         if self.geom.bank_size < self._scan_count:
             rows.append((CtrlWords.BANK1_CHUNK, 1))
@@ -714,7 +730,7 @@ class PulseStreamer:
             bank = chunk & 1
             bit = 1 << bank
             unarmed = self._scan_ready & ~bit
-            words = pack_scan_rows(self._scan_rows, self.geom, bank, chunk)
+            words = pack_scan_rows(self._scan_rows, self.geom, bank, chunk, self._scan_sweeps)
             chunk_reg = CtrlWords.BANK0_CHUNK if bank == 0 else CtrlWords.BANK1_CHUNK
             self._write((
                 (CtrlWords.BANK_READY, unarmed),
