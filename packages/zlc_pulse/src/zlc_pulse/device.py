@@ -291,8 +291,8 @@ class PulseStreamer:
             self._write(
                 tuple(sorted(words.items()))
                 + ((CtrlWords.BANK_READY, 0b11),)
-                + self._command(CMD_LOAD)
             )
+            self._strobe(CMD_LOAD)
             self._await_loaded(); self._hardware_loaded = True; self._program = prog
             self._loaded = True
             self._scan_rows = tuple(prog.scan_points)
@@ -378,7 +378,8 @@ class PulseStreamer:
             # DONE/SAFE clear the RTL's LOADED gate; replay only its resident mini-loader.
             self._last_fire_reloaded = not self._hardware_loaded
             if self._last_fire_reloaded:
-                self._write(self._scan_bank_arming() + self._command(CMD_LOAD))
+                self._write(self._scan_bank_arming())
+                self._strobe(CMD_LOAD)
                 self._await_loaded(); self._hardware_loaded = True
             self._firing = True; self._hardware_loaded = False
             self._done.clear()
@@ -397,8 +398,8 @@ class PulseStreamer:
                 self._write(
                     ((CtrlWords.REPEAT_FOREVER, int(self._forever)),)
                     + self._scan_bank_arming()
-                    + self._command(CMD_FIRE)
                 )
+                self._strobe(CMD_FIRE)
             except BaseException:
                 self._stop_worker()
                 raise
@@ -587,10 +588,8 @@ class PulseStreamer:
             self._terminal_cursor_reads = (first_cursor, second_cursor)
             self._terminal_status = second_status
     def _enter_safe(self, *, deadline: float) -> tuple[int, int]:
-        self._write(
-            ((CtrlWords.STATUS, STATUS_ERROR),) + self._command(CMD_SAFE),
-            deadline=deadline,
-        )
+        self._write(((CtrlWords.STATUS, STATUS_ERROR),), deadline=deadline)
+        self._strobe(CMD_SAFE, deadline=deadline)
         retry_at = time.monotonic() + min(
             SAFE_RETRY_AFTER,
             max(SAFE_POLL_INTERVAL, (deadline - time.monotonic()) / 2),
@@ -603,7 +602,7 @@ class PulseStreamer:
             if stable_zero >= 2:
                 return (0, 0)
             if not retried and time.monotonic() >= retry_at:
-                self._write(self._command(CMD_SAFE), deadline=deadline)
+                self._strobe(CMD_SAFE, deadline=deadline)
                 retried = True
             remaining = deadline - time.monotonic()
             # Once zero is observed, take the adjacent confirming read
@@ -763,11 +762,35 @@ class PulseStreamer:
         return int(value) & 0xFFFFFFFF
 
     def _write(self, rows: Sequence[tuple[int, int]], *, deadline: float | None = None) -> None:
+        """Write register words; a frame the link loses is sent again.
+
+        Data only.  A COMMAND strobe goes through _strobe, which does NOT
+        resend: a command that was executed and whose acknowledgement was lost
+        would be executed twice, and "fire twice" is not a recoverable
+        arithmetic error.
+        """
+
         normalized = tuple((int(address), int(value) & 0xFFFFFFFF) for address, value in rows)
+        assert not any(address == CtrlWords.COMMAND for address, _ in normalized), (
+            "a command strobe must go through _strobe, which never resends"
+        )
         if deadline is None:
             self.transport.write_words(normalized)
         else:
             self.transport.write_words(normalized, deadline=deadline)
+
+    def _strobe(self, code: int, *, deadline: float | None = None) -> None:
+        """Fire one command, once, and never a second time by accident.
+
+        Sent after the data it acts on has been acknowledged, so the board is
+        never asked to act on a program that is still arriving.
+        """
+
+        rows = self._command(code)
+        if deadline is None:
+            self.transport.write_words(rows, resend=False)
+        else:
+            self.transport.write_words(rows, resend=False, deadline=deadline)
 
     def _initial_ready(self, count: int) -> int:
         return (1 if count > 0 else 0) | (2 if count > self.geom.bank_size else 0)

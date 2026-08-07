@@ -317,18 +317,15 @@ def test_safe_readback_uses_stable_status_and_zero_clock_mask() -> None:
     assert safe.stable
     assert safe.status_reads == (0, 0)
     assert not any(safe.clock_enable_words)
-    assert transport.write_batches[-3:] == [
-        (
-            (CtrlWords.STATUS, STATUS_ERROR),
-            (CtrlWords.COMMAND, 0),
-            (CtrlWords.COMMAND, CMD_SAFE),
-        ),
+    # Each strobe is its own transaction, sent after the write it acts on has
+    # been acknowledged: a lost frame is resent and a command must never be.
+    strobe = ((CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, CMD_SAFE))
+    assert transport.write_batches[-5:] == [
+        ((CtrlWords.STATUS, STATUS_ERROR),),
+        strobe,
         tuple((CtrlWords.CLK_ENABLE + index, 0) for index in range(geom.clk_enable_words)),
-        (
-            (CtrlWords.STATUS, STATUS_ERROR),
-            (CtrlWords.COMMAND, 0),
-            (CtrlWords.COMMAND, CMD_SAFE),
-        ),
+        ((CtrlWords.STATUS, STATUS_ERROR),),
+        strobe,
     ]
 
 

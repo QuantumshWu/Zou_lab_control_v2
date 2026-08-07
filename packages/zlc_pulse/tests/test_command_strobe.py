@@ -196,27 +196,30 @@ def test_replaying_a_scan_table_re_arms_the_banks_at_point_zero() -> None:
 
 
 def test_load_drives_v1_physical_safe_before_the_image_and_load_strobe() -> None:
-    """The v1 prepare order is SAFE, clocks-off/readback, SAFE, image, LOAD."""
+    """The v1 prepare order is SAFE, clocks-off/readback, SAFE, image, LOAD.
+
+    Each strobe is its OWN transaction now, after the data it acts on has been
+    acknowledged.  A frame the link loses is sent again, and a command must
+    never be: one that was executed and whose acknowledgement went missing
+    would be executed twice.  Riding along with the data made that impossible
+    to separate, and it also let the board be told to act on an image that was
+    still arriving.
+    """
 
     streamer, transport, program = _streamer()
     streamer.load(program)
 
-    assert transport.write_batches[:3] == [
-        (
-            (CtrlWords.STATUS, 1 << 3),
-            (CtrlWords.COMMAND, 0),
-            (CtrlWords.COMMAND, CMD_SAFE),
-        ),
+    strobe = ((CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, CMD_SAFE))
+    assert transport.write_batches[:5] == [
+        ((CtrlWords.STATUS, 1 << 3),),
+        strobe,
         tuple((CtrlWords.CLK_ENABLE + index, 0) for index in range(streamer.geom.clk_enable_words)),
-        (
-            (CtrlWords.STATUS, 1 << 3),
-            (CtrlWords.COMMAND, 0),
-            (CtrlWords.COMMAND, CMD_SAFE),
-        ),
+        ((CtrlWords.STATUS, 1 << 3),),
+        strobe,
     ]
-    image_batch = transport.write_batches[3]
-    assert image_batch[-3:] == (
-        (CtrlWords.BANK_READY, 0b11),
+    image_batch = transport.write_batches[5]
+    assert image_batch[-1] == (CtrlWords.BANK_READY, 0b11)
+    assert transport.write_batches[6] == (
         (CtrlWords.COMMAND, 0),
         (CtrlWords.COMMAND, CMD_LOAD),
     )

@@ -32,6 +32,8 @@ class PySerialLink:
         self.port = str(port)
         self.baud = int(baud)
         self._serial = None
+        #: What the last short read looked like, for whoever decides it is fatal.
+        self.last_shortfall = ""
 
     def open(self) -> None:
         import serial
@@ -74,6 +76,7 @@ class PySerialLink:
         serial_port.write_timeout = _remaining(deadline, "UART write")
         serial_port.write((b"\xff" * 8).join(requests))
         serial_port.flush()
+        self.last_shortfall = ""
         return self._read_replies(len(requests), deadline=deadline, stop=stop)
 
     def _read_replies(self, count: int, *, deadline: float, stop: threading.Event | None) -> list[bytes]:
@@ -100,16 +103,15 @@ class PySerialLink:
             else:
                 time.sleep(min(0.0005, max(0.0, deadline - time.monotonic())))
         if len(replies) != count:
-            # WHAT was in flight, not just that something was.  A lost reply on
-            # this link is machine-dependent and recurring, and "UART reply
-            # timed out" is the same sentence whether the board answered
-            # nothing, answered half, or answered in bytes that never formed a
-            # frame -- three different faults with three different causes.
-            raise TimeoutError(
-                f"UART reply timed out on {self.port} at {self.baud} baud: "
-                f"{len(replies)} of {count} replies in {time.monotonic() - started:.2f}s "
-                f"({read_bytes} byte(s) read, {len(buffer)} unparsed: "
-                f"{bytes(buffer[:16]).hex(' ') or 'none'})"
+            # Carried, not raised.  Whether a short answer is fatal depends on
+            # whether the frames that went unanswered may be sent again, and
+            # only the transport above knows that.  What it needs to say so is
+            # WHAT was in flight -- nothing answered, some answered, or bytes
+            # that never formed a frame are three faults with three causes.
+            self.last_shortfall = (
+                f"{len(replies)} of {count} replies in "
+                f"{time.monotonic() - started:.2f}s ({read_bytes} byte(s) read, "
+                f"{len(buffer)} unparsed: {bytes(buffer[:16]).hex(' ') or 'none'})"
             )
         return replies
 
@@ -143,6 +145,13 @@ class UartRegisterTransport:
         #: answers within microseconds, so this is the host's cost, not the
         #: board's, and it is per FRAME because every frame is acknowledged.
         self.round_trip_allowance = 0.05
+        #: How many times a frame may be sent before the link is called broken.
+        #: More than one because losing a frame is normal on a line with no
+        #: flow control; few, because a link that needs many is not working.
+        self.resend_attempts = 3
+        #: How many frames have had to be sent again, so a link that is quietly
+        #: degrading can be seen before it fails.
+        self.resends = 0
         self.max_frame_words = max(1, min(int(max_frame_words), framing.MAX_FRAME_WORDS))
         self._link = link or PySerialLink(str(port or ""), baud)
         self._lock = threading.RLock()
@@ -160,7 +169,34 @@ class UartRegisterTransport:
                 self._link.close()
             self._closed = True
 
-    def write_words(self, rows: Sequence[tuple[int, int]], *, stop: threading.Event | None = None, deadline: float | None = None) -> None:
+    def write_words(
+        self,
+        rows: Sequence[tuple[int, int]],
+        *,
+        stop: threading.Event | None = None,
+        deadline: float | None = None,
+        resend: bool = True,
+    ) -> None:
+        """Write register words, resending any frame the board did not answer.
+
+        A serial line with no flow control loses a frame now and then, and the
+        board cannot ask for one back: its bridge is a single-frame state
+        machine, and one mis-sampled stop bit makes it abandon the frame it was
+        reading and go back to hunting for a sync pair.  That frame is never
+        acknowledged, and nothing downstream ever hears about it.
+
+        Which frame is not a mystery: every frame carries a SEQ and every
+        acknowledgement carries it back.  That field existed and was used only
+        to assert equality, so one lost frame in a load of ten failed the whole
+        load -- on one machine and not another, because what differs is the
+        USB-serial adapter's own clock at 3 Mbaud, not the board.
+
+        ``resend=False`` for frames that must not be repeated: a command strobe
+        that WAS executed and whose acknowledgement was lost would be executed
+        twice.  A register write is an absolute value and repeating it is the
+        same write.
+        """
+
         with self._lock:
             self._require_open()
             pending = tuple((int(address), int(value) & 0xFFFFFFFF) for address, value in rows)
@@ -171,17 +207,55 @@ class UartRegisterTransport:
             # Budgeted AFTER the frames exist, because how long this may take is
             # a fact about how much there is to send.
             absolute = self._deadline(deadline, frames=len(frames), words=len(pending))
-            replies = self._link.write_batch(frames, deadline=absolute, stop=stop)
-            if len(replies) != len(frames):
-                raise UartError("UART reply count differs from frame count")
-            for request, reply in zip(frames, replies):
-                sequence, status, words = framing.decode_reply(reply)
-                if sequence != request[3]:
-                    raise UartError("UART write acknowledgement sequence mismatch")
-                if status == framing.ST_CRC_FAIL:
-                    raise UartError("UART CRC error status in write acknowledgement")
-                if status != framing.ST_OK or words:
-                    raise UartError(f"UART write acknowledgement was invalid (status=0x{status:02X})")
+            outstanding = list(frames)
+            attempts = self.resend_attempts if resend else 1
+            for attempt in range(attempts):
+                replies = self._link.write_batch(outstanding, deadline=absolute, stop=stop)
+                answered = self._checked_acknowledgements(outstanding, replies)
+                outstanding = [
+                    frame for frame in outstanding if frame[3] not in answered
+                ]
+                if not outstanding:
+                    return
+                if attempt + 1 < attempts:
+                    # Counted when they are actually SENT again, not when they
+                    # are found missing: a link that gives up is not a link
+                    # that retried.
+                    self.resends += len(outstanding)
+            raise TimeoutError(
+                f"UART reply timed out on {self.port} at {self.baud} baud after "
+                f"{attempts} attempt(s): {len(outstanding)} of {len(frames)} frame(s) "
+                f"unanswered ({getattr(self._link, 'last_shortfall', '') or 'no detail'})"
+            )
+
+    def _checked_acknowledgements(
+        self,
+        frames: Sequence[bytes],
+        replies: Sequence[bytes],
+    ) -> set[int]:
+        """The SEQs that came back clean; anything else is refused or absent.
+
+        A reply that arrives and says something went wrong is NOT a candidate
+        for resending -- the board understood and objected, and repeating the
+        frame would only repeat the objection.
+        """
+
+        expected = {frame[3] for frame in frames}
+        answered: set[int] = set()
+        for reply in replies:
+            sequence, status, words = framing.decode_reply(reply)
+            if sequence not in expected:
+                raise UartError(
+                    f"UART acknowledged a frame nobody sent (seq={sequence})"
+                )
+            if status == framing.ST_CRC_FAIL:
+                raise UartError("UART CRC error status in write acknowledgement")
+            if status != framing.ST_OK or words:
+                raise UartError(
+                    f"UART write acknowledgement was invalid (status=0x{status:02X})"
+                )
+            answered.add(sequence)
+        return answered
 
     def read_word(self, word_offset: int, *, stop: threading.Event | None = None, deadline: float | None = None) -> int:
         absolute = self._deadline(deadline)
@@ -252,6 +326,12 @@ class UartRegisterTransport:
         if not math.isfinite(result) or result <= time.monotonic():
             raise TimeoutError("UART transaction deadline expired")
         return result
+
+    @property
+    def port(self) -> str:
+        """Which port this transport is on, for anything that reports a fault."""
+
+        return str(getattr(self._link, "port", "?"))
 
     @property
     def baud(self) -> int:

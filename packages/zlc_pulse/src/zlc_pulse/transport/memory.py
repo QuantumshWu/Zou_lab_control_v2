@@ -66,6 +66,13 @@ class MemoryRegisterTransport:
         *,
         stop: threading.Event | None = None,
         deadline: float | None = None,
+        #: Whether a frame the link never answered may be sent again.  False
+        #: for a command strobe: one that WAS executed and whose acknowledgement
+        #: was lost would be executed twice.  A transport with no frames to lose
+        #: takes the argument and ignores it, because the caller's meaning is
+        #: the same either way and a caller should not have to ask which
+        #: transport it has.
+        resend: bool = True,
     ) -> None:
         del deadline
         if stop is not None and stop.is_set():

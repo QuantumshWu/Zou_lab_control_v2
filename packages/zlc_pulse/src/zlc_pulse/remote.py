@@ -717,6 +717,19 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 self._owner_started = 0.0
                 self._owner_last_activity = 0.0
 
+    def _link_health(self) -> str:
+        """Frames that had to be sent again, when there have been any.
+
+        A line that loses the occasional frame now recovers instead of failing
+        a load, which is right -- and silent, which is not: a cable or an
+        adapter that is degrading should be visible before it stops working.
+        Nothing is printed while the count is zero.
+        """
+
+        transport = getattr(self.streamer, "transport", None)
+        resends = int(getattr(transport, "resends", 0) or 0)
+        return f" resent_frames={resends}" if resends else ""
+
     def dispatch(
         self,
         method: str,
@@ -760,7 +773,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             program = params.get("program")
             source = params.get("source")
             self.streamer.load(program, source=source)
-            _server_log("LOAD", client=client, detail=_program_summary(program, source=source))
+            _server_log(
+                "LOAD",
+                client=client,
+                detail=f"{_program_summary(program, source=source)}{self._link_health()}",
+            )
             return None
         if method == "write_slots":
             values = tuple(int(value) for value in params.get("values", ()))

@@ -195,6 +195,13 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 6_830 -> 6_950 for resending a frame the board never answered.  Its
+    # bridge is a single-frame state machine: one mis-sampled stop bit makes it
+    # abandon the frame it was reading, and that frame is never acknowledged.
+    # Every frame already carried a SEQ and every acknowledgement carried it
+    # back -- the field was used only to assert equality, so one lost frame in
+    # a load of ten failed the whole load.  Command strobes are excluded and
+    # now go on their own, after the data they act on is acknowledged.
     # 6_780 -> 6_830 for a UART deadline that scales with the transfer, and a
     # timeout that says what was in flight.  One constant covered a register
     # read and a whole register image alike, so it was either too generous to
@@ -226,14 +233,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 6_830
+    assert counted <= 6_950
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_010
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_130
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:
