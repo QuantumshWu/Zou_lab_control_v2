@@ -2351,6 +2351,78 @@ def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) 
     assert view.schedule_view.schedule.scan_summary_text == "1 slot - 21 pts"
 
 
+
+def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
+    """Hold in the middle of a scan simply turned the outputs off.
+
+    It stopped, wrote the row and left it there -- and writing slot values is
+    not playing them.  Holding a point is how a scan is inspected: the pulse
+    keeps running with the sweep frozen at one set of values, so a camera sees
+    that point and nothing else.
+    """
+
+    view = presenter.view
+    board = _Sequencer()
+    written: list = []
+    board.write_slots = lambda row: written.append(tuple(row))
+    board.cursor = lambda: 4
+    presenter.sequencer = board
+    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    view.scan_run_requested.emit(
+        "import numpy as np\n"
+        "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
+    )
+
+    board.events.clear()
+    view.scan_hold_requested.emit()
+    assert board.events == ["safe", "fire forever"], board.events
+    assert presenter._held_point == 4
+    held = written[-1]
+
+    board.events.clear()
+    view.scan_step_requested.emit(1)
+    assert board.events == ["safe", "fire forever"], "a step must play its point too"
+    assert presenter._held_point == 5
+    assert written[-1] != held
+
+    view.scan_step_requested.emit(-1)
+    assert written[-1] == held, "stepping back returns to the same row"
+
+
+def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
+    """It was stored, shown and saved, and read by nothing at all.
+
+    The board streams ONE table, so playing it three times is a table three
+    times as long -- there is no sweep counter down there to set.
+    """
+
+    uploaded: list = []
+    board = _Sequencer()
+    board.write_scan_table = lambda rows: uploaded.append(len(rows))
+    presenter.sequencer = board
+    view = presenter.view
+    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    view.scan_run_requested.emit(
+        "import numpy as np\n"
+        "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
+    )
+
+    view.scan_repeats_committed.emit(3)
+    board.events.clear()
+    assert presenter.fire() is True
+    assert uploaded[-1] == 21, "three sweeps of seven points"
+    # And a counted number of sweeps is a finite run: wrapping it in the outer
+    # forever would repeat the whole scan endlessly and the count would mean
+    # nothing.
+    assert "fire forever" not in board.events, board.events
+
+    view.scan_repeats_committed.emit(0)
+    board.events.clear()
+    assert presenter.fire() is True
+    assert uploaded[-1] == 7, "zero means until Stop, so one sweep is uploaded"
+    assert "fire forever" in board.events, board.events
+
+
 def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:
     """The complaint in one test: "cannot load this pulse: already firing".
 

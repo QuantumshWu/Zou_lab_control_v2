@@ -203,11 +203,6 @@ def resolve(workspace=None, pulse=None):
     space = Workspace(workspace) if workspace is not None else Workspace.discover()
     if not pulse:
         return space, None, ""
-    if space is None:
-        raise FileNotFoundError(
-            f"--pulse {pulse} needs an experiment directory; none of "
-            f"{', '.join(Workspace.MARKERS)} was found at or above {Path.cwd()}"
-        )
     sequence, path = load_sequence(space.root, pulse)
     return space, sequence, path
 

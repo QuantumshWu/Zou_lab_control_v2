@@ -20,6 +20,7 @@ _PACKAGE_DIR = _Path(__file__).resolve().parent
 if _PACKAGE_DIR.name != "zlc_durable" or __package__ != "zlc_durable":
     raise ImportError(f"unexpected zlc_durable installation path: {_PACKAGE_DIR}")
 
+from .readable import readable_json, write_readable_json
 from .durability import (  # noqa: E402
     DirectoryDurabilityError,
     atomic_write_bytes,
@@ -39,6 +40,8 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_file",
     "atomic_write_text",
+    "readable_json",
+    "write_readable_json",
     "day_folder",
     "day_folder_name",
     "durable_makedirs",

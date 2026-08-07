@@ -12,6 +12,8 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 
+from zlc_durable import write_readable_json
+
 from .bimodal import fit_bimodal, finite_mean, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity
 from .psf import extract_psf_window, gaussian_psf_kernel
 
@@ -390,7 +392,11 @@ class TrapCalibration:
 
     def save(self, path: str | Path) -> Path:
         target = Path(path)
-        target.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        # The same reader-facing layout every saved document in this project
+        # uses, written atomically.  The two json.dumps above are DIGESTS and
+        # stay compact and sorted on purpose: a hash must not move because a
+        # line-wrap rule changed its mind.
+        write_readable_json(target, self.to_dict())
         return target
 
     @classmethod

@@ -67,13 +67,6 @@ def open_experiment(workspace=None, template=None, pulse="calibration"):
     from ..session import ExperimentSession, Workspace
 
     space = Workspace(workspace) if workspace is not None else Workspace.discover()
-    if space is None:
-        raise FileNotFoundError(
-            "no experiment directory here.  A console needs one -- it is where "
-            "pulses/, data/ and apparatus.json live.  None of "
-            f"{', '.join(Workspace.MARKERS)} was found at or above {Path.cwd()}; "
-            "pass --workspace, or start the launcher from your experiment folder."
-        )
 
     session = ExperimentSession.open(space.root, template=template)
     loaded = session.load_pulse(pulse)

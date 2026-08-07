@@ -44,13 +44,6 @@ def apparatus_path(workspace=None) -> Path:
     from ..session import Workspace
 
     space = Workspace(workspace) if workspace is not None else Workspace.discover()
-    if space is None:
-        raise FileNotFoundError(
-            "no experiment directory here.  An apparatus belongs to one -- it is "
-            f"where pulses/, data/ and apparatus.json live.  None of "
-            f"{', '.join(Workspace.MARKERS)} was found at or above {Path.cwd()}; "
-            "pass --workspace, or start the launcher from your experiment folder."
-        )
     return space.apparatus
 
 

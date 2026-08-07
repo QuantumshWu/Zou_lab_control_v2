@@ -733,7 +733,15 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         if method == "write_slots":
             values = tuple(int(value) for value in params.get("values", ()))
             self.streamer.write_slots(values)
-            _server_log("WRITE SLOTS", client=client, detail=_log_fields(slots=len(values)))
+            # The VALUES, not just how many.  Holding a scan point and
+            # stepping through one both arrive here, one row at a time, and
+            # which row it is is the only thing this line could usefully say
+            # -- the count is always the slot count and never changes.
+            _server_log(
+                "WRITE SLOTS",
+                client=client,
+                detail=_log_fields(slots=len(values), values=list(values)),
+            )
             return None
         if method == "write_scan_table":
             rows = tuple(tuple(int(value) for value in row) for row in params.get("rows", ()))

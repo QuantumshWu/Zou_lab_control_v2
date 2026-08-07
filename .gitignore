@@ -14,3 +14,9 @@ packages/zlc_pulse/fpga/.Xil/
 
 # A workspace is somebody's experiment, not part of the product.
 **/notebooks/workspace/
+# Including the one every launcher opens by default.  It lives INSIDE the
+# checkout so that a double-clicked launcher finds the same folder whichever
+# one it was, and it is untracked so a pull cannot replace a pulse authored
+# between shots and a reclone does not carry one machine's experiment to
+# another.
+/workspace/

@@ -41,7 +41,7 @@ from zlc_pulse import (
     RepeatRegion,
 )
 from zlc_pulse import TIME_UNIT_CHOICES, TIME_UNIT_TO_NS
-from zlc_durable import unique_path
+from zlc_durable import unique_path, write_readable_json
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui import (
     VALIDATOR_FLOAT,
@@ -1645,7 +1645,7 @@ class PulseEditorPresenter:
             # the keyboard.
             self.sequencer.load(self.compile(), source=self.sequence)
             if self._scan_rows and self.sequence.slots:
-                self.sequencer.write_scan_table(self._wire_rows(self._scan_rows))
+                self.sequencer.write_scan_table(self._wire_rows(self._swept_rows()))
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
             self._poll_board()
@@ -1677,7 +1677,12 @@ class PulseEditorPresenter:
         if not self.load_into_sequencer():
             return False
         if forever is None:
-            forever = self.sequence.whole_pulse_repeat is None
+            # A finite number of sweeps is a finite run: the table uploaded
+            # already contains every point that will be played, so wrapping it
+            # in an endless outer loop would repeat the whole scan for ever and
+            # the count would mean nothing.
+            finite_scan = bool(self._scan_rows) and int(self._scan_repeats) > 0
+            forever = self.sequence.whole_pulse_repeat is None and not finite_scan
         try:
             if forever:
                 self.sequencer.fire(forever=True)
@@ -1952,7 +1957,11 @@ class PulseEditorPresenter:
         }
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(tree, indent=2) + chr(10), encoding="utf-8")
+            # Readable, and atomic, from the package that owns writing files:
+            # a saved pulse is read by people and resumed from by experiments,
+            # and json.dumps(indent=2) put each of 62 channel names on its own
+            # line so the shape of the document was off the screen.
+            write_readable_json(target, tree)
         except Exception as error:
             self._warn(f"cannot save {target.name}: {error}")
             return ""
@@ -2350,36 +2359,62 @@ class PulseEditorPresenter:
         return str(target)
 
     def hold_scan_point(self) -> bool:
-        """Stop advancing and hold the point the board is on.
+        """Stop advancing and PLAY the point the board is on, over and over.
 
         Holding is how a scan is inspected: the outputs stay at one row so a
-        camera or a scope sees that point and nothing else.
+        camera or a scope sees that point and nothing else -- which means the
+        pulse keeps PLAYING, with the sweep frozen at one set of values.
+
+        It stopped and wrote the row and left it there, so pressing Hold in the
+        middle of a scan simply turned the outputs off: writing slot values is
+        not playing them, and nothing fired again.
+
+        A board that reports no cursor is not a reason to give up either.  It
+        is idle, or it is not scanning, and "hold a point" still has an answer:
+        the first one.
         """
 
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
+        if not self._scan_rows:
+            self._warn("there is no scan table to hold a point of")
+            return False
         cursor = self._scan_cursor()
-        self.stop()
-        if cursor is None:
-            self._scan_progress = "held (the board reported no scan point)"
-        else:
-            self._held_point = int(cursor)
-            self._scan_progress = f"held at scan point {self._held_point}"
-            self._write_held_point()
-        self._refresh_scan_page()
-        return True
+        return self._hold(0 if cursor is None else int(cursor))
 
     def step_scan_point(self, delta: int) -> bool:
-        """Move the held point by one, staying held."""
+        """Move the held point by one, and keep playing the new one."""
 
         if self.sequencer is None or not self._scan_rows:
             self._warn("nothing is held to step")
             return False
         held = 0 if self._held_point is None else self._held_point
-        self._held_point = max(0, min(len(self._scan_rows) - 1, held + int(delta)))
+        return self._hold(held + int(delta))
+
+    def _hold(self, point: int) -> bool:
+        """Play one scan row, held, until something else is asked for.
+
+        The whole gesture in one place, because Hold and either Step are the
+        same three things in the same order -- stop, write that row, play it --
+        and a version of it that skipped the third was how Hold came to mean
+        "off".
+        """
+
+        self._held_point = max(0, min(len(self._scan_rows) - 1, int(point)))
+        self.stop()
         self._write_held_point()
-        self._scan_progress = f"held at scan point {self._held_point}"
+        try:
+            self.sequencer.fire(forever=True)
+        except Exception as error:
+            self._scan_progress = f"cannot hold that point: {error}"
+            self._warn(f"cannot hold scan point {self._held_point}: {error}")
+            self._refresh_scan_page()
+            return False
+        self._poll_board()
+        self._scan_progress = (
+            f"held at scan point {self._held_point} of {len(self._scan_rows)}"
+        )
         self._refresh_scan_page()
         return True
 
@@ -2394,6 +2429,24 @@ class PulseEditorPresenter:
 
         self._scan_rows = tuple(tuple(value for value in row) for row in rows)
         self.refresh()
+
+    def _swept_rows(self) -> tuple[tuple[float, ...], ...]:
+        """The table as many times as it is to be played, in sweep order.
+
+        The board streams ONE table, so "play it three times" is a table three
+        times as long -- there is no separate sweep counter down there, and
+        inventing one here would be a second mechanism for a thing the wire
+        already does.
+
+        Scan repeats was read by nothing at all: it was stored, shown and
+        saved, and the number of rows uploaded never changed.  Zero means until
+        Stop, which is the outer forever the pulse already has, so it uploads
+        one sweep and lets the run be endless.
+        """
+
+        rows = tuple(self._scan_rows)
+        sweeps = max(0, int(self._scan_repeats))
+        return rows if sweeps <= 1 else rows * sweeps
 
     def _wire_rows(self, rows: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:
         """The author's table as the slots will hold it.

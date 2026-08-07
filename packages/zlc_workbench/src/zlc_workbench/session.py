@@ -78,22 +78,57 @@ class Workspace:
         self.data.mkdir(parents=True, exist_ok=True)
         return self
 
-    @classmethod
-    def discover(cls, start: str | os.PathLike[str] | None = None) -> "Workspace | None":
-        """The nearest experiment directory at or above ``start``, or None.
+    #: Where an experiment lives when nobody has said otherwise.  Overridable,
+    #: because a lab that keeps its data elsewhere should say so once rather
+    #: than pass a path to every launcher.
+    HOME_VARIABLE = "ZLC_WORKSPACE"
+    #: Inside the checkout, beside the code that drives it, and NOT tracked --
+    #: .gitignore keeps it out, so a pull cannot replace a pulse and a reclone
+    #: does not carry one machine's experiment to another.
+    DEFAULT_HOME = "workspace"
 
-        A launcher cannot assume the working directory is the experiment: a
-        double-clicked shortcut starts in the folder holding the shortcut, which
-        is never where anyone keeps their data.  Rather than each entry point
-        guessing differently, they all ask here, and a caller that finds nothing
-        can say what it looked for.
+    @classmethod
+    def default(cls) -> "Workspace":
+        """The one place an experiment lives when nothing else is nearer.
+
+        In the checkout: ``<repo>/workspace/``, holding pulses/, data/ and
+        apparatus.json.  One folder, wherever the launcher was double-clicked
+        from, and it travels with the code that opens it.
+
+        NOT the working directory, which is what this used to fall back on: a
+        double-clicked launcher starts in the folder holding it, so "the
+        default pulse folder" was a different folder depending on how the
+        window was opened, and a saved pulse landed somewhere nobody would look
+        for it again.
+
+        It is created on demand.  A home that must be made by hand before the
+        first save is a home that will not be there.
+        """
+
+        root = os.environ.get(cls.HOME_VARIABLE, "").strip()
+        home = (
+            Path(root).expanduser()
+            if root
+            else Path(__file__).resolve().parents[4] / cls.DEFAULT_HOME
+        )
+        (home / "pulses").mkdir(parents=True, exist_ok=True)
+        return cls(home)
+
+    @classmethod
+    def discover(cls, start: str | os.PathLike[str] | None = None) -> "Workspace":
+        """The nearest experiment directory at or above ``start``, else the home.
+
+        Standing IN an experiment folder still wins, because that is a real
+        thing people do and the nearest answer is the right one.  What changed
+        is what happens when there is no such folder: the answer is one fixed
+        place, not "wherever this was launched from".
         """
 
         current = Path(start or Path.cwd()).expanduser().resolve()
         for candidate in (current, *current.parents):
             if any((candidate / marker).exists() for marker in cls.MARKERS):
                 return cls(candidate)
-        return None
+        return cls.default()
 
 
 def read_pulse(path: str | os.PathLike[str]) -> tuple[Any, Mapping[str, Any]]:
