@@ -1,15 +1,15 @@
-# Zou_lab_control v2 实施计划（Reopened）
+# Zou_lab_control v2 实施计划（完成）
 
-> 这是 [ARCHITECTURE_DESIGN.md](./ARCHITECTURE_DESIGN.md) 的实施顺序，不是已完成清单。
+> 这是 [ARCHITECTURE_DESIGN.md](./ARCHITECTURE_DESIGN.md) 的实施顺序与最终完成证据；续跑只认下方持久 Checkpoint。
 > 仓库绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2`
 > 本文绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\IMPLEMENTATION_PLAN.md`
-> 唯一权威 v1 参考树：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。不得使用 `ZLC_main`、`_reference\Zou_lab_control_v1` 或其他副本代替它。
+> 凡用户或计划明确要求参考 v1，唯一允许读取的树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；不得用 `ZLC_main`、`_reference` 或其他副本代替。v1 不是本计划的上位规格；目前只用于 Device Manager 可见 UI 等明确点名的参考，其他架构继续按两份 v2 权威文档实施。
 > 设计审查基线：`0243aa6`；实际执行 HEAD 以本文 Checkpoint 为准。先前 Phase 12 完成声明已因真实 Device Manager 与 pulse 入口验收失败而撤销。
 > 目标权威是封闭集合：只有本文和绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`。根 `HANDOFF.md`/`README.md`、七份 `packages/*/GOAL.md`、package contracts/README 以及其他旧 design/goal 文档都不是实施指令；冲突时忽略旧文档。
 
 ## 持续执行 Goal
 
-> 在绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2` 的当前树上，严格按 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md` 和 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\IMPLEMENTATION_PLAN.md` 持续实施，直到虚拟 Calibration -> Camera Measurement -> Occupancy -> Image/Panel Save Fig 通过正式 descriptor/catalog/NodeHost/TaskConsole 路径端到端跑通；同时完成 `Repeat=0` infinite、finite FollowTap/frozen final dataset 处理、Calibration 自动发现 sites 并写 workspace JSON、exposure/ROI measurement request 与 selector -> shared draft -> Producer Apply/Restart 闭环、OBSERVE/EXCLUSIVE 设备仲裁、Add Logic 后自动 Edit、固定 plot kind、Setting/Edit 共享 PanelState、Image Site overlay，以及 Header Save Layout / Header Save Screenshot / Panel Save Fig 三条互不混淆的保存路径。执行期间遇到任何未预见问题、新矛盾或现有代码与目标架构冲突时，不停下询问、不把决策退回给用户，而是按“用户已裁决的产品语义 > 本架构文档 > 整条科学数据链正确 > 最简单可维护实现 > v2 现状 > v1 参考”自主作出最优决定，简要记录理由并继续。除上述两份绝对路径文档外，不把任何 `GOAL.md`、HANDOFF、README、contract 或旧 design 当作目标规格；冲突时忽略旧文档。不增加 fingerprint/hash、loss telemetry、防御型框架或测试矩阵；三条新纵向 guard 必须先证明在原缺陷下变红。所有受影响 package tests、Guard A/B/C 和全树测试通过，两种 virtual run 可正常 stop/close 且无悬挂 worker/device claim，架构文档、实施计划 Checkpoint 和相关产品文档与实现一致时，才标记完成。
+> 在绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2` 的当前树上，严格按 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md` 和 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\IMPLEMENTATION_PLAN.md` 持续实施，直到虚拟 Calibration -> Camera Measurement -> Occupancy -> Image/Panel Save Fig 通过正式 descriptor/catalog/NodeHost/TaskConsole 路径端到端跑通；同时完成 `Repeat=0` infinite、finite FollowTap/frozen final dataset 处理、Calibration 自动发现 sites 并写 workspace JSON、exposure/ROI measurement request 与 selector -> shared draft -> Producer Apply/Restart 闭环、OBSERVE/EXCLUSIVE 设备仲裁、header combined selector 的 Logic entry 创建 stopped row 后自动 Edit、Plot entry 创建无 signal 也成立的固定-kind blank panel、Setting/Edit 共享 PanelState、Image Site overlay，以及 Header Save Layout / Header Save Screenshot / Panel Save Fig 三条互不混淆的保存路径。执行期间遇到任何未预见问题、新矛盾或现有代码与目标架构冲突时，不停下询问、不把决策退回给用户，而是按“用户已裁决的产品语义 > 本架构文档 > 整条科学数据链正确 > 最简单可维护实现 > v2 现状 > v1 参考”自主作出最优决定，简要记录理由并继续。除上述两份绝对路径文档外，不把任何 `GOAL.md`、HANDOFF、README、contract 或旧 design 当作目标规格；冲突时忽略旧文档。不增加 fingerprint/hash、loss telemetry、防御型框架或测试矩阵；三条新纵向 guard 必须先证明在原缺陷下变红。所有受影响 package tests、Guard A/B/C 和全树测试通过，两种 virtual run 可正常 stop/close 且无悬挂 worker/device claim，架构文档、实施计划 Checkpoint 和相关产品文档与实现一致时，才标记完成。
 
 ## 上下文压缩/自动续跑恢复协议
 
@@ -30,13 +30,13 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`active — prior completion rejected at the first real operator step`
-- Repository HEAD at checkpoint：`987d30e Document the verified experiment workflow`
-- Completed phases：`Phase 0–11 的内部实现保留为待复核现状；Phase 12 的 Device Manager、pulse 入口、产品验收与完成声明全部作废，不能作为已完成阶段`
-- Current phase：`Phase 13 — rebaseline from the sole authoritative v1 tree and repair the real experiment entry`
-- Last completed action：已把唯一权威 v1 路径固定为 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`，明确排除 `ZLC_main` 与 `_reference`。已确认当前 v2 Device Manager 来自错误旧快照，且真实入口会在设备 UI 完成前因缺少 `workspace\pulses\calibration.py` 失败。
-- Last verified tests：先前 `1105 passed`、Guard A/B/C 与 detached package tests 只证明合成 fixture 下的内部行为，不能作为产品验收。相关测试曾主动把 package `calibration.py` 复制到临时 workspace，或直接注入 package pulse 搜索路径；真实 workspace 没有该文件，因此真实第一步失败。此前只打开首屏的可见 smoke 也不是验收。
-- Next action：`逐文件对照唯一权威 v1 的 Device Manager 与 JSON PulseDocument API；先证明当前错误在真实入口下变红，再修复 Apply -> shared session -> TaskConsole + Pulse UI 和 imaging_template.json calibration 链；之后按可独立运行的纵向阶段重新提交`
+- Goal status：`complete — formal operator path accepted and all ownership released`
+- Production HEAD at final verification：`6ad2e70 Release pending panels after synchronous render rejection`
+- Completed phases：`Phase 0–13、正式入口重建、pulse API/scan 分离、唯一状态源收口、共享设备仲裁、GUI sender 生命周期和异步 panel 提交生命周期均完成；Phase 12 的错误完成声明只保留为失败记录`
+- Current phase：`complete`
+- Last completed action：在该生产 HEAD 上从根 `bin\experiment.bat` 走真实控件完成 Device Manager `Init devices`，随后在同一进程/session 中依次执行 Calibration（产物 `workspace\data\2026_08_08\calibration-5.json`）、`Repeat=0` Camera Measurement、PulseGUI `Load imaging_template.json` / `On Pulse`、Occupancy、无 signal blank Image、Setting 接线 `frame_judged` 和 `Site overlay = Occupancy`；图像持续更新并显示六个实测 site circles。最后真实点击 `Stop Pulse`，关闭 TaskConsole 后两个窗口和项目 Python 进程均归零。
+- Last verified tests：当前树全量 `1114 passed in 102.28s`；Workbench `319 passed`。`6ad2e70` 又在独立 TEMP detached worktree 中验证 `test_presentation.py 7 passed`、Workbench `319 passed`，probe 路径均指向该 worktree，随后目录与 worktree 注册均已删除。
+- Next action：`none — delivery definition is satisfied`
 - New decisions since architecture review：旧 `GOAL.md` 的误导风险不留到收尾处理；Phase 0 先隔离目标权威，Phase 11 按最终实现同步历史内容。Calibration 普通 measurement exposure 由 adapter request 决定；标定 long/readout/long 窗口由 Task 显式 protocol 参数处理。Panel archive 不持久化 schema 可导出的冗余 digest。Panel Edit 的操作图面是 Workbench 管理的独立 frozen plot host，不复用 monitor QWidget、不建立第二条 runtime derived signal。Layout 中 typed plot choice 以 plain JSON token 保存，并经当前 host 声明的 choices 恢复。Close 超时是 ownership 未释放而非可忽略错误，因此保留 window/bindings 并拒绝 session teardown。旧 FPGA asset SHA 清单因冻结 checkout 换行而无法在 clean worktree 重现，已改为资产存在性、解析后几何相等和既有 wire/launcher 语义验证，不再用字节 hash 代替行为。
 
 ## 1. 执行纪律
@@ -50,7 +50,7 @@
 7. 工作树中无关的已有修改一律保留，不 revert、不借机整理。
 8. 在已授权的 repo 范围内持续执行。遇到任何未预见问题、新缺陷、架构矛盾或当前/v1 代码与目标冲突，都按 Goal 中的优先级自主做出最优且可维护的决定，记录理由并继续到交付定义满足；不停下询问，不把决策退回给用户。
 9. 不把任何 `packages/*/GOAL.md`、旧 design、README、contract 或 HANDOFF 当作实施目标。它们只能用来理解现状；一旦冲突，以本计划和 `ARCHITECTURE_DESIGN.md` 为准。分派任何子任务时也必须明示携带这个权威边界。
-10. 凡声称“与 v1 一致”或从 v1 迁移 API/UI，必须从绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1` 读取并记录具体文件；禁止用目录名、相似入口、`ZLC_main`、`_reference` 或记忆推断 v1 身份。
+10. 凡计划明确要求“参考 v1”，必须从绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1` 读取并记录具体文件；禁止使用其他副本。同时不得把该参考扩张为重做 v2 架构的依据。
 
 ## 1.1 Phase 0：隔离错误目标入口（已完成）
 
@@ -67,7 +67,7 @@
 
 ### P1：产品 UI 闭环
 
-- Add Logic -> 自动 Edit tab -> Start/Restart。
+- combined `Add Panel` 选择 Logic entry -> stopped row -> 自动 Edit tab -> Start/Restart；不新增独立 Add Logic 按钮或 modal chooser。
 - capability-filtered device selector，Camera Measurement 可选 `camera`、`mot_camera` 等实例。
 - Panel Edit 共享 producer draft，selector 改 ROI/range，Producer Apply 立即重启 producer。
 - Plot kind 在 Add Panel 时固定，Setting/Edit 参数表面完整。
@@ -204,8 +204,8 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 
 ### 工作
 
-1. `Add Logic` 只创建 stopped row，删除 Occupancy Add 的 modal signal picker。
-2. Add 后立即打开/聚焦对应 Logic Edit tab。
+1. header 复用权威 v1 的一个 combined 下拉框和一个 `Add Panel` 按钮；Plot entries 在前，随后是 Measurement、Processor、Task，不新增独立 `Add Logic` 按钮或 modal picker。
+2. Logic entry 经同一个按钮创建 stopped row，并立即打开/聚焦对应 Logic Edit tab。
 3. 建立唯一 row draft，包含 node parameters、input binding 和 capability-filtered named device choices。
 4. Logic Edit 只用 Start/Restart、Stop、Remove，不加通用 Apply。
 5. Start/Restart 冻结当前 draft -> validate request -> 停冲突 Logic Nodes -> measurement/task 启动。
@@ -221,7 +221,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 
 ### 工作
 
-1. Add Panel 时固定 plot kind（Facet Grid 同时固定 cell kind），Setting/Edit 中只读，无任何切换路径。
+1. Plot entry 经 combined `Add Panel` 创建固定 kind 的 blank panel，不要求 signal 已发布、不自动选择 signal；Facet Grid 同时固定 cell kind，Setting/Edit 中只读，无任何切换路径。
 2. 每个 panel 建立唯一 Workbench-owned `PanelState`，包含 signal/size/update interval/fixed kind/semantic/display/fit。Setting frame、Panel Edit 和 monitor panel 都订阅它，不保留独立 config 副本。
 3. Setting frame 实现 Signal、Size、Update interval、title/labels 和 kind 常用 display 参数。
 4. Panel Edit 作为 tab，重复显示 Signal/Size/Update interval，并提供完整 plot parameters、fit、selector、direct producer form、Producer Apply 和 Save Fig。两边的共同字段直接绑定同一 `PanelState`；任一边修改都由同一 controller 发布一次更新给所有 views。
@@ -291,10 +291,10 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 
 以下内容是失败记录，不是完成证据：
 
-1. Device Manager 错把无 Git provenance 的 `_reference` 旧快照当作 v1，加入了 `Installation/Configured devices/Available/Cancel/Init devices`；同一提交内的测试又直接断言这些错误标签，形成循环证明。
-2. 权威 v1 实际是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；其当前 Device Manager 是 domain device cards、`Discovered hardware`、`Loaded session` 与底部 `Apply`。
+1. Device Manager 错把无 Git provenance 的 `_reference` 旧快照当作 v1，加入了 `Installation/Configured devices/Available/Cancel` 结构；同一提交内的测试又直接断言这些错误标签，形成循环证明。
+2. 用户指定的 Device Manager 是 domain device cards、`Discovered hardware`、`Loaded session` 与底部 `Init devices`。
 3. 入口把 `session.load_pulse("calibration")` 错误变成设备 Apply/初始化的前置条件；正式 resolver 只查 workspace Python 文件，而真实 workspace 没有它。
-4. app/Guard 测试人为复制或直接注入 package `calibration.py`，所以没有覆盖真实 `bin\experiment.bat` + 真实 workspace。先前可见 smoke 只看第一屏，没有执行 Apply。
+4. app/Guard 测试人为复制或直接注入 package `calibration.py`，所以没有覆盖真实 `bin\experiment.bat` + 真实 workspace。先前可见 smoke 只看第一屏，没有执行 `Init devices`。
 5. 功能已经按依赖提交：
 
    | commit | 阶段 |
@@ -307,14 +307,17 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 
 6. 上述提交虽然通过各自合成测试，但产品验收无效，整个阶段已经撤销完成状态。
 
-## 15.1 Phase 13：权威 v1 重新基线与真实入口修复
+## 15.1 Phase 13：按既定架构修复真实入口
 
-1. 所有 v1 对照只读取 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。
-2. 用该树的当前 Device Manager widget tree 与 Apply/runtime 生命周期重做 v2 可见 UI；v2 内部数据模型只能作为 adapter，不得改变用户操作面。
-3. 审计并使用 `zlc_pulse` 的正式 JSON `PulseDocument` API。产品 pulse、Pulse Editor 文档与 Calibration template 均为 JSON；删除产品链上的 `.py` pulse resolver 和测试复制捷径。
-4. 恢复项目 pulse `pulses\imaging_template.json` 及 Calibration Edit 的 template 选择；设备 Apply 不得以 calibration pulse 是否存在作为初始化前置条件。
-5. 真实入口守卫不得复制 pulse 或注入 package 私有搜索路径；必须从未修改的实际 workspace 启动，执行 Apply，确认 TaskConsole 与 Pulse UI 共用同一 session/sequencer，再执行 calibration -> camera -> occupancy。
-6. 每一阶段先证明原缺陷下会红，再提交一个可独立运行的纵向切片；可见 GUI 验收必须关闭所有窗口并确认无残留进程。
+1. v1 仅用于 Device Manager 可见 UI/交互参考，且只读取 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；session ownership、logic、runtime 和科学链仍按本文既定 v2 架构。
+2. 把 Device Manager 改为计划第 3.0 节的 domain device cards、Discovered hardware、Loaded session 和底部 `Init devices`；v2 `InstallationConfig` 只做内部 adapter，不出现在可见 UI。
+3. `Init devices` transaction 只验证/打开 devices 并建立 session。成功后同一进程显示 TaskConsole + Pulse UI；删除任何 `session.load_pulse("calibration")` 或 pulse 文件存在性前置条件。
+4. 使用 v2 唯一 pulse JSON 规范：顶层 `format` 必须为 `zlc.pulse.v1`，由 `zlc_pulse.sequence_from_tree()` / `sequence_to_tree()` 往返；`slots` 只表示 scan columns，三项 Calibration duration 使用显式 `PulseApiParameter/api_parameters`，由 `resolve_api_parameters()` 绑定。不得新增 `PulseDocument`、用 id 前缀猜 API/scan 或把 API 参数伪装成 scan slot。Calibration Edit 的 template 默认 `imaging_template.json`，Calibration Start 才从 project `pulses` root 加载、参数化，并按连接 sequencer 的 `BoardDescription` 编译。
+5. 产品链删除 `.py` pulse resolver 和测试复制捷径，但不把 Pulse Editor 当前文档、普通 session pulse 操作与 Calibration template 合并成一个全局默认 pulse。
+6. 真实入口测试不得复制 pulse 或注入 package 私有搜索路径：先在无 calibration pulse 的 workspace Apply 并确认双窗/同 session，再单独用真实 JSON template 运行 Calibration -> Camera -> Occupancy。
+7. 两个阶段都先证明原缺陷下会红，再各自提交可独立运行的纵向切片；可见 GUI 验收后立即关闭所有窗口并确认无残留进程。
+
+本阶段及其根因收口已完成并分阶段提交：`836556b` 固定唯一 v1 参考；`adb1cf3` 修复 Device Manager/Init；`63dab99` 与 `70e80a0` 建立全产品 JSON pulse；`e6ae62d`、`45883e4` 恢复 combined Add 流程并修复 GUI layout/form 生命周期；`d08faaf` 明确分离 API parameters 与 scan slots；`1fcda67`、`e54308c`、`420e9d7` 分别收口 device catalog、layout transaction、PulseEditorState；`81b8af5`、`7485f49`、`9db097d` 建立 board authority、Calibration connected-board compile 和 session-scoped device-use coordinator；`7a7504a` 完成 artifact draft 接线；`e7398a4` 修复同步 editor refresh 销毁 sender；`896530b`、`6ad2e70` 完成 pending plot publication 的正常、拒绝和同步异常生命周期。
 
 ## 16. 整体交付定义
 
@@ -325,8 +328,8 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 - Occupancy 只用显式 frames + calibration path，finite 无损，infinite latest，Image overlay 来自实测 SiteMap。
 - 多个 read-only observer 可并存，一个 device 同时最多一个 exclusive Logic Node，新冲突 node 会停旧 node。
 - TaskConsole/Pulse Editor 使用同一 Experiment/session/sequencer/world，Pulse Editor 不被虚构成长期 device owner。
-- Add Logic 自动进 Edit；Logic 无空泛 Apply；Panel Producer Apply 就是修改参数后重启 measurement。
-- Plot kind 在 Add Panel 时固定；Panel Edit 显示完整 panel + producer 参数并支持 selector 联动。Setting/Edit 共享唯一 `PanelState`，对应参数天然双向同步。
+- combined `Add Panel` 的 Logic entry 自动进 Edit；没有独立 Add Logic 控件；Logic 无空泛 Apply；Panel Producer Apply 就是修改参数后重启 measurement。
+- combined `Add Panel` 的 Plot entry 可在无 signal 时创建 blank fixed-kind panel；Panel Edit 显示完整 panel + producer 参数并支持 selector 联动。Setting/Edit 共享唯一 `PanelState`，对应参数天然双向同步。
 - SiteMap 不是 plot kind；site/occupancy markers 是固定 `Image` plot kind 的 `Site overlay` 参数。
 - Header Layout、Header Screenshot、Panel Save Fig 三者分开；Panel data 包含正确调用链参数/device snapshots，不打包整个 monitor tab。
 - 不记 buffer loss，不新增 fingerprint/hash，新增纵向守卫不超过 Guard A/B/C 三条且各自已证明原缺陷下会红。

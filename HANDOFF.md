@@ -1,7 +1,7 @@
 # Zou_lab_control v2 — 历史交接快照
 
 > **HISTORICAL / INACTIVE。** 本文件原来记录 `99870de` 附近的接手现状；那些缺陷清单、状态和下一步不再是实施指令。
-> 唯一权威 v1 参考树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；`ZLC_main`、`_reference\Zou_lab_control_v1` 及其他副本均不得作为 v1 oracle。
+> 凡用户或权威计划明确要求参考 v1，唯一允许读取的树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；其他副本不得代替。v1 不是 v2 的上位规格，目前只明确用于 Device Manager 可见 UI 等点名参考。
 > 当前且唯一的目标权威是：
 >
 > 1. `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
@@ -18,8 +18,8 @@
 - Calibration 是 artifact-only Task：它从图像自动发现 sites，不接受 grid rows、columns 或 site count，写出 workspace 唯一命名的 plain calibration JSON（SiteMap、readout model、frame contract、report facts），不发布 calibration/report signal。
 - Camera Measurement 的 camera instance、exposure、ROI、repeat 和 frames-per-cycle 是每次 run 冻结的 measurement request；adapter 负责设备约束对齐和 actual readback。
 - Occupancy 显式消费 frames stable signal key 与 calibration path，输出同一 parent publication 下对齐的 counts/occupied/valid/rate/frame_judged。SiteMap 是 calibration domain data，不是 plot kind；固定 Image kind 用 `Site overlay = Off / Centers / Occupancy` 显示实测 centers/status。
-- Add Logic 创建 stopped row 后自动进入 non-modal Logic Edit。Logic Edit 只有 Start/Restart、Stop、Remove，没有通用 Apply；Panel Edit 的 Producer Apply 使用共享 row draft 调用同一个 Start/Restart endpoint。
-- Plot kind 在 Add Panel 时固定。Setting frame 与 Panel Edit 绑定同一份 Workbench-owned `PanelState`；Panel Edit 的 selector 可通过 descriptor data-only mapping 更新 direct producer 的共享 measurement draft。
+- TaskConsole header 只有一个 combined Plot/Measurement/Processor/Task 下拉框和一个 `Add Panel` 按钮。Logic entry 经同一按钮创建 stopped row 并自动进入 non-modal Logic Edit；没有独立 `Add Logic` 按钮或 modal chooser。Logic Edit 只有 Start/Restart、Stop、Remove，没有通用 Apply；Panel Edit 的 Producer Apply 使用共享 row draft 调用同一个 Start/Restart endpoint。
+- Plot entry 经同一 `Add Panel` 按钮创建固定 kind 的 blank panel，不依赖 signal publication；signal 在 Setting/Edit 中接入。Setting frame 与 Panel Edit 绑定同一份 Workbench-owned `PanelState`；Panel Edit 的 selector 可通过 descriptor data-only mapping 更新 direct producer 的共享 measurement draft。
 
 ## 当前保存语义
 
@@ -33,7 +33,7 @@ Calibration JSON 是 Task 成功时自动产生的业务 artifact，不是上述
 
 ## 当前验证状态
 
-根据 `IMPLEMENTATION_PLAN.md` 的持久 Checkpoint，Guard A/B/C 已分别先证明旧缺陷下会红，再在当前实现上转绿；正式虚拟产品路径、stop/close ownership 和三种 Save 均已验证。统一入口另有两层证据：真实 `bin\experiment.bat` 可见 smoke 的第一屏只有一个 Device Manager/Python GUI，Qt product-flow 测试完成 Init 后双窗口、共享 sequencer/world、On Pulse/Stop 和 close/recreate。当前主树全树回归为 `1105 passed`，复核后没有 ZLC GUI 进程残留；本文件不维护另一份进度表。
+最终产品证据以 `IMPLEMENTATION_PLAN.md` Checkpoint 为准。当前生产 HEAD `6ad2e70` 的全树回归为 `1114 passed`，Workbench 为 `319 passed`；该提交还通过独立 TEMP detached worktree 的路径探针与 Workbench `319 passed`，验证后 worktree 已删除。正式 `bin\experiment.bat` 的真实控件验收完成 `Init devices -> Calibration -> Repeat=0 Camera -> Pulse Load/On -> Occupancy -> blank Image -> frame_judged -> Occupancy site overlay -> Stop Pulse -> close`，显示六个实测 site circles；结束后两个 ZLC 窗口、session 和项目 Python 进程均无残留。本文件不维护另一份进度表。
 
 ## 历史真机观察（本轮未复测）
 

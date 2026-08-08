@@ -2,7 +2,7 @@
 
 > 仓库绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2`
 > 本文绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
-> 唯一权威 v1 参考树：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。`C:\Users\eadri\Dropbox\WorkCode\Github\ZLC_main`、`C:\Users\eadri\Dropbox\WorkCode\Github\_reference\Zou_lab_control_v1` 以及其他副本都不是 v1 oracle，禁止据其设计、实现或验收 v2。
+> 凡本文或用户明确要求“参考 v1”时，唯一允许读取的 v1 树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。`ZLC_main`、`_reference\Zou_lab_control_v1` 和其他副本都不得代替它。这个路径裁决不把 v1 升格为产品规格；v2 仍只按用户裁决和本文设计实施，目前只明确用 v1 参考 Device Manager 的可见 UI/操作面。
 > 设计基线：`0243aa6`。完成状态与实测证据以 `IMPLEMENTATION_PLAN.md` Checkpoint 为准；package/full-tree 测试不能替代真实实验入口和可见 GUI 的验收。
 > 权威顺序：用户当前裁决 > 简单且可维护的边界 > v2 当前实现 > v1 参考。v1 不是规格。
 > 根目录 `HANDOFF.md` 已在最初接手阶段完整读取，其有效要求和现状已吸收到本文与实施计划。Goal 启动后它只是历史输入，不是续跑权威，也不需要在每次上下文恢复时重读。
@@ -56,9 +56,9 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 ### 3.0 正式实验入口与 Device Manager
 
 1. 根目录 `bin\experiment.bat` 就是正式实验入口，等价于权威 v1 树中的 `task_console.bat`：它只启动一个统一的 TaskConsole experiment flow，不能串起多个 Python 进程，也不再增加第二个根入口。
-2. 同一 Qt 进程先显示权威 v1 的 Device Manager 操作面：`Config` tab 与 `Devices` header；左侧按 device domain 动态生成 Camera/Rf/Sequencer 等分组，每组包含具体 device cards 与 `Add device`；右侧是 `Discovered hardware`/`Scan hardware` 和 `Loaded session`；底部是 `New…`、`Load…`、`Save`、`Save as…`、`Apply`。不得显示已被 v1 淘汰的 `Installation`、`Backend`、`Configured devices`、`Available`、`Cancel`、`Init devices` 结构，也不得把 v2 内部 `InstallationConfig` 名称泄漏成用户界面。
-3. 首次 `Apply` 从当前 draft 创建并持有唯一 `ExperimentSession`；成功后隐藏 Device Manager，并在同一进程中同时显示 TaskConsole 和 Pulse UI。两者接收同一个 session、virtual world 和 sequencer 实例。后续 Apply/restart 的精确行为以该权威 v1 树和用户裁决为准。
-4. 实验入口中的 Pulse UI 借用 session 的 sequencer authority；它不自行 dial 第二个设备，也不拥有或关闭底层 sequencer。独立 `pulse_editor.bat` 只作为单独的脉冲编辑/连接测试工具，不是正式 Experiment 入口；它自行连接的 sequencer 也不代表 TaskConsole session。
+2. 同一 Qt 进程先显示用户指定的 v1 Device Manager 操作面：`Config` tab 与 `Devices` header；左侧按 device domain 动态生成 Camera/Rf/Sequencer 等分组，每组包含具体 device cards 与 `Add device`；右侧是 `Discovered hardware`/`Scan hardware` 和 `Loaded session`；底部是 `New…`、`Load…`、`Save`、`Save as…`、`Init devices`。不得显示错误的 `Installation`、`Backend`、`Configured devices`、`Available`、`Cancel` 结构，也不得把 v2 内部 `InstallationConfig` 名称泄漏成用户界面。
+3. `Init devices` 只从当前 device draft 创建并持有唯一 `ExperimentSession`；成功后隐藏 Device Manager，并在同一进程中同时显示 TaskConsole 和 Pulse UI。设备初始化不解析、不编译、不预载任何 pulse，也不以 `calibration`/`imaging_template` 是否存在作为成功条件。
+4. 实验入口中的 Pulse UI 借用 session 的 sequencer authority；它不自行 dial 第二个设备，也不拥有或关闭底层 sequencer。Pulse UI 的当前/初始文档是自己的 editor 状态，不是 Device Manager 的初始化前置条件，也不是 Calibration Task 的隐式 pulse。独立 `pulse_editor.bat` 只作为单独的脉冲编辑/连接测试工具，不是正式 Experiment 入口。
 5. 主 TaskConsole 关闭时按 Pulse controller -> TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的顺序有界清理；任何 ownership 尚未释放都不得伪装成成功退出。
 
 ### 3.1 两种访问状态
@@ -191,6 +191,8 @@ Calibration 不接受 grid rows、columns、site count 或预先 `SiteLayout`。
 
 Calibration 的 `Reference exposure` 与 `Readout exposure` 是显式 protocol 参数：相机 adapter 以 reference exposure 配置本次 run 的最大积分时间，编译后的 long/readout/long 外部门宽分别使用两项 authored 值。外部门宽可以按真实物理缩短某个 frame 的有效曝光，但不能把已配置的 camera exposure 延长；普通 Camera Measurement 仍只由自己的 request 配置 exposure，不能被一个无声明的 pulse metadata 替代。这样三帧继续共享同一 shot occupancy，同时 exposure 归属没有第二份隐式真相。
 
+Calibration Edit 的 pulse/template 参数指向 project `pulses` 目录中的 v2 pulse JSON，默认 `imaging_template.json`。该文件使用唯一的 `zlc_pulse` tree 格式 `format: "zlc.pulse.v1"`：`slots` 只表示 scan 维度，三项 Calibration duration 则由显式 `PulseApiParameter/api_parameters` 分别绑定 `reference_probe_duration_before`、`readout_probe_duration`、`reference_probe_duration_after`。只有用户 Start Calibration 时，Calibration Logic 才通过 `sequence_from_tree()`、`resolve_api_parameters()` 和连接板卡的 `BoardDescription` 编译；未解析 API parameter 的 sequence 不能被 compile。不得另造 `PulseDocument`、按名字前缀猜 API/scan、把 API parameter 塞进 scan table，或保留第二套 pulse model。产品链不把 Python module 当 pulse 文档，也不由 TaskConsole 启动或 Device Manager `Init devices` 偷偷预载 Calibration pulse。
+
 `SiteMap` 至少包含：
 
 - stable site id/axis；
@@ -235,8 +237,8 @@ Edit 中的理想参数：
 
 ### 9.1 Add/Edit 生命周期
 
-- `Add Logic` 只选 node type，创建 stopped row，不弹 modal 追问 source。
-- Add 成功后立即切换到对应 Logic Edit tab，与 v1 的交互一致。
+- TaskConsole header 只有权威 v1 的一个 combined 下拉框和一个 `Add Panel` 按钮。下拉框依次列 `Plot`、`Measurement`、`Processor`、`Task`；不得新增独立 `Add Logic` 按钮或 modal logic chooser。
+- 选中 Measurement/Processor/Task 后，同一个 `Add Panel` 按钮把 catalog `api_name` 送入唯一 `add_logic` endpoint，创建 stopped row，并立即切换到对应 Logic Edit tab。
 - Logic Edit 实时编辑 row draft，包含本 node 的所有 measurement/task/processor 参数和 input binding。
 - 按钮是 `Start/Restart`、`Stop`、`Remove`；没有空泛的 Logic `Apply`。
 - 新 Logic Node 启动时按第 3 节的 claim 规则停掉占用冲突设备的旧 node。
@@ -255,7 +257,7 @@ Calibration 中所谓“必要的高级检测参数”只能是算法确实需�
 
 ### 10.1 Add Panel
 
-Add Panel 时选定 Signal 和 Plot kind。Plot kind 一旦创建就固定；Setting/Edit 只读显示，需要另一种 kind 就新建 panel。Facet Grid 的 cell kind 也在 Add 时固定。
+在 header combined 下拉框选中 `Plot: ...` 后，同一个 `Add Panel` 按钮只创建该固定 kind 的 blank panel；它不要求 signal 已存在，也不自动挑 signal。空卡显示 `Pick a signal in Setting`，随后由 Setting/Edit 选择 signal。Plot kind 一旦创建就固定；Setting/Edit 只读显示，需要另一种 kind 就新建 panel。Facet Grid 的 cell kind 也在 Add 时固定。
 
 ### 10.2 Setting frame
 
@@ -332,9 +334,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 
 ## 13. 当前实现状态
 
-本文定义的产品链已经在当前树实现：role 与 extent 正交；finite `FollowTap`、retained final 和 infinite latest 三条 processor 路径均由 source 数据状态决定；Camera Measurement 支持 `Repeat=0` 以及 per-run exposure/ROI request；Calibration 自动发现 sites、只写 workspace JSON artifact；Occupancy 显式使用 frames 与 calibration path；Logic/Panel Edit、selector、Producer Apply、固定 plot kind、共享 `PanelState`、Image Site overlay 和三种 Save 语义均已闭环。
-
-正式入口是根 `bin\experiment.bat`。它只启动一个 Qt/Python experiment flow：Device Manager `Init devices` 持有唯一 session，随后在同一进程中同时显示 TaskConsole 与 Pulse UI，二者使用同一个 sequencer/world；退出按 ownership 顺序清理，不留下第二个进程或设备 owner。实现与实测证据记录在 `IMPLEMENTATION_PLAN.md` 的 Checkpoint；本节不另立待办清单。
+本文定义的产品链已经在当前树实现，并通过正式人类 UI 路径验收：根 `bin\experiment.bat` 的 Device Manager 用 `Init devices` 建立唯一 session，不加载 pulse；同一进程随后显示 TaskConsole 与 PulseGUI。操作者经 combined catalog 和同一个 `Add Panel` 依次完成 Calibration、`Repeat=0` Camera Measurement、PulseGUI `Load`/`On Pulse`、Occupancy、无 signal 也可创建的 blank Image panel、Setting 中的 signal 接线和 `Site overlay = Occupancy`，最终图像显示实测六个 site circles。验收结束先 `Stop Pulse`，再关闭 TaskConsole；两个窗口、session 和项目 Python 进程均归零。精确 HEAD、提交、测试和产物证据只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
 
 ## 14. 本轮 review 的结论和非问题
 
@@ -343,7 +343,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 - Calibration 自动发现 sites；无 grid shape/count 输入。
 - exposure/ROI 是 measurement 参数，由 UI 接线层维护共享 draft 并在 Start/Apply 时传给 device。
 - `Repeat=0` 是 infinite。
-- Add Logic 后自动进 Edit tab。
+- combined `Add Panel` 选择 Logic entry 后创建 stopped row 并自动进 Edit tab；没有独立 `Add Logic` 按钮或弹窗。
 - Plot kind 在 Add Panel 时固定。
 - Panel Edit 重复显示 panel 参数和 direct producer 参数，selector 更新同一 measurement draft，Producer Apply 立即重启 measurement。
 - Setting frame 和 Panel Edit 直接绑定同一 `PanelState`，对应参数天然双向同步；不存在两份 panel config。
