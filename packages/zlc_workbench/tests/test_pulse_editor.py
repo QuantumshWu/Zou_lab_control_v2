@@ -784,7 +784,7 @@ def _board_description():
     depends on it entirely.
     """
 
-    from zlc_pulse import load_streamer_config
+    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
 
@@ -794,6 +794,7 @@ def _board_description():
         MemoryRegisterTransport(geom=geometry, auto_done=True),
         geometry,
         config["clock_hz"],
+        target=pulse_target_from_xdc(config_path=config["source"]),
     )
     streamer.open()
     try:
@@ -820,7 +821,13 @@ class _Sequencer:
     exact bug this stopped being able to hide.
     """
 
-    def __init__(self, *, fail_on_fire: bool = False, never_done: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on_fire: bool = False,
+        never_done: bool = False,
+        description: object | None = None,
+    ) -> None:
         self.events: list[str] = []
         self.fail_on_fire = fail_on_fire
         self.never_done = never_done
@@ -829,6 +836,7 @@ class _Sequencer:
         self._forever = False
         self._applied = None
         self.scan_rows: tuple[tuple[int, ...], ...] = ()
+        self.description = description
 
     def applied(self):
         self.events.append("applied")
@@ -836,7 +844,7 @@ class _Sequencer:
 
     def describe(self):
         self.events.append("describe")
-        return _board_description()
+        return self.description or _board_description()
 
     def load(self, prog, *, source=None) -> None:
         self.events.append("load")
@@ -915,6 +923,7 @@ def test_on_pulse_runs_until_stop(sequence) -> None:
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    board.events.clear()
     try:
         view.fire_requested.emit()
         assert board.events == ["load", "fire forever"]
@@ -944,6 +953,7 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    board.events.clear()
     try:
         assert presenter.fire(forever=False) is True
         assert board.events == ["load", "fire"]
@@ -1041,11 +1051,19 @@ def test_saving_refuses_a_non_json_destination(sequence, tmp_path) -> None:
         presenter.close()
 
 
-def test_connecting_attaches_a_sequencer_and_shows_it(sequence) -> None:
+def test_connecting_attaches_a_sequencer_and_shows_it(sequence, monkeypatch) -> None:
     """The Connect button, which used to be attached to nothing."""
 
     view = _EditorView()
-    board = _Sequencer()
+    board = _Sequencer(description=_board_description())
+
+    import zlc_pulse
+
+    def _no_local_board_files(*_args, **_kwargs):
+        raise AssertionError("an attached editor read this computer's board files")
+
+    monkeypatch.setattr(zlc_pulse, "load_streamer_config", _no_local_board_files)
+    monkeypatch.setattr(zlc_pulse, "pulse_target_from_xdc", _no_local_board_files)
     presenter = PulseEditorPresenter(
         view, sequence, dial=lambda _mode, _endpoint: board
     )
@@ -1064,6 +1082,7 @@ def test_connecting_attaches_a_sequencer_and_shows_it(sequence) -> None:
         # through, and offering it without one is a button that cannot work.
         assert view.schedule_view.capabilities == (True, True, False)
         assert view.status_token == "dirty-ready"
+
         assert presenter.fire() is True
         assert view.status_token == "running-synced"
     finally:
@@ -1126,8 +1145,16 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         def close(self) -> None:
             self.closed = True
 
-    board = _Watched()
+    described = _board_description()
+    exact = replace(
+        described,
+        geometry=replace(described.geometry, coeff_frac_bits=3),
+    )
+    board = _Watched(description=exact)
     presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
+    assert presenter.board == exact
+    presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
+    assert presenter.compile().scan_coeff_frac_bits == 3
     presenter.close()
     assert board.closed is False
 
@@ -1774,6 +1801,8 @@ def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, s
     written: list = []
     board.write_slots = lambda values: written.append(tuple(values))
     presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    board.events.clear()
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
@@ -1802,6 +1831,8 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     board = _Sequencer()
     board.write_scan_table = lambda rows, sweeps=1: uploaded.append(tuple(rows))
     presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    board.events.clear()
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
@@ -2375,6 +2406,7 @@ def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    board.events.clear()
     try:
         while len(presenter.sequence.periods) < 3:
             presenter.insert_period(None)
@@ -2507,6 +2539,8 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
     board.write_slots = lambda row: written.append(tuple(row))
     board.cursor = lambda: 4
     presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    board.events.clear()
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
     view.scan_run_requested.emit(
         "import numpy as np\n"
@@ -2544,6 +2578,8 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
         (len(rows), len(rows[0]), sweeps)
     )
     presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    board.events.clear()
     view = presenter.view
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
     view.binding_cycle_requested.emit("duration", sequence.periods[1].period_id, None)
@@ -2597,6 +2633,8 @@ def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -
 
     board = _Sequencer()
     presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    board.events.clear()
     view = presenter.view
     period = sequence.periods[3].period_id
 

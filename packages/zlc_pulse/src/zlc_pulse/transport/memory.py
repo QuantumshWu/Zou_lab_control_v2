@@ -110,7 +110,12 @@ class MemoryRegisterTransport:
                     if value & CMD_LOAD:
                         self.status = STATUS_LOADED
                     if value & CMD_FIRE:
-                        self.status = STATUS_DONE if self.auto_done else STATUS_RUNNING
+                        forever = bool(self.words.get(CtrlWords.REPEAT_FOREVER, 0))
+                        self.status = (
+                            STATUS_RUNNING
+                            if forever or not self.auto_done
+                            else STATUS_DONE
+                        )
                     value = written
                 self.words[address] = value
 

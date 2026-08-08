@@ -89,11 +89,6 @@ def test_forbidden_imports_are_absent_from_the_package() -> None:
         assert forbidden not in text
 
 
-def test_a_half_has_no_parallel_package_imports() -> None:
-    for path in _python_files("devices", "execution"):
-        assert not _parallel_imports(path), path
-
-
 def test_b_half_parallel_import_policy_is_explicit() -> None:
     b_half = _python_files("nodes", "install")
     for path in b_half:

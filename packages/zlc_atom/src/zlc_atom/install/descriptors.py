@@ -7,7 +7,6 @@ from typing import Any, Callable, Mapping
 
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.devices.camera.contract import CameraAdapter, CameraWorkingPoint
-from zlc_atom.devices.sequencer.protocol import PulseStreamer
 from zlc_atom.execution.capabilities import CAPABILITY_TYPES
 from zlc_atom.execution.ports import BoundDevice
 from zlc_atom.devices.camera.world import SimulationWorld

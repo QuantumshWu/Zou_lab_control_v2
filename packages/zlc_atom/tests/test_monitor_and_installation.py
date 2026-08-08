@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from threading import Thread
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -22,15 +21,36 @@ from zlc_atom.nodes.camera_measurement import (
 )
 
 
-def _program_opening(windows: int) -> SimpleNamespace:
-    """A stand-in program that answers the way a compiled one does.
+def _one_camera_window_program():
+    from zlc_pulse import (
+        PulsePeriod,
+        PulseSequence,
+        compile_sequence,
+        load_streamer_config,
+        pulse_target_from_xdc,
+    )
 
-    A real CompiledProgram is asked how many camera windows it opens and works
-    it out from its own edges; a double that hands over a bare number instead
-    lets the twin accept a shape no program has.
-    """
-
-    return SimpleNamespace(camera_window_count=lambda _channel: windows)
+    config = load_streamer_config()
+    target = pulse_target_from_xdc()
+    trigger_lane = target.by_key["emCCD"].lanes[0]
+    trigger_index = target.raw_lanes.index(trigger_lane)
+    high = [0] * len(target.raw_lanes)
+    high[trigger_index] = 1
+    sequence = PulseSequence(
+        "one_camera_window",
+        target,
+        1e9 / config["clock_hz"],
+        (
+            PulsePeriod("expose", 0.02, "s", tuple(high)),
+            PulsePeriod(
+                "close",
+                1e9 / config["clock_hz"],
+                "ns",
+                (0,) * len(high),
+            ),
+        ),
+    )
+    return compile_sequence(sequence, config["params"], config["clock_hz"])
 
 
 def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame() -> None:
@@ -52,7 +72,7 @@ def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame(
         monitor = measurement.monitor(buffer_frames=1)
         assert isinstance(monitor, MonitorCapture)
         sequencer = installation.device("sequencer")
-        sequencer.load(_program_opening(1))
+        sequencer.load(_one_camera_window_program())
         sequencer.fire()
         sequencer.wait_done(1.0)
         record = monitor.poll()
@@ -137,7 +157,7 @@ def test_finite_measurement_collects_only_external_triggers() -> None:
         while not installation.device("camera").capture_state() and time.monotonic() < deadline:
             time.sleep(0.001)
         sequencer = installation.device("sequencer")
-        sequencer.load(_program_opening(1))
+        sequencer.load(_one_camera_window_program())
         for _ in range(3):
             sequencer.fire()
             sequencer.wait_done(1.0)

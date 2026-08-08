@@ -14,6 +14,7 @@ from zlc_pulse import (
     PulseSlot,
     PulseTarget,
     compile_sequence,
+    pulse_target_from_xdc,
 )
 from zlc_pulse.compile import TargetBusDelay
 from zlc_pulse.model import OutputDelay, PulseFieldRef
@@ -36,6 +37,9 @@ from zlc_pulse.wire import (
     StreamerParams,
     unpack_program,
 )
+
+
+_BOARD_TARGET = pulse_target_from_xdc()
 
 
 def _sequence(*, slotted: bool = False) -> PulseSequence:
@@ -111,7 +115,7 @@ def test_write_slots_writes_one_scan_row_without_edge_regions() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     before = len(transport.write_batches)
@@ -128,7 +132,7 @@ def test_write_scan_table_changes_only_scan_regions() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     before = len(transport.write_batches)
@@ -145,7 +149,7 @@ def test_replacing_slots_rearms_new_scan_rows_after_an_existing_table() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     streamer.write_slots((1,))
@@ -165,7 +169,7 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program, source=source)
 
@@ -202,7 +206,7 @@ def test_applied_state_tracks_scan_table_and_survives_done_and_safe() -> None:
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program, source=source)
     rows = ((1,), (2,), (1,))
@@ -251,7 +255,7 @@ def test_repeated_fire_reloads_the_resident_image_before_the_rtl_gate() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = _RtlFireGateTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     bases = region_bases(geom)
@@ -282,7 +286,7 @@ def test_fire_after_safe_reloads_the_resident_image_before_firing() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = _RtlFireGateTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     streamer.safe()
@@ -297,7 +301,7 @@ def test_runtime_slot_rows_reject_colliding_affine_edges() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     with pytest.raises(ValueError, match="edge ticks"):
@@ -310,7 +314,7 @@ def test_safe_readback_uses_stable_status_and_zero_clock_mask() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     streamer.fire()
@@ -334,7 +338,7 @@ def test_safe_readback_uses_stable_status_and_zero_clock_mask() -> None:
 def test_open_rejects_mismatched_word63() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     transport = MemoryRegisterTransport(layout_id=build_fingerprint(geom) ^ 1, geom=geom)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     with pytest.raises(RuntimeError, match="geometry/layout mismatch"):
         streamer.open()
     assert transport.closed
@@ -343,7 +347,7 @@ def test_open_rejects_mismatched_word63() -> None:
 def test_layout_check_and_transport_self_test_use_the_frozen_ctrl_contract() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     transport = MemoryRegisterTransport(geom=geom)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
 
     streamer.check_register_layout()
@@ -356,7 +360,7 @@ def test_wait_done_uses_observer_owned_terminal_double_reads() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     transport.read_log.clear()
@@ -395,7 +399,7 @@ def test_observer_refills_a_freed_scan_bank() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = _AdvancingMemoryTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     streamer.write_scan_table(tuple((value,) for value in (1, 2, 1, 3, 1, 2)))
@@ -415,7 +419,7 @@ def test_observer_refill_failure_becomes_terminal_error() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = _FailingRefillTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
     streamer.write_scan_table(tuple((value,) for value in (1, 2, 1, 3, 1, 2)))

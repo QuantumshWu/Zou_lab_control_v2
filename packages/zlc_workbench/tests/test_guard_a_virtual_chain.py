@@ -5,7 +5,6 @@ import zou_lab_control_v2
 import json
 from pathlib import Path
 import time
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -24,6 +23,37 @@ from zlc_workbench.logic import (
 )
 import zlc_workbench.image_overlay as image_overlay_module
 from zlc_workbench.image_overlay import ImageOverlayResolver
+
+
+def _one_camera_window_program():
+    from zlc_pulse import (
+        PulsePeriod,
+        PulseSequence,
+        compile_sequence,
+        load_streamer_config,
+        pulse_target_from_xdc,
+    )
+
+    config = load_streamer_config()
+    target = pulse_target_from_xdc(config_path=config["source"])
+    trigger_index = target.raw_lanes.index(target.by_key["emCCD"].lanes[0])
+    high = [0] * len(target.raw_lanes)
+    high[trigger_index] = 1
+    sequence = PulseSequence(
+        "one_camera_window",
+        target,
+        1e9 / config["clock_hz"],
+        (
+            PulsePeriod("expose", 0.005, "s", tuple(high)),
+            PulsePeriod(
+                "close",
+                1e9 / config["clock_hz"],
+                "ns",
+                (0,) * len(high),
+            ),
+        ),
+    )
+    return compile_sequence(sequence, config["params"], config["clock_hz"])
 
 
 def _wait_terminal(host: object, *, phase: str, timeout: float = 10.0) -> object:
@@ -162,10 +192,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         }
         assert plane.freeze().signals == {}
 
-        one_window_program = SimpleNamespace(
-            camera_window_count=lambda _channel: 1,
-            camera_window_exposures=lambda _channel: (0.005,),
-        )
+        one_window_program = _one_camera_window_program()
         sequencer.load(one_window_program)
         camera_descriptor = catalog.get("camera_measurement")
         assert camera_descriptor is not None

@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.camera.world import SimulationWorld
-from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
+from zlc_atom.devices.sequencer.virtual import SequencerDevice, VirtualPulseStreamer
 
 
 def _real_streamer():
@@ -48,7 +48,12 @@ def _real_streamer():
     )
     program = compile_sequence(sequence, geometry, config["clock_hz"])
     transport = MemoryRegisterTransport(geom=geometry, auto_done=True)
-    streamer = PulseStreamer(transport, geometry, config["clock_hz"])
+    streamer = PulseStreamer(
+        transport,
+        geometry,
+        config["clock_hz"],
+        target=target,
+    )
     streamer.open()
     return streamer, program
 
@@ -69,11 +74,12 @@ def sequencer(request):
     """The same cases, once per implementation."""
 
     streamer, program = _real_streamer() if request.param == "real" else _virtual_streamer()
-    streamer.kind = request.param
+    device = SequencerDevice(streamer)
+    device.kind = request.param
     try:
-        yield streamer, program
+        yield device, program
     finally:
-        streamer.close()
+        device.close()
 
 
 def test_firing_without_a_program_is_refused(sequencer) -> None:
@@ -156,7 +162,14 @@ def test_a_closed_device_refuses_everything(sequencer) -> None:
 
 def test_wait_done_reports_the_shot_that_just_ran(sequencer) -> None:
     streamer, program = sequencer
+    from zlc_pulse import PulseStreamer
+
+    assert isinstance(streamer.streamer, PulseStreamer)
+    described = streamer.describe()
+    assert described.geometry == streamer.streamer.geom
+    assert described.clock_hz == streamer.streamer.clock_hz
     streamer.load(program)
+    assert streamer.applied() is streamer.streamer.applied()
     streamer.fire()
     report = streamer.wait_done(1.0)
     assert report is not None

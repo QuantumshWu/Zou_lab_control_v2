@@ -108,7 +108,11 @@ def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
     dialled: list[tuple] = []
 
     def dial(host, port, **kwargs):
-        from zlc_pulse import PulseStreamer, load_streamer_config
+        from zlc_pulse import (
+            PulseStreamer,
+            load_streamer_config,
+            pulse_target_from_xdc,
+        )
         from zlc_pulse.transport import MemoryRegisterTransport
 
         dialled.append((host, port, kwargs))
@@ -118,6 +122,7 @@ def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
             MemoryRegisterTransport(geom=geometry, auto_done=True),
             geometry,
             config["clock_hz"],
+            target=pulse_target_from_xdc(config_path=config["source"]),
         )
 
     installation = create_installation(

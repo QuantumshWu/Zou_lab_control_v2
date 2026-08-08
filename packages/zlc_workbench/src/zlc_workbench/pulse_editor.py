@@ -939,7 +939,11 @@ class PulseEditorPresenter:
         #: recognised as new without every caller remembering to say so.
         self._shown: ScheduleVM | None = None
         self._connect()
-        self.refresh()
+        if self.sequencer is not None:
+            if not self.adopt_board():
+                raise RuntimeError("the injected sequencer did not provide its board description")
+        else:
+            self.refresh()
 
     # --------------------------------------------------------------- wiring
 
@@ -1360,11 +1364,25 @@ class PulseEditorPresenter:
         confirmation that survives until the bench proves it wrong.
         """
 
-        from zlc_pulse import compile_sequence, load_streamer_config
+        from zlc_pulse import compile_sequence
 
         sequence = sequence if sequence is not None else self.sequence
         if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
+        if self.sequencer is not None:
+            if self.board is None:
+                raise RuntimeError(
+                    "the attached sequencer has no board description; refusing "
+                    "to substitute this computer's board config"
+                )
+            return compile_sequence(
+                sequence,
+                self.board.geometry,
+                self.board.clock_hz,
+            )
+
+        from zlc_pulse import load_streamer_config
+
         config = load_streamer_config()
         if config["source"] is None:
             raise RuntimeError(
@@ -1404,7 +1422,16 @@ class PulseEditorPresenter:
             return False
         self._owns_sequencer = True
         self.connection = (mode, endpoint)
-        self.adopt_board()
+        had_sequence = self.sequence is not None
+        if not self.adopt_board():
+            failure_status = self._connection_status
+            self._release()
+            self.connection = ("offline", endpoint)
+            self._show_connection(failure_status)
+            self.refresh()
+            return False
+        if not had_sequence:
+            self.start_new_pulse()
         return True
 
     def adopt_board(self) -> bool:
@@ -1445,11 +1472,6 @@ class PulseEditorPresenter:
         self.revision += 1
         if self.sequence is None:
             self._apply_board_only(board)
-            # A board is the one thing a new pulse was missing, so having one
-            # IS the moment to open a pulse on it.  Attaching and then showing
-            # a schedule with no periods left the operator holding a window
-            # whose only reading was "nothing happened".
-            self.start_new_pulse()
         else:
             self._align_sequence_to(board)
         # One round trip, here, because attaching is exactly when what the
@@ -1463,7 +1485,6 @@ class PulseEditorPresenter:
         )
         self._show_connection(where)
         self.refresh()
-        self._done(f"connected to {where}")
         return True
 
     def _apply_board_only(self, board) -> None:
@@ -2032,7 +2053,7 @@ class PulseEditorPresenter:
             return
         attached = self.board is not None
         if attached:
-            width = int(self.board.bus_width)
+            width = int(self.board.geometry.bus_width)
             view.set_target_width_rules(
                 TargetWidthRule(1, 1, 1), TargetWidthRule(2, width, width)
             )

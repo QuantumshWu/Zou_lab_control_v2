@@ -383,6 +383,9 @@ try:
     assert flow.pulse.is_visible()
     assert flow.console.session is flow.session
     assert flow.pulse.presenter.sequencer is flow.session.sequencer
+    exact_board = flow.session.sequencer.describe()
+    assert flow.pulse.presenter.board == exact_board
+    assert flow.pulse.presenter._board_target == exact_board.target
     assert flow.pulse.presenter.sequence is None
     first_session = flow.session
 finally:

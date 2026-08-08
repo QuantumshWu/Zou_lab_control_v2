@@ -8,9 +8,8 @@ from typing import Any
 import numpy as np
 from zlc_runtime import SignalDataPlane as RuntimeSignalDataPlane
 from zlc_runtime.plane import SignalPublication
+from zlc_pulse.device import DoneReport, SafeReadback
 from zlc_pulse.wire import CtrlWords, build_fingerprint
-
-from zlc_atom.devices.sequencer.protocol import DoneReport, SafeReadback
 
 
 class FakePlane(RuntimeSignalDataPlane):
@@ -159,7 +158,7 @@ class FakePulseStreamer:
         return self.fires
 
     def safe(self) -> SafeReadback:
-        return SafeReadback(0, self.fires, False)
+        return SafeReadback((0, 0), (0,), True)
 
     def snapshot(self) -> Mapping[str, object]:
         return {

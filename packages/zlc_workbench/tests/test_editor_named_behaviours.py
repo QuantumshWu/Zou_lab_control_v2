@@ -26,7 +26,7 @@ from zlc_workbench.pulse_editor import programmable_ports, project_schedule
 def board():
     """A real virtual board, described by itself."""
 
-    from zlc_pulse import load_streamer_config
+    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
 
@@ -35,6 +35,7 @@ def board():
         MemoryRegisterTransport(geom=config["params"], auto_done=True),
         config["params"],
         config["clock_hz"],
+        target=pulse_target_from_xdc(config_path=config["source"]),
     )
     streamer.open()
     try:
@@ -115,7 +116,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     behaviour it names was intact.
     """
 
-    from zlc_pulse import load_streamer_config
+    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_workbench.pulse_editor import PulseEditorPresenter
@@ -127,6 +128,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
         MemoryRegisterTransport(geom=config["params"], auto_done=True),
         config["params"],
         config["clock_hz"],
+        target=pulse_target_from_xdc(config_path=config["source"]),
     )
     streamer.open()
     presenter = PulseEditorPresenter(
@@ -179,7 +181,7 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     ordinary territory, which is the part that can be checked without hardware.
     """
 
-    from zlc_pulse import load_streamer_config
+    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_pulse.wire import CtrlWords
@@ -190,7 +192,12 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     sequence = _ordinary_sequence()
     config = load_streamer_config()
     transport = MemoryRegisterTransport(geom=config["params"], auto_done=True)
-    board = PulseStreamer(transport, config["params"], config["clock_hz"])
+    board = PulseStreamer(
+        transport,
+        config["params"],
+        config["clock_hz"],
+        target=pulse_target_from_xdc(config_path=config["source"]),
+    )
     board.open()
     presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
     try:

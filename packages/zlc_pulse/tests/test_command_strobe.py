@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from zlc_pulse import compile_sequence
+from zlc_pulse import compile_sequence, pulse_target_from_xdc
 from zlc_pulse import device
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
@@ -33,6 +33,7 @@ from test_wire_device import _sequence
 
 
 RTL = Path(__file__).resolve().parents[1] / "fpga" / "pulse_streamer" / "zlc_pulse_streamer_top.v"
+_BOARD_TARGET = pulse_target_from_xdc()
 
 
 def _dropped(writes: list[int]) -> list[int]:
@@ -79,7 +80,7 @@ class _Recorder(MemoryRegisterTransport):
 def _streamer() -> tuple[PulseStreamer, _Recorder, object]:
     geom = StreamerParams()
     transport = _Recorder(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     return streamer, transport, program
@@ -158,7 +159,7 @@ def test_load_reports_a_loader_that_never_acknowledges() -> None:
             return super().read_word(word_offset, **kwargs)
 
     transport = _NeverLoads(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     device.LOAD_TIMEOUT = 0.05
@@ -238,7 +239,7 @@ def test_safe_retries_once_and_requires_adjacent_zero_status_reads(monkeypatch) 
 
     monkeypatch.setattr(device, "SAFE_RETRY_AFTER", 0.001)
     transport = _DelayedSafe(geom=StreamerParams(), auto_done=True)
-    streamer = PulseStreamer(transport, StreamerParams(), 50e6)
+    streamer = PulseStreamer(transport, StreamerParams(), 50e6, target=_BOARD_TARGET)
     streamer.open()
 
     readback = streamer.safe()
@@ -257,7 +258,7 @@ def test_safe_times_out_instead_of_returning_an_unstable_readback(monkeypatch) -
     monkeypatch.setattr(device, "SAFE_TIMEOUT", 0.01)
     monkeypatch.setattr(device, "SAFE_RETRY_AFTER", 0.001)
     transport = _NeverSafe(geom=StreamerParams(), auto_done=True)
-    streamer = PulseStreamer(transport, StreamerParams(), 50e6)
+    streamer = PulseStreamer(transport, StreamerParams(), 50e6, target=_BOARD_TARGET)
     streamer.open()
 
     with pytest.raises(TimeoutError, match="stable STATUS=0"):
@@ -266,7 +267,7 @@ def test_safe_times_out_instead_of_returning_an_unstable_readback(monkeypatch) -
     assert transport.commands.count(CMD_SAFE) == 2
 
 
-def test_a_board_describes_itself_rather_than_letting_a_client_assume() -> None:
+def test_a_board_describes_itself_rather_than_letting_a_client_assume(monkeypatch) -> None:
     """The protocol could open, load and fire a board but not ask what it was.
 
     So a client wanting ports, pins or a clock had to read its own XDC and
@@ -284,7 +285,15 @@ def test_a_board_describes_itself_rather_than_letting_a_client_assume() -> None:
         MemoryRegisterTransport(geom=geometry, auto_done=True),
         geometry,
         config["clock_hz"],
+        target=_BOARD_TARGET,
     )
+
+    import zlc_pulse.manifest as manifest
+
+    def _no_late_xdc_read(*_args, **_kwargs):
+        raise AssertionError("describe re-read process-global XDC state")
+
+    monkeypatch.setattr(manifest, "pulse_target_from_xdc", _no_late_xdc_read)
 
     # Nothing is proven before the handshake, so nothing is claimed.
     with pytest.raises(RuntimeError):
@@ -294,9 +303,10 @@ def test_a_board_describes_itself_rather_than_letting_a_client_assume() -> None:
     try:
         described = streamer.describe()
         assert isinstance(described, BoardDescription)
+        assert described.geometry == geometry
         assert len(described.target.raw_lanes) == geometry.channel_count
-        assert described.channel_count == geometry.channel_count
-        assert described.bus_count == geometry.bus_count
+        assert described.geometry.channel_count == geometry.channel_count
+        assert described.geometry.bus_count == geometry.bus_count
         assert described.clock_hz == float(config["clock_hz"])
         assert described.time_step_ns == 1e9 / float(config["clock_hz"])
         # A pin for every lane: the names an operator wires against.
@@ -324,6 +334,7 @@ def test_the_description_survives_the_wire() -> None:
         MemoryRegisterTransport(geom=geometry, auto_done=True),
         geometry,
         config["clock_hz"],
+        target=_BOARD_TARGET,
     )
     streamer.open()
     try:
@@ -336,6 +347,7 @@ def test_the_description_survives_the_wire() -> None:
         ), "the wire dropped the pin map"
 
         assert restored.clock_hz == original.clock_hz
+        assert restored.geometry == original.geometry
         assert restored.layout_fingerprint == original.layout_fingerprint
         # The port labels are what an operator reads in an editor.
         assert [port.label for port in restored.target.ports] == [
@@ -452,7 +464,7 @@ def test_a_fire_whose_acknowledgement_dies_is_verified_not_guessed() -> None:
             return super().write_words(words, **kwargs)
 
     transport = _AckLosingOnce(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
 
@@ -492,7 +504,7 @@ def test_a_fire_that_provably_never_ran_is_strobed_again() -> None:
             return super().write_words(words, **kwargs)
 
     transport = _AckAndCommandLosingOnce(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
 
@@ -561,7 +573,7 @@ def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> N
             return super().write_words(words, **kwargs)
 
     transport = _DeadlineRecorder(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
     streamer.fire()
@@ -598,7 +610,7 @@ def test_a_transport_that_never_loses_anything_gets_no_verify_machinery() -> Non
 
     transport = _NotLossyRecorder(geom=geom, auto_done=True)
     assert getattr(transport, "lossy_line", False) is False
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
     streamer.fire()

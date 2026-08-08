@@ -64,6 +64,7 @@ def dial(mode: str, endpoint: str):
         PulseStreamer,
         connect,
         load_streamer_config,
+        pulse_target_from_xdc,
     )
 
     if mode == "remote":
@@ -87,6 +88,7 @@ def dial(mode: str, endpoint: str):
             MemoryRegisterTransport(geom=geometry, auto_done=True),
             geometry,
             config["clock_hz"],
+            target=pulse_target_from_xdc(config_path=config["source"]),
         )
         streamer.open()
         return streamer

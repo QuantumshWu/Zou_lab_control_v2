@@ -94,6 +94,7 @@ _TREE_TYPES = {
         PulseTarget,
         RepeatRegion,
         SafeReadback,
+        StreamerParams,
         _TargetBusDelay,
         _TargetBusSegment,
     )
@@ -374,6 +375,7 @@ def _probe_uart_port(
     port: str,
     timeout: float,
     *,
+    target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
     state_dir: str,
@@ -387,7 +389,7 @@ def _probe_uart_port(
         baud=baud,
         action_timeout=timeout,
     )
-    streamer = PulseStreamer(transport, params, clock_hz)
+    streamer = PulseStreamer(transport, params, clock_hz, target=target)
     try:
         streamer.open()
     finally:
@@ -424,6 +426,7 @@ def resolve_backend(
     uart_port: str | None = None,
     uart_baud: int = 3_000_000,
     state_dir: str = "fpga/build/state",
+    target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
     port_provider: Callable[[], Iterable[object]] | None = None,
@@ -449,6 +452,7 @@ def resolve_backend(
         probe_fn = lambda port, timeout: _probe_uart_port(
             port,
             timeout,
+            target=target,
             params=params,
             clock_hz=clock_hz,
             state_dir=state_dir,
@@ -1168,6 +1172,7 @@ def _main(argv: list[str] | None = None) -> int:
             uart_port=args.uart_port,
             uart_baud=args.uart_baud,
             state_dir=args.state_dir,
+            target=target,
             params=config["params"],
             clock_hz=config["clock_hz"],
             on_candidates=report_candidates,
@@ -1220,7 +1225,12 @@ def _main(argv: list[str] | None = None) -> int:
             )
         else:
             transport = VivadoAxiRegisterTransport(state_dir=args.state_dir)
-        streamer = PulseStreamer(transport, config["params"], config["clock_hz"])
+        streamer = PulseStreamer(
+            transport,
+            config["params"],
+            config["clock_hz"],
+            target=target,
+        )
         backend_label = {
             "jtag-axi": "JTAG-to-AXI",
             "uart": "UART",

@@ -18,6 +18,7 @@ from zlc_pulse import (
     PulseSequence,
     PulseTarget,
     compile_sequence,
+    pulse_target_from_xdc,
 )
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.remote import (
@@ -33,6 +34,9 @@ from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.transport.uart import UartError
 from zlc_pulse.transport import uart_frame as framing
 from zlc_pulse.wire import CtrlWords, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
+
+
+_BOARD_TARGET = pulse_target_from_xdc()
 
 
 def _sequence(*, slotted: bool = False) -> PulseSequence:
@@ -82,7 +86,7 @@ def test_remote_replays_device_path_with_short_done_poll() -> None:
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     with _server(streamer) as server:
         client = _client(server)
         try:
@@ -106,7 +110,7 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     with _server(streamer) as server:
         client = _client(server)
         try:
@@ -133,7 +137,7 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     with _server(streamer) as server:
         client = _client(server)
         try:
@@ -181,7 +185,9 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
     """
 
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    streamer = PulseStreamer(MemoryRegisterTransport(geom=geom), geom, 50e6)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
     with _server(streamer) as server:
         previous = _client(server)
         previous_address = server.owner_status()[0]
@@ -216,7 +222,7 @@ def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     with _server(streamer) as server:
         client = _client(server)
         try:
@@ -279,6 +285,7 @@ def _fake_resolution(tmp_path, outcomes, *, requested="auto", ports=("COM1",)):
 
     result = resolve_backend(
         requested,
+        target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
         state_dir=str(tmp_path),
@@ -331,7 +338,12 @@ def test_backend_auto_probes_every_os_port_with_physical_usb_first(monkeypatch, 
             raise TimeoutError("not the pulse streamer")
 
     result = resolve_backend(
-        "auto", params=StreamerParams(), clock_hz=50e6, state_dir=str(tmp_path), probe=probe
+        "auto",
+        target=_BOARD_TARGET,
+        params=StreamerParams(),
+        clock_hz=50e6,
+        state_dir=str(tmp_path),
+        probe=probe,
     )
 
     assert result.candidates == ("COM6", "COM3", "COM5", "COM4")
@@ -385,7 +397,9 @@ def test_backend_failure_categories_use_real_transport_exceptions() -> None:
     assert remote_module._probe_failure_reason(UartError("UART CRC error status in read reply")) == "CRC error"
 
     mismatch = MemoryRegisterTransport(layout_id=build_fingerprint(StreamerParams()) ^ 1)
-    mismatch_streamer = PulseStreamer(mismatch, StreamerParams(), 50e6)
+    mismatch_streamer = PulseStreamer(
+        mismatch, StreamerParams(), 50e6, target=_BOARD_TARGET
+    )
     try:
         mismatch_streamer.open()
     except RuntimeError as error:
@@ -440,6 +454,7 @@ def test_backend_auto_missing_pyserial_falls_back_without_probe(tmp_path) -> Non
     calls: list[tuple[str, float]] = []
     result = resolve_backend(
         "auto",
+        target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
         state_dir=str(tmp_path),
@@ -486,6 +501,7 @@ def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> 
     result = resolve_backend(
         "auto",
         uart_baud=3_000_000,
+        target=_BOARD_TARGET,
         params=params,
         clock_hz=50e6,
         state_dir=str(tmp_path),
@@ -522,6 +538,7 @@ def test_uart_probe_direct_helper_uses_existing_open_handshake(monkeypatch, tmp_
     remote_module._probe_uart_port(
         "COM7",
         0.5,
+        target=_BOARD_TARGET,
         params=params,
         clock_hz=50e6,
         state_dir=str(tmp_path),
@@ -546,6 +563,7 @@ def test_explicit_jtag_skips_uart_probe(tmp_path) -> None:
 
     result = resolve_backend(
         "jtag-axi",
+        target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
         state_dir=str(tmp_path),
@@ -563,6 +581,7 @@ def test_uart_port_override_is_the_only_auto_candidate(tmp_path) -> None:
     result = resolve_backend(
         "auto",
         uart_port="COM9",
+        target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
         state_dir=str(tmp_path),
@@ -638,7 +657,7 @@ def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     with _server(streamer) as server:
         client_a = _client(server)
         client_a.load(program, source=source)
@@ -700,7 +719,12 @@ def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
     import struct as struct_module
 
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    streamer = PulseStreamer(MemoryRegisterTransport(geom=geom, auto_done=True), geom, 50e6)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom, auto_done=True),
+        geom,
+        50e6,
+        target=_BOARD_TARGET,
+    )
     seen: list[BaseException] = []
 
     with _server(streamer) as server:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
+import time
 
 import numpy as np
 import pytest
@@ -11,24 +11,13 @@ from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
-from zlc_atom.devices.sequencer.virtual import DictRegisterTransport, VirtualPulseStreamer
+from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
 from zlc_runtime import SignalDataPlane
-from tests.pulse_fixture import PULSE_ROOT
+from tests.pulse_fixture import CAMERA_CHANNEL, PULSE_ROOT, build_calibration_pulse
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _program_opening(windows: int) -> SimpleNamespace:
-    """A stand-in program that answers the way a compiled one does.
-
-    A real CompiledProgram is asked how many camera windows it opens and works
-    it out from its own edges; a double that hands over a bare number instead
-    lets the twin accept a shape no program has.
-    """
-
-    return SimpleNamespace(camera_window_count=lambda _channel: windows)
 
 
 def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() -> None:
@@ -54,17 +43,25 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
 
 def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
     world = SimulationWorld(seed=1)
+    program, _metadata = build_calibration_pulse()
     streamer = VirtualPulseStreamer(
-        transport=DictRegisterTransport(),
         world=world,
-        camera_trigger_channel="camera",
+        camera_trigger_channel=CAMERA_CHANNEL,
     )
     streamer.open()
-    streamer.load(_program_opening(3))
-    streamer.fire()
-    streamer.wait_done(1.0)
-    assert world.fire_count == 1
-    streamer.close()
+    try:
+        streamer.load(program)
+        streamer.fire(forever=True)
+        deadline = time.monotonic() + 0.5
+        while world.fire_count < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert world.fire_count >= 3
+        streamer.safe()
+        stopped_at = world.fire_count
+        time.sleep(0.08)
+        assert world.fire_count == stopped_at
+    finally:
+        streamer.close()
 
 
 def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> None:

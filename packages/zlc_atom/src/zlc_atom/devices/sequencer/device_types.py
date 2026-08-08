@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.sequencer.protocol import PulseStreamer
 from zlc_atom.devices.sequencer.virtual import SequencerDevice, VirtualSequencer
 from zlc_atom.execution import DeviceIdentityEvidenceKind, PhysicalDeviceIdentity, ResourceKey, SafetyOperation, bind_verified_device
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_atom.devices.camera.world import SimulationWorld
+from zlc_pulse import PulseStreamer, RemotePulseStreamer
 
 
 #: The virtual sequencer needs nothing said about it: it has no endpoint.
@@ -75,8 +75,8 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
             int(authored["port"]),
             request_timeout=float(authored["request_timeout"]),
         )
-    if not isinstance(streamer, PulseStreamer):
-        raise TypeError("sequencer.hardware needs an object satisfying the PulseStreamer contract")
+    if not isinstance(streamer, (PulseStreamer, RemotePulseStreamer)):
+        raise TypeError("sequencer.hardware needs a zlc_pulse device")
     device = SequencerDevice(streamer)
     device.open()
     return _bind(context, key, device, f"sequencer:{key}", "sequencer.hardware")

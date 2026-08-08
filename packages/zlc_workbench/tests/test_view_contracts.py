@@ -17,7 +17,6 @@ the real view would refuse.
 
 from __future__ import annotations
 
-import dataclasses
 import inspect
 import os
 
@@ -39,9 +38,8 @@ from zlc_ui.pulse.scan_view import PulseScanView
 from zlc_ui.pulse.schedule_view import PulseScheduleView
 from zlc_ui.pulse.target_view import PulseTargetView
 from zlc_atom.devices.sequencer import device_types as atom_sequencer_types
-from zlc_atom.devices.sequencer import protocol as atom_sequencer
 from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
-from zlc_pulse import load_streamer_config
+from zlc_pulse import load_streamer_config, pulse_target_from_xdc
 from zlc_pulse import device, remote
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
@@ -180,55 +178,6 @@ def test_a_stand_in_view_raises_only_signals_the_real_view_raises(double, real) 
     )
 
 
-# --------------------------------------------------------------- device mirrors
-
-#: zlc_atom writes out what it needs of a pulse board instead of importing
-#: zlc_pulse, so a camera or a sequencer can be driven with no zlc_pulse present.
-#: This is the one place both are visible, so this is where the copy is checked.
-MIRRORS = [
-    (atom_sequencer.DoneReport, device.DoneReport),
-    (atom_sequencer.SafeReadback, device.SafeReadback),
-]
-
-
-@pytest.mark.parametrize("mirror,real", MIRRORS, ids=lambda item: item.__name__)
-def test_a_mirrored_record_has_the_fields_the_real_one_has(mirror, real) -> None:
-    """A copy that names fields the original does not is a copy nobody can use.
-
-    SafeReadback had drifted to three fields the board has never had.  Nothing
-    read them, so nothing failed -- until the first piece of code that did.
-    """
-
-    here = {field.name: field.type for field in dataclasses.fields(mirror)}
-    there = {field.name: field.type for field in dataclasses.fields(real)}
-    invented = sorted(set(here) - set(there))
-    assert not invented, (
-        f"{mirror.__name__} names {invented}, which {real.__name__} does not "
-        "have.  Either the board grew them or the copy imagined them."
-    )
-    differing = sorted(
-        name for name in here if str(here[name]) != str(there[name])
-    )
-    assert not differing, (
-        f"{mirror.__name__} and {real.__name__} disagree about the type of "
-        f"{differing}"
-    )
-
-
-def test_the_board_protocol_asks_only_for_methods_the_board_has() -> None:
-    """A requirement naming a method nobody implements admits nothing."""
-
-    missing = [
-        name
-        for name in atom_sequencer.PulseStreamer.__protocol_attrs__
-        if not hasattr(device.PulseStreamer, name)
-    ]
-    assert not missing, (
-        f"zlc_atom asks a pulse board for {missing}, which zlc_pulse's board "
-        "does not offer"
-    )
-
-
 def test_a_virtual_board_answers_the_questions_a_real_one_answers() -> None:
     """A twin that reports its state under different keys reports nothing.
 
@@ -242,6 +191,7 @@ def test_a_virtual_board_answers_the_questions_a_real_one_answers() -> None:
             MemoryRegisterTransport(geom=_GEOMETRY, auto_done=True),
             _GEOMETRY,
             _CLOCK_HZ,
+            target=pulse_target_from_xdc(config_path=_CONFIG["source"]),
         ).snapshot()
     )
     twin = set(VirtualPulseStreamer().snapshot())
@@ -335,24 +285,3 @@ def test_the_two_content_name_rules_agree() -> None:
     from zlc_pulse.canonical import DIGEST_BITS as PULSE_BITS
 
     assert DATA_BITS == PULSE_BITS
-
-
-def test_both_done_reports_agree_on_what_a_bad_shot_is() -> None:
-    """A shot that errored or underran must not look like a clean one.
-
-    The rule is stated in zlc_pulse and mirrored in zlc_atom, which cannot
-    import it.  If the two disagree, the same board answer is a fault on one
-    path and a good shot on the other.
-    """
-
-    from zlc_pulse.wire import STATUS_ERROR, STATUS_UNDERFLOW
-
-    assert atom_sequencer.STATUS_ERROR == STATUS_ERROR
-    assert atom_sequencer.STATUS_UNDERFLOW == STATUS_UNDERFLOW
-
-    for status, underflow in ((0, False), (STATUS_ERROR, False), (0, True)):
-        real = device.DoneReport(status, None, underflow, 0.0)
-        mirror = atom_sequencer.DoneReport(status, None, underflow, 0.0)
-        assert real.fault == mirror.fault, (status, underflow)
-    assert device.DoneReport(0, None, False, 0.0).fault == ""
-    assert device.DoneReport(STATUS_ERROR, None, False, 0.0).fault

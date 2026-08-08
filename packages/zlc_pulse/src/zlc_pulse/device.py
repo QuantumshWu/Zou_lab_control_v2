@@ -166,12 +166,26 @@ class BoardDescription:
     """
 
     target: PulseTarget
+    geometry: StreamerParams
     clock_hz: float
-    time_step_ns: float
-    layout_fingerprint: int
-    channel_count: int
-    bus_count: int
-    bus_width: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, PulseTarget):
+            raise TypeError("board target must be PulseTarget")
+        if not isinstance(self.geometry, StreamerParams):
+            raise TypeError("board geometry must be StreamerParams")
+        clock_hz = float(self.clock_hz)
+        if not math.isfinite(clock_hz) or clock_hz <= 0:
+            raise ValueError("board clock_hz must be finite and positive")
+        object.__setattr__(self, "clock_hz", clock_hz)
+
+    @property
+    def time_step_ns(self) -> float:
+        return 1e9 / self.clock_hz
+
+    @property
+    def layout_fingerprint(self) -> int:
+        return int(build_fingerprint(self.geometry))
 
 
 class PulseStreamer:
@@ -181,11 +195,37 @@ class PulseStreamer:
     refills scan banks.  Public cursor reads use its cached sample.
     """
 
-    def __init__(self, transport: RegisterTransport, geom: StreamerParams, clock_hz: float) -> None:
+    def __init__(
+        self,
+        transport: RegisterTransport,
+        geom: StreamerParams,
+        clock_hz: float,
+        *,
+        target: PulseTarget,
+    ) -> None:
         if not isinstance(geom, StreamerParams):
             raise TypeError("geom must be StreamerParams")
+        if not isinstance(target, PulseTarget):
+            raise TypeError("target must be PulseTarget")
         if clock_hz <= 0:
             raise ValueError("clock_hz must be positive")
+        buses = tuple(port for port in target.ports if port.kind == PORT_DAC)
+        widths = {port.width for port in buses}
+        mismatches = []
+        if len(target.raw_lanes) != geom.channel_count:
+            mismatches.append(
+                f"target lanes={len(target.raw_lanes)} but geometry has {geom.channel_count}"
+            )
+        if len(buses) != geom.bus_count:
+            mismatches.append(
+                f"target DAC buses={len(buses)} but geometry has {geom.bus_count}"
+            )
+        if widths != {geom.bus_width}:
+            mismatches.append(
+                f"target DAC widths={sorted(widths)} but geometry has {geom.bus_width}"
+            )
+        if mismatches:
+            raise ValueError("target/geometry mismatch: " + "; ".join(mismatches))
         self.transport = transport
         observer_interval = getattr(transport, "observer_interval", DEFAULT_OBSERVER_INTERVAL)
         if isinstance(observer_interval, bool) or not math.isfinite(float(observer_interval)) or observer_interval <= 0:
@@ -193,11 +233,9 @@ class PulseStreamer:
         self._observer_interval = float(observer_interval)
         self.geom = geom
         self.clock_hz = float(clock_hz)
+        self._target = target
         self._lock = threading.RLock()
         self._opened = False
-        # The board's pin-aware target, read from the XDC beside this config the
-        # first time anyone asks what the board is.
-        self._target: PulseTarget | None = None
         self._program: CompiledProgram | None = None
         self._applied: AppliedState | None = None
         # Digested once, when the program is applied.  ``snapshot`` is polled
@@ -469,56 +507,12 @@ class PulseStreamer:
 
         with self._lock:
             self._require_open()
-            target = self._board_target()
             params = self.geom
             return BoardDescription(
-                target=target,
+                target=self._target,
+                geometry=params,
                 clock_hz=float(self.clock_hz),
-                time_step_ns=1e9 / float(self.clock_hz),
-                layout_fingerprint=int(build_fingerprint(params)),
-                channel_count=int(params.channel_count),
-                bus_count=int(params.bus_count),
-                bus_width=int(params.bus_width),
             )
-
-    def _board_target(self) -> PulseTarget:
-        """The pin-aware target for THIS board, read once.
-
-        The XDC is not proven by anything -- the LAYOUT_ID handshake proves the
-        geometry this streamer was constructed with, and nothing else.  So the
-        target read off disk is checked against that geometry before it is
-        handed out: a description used to mix the two, taking its counts from
-        the proven geometry and its ports and pins from whatever XDC happened
-        to be the default, which is two different boards in one answer.
-        """
-
-        if self._target is None:
-            from .manifest import pulse_target_from_xdc
-
-            target = pulse_target_from_xdc()
-            buses = tuple(port for port in target.ports if port.kind == PORT_DAC)
-            widths = sorted({port.width for port in buses})
-            mismatches = []
-            if len(target.raw_lanes) != int(self.geom.channel_count):
-                mismatches.append(
-                    f"lanes={len(target.raw_lanes)} but this board has "
-                    f"{int(self.geom.channel_count)}"
-                )
-            if len(buses) != int(self.geom.bus_count):
-                mismatches.append(
-                    f"DAC buses={len(buses)} but this board has {int(self.geom.bus_count)}"
-                )
-            if widths and widths != [int(self.geom.bus_width)]:
-                mismatches.append(
-                    f"DAC widths={widths} but this board has {int(self.geom.bus_width)}"
-                )
-            if mismatches:
-                raise ValueError(
-                    "the XDC on this machine describes a different board than the "
-                    "one this streamer is driving: " + "; ".join(mismatches)
-                )
-            self._target = target
-        return self._target
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -906,4 +900,10 @@ class PulseStreamer:
         self._safe_clock_enable_words = tuple(int(value) for value in clock_enable_words)
 
 
-__all__ = ["AppliedState", "DoneReport", "PulseStreamer", "SafeReadback"]
+__all__ = [
+    "AppliedState",
+    "BoardDescription",
+    "DoneReport",
+    "PulseStreamer",
+    "SafeReadback",
+]
