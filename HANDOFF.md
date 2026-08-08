@@ -195,6 +195,44 @@ task_console 整体 UI 与 v1 的差距尚未逐项对账。
 
 ---
 
+### ⑩ 真机：hold/step 时 DAC 完全不动，scan 时正常（用户示波器实测）
+
+`untitled` 脉冲，scan repeats=0，Stop at hold，然后 Step：**TTL 正常，DAC 的 edge/ramp
+完全无效**。同一条脉冲**跑 scan 时 DAC 正常变化**。
+
+已在当前树上量实并排除的（主机侧这一整条是干净的）：
+
+* 文档有 DAC 命令：`untitled.json` period1 `ramp→511`、period2 `ramp→0`
+* 编译产出正确的总线段：`seg1 tick 0→1,000,000 stop=1023`、
+  `seg2 tick 1,000,000→1,100,000 stop=512 start_tick_coeffs=(256,0)`
+  （1023/512 = +511/0 的 offset-binary，仿射系数让起点随被扫的时长移动，都对）
+* `load → _hold(0) → step(+1)` 板上始终 2 段，`repeats` 0 与 1 都一样，零 warning
+* `start_value=0` 不是缺陷：`engine_model.py:860` 在 `value_select==0` 时用 DAC 的
+  **当前值**，`start_value` 被忽略；1141 行的预测器同语义。两个模型一致
+* 锁存时钟不是缺陷：`da_clk0..3` 不在 `raw_lanes` 里，由 RTL 从总线段自己生成
+* 几何/ABI 不匹配已被用户的观察排除 —— scan 正常说明段确实到了板子且会播
+
+**剩下的唯一差别，就是这两条路本身**：
+
+| | scan | hold / step |
+|---|---|---|
+| 板上表 | 多点扫描表 | `write_slots` 把持住的点变成**一行**表（`SCAN_COUNT=1`） |
+| 运行 | `fire()` 扫完 | `fire(forever=True)` **永远循环这一个点** |
+
+假说（未验证，需真板子）：**总线段只在进入一个扫描点时求值一次，forever 重播同一点时
+不再重新触发**；边沿表在循环里照常翻转，所以 TTL 正常而 DAC 停在原处。
+虚拟 transport 走同一份 `pack_program`，测不出这个差异。
+
+下一步：在真板子上比对「单点 scan 表跑一遍」与「同一点 hold forever」两种情况下
+DAC 的实际输出；若假说成立，修在 RTL 的段触发条件或 hold 的运行方式（例如 hold 用
+`sweeps` 循环单点表而不是 forever）。
+
+### ⑪ 编辑器打不开自己保存的脉冲
+
+`apps/pulse_editor.py:181` 只找 `f"{name}.py"`，而编辑器 Save 写出的是 `.json`
+（`workspace/pulses/untitled.json`）。`resolve(workspace, 'untitled')` 直接抛
+`no pulse named 'untitled'`。回滚前修过，被退掉了。
+
 ## 7. 工作纪律
 
 1. **`packages/zlc_workbench/GOAL.md` 是历史任务书，可能过期** —— 参考，不是无条件权威。
