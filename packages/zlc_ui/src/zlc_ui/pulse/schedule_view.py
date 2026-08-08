@@ -601,11 +601,20 @@ class PulseDragContainer(QtWidgets.QWidget):
         while self.layout_main.count():
             item = self.layout_main.takeAt(0)
             widget = item.widget()
-            if widget is not None:
-                widget.removeEventFilter(self)
-                widget.setParent(None)
-                if widget not in cards:
-                    widget.hide()
+            if widget is None:
+                continue
+            widget.removeEventFilter(self)
+            if widget in cards:
+                # About to be re-added below.  Taking it out of the LAYOUT is
+                # the whole job; setParent(None) additionally makes it a
+                # top-level window, which is a different thing and one this
+                # widget spends the rest of the function undoing.
+                continue
+            # Not wanted any more.  Hiding an orphan leaves it alive for the
+            # life of the process: every reopened pulse left its predecessor's
+            # cards behind, six of them per load, still holding their text.
+            widget.setParent(None)
+            widget.deleteLater()
         self._cards = tuple(cards)
         for card in self._cards:
             self.watch_card_chrome(card)

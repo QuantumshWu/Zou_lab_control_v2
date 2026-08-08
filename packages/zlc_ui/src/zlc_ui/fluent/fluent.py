@@ -1578,7 +1578,28 @@ class _FluentMessageDialog(QtWidgets.QDialog):
         painter.drawRoundedRect(rect, self._radius, self._radius)
 
 
+def retire_pending_widgets() -> None:
+    """Run the deletions the outer event loop has not got to yet.
+
+    ``deleteLater`` runs when the loop it was called from returns to its top
+    level -- and a modal dialog does not return there, it opens a NESTED loop.
+    So a rebuild that retires widgets and then reports what it did leaves the
+    retired widgets alive for exactly as long as the message is up, and the
+    nested loop repaints the window behind the dialog with both sets on it.
+
+    Measured on a pulse reopen: 6 old period cards still alive beside the 4 new
+    ones until the dialog closed, which is when the text stopped being doubled.
+    """
+
+    application = QtWidgets.QApplication.instance()
+    if application is not None:
+        application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+
+
 def _exec_centered_dialog(dialog: QtWidgets.QDialog, parent) -> int:
+    # Before the nested loop starts, not after: what it is about to paint has
+    # to be what is actually still there.
+    retire_pending_widgets()
     dialog.adjustSize()
     if parent is not None:
         centre = parent.mapToGlobal(parent.rect().center())

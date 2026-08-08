@@ -23,6 +23,7 @@ for _name in (
     "FluentSettingsPopupAnchor", "FluentGroupBox", "FluentButton", "FluentLineEdit",
     "FluentReadoutEdit", "FluentReadoutMultiline", "FluentPathEdit",
     "FluentSectionLabel", "setting_label_width", "FluentSettingRow", "fluent_message",
+    "retire_pending_widgets",
     "fluent_confirm", "FluentComboBox", "FluentTreeComboBox", "FluentTabWidget",
     "FluentSwitch", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "FluentCheckBox", "FluentScrollArea",
