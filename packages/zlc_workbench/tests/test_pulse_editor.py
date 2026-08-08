@@ -40,6 +40,11 @@ from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary
 def PulseEditorPresenter(view, sequence=None, **kwargs):
     """Build the real presenter from its one complete authoring record."""
 
+    if kwargs.get("sequencer") is not None and kwargs.get("device_use") is None:
+        from zlc_workbench.device_use import DeviceUseCoordinator
+
+        kwargs["device_use"] = DeviceUseCoordinator()
+
     return _PulseEditorPresenter(
         view,
         PulseEditorState(sequence=sequence),
@@ -845,6 +850,7 @@ class _Sequencer:
         self._firing = False
         self._forever = False
         self._applied = None
+        self.wait_timeouts: list[object] = []
         self.scan_rows: tuple[tuple[int, ...], ...] = ()
         self.description = description
 
@@ -880,6 +886,7 @@ class _Sequencer:
 
     def wait_done(self, timeout=None) -> object | None:
         self.events.append("wait_done")
+        self.wait_timeouts.append(timeout)
         # None means "no shot finished", exactly as the real device reports it.
         if self.never_done:
             return None
@@ -962,7 +969,16 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
 
     view = _EditorView()
     board = _Sequencer()
-    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy, DeviceUseCoordinator
+
+    device_use = DeviceUseCoordinator()
+    presenter = PulseEditorPresenter(
+        view,
+        sequence,
+        sequencer=board,
+        device_use=device_use,
+    )
     board.events.clear()
     try:
         assert presenter.fire(forever=False) is True
@@ -970,6 +986,36 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
         # Started, not finished: nothing waits for the board any more, so a run
         # that was just asked for is a run that is going.
         assert presenter.running is True
+        with pytest.raises(DeviceUseBusy, match="PulseGUI"):
+            device_use.acquire_command(
+                object(),
+                "calibration",
+                (
+                    DeviceClaim(
+                        "sequencer",
+                        "sequencer",
+                        board,
+                        DeviceAccess.EXCLUSIVE,
+                    ),
+                ),
+            )
+
+        presenter.refresh_run_state()
+        assert board.events[-1] == "wait_done"
+        assert board.wait_timeouts[-1] == 0
+        lease = device_use.acquire_command(
+            object(),
+            "calibration",
+            (
+                DeviceClaim(
+                    "sequencer",
+                    "sequencer",
+                    board,
+                    DeviceAccess.EXCLUSIVE,
+                ),
+            ),
+        )
+        lease.release()
     finally:
         presenter.close()
 
@@ -1201,9 +1247,15 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
 
     class _Watched(_Sequencer):
         closed = False
+        refuse_safe = False
 
         def close(self) -> None:
             self.closed = True
+
+        def safe(self):
+            if self.refuse_safe:
+                raise RuntimeError("board refused safe")
+            return super().safe()
 
     described = _board_description()
     exact = replace(
@@ -1211,12 +1263,49 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         geometry=replace(described.geometry, coeff_frac_bits=3),
     )
     board = _Watched(description=exact)
-    presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
+    from zlc_workbench.device_use import DeviceUseCoordinator
+
+    with pytest.raises(ValueError, match="device-use coordinator"):
+        _PulseEditorPresenter(
+            _EditorView(),
+            PulseEditorState(sequence=sequence),
+            sequencer=board,
+        )
+
+    device_use = DeviceUseCoordinator()
+    presenter = PulseEditorPresenter(
+        _EditorView(),
+        sequence,
+        sequencer=board,
+        device_use=device_use,
+    )
     assert presenter.board == exact
     presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
     assert presenter.compile().scan_coeff_frac_bits == 3
+    assert presenter.fire(forever=True) is True
     presenter.close()
     assert board.closed is False
+    assert board.events[-1] == "safe"
+    device_use.assert_idle()
+
+    refusing = _Watched(description=exact)
+    refusing.refuse_safe = True
+    retained_use = DeviceUseCoordinator()
+    retained = PulseEditorPresenter(
+        _EditorView(),
+        sequence,
+        sequencer=refusing,
+        device_use=retained_use,
+    )
+    assert retained.fire(forever=True) is True
+    with pytest.raises(RuntimeError, match="could not release"):
+        retained.close()
+    with pytest.raises(RuntimeError, match="PulseGUI"):
+        retained_use.assert_idle()
+    assert refusing.snapshot()["firing"] is True
+    refusing.refuse_safe = False
+    retained.close()
+    retained_use.assert_idle()
 
 
 def test_the_editor_opens_with_no_pulse_at_all() -> None:

@@ -119,6 +119,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     from zlc_pulse import load_streamer_config, pulse_target_from_xdc
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
+    from zlc_workbench.device_use import DeviceUseCoordinator
     from zlc_workbench.pulse_editor import PulseEditorPresenter
     from zlc_workbench.pulse_state import PulseEditorState
 
@@ -133,7 +134,10 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     )
     streamer.open()
     presenter = PulseEditorPresenter(
-        _EditorView(), PulseEditorState(sequence=_ordinary_sequence()), sequencer=streamer
+        _EditorView(),
+        PulseEditorState(sequence=_ordinary_sequence()),
+        sequencer=streamer,
+        device_use=DeviceUseCoordinator(),
     )
     try:
         assert presenter.fire() is True, presenter.view.warnings
@@ -186,6 +190,7 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_pulse.wire import CtrlWords
+    from zlc_workbench.device_use import DeviceUseCoordinator
     from zlc_workbench.pulse_editor import PulseEditorPresenter
     from zlc_workbench.pulse_state import PulseEditorState
 
@@ -202,7 +207,10 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     )
     board.open()
     presenter = PulseEditorPresenter(
-        _EditorView(), PulseEditorState(sequence=sequence), sequencer=board
+        _EditorView(),
+        PulseEditorState(sequence=sequence),
+        sequencer=board,
+        device_use=DeviceUseCoordinator(),
     )
     try:
         presenter.view.binding_cycle_requested.emit(

@@ -26,9 +26,10 @@ from typing import Any
 
 from zlc_runtime import DatasetOutputDeclaration, NodeHost
 
+from .device_use import DeviceClaim, DeviceLease, LogicReservation
+
 
 __all__ = [
-    "DeviceClaim",
     "LogicBinding",
     "LogicCandidate",
     "LogicCatalog",
@@ -50,16 +51,6 @@ class LogicDraft:
     artifact_inputs: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class DeviceClaim:
-    """One exact resolved device object claimed by a candidate run."""
-
-    argument_name: str
-    device_key: str
-    device: object = field(compare=False)
-    access: object
-
-
 @dataclass
 class LogicCandidate:
     """A fully built run waiting for any old exclusive owners to stop."""
@@ -67,7 +58,12 @@ class LogicCandidate:
     node: Any
     host: NodeHost
     claims: tuple[DeviceClaim, ...] = ()
-    waiting_for: set[str] = field(default_factory=set)
+    reservation: LogicReservation | None = None
+
+    @property
+    def waiting_for(self) -> tuple[str, ...]:
+        reservation = self.reservation
+        return () if reservation is None else reservation.waiting_for
 
 
 @dataclass
@@ -84,7 +80,8 @@ class LogicBinding:
     draft: LogicDraft = field(default_factory=LogicDraft)
     host: NodeHost | None = None
     node: Any = None
-    claims: tuple[DeviceClaim, ...] = ()
+    owner_token: object = field(default_factory=object, compare=False)
+    lease: DeviceLease | None = field(default=None, compare=False)
     pending: LogicCandidate | None = None
     draft_error: str = ""
     #: Successful declared artifact paths from the current host generation.

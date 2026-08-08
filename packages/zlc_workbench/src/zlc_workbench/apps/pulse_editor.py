@@ -114,6 +114,7 @@ def build(
     path: str = "",
     pulses_directory: str = "",
     sequencer: object | None = None,
+    device_use: object | None = None,
     allow_dial: bool = True,
     connection_label: str | None = None,
 ) -> object:
@@ -164,6 +165,7 @@ def build(
         make_preview=make_preview,
         update_preview=update_preview,
         sequencer=sequencer,
+        device_use=device_use,
         dial=dial if allow_dial else None,
         pulses_directory=pulses_directory,
         path=path,
@@ -248,6 +250,7 @@ def create_bound_window(
     workspace: object,
     sequence: object,
     sequencer: object,
+    device_use: object,
     path: str = "",
     window_ratio: float | None = None,
 ):
@@ -273,6 +276,7 @@ def create_bound_window(
         path=str(path),
         pulses_directory=str(space.pulses),
         sequencer=sequencer,
+        device_use=device_use,
         allow_dial=False,
         connection_label="experiment session",
     )

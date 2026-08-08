@@ -193,14 +193,20 @@ class ExperimentGuiFlow:
                 interval_ms=self.interval_ms,
                 window_ratio=self.window_ratio,
             )
-            timer = attach_qt(presenter.beat, interval_ms=self.interval_ms)
             pulse = create_bound_window(
                 workspace=self.space,
                 sequence=None,
                 sequencer=session.sequencer,
+                device_use=session.device_use,
                 path="",
                 window_ratio=self.window_ratio,
             )
+
+            def beat() -> None:
+                presenter.beat()
+                pulse.presenter.refresh_run_state()
+
+            timer = attach_qt(beat, interval_ms=self.interval_ms)
             console.presenter = presenter
             console.session = session
             console.set_close_guard(self._console_close_guard)
@@ -224,11 +230,12 @@ class ExperimentGuiFlow:
         self.devices.hide()
 
     def _retire_pulse(self) -> None:
-        pulse, self.pulse = self.pulse, None
+        pulse = self.pulse
         if pulse is None:
             return
         pulse.presenter.close()
         pulse.close()
+        self.pulse = None
 
     def _retire_console(self, *, close_window: bool) -> None:
         timer = self.timer

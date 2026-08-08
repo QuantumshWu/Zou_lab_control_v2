@@ -24,6 +24,7 @@ import numpy as np
 from zlc_durable import day_folder
 
 from .archive import write_figure
+from .device_use import DeviceClaim, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse
 
 if TYPE_CHECKING:
@@ -255,6 +256,7 @@ class ExperimentSession:
         self.installation = installation
         self.signal_plane = signal_plane
         self.workspace = workspace.prepare()
+        self.device_use = DeviceUseCoordinator()
 
     # ---------------------------------------------------------------- devices
 
@@ -280,18 +282,22 @@ class ExperimentSession:
         path = self.workspace.pulse(name)
         if not path.is_file():
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
-        from zlc_pulse import compile_sequence, load_streamer_config
+        from zlc_pulse import compile_sequence
 
         state = read_pulse(path)
         sequence = state.sequence
-        config = load_streamer_config()
-        if config["source"] is None:
-            raise RuntimeError(
-                "no streamer config was found, so the deployed board geometry is "
-                "unknown; refusing to compile against built-in defaults"
+        board = self.sequencer.describe()
+        if sequence.target != board.target:
+            raise ValueError(
+                f"pulse target {sequence.target!r} does not match the installed "
+                f"sequencer target {board.target!r}"
             )
-        program = compile_sequence(sequence, config["params"], config["clock_hz"])
-        self.sequencer.load(program, source=sequence)
+        program = compile_sequence(sequence, board.geometry, board.clock_hz)
+        lease = self._acquire_pulse_device()
+        try:
+            self.sequencer.load(program, source=sequence)
+        finally:
+            lease.release()
         self._pulse_sequence = sequence
         self._pulse_path = path
         self._pulse = {"name": sequence.name}
@@ -307,6 +313,20 @@ class ExperimentSession:
 
     # ------------------------------------------------------------------- shot
 
+    def _acquire_pulse_device(self):
+        return self.device_use.acquire_command(
+            object(),
+            "ExperimentSession pulse",
+            (
+                DeviceClaim(
+                    "sequencer",
+                    "sequencer",
+                    self.sequencer,
+                    "exclusive",
+                ),
+            ),
+        )
+
     def fire(self, shots: int = 1, timeout: float = 5.0) -> None:
         """Fire the loaded pulse, waiting for each shot to finish.
 
@@ -316,20 +336,35 @@ class ExperimentSession:
         accepts them all.
         """
 
-        for shot in range(int(shots)):
-            self.sequencer.fire()
-            report = self.sequencer.wait_done(timeout)
-            # The report is the point of waiting.  Throwing it away made a shot
-            # that reported an error, underran, or never finished at all look
-            # exactly like a clean one -- and whatever the camera did or did not
-            # collect was published as though the pulse had run.
-            if report is None:
-                raise TimeoutError(
-                    f"shot {shot + 1} of {int(shots)} did not report done within "
-                    f"{timeout:g}s"
-                )
-            if report.fault:
-                raise RuntimeError(f"shot {shot + 1} of {int(shots)}: {report.fault}")
+        count = int(shots)
+        lease = self._acquire_pulse_device()
+        try:
+            for shot in range(count):
+                self.sequencer.fire()
+                report = self.sequencer.wait_done(timeout)
+                # The report is the point of waiting.  Throwing it away made a shot
+                # that reported an error, underran, or never finished at all look
+                # exactly like a clean one -- and whatever the camera did or did not
+                # collect was published as though the pulse had run.
+                if report is None:
+                    raise TimeoutError(
+                        f"shot {shot + 1} of {count} did not report done within "
+                        f"{timeout:g}s"
+                    )
+                if report.fault:
+                    raise RuntimeError(f"shot {shot + 1} of {count}: {report.fault}")
+        except BaseException as error:
+            try:
+                self.sequencer.safe()
+            except BaseException as safe_error:
+                raise BaseExceptionGroup(
+                    "pulse drive failed and the sequencer did not go safe",
+                    [error, safe_error],
+                ) from None
+            lease.release()
+            raise
+        else:
+            lease.release()
 
     # ---------------------------------------------------------------- keeping
 
@@ -379,6 +414,7 @@ class ExperimentSession:
     # ----------------------------------------------------------------- closing
 
     def close(self) -> None:
+        self.device_use.assert_idle()
         self.installation.close()
         close = getattr(self.signal_plane, "close", None)
         if callable(close):

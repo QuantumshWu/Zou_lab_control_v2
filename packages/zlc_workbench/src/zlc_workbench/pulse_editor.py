@@ -59,6 +59,7 @@ from zlc_ui import (
     ScheduleVM,
 )
 
+from .device_use import DeviceClaim, DeviceLease, DeviceUseBusy, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse, write_pulse
 
 
@@ -864,6 +865,7 @@ class PulseEditorPresenter:
         make_preview: Callable[[Any], Any] | None = None,
         update_preview: Callable[..., Any] | None = None,
         sequencer: Any = None,
+        device_use: DeviceUseCoordinator | None = None,
         dial: Callable[[str, str], Any] | None = None,
         pulses_directory: str = "",
         path: str = "",
@@ -903,7 +905,15 @@ class PulseEditorPresenter:
         self._held_point: int | None = None
         # An editor with a sequencer can fire what it is showing; without one
         # it is a viewer, and says so rather than offering a dead button.
+        if sequencer is not None and device_use is None:
+            raise ValueError(
+                "an injected sequencer requires its session device-use coordinator"
+            )
         self.sequencer = sequencer
+        self.device_use = device_use if device_use is not None else DeviceUseCoordinator()
+        self._device_owner = object()
+        self._drive_lease: DeviceLease | None = None
+        self._finite_drive = False
         # How to get one.  Dialling belongs to whoever knows what a "remote
         # server" is on this bench, which is the composition root, not here.
         self._dial = dial
@@ -1618,6 +1628,7 @@ class PulseEditorPresenter:
         editor did not open that connection and does not get to end it.
         """
 
+        self._retire_drive()
         if not self._owns_sequencer:
             return
         if self.sequencer is not None:
@@ -1638,6 +1649,14 @@ class PulseEditorPresenter:
         # revision -- the same rule adopting one obeys.  The view refuses two
         # different models under one revision, and it is right to.
         self.revision += 1
+
+    def _retire_drive(self) -> None:
+        """Safe and release only a command lease held by this editor."""
+
+        if self._drive_lease is None:
+            return
+        if not self._safe_drive(release=True) or self._drive_lease is not None:
+            raise RuntimeError("PulseGUI could not release its sequencer command")
 
     def _show_connection(self, status: str) -> None:
         """Say what the editor is attached to, and what that makes possible.
@@ -1725,27 +1744,63 @@ class PulseEditorPresenter:
             self._warn("this editor is not connected to a sequencer")
             return False
         try:
-            source = self._execution_sequence()
-            # The source goes with it.  A board that was handed a program and
-            # not the document it came from can say what it holds but not what
-            # it means, and reading a saved run then depends on whoever was at
-            # the keyboard.
-            self.sequencer.load(self.compile(source), source=source)
-            if self._scan_armed():
-                # The table once, and how many times to play it.  The board
-                # streams it and refills behind the cursor, so a sweep count is
-                # a number it can be given -- sending the rows again to say
-                # "again" was the same numbers over the wire N times.
-                self.sequencer.write_scan_table(
-                    self._wire_rows(self._state.scan_rows),
-                    sweeps=max(1, self._state.scan_repeats),
-                )
+            prepared = self._prepare_execution()
+        except Exception as error:
+            self._warn(f"cannot load this pulse: {error}")
+            return False
+        already_driving = self._drive_lease is not None
+        if not self._acquire_command():
+            return False
+        try:
+            self._load_prepared(prepared)
+            self._poll_board()
+            return True
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
             self._poll_board()
             return False
-        self._poll_board()
+        finally:
+            if not already_driving:
+                self._release_drive()
+
+    def _prepare_execution(self) -> tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int]:
+        """Compile every local fact before attempting to acquire the device."""
+
+        source = self._execution_sequence()
+        rows = self._wire_rows(self._state.scan_rows) if self._scan_armed() else ()
+        return source, self.compile(source), rows, max(1, self._state.scan_repeats)
+
+    def _load_prepared(
+        self,
+        prepared: tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int],
+    ) -> None:
+        source, program, rows, sweeps = prepared
+        self.sequencer.load(program, source=source)
+        if rows:
+            self.sequencer.write_scan_table(rows, sweeps=sweeps)
+
+    def _acquire_command(self) -> bool:
+        if self.sequencer is None:
+            self._warn("this editor is not connected to a sequencer")
+            return False
+        if self._drive_lease is not None:
+            return True
+        try:
+            self._drive_lease = self.device_use.acquire_command(
+                self._device_owner,
+                "PulseGUI",
+                (DeviceClaim("sequencer", "sequencer", self.sequencer, "exclusive"),),
+            )
+        except DeviceUseBusy as error:
+            self._warn(str(error))
+            return False
         return True
+
+    def _release_drive(self) -> None:
+        lease, self._drive_lease = self._drive_lease, None
+        self._finite_drive = False
+        if lease is not None:
+            lease.release()
 
     def _execution_sequence(self) -> PulseSequence:
         """One executable document prepared from the current authoring state.
@@ -1792,9 +1847,11 @@ class PulseEditorPresenter:
         invariant lives with the device that owns it.
         """
 
-        if not self._board_ready_for_a_program():
+        if self.sequence is None:
+            self._warn("no pulse is open")
             return False
-        if not self.load_into_sequencer():
+        if self.sequencer is None:
+            self._warn("this editor is not connected to a sequencer")
             return False
         if forever is None:
             # A finite number of sweeps is a finite run: the table uploaded
@@ -1804,11 +1861,22 @@ class PulseEditorPresenter:
             finite_scan = self._scan_armed() and self._state.scan_repeats > 0
             forever = self.sequence.whole_pulse_repeat is None and not finite_scan
         try:
+            prepared = self._prepare_execution()
+        except Exception as error:
+            self._warn(f"cannot load this pulse: {error}")
+            return False
+        if not self._acquire_command():
+            return False
+        if not self._board_ready_for_a_program():
+            return False
+        try:
+            self._load_prepared(prepared)
             self.sequencer.fire(forever=bool(forever))
+            self._finite_drive = not bool(forever)
             self._poll_board()
         except Exception as error:
             self._warn(f"firing stopped: {error}")
-            self.stop()
+            self._safe_drive(release=True)
             return False
         return True
 
@@ -1837,12 +1905,35 @@ class PulseEditorPresenter:
         self._poll_board()
         if not self.running:
             return True
-        self.stop()
+        self._safe_drive(release=False)
         self._poll_board()
         if self.running:
             self._warn("the board is still playing and would not stop; not loading over it")
             return False
         return True
+
+    def _safe_drive(self, *, release: bool) -> bool:
+        if self.sequencer is None:
+            return True
+        if not self._acquire_command():
+            self._poll_board()
+            return False
+        worked = True
+        try:
+            safe = getattr(self.sequencer, "safe", None)
+            if callable(safe):
+                safe()
+        except Exception as error:
+            worked = False
+            self._warn(f"the board did not go safe: {error}")
+        finally:
+            self._poll_board()
+        if worked and not self.running:
+            self._finite_drive = False
+            if release:
+                self._release_drive()
+            return True
+        return False
 
     def stop(self) -> None:
         """Return the outputs to their safe state, whatever state they are in.
@@ -1856,15 +1947,7 @@ class PulseEditorPresenter:
         # stopped is how a window comes to claim idle over driving outputs: if
         # safe() refuses, the board is still playing and must still read as
         # playing, with the refusal on screen next to it.
-        try:
-            if self.sequencer is not None:
-                safe = getattr(self.sequencer, "safe", None)
-                if callable(safe):
-                    safe()
-        except Exception as error:
-            self._warn(f"the board did not go safe: {error}")
-        finally:
-            self._poll_board()
+        self._safe_drive(release=True)
 
     @property
     def running(self) -> bool:
@@ -1947,6 +2030,17 @@ class PulseEditorPresenter:
         standing in for the operator who walked back to the bench.
         """
 
+        if self._finite_drive and self._drive_lease is not None and self.sequencer is not None:
+            try:
+                report = self.sequencer.wait_done(0)
+            except Exception as error:
+                self._warn(f"finite pulse status failed: {error}")
+            else:
+                if report is not None:
+                    fault = str(getattr(report, "fault", "") or "")
+                    if fault:
+                        self._warn(f"finite pulse stopped: {fault}")
+                    self._release_drive()
         self._poll_board()
 
     def _poll_board(self) -> None:
@@ -2505,7 +2599,6 @@ class PulseEditorPresenter:
 
         rows = self._state.scan_rows
         self._held_point = max(0, min(len(rows) - 1, int(point)))
-        self.stop()
         try:
             # A held point is an ORDINARY pulse whose scanned fields carry that
             # row's numbers -- not a scan of length one.  Saying it the other
@@ -2519,11 +2612,24 @@ class PulseEditorPresenter:
                 resolve_api_parameters(self.sequence),
                 rows[self._held_point],
             )
-            self.sequencer.load(self.compile(resolved), source=resolved)
-            self.sequencer.fire(forever=True)
+            program = self.compile(resolved)
         except Exception as error:
             self._scan_progress = f"cannot hold that point: {error}"
             self._warn(f"cannot hold scan point {self._held_point}: {error}")
+            self._refresh_scan_page()
+            return False
+        if not self._acquire_command():
+            return False
+        if not self._safe_drive(release=False):
+            return False
+        try:
+            self.sequencer.load(program, source=resolved)
+            self.sequencer.fire(forever=True)
+            self._finite_drive = False
+        except Exception as error:
+            self._scan_progress = f"cannot hold that point: {error}"
+            self._warn(f"cannot hold scan point {self._held_point}: {error}")
+            self._safe_drive(release=True)
             self._refresh_scan_page()
             return False
         self._poll_board()
@@ -3058,14 +3164,11 @@ class PulseEditorPresenter:
         both close their hosts.
         """
 
-        failures: list[BaseException] = []
-        for step in (self._release, self._close_preview):
-            try:
-                step()
-            except BaseException as error:  # noqa: BLE001 - both steps still run
-                failures.append(error)
-        if failures:
-            raise failures[0]
+        try:
+            self._retire_drive()
+            self._release()
+        finally:
+            self._close_preview()
 
     def _close_preview(self) -> None:
         host, self._preview_host = self._preview_host, None

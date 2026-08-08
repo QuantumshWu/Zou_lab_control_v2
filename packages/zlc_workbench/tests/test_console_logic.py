@@ -28,7 +28,7 @@ from zlc_workbench.logic import (
 from zlc_workbench.session import ExperimentSession
 
 from test_console_presenter import _CardView, _ConsoleView, _Signal, _one_shot
-from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
+from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
 
 from test_console_presenter import _LogicRowView  # noqa: E402
@@ -368,7 +368,7 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
         )
 
 
-def _claim_descriptor(api_name: str, access):
+def _claim_descriptor(api_name: str, access, *capabilities: str):
     from zlc_atom.authoring import AuthoringSchema
     from zlc_atom.nodes._framework.descriptor import (
         DeviceRequirement,
@@ -381,14 +381,19 @@ def _claim_descriptor(api_name: str, access):
             while not context.cancel_requested():
                 time.sleep(0.001)
 
+    def build(*, device_0, device_1=None):
+        return _Hold()
+
+    requested = capabilities or ("camera.adapter",)
     return LogicNodeDescriptor(
         api_name,
         NodeKind.TASK,
         AuthoringSchema(),
-        device_requirements=(
-            DeviceRequirement("camera.adapter", "camera", access),
+        device_requirements=tuple(
+            DeviceRequirement(token, f"device_{index}", access)
+            for index, token in enumerate(requested)
         ),
-        build=lambda *, camera: _Hold(),
+        build=build,
     )
 
 
@@ -435,14 +440,222 @@ def test_observe_and_exclusive_claims_on_one_device_coexist(presenter) -> None:
     assert presenter.logic[owner_id].host.running
 
 
-def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter) -> None:
+def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -> None:
+    """A Pulse command cannot enter through the candidate's currently-free device."""
+
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
+
+    old = _claim_descriptor("old", DeviceAccess.EXCLUSIVE, "camera.adapter")
+    replacement = _claim_descriptor(
+        "replacement",
+        DeviceAccess.EXCLUSIVE,
+        "camera.adapter",
+        "sequencer.streamer",
+    )
+    presenter.catalog = LogicCatalog((old, replacement))
+    old_id = presenter.add_logic("old")
+    replacement_id = presenter.add_logic("replacement")
+    assert presenter.start_logic(old_id) is True
+    assert presenter.start_logic(replacement_id) is True
+    assert presenter.logic[replacement_id].pending is not None
+
+    pulse_owner = object()
+    with pytest.raises(DeviceUseBusy, match="replacement"):
+        presenter.session.device_use.acquire_command(
+            pulse_owner,
+            "PulseGUI",
+            (
+                DeviceClaim(
+                    "sequencer",
+                    "sequencer",
+                    presenter.session.sequencer,
+                    DeviceAccess.EXCLUSIVE,
+                ),
+            ),
+        )
+
+    deadline = time.monotonic() + 2.0
+    while (
+        time.monotonic() < deadline
+        and presenter.logic[replacement_id].pending is not None
+    ):
+        presenter.poll_logic()
+        time.sleep(0.001)
+    assert presenter.logic[replacement_id].host is not None
+    assert presenter.logic[replacement_id].host.running
+
+
+def _pulse_presenter_on_session(presenter):
+    from test_pulse_editor import _EditorView, PulseEditorPresenter
+
+    view = _EditorView()
+    pulse = PulseEditorPresenter(
+        view,
+        ordinary_imaging_sequence(),
+        sequencer=presenter.session.sequencer,
+        device_use=presenter.session.device_use,
+    )
+    return view, pulse
+
+
+def test_running_sequencer_logic_rejects_pulse_without_touching_device(
+    presenter,
+    monkeypatch,
+) -> None:
+    import zlc_pulse
+
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_workbench.device_use import DeviceUseBusy
+
+    descriptor = _claim_descriptor(
+        "sequencer_task",
+        DeviceAccess.EXCLUSIVE,
+        "sequencer.streamer",
+    )
+    presenter.catalog = LogicCatalog((descriptor,))
+    node_id = presenter.add_logic("sequencer_task")
+    assert presenter.start_logic(node_id) is True
+
+    events: list[str] = []
+    sequencer = presenter.session.sequencer
+    for name in ("safe", "load", "fire"):
+        original = getattr(sequencer, name)
+
+        def recorded(*args, _name=name, _original=original, **kwargs):
+            events.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(sequencer, name, recorded)
+
+    view, pulse = _pulse_presenter_on_session(presenter)
+    try:
+        before = tuple(events)
+        assert pulse.fire() is False
+        assert tuple(events) == before
+        assert node_id in view.warnings[-1]
+        monkeypatch.setattr(
+            zlc_pulse,
+            "load_streamer_config",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("session load consulted process-global board config")
+            ),
+        )
+        with pytest.raises(DeviceUseBusy, match=node_id):
+            presenter.session.load_pulse(PULSE_NAME)
+        assert tuple(events) == before
+        pulse.close()
+        assert tuple(events) == before
+        assert presenter.logic[node_id].host.running
+    finally:
+        pulse.close()
+
+
+def test_notebook_fire_holds_the_session_lease_through_wait_done(
+    session,
+    monkeypatch,
+) -> None:
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
+
+    session.load_pulse(PULSE_NAME)
+    original = session.sequencer.wait_done
+    observed: list[bool] = []
+    reentrant_blocked: list[bool] = []
+
+    def wait_done(timeout):
+        try:
+            session.fire(shots=0)
+        except DeviceUseBusy as error:
+            reentrant_blocked.append("ExperimentSession" in str(error))
+        else:
+            reentrant_blocked.append(False)
+        try:
+            intruder = session.device_use.acquire_command(
+                object(),
+                "other driver",
+                (
+                    DeviceClaim(
+                        "sequencer",
+                        "sequencer",
+                        session.sequencer,
+                        DeviceAccess.EXCLUSIVE,
+                    ),
+                ),
+            )
+        except DeviceUseBusy as error:
+            observed.append("ExperimentSession" in str(error))
+        else:
+            intruder.release()
+            observed.append(False)
+        return original(timeout)
+
+    monkeypatch.setattr(session.sequencer, "wait_done", wait_done)
+    session.fire(shots=1)
+    assert reentrant_blocked == [True]
+    assert observed == [True]
+    session.device_use.assert_idle()
+
+
+def test_pulse_drive_rejects_whole_logic_candidate_before_any_logic_is_stopped(
+    presenter,
+) -> None:
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+
+    camera_owner = _claim_descriptor(
+        "camera_owner",
+        DeviceAccess.EXCLUSIVE,
+        "camera.adapter",
+    )
+    calibration = _claim_descriptor(
+        "calibration_like",
+        DeviceAccess.EXCLUSIVE,
+        "camera.adapter",
+        "sequencer.streamer",
+    )
+    presenter.catalog = LogicCatalog((camera_owner, calibration))
+    camera_id = presenter.add_logic("camera_owner")
+    candidate_id = presenter.add_logic("calibration_like")
+    assert presenter.start_logic(camera_id) is True
+    camera_host = presenter.logic[camera_id].host
+    assert camera_host is not None and camera_host.running
+
+    _view, pulse = _pulse_presenter_on_session(presenter)
+    try:
+        assert pulse.fire(forever=True) is True
+        assert pulse.running is True
+        assert presenter.start_logic(candidate_id) is False
+        assert pulse.running is True
+        assert camera_host.running, "a rejected candidate cancelled an existing Logic"
+        assert presenter.logic[candidate_id].pending is None
+        assert presenter.logic[candidate_id].host is None
+    finally:
+        pulse.stop()
+        pulse.close()
+
+
+def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -> None:
+    from zlc_atom.install import create_installation
+
+    previous_installation = session.installation
+    session.installation = create_installation(
+        [
+            {"key": "camera", "type_id": "camera.virtual", "config": {}},
+            {"key": "mot_camera", "type_id": "camera.virtual", "config": {}},
+        ]
+    )
+    previous_installation.close()
     node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
     assert presenter.start_logic(node_id) is True
     old_host = presenter.logic[node_id].host
     assert old_host is not None
     old_key = old_host.signal_key("frames")
     old_generation = old_host.generation
-    presenter.update_logic_draft(node_id, values={"exposure_seconds": 0.031})
+    presenter.update_logic_draft(
+        node_id,
+        values={"exposure_seconds": 0.031},
+        device_keys={"camera": "mot_camera"},
+    )
 
     assert presenter.start_logic(node_id) is True
     assert presenter.logic[node_id].host is old_host
@@ -454,6 +667,9 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter) -> None:
         time.sleep(0.002)
     replacement = presenter.logic[node_id].host
     assert replacement is not None and replacement is not old_host
+    assert presenter.logic[node_id].node.camera is session.installation.capability(
+        "camera.adapter", key="mot_camera"
+    )
     assert replacement.signal_key("frames") == old_key
     assert replacement.generation != old_generation
 

@@ -31,8 +31,8 @@ from .console_layout import (
     ResolvedLayout,
     resolve_layout,
 )
+from .device_use import DeviceClaim, DeviceUseBusy
 from .logic import (
-    DeviceClaim,
     LogicBinding,
     LogicCandidate,
     LogicCatalog,
@@ -2312,32 +2312,32 @@ class ConsolePresenter:
 
         binding.draft_error = ""
         self._discard_pending(binding)
-        for other in tuple(self.logic.values()):
-            if (
-                other is not binding
-                and other.pending is not None
-                and self._claims_conflict(candidate.claims, other.pending.claims)
-            ):
-                self._discard_pending(other)
+        try:
+            candidate.reservation = self.session.device_use.prepare_logic(
+                binding.owner_token,
+                binding.node_id,
+                candidate.claims,
+                stop=candidate.host.cancel,
+                superseded=lambda: self._discard_candidate(binding, candidate),
+            )
+        except DeviceUseBusy as error:
+            self._discard_candidate(binding, candidate)
+            binding.draft_error = str(error)
+            self._report(f"{node_id}: {error}", severity="error")
+            self._refresh_console_projection()
+            self.refresh_logic_editor(binding.node_id)
+            return False
+        except Exception as error:
+            self._discard_candidate(binding, candidate)
+            binding.draft_error = str(error)
+            self._report(f"{node_id}: {error}", severity="error")
+            self._refresh_console_projection()
+            self.refresh_logic_editor(binding.node_id)
+            return False
 
-        blockers: set[str] = set()
-        if binding.host is not None and binding.host.running:
-            blockers.add(binding.node_id)
-        for other in self.logic.values():
-            if (
-                other is not binding
-                and other.host is not None
-                and other.host.running
-                and self._claims_conflict(candidate.claims, other.claims)
-            ):
-                blockers.add(other.node_id)
+        blockers = set(candidate.reservation.waiting_for)
         if blockers:
-            candidate.waiting_for.update(blockers)
             binding.pending = candidate
-            for blocker_id in blockers:
-                blocker = self.logic.get(blocker_id)
-                if blocker is not None and blocker.host is not None:
-                    blocker.host.cancel(f"{binding.node_id} needs its exclusive device")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             self._report(
@@ -2404,6 +2404,9 @@ class ConsolePresenter:
             except Exception as error:
                 self._report(f"{binding.node_id}: {error}", severity="error")
                 return False
+        if binding.lease is not None:
+            binding.lease.release()
+            binding.lease = None
         self.logic.pop(binding.node_id, None)
         close_editor = getattr(self.view, "close_logic_editor", None)
         if callable(close_editor):
@@ -2427,6 +2430,9 @@ class ConsolePresenter:
                 except Exception as error:
                     self._report(f"{binding.node_id}: {error}", severity="error")
                 self._capture_artifact_results(binding)
+                if not binding.host.running and binding.lease is not None:
+                    binding.lease.release()
+                    binding.lease = None
             if binding.removing and (
                 binding.host is None or not binding.host.running
             ):
@@ -2437,15 +2443,6 @@ class ConsolePresenter:
             candidate = binding.pending
             if candidate is None:
                 continue
-            candidate.waiting_for = {
-                blocker_id
-                for blocker_id in candidate.waiting_for
-                if self._candidate_still_blocked(
-                    binding,
-                    candidate,
-                    blocker_id,
-                )
-            }
             if not candidate.waiting_for:
                 binding.pending = None
                 self._activate_candidate(binding, candidate)
@@ -2572,42 +2569,26 @@ class ConsolePresenter:
         )
         return LogicCandidate(node, host, claims)
 
-    @staticmethod
-    def _claims_conflict(
-        left: Sequence[DeviceClaim],
-        right: Sequence[DeviceClaim],
-    ) -> bool:
-        """Only two exclusive claims on the same object identity conflict."""
-
-        return any(
-            str(getattr(first.access, "value", first.access)) == "exclusive"
-            and str(getattr(second.access, "value", second.access)) == "exclusive"
-            and first.device is second.device
-            for first in left
-            for second in right
-        )
-
     def _discard_pending(self, binding: LogicBinding) -> None:
         candidate, binding.pending = binding.pending, None
         if candidate is None:
             return
+        self._discard_candidate(binding, candidate)
+
+    def _discard_candidate(
+        self,
+        binding: LogicBinding,
+        candidate: LogicCandidate,
+    ) -> None:
+        if binding.pending is candidate:
+            binding.pending = None
+        if candidate.reservation is not None:
+            candidate.reservation.abort()
+            candidate.reservation = None
         try:
             candidate.host.shutdown()
         except Exception as error:
             self._report(f"{binding.node_id}: {error}", severity="error")
-
-    def _candidate_still_blocked(
-        self,
-        binding: LogicBinding,
-        candidate: LogicCandidate,
-        blocker_id: str,
-    ) -> bool:
-        blocker = self.logic.get(blocker_id)
-        if blocker is None or blocker.host is None or not blocker.host.running:
-            return False
-        if blocker is binding:
-            return True
-        return self._claims_conflict(candidate.claims, blocker.claims)
 
     def _activate_candidate(
         self,
@@ -2619,22 +2600,39 @@ class ConsolePresenter:
         old_host = binding.host
         if old_host is not None:
             if old_host.running:
-                candidate.waiting_for.add(binding.node_id)
                 binding.pending = candidate
-                old_host.cancel("this row is restarting")
                 self._refresh_console_projection()
                 return True
             try:
                 old_host.shutdown()
             except Exception as error:
-                candidate.host.shutdown()
+                self._discard_candidate(binding, candidate)
                 binding.draft_error = str(error)
                 self._report(f"{binding.node_id}: {error}", severity="error")
                 self._refresh_console_projection()
                 return False
+        reservation = candidate.reservation
+        if reservation is None:
+            self._discard_candidate(binding, candidate)
+            binding.draft_error = "logic candidate lost its device reservation"
+            self._refresh_console_projection()
+            return False
+        try:
+            lease = reservation.commit()
+        except DeviceUseBusy:
+            binding.pending = candidate
+            self._refresh_console_projection()
+            return True
+        except Exception as error:
+            self._discard_candidate(binding, candidate)
+            binding.draft_error = str(error)
+            self._report(f"{binding.node_id}: {error}", severity="error")
+            self._refresh_console_projection()
+            return False
+        candidate.reservation = None
         binding.node = candidate.node
         binding.host = candidate.host
-        binding.claims = candidate.claims
+        binding.lease = lease
         binding.pending = None
         binding.artifact_results = ()
         binding.artifact_result_host = None
@@ -2642,6 +2640,8 @@ class ConsolePresenter:
         try:
             candidate.host.start()
         except Exception as error:
+            lease.release()
+            binding.lease = None
             binding.draft_error = str(error)
             self._report(f"{binding.node_id}: {error}", severity="error")
             self._refresh_console_projection()
