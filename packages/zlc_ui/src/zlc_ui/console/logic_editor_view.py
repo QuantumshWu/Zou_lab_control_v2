@@ -147,7 +147,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
         self.artifact_form.setVisible(bool(artifact_spec.keys))
         self.form.reconcile(spec, dict(values))
-        self._rebuild_selectors(incoming)
+        self._reconcile_selectors(incoming)
         self._rebuild_artifact_results(incoming.get("artifact_results", ()))
 
         running = bool(incoming.get("running"))
@@ -162,39 +162,63 @@ class LogicEditorView(QtWidgets.QWidget):
             f"color: {'#D13438' if error else GREY}; background: transparent; border: none;"
         )
 
-    def _rebuild_selectors(self, projection: Mapping[str, object]) -> None:
-        while self._selector_layout.rowCount():
-            self._selector_layout.removeRow(0)
-        self._device_combos.clear()
+    def _reconcile_selectors(self, projection: Mapping[str, object]) -> None:
+        device_options = projection.get("device_options") or {}
+        device_keys = projection.get("device_keys") or {}
+        if not isinstance(device_options, Mapping) or not isinstance(device_keys, Mapping):
+            raise TypeError("logic editor device selectors must be mappings")
 
         has_source = bool(projection.get("source_required"))
         if has_source:
             current = str(projection.get("source_signal") or "")
             options = tuple(str(item) for item in projection.get("source_options", ()))
-            source_combo = FluentComboBox()
-            self._fill_combo(source_combo, current, options, blank=True)
-            source_combo.currentIndexChanged[int].connect(self._source_changed)
-            self.source_combo = source_combo
-            self._selector_layout.addRow("Frames signal", source_combo)
-        else:
+            if self.source_combo is None:
+                self.source_combo = FluentComboBox()
+                self.source_combo.currentIndexChanged[int].connect(
+                    self._source_changed
+                )
+                self._selector_layout.insertRow(
+                    0, "Frames signal", self.source_combo
+                )
+            self._fill_combo(self.source_combo, current, options, blank=True)
+        elif self.source_combo is not None:
+            self._retire_selector(self.source_combo)
             self.source_combo = None
 
-        device_options = projection.get("device_options") or {}
-        device_keys = projection.get("device_keys") or {}
-        if not isinstance(device_options, Mapping) or not isinstance(device_keys, Mapping):
-            raise TypeError("logic editor device selectors must be mappings")
         for argument_name, offered in device_options.items():
             name = str(argument_name)
-            combo = FluentComboBox()
+            combo = self._device_combos.get(name)
+            if combo is None:
+                combo = FluentComboBox()
+                combo.currentIndexChanged[int].connect(
+                    lambda _index, key=name, control=combo: self._device_changed(
+                        key, control
+                    )
+                )
+                self._device_combos[name] = combo
+                self._selector_layout.addRow(
+                    name.replace("_", " ").title(), combo
+                )
             current = str(device_keys.get(name, ""))
             self._fill_combo(combo, current, tuple(str(item) for item in offered), blank=True)
-            combo.currentIndexChanged[int].connect(
-                lambda _index, key=name, control=combo: self._device_changed(key, control)
-            )
-            self._device_combos[name] = combo
-            self._selector_layout.addRow(name.replace("_", " ").title(), combo)
+
+        retired = set(self._device_combos).difference(
+            str(name) for name in device_options
+        )
+        for name in retired:
+            self._retire_selector(self._device_combos.pop(name))
 
         self._selector_frame.setVisible(has_source or bool(self._device_combos))
+
+    def _retire_selector(self, combo: FluentComboBox) -> None:
+        row = self._selector_layout.takeRow(combo)
+        for item in (row.labelItem, row.fieldItem):
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
 
     @staticmethod
     def _fill_combo(
@@ -210,10 +234,16 @@ class LogicEditorView(QtWidgets.QWidget):
         if current and current not in options:
             ordered.append(current)
         ordered.extend(item for item in options if item not in ordered)
+        desired = tuple((value or "(not selected)", value) for value in ordered)
+        existing = tuple(
+            (combo.itemText(index), combo.itemData(index))
+            for index in range(combo.count())
+        )
         combo.blockSignals(True)
-        combo.clear()
-        for value in ordered:
-            combo.addItem(value or "(not selected)", value)
+        if existing != desired:
+            combo.clear()
+            for label, value in desired:
+                combo.addItem(label, value)
         index = combo.findData(current)
         combo.setCurrentIndex(max(0, index))
         combo.blockSignals(False)

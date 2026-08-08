@@ -288,6 +288,9 @@ assert events == ['start', 'edit']
 def test_logic_editor_is_a_live_closable_draft_projection() -> None:
     _run_qt(
         """
+import zou_lab_control_v2
+import zlc_ui.console.logic_editor_view as tested_module
+print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -323,18 +326,62 @@ projection = {
     'error': '',
 }
 patches = []
-handle.logic_draft_changed.connect(lambda node_id, patch: patches.append((node_id, patch)))
+def accept_and_refresh(node_id, patch):
+    patches.append((node_id, patch))
+    if 'values' in patch:
+        projection['form_values'].update(patch['values'])
+    if 'artifact_inputs' in patch:
+        projection['artifact_values'].update(patch['artifact_inputs'])
+    if 'source_signal' in patch:
+        projection['source_signal'] = patch['source_signal']
+    if 'device_keys' in patch:
+        projection['device_keys'].update(patch['device_keys'])
+    handle.update_logic_editor(node_id, projection)
+handle.logic_draft_changed.connect(accept_and_refresh)
 handle.open_logic_editor('camera-1', projection)
 editor = handle._logic_editors['camera-1']
+view.show()
+app.processEvents()
 assert view.tabs.count() == 3
 assert view.tabs.currentWidget() is editor
 editor.form.widget_for('repeat').setValue(3)
 artifact_picker = editor.artifact_form.widget_for('calibration_path')
 assert artifact_picker.browse.text() == 'Browse…'
 artifact_picker.setText('C:/data/manual.json')
-editor.source_combo.setCurrentIndex(editor.source_combo.findData('camera-1.frames'))
+def pick_from_popup(combo, value):
+    index = combo.findData(value)
+    assert index >= 0
+    combo.showPopup()
+    app.processEvents()
+    model_index = combo.model().index(index, combo.modelColumn())
+    rect = combo.view().visualRect(model_index)
+    assert rect.isValid() and not rect.isEmpty()
+    QtTest.QTest.mouseClick(
+        combo.view().viewport(), QtCore.Qt.LeftButton,
+        QtCore.Qt.NoModifier, rect.center(),
+    )
+source_combo = editor.source_combo
+source_model_events = []
+source_combo.model().rowsRemoved.connect(
+    lambda *_args: source_model_events.append('removed')
+)
+source_combo.model().rowsInserted.connect(
+    lambda *_args: source_model_events.append('inserted')
+)
+pick_from_popup(source_combo, 'camera-1.frames')
+assert editor.source_combo is source_combo
+assert not source_model_events
 camera_combo = editor._device_combos['camera']
-camera_combo.setCurrentIndex(camera_combo.findData('mot_camera'))
+camera_model_events = []
+camera_combo.model().rowsRemoved.connect(
+    lambda *_args: camera_model_events.append('removed')
+)
+camera_combo.model().rowsInserted.connect(
+    lambda *_args: camera_model_events.append('inserted')
+)
+pick_from_popup(camera_combo, 'mot_camera')
+assert editor._device_combos['camera'] is camera_combo
+assert not camera_model_events
 app.processEvents()
 assert ('camera-1', {'values': {'repeat': 3}}) in patches
 assert ('camera-1', {'artifact_inputs': {'calibration_path': 'C:/data/manual.json'}}) in patches
