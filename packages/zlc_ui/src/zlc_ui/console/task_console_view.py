@@ -10,8 +10,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    FluentFlowRow,
     ACCENT,
+    ElidedLabel,
     GREEN,
     GREY,
     ORANGE,
@@ -67,22 +67,22 @@ class TaskConsoleView(QtWidgets.QWidget):
         outer.setContentsMargins(margin, margin, margin, margin)
         outer.setSpacing(window_pad(0.5))
 
-        # A WRAPPING row, not a widening one.  A plain horizontal row's minimum
-        # width is the sum of everything in it, so nine controls set the
-        # window's minimum and the tenth pushed it past the shared screen-fit
-        # size -- adding a button became a window-geometry decision.  The frame
-        # takes its height from the row rather than fixing it, so a second line
-        # appears when one is needed and never otherwise.
+        # One semantic row, as in v1: identity on the left, telemetry as the
+        # only flexible middle cell, and commands pinned to the right.  The
+        # telemetry elides when space is tight; commands never wrap into a
+        # second pseudo-toolbar whose alignment depends on label size hints.
         header_frame = FluentFrame(bordered=False)
-        header = FluentFlowRow(header_frame, spacing=scaled_px(7, minimum=4))
+        header_frame.setFixedHeight(scaled_px(48, minimum=38))
+        header = QtWidgets.QHBoxLayout(header_frame)
         header.setContentsMargins(scaled_px(12), scaled_px(6), scaled_px(12), scaled_px(6))
+        header.setSpacing(scaled_px(7, minimum=4))
 
         self.status_dot = FluentStatusDot(size=16)
         self.status_dot.set_color(GREEN)
         self.name_edit = FluentLineEdit("task")
         self.name_edit.setPlaceholderText("task name")
         self.name_edit.setFixedWidth(scaled_px(150, minimum=110))
-        self.summary_label = FluentLabel("")
+        self.summary_label = ElidedLabel("")
         self.summary = self.summary_label
         self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
 
@@ -102,16 +102,19 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.pause_button = self.pause_switch
         self._paused = False
         self.selectors_switch = FluentSwitch("Selectors")
-        self.save_screenshot_button = FluentButton("Save Screenshot", color=ACCENT)
-        self.save_layout_button = FluentButton("Save Layout", color=ACCENT)
-        self.load_layout_button = FluentButton("Load Layout", color=ORANGE)
+        self.save_screenshot_button = FluentButton("Save image", color=ACCENT)
+        self.save_screenshot_button.setToolTip("Save one screenshot of TaskConsole")
+        self.save_layout_button = FluentButton("Save", color=ACCENT)
+        self.save_layout_button.setToolTip("Save the layout and signal wiring")
+        self.load_layout_button = FluentButton("Load", color=ORANGE)
+        self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
 
         for widget in (
             self.status_dot,
             self.name_edit,
         ):
-            header.addWidget(widget)
-        header.addWidget(self.summary_label)
+            header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)
         for widget in (
             self.kind_combo,
             self.add_panel_button,
@@ -121,7 +124,7 @@ class TaskConsoleView(QtWidgets.QWidget):
             self.save_layout_button,
             self.load_layout_button,
         ):
-            header.addWidget(widget)
+            header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         outer.addWidget(header_frame)
 
         # v1 keeps this status surface between the header and tabs.  It is not

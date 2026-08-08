@@ -27,7 +27,7 @@ for _name in (
     "fluent_confirm", "FluentComboBox", "FluentTreeComboBox", "FluentTabWidget",
     "FluentSwitch", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "FluentCheckBox", "FluentScrollArea",
-    "FluentFlowRow", "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "bind_body_close", "launch_qt_window", "launch_fluent_window",
+    "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "bind_body_close", "launch_qt_window", "launch_fluent_window",
     "open_fluent_window",
     "Metrics", "measure_text_width", "ElidedLabel", "FluentStatusStrip", "FluentFormGrid",
 ):

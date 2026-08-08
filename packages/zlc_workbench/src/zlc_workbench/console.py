@@ -158,6 +158,7 @@ class ConsolePresenter:
         self._offered_groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
         self._paused = False
         self._deriving = True
+        self._shown_console_summary: str | None = None
         #: How often a new panel redraws.  The board's default, kept so a panel
         #: and the card that reports it cannot state different numbers.
         self._default_interval_ms = int(default_interval_ms)
@@ -300,7 +301,7 @@ class ConsolePresenter:
         self.view.show_panel(panel_id, None)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
-        self._summarise()
+        self._refresh_console_projection()
 
         # Layout restore may already name a live signal.  Re-enter the exact
         # same state-replacement path Setting uses; no second mounting path.
@@ -432,7 +433,7 @@ class ConsolePresenter:
         self.view.show_panel(panel_id, host)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
-        self._summarise()
+        self._refresh_console_projection()
         return binding
 
     @staticmethod
@@ -799,7 +800,7 @@ class ConsolePresenter:
             binding.frozen_stale = False
             binding.display_publication = None
             self._publish_panel_state(binding)
-            self._summarise()
+            self._refresh_console_projection()
             return True
 
         if needs_mount:
@@ -815,7 +816,7 @@ class ConsolePresenter:
                 binding.state = candidate
                 binding.parameter_surface = {}
                 self._publish_panel_state(binding)
-                self._summarise()
+                self._refresh_console_projection()
                 self._report(
                     f"{candidate.signal} has not published yet; {panel_id} remains ready",
                     severity="warning",
@@ -832,7 +833,7 @@ class ConsolePresenter:
                 binding.state = candidate
                 binding.parameter_surface = {}
                 self._publish_panel_state(binding)
-                self._summarise()
+                self._refresh_console_projection()
                 self._report(
                     f"{candidate.signal} cannot be drawn as a "
                     f"{candidate.kind.replace('_', ' ')}; the panel remains ready",
@@ -920,7 +921,7 @@ class ConsolePresenter:
             if binding.host is None or binding.port is None:
                 binding.state = candidate
                 self._publish_panel_state(binding)
-                self._summarise()
+                self._refresh_console_projection()
                 return True
             try:
                 self._apply_panel_host_patch(binding.host, current, candidate, host_patch)
@@ -941,7 +942,7 @@ class ConsolePresenter:
             )
 
         self._publish_panel_state(binding)
-        self._summarise()
+        self._refresh_console_projection()
         return True
 
     @staticmethod
@@ -1576,7 +1577,7 @@ class ConsolePresenter:
             self._release_panel(binding)
         self.close_panel_editor(panel_id)
         self.view.remove_panel(panel_id)
-        self._summarise()
+        self._refresh_console_projection()
 
     # ------------------------------------------------------------------ running
 
@@ -1585,7 +1586,7 @@ class ConsolePresenter:
 
         self._paused = bool(paused)
         self.view.set_paused(self._paused)
-        self._summarise()
+        self._refresh_console_projection()
 
     def set_deriving(self, deriving: bool) -> None:
         """Whether a box drawn on a panel derives a signal from it.
@@ -1716,7 +1717,7 @@ class ConsolePresenter:
                 "those panels remain available for rewiring",
                 severity="warning",
             )
-        self._summarise()
+        self._refresh_console_projection()
         return True
 
     def save_layout(self) -> str:
@@ -2005,11 +2006,10 @@ class ConsolePresenter:
             ),
         )
         self.logic[selected_id] = binding
-        self._show_logic(binding)
         for other_id in self.logic:
             if other_id != selected_id:
                 self.refresh_logic_editor(other_id)
-        self._summarise()
+        self._refresh_console_projection()
         if open_editor:
             self._open_logic_editor(binding)
         self._report(f"added {selected_id}", severity="task")
@@ -2092,7 +2092,7 @@ class ConsolePresenter:
                 {str(name): str(key) for name, key in device_keys.items()}
             )
         binding.draft_error = ""
-        self._show_logic(binding)
+        self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
         return True
 
@@ -2114,7 +2114,7 @@ class ConsolePresenter:
         except Exception as error:
             binding.draft_error = str(error)
             self._report(f"{node_id}: {error}", severity="error")
-            self._show_logic(binding)
+            self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
 
@@ -2127,7 +2127,6 @@ class ConsolePresenter:
                 and self._claims_conflict(candidate.claims, other.pending.claims)
             ):
                 self._discard_pending(other)
-                self._show_logic(other)
 
         blockers: set[str] = set()
         if binding.host is not None and binding.host.running:
@@ -2147,9 +2146,7 @@ class ConsolePresenter:
                 blocker = self.logic.get(blocker_id)
                 if blocker is not None and blocker.host is not None:
                     blocker.host.cancel(f"{binding.node_id} needs its exclusive device")
-                    self._show_logic(blocker)
-            self._show_logic(binding)
-            self._summarise()
+            self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             self._report(
                 f"{node_id} queued while {', '.join(sorted(blockers))} stops",
@@ -2165,8 +2162,7 @@ class ConsolePresenter:
         self._discard_pending(binding)
         if binding.host is not None:
             binding.host.cancel("the operator pressed Stop")
-        self._show_logic(binding)
-        self._summarise()
+        self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
         return True
 
@@ -2195,7 +2191,7 @@ class ConsolePresenter:
             binding.host.cancel("the operator removed this node")
             binding.host.poll()
         if binding.host is not None and binding.host.running:
-            self._show_logic(binding)
+            self._refresh_console_projection()
             self._report(f"{node_id} is stopping", severity="task")
             return False
         return self._retire_logic(binding)
@@ -2225,7 +2221,7 @@ class ConsolePresenter:
             self.refresh_logic_editor(other_id)
         for panel_id in self.panels:
             self.refresh_panel_editor(panel_id)
-        self._summarise()
+        self._refresh_console_projection()
         self._report(f"removed {binding.node_id}", severity="task")
         return True
 
@@ -2243,7 +2239,6 @@ class ConsolePresenter:
             ):
                 if self._retire_logic(binding):
                     continue
-            self._show_logic(binding)
 
         for binding in tuple(self.logic.values()):
             candidate = binding.pending
@@ -2261,6 +2256,7 @@ class ConsolePresenter:
             if not candidate.waiting_for:
                 binding.pending = None
                 self._activate_candidate(binding, candidate)
+        self._refresh_console_projection()
 
     def _show_logic(self, binding: LogicBinding) -> None:
         """What one node is doing, pushed only when it changed.
@@ -2432,7 +2428,7 @@ class ConsolePresenter:
                 candidate.waiting_for.add(binding.node_id)
                 binding.pending = candidate
                 old_host.cancel("this row is restarting")
-                self._show_logic(binding)
+                self._refresh_console_projection()
                 return True
             try:
                 old_host.shutdown()
@@ -2440,7 +2436,7 @@ class ConsolePresenter:
                 candidate.host.shutdown()
                 binding.draft_error = str(error)
                 self._report(f"{binding.node_id}: {error}", severity="error")
-                self._show_logic(binding)
+                self._refresh_console_projection()
                 return False
         binding.node = candidate.node
         binding.host = candidate.host
@@ -2451,12 +2447,10 @@ class ConsolePresenter:
         except Exception as error:
             binding.draft_error = str(error)
             self._report(f"{binding.node_id}: {error}", severity="error")
-            self._show_logic(binding)
-            self._summarise()
+            self._refresh_console_projection()
             return False
         binding.draft_error = ""
-        self._show_logic(binding)
-        self._summarise()
+        self._refresh_console_projection()
         self._report(f"{binding.node_id} started", severity="task")
         return True
 
@@ -2516,7 +2510,16 @@ class ConsolePresenter:
             index += 1
         return f"{api_name}{index}"
 
-    def _summarise(self) -> None:
+    def _refresh_console_projection(self) -> None:
+        """Project logic rows and header chrome from one current state read.
+
+        Runtime polling, command transitions, and structural edits all end
+        here.  Rows and the running count therefore cannot observe different
+        moments of the same host lifecycle.
+        """
+
+        for binding in tuple(self.logic.values()):
+            self._show_logic(binding)
         state = "paused" if self._paused else "running"
         running = sum(
             1
@@ -2524,7 +2527,11 @@ class ConsolePresenter:
             if item.host is not None and item.host.running
         )
         nodes = f", {running}/{len(self.logic)} node(s) running" if self.logic else ""
-        self.view.set_summary(f"{len(self.panels)} panel(s), {state}{nodes}")
+        summary = f"{len(self.panels)} panel(s), {state}{nodes}"
+        if summary == self._shown_console_summary:
+            return
+        self._shown_console_summary = summary
+        self.view.set_summary(summary)
 
     def close(self, *, node_stop_seconds: float = 10.0) -> None:
         # Nodes first: one still running publishes into a plane the panels are

@@ -49,11 +49,21 @@ view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'),))
 spec = FormSpec((FormFieldProps('count', 'int', 'Count', default=2, minimum=0, maximum=99),))
 view.set_form_spec('id-1', spec, (('count', 7),))
 assert view.read_values('id-1') == (('count', 7),)
+form = view._cards['id-1'].form
+field = form.widget_for('count')
+view.set_form_spec('id-1', spec, (('count', 8),))
+assert view._cards['id-1'].form is form
+assert form.widget_for('count') is field
+assert view.read_values('id-1') == (('count', 8),)
 view.show_status('ready', 'idle')
 assert view.status_strip.text() == 'ready'
 assert view.status_strip.current_severity == 'idle'
 assert tuple(view.domain_groups) == ('sensor', 'camera')
 assert view._cards['id-1'].role_edit.text() == 'input'
+card = view._cards['id-1']
+view.set_devices(())
+assert not card.isWindow(), 'retiring a card briefly promoted it to a top-level window'
+assert card.isHidden()
 """
     )
 
@@ -139,6 +149,7 @@ view.set_device_choices((
     ('Virtual sequencer', 'sequencer.virtual', 'sequencer'),
 ))
 view.set_templates((('Virtual', 'virtual'), ('Hardware', 'hardware')))
+view.resize(1100, 700); view.show(); app.processEvents()
 assert view.tabs.tabText(0) == 'Config'
 assert view.heading_label.text() == 'Devices'
 assert view.document_name.text() == 'untitled'
@@ -154,6 +165,19 @@ group_titles = {group.title() for group in view.findChildren(type(view.loaded_gr
 assert not {'Installation', 'Configured devices', 'Available', 'Loaded (session)'} & group_titles
 assert view.new_combo.itemText(0) == 'New…'
 assert tuple(view.new_combo.itemText(index) for index in range(1, view.new_combo.count())) == ('Virtual', 'Hardware')
+# FluentComboBox paints its own collapsed text, so its natural width must use
+# the same chrome budget as that painter.  Depending on QComboBox's unrelated
+# native size hint leaves less room than the widest item and visibly elides it.
+from zlc_ui.fluent import scaled_px
+from zlc_ui.fluent.style import COMBO_WIDTH, EDIT_PADDING_H
+pad = scaled_px(EDIT_PADDING_H)
+text_inset = pad + scaled_px(2)
+text_width = view.new_combo.width() - scaled_px(COMBO_WIDTH) - text_inset - pad
+measure = getattr(view.new_combo.fontMetrics(), 'horizontalAdvance', view.new_combo.fontMetrics().width)
+assert text_width >= max(
+    measure(view.new_combo.itemText(index))
+    for index in range(view.new_combo.count())
+)
 assert view.load_button.text() == 'Load…'
 assert view.save_button.text() == 'Save'
 assert view.save_as_button.text() == 'Save as…'

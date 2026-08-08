@@ -566,11 +566,35 @@ view.set_cards((card,))
 view.set_logic_rows((row,))
 view.set_summary('one fake card')
 view.show_status('ready', 'idle')
-view.resize(1096, 422); view.show(); app.processEvents()
+view.set_panel_kinds((('image', 'Image'),))
+view.resize(1500, 422); view.show(); app.processEvents()
 assert view.summary_label.text() == 'one fake card'
 assert view.status_strip.current_severity == 'idle'
 assert view.board._cards['panel-1'] is card
 assert view.selectors_switch.width() > 0
+# The v1 header is one semantic row: identity on the left, telemetry as the
+# only flexible middle cell, and the command cluster pinned to the right.
+# A wrapping row top-aligned every sizeHint and left the spare width after the
+# final button, making both the grey summary and the action cluster visibly
+# wrong while every control still existed.
+header = view.summary_label.parentWidget()
+layout = header.layout()
+right_edge = header.rect().right() - layout.contentsMargins().right()
+assert view.load_layout_button.geometry().right() == right_edge
+center_y = header.rect().center().y()
+for widget in (
+    view.status_dot,
+    view.name_edit,
+    view.summary_label,
+    view.kind_combo,
+    view.add_panel_button,
+    view.selectors_switch,
+    view.pause_switch,
+    view.save_screenshot_button,
+    view.save_layout_button,
+    view.load_layout_button,
+):
+    assert abs(widget.geometry().center().y() - center_y) <= 1
 """
     )
 
@@ -918,46 +942,5 @@ view.scan_code.setPlainText('half typed')
 assert view.code_dirty
 view.set_page(ScanPageRecord(source_text='something else', source_revision=2))
 assert view.scan_code.toPlainText() == 'half typed'
-"""
-    )
-
-
-def test_one_more_control_cannot_widen_the_console_window() -> None:
-    """Adding a button must not be a window-geometry decision.
-
-    A plain horizontal row's minimum width is the sum of everything in it and
-    nothing in it may shrink, so nine controls set the window's minimum and the
-    tenth pushed it past the shared screen-fit size -- the window grew, the size
-    rule broke, and the acceptance check failed on a change that had nothing to
-    do with geometry.  The header wraps now: its minimum is the widest single
-    control, and a second line appears when one is needed.
-    """
-
-    _run_qt(
-        """
-from PyQt5 import QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import (
-    ACCENT, FluentButton, WINDOW_SCREEN_FRACTION, screen_fit_window_size,
-)
-from zlc_ui.console import TaskConsoleView
-
-app = ensure_qt_app(["header-wrap"])
-view = TaskConsoleView(); view.show(); app.processEvents()
-header = view.name_edit.parentWidget()
-target = screen_fit_window_size(WINDOW_SCREEN_FRACTION).width()
-
-before = header.minimumSizeHint().width()
-assert before < target, (before, target)
-
-# Five more, which no toolbar would survive if the row could not wrap.
-for index in range(5):
-    header.layout().addWidget(FluentButton(f"Extra {index}", color=ACCENT))
-app.processEvents()
-after = header.minimumSizeHint().width()
-assert after == before, "a new control must not raise the window's minimum"
-assert header.layout().heightForWidth(target) > header.layout().heightForWidth(4000), (
-    "a narrow row has to take more lines than a wide one"
-)
 """
     )

@@ -85,14 +85,20 @@ class _DeviceCard(FluentFrame):
             self.type_combo.blockSignals(False)
 
     def set_form(self, spec: FormSpec, values: tuple[tuple[str, object], ...]) -> None:
-        if self.form is not None:
-            self.form_host.removeWidget(self.form)
-            self.form.setParent(None)
-            self.form.deleteLater()
-        self.form = FluentParameterForm(spec, dict(values), parent=self)
-        self.form.changed.connect(lambda key: self.parameter_committed.emit(self.instance_id, key))
-        self.form.setVisible(not self._collapsed)
-        self.form_host.addWidget(self.form)
+        projected = dict(values)
+        if self.form is None:
+            self.form = FluentParameterForm(spec, projected, parent=self)
+            self.form.changed.connect(
+                lambda key: self.parameter_committed.emit(self.instance_id, key)
+            )
+            self.form.setVisible(not self._collapsed)
+            self.form_host.addWidget(self.form)
+            return
+        # A card is the stable owner of one form.  Reconcile already performs
+        # the keyed schema/value diff, preserving compatible controls, focus,
+        # and the sole changed-signal connection.  Rebuilding here detached a
+        # visible QWidget into a transient top-level window before deleteLater.
+        self.form.reconcile(spec, projected)
 
     def _type_changed(self, index: int) -> None:
         value = self.type_combo.itemData(index)
@@ -315,7 +321,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 card = self._cards.pop(instance_id)
                 domain = self._card_domains.pop(instance_id)
                 self.domain_card_layouts[domain].removeWidget(card)
-                card.setParent(None)
+                card.hide()
                 card.deleteLater()
         for instance_id, role, type_key, domain in wanted:
             self._ensure_domain(domain)
@@ -366,7 +372,7 @@ class DeviceManagerView(QtWidgets.QWidget):
     ) -> None:
         for widget in self._loaded_widgets:
             self.loaded_layout.removeWidget(widget)
-            widget.setParent(None)
+            widget.hide()
             widget.deleteLater()
         self._loaded_widgets.clear()
         for instance_id, role, type_id in devices:

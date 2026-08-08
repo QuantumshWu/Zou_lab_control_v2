@@ -1658,6 +1658,11 @@ class FluentComboBox(QtWidgets.QComboBox):
         super().__init__(parent)
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self.setEditable(False)
+        # The collapsed field is custom-painted below, so Qt's native combo
+        # chrome cannot author its natural width.  Re-evaluate when choices
+        # change and let :meth:`sizeHint` budget the exact same text rectangle
+        # as the painter.
+        self.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         # Long lists scroll rather than overflowing the screen.
         self.setMaxVisibleItems(_COMBO_MAX_VISIBLE_ITEMS)
         self._popup_styled = False
@@ -1746,6 +1751,39 @@ class FluentComboBox(QtWidgets.QComboBox):
                                               combo=self, gap=self._gap, parent=container)
         container.installEventFilter(self._card_filter)
 
+    @staticmethod
+    def _collapsed_font() -> QtGui.QFont:
+        return QtGui.QFont(FONT, fluent_font_size())
+
+    @staticmethod
+    def _collapsed_text_chrome() -> tuple[int, int, int]:
+        """Return ``(left inset, right pad, drop width)`` for collapsed text."""
+
+        pad = scaled_px(EDIT_PADDING_H)
+        return pad + scaled_px(2), pad, scaled_px(COMBO_WIDTH)
+
+    def _collapsed_text_rect(self) -> QtCore.QRect:
+        left, right, drop_width = self._collapsed_text_chrome()
+        width = max(0, self.width() - drop_width - left - right)
+        return QtCore.QRect(left, 0, width, self.height())
+
+    def _collapsed_text_candidates(self) -> tuple[str, ...]:
+        return tuple(self.itemText(index) for index in range(self.count()))
+
+    def sizeHint(self):  # noqa: N802 - Qt API name
+        hint = super().sizeHint()
+        candidates = self._collapsed_text_candidates()
+        if not candidates:
+            return hint
+        metrics = QtGui.QFontMetrics(self._collapsed_font())
+        measure = getattr(metrics, "horizontalAdvance", metrics.width)
+        left, right, drop_width = self._collapsed_text_chrome()
+        content_width = max(measure(text) for text in candidates)
+        return QtCore.QSize(
+            max(hint.width(), content_width + left + right + drop_width),
+            hint.height(),
+        )
+
     def paintEvent(self, event):
         del event
         painter = QtGui.QPainter(self)
@@ -1755,24 +1793,18 @@ class FluentComboBox(QtWidgets.QComboBox):
         option.currentText = ""  # suppress the style's own label so we don't double-draw
         self.style().drawComplexControl(QtWidgets.QStyle.CC_ComboBox, option, painter, self)
 
-        drop_width = scaled_px(COMBO_WIDTH)
-        pad = scaled_px(EDIT_PADDING_H)
-        # A styled QLineEdit insets its text by the frame width (~2 px) on top of
-        # the stylesheet padding, so a combo that paints text at `pad` alone sits
-        # a couple of pixels further left than the line edits / spin boxes beside
-        # it.  Add the frame allowance so e.g. the "ns" unit lines up exactly with
-        # the duration value above it.
-        text_inset = pad + scaled_px(2)
-        text_width = max(0, self.width() - drop_width - text_inset - pad)
-        text_rect = QtCore.QRect(text_inset, 0, text_width, self.height())
+        text_rect = self._collapsed_text_rect()
         painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
-        painter.setFont(QtGui.QFont(FONT, fluent_font_size()))
+        painter.setFont(self._collapsed_font())
         metrics = painter.fontMetrics()
-        text = metrics.elidedText(self._display_text(), QtCore.Qt.ElideRight, text_width)
+        text = metrics.elidedText(
+            self._display_text(), QtCore.Qt.ElideRight, text_rect.width()
+        )
         painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
 
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor("#FFFFFF"))
+        _left, _right, drop_width = self._collapsed_text_chrome()
         cx = int(self.width() - drop_width / 2)
         cy = int(self.height() / 2)
         size = scaled_px(COMBO_TRI_SIZE)
@@ -3106,85 +3138,6 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             QtWidgets.QSizePolicy.Preferred,
         )
         self.setWidget(widget)
-
-
-class FluentFlowRow(QtWidgets.QLayout):
-    """A row of controls that WRAPS instead of widening its window.
-
-    A plain QHBoxLayout's minimum width is the sum of everything in it, and
-    nothing in it may shrink.  So a header holding nine controls has a minimum
-    of all nine, and the tenth pushes the window past the shared screen-fit
-    size -- the window grows, the size rule is broken, and the acceptance check
-    that guards it fails on a change that had nothing to do with geometry.
-    Adding one control was a window-layout decision without meaning to be.
-
-    Here the row is allowed to take a second line.  Its minimum is the widest
-    single item, not the sum, so a control can always be added and the window
-    stays the size the rule says it is.
-    """
-
-    def __init__(self, parent=None, *, spacing: int | None = None):
-        super().__init__(parent)
-        self._items: list[QtWidgets.QLayoutItem] = []
-        gap = scaled_px(8, minimum=5) if spacing is None else int(spacing)
-        self.setSpacing(gap)
-
-    # -- QLayout plumbing -------------------------------------------------
-    def addItem(self, item) -> None:  # noqa: N802 - Qt name
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, index):  # noqa: N802 - Qt name
-        return self._items[index] if 0 <= index < len(self._items) else None
-
-    def takeAt(self, index):  # noqa: N802 - Qt name
-        return self._items.pop(index) if 0 <= index < len(self._items) else None
-
-    def expandingDirections(self):  # noqa: N802 - Qt name
-        return QtCore.Qt.Orientations(QtCore.Qt.Orientation(0))
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt name
-        return True
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt name
-        return self._lay_out(QtCore.QRect(0, 0, width, 0), apply=False)
-
-    def setGeometry(self, rect) -> None:  # noqa: N802 - Qt name
-        super().setGeometry(rect)
-        self._lay_out(rect, apply=True)
-
-    def sizeHint(self):  # noqa: N802 - Qt name
-        return self.minimumSize()
-
-    def minimumSize(self):  # noqa: N802 - Qt name
-        size = QtCore.QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        margins = self.contentsMargins()
-        return size + QtCore.QSize(
-            margins.left() + margins.right(), margins.top() + margins.bottom()
-        )
-
-    # -- the wrapping itself ----------------------------------------------
-    def _lay_out(self, rect, *, apply: bool) -> int:
-        margins = self.contentsMargins()
-        area = rect.adjusted(
-            margins.left(), margins.top(), -margins.right(), -margins.bottom()
-        )
-        x, y, line_height = area.x(), area.y(), 0
-        gap = self.spacing()
-        for item in self._items:
-            hint = item.sizeHint()
-            if line_height and x + hint.width() > area.right() + 1:
-                x, y = area.x(), y + line_height + gap
-                line_height = 0
-            if apply:
-                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
-            x += hint.width() + gap
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y() + margins.bottom()
 
 
 class LinkedScrollPanes(QtWidgets.QWidget):
