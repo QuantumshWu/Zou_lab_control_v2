@@ -28,8 +28,11 @@ FIELD_DAC = "dac"
 FIELD_DELAY = "delay"
 FIELD_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
 SLOT_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
+#: How long one of each unit is, in nanoseconds.  A tick is NOT here: it is
+#: however long this board's clock says, and listing it as 1.0 ns made it a
+#: synonym for ns -- so on a 20 ns clock the one unit that is on the grid by
+#: definition became the one most likely to be refused.
 TIME_UNIT_TO_NS = {
-    "ticks": 1.0,
     "ns": 1.0,
     "us": 1_000.0,
     "ms": 1_000_000.0,
@@ -80,22 +83,53 @@ def _unit(value: Any, field_name: str) -> str:
     return result
 
 
-def exact_ticks(value: int | float, unit: str, time_step_ns: float, field_name: str,
-                *, minimum: int | None = 1) -> int:
-    """Convert an owner-declared time value to an exact device-clock tick count."""
+def _tick_ratio(value: int | float, unit: str, time_step_ns: float,
+                field_name: str) -> Fraction:
+    """How many device-clock ticks this value is -- exactly, as a fraction.
+
+    Both questions below start here, so "what counts as a tick" is answered in
+    one place and they can never disagree about it.
+    """
 
     number = _number(value, field_name)
     if time_step_ns <= 0:
         raise ValueError("time_step_ns must be positive")
     if unit not in TIME_UNIT_TO_NS:
         raise ValueError(f"{field_name} has an unsupported time unit")
-    ratio = Fraction(str(number)) * Fraction(str(TIME_UNIT_TO_NS[unit])) / Fraction(str(time_step_ns))
+    return Fraction(str(number)) * Fraction(str(TIME_UNIT_TO_NS[unit])) / Fraction(str(time_step_ns))
+
+
+def exact_ticks(value: int | float, unit: str, time_step_ns: float, field_name: str,
+                *, minimum: int | None = 1) -> int:
+    """Convert an owner-declared time value to an exact device-clock tick count."""
+
+    ratio = _tick_ratio(value, unit, time_step_ns, field_name)
     if ratio.denominator != 1:
         raise ValueError(f"{field_name} is not on the device clock grid")
     ticks = int(ratio)
     if minimum is not None and ticks < minimum:
         raise ValueError(f"{field_name} must be at least {minimum} tick(s)")
     return ticks
+
+
+def align_to_grid(value: int | float, unit: str, time_step_ns: float, field_name: str,
+                  *, minimum: int | None = 1) -> float:
+    """The nearest value ON the clock grid, in the unit it arrived in.
+
+    ``exact_ticks`` asks "is this legal"; this asks "what legal value did they
+    mean" -- the question an editor has.  Round with this BEFORE authoring, so
+    the model stays strict and a document can never claim 1.003 us while the
+    board runs 1.00 us.  Only ns ever felt the rule: on a 20 ns clock a whole
+    number of us/ms/s lands on the grid by arithmetic alone.
+    """
+
+    ratio = _tick_ratio(value, unit, time_step_ns, field_name)
+    half = Fraction(1, 2)
+    ticks = int(ratio + half) if ratio >= 0 else -int(-ratio + half)
+    if minimum is not None and ticks < minimum:
+        ticks = minimum
+    return float(Fraction(ticks) * Fraction(str(time_step_ns))
+                 / Fraction(str(TIME_UNIT_TO_NS[unit])))
 
 
 @dataclass(frozen=True)

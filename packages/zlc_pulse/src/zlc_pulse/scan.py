@@ -297,7 +297,7 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
     contract with whoever runs the program.
     """
 
-    cols = list(columns) or [ScanColumnSpec("s0", 1.0, 10_000.0, False, "ticks")]
+    cols = list(columns) or [ScanColumnSpec("s0", 1.0, 10_000.0, False, "ns")]
     count = len(cols)
 
     def _sweep(spec: ScanColumnSpec, size: object) -> str:

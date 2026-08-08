@@ -40,7 +40,7 @@ from zlc_pulse import (
     PulseSequence,
     RepeatRegion,
 )
-from zlc_pulse import TIME_UNIT_CHOICES, TIME_UNIT_TO_NS
+from zlc_pulse import TIME_UNIT_CHOICES, TIME_UNIT_TO_NS, align_to_grid
 from zlc_durable import unique_path, write_readable_json
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui import (
@@ -1153,9 +1153,20 @@ class PulseEditorPresenter:
         self._edit_period(period_id, lambda period: replace(period, name=str(name)))
 
     def set_duration(self, period_id: str, value: object, unit: str) -> None:
+        """How long this period lasts, rounded onto the board's clock.
+
+        A duration between ticks is not a mistake to argue with -- it is a
+        number the board would round anyway.  Refusing it put a blocking
+        dialog in front of an operator typing a number, and typing is when
+        every intermediate value is briefly wrong.
+        """
+
+        aligned = self._on_grid(value, unit, "duration")
+        if aligned is None:
+            return
         self._edit_period(
             period_id,
-            lambda period: replace(period, duration=float(value), unit=str(unit)),
+            lambda period: replace(period, duration=aligned, unit=str(unit)),
         )
 
     def set_digital(self, period_id: str, port_key: str, high: bool) -> None:
@@ -1205,7 +1216,10 @@ class PulseEditorPresenter:
         if self.sequence is None:
             return
         delays = tuple(item for item in self.sequence.delays if item.port != port_key)
-        amount = float(value or 0.0)
+        # A delay may legitimately be zero, so it rounds with no floor.
+        amount = self._on_grid(value or 0.0, unit, "delay", minimum=None)
+        if amount is None:
+            return
         if amount:
             delays = delays + (OutputDelay(str(port_key), amount, str(unit)),)
         self._apply_value(
@@ -2907,6 +2921,29 @@ class PulseEditorPresenter:
                 else "no scan slots"
             ),
         )
+
+    def _on_grid(self, value: object, unit: str, field: str,
+                 *, minimum: int | None = 1) -> float | None:
+        """One rounding rule for every time an operator types, or None if the
+        value is not a number at all -- which IS worth saying out loud.
+
+        The unit decides nothing here.  On a 20 ns clock a whole number of
+        us/ms/s lands on the grid by arithmetic, so only ns ever felt the
+        rule; routing every unit through the same call is what stops that
+        difference from being written into the code as a special case.
+        """
+
+        if self.sequence is None:
+            return None
+        try:
+            # A field sends what was typed, which is text.  Numbers arrive as
+            # numbers from a notebook.  Both are the same question.
+            return align_to_grid(float(value), str(unit),
+                                 float(self.sequence.time_step_ns),
+                                 field, minimum=minimum)
+        except Exception as error:
+            self._warn(str(error))
+            return None
 
     def _warn(self, text: str) -> None:
         warn = getattr(self.view, "show_warning", None)

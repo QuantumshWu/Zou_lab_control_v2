@@ -37,6 +37,7 @@ __all__ = (
     "DEFAULT_PORT",
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
+    "align_to_grid",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",

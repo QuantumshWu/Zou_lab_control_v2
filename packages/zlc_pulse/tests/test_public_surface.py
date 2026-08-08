@@ -35,7 +35,7 @@ from zlc_pulse.remote import REMOTE_METHODS, RemotePulseStreamer
 #: the author's problem: the template offered offset-binary codes and device
 #: ticks for fields whose own boxes are signed codes and microseconds.  Naming
 #: both directions makes the conversion a place instead of an instruction.
-MAX_PUBLIC_NAMES = 36
+MAX_PUBLIC_NAMES = 37
 EXPECTED_PUBLIC_NAMES = (
     "PulseStreamer",
     "RemotePulseStreamer",
@@ -64,6 +64,7 @@ EXPECTED_PUBLIC_NAMES = (
     "DEFAULT_PORT",
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
+    "align_to_grid",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
@@ -79,10 +80,13 @@ EXPECTED_PUBLIC_NAMES = (
 def test_package_exports_are_the_final_surface_and_not_builtin_shadowing() -> None:
     names = tuple(zlc_pulse.__all__)
     assert names == EXPECTED_PUBLIC_NAMES
-    # Derived, not re-typed: the listing above IS the count.  Raised once, for
-    # MINIMUM_REPEAT_COUNT -- the smallest count that is a repeat is a fact of
-    # the pulse model that anyone authoring one needs, and leaving it private
-    # meant the editor invented its own answer and got it wrong.
+    # Derived, not re-typed: the listing above IS the count.  Raised twice.
+    # For MINIMUM_REPEAT_COUNT -- the smallest count that is a repeat is a fact
+    # of the pulse model that anyone authoring one needs, and leaving it
+    # private meant the editor invented its own answer and got it wrong.  And
+    # for align_to_grid: this package could say whether a value was ON the
+    # clock grid but not WHERE the grid is, so an editor had nothing to round
+    # with and refused the operator mid-keystroke instead.
     assert len(names) == len(set(names)) == len(EXPECTED_PUBLIC_NAMES)
     assert len(names) <= MAX_PUBLIC_NAMES
     seen_ids: dict[int, str] = {}
@@ -195,6 +199,10 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 7_200 -> 7_230 for align_to_grid: v1 could say where the clock grid is
+    # (time_value_per_tick) and this package could only say whether you were on
+    # it, so an editor had nothing to round WITH and refused the operator
+    # instead -- with a blocking dialog, while they were still typing.
     # 7_170 -> 7_200 for stating which lines can LOSE things.  The strobe
     # verify-and-retry is sound only where a timeout means nothing is still in
     # flight -- true of a UART frame, false of a Vivado TCL that may execute
@@ -258,14 +266,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 7_200
+    assert counted <= 7_230
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_380
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_410
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

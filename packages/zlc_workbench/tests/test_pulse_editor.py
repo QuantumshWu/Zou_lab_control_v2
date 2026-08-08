@@ -594,21 +594,39 @@ def test_turning_a_lane_on_changes_that_lane_and_nothing_else(presenter, sequenc
     ] == [value for position, value in enumerate(before) if position != index]
 
 
-def test_a_duration_off_the_clock_grid_is_refused_by_the_model(presenter) -> None:
-    """The rule belongs to zlc_pulse and is not copied here.
+def test_a_duration_off_the_clock_grid_is_rounded_onto_it(presenter) -> None:
+    """Typed between ticks is not an argument to have.
 
-    A period that is not a whole number of ticks cannot be played.  The editor
-    finds that out by trying, which is what keeps one answer to the question --
-    and shows the model's own words rather than letting them out of a Qt slot,
-    where PyQt5 ends the process and the window simply vanishes.
+    A period that is not a whole number of ticks cannot be played, and the
+    editor used to say so in a blocking dialog -- while the operator was still
+    typing, when every intermediate value is briefly wrong.  It rounds onto the
+    grid instead and shows what it did, so the number on screen is the number
+    the board will play.
+
+    Where the grid IS still belongs to zlc_pulse; this only asks.
     """
+
+    period_id = presenter.sequence.periods[0].period_id
+    step = presenter.sequence.time_step_ns
+
+    presenter.view.duration_committed.emit(period_id, 3.7, "ns")
+
+    stored = presenter.sequence.periods[0]
+    assert stored.unit == "ns"
+    assert (stored.duration % step) == 0, f"{stored.duration} is not a whole tick"
+    assert stored.duration == step, "3.7 ns should land on the first tick"
+    assert not presenter.view.warnings, "rounding is not something to warn about"
+
+
+def test_a_duration_that_is_not_a_number_still_says_so(presenter) -> None:
+    """Rounding answers "which legal value"; it cannot answer "which number"."""
 
     period_id = presenter.sequence.periods[0].period_id
     kept = presenter.sequence
 
-    presenter.view.duration_committed.emit(period_id, 3.7, "ns")
+    presenter.view.duration_committed.emit(period_id, "not a duration", "ns")
 
-    assert presenter.sequence is kept, "an illegal edit was kept"
+    assert presenter.sequence is kept, "a meaningless edit was kept"
     assert presenter.view.warnings, "the operator was told nothing"
 
 
