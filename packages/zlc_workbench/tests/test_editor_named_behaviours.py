@@ -105,17 +105,44 @@ def test_target_rows_carry_the_package_pin_of_every_lane(board) -> None:
     assert reached - lanes, "endpoints are package pins, not the lane names"
 
 
-def test_on_pulse_runs_the_whole_pulse_until_stop(board) -> None:
-    """v1's On Pulse is a cycle an experiment holds running, not one shot."""
+def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
+    """v1's On Pulse is a cycle an experiment holds running, not one shot.
 
-    import inspect
+    Asked of a real board, not of the source text.  Reading fire() for the
+    string "forever=True" passed for as long as that literal happened to be
+    spelled that way and said nothing about what the board was told -- so it
+    broke the moment the value stopped being written out longhand, while the
+    behaviour it names was intact.
+    """
 
+    from zlc_pulse import load_streamer_config
+    from zlc_pulse.device import PulseStreamer
+    from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_workbench.pulse_editor import PulseEditorPresenter
 
-    source = inspect.getsource(PulseEditorPresenter.fire)
-    assert "forever=True" in source, (
-        "On Pulse must ask the board to repeat until Stop, which is what v1 does"
+    from test_pulse_editor import _EditorView, _calibration_sequence
+
+    config = load_streamer_config()
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=config["params"], auto_done=True),
+        config["params"],
+        config["clock_hz"],
     )
+    streamer.open()
+    presenter = PulseEditorPresenter(
+        _EditorView(), _calibration_sequence(), sequencer=streamer
+    )
+    try:
+        assert presenter.fire() is True, presenter.view.warnings
+        applied = streamer.applied()
+        assert applied is not None, "the board was never told anything"
+        assert applied.forever is True, (
+            "On Pulse must ask the board to repeat until Stop, which is what v1 does"
+        )
+    finally:
+        presenter.stop()
+        presenter.close()
+        streamer.close()
 
 
 def test_the_preview_page_offers_sizes_and_a_show_all_switch() -> None:

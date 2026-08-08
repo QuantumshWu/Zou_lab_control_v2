@@ -527,6 +527,12 @@ class _EditorView:
 def sequence():
     """The real calibration pulse, as the experiment builds it."""
 
+    return _calibration_sequence()
+
+
+def _calibration_sequence():
+    """The same pulse, reachable without the fixture, for sibling suites."""
+
     spec = importlib.util.spec_from_file_location(
         "calibration_pulse", ATOM_ROOT / "pulses" / "calibration.py"
     )
@@ -909,16 +915,18 @@ def test_on_pulse_runs_until_stop(sequence) -> None:
         presenter.close()
 
 
-def test_a_finite_run_is_asked_for_explicitly_and_waits(sequence) -> None:
-    """The diagnostic path: one shot, waited on, the way a scan point runs."""
+def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
+    """A finite run is started the same way a forever run is: started."""
 
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
     try:
         assert presenter.fire(forever=False) is True
-        assert board.events == ["load", "fire", "wait_done"]
-        assert presenter.running is False
+        assert board.events == ["load", "fire"]
+        # Started, not finished: nothing waits for the board any more, so a run
+        # that was just asked for is a run that is going.
+        assert presenter.running is True
     finally:
         presenter.close()
 
@@ -935,21 +943,27 @@ def test_a_shot_that_fails_leaves_the_outputs_safe(sequence) -> None:
         presenter.close()
 
 
-def test_a_shot_that_never_reports_done_is_not_a_shot_that_succeeded(sequence) -> None:
-    """Firing over an unfinished shot is the failure this project has paid for.
+def test_a_finite_run_does_not_block_on_the_board(sequence) -> None:
+    """Start it and come back; the beat says what the board is doing.
 
-    The board takes the second command while the first is still playing and the
-    scan quietly returns one point, with every report looking normal.
+    The finite path used to wait for done on the calling thread, which for On
+    Pulse is the GUI thread -- so a scan long enough to matter froze the window
+    for its whole length, and Stop, the one control that would have helped,
+    could not be delivered.
+
+    Nothing is lost by not waiting.  Firing over an unfinished shot cannot
+    happen: the device requires an idle board for load, write_slots,
+    write_scan_table and fire, and raises otherwise.
     """
 
     view = _EditorView()
     board = _Sequencer(never_done=True)
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
     try:
-        assert presenter.fire(forever=False, shots=3) is False
-        assert board.events.count("fire") == 1, "it fired again over an unfinished shot"
-        assert board.events[-1] == "safe"
-        assert any("did not report done" in text for text in view.warnings)
+        assert presenter.fire(forever=False) is True
+        assert "wait_done" not in board.events, "the GUI thread waited on the board"
+        assert board.events.count("fire") == 1
+        assert not view.warnings, repr(view.warnings)
     finally:
         presenter.close()
 
@@ -2265,14 +2279,16 @@ def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
 
         presenter.set_repeat(ids[0], ids[-1], 3)
         assert presenter.fire() is True
-        assert board.events == ["load", "fire", "wait_done"], board.events
+        assert board.events == ["load", "fire"], board.events
         assert presenter.compile().loop_count == 3
 
         # A bracket over PART leaves the outer level alone: still until Stop.
         board.events.clear()
         presenter.set_repeat(ids[1], ids[2], 5)
         assert presenter.fire() is True
-        assert board.events == ["load", "fire forever"], board.events
+        # The finite run above is still going -- nothing waits it out any more
+        # -- so this press stops it first, which is what "off then on" means.
+        assert board.events == ["safe", "load", "fire forever"], board.events
 
         # And asking explicitly still wins over what the document says.  The
         # board is playing forever by now, so this press is the ordinary bench

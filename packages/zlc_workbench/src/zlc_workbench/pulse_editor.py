@@ -1681,7 +1681,7 @@ class PulseEditorPresenter:
         self._poll_board()
         return True
 
-    def fire(self, *, forever: bool | None = None, shots: int = 1, timeout: float = 5.0) -> bool:
+    def fire(self, *, forever: bool | None = None) -> bool:
         """On Pulse: load what is on screen and run it the way the pulse says.
 
         A pulse is a cycle, and an experiment holds it running -- the MOT loads
@@ -1696,8 +1696,17 @@ class PulseEditorPresenter:
         did nothing -- N times, over and over, is indistinguishable from over
         and over.  So the document is asked, here, on the path that fires.
 
-        A forever run is deliberately NOT waited on.  It never reports done, so
-        waiting would hang the window on its own success.
+        NOTHING here waits for the board.  A run is started and the display
+        beat says what the board is doing, which is how the forever path always
+        worked -- the finite path used to block the GUI thread on wait_done()
+        instead, and the one control that would have helped, Stop, is the one a
+        blocked event loop cannot deliver.
+
+        There is nothing left for that wait to protect.  Firing over an
+        unfinished shot cannot happen: ``load``, ``write_slots``,
+        ``write_scan_table`` and ``fire`` all call ``_require_idle()`` and
+        raise, and On Pulse stops a running board before loading anyway.  The
+        invariant lives with the device that owns it.
         """
 
         if not self._board_ready_for_a_program():
@@ -1712,23 +1721,8 @@ class PulseEditorPresenter:
             finite_scan = self._scan_armed() and int(self._scan_repeats) > 0
             forever = self.sequence.whole_pulse_repeat is None and not finite_scan
         try:
-            if forever:
-                self.sequencer.fire(forever=True)
-                self._poll_board()
-                return True
-            for shot in range(max(1, int(shots))):
-                self.sequencer.fire()
-                # A shot that does not report done is not a shot that
-                # succeeded.  Firing again over an unfinished one is the
-                # failure this project has already paid for twice: the board
-                # takes the second command while the first is still playing.
-                if self.sequencer.wait_done(timeout) is None:
-                    self._warn(
-                        f"shot {shot + 1} did not report done within {timeout:g}s; "
-                        "stopping rather than firing over it"
-                    )
-                    self.stop()
-                    return False
+            self.sequencer.fire(forever=bool(forever))
+            self._poll_board()
         except Exception as error:
             self._warn(f"firing stopped: {error}")
             self.stop()
