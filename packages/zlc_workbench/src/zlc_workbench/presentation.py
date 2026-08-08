@@ -30,7 +30,7 @@ class _Prepared:
     """What one panel handed to the batch, and what it was drawn from."""
 
     publication: object
-    value: object
+    plot_input: object
 
 
 def _revision_of(snapshot: object) -> object | None:
@@ -78,7 +78,7 @@ class PlotPanelPort:
         self._shown_revision = _revision_of(shown)
         self._shown_generation: object | None = None
         self._serial = 0
-        self._pending_inputs: dict[int, object] = {}
+        self._pending: dict[int, _Prepared] = {}
         self.missing: list[str] = []
         #: The last render this panel could not show.  Read on the beat and put
         #: on the card, because a panel that quietly stopped drawing looks
@@ -190,9 +190,14 @@ class PlotPanelPort:
             and revision == self._shown_revision
         ):
             return None
+        if any(
+            prepared.publication is publication
+            for prepared in self._pending.values()
+        ):
+            return None
         self._serial += 1
         serial = self._serial
-        self._pending_inputs[serial] = plot_input
+        self._pending[serial] = _Prepared(publication, plot_input)
         future = self._host.update_data(plot_input)
         return SurfaceUpdate(
             panel_id=self._panel_id,
@@ -220,7 +225,10 @@ class PlotPanelPort:
         if not self.can_accept(update, operation):
             return False
         self._presented = update.publication
-        self._presented_input = self._pending_inputs.pop(update.serial, update.value.snapshot)
+        prepared = self._pending.pop(update.serial, None)
+        self._presented_input = (
+            update.value.snapshot if prepared is None else prepared.plot_input
+        )
         self._shown_generation = _publication_generation(update.publication)
         self._shown_revision = _revision_of(self._presented_input)
         self.last_error = None
@@ -238,7 +246,7 @@ class PlotPanelPort:
 
         serial = getattr(update, "serial", None)
         if serial is not None:
-            self._pending_inputs.pop(serial, None)
+            self._pending.pop(serial, None)
         if error is not None:
             self.last_error = error
 
@@ -247,7 +255,7 @@ class PlotPanelPort:
 
         serial = getattr(update, "serial", None)
         if serial is not None:
-            self._pending_inputs.pop(serial, None)
+            self._pending.pop(serial, None)
 
     def report_waiting(self, missing_signal: str) -> None:
         """The signal this panel wants has not arrived on this tick."""

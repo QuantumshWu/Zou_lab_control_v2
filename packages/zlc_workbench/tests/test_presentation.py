@@ -179,6 +179,38 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
         other.close()
 
 
+def test_one_publication_is_submitted_once_while_its_surface_is_pending(
+    live_bench,
+) -> None:
+    """A display beat cannot enqueue the same immutable publication twice."""
+
+    from concurrent.futures import Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    calls: list[object] = []
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda snapshot: calls.append(snapshot) or Future(),
+    )
+    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
+    first = port.prepare(value, publication)
+    assert first is not None
+    assert port.prepare(value, publication) is None
+    assert len(calls) == 1
+
+    port.finish_unpresented(first)
+    retry = port.prepare(value, publication)
+    assert retry is not None
+    assert len(calls) == 2
+    port.finish_unpresented(retry)
+
+
 def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
     live_bench,
 ) -> None:
