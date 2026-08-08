@@ -186,3 +186,34 @@ def test_a_semantic_edit_that_changes_nothing_does_not_rebuild() -> None:
         assert host.front.identity.layout_revision == first.identity.layout_revision
     finally:
         host.close(timeout=10)
+
+
+def test_a_host_that_could_not_start_says_why_not_that_it_is_closing() -> None:
+    """The refusal must carry the reason, not the symptom.
+
+    A startup failure sets ``_closing`` and records itself in
+    ``_startup_error``.  Every refusal that read only ``_closing`` answered
+    "raster plot host is closing" -- so a panel asked to draw something the
+    plot kind cannot accept reported a host that was shutting down, and the
+    real sentence was recorded and never read by anyone.  It cost a whole
+    investigation to find a message the program already had.
+    """
+
+    # A calibration artifact is not a snapshot; CurvePlot refuses it, which is
+    # correct -- what matters is whether the caller is told THAT.
+    host = RasterPlotHost.from_plot(object(), CurvePlot(AxisRef.point("x")))
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            host.wait_for_front(timeout=10)
+        assert "failed to start" in str(raised.value), str(raised.value)
+        assert "OwnedSnapshot" in str(raised.value), (
+            "the refusal must name the real reason: " + str(raised.value)
+        )
+        assert raised.value.__cause__ is not None, "and keep the original as its cause"
+
+        # Every later refusal says the same thing, not "closing".
+        with pytest.raises(RuntimeError) as again:
+            host.subscribe_front(lambda front: None)
+        assert "failed to start" in str(again.value), str(again.value)
+    finally:
+        host.close()

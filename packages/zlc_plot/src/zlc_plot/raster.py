@@ -635,6 +635,28 @@ class RasterPlotHost:
             raise TypeError("session must be PlotSession")
         return cls(lambda: session, close_session=close_session)
 
+    def _unusable(self) -> RuntimeError:
+        """Why this host will not take work -- the REASON, not the symptom.
+
+        A startup failure sets ``_closing`` and records itself in
+        ``_startup_error``, and the refusals that read only ``_closing`` said
+        "raster plot host is closing" to every later caller.  So a panel asked
+        to draw something the plot kind cannot accept reported a host that was
+        shutting down, while the actual sentence -- "CurvePlot requires
+        zlc_data.OwnedSnapshot" -- sat in a field nobody read.  Every refusal
+        comes through here, so there is one answer to "why".
+
+        Call with ``self._condition`` held.
+        """
+
+        if self._startup_error is not None:
+            failure = RuntimeError(
+                f"raster plot host failed to start: {self._startup_error}"
+            )
+            failure.__cause__ = self._startup_error
+            return failure
+        return RuntimeError("raster plot host is closing")
+
     def _require_session(self) -> "PlotSession":
         with self._condition:
             while (
@@ -751,7 +773,10 @@ class RasterPlotHost:
             closing = self._closing
         if front is not None:
             return front
-        if closing or initial is None:
+        if closing:
+            with self._condition:
+                raise self._unusable()
+        if initial is None:
             raise RuntimeError("raster plot host closed before its first front")
         return initial.result(timeout=timeout).front
 
@@ -763,7 +788,7 @@ class RasterPlotHost:
             raise TypeError("front callback must be callable")
         with self._condition:
             if self._closing:
-                raise RuntimeError("raster plot host is closing")
+                raise self._unusable()
             self._front_callbacks.append(callback)
 
         def unsubscribe() -> None:
@@ -1764,7 +1789,7 @@ class RasterPlotHost:
         superseded: Future[RasterOperation[Any]] | None = None
         with self._condition:
             if self._closing:
-                completion.set_exception(RuntimeError("raster plot host is closing"))
+                completion.set_exception(self._unusable())
                 return completion
             if (
                 coalesce_key is not None
