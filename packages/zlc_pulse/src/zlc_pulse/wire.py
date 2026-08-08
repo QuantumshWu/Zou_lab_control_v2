@@ -542,12 +542,17 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     # PREVIOUS program's value, so after a negative-delay run (global shift G delays all driven
     # buses) a following no-delay program left the DAC buses STILL delayed on hardware -- the
     # A delayed digital output must not leave an unrelated DAC bus delayed.  Always zero them.
+    # One name for this number, and NO default.  The compiled record calls it
+    # ``delay_ticks`` (compile.py: TargetBusDelay); this read asked for ``delay``
+    # and let getattr's default answer, so EVERY DAC bus delay was packed as zero
+    # -- silently, on real hardware, in the one direction nothing checks.  A
+    # missing field is a mismatch to raise, not a zero to send to the board.
     bus_delay_by_index: dict[int, int] = {}
     for bd in (getattr(program, "bus_delays", None) or []):
         if isinstance(bd, Mapping):
-            b, d = int(bd.get("bus_index", 0)), int(bd.get("delay", 0))
+            b, d = int(bd["bus_index"]), int(bd["delay_ticks"])
         else:
-            b, d = int(getattr(bd, "bus_index", 0)), int(getattr(bd, "delay", 0))
+            b, d = int(bd.bus_index), int(bd.delay_ticks)
         if b < 0 or b >= p.bus_count:
             raise ValueError(f"bus delay bus_index {b} is outside bus_count {p.bus_count}.")
         if d < 0 or d > p.ttl_delay_max_ticks:
@@ -614,7 +619,7 @@ def unpack_program(words: Mapping[int, int], params: StreamerParams | None = Non
     # PER-SIGNAL OUTPUT DELAY -- one 32b R_DELAY word per channel, then one per bus (both
     # event-scheduled, 32b), exactly as zlc_pulse_streamer_top.v slices R_DELAY.
     channel_delays = [int(g(bases["delay"] + ch)) for ch in range(p.channel_count)]
-    bus_delays = [{"bus_index": b, "delay": int(g(bases["delay"] + p.channel_count + b))}
+    bus_delays = [{"bus_index": b, "delay_ticks": int(g(bases["delay"] + p.channel_count + b))}
                   for b in range(p.bus_count)
                   if int(g(bases["delay"] + p.channel_count + b)) != 0]
     clk_enable = 0

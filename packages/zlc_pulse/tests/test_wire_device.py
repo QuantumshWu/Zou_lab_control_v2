@@ -15,7 +15,8 @@ from zlc_pulse import (
     PulseTarget,
     compile_sequence,
 )
-from zlc_pulse.model import PulseFieldRef
+from zlc_pulse.compile import TargetBusDelay
+from zlc_pulse.model import OutputDelay, PulseFieldRef
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.wire import (
@@ -33,6 +34,7 @@ from zlc_pulse.wire import (
     pack_scan_rows,
     region_bases,
     StreamerParams,
+    unpack_program,
 )
 
 
@@ -431,3 +433,46 @@ def test_pack_scan_rows_only_targets_the_requested_bank_chunk() -> None:
     words = pack_scan_rows(((1, 2), (3, 4), (5, 6)), geom, bank=1, chunk=1)
     base = region_bases(geom)["scan"] + geom.bank_size * geom.scan_words
     assert set(words) == {base, base + 1, base + 2, base + 3}
+
+
+def test_a_dac_bus_delay_reaches_the_board_word_it_was_asked_for() -> None:
+    """The delay an operator set must be the number the board is given.
+
+    pack read the record's delay through ``getattr(bd, "delay", 0)`` while the
+    compiled record calls it ``delay_ticks``, so the default answered every
+    time and EVERY DAC bus delay went to hardware as zero -- silently, in the
+    one direction nothing checks, on a rig where the only symptom is a waveform
+    that is wrong.  Nothing was red, because nothing read this word.
+    """
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    sequence = replace(_sequence(), delays=(OutputDelay("dac", 200, "ns"),))
+    program = compile_sequence(sequence, geom, 50e6)
+
+    # 200 ns at 20 ns/tick, carried on the record the compiler actually builds.
+    assert program.bus_delays == (TargetBusDelay(bus_index=0, delay_ticks=10),)
+
+    words = pack_program(program, geom)
+    bases = region_bases(geom)
+    assert words[bases["delay"] + geom.channel_count + 0] == 10
+
+
+def test_an_unpacked_bus_delay_can_be_packed_again_unchanged() -> None:
+    """Unpack and pack must use ONE name for this number, or the trip loses it."""
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    sequence = replace(_sequence(), delays=(OutputDelay("dac", 200, "ns"),))
+    program = compile_sequence(sequence, geom, 50e6)
+    unpacked = unpack_program(pack_program(program, geom), geom)
+
+    assert unpacked["bus_delays"] == [{"bus_index": 0, "delay_ticks": 10}]
+
+    class _AsUnpacked:
+        bus_delays = unpacked["bus_delays"]
+
+    round_tripped = replace(program, bus_delays=tuple(
+        TargetBusDelay(**entry) for entry in unpacked["bus_delays"]
+    ))
+    assert pack_program(round_tripped, geom)[
+        region_bases(geom)["delay"] + geom.channel_count
+    ] == 10
