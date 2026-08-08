@@ -24,10 +24,17 @@ from zlc_ui import (  # noqa: E402
 
 def populate(view) -> None:
     view.set_device_choices(
-        (("Fake sensor", "sensor"), ("Fake camera", "camera"), ("Fake DAC", "dac"))
+        (
+            ("Fake sensor", "sensor.fake", "sensor"),
+            ("Fake camera", "camera.fake", "camera"),
+            ("Fake DAC", "rf.fake", "rf"),
+        )
     )
     view.set_devices(
-        (("sensor-1", "input", "sensor"), ("camera-1", "imaging", "camera"))
+        (
+            ("sensor-1", "input", "sensor.fake", "sensor"),
+            ("camera-1", "imaging", "camera.fake", "camera"),
+        )
     )
     spec = FormSpec(
         (

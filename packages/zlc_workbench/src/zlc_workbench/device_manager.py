@@ -109,7 +109,11 @@ class DeviceManagerPresenter:
         # exactly like a family that does not exist.
         self.view.set_device_choices(
             tuple(
-                (f"{descriptor.type_id}", descriptor.type_id)
+                (
+                    f"{descriptor.type_id}",
+                    descriptor.type_id,
+                    descriptor.domain,
+                )
                 for descriptor in sorted(self.types.values(), key=lambda item: item.type_id)
             ),
             tuple(
@@ -558,7 +562,17 @@ class DeviceManagerPresenter:
         )
         self.view.set_devices(
             tuple(
-                (item.instance_id, item.role, item.type_id) for item in self.devices
+                (
+                    item.instance_id,
+                    item.role,
+                    item.type_id,
+                    (
+                        self.types[item.type_id].domain
+                        if item.type_id in self.types
+                        else "Unavailable"
+                    ),
+                )
+                for item in self.devices
             )
         )
         for item in self.devices:

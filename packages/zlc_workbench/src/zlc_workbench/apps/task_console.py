@@ -37,11 +37,6 @@ def _parser() -> argparse.ArgumentParser:
         help="start from a named apparatus template instead of apparatus.json (e.g. virtual)",
     )
     parser.add_argument(
-        "--pulse",
-        default="calibration",
-        help="pulse to load at startup (default: calibration)",
-    )
-    parser.add_argument(
         "--check",
         action="store_true",
         help="build everything and exit without opening a window (a startup smoke test)",
@@ -55,7 +50,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def open_experiment(workspace=None, template=None, pulse="calibration"):
+def open_experiment(workspace=None, template=None):
     """Open the shared Experiment session behind an initially empty console.
 
     Kept apart from the window so the same assembly serves the smoke check, a
@@ -67,8 +62,7 @@ def open_experiment(workspace=None, template=None, pulse="calibration"):
     space = Workspace(workspace) if workspace is not None else Workspace.discover()
 
     session = ExperimentSession.open(space.root, template=template)
-    loaded = session.load_pulse(pulse)
-    return space, session, loaded
+    return space, session
 
 
 def build_console(session, *, interval_ms, window_ratio=None):
@@ -184,7 +178,6 @@ class ExperimentGuiFlow:
         *,
         workspace=None,
         template=None,
-        pulse="calibration",
         interval_ms=200,
         window_ratio=None,
     ) -> None:
@@ -192,7 +185,6 @@ class ExperimentGuiFlow:
 
         self.space = Workspace(workspace) if workspace is not None else Workspace.discover()
         self.template = template
-        self.pulse_name = str(pulse)
         self.interval_ms = int(interval_ms)
         self.window_ratio = window_ratio
         self.devices = None
@@ -222,13 +214,7 @@ class ExperimentGuiFlow:
     def _initialize_session(self, config: object):
         from ..session import ExperimentSession
 
-        session = ExperimentSession.from_config(self.space, config)
-        try:
-            session.load_pulse(self.pulse_name)
-        except BaseException:
-            session.close()
-            raise
-        return session
+        return ExperimentSession.from_config(self.space, config)
 
     def _open_work_windows(self, session: object) -> None:
         from ..board import attach_qt
@@ -246,9 +232,9 @@ class ExperimentGuiFlow:
             timer = attach_qt(presenter.beat, interval_ms=self.interval_ms)
             pulse = create_bound_window(
                 workspace=self.space,
-                sequence=session.pulse_sequence,
+                sequence=None,
                 sequencer=session.sequencer,
-                path=str(session.pulse_path or ""),
+                path="",
                 window_ratio=self.window_ratio,
             )
             console.presenter = presenter
@@ -347,7 +333,6 @@ def create_experiment_flow(
     *,
     workspace=None,
     template=None,
-    pulse="calibration",
     interval_ms=200,
     window_ratio=None,
 ) -> ExperimentGuiFlow:
@@ -356,7 +341,6 @@ def create_experiment_flow(
     return ExperimentGuiFlow(
         workspace=workspace,
         template=template,
-        pulse=pulse,
         interval_ms=interval_ms,
         window_ratio=window_ratio,
     ).open()
@@ -366,7 +350,6 @@ def create_console_window(
     *,
     workspace=None,
     template=None,
-    pulse="calibration",
     interval_ms=200,
     window_ratio=None,
 ):
@@ -379,7 +362,7 @@ def create_console_window(
 
     from ..board import attach_qt
 
-    _space, session, _loaded = open_experiment(workspace, template, pulse)
+    _space, session = open_experiment(workspace, template)
     # The window is opened by build_console, through zlc_ui's one entry: this
     # layer composes and wires, and no longer knows what a window is made of.
     window, presenter = build_console(
@@ -436,7 +419,6 @@ def create_window(
     *,
     workspace=None,
     template=None,
-    pulse="calibration",
     interval_ms=200,
     window_ratio=None,
 ):
@@ -445,7 +427,6 @@ def create_window(
     return create_console_window(
         workspace=workspace,
         template=template,
-        pulse=pulse,
         interval_ms=interval_ms,
         window_ratio=window_ratio,
     )
@@ -482,9 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.check:
         # The same assembly, without a window: a smoke test, not acceptance.
         try:
-            space, session, pulse = open_experiment(
-                arguments.workspace, arguments.template, arguments.pulse
-            )
+            space, session = open_experiment(arguments.workspace, arguments.template)
         except FileNotFoundError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -504,8 +483,7 @@ def main(argv: list[str] | None = None) -> int:
                 presenter.beat()
             print(
                 f"console ready: {len(presenter.panels)} panel(s), "
-                f"{len(presenter.offered_signals())} more signal(s) offerable, "
-                f"pulse {pulse['name']!r}, {pulse['camera_windows']} camera window(s)"
+                f"{len(presenter.offered_signals())} more signal(s) offerable"
             )
             return 0
         finally:
@@ -517,7 +495,6 @@ def main(argv: list[str] | None = None) -> int:
         flow = create_experiment_flow(
             workspace=arguments.workspace,
             template=arguments.template,
-            pulse=arguments.pulse,
             interval_ms=arguments.interval_ms,
         )
     except (FileNotFoundError, KeyError, ValueError) as error:

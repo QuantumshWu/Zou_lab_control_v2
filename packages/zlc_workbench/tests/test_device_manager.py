@@ -118,7 +118,7 @@ def test_the_types_offered_are_the_types_that_can_be_built(manager) -> None:
 
     from zlc_atom.install.discovery import discover_device_types
 
-    offered = {key for _label, key in manager.view.choices}
+    offered = {key for _label, key, _domain in manager.view.choices}
     assert offered == {item.type_id for item in discover_device_types()}
 
 
