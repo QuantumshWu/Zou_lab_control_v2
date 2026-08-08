@@ -100,8 +100,6 @@ class ScheduleVM:
     repeat: RepeatVM | None = None
     delay_rows: tuple[DelayRowVM, ...] = ()
     scan_summary_text: str = ""
-    scan_source_loaded: bool = False
-    scan_file_path: str = ""
     min_repeat_count: int = 1
     default_repeat_count: int = 1
 
@@ -111,7 +109,6 @@ class ScanPageRecord:
     slots_text: str = ""
     table_text: str = ""
     source_text: str = ""
-    source_revision: int = 0
     source_dirty: bool = False
     repeats: int = 1
     busy: bool = False

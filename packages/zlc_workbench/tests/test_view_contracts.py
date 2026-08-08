@@ -104,11 +104,15 @@ def _signal_names(double: type) -> tuple[str, ...]:
     """Signal names the double raises, taken from what its instances hold."""
 
     source = inspect.getsource(double)
-    return tuple(
+    explicit = tuple(
         line.split("=")[0].strip().removeprefix("self.")
         for line in source.splitlines()
         if "= _Signal()" in line
     )
+    declared = tuple(getattr(double, "_INTENTS", ())) + tuple(
+        getattr(double, "_SIGNALS", ())
+    )
+    return tuple(dict.fromkeys(explicit + declared))
 
 
 @pytest.mark.parametrize("double,real", PAIRS, ids=lambda item: item.__name__)

@@ -258,15 +258,18 @@ app.processEvents()
     )
 
 
-def test_scan_draft_arbitration_and_target_plain_payload() -> None:
+def test_scan_text_is_immediate_state_intent_and_run_has_no_payload() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScanView, PulseTargetView, TargetPortRecord, TargetWidthRule
+from zlc_ui.pulse import PulseScanView, PulseTargetView, ScanPageRecord, TargetPortRecord, TargetWidthRule
 app = ensure_qt_app(["pulse-pages"])
-scan = PulseScanView(); scan.set_scan_code("committed", source_revision=4); scan.replace_scan_draft("typing"); scan.acknowledge_scan_draft(dirty=True, source_revision=5)
-assert scan.scan_code.toPlainText() == "typing" and scan.source_revision == 5 and scan.code_dirty
+scan = PulseScanView(); scan.set_page(ScanPageRecord(source_text="committed", source_dirty=False))
+edited = []; runs = []; scan.source_edited.connect(edited.append); scan.run_requested.connect(lambda: runs.append("run"))
+scan.scan_code.setPlainText("typing"); scan.scan_run_button.click()
+assert edited == ["typing"] and runs == ["run"]
+assert not hasattr(scan, "_code_dirty") and not hasattr(scan, "_source_revision")
 target = PulseTargetView(); target.set_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
 target.set_ports((TargetPortRecord("d0", "digital", "Gate", ("d0",), lane_order=(0,)),), True, "ready")
 events = []; target.apply_requested.connect(events.append)

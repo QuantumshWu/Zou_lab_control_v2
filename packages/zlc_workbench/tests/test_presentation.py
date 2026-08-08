@@ -57,7 +57,7 @@ def live_bench(tmp_path):
         sequencer = installation.device("sequencer")
         from zlc_pulse import compile_sequence, load_streamer_config
 
-        sequence, _editor = read_pulse(write_ordinary_pulse(tmp_path))
+        sequence = read_pulse(write_ordinary_pulse(tmp_path)).sequence
         config = load_streamer_config()
         program = compile_sequence(sequence, config["params"], config["clock_hz"])
         sequencer.camera_trigger_channel = "emCCD"

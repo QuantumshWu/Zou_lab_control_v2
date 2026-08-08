@@ -31,7 +31,6 @@ from typing import Any
 
 from zlc_pulse import (
     MINIMUM_REPEAT_COUNT,
-    sequence_to_tree,
     AnalogStep,
     OutputDelay,
     PulsePeriod,
@@ -45,7 +44,7 @@ from zlc_pulse import (
     resolve_api_parameters,
     resolve_scan_point,
 )
-from zlc_durable import unique_path, write_readable_json
+from zlc_durable import unique_path
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui import (
     VALIDATOR_FLOAT,
@@ -59,6 +58,8 @@ from zlc_ui import (
     RepeatVM,
     ScheduleVM,
 )
+
+from .pulse_state import PulseEditorState, read_pulse, write_pulse
 
 
 __all__ = [
@@ -505,8 +506,6 @@ def project_schedule(
             if slots
             else "no scan slots"
         ),
-        scan_source_loaded=bool(slots),
-        scan_file_path=str(path),
         # From the domain, which is what decides that once is not a repeat.
         # The view model carried 1 for both, so Add Bracket committed a
         # count-1 region -- which set_repeat reads as "no bracket" and the
@@ -860,7 +859,7 @@ class PulseEditorPresenter:
     def __init__(
         self,
         view: object,
-        sequence: PulseSequence | None = None,
+        state: PulseEditorState | None = None,
         *,
         make_preview: Callable[[Any], Any] | None = None,
         update_preview: Callable[..., Any] | None = None,
@@ -871,8 +870,10 @@ class PulseEditorPresenter:
         default_endpoint: str = "",
     ) -> None:
         self.view = view
-        self.sequence = sequence
-        self.original = sequence
+        if state is not None and not isinstance(state, PulseEditorState):
+            raise TypeError("state must be PulseEditorState or None")
+        self._state = state if state is not None else PulseEditorState()
+        self._saved_state = self._state
         self.path = str(path)
         #: Where the Open dialog starts when nothing is open yet.
         self.pulses_directory = str(pulses_directory)
@@ -896,14 +897,8 @@ class PulseEditorPresenter:
         #: shape; None means the content chooses.
         self._pinned_size: str | None = None
         self._preview_selectors = False
-        #: The scan program, the table it produced, and where the board is in it.
-        self._scan_source = ""
-        self._scan_rows: tuple[tuple[int, ...], ...] = ()
-        self._scan_shape = None
-        self._scan_dirty = True
-        self._scan_repeats = SCAN_UNTIL_STOP
-        self._scan_use_loaded = False
-        self._scan_path = ""
+        #: Runtime-only scan feedback.  Authored source, rows and repeats live
+        #: only in ``_state`` beside the sequence they belong to.
         self._scan_progress = ""
         self._held_point: int | None = None
         # An editor with a sequencer can fire what it is showing; without one
@@ -934,7 +929,6 @@ class PulseEditorPresenter:
         )
         self._owns_sequencer = False
         self._connection_status = "connected" if sequencer is not None else "not connected"
-        self._visible: set[str] | None = None
         #: The last model handed to the schedule page, so a new one can be
         #: recognised as new without every caller remembering to say so.
         self._shown: ScheduleVM | None = None
@@ -944,6 +938,30 @@ class PulseEditorPresenter:
                 raise RuntimeError("the injected sequencer did not provide its board description")
         else:
             self.refresh()
+
+    @property
+    def state(self) -> PulseEditorState:
+        """The immutable authoring value currently projected by the editor."""
+
+        return self._state
+
+    @property
+    def sequence(self) -> PulseSequence | None:
+        """The sequence inside the sole authoring state."""
+
+        return self._state.sequence
+
+    def _accept_state(self, candidate: PulseEditorState) -> None:
+        """Replace current authoring atomically and invalidate derived views."""
+
+        if candidate == self._state:
+            return
+        self._state = candidate
+        self.revision += 1
+        self._digest_revision = -1
+
+    def _edit_state(self, **changes: Any) -> None:
+        self._accept_state(replace(self._state, **changes))
 
     # --------------------------------------------------------------- wiring
 
@@ -969,7 +987,7 @@ class PulseEditorPresenter:
         view.page_changed.connect(self.show_page)
         view.binding_cycle_requested.connect(self.cycle_binding)
         view.scan_array_load_requested.connect(self.load_scan_array)
-        view.scan_source_committed.connect(self.set_scan_source)
+        view.scan_source_edited.connect(self.edit_scan_source)
         view.feedback_requested.connect(self._warn)
         view.scan_repeats_committed.connect(self.set_scan_repeats)
         view.scan_hold_requested.connect(self.hold_scan_point)
@@ -1013,44 +1031,20 @@ class PulseEditorPresenter:
     def open_pulse(self, path: str) -> bool:
         """Replace what is being edited with one ``zlc.pulse.v1`` JSON file."""
 
-        from .session import read_pulse
-
         try:
-            sequence, session = read_pulse(path)
+            candidate = read_pulse(path)
         except Exception as error:
             self._warn(f"cannot open {Path(path).name}: {error}")
             return False
-        self.sequence = self.original = sequence
+        self._accept_state(candidate)
+        self._saved_state = candidate
         self.path = str(path)
-        self.revision += 1
-        self._restore_session(session)
         self.refresh()
         self._done(
-            f"opened {Path(path).name} - {len(sequence.periods)} period(s), "
-            f"{len(sequence.slots)} scan slot(s)"
+            f"opened {Path(path).name} - {len(candidate.sequence.periods)} period(s), "
+            f"{len(candidate.sequence.slots)} scan slot(s)"
         )
         return True
-
-    def _restore_session(self, session: Mapping[str, Any]) -> None:
-        """Put the editing session back: which rows, which scan, which source.
-
-        A pulse file that reopens showing every port and an empty Scan page has
-        kept the pulse and lost the work around it, which is what the operator
-        was actually doing.
-        """
-
-        visible = session.get("visible_ports")
-        self._visible = None if visible is None else {str(key) for key in visible}
-        self._scan_source = str(session.get("scan_source", "") or "")
-        # Floats: a saved table is in the author's units, where 2.5 us is a
-        # point.  Coercing to int here rounded every fractional sweep the
-        # moment its pulse was reopened.
-        self._scan_rows = tuple(
-            tuple(float(value) for value in row) for row in session.get("scan_rows", ())
-        )
-        self._scan_use_loaded = bool(session.get("scan_use_loaded", False))
-        self._scan_repeats = int(session.get("scan_repeats", SCAN_UNTIL_STOP))
-        self._scan_dirty = not self._scan_source
 
     def start_new_pulse(self) -> bool:
         """Begin a pulse on the board this bench actually has.
@@ -1087,7 +1081,7 @@ class PulseEditorPresenter:
             )
             if first_digital is not None:
                 driven[target.raw_lanes.index(first_digital.lanes[0])] = 1
-            self.sequence = self.original = PulseSequence(
+            candidate = PulseSequence(
                 name="untitled",
                 target=target,
                 time_step_ns=step_ns,
@@ -1101,8 +1095,8 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(f"cannot start a pulse for this board: {error}")
             return False
+        self._accept_state(PulseEditorState(sequence=candidate))
         self.path = ""
-        self.revision += 1
         self.refresh()
         return True
 
@@ -1116,8 +1110,7 @@ class PulseEditorPresenter:
         candidate = self._rebuilt(name=str(name))
         if candidate is None:
             return
-        self.sequence = candidate
-        self.revision += 1
+        self._edit_state(sequence=candidate)
         self.view.set_title(f"PulseGUI - {candidate.name}")
         self._refresh_summary()
 
@@ -1136,8 +1129,7 @@ class PulseEditorPresenter:
         candidate = self._rebuilt(target=renamed)
         if candidate is None:
             return
-        self.sequence = candidate
-        self.revision += 1
+        self._edit_state(sequence=candidate)
         self.view.set_port_label(str(key), str(label))
         self._refresh_summary()
         self.refresh_target()
@@ -1300,12 +1292,15 @@ class PulseEditorPresenter:
         itself as different.
         """
 
-        self._visible = None if ports is None else {str(key) for key in ports}
+        visible = None if ports is None else frozenset(str(key) for key in ports)
+        self._edit_state(visible_ports=visible)
         if self._shown is None or self.sequence is None:
             self.refresh()
             return
-        keys = tuple(sorted(self._visible)) if self._visible is not None else tuple(
-            port.key for port in self._shown.ports
+        keys = tuple(
+            port.key
+            for port in self._shown.ports
+            if visible is None or port.key in visible
         )
         self.view.set_visible_ports(keys)
         shown = set(keys)
@@ -1316,6 +1311,7 @@ class PulseEditorPresenter:
             ),
             visible_text=f"{len(shown)}/{len(self._shown.ports)}",
         )
+        self._render_run_state()
 
     def clear_port(self, port_key: str) -> None:
         """Return one port to rest everywhere, without touching the others."""
@@ -1345,13 +1341,29 @@ class PulseEditorPresenter:
         )
 
     def clear_all(self) -> None:
-        """Back to the pulse as it was opened, not to an empty one.
+        """Clear authored content to one safe period, retaining file context."""
 
-        "Clear" in an editor over a file means undo my edits; an empty sequence
-        would discard the target and the file with it.
-        """
-
-        self._apply(self.original)
+        if self.sequence is None:
+            return
+        sequence = self.sequence
+        safe = (0,) * len(sequence.target.raw_lanes)
+        blank = PulseSequence(
+            name=sequence.name,
+            target=sequence.target,
+            time_step_ns=sequence.time_step_ns,
+            periods=(
+                PulsePeriod(
+                    "period1",
+                    sequence.time_step_ns,
+                    "ns",
+                    safe,
+                ),
+            ),
+        )
+        self._accept_state(
+            PulseEditorState(sequence=blank, visible_ports=self._state.visible_ports)
+        )
+        self.refresh()
 
     # ------------------------------------------------------------- hardware
 
@@ -1577,8 +1589,13 @@ class PulseEditorPresenter:
             delays=delays,
             repeat=current.repeat,
         )
-        self.sequence = candidate
-        self.original = candidate
+        state_changes: dict[str, Any] = {"sequence": candidate}
+        if len(candidate.slots) != len(current.slots):
+            state_changes.update(
+                scan_rows=(),
+                scan_source_dirty=bool(self._state.scan_source),
+            )
+        self._edit_state(**state_changes)
         if lost or dropped_steps or dropped_bindings:
             missing = ", ".join(lost + dropped_steps + dropped_bindings)
             self._warn(
@@ -1664,24 +1681,37 @@ class PulseEditorPresenter:
                 "its pulse, so there is nothing an editor can show"
             )
             return False
-        self.sequence = self.original = source
-        self.revision += 1
-        rows = tuple(getattr(state, "scan_rows", ()) or ())
-        if rows:
+        wire_rows = tuple(getattr(state, "scan_rows", ()) or ())
+        authored_rows: tuple[tuple[float, ...], ...] = ()
+        if wire_rows:
             # Back into the units this window writes tables in.  The board
             # holds offset-binary codes and device ticks; showing those in the
             # table view is showing the operator a different number system for
             # the same fields.
             from zlc_pulse import scan_columns_for, scan_rows_from_wire
 
-            self._take_scan_rows(scan_rows_from_wire(rows, scan_columns_for(source)))
+            authored_rows = tuple(
+                tuple(value for value in row)
+                for row in scan_rows_from_wire(
+                    wire_rows,
+                    scan_columns_for(source),
+                )
+            )
+        self._accept_state(
+            replace(
+                self._state,
+                sequence=source,
+                scan_rows=authored_rows,
+                scan_source_dirty=bool(self._state.scan_source),
+            )
+        )
         self.refresh()
         # What came back IS what the board holds, so the dot must stop saying
         # the board is playing something older the moment it no longer is.
         self._poll_board()
         self._done(
             f"synced from the board - {len(source.periods)} period(s)"
-            + (f", {len(rows)} scan point(s)" if rows else "")
+            + (f", {len(wire_rows)} scan point(s)" if wire_rows else "")
         )
         return True
 
@@ -1707,8 +1737,8 @@ class PulseEditorPresenter:
                 # a number it can be given -- sending the rows again to say
                 # "again" was the same numbers over the wire N times.
                 self.sequencer.write_scan_table(
-                    self._wire_rows(self._scan_rows),
-                    sweeps=max(1, int(self._scan_repeats)),
+                    self._wire_rows(self._state.scan_rows),
+                    sweeps=max(1, self._state.scan_repeats),
                 )
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
@@ -1771,7 +1801,7 @@ class PulseEditorPresenter:
             # already contains every point that will be played, so wrapping it
             # in an endless outer loop would repeat the whole scan for ever and
             # the count would mean nothing.
-            finite_scan = self._scan_armed() and int(self._scan_repeats) > 0
+            finite_scan = self._scan_armed() and self._state.scan_repeats > 0
             forever = self.sequence.whole_pulse_repeat is None and not finite_scan
         try:
             self.sequencer.fire(forever=bool(forever))
@@ -1950,7 +1980,7 @@ class PulseEditorPresenter:
         self.view.set_control_state(
             running=bool(self.running),
             synchronized=bool(self.synchronized),
-            file_dirty=False,
+            file_dirty=self._state != self._saved_state,
             can_run=live,
             # Going safe needs a board and nothing else.  Requiring a pulse to
             # be open, or the window to believe the board is busy, makes Stop
@@ -1965,7 +1995,7 @@ class PulseEditorPresenter:
             # hardware is holding is worth doing.
             can_sync=self.sequencer is not None,
             can_hold=live,
-            can_step=live and bool(self._scan_rows),
+            can_step=live and bool(self._state.scan_rows),
         )
         self.view.set_status_color(self._status_token())
 
@@ -2004,32 +2034,14 @@ class PulseEditorPresenter:
                 f"{target.name} is not a JSON pulse; save with a .json suffix"
             )
             return ""
-        # Persist the pulse plus the editing session around it.  A scan slot
-        # without its table is half a scan, while reopening with every channel
-        # visible discards the operator's working view.  zlc_pulse owns the
-        # pulse tree; the explicitly named editor section owns only UI/session
-        # state, so the two responsibilities remain distinct.
-        tree = dict(sequence_to_tree(self.sequence))
-        tree["editor"] = {
-            "visible_ports": (
-                None if self._visible is None else sorted(self._visible)
-            ),
-            "scan_source": self._scan_source,
-            "scan_rows": [list(row) for row in self._scan_rows],
-            "scan_use_loaded": bool(self._scan_use_loaded),
-            "scan_repeats": int(self._scan_repeats),
-        }
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            # Readable, and atomic, from the package that owns writing files:
-            # a saved pulse is read by people and resumed from by experiments,
-            # and json.dumps(indent=2) put each of 62 channel names on its own
-            # line so the shape of the document was off the screen.
-            write_readable_json(target, tree)
+            write_pulse(target, self._state)
         except Exception as error:
             self._warn(f"cannot save {target.name}: {error}")
             return ""
         self.path = str(target)
+        self._saved_state = self._state
         self._show_connection(self._connection_status)
         self._done(f"saved {target.name}")
         return str(target)
@@ -2201,10 +2213,18 @@ class PulseEditorPresenter:
                     ),
                 ),
             )
-        self._apply(
-            self._rebuilt(slots=slots, api_parameters=api_parameters)
+        candidate = self._rebuilt(slots=slots, api_parameters=api_parameters)
+        if candidate is None:
+            return
+        self._accept_state(
+            replace(
+                self._state,
+                sequence=candidate,
+                scan_rows=(),
+                scan_source_dirty=bool(self._state.scan_source),
+            )
         )
-        self._refresh_scan_page()
+        self.refresh()
 
     @staticmethod
     def _binding_id(reference: object) -> str:
@@ -2266,9 +2286,7 @@ class PulseEditorPresenter:
             self._render_run_state()
             return
         columns = scan_columns_for(self.sequence)
-        if not self._scan_source:
-            self._scan_source = self._template("column_stack")
-        rows = self._scan_rows
+        rows = self._state.scan_rows
         view.set_scan_page(
             ScanPageRecord(
                 slots_text=(
@@ -2278,10 +2296,9 @@ class PulseEditorPresenter:
                     else "Bound: " + ", ".join(column.name for column in columns)
                 ),
                 table_text=_scan_table_text(rows, columns),
-                source_text=self._scan_source,
-                source_revision=self.revision,
-                source_dirty=self._scan_dirty,
-                repeats=self._scan_repeats,
+                source_text=self._state.scan_source,
+                source_dirty=self._state.scan_source_dirty,
+                repeats=self._state.scan_repeats,
                 busy=False,
                 progress_text=self._scan_progress,
             )
@@ -2296,15 +2313,23 @@ class PulseEditorPresenter:
         return scan_table_template(kind, scan_columns_for(self.sequence))
 
     def write_scan_template(self, kind: str) -> None:
-        """Replace the editor's draft with a starter program for these slots."""
+        """Replace the authored source with a starter program for these slots."""
 
         if self.sequence is None:
             return
-        self._scan_source = self._template(str(kind))
-        self._scan_dirty = True
-        self.view.replace_scan_draft(self._scan_source)
+        self._edit_state(
+            scan_source=self._template(str(kind)),
+            scan_source_dirty=True,
+        )
+        self._refresh_scan_page()
 
-    def run_scan_program(self, source: str) -> bool:
+    def edit_scan_source(self, source: str) -> None:
+        """Accept each text edit immediately into the sole authoring state."""
+
+        self._edit_state(scan_source=str(source), scan_source_dirty=True)
+        self._refresh_scan_page()
+
+    def run_scan_program(self) -> bool:
         """Execute the scan program and keep the table it produced.
 
         The program is experiment code the operator just typed, run in this
@@ -2320,10 +2345,10 @@ class PulseEditorPresenter:
 
         if self.sequence is None or not self._has_scan_slots():
             return False
-        self._scan_source = str(source)
+        source = self._state.scan_source
         namespace: dict = {}
         try:
-            exec(compile(self._scan_source, "<scan program>", "exec"), namespace)  # noqa: S102
+            exec(compile(source, "<scan program>", "exec"), namespace)  # noqa: S102
         except Exception as error:
             self._scan_progress = f"scan program failed: {error}"
             self._warn(f"scan program failed: {error}")
@@ -2337,46 +2362,37 @@ class PulseEditorPresenter:
         # used to decide it here and again on the file-load path, and the two
         # did not agree: the loader skipped the width check entirely.
         try:
-            self._take_scan_rows(
-                validate_scan_table(table, scan_columns_for(self.sequence))
+            rows = validate_scan_table(
+                table,
+                scan_columns_for(self.sequence),
             )
         except Exception as error:
             self._warn(str(error))
             return False
-        self._scan_shape = namespace.get("scan_shape")
-        self._scan_dirty = False
-        self._scan_progress = f"{len(self._scan_rows)} scan point(s) ready"
-        self._done(f"scan program produced {len(self._scan_rows)} point(s)")
-        self.view.acknowledge_scan_draft(dirty=False, source_revision=self.revision)
-        self._refresh_scan_page()
+        self._accept_state(
+            replace(
+                self._state,
+                scan_rows=tuple(tuple(value for value in row) for row in rows),
+                scan_source_dirty=False,
+            )
+        )
+        self._scan_progress = f"{len(self._state.scan_rows)} scan point(s) ready"
+        self._done(f"scan program produced {len(self._state.scan_rows)} point(s)")
+        self.refresh()
         return True
 
     def set_scan_repeats(self, repeats: int) -> None:
         """How many times the table is played; zero means until Stop."""
 
-        self._scan_repeats = max(0, int(repeats))
-        self._refresh_scan_page()
-
-    def set_scan_source(self, use_loaded: bool) -> None:
-        """Whether the uploaded table is the loaded file or the generated one."""
-
-        if use_loaded and not self._scan_path:
-            self._warn(
-                "no file has been loaded yet -- use Load Array first; "
-                "the generated table is what will be used"
-            )
-            self.view.set_scan_source(False, self._scan_path)
-            self._scan_use_loaded = False
-            self._refresh_scan_page()
-            return
-        self._scan_use_loaded = bool(use_loaded)
-        self.view.set_scan_source(self._scan_use_loaded, self._scan_path)
+        self._edit_state(scan_repeats=max(0, int(repeats)))
         self._refresh_scan_page()
 
     def load_scan_array(self) -> bool:
         """Read a scan table from a file, instead of generating one."""
 
         import numpy as np
+
+        from zlc_pulse import scan_columns_for, validate_scan_table
 
         # Asked BEFORE the dialog: picking a file and then being told the
         # slots were never bound wastes the choice that was just made.
@@ -2389,7 +2405,7 @@ class PulseEditorPresenter:
         if not chosen:
             return False
         # A scan table off a network share takes long enough for a second click
-        # to land, and the second read would race the first into _scan_rows.
+        # to land, and the second read would race the first into the state.
         # The button says so while it is busy, which is also why the setter
         # exists; nobody was calling it.
         self.view.set_scan_busy(True)
@@ -2404,28 +2420,42 @@ class PulseEditorPresenter:
             return False
         finally:
             self.view.set_scan_busy(False)
-        self._scan_path = str(chosen)
-        self._scan_use_loaded = True
         self._done(
-            f"loaded {len(self._scan_rows)} scan point(s) from {Path(chosen).name}"
+            f"loaded {len(self._state.scan_rows)} scan point(s) from {Path(chosen).name}"
         )
-        self.view.set_scan_source(True, self._scan_path)
         self._refresh_scan_page()
         return True
 
-    load_scan_program = load_scan_array
+    def load_scan_program(self) -> bool:
+        """Load Python source into the same immediate text state as typing."""
+
+        chosen = self.view.ask_open_path(
+            "Load scan program",
+            str(Path(self.path).parent if self.path else ""),
+            "Python source (*.py);;All files (*)",
+        )
+        if not chosen:
+            return False
+        try:
+            source = Path(chosen).read_text(encoding="utf-8")
+        except Exception as error:
+            self._warn(f"cannot read {Path(chosen).name}: {error}")
+            return False
+        self.edit_scan_source(source)
+        self._done(f"loaded scan source from {Path(chosen).name}")
+        return True
 
     def save_scan_array(self) -> str:
         """Write the table exactly as it will be uploaded."""
 
         import numpy as np
 
-        if not self._scan_rows:
+        if not self._state.scan_rows:
             self._warn("there is no scan table to save")
             return ""
         folder = Path(self.path).parent if self.path else Path.cwd()
         target = unique_path(folder, f"{(self.sequence.name if self.sequence else 'scan')}-scan", ".npy")
-        np.save(target, np.asarray(self._scan_rows, dtype=np.int64))
+        np.save(target, np.asarray(self._state.scan_rows, dtype=np.int64))
         self._scan_progress = f"saved {target.name}"
         self._refresh_scan_page()
         return str(target)
@@ -2473,7 +2503,8 @@ class PulseEditorPresenter:
         "off".
         """
 
-        self._held_point = max(0, min(len(self._scan_rows) - 1, int(point)))
+        rows = self._state.scan_rows
+        self._held_point = max(0, min(len(rows) - 1, int(point)))
         self.stop()
         try:
             # A held point is an ORDINARY pulse whose scanned fields carry that
@@ -2486,7 +2517,7 @@ class PulseEditorPresenter:
             # been good at.
             resolved = resolve_scan_point(
                 resolve_api_parameters(self.sequence),
-                self._scan_rows[self._held_point],
+                rows[self._held_point],
             )
             self.sequencer.load(self.compile(resolved), source=resolved)
             self.sequencer.fire(forever=True)
@@ -2497,7 +2528,7 @@ class PulseEditorPresenter:
             return False
         self._poll_board()
         self._scan_progress = (
-            f"held at scan point {self._held_point} of {len(self._scan_rows)}"
+            f"held at scan point {self._held_point} of {len(rows)}"
         )
         self._refresh_scan_page()
         return True
@@ -2511,12 +2542,9 @@ class PulseEditorPresenter:
         so the two cannot disagree about what is loaded.
         """
 
-        self._scan_rows = tuple(tuple(value for value in row) for row in rows)
-        # Empty versus non-empty changes the executable document from a static
-        # pulse with nominal scan values to a dynamic scan program.  Revision
-        # tracks PulseSequence edits, not table state, so invalidate this cache
-        # at the one place table state changes.
-        self._digest_revision = -1
+        self._edit_state(
+            scan_rows=tuple(tuple(value for value in row) for row in rows)
+        )
         self.refresh()
 
     def _scan_armed(self) -> bool:
@@ -2532,7 +2560,7 @@ class PulseEditorPresenter:
         nothing.
         """
 
-        return bool(self._scan_rows) and bool(
+        return bool(self._state.scan_rows) and bool(
             self.sequence is not None and self.sequence.slots
         )
 
@@ -2565,7 +2593,7 @@ class PulseEditorPresenter:
         if self.sequencer is None:
             return
         cursor = self._scan_cursor()
-        total = len(self._scan_rows)
+        total = len(self._state.scan_rows)
         if cursor is None:
             self._scan_progress = "running" if self.running else ""
         elif total:
@@ -2631,9 +2659,9 @@ class PulseEditorPresenter:
                 path=self.path,
                 generation=0,
                 revision=self.revision,
-                visible_ports=self._visible,
+                visible_ports=self._state.visible_ports,
                 pins=self.pins,
-                scan_points=len(self._scan_rows),
+                scan_points=len(self._state.scan_rows),
             )
         )
         self.view.set_title(f"PulseGUI - {self.sequence.name}")
@@ -2888,8 +2916,7 @@ class PulseEditorPresenter:
 
         if candidate is None:
             return
-        self.sequence = candidate
-        self.revision += 1
+        self._edit_state(sequence=candidate)
         self.refresh()
 
     def _apply_value(
@@ -2911,8 +2938,7 @@ class PulseEditorPresenter:
 
         if candidate is None:
             return
-        self.sequence = candidate
-        self.revision += 1
+        self._edit_state(sequence=candidate)
         schedule = self.view
         for identifier in ((period_id,) if period_id is not None else ()) + tuple(also):
             period = next(
@@ -2921,14 +2947,20 @@ class PulseEditorPresenter:
             )
             if period is not None:
                 schedule.set_period(
-                    project_period(candidate, period, visible_ports=self._visible)
+                    project_period(
+                        candidate,
+                        period,
+                        visible_ports=self._state.visible_ports,
+                    )
                 )
         if port_key is not None:
             row = next(
                 (
                     row
                     for row in project_schedule(
-                        candidate, visible_ports=self._visible, pins=self.pins
+                        candidate,
+                        visible_ports=self._state.visible_ports,
+                        pins=self.pins,
                     ).delay_rows
                     if row.port_key == port_key
                 ),
@@ -2948,7 +2980,11 @@ class PulseEditorPresenter:
         total_ns = sum(
             _nanoseconds(period.duration, period.unit) for period in self.sequence.periods
         )
-        ports = project_ports(self.sequence.target, pins=self.pins, visible=self._visible)
+        ports = project_ports(
+            self.sequence.target,
+            pins=self.pins,
+            visible=self._state.visible_ports,
+        )
         visible = sum(1 for port in ports if port.visible)
         self.view.set_schedule_summary(
             total_text=_readable(total_ns),

@@ -109,7 +109,7 @@ def default_endpoint() -> str:
 
 def build(
     view: object,
-    sequence: object = None,
+    state: object = None,
     *,
     path: str = "",
     pulses_directory: str = "",
@@ -160,7 +160,7 @@ def build(
 
     return PulseEditorPresenter(
         view,
-        sequence,
+        state,
         make_preview=make_preview,
         update_preview=update_preview,
         sequencer=sequencer,
@@ -173,8 +173,8 @@ def build(
     )
 
 
-def load_sequence(workspace: Path, name: str):
-    """The sequence stored in one named JSON pulse document.
+def load_state(workspace: Path, name: str):
+    """The complete editor state stored in one named JSON pulse document.
 
     Read through the same loader the session uses, so the window cannot show a
     pulse assembled differently from the one that would be fired.
@@ -186,8 +186,7 @@ def load_sequence(workspace: Path, name: str):
     path = space.pulse(name)
     if not path.is_file():
         raise FileNotFoundError(f"no pulse named {name!r} in {space.pulses}")
-    sequence, _editor = read_pulse(path)
-    return sequence, str(path)
+    return read_pulse(path), str(path)
 
 
 def resolve(workspace=None, pulse=None):
@@ -203,8 +202,8 @@ def resolve(workspace=None, pulse=None):
     space = Workspace(workspace) if workspace is not None else Workspace.discover()
     if not pulse:
         return space, None, ""
-    sequence, path = load_sequence(space.root, pulse)
-    return space, sequence, path
+    state, path = load_state(space.root, pulse)
+    return space, state, path
 
 
 def create_window(
@@ -223,7 +222,7 @@ def create_window(
 
     from zlc_ui import open_pulse_editor
 
-    space, sequence, path = resolve(workspace, pulse)
+    space, state, path = resolve(workspace, pulse)
     # One call, one handle.  This layer never names a widget class: what comes
     # back has signals to hear and methods to call, and nothing to assemble.
     window = open_pulse_editor(
@@ -231,7 +230,7 @@ def create_window(
     )
     window.presenter = build(
         window,
-        sequence,
+        state,
         path=path,
         pulses_directory=str(space.pulses) if space is not None else "",
     )
@@ -261,6 +260,7 @@ def create_bound_window(
 
     from zlc_ui import open_pulse_editor
 
+    from ..pulse_state import PulseEditorState
     from ..session import Workspace
 
     space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
@@ -269,7 +269,7 @@ def create_bound_window(
     )
     window.presenter = build(
         window,
-        sequence,
+        PulseEditorState(sequence=sequence),
         path=str(path),
         pulses_directory=str(space.pulses),
         sequencer=sequencer,
@@ -287,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
 
     application = ensure_qt_app([])
     try:
-        space, sequence, path = resolve(arguments.workspace, arguments.pulse)
+        space, state, path = resolve(arguments.workspace, arguments.pulse)
     except (FileNotFoundError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -300,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         view = open_pulse_editor(window_ratio=0.4)
         presenter = build(
             view,
-            sequence,
+            state,
             path=path,
             pulses_directory=str(space.pulses) if space is not None else "",
         )
@@ -314,9 +314,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 3
                 print(f"connected: {mode} {endpoint}".rstrip())
-            if sequence is None:
+            if state is None or state.sequence is None:
                 print("editor ready: no pulse open")
             else:
+                sequence = state.sequence
                 print(
                     f"pulse ready: {sequence.name!r}, "
                     f"{len(sequence.periods)} period(s), "

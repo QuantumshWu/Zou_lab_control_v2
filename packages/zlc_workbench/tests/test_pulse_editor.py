@@ -17,6 +17,7 @@ exercise a DAC, a clock port, or the 62-lane target the bench actually has.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import os
 from pathlib import Path
 
@@ -26,13 +27,29 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_workbench.pulse_editor import (
-    PulseEditorPresenter,
+    PulseEditorPresenter as _PulseEditorPresenter,
     project_schedule,
     replace_sequence,
     timeline_of,
 )
+from zlc_workbench.pulse_state import PulseEditorState
 
 from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
+
+
+def PulseEditorPresenter(view, sequence=None, **kwargs):
+    """Build the real presenter from its one complete authoring record."""
+
+    return _PulseEditorPresenter(
+        view,
+        PulseEditorState(sequence=sequence),
+        **kwargs,
+    )
+
+
+def _run_scan(view, source: str) -> None:
+    view.scan_source_edited.emit(str(source))
+    view.scan_run_requested.emit()
 
 
 class _Signal:
@@ -66,7 +83,6 @@ class _ScheduleView:
         "clear_port_requested",
         "binding_cycle_requested",
         "scan_array_load_requested",
-        "scan_source_committed",
         "feedback_requested",
         "run_requested",
         "stop_requested",
@@ -86,8 +102,6 @@ class _ScheduleView:
         self.updated_delays: list = []
         self.updated_labels: list = []
         self.summary: dict = {}
-        self.scan_source = None
-
         self.connection = None
         self.capabilities = None
         self.control_state = None
@@ -157,9 +171,6 @@ class _ScheduleView:
             "summary_text": summary_text,
             "scan_summary_text": scan_summary_text,
         }
-
-    def set_scan_source(self, use_loaded: bool, path: str) -> None:
-        self.scan_source = (bool(use_loaded), str(path))
 
     def set_connection(self, mode: str, endpoint: str, status: str) -> None:
         self.connection = (str(mode), str(endpoint), str(status))
@@ -260,6 +271,7 @@ class _ScanView:
         "step_requested",
         "load_program_requested",
         "template_requested",
+        "source_edited",
         "run_requested",
         "save_array_requested",
         "progress_refresh_requested",
@@ -269,18 +281,10 @@ class _ScanView:
         for name in self._INTENTS:
             setattr(self, name, _Signal())
         self.page = None
-        self.draft = ""
-        self.acknowledged = None
         self.progress = ""
 
     def set_page(self, record) -> None:
         self.page = record
-
-    def replace_scan_draft(self, source: str) -> None:
-        self.draft = str(source)
-
-    def acknowledge_scan_draft(self, *, dirty: bool, source_revision: int) -> None:
-        self.acknowledged = (bool(dirty), int(source_revision))
 
     def set_progress_text(self, text: str) -> None:
         self.progress = str(text)
@@ -343,7 +347,7 @@ class _EditorView:
         "visible_ports_committed", "clear_port_requested",
         "feedback_requested", "connection_requested", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
-        "scan_array_load_requested", "scan_source_committed",
+        "scan_array_load_requested", "scan_source_edited",
         "scan_repeats_committed", "scan_hold_requested", "scan_step_requested",
         "scan_program_load_requested", "scan_template_requested",
         "scan_run_requested", "scan_array_save_requested",
@@ -457,21 +461,10 @@ class _EditorView:
     def set_scan_busy(self, busy: bool) -> None:
         self.schedule_view.set_scan_busy(busy)
 
-    def set_scan_source(self, use_loaded: bool, path: str) -> None:
-        self.schedule_view.set_scan_source(use_loaded, path)
-
     # -- the scan --------------------------------------------------------
 
     def set_scan_page(self, record) -> None:
         self.scan_view.set_page(record)
-
-    def replace_scan_draft(self, text: str) -> None:
-        self.scan_view.replace_scan_draft(text)
-
-    def acknowledge_scan_draft(self, *, dirty: bool, source_revision: int) -> None:
-        self.scan_view.acknowledge_scan_draft(
-            dirty=dirty, source_revision=source_revision
-        )
 
     def set_scan_progress_text(self, text: str) -> None:
         self.scan_view.set_progress_text(text)
@@ -689,18 +682,35 @@ def test_clearing_a_port_leaves_the_others_alone(presenter, sequence) -> None:
     assert [period.states[kept_index] for period in presenter.sequence.periods] == kept_before
 
 
-def test_clear_all_returns_to_the_sequence_as_opened(presenter, sequence) -> None:
-    """Not to an empty one, which would discard the target and the file."""
+def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
+    presenter, sequence, tmp_path
+) -> None:
+    """Clear is destructive authoring, not an alias for reopening the file."""
 
+    presenter.path = str(tmp_path / "mine.json")
+    visible = tuple(port.key for port in sequence.target.ports[:2])
+    presenter.view.visible_ports_committed.emit(visible)
     period_id = presenter.sequence.periods[0].period_id
     presenter.view.period_name_committed.emit(period_id, "edited")
-    assert presenter.sequence != sequence
+    saved = presenter._saved_state
 
-    # From the toolbar button that raises it.  The schedule page also declared
-    # this command and never emitted it, and the presenter listened to that
-    # one -- so Clear All was a button that did nothing.
     presenter.view.clear_all_requested.emit()
-    assert presenter.sequence == sequence
+
+    blank = presenter.sequence
+    assert blank.name == sequence.name
+    assert blank.target == sequence.target
+    assert presenter.path == str(tmp_path / "mine.json")
+    assert presenter._state.visible_ports == frozenset(visible)
+    assert len(blank.periods) == 1
+    assert all(value == 0 for value in blank.periods[0].states)
+    assert blank.periods[0].analog_steps == ()
+    assert blank.slots == blank.api_parameters == blank.delays == ()
+    assert blank.repeat is None
+    assert presenter._state.scan_source == ""
+    assert presenter._state.scan_rows == ()
+    assert presenter._state.scan_source_dirty is False
+    assert presenter._saved_state is saved
+    assert presenter.view.schedule_view.control_state[2] is True
 
 
 def test_the_preview_is_built_from_the_periods_that_will_be_played(presenter, sequence) -> None:
@@ -1012,7 +1022,7 @@ def test_without_a_sequencer_the_editor_says_so_rather_than_pretending(sequence)
 
 
 def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
-    """An editor keeps an edit in the v2 ``zlc.pulse.v1`` JSON format."""
+    """The JSON round trip owns the whole authoring state, including unrun text."""
 
     written = tmp_path / "mine.json"
     view = _EditorView()
@@ -1022,21 +1032,55 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
         presenter.set_document_name("kept")
         presenter.insert_period(None)
         expected = len(presenter.sequence.periods)
+        period_id = presenter.sequence.periods[0].period_id
+        presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+        presenter.view.scan_source_edited.emit(
+            "import numpy as np\nscan_table = np.linspace(0.001, 0.004, 4).reshape(-1, 1)\n"
+        )
+        presenter.view.scan_run_requested.emit()
+        generated_rows = presenter._state.scan_rows
+        unrun_source = "import numpy as np\nscan_table = np.linspace(0.002, 0.006, 9).reshape(-1, 1)\n"
+        presenter.view.scan_source_edited.emit(unrun_source)
+        visible = tuple(port.key for port in presenter.sequence.target.ports[:2])
+        presenter.view.visible_ports_committed.emit(visible)
+        presenter.view.scan_repeats_committed.emit(3)
 
         assert presenter.save_pulse() == str(written)
         assert written.exists() and written.stat().st_size > 0
+        assert presenter._state is presenter._saved_state
+        assert presenter.view.schedule_view.control_state[2] is False
+        tree = json.loads(written.read_text(encoding="utf-8"))
+        assert tuple(tree["editor"]) == (
+            "visible_ports",
+            "scan_source",
+            "scan_rows",
+            "scan_source_dirty",
+            "scan_repeats",
+        )
+        assert tree["editor"]["scan_source"] == unrun_source
+        assert tree["editor"]["scan_source_dirty"] is True
+        assert tree["editor"]["scan_rows"] == [list(row) for row in generated_rows]
+
+        from zlc_workbench.session import read_pulse
+
+        decoded = read_pulse(written)
+        assert decoded == presenter._state
+        assert decoded.visible_ports == frozenset(visible)
 
         presenter.clear_all()
         view.open_answer = str(written)
         assert presenter.ask_for_pulse() is True
-        assert presenter.sequence.name == "kept"
-        assert len(presenter.sequence.periods) == expected
+        assert presenter._state == decoded
+        assert presenter._saved_state == decoded
+        assert presenter.sequence.name == "kept" and len(presenter.sequence.periods) == expected
     finally:
         presenter.close()
 
 
-def test_saving_refuses_a_non_json_destination(sequence, tmp_path) -> None:
-    """The product format is JSON even when All files is chosen in the dialog."""
+def test_save_updates_neither_path_nor_baseline_until_the_write_succeeds(
+    sequence, tmp_path, monkeypatch
+) -> None:
+    """Validation and IO failure both leave the current file identity intact."""
 
     other = tmp_path / "pulse.txt"
     other.write_text("keep me" + chr(10), encoding="utf-8")
@@ -1044,9 +1088,25 @@ def test_saving_refuses_a_non_json_destination(sequence, tmp_path) -> None:
     view.save_answer = str(other)
     presenter = PulseEditorPresenter(view, sequence)
     try:
+        presenter.set_document_name("dirty")
+        baseline = presenter._saved_state
+        path = presenter.path
         assert presenter.save_pulse() == ""
         assert other.read_text(encoding="utf-8") == "keep me" + chr(10)
         assert any("not a JSON pulse" in text for text in view.warnings)
+        assert presenter.path == path and presenter._saved_state is baseline
+
+        import zlc_workbench.pulse_editor as module
+
+        view.save_answer = str(tmp_path / "will-fail.json")
+
+        def refuse_write(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(module, "write_pulse", refuse_write)
+        assert presenter.save_pulse() == ""
+        assert presenter.path == path and presenter._saved_state is baseline
+        assert any("disk full" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1210,26 +1270,38 @@ def test_seeded_calibration_template_is_not_the_editor_current_document(
     default = Workspace.default()
     assert (default.pulses / Workspace.IMAGING_TEMPLATE).is_file()
 
-    space, sequence, path = resolve(default.root, None)
+    space, state, path = resolve(default.root, None)
 
     assert space.root == default.root
-    assert sequence is None
+    assert state is None
     assert path == ""
 
 
 def test_named_pulse_loader_resolves_the_json_product_document(tmp_path) -> None:
-    """A product pulse is the v2 zlc.pulse.v1 JSON file."""
+    """The app loader carries the complete editor state, not only its sequence."""
 
     target = write_ordinary_pulse(tmp_path, file_stem="ordinary")
+    tree = json.loads(target.read_text(encoding="utf-8"))
+    tree["editor"] = {
+        "visible_ports": None,
+        "scan_source": "half typed",
+        "scan_rows": [],
+        "scan_source_dirty": True,
+        "scan_repeats": 4,
+    }
+    target.write_text(json.dumps(tree), encoding="utf-8")
 
-    from zlc_workbench.apps.pulse_editor import load_sequence
+    from zlc_workbench.apps.pulse_editor import load_state
 
-    loaded, path = load_sequence(tmp_path, "ordinary")
+    loaded, path = load_state(tmp_path, "ordinary")
 
-    assert loaded.name == PULSE_NAME
+    assert loaded.sequence.name == PULSE_NAME
+    assert loaded.scan_source == "half typed"
+    assert loaded.scan_source_dirty is True
+    assert loaded.scan_repeats == 4
     assert Path(path) == target
 
-    named, named_path = load_sequence(tmp_path, "ordinary.json")
+    named, named_path = load_state(tmp_path, "ordinary.json")
     assert named == loaded
     assert Path(named_path) == target
 
@@ -1248,10 +1320,10 @@ def test_named_pulse_loader_resolves_the_json_product_document(tmp_path) -> None
     ),
 )
 def test_named_pulse_loader_refuses_paths_and_non_json_suffixes(tmp_path, name) -> None:
-    from zlc_workbench.apps.pulse_editor import load_sequence
+    from zlc_workbench.apps.pulse_editor import load_state
 
     with pytest.raises(ValueError):
-        load_sequence(tmp_path, name)
+        load_state(tmp_path, name)
 
 
 def test_declining_the_open_dialog_leaves_the_editor_as_it_was(sequence) -> None:
@@ -1266,15 +1338,34 @@ def test_declining_the_open_dialog_leaves_the_editor_as_it_was(sequence) -> None
         presenter.close()
 
 
-def test_opening_something_that_is_not_a_pulse_says_which_file(tmp_path) -> None:
-    stray = tmp_path / "notes.json"
-    stray.write_text("value = 1\n", encoding="utf-8")
+def test_open_decodes_the_whole_state_before_replacing_any_of_it(sequence, tmp_path) -> None:
+    from zlc_pulse import sequence_to_tree
+
+    with pytest.raises(TypeError):
+        PulseEditorState(sequence=sequence, visible_ports="d0")
+
+    stray = tmp_path / "bad-editor.json"
     view = _EditorView()
-    presenter = PulseEditorPresenter(view)
+    presenter = PulseEditorPresenter(view, sequence, path=str(tmp_path / "kept.json"))
     try:
-        assert presenter.open_pulse(str(stray)) is False
-        assert presenter.sequence is None
-        assert any("notes.json" in text for text in view.warnings)
+        before = presenter._state
+        baseline = presenter._saved_state
+        path = presenter.path
+        for editor in (
+            {"scan_use_loaded": True},
+            {"scan_source_dirty": "false"},
+            {"scan_repeats": 1.5},
+            {"scan_rows": ["not a row"]},
+            {"visible_ports": "d0"},
+        ):
+            tree = dict(sequence_to_tree(sequence))
+            tree["editor"] = editor
+            stray.write_text(json.dumps(tree), encoding="utf-8")
+            assert presenter.open_pulse(str(stray)) is False
+            assert presenter._state is before
+            assert presenter._saved_state is baseline
+            assert presenter.path == path
+        assert any("bad-editor.json" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1740,10 +1831,10 @@ def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> No
 
     presenter.view.scan_template_requested.emit("column_stack")
 
-    assert "np.column_stack" in scan.draft
+    assert "np.column_stack" in scan.page.source_text
     # One column per bound slot, each seeded by its own kind.
-    assert scan.draft.count("np.linspace") == 2
-    assert "DAC code" in scan.draft
+    assert scan.page.source_text.count("np.linspace") == 2
+    assert "DAC code" in scan.page.source_text
 
 
 def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequence) -> None:
@@ -1751,15 +1842,16 @@ def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequenc
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
 
-    presenter.view.scan_run_requested.emit(
+    _run_scan(
+        presenter.view,
         # In the unit the bound period is written in -- this pulse is authored
         # in seconds -- and inside what a 25-bit slot operand can hold.
         "import numpy as np\n"
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
 
-    assert len(presenter._scan_rows) == 7
-    assert scan.acknowledged == (False, presenter.revision)
+    assert len(presenter._state.scan_rows) == 7
+    assert presenter._state.scan_source_dirty is False
     assert "7 scan point" in scan.page.progress_text
     assert "more point" not in scan.page.table_text
 
@@ -1771,11 +1863,12 @@ def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
 
-    presenter.view.scan_run_requested.emit(
+    _run_scan(
+        presenter.view,
         "import numpy as np\nscan_table = np.zeros((5, 3))\n"
     )
 
-    assert presenter._scan_rows == ()
+    assert presenter._state.scan_rows == ()
     assert any("3 column" in text for text in presenter.view.warnings)
 
 
@@ -1783,14 +1876,15 @@ def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, seque
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    presenter.view.scan_run_requested.emit(
+    _run_scan(
+        presenter.view,
         "import numpy as np\nscan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
     )
-    kept = presenter._scan_rows
+    kept = presenter._state.scan_rows
 
-    presenter.view.scan_run_requested.emit("raise RuntimeError('bad sweep')")
+    _run_scan(presenter.view, "raise RuntimeError('bad sweep')")
 
-    assert presenter._scan_rows == kept
+    assert presenter._state.scan_rows == kept
     assert any("bad sweep" in text for text in presenter.view.warnings)
 
 
@@ -1806,7 +1900,8 @@ def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, s
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    presenter.view.scan_run_requested.emit(
+    _run_scan(
+        presenter.view,
         "import numpy as np\nscan_table = (np.arange(5) + 1).reshape(-1, 1) * 0.001\n"
     )
 
@@ -1840,7 +1935,8 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     # seconds -- and converted once, at the boundary, into what a slot holds:
     # device ticks at 20 ns.  The author never sees a tick; the board never
     # sees a second.
-    presenter.view.scan_run_requested.emit(
+    _run_scan(
+        presenter.view,
         "import numpy as np\nscan_table = np.array([0.004, 0.005, 0.006]).reshape(-1, 1)\n"
     )
 
@@ -1878,7 +1974,8 @@ def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> Non
 
     # Arming a real table changes only scan state, not PulseSequence revision:
     # it must still invalidate the prepared-program digest immediately.
-    view.scan_run_requested.emit(
+    _run_scan(
+        view,
         "import numpy as np\n"
         "scan_table = np.array([0.004, 0.005]).reshape(-1, 1)\n"
     )
@@ -1968,7 +2065,8 @@ def test_stepping_is_offered_only_once_there_is_a_table(presenter, sequence) -> 
     presenter.view.binding_cycle_requested.emit(
         "duration", sequence.periods[3].period_id, None
     )
-    presenter.view.scan_run_requested.emit(
+    _run_scan(
+        presenter.view,
         "import numpy as np\nscan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
     )
     assert presenter.view.capabilities[2] is True
@@ -2333,14 +2431,14 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
         # Sync needs a BOARD, not a pulse: an editor with nothing open is
         # exactly when reading what the hardware holds is worth doing.
         assert view.schedule_view.capabilities[0] is True
-        presenter.sequence = None
+        presenter._accept_state(PulseEditorState())
         presenter.refresh()
         assert view.schedule_view.capabilities[0] is True
 
         assert presenter.sync_from_sequencer() is False
         assert any("nothing to sync" in text for text in view.warnings)
 
-        presenter.sequence = sequence
+        presenter._accept_state(PulseEditorState(sequence=sequence))
         presenter.load_into_sequencer()
         held = len(sequence.periods)
 
@@ -2372,7 +2470,8 @@ def test_the_scan_page_says_what_to_do_before_it_says_what_failed(sequence) -> N
     try:
         assert not presenter.sequence.slots, "this fixture starts unbound"
 
-        assert presenter.run_scan_program("scan_table = [[1]]") is False
+        presenter.edit_scan_source("scan_table = [[1]]")
+        assert presenter.run_scan_program() is False
         assert any("click a dot" in text for text in view.warnings)
 
         view.warnings.clear()
@@ -2381,11 +2480,43 @@ def test_the_scan_page_says_what_to_do_before_it_says_what_failed(sequence) -> N
         assert any("click a dot" in text for text in view.warnings)
         assert view.asked is None, "the dialog must not open before the check"
 
-        # And "use the loaded file" with no file loaded says so, and stays off.
-        view.warnings.clear()
-        presenter.set_scan_source(True)
-        assert any("Load Array first" in text for text in view.warnings)
-        assert presenter._scan_use_loaded is False
+    finally:
+        presenter.close()
+
+
+def test_new_pulse_replaces_the_whole_editor_state_in_one_candidate(
+    sequence, tmp_path
+) -> None:
+    view = _EditorView()
+    presenter = PulseEditorPresenter(
+        view,
+        sequence,
+        path=str(tmp_path / "old.json"),
+    )
+    try:
+        period_id = sequence.periods[3].period_id
+        view.binding_cycle_requested.emit("duration", period_id, None)
+        _run_scan(
+            view,
+            "import numpy as np\nscan_table = np.array([[0.001], [0.002]])\n",
+        )
+        view.scan_source_edited.emit("half typed")
+        view.scan_repeats_committed.emit(4)
+        view.visible_ports_committed.emit(
+            tuple(row.key for row in view.schedule_view.schedule.ports[:2])
+        )
+        baseline = presenter._saved_state
+
+        assert presenter.start_new_pulse() is True
+
+        assert presenter.path == ""
+        assert presenter.sequence.name == "untitled"
+        assert presenter._state.scan_source == ""
+        assert presenter._state.scan_rows == ()
+        assert presenter._state.scan_source_dirty is False
+        assert presenter._state.scan_repeats == 0
+        assert presenter._state.visible_ports is None
+        assert presenter._saved_state is baseline
     finally:
         presenter.close()
 
@@ -2516,7 +2647,8 @@ def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) 
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
     assert view.schedule_view.schedule.scan_summary_text == "1 slot - 0 pts"
 
-    view.scan_run_requested.emit(
+    _run_scan(
+        view,
         "import numpy as np\n"
         "scan_table = (np.arange(21) + 1).reshape(-1, 1) * 0.001\n"
     )
@@ -2542,7 +2674,8 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
     assert presenter.adopt_board() is True
     board.events.clear()
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    view.scan_run_requested.emit(
+    _run_scan(
+        view,
         "import numpy as np\n"
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
@@ -2586,7 +2719,8 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     view.binding_cycle_requested.emit("duration", sequence.periods[1].period_id, None)
     assert len(presenter.sequence.slots) == 1
     assert len(presenter.sequence.api_parameters) == 1
-    view.scan_run_requested.emit(
+    _run_scan(
+        view,
         "import numpy as np\n"
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
@@ -2639,7 +2773,8 @@ def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -
     period = sequence.periods[3].period_id
 
     view.binding_cycle_requested.emit("duration", period, None)
-    view.scan_run_requested.emit(
+    _run_scan(
+        view,
         "import numpy as np\n"
         "scan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
     )

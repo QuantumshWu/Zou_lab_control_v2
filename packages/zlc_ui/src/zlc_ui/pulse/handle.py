@@ -68,13 +68,13 @@ class PulseEditorHandle(QtCore.QObject):
 
     # -- the scan --------------------------------------------------------
     scan_array_load_requested = QtCore.pyqtSignal()
-    scan_source_committed = QtCore.pyqtSignal(bool)
+    scan_source_edited = QtCore.pyqtSignal(str)
     scan_repeats_committed = QtCore.pyqtSignal(int)
     scan_hold_requested = QtCore.pyqtSignal()
     scan_step_requested = QtCore.pyqtSignal(int)
     scan_program_load_requested = QtCore.pyqtSignal()
     scan_template_requested = QtCore.pyqtSignal(str)
-    scan_run_requested = QtCore.pyqtSignal(str)
+    scan_run_requested = QtCore.pyqtSignal()
     scan_array_save_requested = QtCore.pyqtSignal()
     scan_progress_refresh_requested = QtCore.pyqtSignal()
 
@@ -109,7 +109,7 @@ class PulseEditorHandle(QtCore.QObject):
             "visible_ports_committed", "clear_port_requested",
             "feedback_requested", "connection_requested", "stop_requested",
             "sync_requested", "save_requested", "load_requested",
-            "scan_array_load_requested", "scan_source_committed",
+            "scan_array_load_requested",
         ):
             getattr(schedule, name).connect(getattr(self, name))
         schedule.run_requested.connect(self.fire_requested)
@@ -118,6 +118,7 @@ class PulseEditorHandle(QtCore.QObject):
         scan.step_requested.connect(self.scan_step_requested)
         scan.load_program_requested.connect(self.scan_program_load_requested)
         scan.template_requested.connect(self.scan_template_requested)
+        scan.source_edited.connect(self.scan_source_edited)
         scan.run_requested.connect(self.scan_run_requested)
         scan.save_array_requested.connect(self.scan_array_save_requested)
         scan.progress_refresh_requested.connect(self.scan_progress_refresh_requested)
@@ -239,30 +240,16 @@ class PulseEditorHandle(QtCore.QObject):
     def set_scan_busy(self, busy: bool) -> None:
         self._view.schedule_view.set_scan_busy(busy)
 
-    def set_scan_source(self, use_loaded: bool, path: str) -> None:
-        self._view.schedule_view.set_scan_source(use_loaded, path)
-
     # -------------------------------------------------------------- the scan
 
     def set_scan_page(self, record: Any) -> None:
         self._view.scan_view.set_page(record)
-
-    def replace_scan_draft(self, text: str) -> None:
-        self._view.scan_view.replace_scan_draft(text)
-
-    def acknowledge_scan_draft(self, *, dirty: bool, source_revision: int) -> None:
-        self._view.scan_view.acknowledge_scan_draft(
-            dirty=dirty, source_revision=source_revision
-        )
 
     def set_scan_progress_text(self, text: str) -> None:
         self._view.scan_view.set_progress_text(text)
 
     def set_scan_repeats_range(self, low: int, high: int) -> None:
         self._view.scan_view.set_repeats_range(low, high)
-
-    def set_scan_code(self, source: str, *, source_revision: int) -> None:
-        self._view.scan_view.set_scan_code(source, source_revision=source_revision)
 
     # ----------------------------------------------------------- the preview
 

@@ -16,7 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
-    FluentScrollArea, FluentSpinBox, FluentSwitch, LinkedScrollPanes,
+    FluentScrollArea, FluentSpinBox, LinkedScrollPanes,
     signals_blocked,
 )
 
@@ -372,7 +372,6 @@ class ChannelPanel(FluentGroupBox):
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
     clear_port_requested = QtCore.pyqtSignal(str)
     scan_array_load_requested = QtCore.pyqtSignal()
-    scan_source_committed = QtCore.pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__("Delay / Scan", parent)
@@ -407,17 +406,7 @@ class ChannelPanel(FluentGroupBox):
         add_labeled_widget(top_layout, "Scan:", self.scan_summary_label)
         self.load_array_button = FluentButton("Load Array", color=ACCENT)
         self.load_array_button.clicked.connect(self.scan_array_load_requested)
-        load_row = QtWidgets.QHBoxLayout()
-        load_row.setContentsMargins(0, 0, 0, 0)
-        load_row.setSpacing(px(5, minimum=3))
-        load_row.addWidget(self.load_array_button)
-        self.scan_file_label = FluentLabel("(no file)")
-        load_row.addWidget(self.scan_file_label, 1)
-        top_layout.addLayout(load_row)
-        self.use_loaded_switch = FluentSwitch("Use loaded file")
-        self.use_loaded_switch.toggled.connect(self.scan_source_committed)
-        self.use_loaded_switch.setFixedHeight(row_height())
-        top_layout.addWidget(self.use_loaded_switch)
+        top_layout.addWidget(self.load_array_button)
         top_layout.addStretch(1)
         self._layout.addWidget(top)
         self._rows: dict[str, tuple[FluentScanLineEdit, FluentComboBox, FluentButton]] = {}
@@ -497,13 +486,6 @@ class ChannelPanel(FluentGroupBox):
 
     def set_scan_summary(self, text: str) -> None:
         self.scan_summary_label.setText(str(text))
-
-    def set_scan_source(self, use_loaded: bool, path: str) -> None:
-        with signals_blocked(self.use_loaded_switch):
-            self.use_loaded_switch.setChecked(bool(use_loaded))
-        self.scan_file_label.setText(str(path) if str(path) else "(no file)")
-        self.scan_summary_label.setToolTip(str(path))
-
 
 BRACKET_WIDTH = 78
 
@@ -868,7 +850,6 @@ class PulseScheduleView(QtWidgets.QWidget):
     load_requested = QtCore.pyqtSignal()
     connection_requested = QtCore.pyqtSignal(str, str)
     scan_array_load_requested = QtCore.pyqtSignal()
-    scan_source_committed = QtCore.pyqtSignal(bool)
     left_panels_collapsed = QtCore.pyqtSignal(bool)
     feedback_requested = QtCore.pyqtSignal(str)
 
@@ -1100,7 +1081,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.binding_cycle_requested.connect(self.binding_cycle_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
-        self.channel_panel.scan_source_committed.connect(self.scan_source_committed)
         self.drag_container.move_period_requested.connect(self.move_period_requested)
         self.drag_container.repeat_committed.connect(self.repeat_committed)
         self.run_button.clicked.connect(self.run_requested)
@@ -1310,9 +1290,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         )
         self.names_panel.set_summary(str(total_text), int(period_count), str(visible_text))
         self.channel_panel.set_scan_summary(str(scan_summary_text))
-
-    def set_scan_source(self, use_loaded: bool, path: str) -> None:
-        self.channel_panel.set_scan_source(use_loaded, path)
 
     def set_scan_busy(self, busy: bool) -> None:
         self.channel_panel.load_array_button.setEnabled(not bool(busy))

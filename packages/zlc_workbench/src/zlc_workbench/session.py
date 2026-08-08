@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date as _date
-import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,13 +24,14 @@ import numpy as np
 from zlc_durable import day_folder
 
 from .archive import write_figure
+from .pulse_state import PulseEditorState, read_pulse
 
 if TYPE_CHECKING:
     from zlc_atom.install import DeviceCatalogSnapshot
     from zlc_atom.install.configuration import InstallationConfig
 
 
-__all__ = ["ExperimentSession", "Workspace", "read_pulse"]
+__all__ = ["ExperimentSession", "PulseEditorState", "Workspace", "read_pulse"]
 
 
 def _connect_pulse(host: str, port: int, **kwargs: Any) -> object:
@@ -163,29 +163,6 @@ class Workspace:
         return cls.default()
 
 
-def read_pulse(path: str | os.PathLike[str]) -> tuple[Any, Mapping[str, Any]]:
-    """Read one JSON pulse and its editor state through zlc_pulse's codec.
-
-    Product pulses are data, not executable modules.  Shared by the session and
-    editor so the sequence shown is exactly the sequence compiled for hardware.
-    """
-
-    source = Path(path)
-    if source.suffix.lower() != ".json":
-        raise ValueError(f"pulse files must be JSON: {source}")
-
-    from zlc_pulse import sequence_from_tree
-
-    tree = json.loads(source.read_text(encoding="utf-8"))
-    sequence = sequence_from_tree(tree)
-    editor = tree.get("editor", {})
-    if editor is None:
-        editor = {}
-    if not isinstance(editor, Mapping):
-        raise TypeError(f"pulse editor state must be an object: {source}")
-    return sequence, dict(editor)
-
-
 class ExperimentSession:
     """Devices, a signal plane, and the ability to take and keep a shot."""
 
@@ -305,7 +282,8 @@ class ExperimentSession:
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
         from zlc_pulse import compile_sequence, load_streamer_config
 
-        sequence, _editor = read_pulse(path)
+        state = read_pulse(path)
+        sequence = state.sequence
         config = load_streamer_config()
         if config["source"] is None:
             raise RuntimeError(

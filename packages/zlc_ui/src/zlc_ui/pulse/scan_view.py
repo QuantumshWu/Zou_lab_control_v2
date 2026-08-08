@@ -1,10 +1,4 @@
-"""Pure Scan page.
-
-The presenter supplies already formatted text and owns execution, file IO and
-scan-table validation.  The three draft methods intentionally remain
-separate: they are the small protocol that prevents controller updates from
-clobbering text a person is currently editing.
-"""
+"""Pure Scan page: projections in, immediate text intents out."""
 
 from __future__ import annotations
 
@@ -25,7 +19,8 @@ class PulseScanView(QtWidgets.QWidget):
     step_requested = QtCore.pyqtSignal(int)
     load_program_requested = QtCore.pyqtSignal()
     template_requested = QtCore.pyqtSignal(str)
-    run_requested = QtCore.pyqtSignal(str)
+    source_edited = QtCore.pyqtSignal(str)
+    run_requested = QtCore.pyqtSignal()
     save_array_requested = QtCore.pyqtSignal()
     progress_refresh_requested = QtCore.pyqtSignal()
 
@@ -83,8 +78,6 @@ class PulseScanView(QtWidgets.QWidget):
         editor_layout.setContentsMargins(px(8), px(28, minimum=24), px(8), px(8))
         editor_layout.setSpacing(px(6, minimum=4))
         self.scan_code = FluentCodeEdit()
-        self._code_dirty = False
-        self._source_revision = -1
 
         template_buttons = QtWidgets.QHBoxLayout()
         template_buttons.setSpacing(px(6, minimum=4))
@@ -107,7 +100,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_save_array_button = FluentButton("Save Array", color=YELLOW)
         self.scan_run_button.setFixedHeight(row_height())
         self.scan_save_array_button.setFixedHeight(row_height())
-        self.scan_run_button.clicked.connect(lambda: self.run_requested.emit(self.scan_code.toPlainText()))
+        self.scan_run_button.clicked.connect(lambda: self.run_requested.emit())
         self.scan_save_array_button.clicked.connect(self.save_array_requested)
         self.scan_code.textChanged.connect(self._on_code_changed)
         for button in (self.scan_run_button, self.scan_save_array_button):
@@ -130,7 +123,7 @@ class PulseScanView(QtWidgets.QWidget):
         self._scan_progress_timer.timeout.connect(self._request_visible_progress)
 
     def _on_code_changed(self) -> None:
-        self.set_run_dirty(True)
+        self.source_edited.emit(self.scan_code.toPlainText())
 
     def _request_visible_progress(self) -> None:
         if self.isVisible():
@@ -166,15 +159,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.repeats_committed.emit(value)
 
     def set_page(self, record: ScanPageRecord) -> None:
-        """Show the whole page, including the program it is showing.
-
-        The source text was the one field this dropped, so the editor opened
-        blank -- the presenter generates a starter template for exactly this
-        moment -- and then went stale while the revision it carries advanced.
-
-        A half-typed program is never overwritten: an operator mid-edit owns
-        the box, and the page catching up must not take what they were writing.
-        """
+        """Show the whole page from its one presenter-owned state."""
 
         if not isinstance(record, ScanPageRecord):
             raise TypeError("record must be ScanPageRecord")
@@ -184,11 +169,10 @@ class PulseScanView(QtWidgets.QWidget):
         self.set_progress_text(record.progress_text)
         self.set_workspace_busy(record.busy)
         self.set_progress_polling(record.progress_polling)
-        if not self._code_dirty and record.source_text != self.scan_code.toPlainText():
+        if record.source_text != self.scan_code.toPlainText():
             with signals_blocked(self.scan_code):
                 self.scan_code.setPlainText(str(record.source_text))
         self.set_run_dirty(record.source_dirty)
-        self._source_revision = int(record.source_revision)
 
     def set_slots_text(self, text: str) -> None:
         self.scan_slots_label.setText(str(text))
@@ -196,35 +180,11 @@ class PulseScanView(QtWidgets.QWidget):
     def set_progress_text(self, text: str) -> None:
         self.scan_progress_label.setText(str(text))
 
-    @property
-    def code_dirty(self) -> bool:
-        return self._code_dirty
-
-    @property
-    def source_revision(self) -> int:
-        return self._source_revision
-
-    def set_scan_code(self, source: str, *, dirty: bool = False, source_revision: int) -> None:
-        with signals_blocked(self.scan_code):
-            self.scan_code.setPlainText(str(source))
-        self._source_revision = int(source_revision)
-        self.set_run_dirty(dirty)
-
-    def replace_scan_draft(self, source: str) -> None:
-        with signals_blocked(self.scan_code):
-            self.scan_code.setPlainText(str(source))
-        self.set_run_dirty(True)
-
-    def acknowledge_scan_draft(self, *, dirty: bool, source_revision: int) -> None:
-        self._source_revision = int(source_revision)
-        self.set_run_dirty(dirty)
-
     def set_scan_table_text(self, text: str) -> None:
         self.scan_table_view.setPlainText(str(text))
 
     def set_run_dirty(self, dirty: bool) -> None:
-        self._code_dirty = bool(dirty)
-        self.scan_run_button.set_dirty(self._code_dirty)
+        self.scan_run_button.set_dirty(bool(dirty))
 
     def set_workspace_busy(self, busy: bool) -> None:
         enabled = not bool(busy)

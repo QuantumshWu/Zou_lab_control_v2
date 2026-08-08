@@ -176,8 +176,6 @@ def fake_schedule() -> ScheduleVM:
             ),
         ),
         scan_summary_text="2 slots · 16 pts",
-        scan_source_loaded=False,
-        scan_file_path="",
         min_repeat_count=1,
         default_repeat_count=1,
     )
@@ -330,15 +328,13 @@ def populate(editor) -> None:
     scan.set_scan_page(ScanPageRecord(
         slots_text="2 bound scan slots · fake table ready",
         table_text="0.0  1.0\n0.5  1.5\n1.0  2.0",
-        source_text="scan_table = fake_points",
-        source_revision=4,
+        source_text="scan_table = [[0.0, 1.0], [0.5, 1.5]]",
         source_dirty=False,
         repeats=0,
         busy=False,
         progress_text="held at point 2/16: fake_value = 0.5",
         progress_polling=False,
     ))
-    scan.set_scan_code("scan_table = [[0.0, 1.0], [0.5, 1.5]]", source_revision=4)
     target = editor
     target.set_target_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
     target.set_target_ports((
@@ -364,6 +360,7 @@ def populate(editor) -> None:
         (schedule.visible_ports_committed, "visible_ports_committed"),
         (scan.scan_hold_requested, "scan_hold_requested"),
         (scan.scan_step_requested, "scan_step_requested"),
+        (scan.scan_source_edited, "scan_source_edited"),
         (scan.scan_run_requested, "scan_run_requested"),
         (target.target_apply_requested, "target_apply_requested"),
         (target.target_feedback_requested, "target_feedback_requested"),

@@ -120,6 +120,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_workbench.pulse_editor import PulseEditorPresenter
+    from zlc_workbench.pulse_state import PulseEditorState
 
     from test_pulse_editor import _EditorView, _ordinary_sequence
 
@@ -132,7 +133,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     )
     streamer.open()
     presenter = PulseEditorPresenter(
-        _EditorView(), _ordinary_sequence(), sequencer=streamer
+        _EditorView(), PulseEditorState(sequence=_ordinary_sequence()), sequencer=streamer
     )
     try:
         assert presenter.fire() is True, presenter.view.warnings
@@ -186,6 +187,7 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_pulse.wire import CtrlWords
     from zlc_workbench.pulse_editor import PulseEditorPresenter
+    from zlc_workbench.pulse_state import PulseEditorState
 
     from test_pulse_editor import _EditorView, _ordinary_sequence
 
@@ -199,16 +201,19 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         target=pulse_target_from_xdc(config_path=config["source"]),
     )
     board.open()
-    presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
+    presenter = PulseEditorPresenter(
+        _EditorView(), PulseEditorState(sequence=sequence), sequencer=board
+    )
     try:
         presenter.view.binding_cycle_requested.emit(
             "duration", sequence.periods[3].period_id, None
         )
-        presenter.view.scan_run_requested.emit(
+        presenter.view.scan_source_edited.emit(
             "import numpy as np\n"
             "scan_table = (np.arange(5) + 1).reshape(-1, 1) * 0.001\n"
         )
-        presenter._scan_repeats = 0
+        presenter.view.scan_run_requested.emit()
+        presenter.set_scan_repeats(0)
         assert presenter.load_into_sequencer() is True
         assert transport.words[CtrlWords.SCAN_COUNT] > 1, (
             "this fixture is meant to have a scan on the board to begin with"
