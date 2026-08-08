@@ -77,8 +77,8 @@ class PanelBinding:
 
     panel_id: str
     state: PanelState
-    host: Any
-    port: PlotPanelPort
+    host: Any = None
+    port: PlotPanelPort | None = None
     #: Edit deliberately keeps one frozen data revision until Refresh.  It is
     #: not panel configuration and therefore does not live in ``PanelState``.
     frozen_data: PanelFrozenData | None = None
@@ -87,6 +87,7 @@ class PanelBinding:
     #: not the live monitor host and therefore has no PlotPanelPort.
     editor_host: Any = None
     editor_selections: Any = None
+    editor_open: bool = False
     #: Live derivation from selections drawn on this panel, if it has one.
     bridge: Any = None
     selections: Any = None
@@ -133,9 +134,7 @@ class ConsolePresenter:
         make_host: Callable[[object, str, str], Any],
         panel_kinds: Callable[[], Sequence[tuple[str, str]]] | None = None,
         spec_for: Callable[[object, str], Any] | None = None,
-        choose_signal: Callable[[Sequence[tuple]], str | None] | None = None,
         open_saved: Callable[[str], object] | None = None,
-        choose_logic: Callable[[Sequence[tuple]], str | None] | None = None,
         intervals: Sequence[int] = (100, 200, 400, 800),
         default_interval_ms: int = 400,
     ) -> None:
@@ -146,18 +145,9 @@ class ConsolePresenter:
         # belong to the plotting package; this only asks.
         self._panel_kinds = panel_kinds
         self._spec_probe = spec_for
-        # Asking is the window's job and answering is not, so the question
-        # arrives as a callable: the presenter stays Qt-free and a notebook can
-        # answer it with a name it already knows.  The window's own answer is
-        # its handle's choose_signal; a notebook passes its own.
-        self._choose_signal = choose_signal
         # Reading a saved run is a different window over a different subject,
         # so the console asks for it rather than growing one.
         self._open_saved = open_saved
-        # Choosing a type remains a small Qt question.  Editing no longer uses
-        # the old modal callback: the view projects the row's one shared draft
-        # through open_logic_editor/update_logic_editor seams instead.
-        self._choose_logic = choose_logic
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         self.panels: dict[str, PanelBinding] = {}
@@ -173,14 +163,24 @@ class ConsolePresenter:
         self._default_interval_ms = int(default_interval_ms)
 
         kinds = tuple(self._panel_kinds() if self._panel_kinds is not None else ())
+        self._panel_kind_labels = {
+            str(key): str(label or key) for key, label in kinds
+        }
         self._default_panel_kind = kinds[0][0] if kinds else ""
         setter = getattr(self.view, "set_panel_kinds", None)
         if setter is not None:
             setter(kinds, self._default_panel_kind)
+        logic_setter = getattr(self.view, "set_logic_kinds", None)
+        if logic_setter is not None:
+            logic_setter(self.logic_offer())
 
         self.board = LiveBoard(
             session.signal_plane,
-            lambda: tuple(binding.port for binding in self.panels.values()),
+            lambda: tuple(
+                binding.port
+                for binding in self.panels.values()
+                if binding.port is not None
+            ),
             intervals=intervals,
             default_interval_ms=default_interval_ms,
         )
@@ -201,7 +201,7 @@ class ConsolePresenter:
         self.view.save_screenshot_requested.connect(self.save_screenshot)
         self.view.add_panel_requested.connect(self.add_selected_panel)
         self.view.selectors_toggled.connect(self.set_deriving)
-        self.view.add_logic_requested.connect(self.add_chosen_logic)
+        self.view.add_logic_requested.connect(self.add_logic)
         self.view.panel_order_committed.connect(self.reorder_panels)
         # Every control on a card is a decision about ONE named panel, wired
         # once here rather than re-strung by whoever built the widget.
@@ -239,6 +239,74 @@ class ConsolePresenter:
         self.set_deriving(True)
 
     # ------------------------------------------------------------------ panels
+
+    def add_blank_panel(
+        self,
+        kind: str,
+        *,
+        signal: str = "",
+        title: str = "",
+        size: str = "2x2",
+        interval_ms: int | None = None,
+        semantic: Mapping[str, Any] | None = None,
+        display: Mapping[str, Any] | None = None,
+        fit: Mapping[str, Any] | None = None,
+        site_overlay: str = "off",
+    ) -> PanelBinding | None:
+        """Author one fixed-kind panel before any signal has published.
+
+        A panel is configuration first and a plot host second.  The empty card
+        is intentional: its Setting/Edit projections own the later signal
+        choice, while the plot surface is mounted only when that signal has an
+        actual compatible publication.
+        """
+
+        wanted = str(kind or self._default_panel_kind)
+        if wanted not in self._panel_kind_labels:
+            self._report(
+                f"{wanted.replace('_', ' ') or 'that plot kind'} is not available "
+                "on TaskConsole",
+                severity="warning",
+            )
+            return None
+
+        self._panel_serial += 1
+        panel_id = f"panel-{self._panel_serial}"
+        base_title = self._panel_kind_labels[wanted]
+        used_titles = {binding.state.title for binding in self.panels.values()}
+        generated_title = base_title
+        suffix = 2
+        while generated_title in used_titles:
+            generated_title = f"{base_title} {suffix}"
+            suffix += 1
+        state = PanelState(
+            signal=str(signal).strip(),
+            kind=wanted,
+            size=str(size or "2x2"),
+            interval_ms=(
+                self._default_interval_ms
+                if interval_ms is None
+                else int(interval_ms)
+            ),
+            title=str(title).strip() or generated_title,
+            semantic=dict(semantic or {}),
+            display=dict(display or {}),
+            fit=dict(fit or {}),
+            site_overlay=str(site_overlay),
+        )
+        binding = PanelBinding(panel_id, state)
+        self.panels[panel_id] = binding
+        self.view.add_panel(panel_id, state.title)
+        self.view.show_panel(panel_id, None)
+        self.view.set_panel_selectors_enabled(panel_id, self._deriving)
+        self._publish_panel_state(binding)
+        self._summarise()
+
+        # Layout restore may already name a live signal.  Re-enter the exact
+        # same state-replacement path Setting uses; no second mounting path.
+        if state.signal:
+            self.update_panel_state(panel_id, {"signal": state.signal})
+        return binding
 
     def add_panel(
         self,
@@ -502,7 +570,8 @@ class ConsolePresenter:
         binding.display_publication = publication
         self.view.show_panel(binding.panel_id, host)
         self._apply_deriving(binding)
-        old_host.close()
+        if old_host is not None:
+            old_host.close()
         return host
 
     def reorder_panels(self, order: Sequence[str]) -> bool:
@@ -577,6 +646,14 @@ class ConsolePresenter:
                 groups,
                 current=binding.state.signal if binding is not None else "",
             )
+        front = self.session.signal_plane.freeze()
+        for panel_id, binding in tuple(self.panels.items()):
+            if (
+                binding.host is None
+                and binding.state.signal
+                and front.value(binding.state.signal) is not None
+            ):
+                self.update_panel_state(panel_id, {"signal": binding.state.signal})
 
     def retarget_panel(self, panel_id: str, signal: str) -> bool:
         """Point one fixed-kind panel at a different compatible signal."""
@@ -618,7 +695,8 @@ class ConsolePresenter:
         focused = getattr(self.view, "focus_panel_editor", None)
         if callable(opened):
             opened(panel_id, projection)
-            if binding.editor_host is None:
+            binding.editor_open = True
+            if binding.editor_host is None and binding.frozen_data is not None:
                 try:
                     self._replace_panel_editor_host(binding)
                 except Exception as error:
@@ -673,13 +751,14 @@ class ConsolePresenter:
             return False
 
         signal = str(changes.get("signal", current.signal)).strip()
-        if not signal:
-            self._report(f"{panel_id}: signal must be selected", severity="warning")
-            return False
         title = str(changes.get("title", current.title)).strip()
         if signal != current.signal and "title" not in changes and current.title == current.signal:
             title = signal
-        title = title or signal
+        title = (
+            title
+            or signal
+            or self._panel_kind_labels.get(current.kind, current.kind.replace("_", " "))
+        )
         merged: dict[str, Any] = {
             "signal": signal,
             "size": str(changes.get("size", current.size)),
@@ -697,29 +776,69 @@ class ConsolePresenter:
         except Exception as error:
             self._report(f"{panel_id}: {error}", severity="error")
             return False
-        if candidate == current:
+        needs_mount = bool(candidate.signal) and (
+            candidate.signal != current.signal
+            or binding.host is None
+            or binding.port is None
+        )
+        if candidate == current and not needs_mount:
             return False
 
         host_patch = dict(changes)
         if candidate.title != current.title:
             host_patch["title"] = candidate.title
 
-        if candidate.signal != current.signal:
+        if not candidate.signal:
+            if binding.host is not None or binding.port is not None:
+                self._release_panel_editor(binding)
+                self._release_panel(binding)
+                self.view.show_panel(panel_id, None)
+            binding.state = candidate
+            binding.parameter_surface = {}
+            binding.frozen_data = None
+            binding.frozen_stale = False
+            binding.display_publication = None
+            self._publish_panel_state(binding)
+            self._summarise()
+            return True
+
+        if needs_mount:
             front = self.session.signal_plane.freeze()
             value = front.value(candidate.signal)
             if value is None:
+                if candidate.signal != current.signal and binding.host is not None:
+                    self._report(
+                        f"{candidate.signal} has not published yet",
+                        severity="warning",
+                    )
+                    return False
+                binding.state = candidate
+                binding.parameter_surface = {}
+                self._publish_panel_state(binding)
+                self._summarise()
                 self._report(
-                    f"{candidate.signal} has not published yet",
+                    f"{candidate.signal} has not published yet; {panel_id} remains ready",
                     severity="warning",
                 )
-                return False
+                return True
             if candidate.kind and self._spec_for(value.snapshot, candidate.kind) is None:
+                if candidate.signal != current.signal and binding.host is not None:
+                    self._report(
+                        f"{candidate.signal} cannot be drawn as a "
+                        f"{candidate.kind.replace('_', ' ')}",
+                        severity="warning",
+                    )
+                    return False
+                binding.state = candidate
+                binding.parameter_surface = {}
+                self._publish_panel_state(binding)
+                self._summarise()
                 self._report(
                     f"{candidate.signal} cannot be drawn as a "
-                    f"{candidate.kind.replace('_', ' ')}",
+                    f"{candidate.kind.replace('_', ' ')}; the panel remains ready",
                     severity="warning",
                 )
-                return False
+                return True
             publication = front.publication(candidate.signal)
             try:
                 plot_input = self._project_panel_input(
@@ -734,6 +853,9 @@ class ConsolePresenter:
                 self._configure_panel_host(host, candidate)
                 self._apply_plot_input_overlay(host, plot_input)
                 parameter_surface = self._describe_panel_parameters(host, candidate)
+                candidate = self._state_with_described_semantics(
+                    candidate, parameter_surface
+                )
                 if binding.editor_host is not None:
                     self._apply_panel_host_patch(
                         binding.editor_host, current, candidate, host_patch
@@ -764,16 +886,42 @@ class ConsolePresenter:
             binding.display_publication = publication
             binding.state = candidate
             binding.parameter_surface = parameter_surface
-            binding.frozen_stale = binding.frozen_data is not None
+            if binding.frozen_data is None:
+                binding.frozen_data = self._panel_frozen_data(
+                    binding,
+                    snapshot=value.snapshot,
+                    publication=publication,
+                    plot_input=plot_input,
+                )
+                binding.frozen_stale = False
+            else:
+                binding.frozen_stale = True
             binding.reported_error = None
             self.view.show_panel(panel_id, host)
             self._apply_deriving(binding)
+            if (
+                binding.editor_open
+                and binding.editor_host is None
+                and not binding.frozen_stale
+            ):
+                try:
+                    self._replace_panel_editor_host(binding)
+                except Exception as error:
+                    self._report(
+                        f"cannot mount {binding.state.title} plot editor: {error}",
+                        severity="error",
+                    )
             if "site_overlay" in changes:
                 self._refresh_panel_overlay_state(binding, candidate)
             self._report(
                 f"{panel_id} now shows {candidate.signal}", severity="task"
             )
         else:
+            if binding.host is None or binding.port is None:
+                binding.state = candidate
+                self._publish_panel_state(binding)
+                self._summarise()
+                return True
             try:
                 self._apply_panel_host_patch(binding.host, current, candidate, host_patch)
                 if binding.editor_host is not None:
@@ -1057,6 +1205,8 @@ class ConsolePresenter:
 
         if state.kind != "image":
             return
+        if binding.host is None or binding.port is None:
+            return
         frozen = binding.frozen_data
         if frozen is not None and frozen.publication is not None:
             frozen_value = self._publication_value(
@@ -1242,11 +1392,13 @@ class ConsolePresenter:
     def _panel_editor_closed(self, panel_id: str) -> None:
         binding = self.panels.get(str(panel_id))
         if binding is not None:
+            binding.editor_open = False
             self._release_panel_editor(binding)
 
     def close_panel_editor(self, panel_id: str) -> bool:
         binding = self.panels.get(str(panel_id))
         if binding is not None:
+            binding.editor_open = False
             self._release_panel_editor(binding)
         close = getattr(self.view, "close_panel_editor", None)
         if callable(close):
@@ -1372,51 +1524,22 @@ class ConsolePresenter:
         if binding.bridge is not None:
             binding.bridge.close()
         binding.bridge = binding.selections = None
-        binding.host.close()
+        host = binding.host
+        binding.host = None
+        binding.port = None
+        if host is not None:
+            host.close()
 
     def add_selected_panel(self, kind: str = "") -> PanelBinding | None:
-        """Add a panel of the kind chosen beside the button.
+        """Author the chosen fixed kind; signal wiring is a later panel edit."""
 
-        That is what the control says it does.  It used to ignore the kind
-        entirely and open a modal signal chooser, so the combo beside Add Panel
-        described a choice the button did not make -- and a board where every
-        signal was already shown opened a blank list.
-
-        The signal is the first published one this kind can actually draw,
-        preferring one not already on the board.  Which signal a panel shows is
-        a per-panel decision the card's own picker already owns, so asking for
-        it up front asked twice.
-        """
-
-        wanted = str(kind or self._default_panel_kind)
-        frozen = self.session.signal_plane.freeze()
-        offered = [name for name, *_rest in self.offered_signals()]
-        shown = [name for name, *_rest in self.offered_signals(include_shown=True)]
-        if not shown:
+        binding = self.add_blank_panel(str(kind or self._default_panel_kind))
+        if binding is not None:
             self._report(
-                "nothing has published yet, so there is nothing to show",
-                severity="warning",
+                f"added {binding.title}; choose a signal in Setting",
+                severity="task",
             )
-            return None
-        for signal in offered + [name for name in shown if name not in offered]:
-            value = frozen.value(signal)
-            if value is None:
-                continue
-            if self._spec_for(value.snapshot, wanted) is None:
-                continue
-            binding = self.add_panel(
-                signal,
-                value.snapshot,
-                kind=wanted,
-                initial_publication=frozen.publication(signal),
-            )
-            self._report(f"showing {binding.title}", severity="task")
-            return binding
-        self._report(
-            f"nothing published can be drawn as a {wanted.replace('_', ' ')}",
-            severity="warning",
-        )
-        return None
+        return binding
 
     def open_saved(self) -> object | None:
         """Open a saved figure, in whatever window the host provides for it."""
@@ -1572,15 +1695,12 @@ class ConsolePresenter:
         missing: list[str] = []
         for entry in document.get("panels", ()):
             signal = str(entry.get("signal", ""))
-            value = front.value(signal)
-            if value is None:
+            if signal and front.value(signal) is None:
                 missing.append(signal)
-                continue
-            binding = self.add_panel(
-                signal,
-                value.snapshot,
+            self.add_blank_panel(
+                str(entry.get("kind", "")),
+                signal=signal,
                 title=str(entry.get("title", "")),
-                kind=str(entry.get("kind", "")),
                 size=str(entry.get("size", "")),
                 interval_ms=int(
                     entry.get("interval_ms", self._default_interval_ms)
@@ -1589,12 +1709,11 @@ class ConsolePresenter:
                 display=dict(entry.get("display", {})),
                 fit=dict(entry.get("fit", {})),
                 site_overlay=str(entry.get("site_overlay", "off")),
-                initial_publication=front.publication(signal),
             )
         if missing:
             self._report(
                 f"nothing is publishing {', '.join(sorted(set(missing)))}; "
-                "the rest of the board is back",
+                "those panels remain available for rewiring",
                 severity="warning",
             )
         self._summarise()
@@ -1669,7 +1788,11 @@ class ConsolePresenter:
         """
 
         if self._deriving:
-            if binding.bridge is not None or not hasattr(binding.host, "subscribe_selection"):
+            if (
+                binding.host is None
+                or binding.bridge is not None
+                or not hasattr(binding.host, "subscribe_selection")
+            ):
                 return
             binding.bridge, binding.selections = attach_selection_bridge(
                 self.session.signal_plane,
@@ -1698,6 +1821,8 @@ class ConsolePresenter:
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
+            return
+        if binding.port is None:
             return
         publication = binding.port.presented_publication()
         if publication is None:
@@ -1828,15 +1953,6 @@ class ConsolePresenter:
             (api_name, kind, publishes, "")
             for api_name, kind, publishes in self.catalog.rows()
         )
-
-    def add_chosen_logic(self) -> str:
-        """Ask which node type, then add one.  Asking is the window's job."""
-
-        if self._choose_logic is None:
-            self._report("this console cannot ask which node to add", severity="warning")
-            return ""
-        chosen = self._choose_logic(self.logic_offer())
-        return self.add_logic(str(chosen)) if chosen else ""
 
     def add_logic(
         self,

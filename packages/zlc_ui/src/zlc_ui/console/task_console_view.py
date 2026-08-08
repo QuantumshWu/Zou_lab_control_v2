@@ -38,9 +38,10 @@ from .status_strip import StatusStrip
 class TaskConsoleView(QtWidgets.QWidget):
     """A presenter-friendly shell with the original v1 arrangement."""
 
-    #: Which KIND of panel to add -- the one chosen beside the button.
+    #: The v1 header has one combined chooser and one Add Panel button.  These
+    #: two signals are the typed result of that one visible action.
     add_panel_requested = QtCore.pyqtSignal(str)
-    add_logic_requested = QtCore.pyqtSignal()
+    add_logic_requested = QtCore.pyqtSignal(str)
     pause_toggled = QtCore.pyqtSignal(bool)
     selectors_toggled = QtCore.pyqtSignal(bool)
     #: Two deliberately separate header products: a stopped, reusable pipeline
@@ -86,10 +87,13 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
 
         self.kind_combo = FluentComboBox()
+        self._panel_kind_choices: tuple[tuple[str, str], ...] = ()
+        self._logic_kind_choices: tuple[tuple[str, str, str, str], ...] = ()
         # v1's toolbar token: keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
         self.add_panel_button = FluentButton("Add Panel", color=ACCENT)
+        self.add_panel_button.setEnabled(False)
 
         # Rendered as a push button rather than a toggle, so the button carries
         # the command and the label carries the state.  It emits the state it
@@ -166,9 +170,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.tabs.add_permanent_tab(logic_page, "Logic")
         outer.addWidget(self.tabs, 1)
 
-        self.add_panel_button.clicked.connect(
-            lambda: self.add_panel_requested.emit(str(self.kind_combo.currentData() or ""))
-        )
+        self.add_panel_button.clicked.connect(self._add_current_selection)
         self.pause_switch.clicked.connect(
             lambda _checked=False: self.pause_toggled.emit(not self._paused)
         )
@@ -178,25 +180,68 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.load_layout_button.clicked.connect(self.load_layout_requested.emit)
 
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
-        """What kinds of panel this board can add, as (key, label).
+        """Replace the Plot entries in the combined v1 chooser."""
 
-        The combo held one hardcoded item and nothing read it: pressing Add
-        Panel opened a signal chooser instead, so the control beside the button
-        described a choice the button did not make.  What kinds exist belongs
-        to the plotting package and arrives from whoever knows both.
-        """
+        self._panel_kind_choices = tuple(
+            (str(key), str(label or key)) for key, label in kinds
+        )
+        selected = ("plot", str(current)) if current else None
+        self._rebuild_kind_combo(selected)
 
-        incoming = tuple((str(key), str(label or key)) for key, label in kinds)
+    def set_logic_kinds(
+        self, kinds: tuple[tuple[str, str, str, str], ...]
+    ) -> None:
+        """Replace the ``(api_name, kind, publishes, blocked)`` Logic entries."""
+
+        layer_order = {"measurement": 0, "processor": 1, "task": 2}
+        self._logic_kind_choices = tuple(
+            sorted(
+                (
+                    (str(api_name), str(kind), str(publishes), str(blocked))
+                    for api_name, kind, publishes, blocked in kinds
+                ),
+                key=lambda item: (layer_order.get(item[1], 3), item[0]),
+            )
+        )
+        self._rebuild_kind_combo()
+
+    def _rebuild_kind_combo(self, selected: tuple[str, str] | None = None) -> None:
+        wanted = selected if selected is not None else self.kind_combo.currentData()
         self.kind_combo.blockSignals(True)
         self.kind_combo.clear()
-        for key, label in incoming:
-            self.kind_combo.addItem(label, key)
-        if current:
-            index = self.kind_combo.findData(str(current))
+        for key, label in self._panel_kind_choices:
+            self.kind_combo.addItem(f"Plot: {label}", ("plot", key))
+        for api_name, kind, publishes, blocked in self._logic_kind_choices:
+            title = api_name.replace("_", " ").strip().title()
+            layer = kind.replace("_", " ").strip().title() or "Logic"
+            self.kind_combo.addItem(f"{layer}: {title}", ("logic", api_name))
+            details = blocked or f"Publishes: {publishes}"
+            self.kind_combo.setItemData(
+                self.kind_combo.count() - 1, details, QtCore.Qt.ToolTipRole
+            )
+        if wanted is not None:
+            index = next(
+                (
+                    item
+                    for item in range(self.kind_combo.count())
+                    if self.kind_combo.itemData(item) == wanted
+                ),
+                -1,
+            )
             if index >= 0:
                 self.kind_combo.setCurrentIndex(index)
         self.kind_combo.blockSignals(False)
-        self.add_panel_button.setEnabled(bool(incoming))
+        self.add_panel_button.setEnabled(self.kind_combo.count() > 0)
+
+    def _add_current_selection(self) -> None:
+        selected = self.kind_combo.currentData()
+        if selected is None:
+            return
+        family, key = selected
+        if family == "plot":
+            self.add_panel_requested.emit(str(key))
+        elif family == "logic":
+            self.add_logic_requested.emit(str(key))
 
     def set_cards(self, cards: tuple[PanelCardView, ...]) -> None:
         self.board.set_cards(tuple(cards))

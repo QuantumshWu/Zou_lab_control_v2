@@ -284,7 +284,7 @@ def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) ->
 
 
 def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace) -> None:
-    """Opening the GUI must not create a hidden camera owner or default panel."""
+    """The v1-style combined Add Panel control reaches both endpoints."""
 
     environment = dict(
         os.environ,
@@ -298,15 +298,49 @@ def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace
     )
     script = """import zou_lab_control_v2
 from zlc_ui import ensure_qt_app
-ensure_qt_app([])
+application = ensure_qt_app([])
+from PyQt5 import QtCore, QtTest
 from zlc_workbench.apps import task_console as tested_module
 print(tested_module.__file__)
 space, session = tested_module.open_experiment(r'%s', 'virtual')
 view, presenter = tested_module.build_console(session, interval_ms=200)
 assert presenter.panels == {}
 assert presenter.logic == {}
-added = presenter.add_logic('camera_measurement')
-assert added and presenter.logic[added].host is None
+logic_index = next(
+    index for index in range(view._view.kind_combo.count())
+    if view._view.kind_combo.itemData(index) == ('logic', 'camera_measurement')
+)
+view._view.kind_combo.setCurrentIndex(logic_index)
+QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+application.processEvents()
+assert 'camera_measurement' in presenter.logic
+assert presenter.logic['camera_measurement'].host is None
+assert 'camera_measurement' in view._logic_editors
+image_index = next(
+    index for index in range(view._view.kind_combo.count())
+    if view._view.kind_combo.itemData(index) == ('plot', 'image')
+)
+view._view.kind_combo.setCurrentIndex(image_index)
+QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+application.processEvents()
+assert len(presenter.panels) == 1
+blank = next(iter(presenter.panels.values()))
+assert blank.kind == 'image' and blank.signal == ''
+assert blank.host is None and blank.port is None
+catalog = tuple(
+    view._view.kind_combo.itemData(index)
+    for index in range(view._view.kind_combo.count())
+)
+assert catalog == (
+    ('plot', 'curve'),
+    ('plot', 'image'),
+    ('plot', 'histogram'),
+    ('plot', 'rolling'),
+    ('plot', 'facet_grid'),
+    ('logic', 'camera_measurement'),
+    ('logic', 'occupancy'),
+    ('logic', 'calibration'),
+)
 print('STOPPED_DRAFT')
 presenter.close()
 session.close()

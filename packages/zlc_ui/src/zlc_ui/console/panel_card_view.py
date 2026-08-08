@@ -110,7 +110,7 @@ class PanelCardView(FluentGroupBox):
         )
         holder.setSpacing(0)
         self._surface_layout = holder
-        self._placeholder = FluentLabel("No surface mounted")
+        self._placeholder = FluentLabel("Pick a signal in Setting")
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         holder.addWidget(self._placeholder)
 

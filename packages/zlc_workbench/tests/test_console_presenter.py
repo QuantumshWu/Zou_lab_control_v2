@@ -147,6 +147,7 @@ class _ConsoleView:
         self.selectors = False
         self.status: list[tuple[str, str]] = []
         self.kinds: tuple = ()
+        self.logic_kinds: tuple = ()
         #: What a chooser would answer, and what it was offered.
         self.chooser_answer: str | None = None
         #: What a file dialog would answer; "" is the operator cancelling.
@@ -177,6 +178,9 @@ class _ConsoleView:
 
     def set_panel_kinds(self, kinds, current: str = "") -> None:
         self.kinds = tuple(kinds)
+
+    def set_logic_kinds(self, kinds) -> None:
+        self.logic_kinds = tuple(kinds)
 
     def set_summary(self, text: str) -> None:
         self.summary = text
@@ -351,22 +355,6 @@ class _ConsoleView:
             self.focused_logic_editor = ""
 
 
-class _Chooser:
-    """The window's question, without the window.
-
-    It records what it was offered, because what an operator can choose from is
-    as much a part of the behaviour as what happens once they choose.
-    """
-
-    def __init__(self) -> None:
-        self.offered: tuple = ()
-        self.answer: str | None = None
-
-    def __call__(self, rows):
-        self.offered = tuple(rows)
-        return self.answer
-
-
 @pytest.fixture
 def session(tmp_path):
     write_ordinary_pulse(tmp_path)
@@ -392,16 +380,13 @@ def presenter(session):
         # its hosts a different way is a double that stops being evidence.
         return plot.RasterPlotHost.from_plot(initial, spec_for(initial, kind))
 
-    chooser = _Chooser()
     presenter = ConsolePresenter(
         session,
         _ConsoleView(),
         make_host=make_host,
         panel_kinds=plot.panel_kinds,
         spec_for=spec_for,
-        choose_signal=chooser,
     )
-    presenter.chooser = chooser
     try:
         yield presenter
     finally:
@@ -520,39 +505,36 @@ def test_the_presenter_never_imports_qt() -> None:
     assert "PyQt5" not in roots
 
 
-def test_add_panel_puts_the_chosen_kind_on_the_board(presenter, session) -> None:
-    """The button that was connected to nothing, then to the wrong question.
-
-    Its whole flow now exists: the operator picks a KIND beside the button, the
-    presenter finds a published signal that kind can draw, and the card's own
-    picker retargets it afterwards.  It used to open a modal signal chooser
-    instead, which asked for a per-panel decision the card already owns and
-    ignored the kind combo entirely.
-    """
-
-    node, _snapshot = _one_shot(session)
-    signal = node.signal_key("frames")
+def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None:
+    """Panel authoring is independent of whether a producer has run yet."""
 
     presenter.view.add_panel_requested.emit("image")
     assert len(presenter.panels) == 1
     binding = next(iter(presenter.panels.values()))
-    assert binding.signal == signal and binding.kind == "image"
+    assert binding.signal == ""
+    assert binding.kind == "image"
+    assert binding.host is None
+    assert binding.port is None
+    assert presenter.view.cards
 
 
-def test_a_signal_already_on_screen_can_still_take_another_panel(
+def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     presenter, session
 ) -> None:
-    """Two views of one signal is a thing an operator asks for -- the frames as
-    an image beside their histogram -- so the second is not refused."""
+    """The signal picker completes a panel; it is not a creation precondition."""
 
-    node, snapshot = _one_shot(session)
+    presenter.view.add_panel_requested.emit("image")
+    binding = next(iter(presenter.panels.values()))
+    assert presenter.edit_panel(binding.panel_id) is True
+    assert binding.editor_host is None
+    node, _snapshot = _one_shot(session)
     signal = node.signal_key("frames")
-    presenter.add_panel(signal, snapshot, kind="image")
-
-    presenter.view.add_panel_requested.emit("histogram")
-    kinds = sorted(binding.kind for binding in presenter.panels.values())
-    assert kinds == ["histogram", "image"]
-    assert {binding.signal for binding in presenter.panels.values()} == {signal}
+    assert presenter.retarget_panel(binding.panel_id, signal) is True
+    assert binding.signal == signal
+    assert binding.host is not None
+    assert binding.port is not None
+    assert binding.editor_host is not None
+    assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
 
 def test_pausing_is_reversible_and_the_window_is_told(presenter, session) -> None:
@@ -831,27 +813,21 @@ def test_add_panel_adds_a_panel_of_the_kind_chosen_beside_the_button(
     already owns, so asking for it up front asked twice.
     """
 
-    asked: list = []
-    presenter._choose_signal = lambda rows: asked.append(rows) or None
-
-    _node, snapshot = _one_shot(session)
     before = len(presenter.panels)
 
     binding = presenter.add_selected_panel("curve")
     assert binding is not None and binding.kind == "curve"
+    assert binding.signal == "" and binding.host is None
     assert len(presenter.panels) == before + 1
-    assert not asked, "the kind is chosen beside the button, not in a dialog"
-
-    # A kind this data cannot be drawn as is refused with the reason.
-    assert presenter.add_selected_panel("pulse_timeline") is None
-    assert "pulse timeline" in presenter.view.status[-1][1]
 
 
-def test_add_panel_before_anything_publishes_says_so(presenter) -> None:
-    """A board with no data cannot open a panel onto nothing."""
+def test_add_panel_before_anything_publishes_still_creates_the_panel(presenter) -> None:
+    """No publication is a normal stopped-pipeline state, not an Add error."""
 
-    assert presenter.add_selected_panel("image") is None
-    assert "published" in presenter.view.status[-1][1]
+    binding = presenter.add_selected_panel("image")
+    assert binding is not None
+    assert binding.signal == ""
+    assert binding.host is None
 
 
 def test_a_panel_keeps_the_kind_it_was_added_as(presenter, session) -> None:
@@ -1022,22 +998,25 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored_logic.draft.device_keys == {"camera": "camera"}
 
 
-def test_a_board_naming_a_signal_nobody_publishes_comes_back_in_part(
+def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     presenter, session
 ) -> None:
-    """Three quarters of an afternoon's work is worth more than a refusal."""
+    """An unresolved wire is editable layout state, not a reason to drop it."""
 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
     presenter.add_panel(signal, snapshot, title="here")
     document = presenter.layout()
     document["panels"].append(
-        {"signal": "nobody.publishes.this", "title": "gone", "kind": "", "size": "",
+        {"signal": "nobody.publishes.this", "title": "gone", "kind": "image", "size": "",
          "interval_ms": 200}
     )
 
     assert presenter.apply_layout(document) is True
-    assert [binding.title for binding in presenter.panels.values()] == ["here"]
+    assert [binding.title for binding in presenter.panels.values()] == ["here", "gone"]
+    unresolved = tuple(presenter.panels.values())[-1]
+    assert unresolved.signal == "nobody.publishes.this"
+    assert unresolved.host is None and unresolved.port is None
     assert any("nobody.publishes.this" in text for _severity, text in presenter.view.status)
 
 

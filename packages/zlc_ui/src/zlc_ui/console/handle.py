@@ -38,7 +38,7 @@ class TaskConsoleHandle(QtCore.QObject):
 
     # -- the board -------------------------------------------------------
     add_panel_requested = QtCore.pyqtSignal(str)
-    add_logic_requested = QtCore.pyqtSignal()
+    add_logic_requested = QtCore.pyqtSignal(str)
     pause_toggled = QtCore.pyqtSignal(bool)
     selectors_toggled = QtCore.pyqtSignal(bool)
     save_layout_requested = QtCore.pyqtSignal()
@@ -125,6 +125,11 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
         self._view.set_panel_kinds(kinds, current)
+
+    def set_logic_kinds(
+        self, kinds: tuple[tuple[str, str, str, str], ...]
+    ) -> None:
+        self._view.set_logic_kinds(kinds)
 
     def set_paused(self, paused: bool) -> None:
         self._view.set_paused(paused)

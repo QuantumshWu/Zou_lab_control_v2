@@ -510,17 +510,9 @@ def test_artifacts_come_only_from_a_successful_host_result_and_declaration(prese
 
 
 def test_a_processor_adds_with_an_unresolved_source_and_no_modal(presenter) -> None:
-    asked: list = []
-
-    def _pick(rows):
-        asked.append(tuple(rows))
-        return "@logic/nowhere/frames"
-
-    presenter._choose_signal = _pick
     node_id = presenter.add_logic("occupancy")
 
     assert node_id == "occupancy"
-    assert asked == []
     assert presenter.logic[node_id].draft.source_signal == ""
     assert presenter.view.logic_editors[node_id]["source_required"] is True
     assert presenter.view.logic_editors[node_id]["source_options"] == ()

@@ -602,22 +602,49 @@ assert row_b.status_label.text() == 'also usable'
 
 def test_task_console_qtest_signal_payloads() -> None:
     _run_qt(
-        """
+        """import zou_lab_control_v2
+from zlc_ui.console import task_console_view as tested_module
+print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import TaskConsoleView
+from zlc_ui.console import TaskConsoleHandle
 app = ensure_qt_app(['test'])
-view = TaskConsoleView(); view.show(); app.processEvents()
+view = tested_module.TaskConsoleView()
+handle = TaskConsoleHandle(None, view)
+view.show(); app.processEvents()
 events = []
-view.add_panel_requested.connect(lambda: events.append(('panel',)))
-view.pause_toggled.connect(lambda value: events.append(('pause', value)))
-view.save_screenshot_requested.connect(lambda: events.append(('screenshot',)))
-view.save_layout_requested.connect(lambda: events.append(('layout',)))
+handle.set_panel_kinds((('curve', 'Curve'), ('image', '2D image')), 'image')
+handle.set_logic_kinds((
+    ('calibration', 'task', 'nothing', ''),
+    ('occupancy', 'processor', 'occupied', ''),
+    ('camera_measurement', 'measurement', 'frames', ''),
+))
+handle.add_panel_requested.connect(lambda kind: events.append(('panel', kind)))
+handle.add_logic_requested.connect(lambda api_name: events.append(('logic', api_name)))
+handle.pause_toggled.connect(lambda value: events.append(('pause', value)))
+handle.save_screenshot_requested.connect(lambda: events.append(('screenshot',)))
+handle.save_layout_requested.connect(lambda: events.append(('layout',)))
+assert view.kind_combo.count() == 5
+assert view.kind_combo.itemData(0) == ('plot', 'curve')
+assert view.kind_combo.itemData(1) == ('plot', 'image')
+assert view.kind_combo.itemData(2) == ('logic', 'camera_measurement')
+assert view.kind_combo.itemData(3) == ('logic', 'occupancy')
+assert view.kind_combo.itemData(4) == ('logic', 'calibration')
+assert view.kind_combo.itemText(0) == 'Plot: Curve'
+assert view.kind_combo.itemText(1) == 'Plot: 2D image'
+assert view.kind_combo.itemText(2) == 'Measurement: Camera Measurement'
+assert view.kind_combo.itemText(3) == 'Processor: Occupancy'
+assert view.kind_combo.itemText(4) == 'Task: Calibration'
+assert view.kind_combo.currentData() == ('plot', 'image')
+assert not hasattr(view, 'add_logic_button')
+QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+view.kind_combo.setCurrentIndex(2)
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_layout_button, QtCore.Qt.LeftButton)
-assert ('panel',) in events
+assert ('panel', 'image') in events
+assert ('logic', 'camera_measurement') in events
 assert ('pause', True) in events
 assert ('screenshot',) in events
 assert ('layout',) in events

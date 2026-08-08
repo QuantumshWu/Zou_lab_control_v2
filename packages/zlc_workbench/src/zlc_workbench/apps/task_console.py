@@ -86,9 +86,13 @@ def build_console(session, *, interval_ms, window_ratio=None):
         return plot.fitting_spec(snapshot.block.schema, _kind_of(kind))
 
     def _panel_kinds():
-        """Which kinds a panel may be, named the way the plotting package names them."""
+        """Plot kinds that belong on TaskConsole's live signal board."""
 
-        return plot.panel_kinds()
+        return tuple(
+            row
+            for row in plot.panel_kinds()
+            if row[0] != plot.PlotKind.PULSE_TIMELINE.value
+        )
 
     def _make_host(initial, signal, kind=""):
         # The operator's kind when they chose one, the signal's own schema when
@@ -108,41 +112,10 @@ def build_console(session, *, interval_ms, window_ratio=None):
         make_host=_make_host,
         panel_kinds=_panel_kinds,
         spec_for=_spec_for,
-        # The window asks which signal; the presenter projects what exists and
-        # the window renders the question.  Neither knows what any of it means.
-        choose_signal=view.choose_signal,
         open_saved=lambda start: _open_saved_figure(view, start),
-        # A logic node is what publishes a signal.  The question of which type
-        # to add and the settings form are Qt; what a node IS, and what running
-        # one means, are not, and stay out of this file.
-        choose_logic=lambda rows: _choose_logic(view, rows),
         default_interval_ms=interval_ms,
     )
     return view, presenter
-
-def _choose_logic(parent: object, rows) -> str | None:
-    """Ask which kind of node to add.
-
-    The same dialog the signal chooser uses, over the node catalog: a node type
-    is picked the same way a signal is, and inventing a second picker would give
-    an operator two ways to answer one kind of question.
-    """
-
-    return parent.choose_signal(
-        tuple(
-            (
-                name,
-                f"{name}  ({kind})",
-                # What this bench can actually do with it, from the presenter
-                # that tried.  "available" used to be written here for every
-                # row by the one place with no way to check.
-                "live" if not blocked else blocked,
-                kind,
-                f"publishes {publishes}",
-            )
-            for name, kind, publishes, blocked in rows
-        ),
-    )
 
 
 def _template_config(name: str | None):

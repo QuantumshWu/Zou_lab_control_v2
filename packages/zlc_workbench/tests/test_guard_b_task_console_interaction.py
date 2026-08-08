@@ -115,6 +115,10 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
         )
         panel = presenter.add_selected_panel("image")
         assert panel is not None and panel.kind == "image"
+        presenter.view.panel_state_changed.emit(
+            panel.panel_id, {"signal": signal_key}
+        )
+        assert panel.signal == signal_key and panel.host is not None
         assert presenter.edit_panel(panel.panel_id) is True
         assert panel.editor_host is not None and panel.editor_host is not panel.host
 
