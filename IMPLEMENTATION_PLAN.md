@@ -1,9 +1,10 @@
-# Zou_lab_control v2 实施计划（Complete）
+# Zou_lab_control v2 实施计划（Reopened）
 
 > 这是 [ARCHITECTURE_DESIGN.md](./ARCHITECTURE_DESIGN.md) 的实施顺序，不是已完成清单。
 > 仓库绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2`
 > 本文绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\IMPLEMENTATION_PLAN.md`
-> 设计审查基线：`0243aa6`；实际执行 HEAD 以本文 Checkpoint 为准。先前完成声明曾因真实 `experiment.bat` 产品入口失败而撤销；Phase 12 已纠正入口并重新验收。
+> 唯一权威 v1 参考树：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。不得使用 `ZLC_main`、`_reference\Zou_lab_control_v1` 或其他副本代替它。
+> 设计审查基线：`0243aa6`；实际执行 HEAD 以本文 Checkpoint 为准。先前 Phase 12 完成声明已因真实 Device Manager 与 pulse 入口验收失败而撤销。
 > 目标权威是封闭集合：只有本文和绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`。根 `HANDOFF.md`/`README.md`、七份 `packages/*/GOAL.md`、package contracts/README 以及其他旧 design/goal 文档都不是实施指令；冲突时忽略旧文档。
 
 ## 持续执行 Goal
@@ -29,13 +30,13 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — product path, unified experiment entry, staged commits, clean-worktree verification and documentation are complete`
-- Repository HEAD at checkpoint：`cb6ab87 Align pulse tests with held-point playback`
-- Completed phases：`Phase 0 authority quarantine；Phase 1 role/extent；Phase 2 finite/infinite data path；Phase 3 Camera request + publication run record；Phase 4 Calibration artifact；Phase 5 Occupancy + Image overlay；Phase 6 headless Guard A；Phase 7 TaskConsole Logic Add/Edit/Start；Phase 8 PanelState/selector/Producer Apply；Phase 9 three Save paths/viewer；Phase 10 virtual product path；Phase 11 scoped code cleanup；Phase 12 operator entry/shared session/staged delivery implementation`
-- Current phase：`complete`
-- Last completed action：根 `bin\experiment.bat` 已恢复为唯一统一 experiment flow；v1 形态的 Device Manager `Init devices` 在同一进程/session 中打开 TaskConsole + Pulse UI，Pulse UI 使用 exact session sequencer。功能改动已经按依赖拆成五个提交：`2388fc4`、`3398139`、`451a64c`、`5951bd2`、`cb6ab87`。
-- Last verified tests：当前主树先打印本树 root/atom/runtime/UI/Workbench/TaskConsole module 路径，随后全树 `1105 passed`；Guard A/B/C 单列 `3 passed`。Detached worktree 复验为：`2388fc4` Device Manager `21 passed`，`3398139` runtime `142 passed`，`451a64c` atom `132 passed`，最终 `cb6ab87` Pulse `137 passed`、Workbench `303 passed`。真实 batch 可见 smoke 确认第一屏只有一个 `Devices@Zou lab` Python GUI；Qt product-flow 测试确认 Init 后双窗口、同一 sequencer/world 的 On Pulse/Stop、close/recreate；所有临时 worktree 已移除，复核后为 `NO_ZLC_GUI_PROCESS`。
-- Next action：`none within this Goal；真机/FPGA 现象需在硬件重新到手后另行实测`
+- Goal status：`active — prior completion rejected at the first real operator step`
+- Repository HEAD at checkpoint：`987d30e Document the verified experiment workflow`
+- Completed phases：`Phase 0–11 的内部实现保留为待复核现状；Phase 12 的 Device Manager、pulse 入口、产品验收与完成声明全部作废，不能作为已完成阶段`
+- Current phase：`Phase 13 — rebaseline from the sole authoritative v1 tree and repair the real experiment entry`
+- Last completed action：已把唯一权威 v1 路径固定为 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`，明确排除 `ZLC_main` 与 `_reference`。已确认当前 v2 Device Manager 来自错误旧快照，且真实入口会在设备 UI 完成前因缺少 `workspace\pulses\calibration.py` 失败。
+- Last verified tests：先前 `1105 passed`、Guard A/B/C 与 detached package tests 只证明合成 fixture 下的内部行为，不能作为产品验收。相关测试曾主动把 package `calibration.py` 复制到临时 workspace，或直接注入 package pulse 搜索路径；真实 workspace 没有该文件，因此真实第一步失败。此前只打开首屏的可见 smoke 也不是验收。
+- Next action：`逐文件对照唯一权威 v1 的 Device Manager 与 JSON PulseDocument API；先证明当前错误在真实入口下变红，再修复 Apply -> shared session -> TaskConsole + Pulse UI 和 imaging_template.json calibration 链；之后按可独立运行的纵向阶段重新提交`
 - New decisions since architecture review：旧 `GOAL.md` 的误导风险不留到收尾处理；Phase 0 先隔离目标权威，Phase 11 按最终实现同步历史内容。Calibration 普通 measurement exposure 由 adapter request 决定；标定 long/readout/long 窗口由 Task 显式 protocol 参数处理。Panel archive 不持久化 schema 可导出的冗余 digest。Panel Edit 的操作图面是 Workbench 管理的独立 frozen plot host，不复用 monitor QWidget、不建立第二条 runtime derived signal。Layout 中 typed plot choice 以 plain JSON token 保存，并经当前 host 声明的 choices 恢复。Close 超时是 ownership 未释放而非可忽略错误，因此保留 window/bindings 并拒绝 session teardown。旧 FPGA asset SHA 清单因冻结 checkout 换行而无法在 clean worktree 重现，已改为资产存在性、解析后几何相等和既有 wire/launcher 语义验证，不再用字节 hash 代替行为。
 
 ## 1. 执行纪律
@@ -49,6 +50,7 @@
 7. 工作树中无关的已有修改一律保留，不 revert、不借机整理。
 8. 在已授权的 repo 范围内持续执行。遇到任何未预见问题、新缺陷、架构矛盾或当前/v1 代码与目标冲突，都按 Goal 中的优先级自主做出最优且可维护的决定，记录理由并继续到交付定义满足；不停下询问，不把决策退回给用户。
 9. 不把任何 `packages/*/GOAL.md`、旧 design、README、contract 或 HANDOFF 当作实施目标。它们只能用来理解现状；一旦冲突，以本计划和 `ARCHITECTURE_DESIGN.md` 为准。分派任何子任务时也必须明示携带这个权威边界。
+10. 凡声称“与 v1 一致”或从 v1 迁移 API/UI，必须从绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1` 读取并记录具体文件；禁止用目录名、相似入口、`ZLC_main`、`_reference` 或记忆推断 v1 身份。
 
 ## 1.1 Phase 0：隔离错误目标入口（已完成）
 
@@ -285,12 +287,14 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 3. Phase 0 将七份 package `GOAL.md` 标成 historical/inactive，当前又已把旧 active 正文收缩为 tombstone，并同步 root README、contracts 和 HANDOFF 中“task 发 signal”“infinite 记 loss”“grid shape 是 calibration 输入”“两 GUI 需 IPC”等错误现状说法。这些文件不得重新出现 active TODO/冻结命令来与两份执行权威竞争；文档同步也不得反过来影响已审查架构。
 4. 先跑受影响 package tests，再跑 Guard A/B/C，最后跑全树。所有临时脚本都打印本树 module `__file__`。
 
-## 15. Phase 12：真实实验入口与分阶段交付纠正
+## 15. Phase 12：已撤销的错误入口实现
 
-1. 既有 Device Manager/UI 测试先证明 flat editor + Test-and-release 旧流程会红，随后恢复 v1 可见结构；没有增加第四条 Guard。
-2. `Init devices` 直接从当前 draft 建立并持有 session，不要求先 Save；成功后同一进程同时显示 TaskConsole 与 Pulse UI，并隐藏 Device Manager。
-3. Pulse UI 借用该 session 的 exact sequencer。Qt product-flow 测试实际执行 On Pulse/Stop，证明它作用于同一 virtual world，且关闭窗口不会另开或关闭第二个 sequencer。
-4. 根 `bin\experiment.bat` 本身是唯一正式实验入口（对应 v1 `task_console.bat`）；没有新增根 launcher。可见 smoke 确认第一屏只有一个 Device Manager/Python GUI；自动 product-flow 覆盖 Init 双窗、关闭清理和立即重建。
+以下内容是失败记录，不是完成证据：
+
+1. Device Manager 错把无 Git provenance 的 `_reference` 旧快照当作 v1，加入了 `Installation/Configured devices/Available/Cancel/Init devices`；同一提交内的测试又直接断言这些错误标签，形成循环证明。
+2. 权威 v1 实际是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；其当前 Device Manager 是 domain device cards、`Discovered hardware`、`Loaded session` 与底部 `Apply`。
+3. 入口把 `session.load_pulse("calibration")` 错误变成设备 Apply/初始化的前置条件；正式 resolver 只查 workspace Python 文件，而真实 workspace 没有它。
+4. app/Guard 测试人为复制或直接注入 package `calibration.py`，所以没有覆盖真实 `bin\experiment.bat` + 真实 workspace。先前可见 smoke 只看第一屏，没有执行 Apply。
 5. 功能已经按依赖提交：
 
    | commit | 阶段 |
@@ -301,7 +305,16 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
    | `5951bd2` | TaskConsole/plot/UI/save/shared experiment flow |
    | `cb6ab87` | held-point Pulse 测试对齐、自包含 fixture 与语义化 FPGA asset 验证 |
 
-6. 每次提交均显式审查 staged 文件和 `diff --check`；最终在 detached worktree 中打印被测 module `__file__` 后复验。当前主树全树为 `1105 passed`，Guard A/B/C 为 `3 passed`，临时 worktree 与 GUI 进程均已清零。
+6. 上述提交虽然通过各自合成测试，但产品验收无效，整个阶段已经撤销完成状态。
+
+## 15.1 Phase 13：权威 v1 重新基线与真实入口修复
+
+1. 所有 v1 对照只读取 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。
+2. 用该树的当前 Device Manager widget tree 与 Apply/runtime 生命周期重做 v2 可见 UI；v2 内部数据模型只能作为 adapter，不得改变用户操作面。
+3. 审计并使用 `zlc_pulse` 的正式 JSON `PulseDocument` API。产品 pulse、Pulse Editor 文档与 Calibration template 均为 JSON；删除产品链上的 `.py` pulse resolver 和测试复制捷径。
+4. 恢复项目 pulse `pulses\imaging_template.json` 及 Calibration Edit 的 template 选择；设备 Apply 不得以 calibration pulse 是否存在作为初始化前置条件。
+5. 真实入口守卫不得复制 pulse 或注入 package 私有搜索路径；必须从未修改的实际 workspace 启动，执行 Apply，确认 TaskConsole 与 Pulse UI 共用同一 session/sequencer，再执行 calibration -> camera -> occupancy。
+6. 每一阶段先证明原缺陷下会红，再提交一个可独立运行的纵向切片；可见 GUI 验收必须关闭所有窗口并确认无残留进程。
 
 ## 16. 整体交付定义
 

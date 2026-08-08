@@ -2,6 +2,7 @@
 
 > 仓库绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2`
 > 本文绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
+> 唯一权威 v1 参考树：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。`C:\Users\eadri\Dropbox\WorkCode\Github\ZLC_main`、`C:\Users\eadri\Dropbox\WorkCode\Github\_reference\Zou_lab_control_v1` 以及其他副本都不是 v1 oracle，禁止据其设计、实现或验收 v2。
 > 设计基线：`0243aa6`。完成状态与实测证据以 `IMPLEMENTATION_PLAN.md` Checkpoint 为准；package/full-tree 测试不能替代真实实验入口和可见 GUI 的验收。
 > 权威顺序：用户当前裁决 > 简单且可维护的边界 > v2 当前实现 > v1 参考。v1 不是规格。
 > 根目录 `HANDOFF.md` 已在最初接手阶段完整读取，其有效要求和现状已吸收到本文与实施计划。Goal 启动后它只是历史输入，不是续跑权威，也不需要在每次上下文恢复时重读。
@@ -54,9 +55,9 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 
 ### 3.0 正式实验入口与 Device Manager
 
-1. 根目录 `bin\experiment.bat` 就是正式实验入口，等价于 v1 的 `task_console.bat`：它只启动一个统一的 TaskConsole experiment flow，不能串起多个 Python 进程，也不再增加第二个根入口。
-2. 同一 Qt 进程先显示 v1 操作流程的 Device Manager：Config、状态与文档名、Installation/Configured devices、Available/Loaded，以及 New、Load、Save、Save as、Cancel、Init devices（活动后为 Shutdown/Shutdown for restart）。底层继续使用 v2 的 `InstallationConfig`/`apparatus.json` 和 named devices，不复制 v1 domain/storage。
-3. `Init devices` 从当前 draft 创建并持有唯一 `ExperimentSession`；成功后隐藏 Device Manager，并在同一进程中同时显示 TaskConsole 和 Pulse UI。两者接收同一个 session、virtual world 和 sequencer 实例。
+1. 根目录 `bin\experiment.bat` 就是正式实验入口，等价于权威 v1 树中的 `task_console.bat`：它只启动一个统一的 TaskConsole experiment flow，不能串起多个 Python 进程，也不再增加第二个根入口。
+2. 同一 Qt 进程先显示权威 v1 的 Device Manager 操作面：`Config` tab 与 `Devices` header；左侧按 device domain 动态生成 Camera/Rf/Sequencer 等分组，每组包含具体 device cards 与 `Add device`；右侧是 `Discovered hardware`/`Scan hardware` 和 `Loaded session`；底部是 `New…`、`Load…`、`Save`、`Save as…`、`Apply`。不得显示已被 v1 淘汰的 `Installation`、`Backend`、`Configured devices`、`Available`、`Cancel`、`Init devices` 结构，也不得把 v2 内部 `InstallationConfig` 名称泄漏成用户界面。
+3. 首次 `Apply` 从当前 draft 创建并持有唯一 `ExperimentSession`；成功后隐藏 Device Manager，并在同一进程中同时显示 TaskConsole 和 Pulse UI。两者接收同一个 session、virtual world 和 sequencer 实例。后续 Apply/restart 的精确行为以该权威 v1 树和用户裁决为准。
 4. 实验入口中的 Pulse UI 借用 session 的 sequencer authority；它不自行 dial 第二个设备，也不拥有或关闭底层 sequencer。独立 `pulse_editor.bat` 只作为单独的脉冲编辑/连接测试工具，不是正式 Experiment 入口；它自行连接的 sequencer 也不代表 TaskConsole session。
 5. 主 TaskConsole 关闭时按 Pulse controller -> TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的顺序有界清理；任何 ownership 尚未释放都不得伪装成成功退出。
 

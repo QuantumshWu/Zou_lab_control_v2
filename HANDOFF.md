@@ -1,6 +1,7 @@
 # Zou_lab_control v2 — 历史交接快照
 
 > **HISTORICAL / INACTIVE。** 本文件原来记录 `99870de` 附近的接手现状；那些缺陷清单、状态和下一步不再是实施指令。
+> 唯一权威 v1 参考树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；`ZLC_main`、`_reference\Zou_lab_control_v1` 及其他副本均不得作为 v1 oracle。
 > 当前且唯一的目标权威是：
 >
 > 1. `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
