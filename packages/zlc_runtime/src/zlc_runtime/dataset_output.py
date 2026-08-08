@@ -47,12 +47,15 @@ class FinalDatasetOutput:
 
     declaration: DatasetOutputDeclaration
     snapshot: OwnedSnapshot
+    run_record: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.declaration, DatasetOutputDeclaration):
             raise TypeError("declaration must be DatasetOutputDeclaration")
         if not isinstance(self.snapshot, OwnedSnapshot):
             raise TypeError("snapshot must be OwnedSnapshot")
+        if self.run_record is not None and not isinstance(self.run_record, Mapping):
+            raise TypeError("run_record must be a mapping or None")
 
     @property
     def name(self) -> str:
@@ -70,6 +73,7 @@ class LiveDatasetOutput:
     declaration: DatasetOutputDeclaration
     snapshot: OwnedSnapshot
     coverage: DatasetCoverage | MonitorCoverage
+    run_record: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.declaration, DatasetOutputDeclaration):
@@ -78,6 +82,8 @@ class LiveDatasetOutput:
             raise TypeError("snapshot must be OwnedSnapshot")
         if not isinstance(self.coverage, (DatasetCoverage, MonitorCoverage)):
             raise TypeError("coverage must be DatasetCoverage or MonitorCoverage")
+        if self.run_record is not None and not isinstance(self.run_record, Mapping):
+            raise TypeError("run_record must be a mapping or None")
         total = (
             self.snapshot.block.schema.repeat_axis.size
             * self.snapshot.block.schema.point_table.row_count

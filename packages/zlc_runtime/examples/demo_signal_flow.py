@@ -71,7 +71,7 @@ def _live(declaration: DatasetOutputDeclaration, revision: int) -> LiveDatasetOu
     return LiveDatasetOutput(
         declaration,
         _snapshot(declaration.name, revision),
-        MonitorCoverage(1, 1, 0, False),
+        MonitorCoverage(1, 1),
     )
 
 

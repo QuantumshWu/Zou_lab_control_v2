@@ -36,7 +36,7 @@ from zlc_runtime.streams import EventRef, StreamId
 from zlc_runtime.dataset_output import LiveDatasetOutput, DatasetOutputDeclaration
 
 
-def _output(name: str, revision: int, *, missed: int = 0) -> LiveDatasetOutput:
+def _output(name: str, revision: int) -> LiveDatasetOutput:
     repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
     point = AxisSpec(AxisId(f"{name}.point"), "point", SCAN_POINT, 1, (0,))
     schema = DatasetSchema(
@@ -70,7 +70,7 @@ def _output(name: str, revision: int, *, missed: int = 0) -> LiveDatasetOutput:
     return LiveDatasetOutput(
         DatasetOutputDeclaration(name, f"test.{name}"),
         snapshot,
-        MonitorCoverage(1, 1, missed, False),
+        MonitorCoverage(1, 1),
     )
 
 
@@ -176,9 +176,9 @@ def _root_refs(
     return roots
 
 
-def test_plane_front_keeps_weak_parent_payload_alive_and_tracks_missed_coverage() -> None:
+def test_plane_front_keeps_weak_parent_payload_alive() -> None:
     plane = SignalDataPlane()
-    output = _output("frame", 1, missed=4)
+    output = _output("frame", 1)
     state = {"frame": output}
     node = SimpleNamespace(
         instance_id="camera",
@@ -198,7 +198,6 @@ def test_plane_front_keeps_weak_parent_payload_alive_and_tracks_missed_coverage(
         first_front = plane.freeze()
         root = first_front.publication("camera/frame")
         assert root is not None
-        assert first_front.value("camera/frame").behind == 4
 
         roi_generation = plane.bind_continuous_derived(
             "roi",

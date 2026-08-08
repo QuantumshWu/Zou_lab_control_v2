@@ -147,9 +147,7 @@ def _source_setup(
             declaration,
             _snapshot("frame", 1, schema, values),
             MonitorCoverage(schema.repeat_axis.size * schema.point_table.row_count,
-                            schema.repeat_axis.size * schema.point_table.row_count,
-                            0,
-                            False),
+                            schema.repeat_axis.size * schema.point_table.row_count),
         )
     }
     source = _Source(declaration)
@@ -305,7 +303,7 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
             _snapshot("frame", 2, schema, values + 100.0),
-            MonitorCoverage(1, 1, 0, False),
+            MonitorCoverage(1, 1),
         )
         plane.mark_changed(source, slot)
         front = _wait_for_signal(plane, bridge, "@logic/image/roi_value", 2)
@@ -674,7 +672,7 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
             _snapshot("frame", 2, schema, values + 1.0),
-            MonitorCoverage(1, 5, 0, False),
+            MonitorCoverage(1, 5),
         )
         plane.mark_changed(source, slot)
         plane.freeze()
@@ -747,7 +745,7 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
             _snapshot("frame", 2, schema, values + 1.0),
-            MonitorCoverage(1, 5, 0, False),
+            MonitorCoverage(1, 5),
         )
         plane.mark_changed(source, slot)
         plane.freeze()

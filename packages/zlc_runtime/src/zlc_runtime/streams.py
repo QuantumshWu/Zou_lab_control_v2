@@ -984,15 +984,13 @@ class AcquisitionCursor(Generic[PayloadT]):
 
 @dataclass(frozen=True, slots=True)
 class MonitorUpdate(Generic[PayloadT]):
-    """One atomic monitor delivery and any explicit ``latest()`` skips."""
+    """One atomic monitor delivery."""
 
     envelope: Envelope[PayloadT]
-    missed: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.envelope, Envelope):
             raise TypeError("envelope must be Envelope")
-        object.__setattr__(self, "missed", _nonnegative_int(self.missed, "missed"))
 
 
 class MonitorTap(Generic[PayloadT]):
@@ -1074,13 +1072,11 @@ class MonitorTap(Generic[PayloadT]):
                     self._condition.wait()
             if self._consumer_owner is not owner:
                 raise PermissionError("monitor tap belongs to another consumer")
-            skipped = 0
             if latest:
-                skipped = len(self._queue) - 1
-                for _ in range(skipped):
+                for _ in range(len(self._queue) - 1):
                     self._queue.popleft()
             envelope = self._queue.popleft()
-            return MonitorUpdate(envelope, skipped)
+            return MonitorUpdate(envelope)
 
     def next(self, timeout: float | None = None) -> MonitorUpdate[PayloadT]:
         return self._take(None, latest=False, timeout=timeout)

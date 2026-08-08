@@ -88,7 +88,7 @@ def _live_output(
     return LiveDatasetOutput(
         DatasetOutputDeclaration(name, f"test.{name}"),
         snapshot,
-        MonitorCoverage(1, 1, 0, False),
+        MonitorCoverage(1, 1),
     )
 
 

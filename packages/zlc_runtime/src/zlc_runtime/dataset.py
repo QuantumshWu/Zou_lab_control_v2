@@ -502,28 +502,17 @@ class DatasetCoverage:
 
 @dataclass(frozen=True)
 class MonitorCoverage:
-    """Visible-window completeness plus lifetime monitor loss telemetry."""
+    """Completeness of the monitor's currently visible window."""
 
     written_cells: int
     total_cells: int
-    missed_events: int
-    current_gap: bool
 
     def __post_init__(self) -> None:
         _validate_cell_counts(self)
-        if (
-            isinstance(self.missed_events, bool)
-            or not isinstance(self.missed_events, Integral)
-            or self.missed_events < 0
-        ):
-            raise ValueError("missed_events must be a non-negative integer")
-        object.__setattr__(self, "missed_events", int(self.missed_events))
-        if not isinstance(self.current_gap, bool):
-            raise TypeError("current_gap must be bool")
 
     @property
     def complete(self) -> bool:
-        return self.written_cells == self.total_cells and not self.current_gap
+        return self.written_cells == self.total_cells
 
 
 def _validate_cell_counts(coverage: DatasetCoverage | MonitorCoverage) -> None:
@@ -1422,8 +1411,6 @@ class MonitorDataset(Generic[PayloadT]):
             self._event_refs: list[EventRef | None] = [None] * total_cells
             self._revision = 0
             self._last_sequence: int | None = None
-            self._missed_events = 0
-            self._current_gap = False
             self._head: EventRef | None = None
             self._latest_replacement: _LatestCellReplacement[PayloadT] | None = None
             self._aborted = False
@@ -1453,20 +1440,15 @@ class MonitorDataset(Generic[PayloadT]):
     def ingest_latest(
         self,
         *,
-        account_skipped_events: bool = True,
         expected_event_ref: EventRef | None = None,
     ) -> DatasetRevisionRef:
-        """Ingest newest, optionally admitting an authored sparse source view.
+        """Ingest the newest retained monitor event.
 
         ``expected_event_ref`` binds the materialized head to the producer's
         already accepted exact envelope; it is checked before and after the
-        atomic write.  ``account_skipped_events=False`` is legal only for a
-        single-cell latest view whose omitted events were explicitly selected
-        out by that same producer.
+        atomic write.
         """
 
-        if not isinstance(account_skipped_events, bool):
-            raise TypeError("account_skipped_events must be bool")
         if expected_event_ref is not None and not isinstance(
             expected_event_ref,
             EventRef,
@@ -1478,10 +1460,6 @@ class MonitorDataset(Generic[PayloadT]):
                     raise DatasetError(
                         "ordinary monitor ingest cannot consume a staged latest-cell replacement"
                     )
-                if not account_skipped_events and self._cycle_schedule is not None:
-                    raise DatasetError(
-                        "intentional source selection requires a latest-cell monitor"
-                    )
             update = self._monitor._latest_for(self)
             if (
                 expected_event_ref is not None
@@ -1490,10 +1468,7 @@ class MonitorDataset(Generic[PayloadT]):
                 raise DatasetError(
                     "monitor tap delivered another event than the selected exact envelope"
                 )
-            revision = self._ingest(
-                update,
-                account_skipped_events=account_skipped_events,
-            )
+            revision = self._ingest(update)
             if expected_event_ref is not None:
                 with self._lock:
                     if self._head != expected_event_ref:
@@ -1616,10 +1591,6 @@ class MonitorDataset(Generic[PayloadT]):
                         raise DatasetError(
                             "latest-cell replacement sequence differs from its staged watermark"
                         )
-                    if update.missed != 0:
-                        raise DatasetError(
-                            "latest-cell replacement requires ordered monitor delivery"
-                        )
                     if self._revision != replacement.base_revision:
                         raise DatasetError(
                             "latest-cell replacement base revision changed before commit"
@@ -1631,8 +1602,6 @@ class MonitorDataset(Generic[PayloadT]):
                     self._validity = replacement.validity
                     self._cell_metadata = replacement.cell_metadata
                     self._event_refs = replacement.event_refs
-                    self._missed_events = 0
-                    self._current_gap = False
                     self._last_sequence = envelope.sequence
                     self._head = envelope.ref
                     self._revision += 1
@@ -1646,8 +1615,6 @@ class MonitorDataset(Generic[PayloadT]):
     def _ingest(
         self,
         update: MonitorUpdate[PayloadT],
-        *,
-        account_skipped_events: bool = True,
     ) -> DatasetRevisionRef:
         envelope = update.envelope
         value, metadata = _project_payload(self.edge, envelope.payload)
@@ -1685,13 +1652,6 @@ class MonitorDataset(Generic[PayloadT]):
                 values, written, validity = latest_state
                 cell_metadata = [metadata]
                 event_refs = [envelope.ref]
-                missed_now = (
-                    max(update.missed, sequence_gap)
-                    if account_skipped_events
-                    else 0
-                )
-                missed_events = self._missed_events + missed_now
-                current_gap = missed_now > 0
             else:
                 offset = envelope.sequence % len(self._cycle_schedule)
                 expected_address = self._cycle_schedule.cell_at(offset)
@@ -1701,7 +1661,7 @@ class MonitorDataset(Generic[PayloadT]):
                         f"frozen key {expected_address!r} at sequence "
                         f"{envelope.sequence}"
                     )
-                if offset == 0 or sequence_gap > 0 or update.missed > 0:
+                if offset == 0 or sequence_gap > 0:
                     self._clear_locked()
                 cell = (
                     expected_address.repeat_index,
@@ -1712,10 +1672,6 @@ class MonitorDataset(Generic[PayloadT]):
                 validity = self._validity
                 cell_metadata = self._cell_metadata
                 event_refs = self._event_refs
-                missed_events = self._missed_events + max(
-                    update.missed,
-                    sequence_gap,
-                )
                 _write_cell(
                     cell,
                     value,
@@ -1733,8 +1689,6 @@ class MonitorDataset(Generic[PayloadT]):
                 self._validity = validity
                 self._cell_metadata = cell_metadata
                 self._event_refs = event_refs
-                self._current_gap = current_gap
-            self._missed_events = missed_events
             self._last_sequence = envelope.sequence
             self._head = envelope.ref
             self._revision += 1
@@ -1804,10 +1758,6 @@ class MonitorDataset(Generic[PayloadT]):
         return MonitorCoverage(
             written_cells=int(np.count_nonzero(written)),
             total_cells=int(written.size),
-            missed_events=self._missed_events,
-            current_gap=(
-                self._current_gap if self._cycle_schedule is None else False
-            ),
         )
 
     def _ensure_writable_locked(self) -> None:

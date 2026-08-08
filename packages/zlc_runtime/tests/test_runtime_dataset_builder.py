@@ -47,11 +47,13 @@ from zlc_runtime.streams import (
 )
 
 
-def test_formal_and_monitor_coverage_have_distinct_loss_semantics():
+def test_formal_and_monitor_coverage_report_current_window_completeness():
     assert DatasetCoverage(1, 1).complete
     assert not hasattr(DatasetCoverage(1, 1), "missed_events")
-    assert MonitorCoverage(1, 1, 1, current_gap=False).complete
-    assert not MonitorCoverage(1, 1, 1, current_gap=True).complete
+    coverage = MonitorCoverage(1, 1)
+    assert coverage.complete
+    assert not hasattr(coverage, "missed_events")
+    assert not hasattr(coverage, "current_gap")
 
 
 def axis(name: str, role, size: int) -> AxisSpec:
@@ -601,7 +603,6 @@ def test_keyed_monitor_gap_at_nonzero_offset_clears_every_stale_cell():
     assert current.event_refs[1] == current.head
     assert current.event_refs[2] is None
     assert current.cell_metadata == (None, None, None)
-    assert current.coverage.missed_events == 1
     assert not current.coverage.complete
     builder.close()
 
@@ -633,11 +634,10 @@ def test_latest_cell_replaces_the_front_without_exposing_source_join_keys():
     assert snapshot.head == snapshot.event_refs[0]
     assert snapshot.ref.revision.value == 4
     assert snapshot.coverage.complete
-    assert snapshot.coverage.missed_events == 0
     latest.close()
 
 
-def test_latest_cell_accounts_for_a_gap_and_clears_current_gap_on_contiguous_ingest():
+def test_latest_cell_selects_current_value_after_a_sequence_gap():
     source_schema = dataset_schema(points=2)
     latest_schema = monitor_latest_schema(source_schema)
     stream, producer, payload_contract = source(source_schema)
@@ -654,9 +654,7 @@ def test_latest_cell_accounts_for_a_gap_and_clears_current_gap_on_contiguous_ing
     emit(producer, value(3), DatasetCellAddress(0, 0), 2)
     latest.ingest_latest()
     with_gap = latest.materialize()
-    assert with_gap.coverage.missed_events == 1
-    assert with_gap.coverage.current_gap
-    assert not with_gap.coverage.complete
+    assert with_gap.coverage.complete
     assert with_gap.block.values[0, 0, 0, 0] == 3
 
     emit(producer, value(4), DatasetCellAddress(0, 1), 3)
@@ -664,8 +662,6 @@ def test_latest_cell_accounts_for_a_gap_and_clears_current_gap_on_contiguous_ing
     recovered = latest.materialize()
     assert recovered.block.values[0, 0, 0, 0] == 4
     assert recovered.coverage.complete
-    assert not recovered.coverage.current_gap
-    assert recovered.coverage.missed_events == 1
     latest.close()
 
 

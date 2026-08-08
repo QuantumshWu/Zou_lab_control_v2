@@ -762,7 +762,11 @@ class SelectionBridge:
             self._plane.publish_final(
                 owner,
                 {
-                    name: FinalDatasetOutput(output.declaration, output.snapshot)
+                    name: FinalDatasetOutput(
+                        output.declaration,
+                        output.snapshot,
+                        output.run_record,
+                    )
                     for name, output in outputs.items()
                 },
             )
@@ -1306,7 +1310,7 @@ class SelectionBridge:
             output["roi_frame"] = LiveDatasetOutput(
                 declaration,
                 roi_frame,
-                MonitorCoverage(total, total, 0, False),
+                MonitorCoverage(total, total),
             )
         finite = valid_values & np.isfinite(values)
         scalar_value = float(np.mean(values[finite])) if np.any(finite) else 0.0
@@ -1324,7 +1328,7 @@ class SelectionBridge:
         output["roi_value"] = LiveDatasetOutput(
             DatasetOutputDeclaration("roi_value", "zlc.selection.roi_value.v1"),
             scalar,
-            MonitorCoverage(1, 1, 0, False),
+            MonitorCoverage(1, 1),
         )
         return output
 
@@ -1380,7 +1384,7 @@ class SelectionBridge:
             source.ref.schema_fingerprint,
             DatasetRevision(event.batch_revision),
         )
-        coverage = MonitorCoverage(sample_count, sample_count, 0, False)
+        coverage = MonitorCoverage(sample_count, sample_count)
 
         for parameter in event.parameter_names:
             unit = event.parameter_units[parameter] or None

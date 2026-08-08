@@ -148,7 +148,7 @@ def test_unreserved_cursor_gets_typed_gap_instead_of_latest_fallback():
     assert caught.value.earliest_retained == 5
 
 
-def test_slow_exact_consumer_retains_all_events_and_display_latest_reports_skips():
+def test_slow_exact_consumer_retains_all_events_and_monitor_latest_takes_current():
     source, producer = stream()
     reservation = source.reserve(
         total_events=4,
@@ -163,7 +163,6 @@ def test_slow_exact_consumer_retains_all_events_and_display_latest_reports_skips
     assert source.retained_events == 4
     update = monitor.latest()
     assert update.envelope is emitted[-1]
-    assert update.missed == 3
     for expected in emitted:
         delivery = cursor.next()
         assert delivery.envelope is expected
@@ -196,10 +195,8 @@ def test_monitor_next_never_drops_and_display_latest_does_not_change_exact_order
     assert exact_sequences == list(range(total))
     ordered_updates = [ordered_monitor.next() for _ in range(total)]
     assert [update.envelope.sequence for update in ordered_updates] == list(range(total))
-    assert all(update.missed == 0 for update in ordered_updates)
     latest = latest_monitor.latest()
     assert latest.envelope.sequence == total - 1
-    assert latest.missed == total - 1
     eos = producer.finish()
     source._complete_consumer(reservation, eos, owner, lambda: None)
     reservation.release()
