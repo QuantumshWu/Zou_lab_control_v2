@@ -198,7 +198,11 @@ class PlotPanelPort:
         self._serial += 1
         serial = self._serial
         self._pending[serial] = _Prepared(publication, plot_input)
-        future = self._host.update_data(plot_input)
+        try:
+            future = self._host.update_data(plot_input)
+        except BaseException:
+            self._pending.pop(serial, None)
+            raise
         return SurfaceUpdate(
             panel_id=self._panel_id,
             serial=serial,

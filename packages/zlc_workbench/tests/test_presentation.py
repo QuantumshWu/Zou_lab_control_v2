@@ -210,6 +210,16 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     assert len(calls) == 2
     port.finish_unpresented(retry)
 
+    host.update_data = lambda _snapshot: (_ for _ in ()).throw(
+        RuntimeError("synchronous render rejection")
+    )
+    with pytest.raises(RuntimeError, match="synchronous render rejection"):
+        port.prepare(value, publication)
+    host.update_data = lambda snapshot: calls.append(snapshot) or Future()
+    recovered = port.prepare(value, publication)
+    assert recovered is not None
+    port.finish_unpresented(recovered)
+
 
 def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
     live_bench,
