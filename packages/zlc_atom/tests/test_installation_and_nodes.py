@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,7 @@ from zlc_data import OwnedSnapshot, REPEAT, SITE
 
 from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_types
 from zlc_atom.nodes import discover_logic_nodes
-from zlc_atom.nodes.calibration import CalibrationTask
+from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
 from tests.fakes import FakePlane
@@ -17,14 +18,24 @@ from tests.fakes import FakePlane
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _short_stamps(result: object) -> dict[str, object]:
-    """The run the short frames came from, which a derived signal inherits."""
-
-    from zlc_atom.nodes.occupancy.processor import inherited_stamps
-
-    publication = result.short.publication
-    name = next(iter(publication.signals))
-    return inherited_stamps(publication.signals[name].snapshot)
+def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
+    return CalibrationRequest(
+        camera_key="camera",
+        sequencer_key="sequencer",
+        pulse_name="calibration",
+        repeats=repeats,
+        reference_exposure_seconds=0.02,
+        readout_exposure_seconds=0.005,
+        roi_xywh=None,
+        integration_method="box",
+        threshold_method="empirical",
+        integration_half_width=1,
+        reducer="mean",
+        detection_spot_sigma=1.0,
+        detection_min_distance=3,
+        detection_sigma=6.0,
+        timeout_seconds=2.0,
+    )
 
 
 def test_device_discovery_is_the_leaf_manifest() -> None:
@@ -56,50 +67,105 @@ def test_logic_discovery_is_derived_from_three_leaf_modules() -> None:
     assert tuple(item.api_name for item in descriptors) == ("calibration", "camera_measurement", "occupancy")
 
 
-def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front() -> None:
+def test_device_requirements_name_build_arguments_and_exclusive_access() -> None:
+    from zlc_atom.nodes._framework import DeviceAccess
+
+    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    camera = descriptors["camera_measurement"].device_requirements
+    calibration = descriptors["calibration"].device_requirements
+
+    assert [
+        (value.capability_token, value.argument_name, value.access)
+        for value in camera
+    ] == [("camera.adapter", "camera", DeviceAccess.EXCLUSIVE)]
+    assert [
+        (value.capability_token, value.argument_name, value.access)
+        for value in calibration
+    ] == [
+        ("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
+        ("sequencer.streamer", "sequencer", DeviceAccess.EXCLUSIVE),
+    ]
+    assert all(not hasattr(value, "device_key") for value in (*camera, *calibration))
+
+
+def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
+    tmp_path: Path,
+) -> None:
     installation = create_installation("virtual")
     plane = FakePlane()
     try:
         result = CalibrationTask(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
-            signal_plane=plane,
+            request=_calibration_request(),
             pulse_search_paths=(REPO_ROOT / "pulses",),
-            expected_centers_xy=installation.world.geometry.site_centers_xy,
+            artifact_directory=tmp_path,
         ).run()
+        assert plane.freeze().signals == {}
+        second = CalibrationTask(
+            camera=installation.device("camera"),
+            sequencer=installation.device("sequencer"),
+            request=_calibration_request(),
+            pulse_search_paths=(REPO_ROOT / "pulses",),
+            artifact_directory=tmp_path,
+        ).run()
+        assert result.artifact_path.name == "calibration.json"
+        assert second.artifact_path.name == "calibration-2.json"
+        assert result.artifact_path != second.artifact_path
+        artifact = json.loads(result.artifact_path.read_text(encoding="utf-8"))
+        assert set(artifact) == {
+            "site_map",
+            "readout_model",
+            "frame_contract",
+            "report",
+        }
+        assert result.calibration.n_sites == len(
+            installation.world.geometry.site_centers_xy
+        )
+        assert result.calibration.frame_contract.image_shape == (32, 48)
+        assert result.calibration.frame_contract.sensor_shape == (32, 48)
+        assert result.calibration.frame_contract.roi_xywh == (0, 0, 48, 32)
+        assert result.calibration.frame_contract.exposure_seconds == 0.005
+        assert result.calibration.frame_contract.camera_id == "camera"
+        json.dumps(result.run_record)
         occupancy_node = OccupancyProcessor(
             result.calibration,
             signal_plane=plane,
         )
         occupancy = occupancy_node.process(
-            result.short.frames, **_short_stamps(result)
+            result.short,
+            generation="calibration-task",
+            revision=1,
         )
         np.testing.assert_array_equal(occupancy.rate, np.mean(occupancy.occupied, axis=-1))
         assert occupancy.counts.shape == (30, 6)
         assert occupancy.rate.shape == (30,)
         np.testing.assert_array_equal(occupancy.artifacts["counts"].block.values[:, :, 0], occupancy.counts)
         assert len(result.capture.frames) == 90
-        assert len(result.reference.frames) == 60
-        assert len(result.short.frames) == 30
-        assert result.publication is not None
+        assert sum(len(group) for group in result.reference) == 60
+        assert len(result.short) == 30
     finally:
         plane.close()
         installation.close()
 
 
-def test_virtual_installation_auto_calibration_path_matches_usage_notebook() -> None:
+def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
+    tmp_path: Path,
+) -> None:
     installation = create_installation("virtual")
     plane = FakePlane()
     try:
         result = CalibrationTask(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
-            signal_plane=plane,
+            request=_calibration_request(),
             pulse_search_paths=(REPO_ROOT / "pulses",),
-            expected_centers_xy=installation.world.geometry.site_centers_xy,
+            artifact_directory=tmp_path,
         ).run()
         occupancy = OccupancyProcessor(result.calibration).process(
-            result.short.frames, **_short_stamps(result)
+            result.short,
+            generation="calibration-task",
+            revision=1,
         )
         assert occupancy.counts.shape == (30, 6)
         assert occupancy.rate.shape == (30,)
@@ -128,13 +194,8 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
 
     import typing
 
-    from zlc_atom.nodes._framework.descriptor import NodeKind, runtime_kind
+    from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
 
-    drivers = {
-        runtime_kind(NodeKind.TASK): "execute",
-        runtime_kind(NodeKind.MEASUREMENT): "execute",
-        runtime_kind(NodeKind.PROCESSOR): "evaluate",
-    }
     undriveable = []
     checked = []
     for descriptor in discover_logic_nodes():
@@ -145,7 +206,10 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
         assert isinstance(produced, type), (
             f"{descriptor.api_name}'s build must annotate the node class it returns"
         )
-        wanted = drivers[runtime_kind(descriptor.kind)]
+        consumes_dataset = any(
+            isinstance(spec, DatasetInputSpec) for spec in descriptor.input_specs
+        )
+        wanted = "evaluate" if consumes_dataset else "execute"
         checked.append(descriptor.api_name)
         if not callable(getattr(produced, wanted, None)):
             undriveable.append(f"{descriptor.api_name} has no {wanted}()")

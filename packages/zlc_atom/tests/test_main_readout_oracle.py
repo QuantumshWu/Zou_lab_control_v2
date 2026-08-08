@@ -9,13 +9,12 @@ import numpy as np
 from zlc_atom.nodes.calibration.bimodal import fit_bimodal, normal_cdf, per_site_fidelity
 from zlc_atom.nodes.calibration.calibration import (
     FrameContract,
-    GridOrder,
     calibrate,
     classify_threshold,
+    detect_sites,
     extract_box_signals,
     extract_psf_signals,
     extract_psf_window,
-    find_site_centers,
 )
 
 
@@ -175,21 +174,19 @@ def test_main_oracle_data_driven_psf_fit_and_uniform_sibling() -> None:
     oracle = _load_oracle()
     kwargs = {
         "frame_contract": FrameContract((34, 40), exposure_seconds=0.005),
-        "grid_shape": (2, 3),
-        "roi_radius": 3,
+        "integration_half_width": 3,
         "psf_padding": 3,
-        "expected_centers_xy": oracle["centers_row_major"],
     }
     per_site = calibrate(oracle["input_reference_frames"], oracle["input_short_frames"], method="psf", **kwargs)
-    _assert_close(per_site.calibration.psf_weights, oracle["psf_kernels"])
-    np.testing.assert_array_equal(per_site.calibration.psf_boxes, oracle["psf_boxes_xywh"])
+    _assert_close(per_site.calibration.readout_model.psf_weights, oracle["psf_kernels"])
+    np.testing.assert_array_equal(per_site.calibration.readout_model.psf_boxes, oracle["psf_boxes_xywh"])
     _assert_close(per_site.report["psf_fit_centers_xy"], oracle["psf_fit_centers_xy"])
     _assert_close(per_site.report["psf_fit_sigma_xy"], oracle["psf_fit_sigma_xy"])
     np.testing.assert_array_equal(per_site.report["psf_fit_ok"], oracle["psf_fit_ok"])
     _assert_close(per_site.report["uniform_kernel"], oracle["uniform_kernel"])
 
     uniform = calibrate(oracle["input_reference_frames"], oracle["input_short_frames"], method="uniform_psf", **kwargs)
-    _assert_close(uniform.calibration.psf_weights[0], oracle["uniform_kernel"])
+    _assert_close(uniform.calibration.readout_model.psf_weights[0], oracle["uniform_kernel"])
 
 
 def test_main_oracle_bimodal_components_and_threshold() -> None:
@@ -208,16 +205,12 @@ def test_main_oracle_bimodal_components_and_threshold() -> None:
     np.testing.assert_array_equal([fit.ok for fit in fits], oracle["reference_fit_ok"])
 
 
-def test_main_oracle_detector_centers_and_orderings() -> None:
+def test_main_oracle_detector_discovers_sites_without_grid_input() -> None:
     oracle = _load_oracle()
-    for ordering, field in (
-        (GridOrder.ROW_MAJOR, "centers_row_major"),
-        (GridOrder.SERPENTINE, "centers_serpentine"),
-        (GridOrder.COLUMN_MAJOR, "centers_column_major"),
-        (GridOrder.COLUMN_SERPENTINE, "centers_column_serpentine"),
-    ):
-        observed = find_site_centers(oracle["reference_average"], (2, 3), ordering=ordering)
-        _assert_close(observed, oracle[field])
+    observed = detect_sites(oracle["reference_average"])
+    assert observed.n_sites == 6
+    assert observed.site_ids == tuple(f"site_{index:04d}" for index in range(6))
+    _assert_close(observed.centers_xy, oracle["centers_row_major"])
 
 
 def test_main_oracle_classification() -> None:
@@ -232,20 +225,20 @@ def test_main_oracle_grouped_calibration_end_to_end() -> None:
         oracle["input_reference_frames"],
         oracle["input_short_frames"],
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
-        grid_shape=(2, 3),
         method="box",
-        roi_radius=1,
+        integration_half_width=1,
         reducer="mean",
-        expected_centers_xy=oracle["centers_row_major"],
     )
     report = result.report
+    assert result.calibration.readout_model.threshold_method == "empirical"
+    assert report["threshold_method"] == "empirical"
     _assert_close(report["reference_average"], oracle["reference_average"])
     _assert_close(report["reference_signals"], oracle["reference_box_signals"])
     np.testing.assert_array_equal(report["labels_occupied"], oracle["labels_occupied"])
     np.testing.assert_array_equal(report["labels_dark"], oracle["labels_dark"])
     np.testing.assert_array_equal(report["labels_valid"], oracle["labels_valid"])
     _assert_close(report["short_signals"], oracle["short_signals_box"])
-    _assert_close(result.calibration.thresholds, oracle["thresholds_box"])
+    _assert_close(result.calibration.readout_model.thresholds, oracle["thresholds_box"])
     np.testing.assert_array_equal(report["predictions"], oracle["pred_box"])
     assert int(np.count_nonzero(report["predictions"] != oracle["input_latent_occupancy"])) == 29
     _assert_close(report["site_fidelity"], oracle["site_fidelity_box"])
@@ -253,7 +246,7 @@ def test_main_oracle_grouped_calibration_end_to_end() -> None:
         per_site_fidelity(
             report["short_signals"],
             report["labels_occupied"],
-            result.calibration.thresholds,
+            result.calibration.readout_model.thresholds,
             test_mask=report["split_test"],
             valid_mask=report["labels_valid"],
         ).balanced,
@@ -267,6 +260,23 @@ def test_main_oracle_grouped_calibration_end_to_end() -> None:
     np.testing.assert_array_equal(report["site_n_test"], oracle["site_n_test_box"])
     np.testing.assert_array_equal(report["site_n_train_dark"], oracle["site_n_train_dark_box"])
     np.testing.assert_array_equal(report["site_n_train_bright"], oracle["site_n_train_bright_box"])
+
+    gaussian = calibrate(
+        oracle["input_reference_frames"],
+        oracle["input_short_frames"],
+        frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
+        method="box",
+        threshold_method="gaussian",
+        integration_half_width=1,
+        reducer="mean",
+    )
+    assert gaussian.calibration.readout_model.threshold_method == "gaussian"
+    assert gaussian.report["threshold_method"] == "gaussian"
+    np.testing.assert_allclose(
+        gaussian.calibration.readout_model.thresholds,
+        gaussian.report["gaussian_thresholds"],
+        equal_nan=True,
+    )
 
 
 def test_a_site_whose_fit_says_bright_is_below_is_refused() -> None:

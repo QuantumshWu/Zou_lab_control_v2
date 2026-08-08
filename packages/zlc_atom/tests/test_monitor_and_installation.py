@@ -9,7 +9,11 @@ import pytest
 from tests.fakes import FakePlane
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.install import DeviceSpec, DeviceTypeDescriptor, InstalledLeaf, create_installation
-from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, MonitorCapture
+from zlc_atom.nodes.camera_measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+    MonitorCapture,
+)
 
 
 def _program_opening(windows: int) -> SimpleNamespace:
@@ -29,8 +33,15 @@ def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame(
     try:
         measurement = CameraMeasurementNode(
             camera=installation.device("camera"),
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=(2, 3, 20, 16),
+                repeat=0,
+                frames_per_cycle=1,
+                timeout_seconds=1.0,
+            ),
             signal_plane=plane,
-            timeout=1.0,
         )
         monitor = measurement.monitor(buffer_frames=1)
         assert isinstance(monitor, MonitorCapture)
@@ -40,7 +51,11 @@ def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame(
         sequencer.wait_done(1.0)
         record = monitor.poll()
         assert record is not None
+        assert record.image.shape == (16, 20)
         assert record.image.dtype.str == "<u2"
+        assert measurement.request.roi_xywh == (2, 3, 20, 16)
+        assert measurement.actual_working_point is not None
+        assert measurement.actual_working_point.roi_origin_yx == (3, 2)
         assert any(call[0] == "reserve" for call in plane.calls)
         assert any(call[0] == "mark_changed" for call in plane.calls)
         front = plane.freeze()
@@ -51,6 +66,40 @@ def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame(
         assert signal_key in front.signals
         terminal = monitor.close()
         assert terminal.source_stopped and terminal.joined
+        assert monitor.slot.closed
+        assert measurement.camera.capture_state() is False
+        assert plane.latest_publication(signal_key) is None
+    finally:
+        plane.close()
+        installation.close()
+
+
+def test_direct_monitor_disarms_when_live_detach_fails() -> None:
+    installation = create_installation("virtual")
+    plane = FakePlane()
+    try:
+        camera = installation.device("camera")
+        measurement = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=0,
+                frames_per_cycle=1,
+                timeout_seconds=0.05,
+            ),
+            signal_plane=plane,
+        )
+        monitor = measurement.monitor(buffer_frames=1)
+
+        def fail_detach(_node: object) -> None:
+            raise RuntimeError("synthetic detach failure")
+
+        plane.detach_live = fail_detach  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="synthetic detach failure"):
+            monitor.close()
+        assert camera.capture_state() is False
     finally:
         plane.close()
         installation.close()
@@ -62,17 +111,24 @@ def test_finite_measurement_collects_only_external_triggers() -> None:
     try:
         measurement = CameraMeasurementNode(
             camera=installation.device("camera"),
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=3,
+                frames_per_cycle=1,
+                timeout_seconds=1.0,
+            ),
             signal_plane=plane,
-            timeout=1.0,
         )
         result_box: list[object] = []
         worker = Thread(
-            target=lambda: result_box.append(measurement.measure(repeat=3, frames_per_cycle=1)),
+            target=lambda: result_box.append(measurement.measure()),
             daemon=True,
         )
         worker.start()
         deadline = time.monotonic() + 1.0
-        while not installation.device("camera").capture_state()[0] and time.monotonic() < deadline:
+        while not installation.device("camera").capture_state() and time.monotonic() < deadline:
             time.sleep(0.001)
         sequencer = installation.device("sequencer")
         sequencer.load(_program_opening(1))

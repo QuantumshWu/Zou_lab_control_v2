@@ -1,346 +1,564 @@
-"""Finite calibration orchestration over pulse, camera, and readout analysis."""
+"""Artifact-only calibration orchestration over camera and sequencer adapters."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from zlc_data import SITE
-from zlc_runtime import DatasetOutputDeclaration, FinalDatasetOutput
-from zlc_runtime import SignalPublication
+from zlc_durable import unique_path
 
-from zlc_atom.data import snapshot_from_array
-from zlc_atom.devices.camera.contract import CameraAdapter, CameraFrameRecord
-from zlc_atom.nodes._framework.pulse_source import arm_sequencer, ResolvedPulse, resolve_pulse
-from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, MeasurementResult
-from .calibration import CalibrationResult, FrameContract, calibrate
-from zlc_atom.nodes._framework.descriptor import NodeKind, runtime_kind
-from zlc_atom.nodes._framework.generation import ProducerRuns
-from zlc_atom.nodes._framework.provenance import ProvenanceRecorder
+from zlc_atom.devices.camera.contract import (
+    CameraAdapter,
+    CameraCaptureTerminalRecord,
+    CameraFrameRecord,
+    CameraWorkingPoint,
+)
+from zlc_atom.nodes._framework.pulse_source import (
+    ResolvedPulse,
+    arm_sequencer,
+    resolve_pulse,
+)
+
+from .calibration import CalibrationResult, FrameContract, TrapCalibration, calibrate
 
 
-_CALIBRATION_DECLARATION = DatasetOutputDeclaration("calibration", "calibration.readout.v1")
-_REPORT_DECLARATION = DatasetOutputDeclaration("report", "calibration.report.v1")
+_INTEGRATION_METHODS = {"box", "psf", "uniform_psf"}
+_THRESHOLD_METHODS = {"empirical", "gaussian"}
+_REDUCERS = {"mean", "sum", "median", "max"}
+
+
+def _positive_float(value: object, name: str) -> float:
+    result = float(value)
+    if not np.isfinite(result) or result <= 0:
+        raise ValueError(f"{name} must be positive and finite")
+    return result
+
+
+def _non_empty_key(value: object, name: str) -> str:
+    result = str(value).strip()
+    if not result:
+        raise ValueError(f"{name} must be non-empty")
+    return result
+
+
+def _roi(value: object | None) -> tuple[int, int, int, int] | None:
+    if value is None:
+        return None
+    try:
+        result = tuple(int(item) for item in value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise TypeError("roi_xywh must contain four integers or be None") from exc
+    if len(result) != 4:
+        raise ValueError("roi_xywh must contain four integers or be None")
+    x, y, width, height = result
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
+        raise ValueError("roi_xywh must have a non-negative origin and positive size")
+    return x, y, width, height
+
+
+@dataclass(frozen=True)
+class CalibrationRequest:
+    """One frozen calibration protocol and analysis request."""
+
+    camera_key: str
+    sequencer_key: str
+    pulse_name: str
+    repeats: int
+    reference_exposure_seconds: float
+    readout_exposure_seconds: float
+    roi_xywh: tuple[int, int, int, int] | None
+    integration_method: str
+    threshold_method: str
+    integration_half_width: int
+    reducer: str
+    detection_spot_sigma: float
+    detection_min_distance: int
+    detection_sigma: float
+    timeout_seconds: float
+
+    def __post_init__(self) -> None:
+        camera_key = _non_empty_key(self.camera_key, "camera_key")
+        sequencer_key = _non_empty_key(self.sequencer_key, "sequencer_key")
+        pulse_name = _non_empty_key(self.pulse_name, "pulse_name")
+        repeats = int(self.repeats)
+        if repeats <= 0:
+            raise ValueError("repeats must be positive")
+        reference_exposure = _positive_float(
+            self.reference_exposure_seconds,
+            "reference_exposure_seconds",
+        )
+        readout_exposure = _positive_float(
+            self.readout_exposure_seconds,
+            "readout_exposure_seconds",
+        )
+        if readout_exposure > reference_exposure:
+            raise ValueError("readout exposure cannot exceed reference exposure")
+        integration_method = str(self.integration_method).lower()
+        if integration_method not in _INTEGRATION_METHODS:
+            raise ValueError(
+                "integration_method must be 'box', 'psf', or 'uniform_psf'"
+            )
+        threshold_method = str(self.threshold_method).lower()
+        if threshold_method not in _THRESHOLD_METHODS:
+            raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
+        integration_half_width = int(self.integration_half_width)
+        if integration_half_width < 0:
+            raise ValueError("integration_half_width must be non-negative")
+        reducer = str(self.reducer).lower()
+        if reducer not in _REDUCERS:
+            raise ValueError("reducer must be mean, sum, median, or max")
+        detection_spot_sigma = _positive_float(
+            self.detection_spot_sigma,
+            "detection_spot_sigma",
+        )
+        detection_min_distance = int(self.detection_min_distance)
+        if detection_min_distance <= 0:
+            raise ValueError("detection_min_distance must be positive")
+        detection_sigma = _positive_float(self.detection_sigma, "detection_sigma")
+        timeout_seconds = _positive_float(self.timeout_seconds, "timeout_seconds")
+        object.__setattr__(self, "camera_key", camera_key)
+        object.__setattr__(self, "sequencer_key", sequencer_key)
+        object.__setattr__(self, "pulse_name", pulse_name)
+        object.__setattr__(self, "repeats", repeats)
+        object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
+        object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
+        object.__setattr__(self, "roi_xywh", _roi(self.roi_xywh))
+        object.__setattr__(self, "integration_method", integration_method)
+        object.__setattr__(self, "threshold_method", threshold_method)
+        object.__setattr__(self, "integration_half_width", integration_half_width)
+        object.__setattr__(self, "reducer", reducer)
+        object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
+        object.__setattr__(self, "detection_min_distance", detection_min_distance)
+        object.__setattr__(self, "detection_sigma", detection_sigma)
+        object.__setattr__(self, "timeout_seconds", timeout_seconds)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "camera_key": self.camera_key,
+            "sequencer_key": self.sequencer_key,
+            "pulse_name": self.pulse_name,
+            "repeats": self.repeats,
+            "reference_exposure_seconds": self.reference_exposure_seconds,
+            "readout_exposure_seconds": self.readout_exposure_seconds,
+            "roi_xywh": None if self.roi_xywh is None else list(self.roi_xywh),
+            "integration_method": self.integration_method,
+            "threshold_method": self.threshold_method,
+            "integration_half_width": self.integration_half_width,
+            "reducer": self.reducer,
+            "detection_spot_sigma": self.detection_spot_sigma,
+            "detection_min_distance": self.detection_min_distance,
+            "detection_sigma": self.detection_sigma,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+
+@dataclass(frozen=True)
+class CalibrationCapture:
+    """Adapter records from one exact long/readout/long acquisition."""
+
+    cycles: tuple[
+        tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord], ...
+    ]
+    terminal: CameraCaptureTerminalRecord
+
+    def __post_init__(self) -> None:
+        cycles = tuple(tuple(cycle) for cycle in self.cycles)
+        if not cycles or any(
+            len(cycle) != 3
+            or any(not isinstance(frame, CameraFrameRecord) for frame in cycle)
+            for cycle in cycles
+        ):
+            raise ValueError(
+                "calibration capture requires non-empty three-frame cycles"
+            )
+        if not isinstance(self.terminal, CameraCaptureTerminalRecord):
+            raise TypeError("terminal must be CameraCaptureTerminalRecord")
+        object.__setattr__(self, "cycles", cycles)
+
+    @property
+    def frames(self) -> tuple[CameraFrameRecord, ...]:
+        return tuple(frame for cycle in self.cycles for frame in cycle)
+
+    @property
+    def reference(self) -> tuple[tuple[CameraFrameRecord, CameraFrameRecord], ...]:
+        return tuple((cycle[0], cycle[2]) for cycle in self.cycles)
+
+    @property
+    def short(self) -> tuple[CameraFrameRecord, ...]:
+        return tuple(cycle[1] for cycle in self.cycles)
 
 
 @dataclass(frozen=True)
 class CalibrationRunResult:
-    """The complete product of one automated calibration task."""
+    """Artifact and in-memory analysis returned by one task run."""
 
-    analysis: CalibrationResult
-    capture: MeasurementResult
-    reference: MeasurementResult
-    short: MeasurementResult
-    publication: SignalPublication | None = None
-    pulse_name: str = "calibration"
-
-    @property
-    def calibration(self):
-        return self.analysis.calibration
-
-    @property
-    def report(self) -> Mapping[str, Any]:
-        return self.analysis.report
-
-
-@dataclass
-class CalibrationTask:
-    camera: CameraAdapter
-    sequencer: object
-    signal_plane: object
-    grid_shape: tuple[int, int] = (2, 3)
-    method: str = "box"
-    roi_radius: int = 1
-    reducer: str = "mean"
-    repeats: int = 30
-    pulse_name: str = "calibration"
-    pulse_override: object | None = None
-    pulse_search_paths: tuple[str | Path, ...] = (Path.cwd() / "pulses",)
-    expected_centers_xy: object | None = None
-    timeout: float | None = None
-    result: CalibrationRunResult | None = None
-    #: One revision line for this producer's publications.
-    runs: ProducerRuns = field(default_factory=ProducerRuns)
-    #: What apparatus this ran on, for the archive to record.  A task that
-    #: commands a camera and a sequencer and then cannot say which ones leaves
-    #: a saved figure describing an apparatus that produced none of its data.
-    provenance: ProvenanceRecorder = field(default_factory=ProvenanceRecorder)
-
-    #: Derived from the domain layer, never declared twice.
-    kind: str = runtime_kind(NodeKind.TASK)
+    artifact_path: Path
+    calibration: TrapCalibration
+    report: Mapping[str, Any]
+    capture: CalibrationCapture
+    reference: tuple[tuple[CameraFrameRecord, CameraFrameRecord], ...]
+    short: tuple[CameraFrameRecord, ...]
+    pulse: Mapping[str, object]
+    run_record: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.camera, CameraAdapter):
+        if not isinstance(self.calibration, TrapCalibration):
+            raise TypeError("calibration must be TrapCalibration")
+        if not isinstance(self.capture, CalibrationCapture):
+            raise TypeError("capture must be CalibrationCapture")
+        object.__setattr__(self, "artifact_path", Path(self.artifact_path).resolve())
+        object.__setattr__(self, "report", dict(self.report))
+        object.__setattr__(self, "reference", tuple(tuple(group) for group in self.reference))
+        object.__setattr__(self, "short", tuple(self.short))
+        object.__setattr__(self, "pulse", dict(self.pulse))
+        object.__setattr__(self, "run_record", dict(self.run_record))
+
+
+def _camera_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
+    roi_y, roi_x = point.roi_origin_yx
+    roi_height, roi_width = point.roi_shape_yx
+    return {
+        "acquisition_mode": point.acquisition_mode,
+        "frame_shape_yx": list(point.frame_shape_yx),
+        "sensor_shape_yx": list(point.sensor_shape_yx),
+        "roi_xywh": [roi_x, roi_y, roi_width, roi_height],
+        "binning_yx": list(point.binning_yx),
+        "dtype": point.dtype.str,
+        "count_unit": point.count_unit,
+        "exposure_seconds": point.exposure_seconds,
+        "required_external_trigger_interval_seconds": (
+            point.required_external_trigger_interval_seconds
+        ),
+        "external_trigger_integration_start_offset_seconds": (
+            point.external_trigger_integration_start_offset_seconds
+        ),
+        "gain": point.gain,
+        "readout_mode": point.readout_mode,
+    }
+
+
+def _plain(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    raise TypeError(f"device snapshot contains non-plain {type(value).__name__}")
+
+
+def _sequencer_snapshot(sequencer: object) -> dict[str, object]:
+    snapshot = sequencer.snapshot()
+    if not isinstance(snapshot, Mapping):
+        raise TypeError("sequencer snapshot must be a mapping")
+    fields = (
+        "opened",
+        "loaded",
+        "firing",
+        "forever",
+        "cursor",
+        "scan_count",
+        "underflow",
+        "status",
+    )
+    return {
+        key: _plain(snapshot[key])
+        for key in fields
+        if key in snapshot
+    }
+
+
+class CalibrationTask:
+    """Drive one calibration protocol and return one saved artifact."""
+
+    instance_id = "calibration"
+
+    def __init__(
+        self,
+        *,
+        camera: CameraAdapter,
+        sequencer: object,
+        request: CalibrationRequest,
+        pulse_search_paths: Sequence[str | Path],
+        artifact_directory: str | Path,
+        pulse_override: object | None = None,
+    ) -> None:
+        if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
-        if not callable(getattr(self.sequencer, "load", None)):
-            raise TypeError("sequencer must expose load")
-        if not callable(getattr(self.sequencer, "fire", None)):
-            raise TypeError("sequencer must expose fire")
-        if self.signal_plane is None:
-            raise TypeError("signal_plane must be supplied by the runtime owner")
-        grid = tuple(int(value) for value in self.grid_shape)
-        if len(grid) != 2 or any(value <= 0 for value in grid):
-            raise ValueError("grid_shape must contain two positive dimensions")
-        object.__setattr__(self, "grid_shape", grid)
-        repeats = int(self.repeats)
-        if repeats <= 0:
-            raise ValueError("repeats must be positive")
-        object.__setattr__(self, "repeats", repeats)
-        name = str(self.pulse_name).strip()
-        if not name:
-            raise ValueError("pulse_name must be non-empty")
-        object.__setattr__(self, "pulse_name", name)
-        paths = tuple(Path(value).expanduser().resolve() for value in self.pulse_search_paths)
+        for name in ("load", "fire", "wait_done", "safe", "snapshot"):
+            if not callable(getattr(sequencer, name, None)):
+                raise TypeError(f"sequencer must expose {name}")
+        if not isinstance(request, CalibrationRequest):
+            raise TypeError("request must be CalibrationRequest")
+        paths = tuple(Path(value).expanduser().resolve() for value in pulse_search_paths)
         if not paths:
             raise ValueError("pulse_search_paths must not be empty")
-        object.__setattr__(self, "pulse_search_paths", paths)
-        if self.timeout is not None and float(self.timeout) <= 0:
-            raise ValueError("timeout must be positive")
+        directory = Path(artifact_directory).expanduser().resolve()
+        if not directory.is_dir():
+            raise ValueError("artifact_directory must be an existing directory")
+        self.camera = camera
+        self.sequencer = sequencer
+        self._request = request
+        self.pulse_search_paths = paths
+        self.artifact_directory = directory
+        self.pulse_override = pulse_override
+        self._actual_working_point: CameraWorkingPoint | None = None
+        self._result: CalibrationRunResult | None = None
 
     @property
-    def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
-        return (_CALIBRATION_DECLARATION, _REPORT_DECLARATION)
+    def request(self) -> CalibrationRequest:
+        return self._request
 
     @property
-    def instance_id(self) -> str:
-        return "calibration"
+    def actual_working_point(self) -> CameraWorkingPoint | None:
+        return self._actual_working_point
 
-    def signal_key(self, output_name: str) -> str:
-        if output_name not in {"calibration", "report"}:
-            raise KeyError(f"unknown calibration output {output_name!r}")
-        return f"@logic/calibration/{output_name}"
+    @property
+    def result(self) -> CalibrationRunResult | None:
+        return self._result
 
     def _resolve_pulse(self) -> ResolvedPulse:
         return resolve_pulse(
-            self.pulse_name,
+            self.request.pulse_name,
             search_paths=self.pulse_search_paths,
             override=self.pulse_override,
+            build_parameters={
+                "reference_exposure_seconds": (
+                    self.request.reference_exposure_seconds
+                ),
+                "readout_exposure_seconds": self.request.readout_exposure_seconds,
+            },
         )
 
-    @staticmethod
-    def _frame_exposures(pulse: ResolvedPulse) -> tuple[float, float, float]:
-        windows = int(pulse.metadata.get("camera_windows", 0))
-        if windows != 3:
-            raise ValueError(f"calibration pulse {pulse.name!r} must declare exactly three camera windows")
-        if pulse.metadata.get("repeat_forever", False):
-            raise ValueError(f"pulse {pulse.name!r} is repeat_forever and cannot finish calibration")
+    def _pulse_facts(self, pulse: ResolvedPulse) -> dict[str, object]:
+        metadata = pulse.metadata
+        if int(metadata.get("camera_windows", 0)) != 3:
+            raise ValueError(
+                f"calibration pulse {pulse.name!r} must declare exactly three camera windows"
+            )
+        if metadata.get("repeat_forever", False):
+            raise ValueError(
+                f"pulse {pulse.name!r} is repeat_forever and cannot finish calibration"
+            )
         try:
-            exposures = tuple(float(value) for value in pulse.metadata["frame_exposures"])
+            exposures = tuple(float(value) for value in metadata["frame_exposures"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("calibration pulse must declare frame_exposures=(long, short, long)") from exc
-        if len(exposures) != 3 or any(not np.isfinite(value) or value <= 0 for value in exposures):
-            raise ValueError("calibration pulse frame_exposures must contain three positive finite values")
-        if not np.isclose(exposures[0], exposures[2], rtol=0.0, atol=1e-12):
-            raise ValueError("calibration pulse outer reference exposures must be equal")
-        if tuple(pulse.metadata.get("reference_frame_indices", ())) != (0, 2):
-            raise ValueError("calibration pulse reference_frame_indices must be (0, 2)")
-        if int(pulse.metadata.get("short_frame_index", -1)) != 1:
-            raise ValueError("calibration pulse short_frame_index must be 1")
-        semantics = tuple(pulse.metadata.get("frame_semantics", ()))
+            raise ValueError(
+                "calibration pulse must declare frame_exposures=(long, readout, long)"
+            ) from exc
+        expected = (
+            self.request.reference_exposure_seconds,
+            self.request.readout_exposure_seconds,
+            self.request.reference_exposure_seconds,
+        )
+        if (
+            len(exposures) != 3
+            or any(not np.isfinite(value) or value <= 0 for value in exposures)
+            or not np.allclose(exposures, expected, rtol=1e-9, atol=1e-12)
+        ):
+            raise ValueError(
+                "calibration pulse frame exposures do not match the frozen request"
+            )
+        semantics = tuple(metadata.get("frame_semantics", ()))
         if semantics != (
             "reference_long_before",
             "short_readout",
             "reference_long_after",
         ):
-            raise ValueError("calibration pulse frame_semantics must be long-short-long")
-        return exposures[0], exposures[1], exposures[2]
+            raise ValueError("calibration pulse frame_semantics must be long/readout/long")
+        if tuple(metadata.get("reference_frame_indices", ())) != (0, 2):
+            raise ValueError("calibration pulse reference_frame_indices must be (0, 2)")
+        if int(metadata.get("short_frame_index", -1)) != 1:
+            raise ValueError("calibration pulse short_frame_index must be 1")
+        return {
+            "name": pulse.name,
+            "path": None if pulse.path is None else str(pulse.path),
+            "camera_trigger_channel": metadata.get("camera_trigger_channel"),
+            "camera_windows": 3,
+            "frame_exposures": list(exposures),
+            "frame_semantics": list(semantics),
+            "reference_frame_indices": [0, 2],
+            "readout_frame_index": 1,
+        }
 
-    def _arm_sequencer(self, pulse: ResolvedPulse) -> None:
-        """Load the program the way every caller loads one."""
-
-        arm_sequencer(self.sequencer, pulse.program, pulse.metadata)
+    def _safe(self) -> None:
+        self.sequencer.safe()
 
     def _capture(
         self,
-        measurement: CameraMeasurementNode,
         pulse: ResolvedPulse,
-        repeats: int,
-    ) -> MeasurementResult:
-        # The pulse describes its own camera bracket; taking the frame count from
-        # anywhere else lets a three-window bracket be collected as one frame per
-        # shot, silently discarding two thirds of every measurement.
-        frames_per_cycle = int(pulse.metadata["camera_windows"])
-        capture = measurement.prepare(repeat=repeats, frames_per_cycle=frames_per_cycle)
+        *,
+        context: object | None,
+    ) -> tuple[CalibrationCapture, Mapping[str, object]]:
+        count = self.request.repeats * 3
+        armed = False
         try:
-            self._arm_sequencer(pulse)
-            for _ in range(repeats):
+            self.camera.arm(
+                count,
+                source_group_sizes=(3,) * self.request.repeats,
+                buffer_frame_count=count,
+                timeout=self.request.timeout_seconds,
+            )
+            armed = True
+            arm_sequencer(self.sequencer, pulse.program, pulse.metadata)
+            sequencer_snapshot = _sequencer_snapshot(self.sequencer)
+            cycles: list[
+                tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord]
+            ] = []
+            for _ in range(self.request.repeats):
+                if context is not None and context.cancel_requested():
+                    raise RuntimeError("calibration was cancelled")
                 self.sequencer.fire()
-                # Wait for the shot to finish before starting the next one.  The
-                # real board detects its commands on a rising edge and refuses a
-                # second fire while the first is still running, so firing in a
-                # bare loop takes exactly one shot on hardware while a virtual
-                # sequencer that models no firing state accepts them all.
-                report = self.sequencer.wait_done(self.timeout)
-                # The report is the point of waiting.  A calibration built on a
-                # shot that errored or underran is a calibration of nothing,
-                # and it used to be indistinguishable from a good one.
+                report = self.sequencer.wait_done(self.request.timeout_seconds)
                 if report is None:
                     raise TimeoutError(
-                        "a calibration shot was fired and never reported done"
-                        + (
-                            ""
-                            if self.timeout is None
-                            else f" within {float(self.timeout):g}s"
-                        )
+                        "a calibration shot was fired and never reported done within "
+                        f"{self.request.timeout_seconds:g}s"
                     )
-                fault = getattr(report, "fault", "")
+                fault = str(getattr(report, "fault", ""))
                 if fault:
                     raise RuntimeError(f"calibration shot: {fault}")
-            return capture.collect()
+                records = tuple(
+                    self.camera.read_frame_records(
+                        3,
+                        timeout=self.request.timeout_seconds,
+                        exact=True,
+                    )
+                )
+                if len(records) != 3 or any(
+                    not isinstance(record, CameraFrameRecord) for record in records
+                ):
+                    raise RuntimeError(
+                        "camera returned an incomplete calibration cycle"
+                    )
+                cycles.append((records[0], records[1], records[2]))
+            terminal = self.camera.finish_record_capture()
+            armed = False
+            if (
+                terminal.produced_count != count
+                or not terminal.source_stopped
+                or not terminal.no_more_frames
+                or not terminal.joined
+            ):
+                raise RuntimeError("camera did not prove exact calibration completion")
+            return CalibrationCapture(tuple(cycles), terminal), sequencer_snapshot
         except BaseException:
-            try:
-                capture.close()
-            finally:
-                safe = getattr(self.sequencer, "safe", None)
-                if callable(safe):
-                    safe()
+            if armed:
+                self.camera.finish_record_capture()
             raise
 
-    @staticmethod
-    def _split_capture(capture: MeasurementResult) -> tuple[MeasurementResult, MeasurementResult]:
-        reference_cycles: list[tuple[CameraFrameRecord, CameraFrameRecord]] = []
-        short_cycles: list[tuple[CameraFrameRecord]] = []
-        for cycle in capture.cycles:
-            if len(cycle) != 3:
-                raise RuntimeError("calibration capture cycle must contain long-short-long frames")
-            reference_cycles.append((cycle[0], cycle[2]))
-            short_cycles.append((cycle[1],))
-        reference = MeasurementResult(tuple(reference_cycles), capture.publication, capture.terminal)
-        short = MeasurementResult(tuple(short_cycles), capture.publication, capture.terminal)
-        return reference, short
-
-    def _publish(
+    def _frame_contract(
         self,
-        analysis: CalibrationResult,
-        *,
-        publish_final: object | None = None,
-    ) -> SignalPublication | None:
-        plane_publish = getattr(self.signal_plane, "publish_final", None)
-        latest = getattr(self.signal_plane, "latest_publication", None)
-        if not callable(plane_publish) or not callable(latest):
-            raise TypeError("signal_plane must implement the final publication contract")
-        if publish_final is None:
-            # The notebook path owns its own run.  Hosted, the NodeHost has
-            # already begun the generation and beginning a second one here would
-            # make the publication belong to a run nobody is watching.
-            self.runs.begin(self.signal_plane, self)
-        thresholds = np.asarray(analysis.calibration.thresholds, dtype="<f8")[None, :]
-        site_fidelity = np.asarray(analysis.report["site_fidelity"], dtype="<f8")[None, :]
-        outputs = {
-            "calibration": FinalDatasetOutput(
-                _CALIBRATION_DECLARATION,
-                snapshot_from_array(
-                    thresholds,
-                    producer=self.instance_id,
-                    signal="calibration",
-                    roles=(SITE,),
-                    generation=self.runs.generation,
-                    revision=self.runs.next_revision(),
-                ),
-            ),
-            "report": FinalDatasetOutput(
-                _REPORT_DECLARATION,
-                snapshot_from_array(
-                    site_fidelity,
-                    producer=self.instance_id,
-                    signal="report",
-                    roles=(SITE,),
-                    generation=self.runs.generation,
-                    revision=self.runs.next_revision(),
-                ),
-            ),
-        }
-        if publish_final is None:
-            plane_publish(self, outputs)
-        else:
-            publish_final(outputs)
-        publication = latest(self.signal_key("calibration"))
-        if not isinstance(publication, SignalPublication):
-            raise RuntimeError("signal plane did not expose the calibration publication")
-        return publication
+        actual: CameraWorkingPoint,
+        pulse: Mapping[str, object],
+    ) -> FrameContract:
+        roi_y, roi_x = actual.roi_origin_yx
+        roi_height, roi_width = actual.roi_shape_yx
+        frame_exposures = pulse["frame_exposures"]
+        readout_gate = float(frame_exposures[1])  # type: ignore[index]
+        return FrameContract(
+            actual.frame_shape_yx,
+            sensor_shape=actual.sensor_shape_yx,
+            roi_xywh=(roi_x, roi_y, roi_width, roi_height),
+            binning_yx=actual.binning_yx,
+            exposure_seconds=min(actual.exposure_seconds, readout_gate),
+            camera_id=self.request.camera_key,
+            readout_mode=actual.readout_mode,
+        )
 
-    def run(self, *, publish_final: object | None = None) -> CalibrationRunResult:
+    def _analyse(
+        self,
+        capture: CalibrationCapture,
+        contract: FrameContract,
+    ) -> CalibrationResult:
+        return calibrate(
+            capture.reference,
+            capture.short,
+            frame_contract=contract,
+            method=self.request.integration_method,
+            threshold_method=self.request.threshold_method,
+            integration_half_width=self.request.integration_half_width,
+            reducer=self.request.reducer,
+            detection_spot_sigma=self.request.detection_spot_sigma,
+            detection_min_distance=self.request.detection_min_distance,
+            detection_sigma=self.request.detection_sigma,
+        )
+
+    def _run(self, context: object | None) -> CalibrationRunResult:
+        self._actual_working_point = None
+        self._result = None
         try:
             pulse = self._resolve_pulse()
-            frame_exposures = self._frame_exposures(pulse)
-            measurement = CameraMeasurementNode(
-                camera=self.camera,
-                signal_plane=self.signal_plane,
-                producer="calibration_camera",
-                timeout=self.timeout,
+            pulse_facts = self._pulse_facts(pulse)
+            actual = self.camera.configure_measurement(
+                exposure_seconds=self.request.reference_exposure_seconds,
+                roi_xywh=self.request.roi_xywh,
             )
-            capture = self._capture(measurement, pulse, self.repeats)
-            reference, short = self._split_capture(capture)
-            working_point = self.camera.capture_working_point()
-            contract = FrameContract(
-                working_point.frame_shape_yx,
-                exposure_seconds=frame_exposures[1],
+            if not isinstance(actual, CameraWorkingPoint):
+                raise TypeError(
+                    "camera configure_measurement must return CameraWorkingPoint"
+                )
+            self._actual_working_point = actual
+            capture, sequencer_snapshot = self._capture(pulse, context=context)
+            contract = self._frame_contract(actual, pulse_facts)
+            analysis = self._analyse(capture, contract)
+            run_record = {
+                "request": self.request.to_dict(),
+                "actual_devices": {
+                    self.request.camera_key: _camera_snapshot(actual),
+                    self.request.sequencer_key: dict(sequencer_snapshot),
+                },
+                "pulse": dict(pulse_facts),
+            }
+            artifact_report = dict(analysis.calibration.report)
+            artifact_report["run_record"] = run_record
+            calibration = TrapCalibration(
+                analysis.calibration.site_map,
+                analysis.calibration.readout_model,
+                analysis.calibration.frame_contract,
+                artifact_report,
             )
-            analysis = calibrate(
-                reference.cycles,
-                short.frames,
-                frame_contract=contract,
-                grid_shape=self.grid_shape,
-                method=self.method,
-                roi_radius=self.roi_radius,
-                reducer=self.reducer,
-                expected_centers_xy=self.expected_centers_xy,
+            artifact_path = unique_path(
+                self.artifact_directory,
+                "calibration",
+                ".json",
             )
-            publication = self._publish(analysis, publish_final=publish_final)
-            self.result = CalibrationRunResult(
-                analysis,
+            calibration.save(artifact_path)
+            result = CalibrationRunResult(
+                artifact_path,
+                calibration,
+                analysis.report,
                 capture,
-                reference,
-                short,
-                publication,
-                self.pulse_name,
+                capture.reference,
+                capture.short,
+                pulse_facts,
+                run_record,
             )
-            # After the result exists, so the record carries the calibration's
-            # own fingerprint alongside the devices it was measured on.
-            self.provenance.reset()
-            self.provenance.capture(self)
-            return self.result
+            self._result = result
+            return result
         except BaseException:
-            safe = getattr(self.sequencer, "safe", None)
-            if callable(safe):
-                safe()
+            self._safe()
             raise
 
-    def execute(self, context: object) -> dict[str, object]:
-        """Hosted entry point: the same calibration, published through the host.
+    def run(self) -> CalibrationRunResult:
+        return self._run(None)
 
-        A NodeHost has already begun the generation, so this adopts it instead
-        of starting a second one, and its publications go through the host's
-        context so the host can observe them.  Everything else is the identical
-        code the notebook path runs, because a second implementation is how a
-        virtual bench and a real one start to disagree.
-
-        Without this the descriptor declared a task the runtime could not
-        drive: the console offered Add Logic -> calibration, and starting it
-        failed instantly with "finite node must provide execute(ctx)".
-        """
-
-        self.runs.adopt(context.generation)
-        result = self.run(publish_final=context.publish_final)
-        return {
-            "sites": len(result.calibration.thresholds),
-            "signal": self.signal_key("calibration"),
-        }
-
-    @property
-    def calibration(self):
-        if self.result is None:
-            raise RuntimeError("calibration task has not run")
-        return self.result.calibration
-
-    @property
-    def report(self) -> Mapping[str, Any]:
-        if self.result is None:
-            raise RuntimeError("calibration task has not run")
-        return self.result.report
+    def execute(self, context: object) -> CalibrationRunResult:
+        return self._run(context)
 
 
-__all__ = ["CalibrationRunResult", "CalibrationTask"]
+__all__ = [
+    "CalibrationCapture",
+    "CalibrationRequest",
+    "CalibrationRunResult",
+    "CalibrationTask",
+]

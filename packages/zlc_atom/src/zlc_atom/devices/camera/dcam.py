@@ -23,6 +23,21 @@ from zlc_data import finite_real, integer, positive_integer
 def positive_real(value: object, field: str) -> float:
     return finite_real(value, field, positive=True)
 
+
+def _snap_roi_axis(
+    origin: int,
+    extent: int,
+    *,
+    step: int,
+    sensor_extent: int,
+) -> tuple[int, int]:
+    snapped_extent = max(step, min(int(extent), sensor_extent))
+    snapped_extent = (snapped_extent // step) * step
+    maximum_origin = sensor_extent - snapped_extent
+    snapped_origin = max(0, min(int(origin), maximum_origin))
+    snapped_origin = (snapped_origin // step) * step
+    return snapped_origin, snapped_extent
+
 from ._dcam_driver import DcamProperty, DcamSdkDriver, DcamValue
 from ._owner_lane import CameraSdkOwnerLane
 from .contract import (
@@ -239,24 +254,24 @@ class DcamCameraAdapter:
         roi = config.roi_xywh
         if roi is not None:
             x, y, width, height = roi
-            if x + width > sensor_width or y + height > sensor_height:
-                raise ValueError("roi_xywh extends beyond the DCAM sensor")
-            if any(
-                value % step
-                for value, step in (
-                    (x, h_step),
-                    (width, h_step),
-                    (y, v_step),
-                    (height, v_step),
-                )
-            ):
-                raise ValueError("roi_xywh is not aligned to the DCAM subarray grid")
-            device.set_get_property(DcamProperty.SUBARRAY_HPOS, 0)
-            device.set_get_property(DcamProperty.SUBARRAY_VPOS, 0)
-            device.set_get_property(DcamProperty.SUBARRAY_HSIZE, width)
-            device.set_get_property(DcamProperty.SUBARRAY_VSIZE, height)
-            device.set_get_property(DcamProperty.SUBARRAY_HPOS, x)
-            device.set_get_property(DcamProperty.SUBARRAY_VPOS, y)
+            x, width = _snap_roi_axis(
+                x,
+                width,
+                step=h_step,
+                sensor_extent=sensor_width,
+            )
+            y, height = _snap_roi_axis(
+                y,
+                height,
+                step=v_step,
+                sensor_extent=sensor_height,
+            )
+            self._set_exact(device, DcamProperty.SUBARRAY_HPOS, 0)
+            self._set_exact(device, DcamProperty.SUBARRAY_VPOS, 0)
+            self._set_exact(device, DcamProperty.SUBARRAY_HSIZE, width)
+            self._set_exact(device, DcamProperty.SUBARRAY_VSIZE, height)
+            self._set_exact(device, DcamProperty.SUBARRAY_HPOS, x)
+            self._set_exact(device, DcamProperty.SUBARRAY_VPOS, y)
             self._set_exact(device, DcamProperty.SUBARRAY_MODE, int(DcamValue.MODE_ON))
         return self._read_working_point_on_owner()
 
@@ -370,17 +385,36 @@ class DcamCameraAdapter:
     def capture_working_point(self) -> CameraWorkingPoint:
         return self._lane.call(self._read_working_point_on_owner)
 
-    def configure_exposure_seconds(self, exposure_seconds: float) -> None:
+    def configure_measurement(
+        self,
+        *,
+        exposure_seconds: float,
+        roi_xywh: tuple[int, int, int, int] | None,
+    ) -> CameraWorkingPoint:
         candidate = replace(
             self._config,
             exposure_seconds=positive_real(exposure_seconds, "exposure_seconds"),
+            roi_xywh=roi_xywh,
         )
 
-        def apply() -> None:
-            self._apply_settings_on_owner(candidate)
-            self._config = candidate
+        def apply() -> CameraWorkingPoint:
+            point = self._apply_settings_on_owner(candidate)
+            actual_roi = None
+            if roi_xywh is not None:
+                actual_roi = (
+                    point.roi_origin_yx[1],
+                    point.roi_origin_yx[0],
+                    point.roi_shape_yx[1],
+                    point.roi_shape_yx[0],
+                )
+            self._config = replace(
+                candidate,
+                exposure_seconds=point.exposure_seconds,
+                roi_xywh=actual_roi,
+            )
+            return point
 
-        self._lane.call(apply)
+        return self._lane.call(apply)
 
     @staticmethod
     def _finite_groups(
@@ -706,9 +740,9 @@ class DcamCameraAdapter:
         self._finish_requested.set()
         return self._lane.call(self._finish_on_owner)
 
-    def capture_state(self) -> tuple[bool, int]:
+    def capture_state(self) -> bool:
         with self._state_lock:
-            return self._armed, self._copied_count
+            return self._armed
 
     def observed_produced_count(self) -> int:
         """Read the DCAM transfer counter without consuming a frame."""
@@ -756,7 +790,7 @@ class DcamCameraAdapter:
             return
         failures: list[BaseException] = []
         try:
-            if self.capture_state()[0]:
+            if self.capture_state():
                 self.finish_record_capture()
         except BaseException as error:  # noqa: BLE001 - the handle still goes
             failures.append(error)

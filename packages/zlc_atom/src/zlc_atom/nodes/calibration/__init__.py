@@ -13,28 +13,45 @@ from .bimodal import (
 from .calibration import (
     AtomDetection,
     CalibrationResult,
+    FrameContract,
+    ReadoutModel,
+    SiteMap,
     TrapCalibration,
+    calibrate,
     classify_threshold,
     detect,
+    detect_sites,
     extract_box_signals,
     extract_psf_signals,
     signals,
 )
 from .logic_node import LOGIC_NODE
 from .psf import gaussian_psf_kernel, normalized_psf_kernel
-from .task import CalibrationRunResult, CalibrationTask
+from .task import (
+    CalibrationCapture,
+    CalibrationRequest,
+    CalibrationRunResult,
+    CalibrationTask,
+)
 
 __all__ = [
     "BimodalFit",
     "AtomDetection",
     "CalibrationResult",
+    "CalibrationCapture",
+    "CalibrationRequest",
     "CalibrationRunResult",
     "CalibrationTask",
+    "FrameContract",
     "LOGIC_NODE",
+    "ReadoutModel",
+    "SiteMap",
     "TrapCalibration",
+    "calibrate",
     "classify_threshold",
     "confidence_weighted_fidelity",
     "detect",
+    "detect_sites",
     "extract_box_signals",
     "extract_psf_signals",
     "fit_bimodal",

@@ -8,8 +8,9 @@ from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import discover_logic_nodes
+from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
 from zlc_atom.nodes._framework.pulse_source import resolve_pulse
-from zlc_atom.nodes.calibration import CalibrationTask
+from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 
 
 ROOT = Path(__file__).parents[1]
@@ -28,6 +29,13 @@ class _RecordingCamera:
     def capture_working_point(self):
         self.events.append(("working_point", None))
         return self.camera.capture_working_point()  # type: ignore[attr-defined]
+
+    def configure_measurement(self, *, exposure_seconds, roi_xywh):
+        self.events.append(("configure_measurement", (exposure_seconds, roi_xywh)))
+        return self.camera.configure_measurement(  # type: ignore[attr-defined]
+            exposure_seconds=exposure_seconds,
+            roi_xywh=roi_xywh,
+        )
 
     def arm(self, frames, *, source_group_sizes, buffer_frame_count, timeout) -> None:
         self.events.append(("arm", (frames, source_group_sizes, buffer_frame_count)))
@@ -83,6 +91,10 @@ class _RecordingSequencer:
         self.events.append(("safe", None))
         self.sequencer.safe()  # type: ignore[attr-defined]
 
+    def snapshot(self):
+        self.events.append(("snapshot", None))
+        return self.sequencer.snapshot()  # type: ignore[attr-defined]
+
     @property
     def camera_trigger_channel(self) -> str:
         return self.sequencer.camera_trigger_channel  # type: ignore[attr-defined]
@@ -92,14 +104,24 @@ class _RecordingSequencer:
         self.sequencer.camera_trigger_channel = value  # type: ignore[attr-defined]
 
 
-def _short_stamps(result: object) -> dict[str, object]:
-    """The run the short frames came from, which a derived signal inherits."""
-
-    from zlc_atom.nodes.occupancy.processor import inherited_stamps
-
-    publication = result.short.publication
-    name = next(iter(publication.signals))
-    return inherited_stamps(publication.signals[name].snapshot)
+def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
+    return CalibrationRequest(
+        camera_key="camera",
+        sequencer_key="sequencer",
+        pulse_name="calibration",
+        repeats=repeats,
+        reference_exposure_seconds=0.02,
+        readout_exposure_seconds=0.005,
+        roi_xywh=None,
+        integration_method="box",
+        threshold_method="empirical",
+        integration_half_width=1,
+        reducer="mean",
+        detection_spot_sigma=1.0,
+        detection_min_distance=3,
+        detection_sigma=6.0,
+        timeout_seconds=2.0,
+    )
 
 
 def test_measurement_leaf_has_no_sequencer_dependency_or_operation() -> None:
@@ -130,7 +152,7 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
             target_owner = module.split(".")[2]
             if target_owner != source_owner and target_owner != "_framework":
                 edges.add((source_owner, target_owner))
-    assert edges == {("occupancy", "calibration"), ("calibration", "camera_measurement")}
+    assert edges == {("occupancy", "calibration")}
 
 
 def test_pulse_resolver_has_one_named_source_and_clear_missing_paths() -> None:
@@ -138,6 +160,16 @@ def test_pulse_resolver_has_one_named_source_and_clear_missing_paths() -> None:
     assert resolved.path == (ROOT / "pulses" / "calibration.py").resolve()
     assert resolved.metadata["camera_windows"] == 3
     assert resolved.metadata["frame_exposures"] == (0.02, 0.005, 0.02)
+
+    authored = resolve_pulse(
+        "calibration",
+        search_paths=(ROOT / "pulses",),
+        build_parameters={
+            "reference_exposure_seconds": 0.031,
+            "readout_exposure_seconds": 0.007,
+        },
+    )
+    assert authored.metadata["frame_exposures"] == (0.031, 0.007, 0.031)
 
     override_program = object()
     overridden = resolve_pulse(
@@ -156,7 +188,7 @@ def test_pulse_resolver_has_one_named_source_and_clear_missing_paths() -> None:
         raise AssertionError("missing pulse unexpectedly resolved")
 
 
-def test_discovered_descriptors_build_and_exercise_declared_devices() -> None:
+def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Path) -> None:
     installation = create_installation("virtual")
     plane = SignalDataPlane()
     try:
@@ -165,59 +197,144 @@ def test_discovered_descriptors_build_and_exercise_declared_devices() -> None:
         sequencer = _RecordingSequencer(installation.device("sequencer"))
         camera_node = descriptors["camera_measurement"].instantiate(
             camera=camera,
+            camera_key="camera",
             signal_plane=plane,
+            frames_per_cycle=3,
         )
         assert camera_node.camera is camera
         pulse = resolve_pulse("calibration", search_paths=(ROOT / "pulses",))
-        capture = camera_node.prepare(repeat=1, frames_per_cycle=3)
+        capture = camera_node.prepare()
         sequencer.load(pulse.program)
         sequencer.fire()
         sequencer.wait_done(1.0)
         manual_result = capture.collect()
         assert len(manual_result.frames) == 3
         assert any(name == "arm" for name, _ in camera.events)
+        assert next(
+            name
+            for name, _ in camera.events
+            if name in {"configure_measurement", "arm"}
+        ) == "configure_measurement"
 
         calibration_node = descriptors["calibration"].instantiate(
             camera=camera,
+            camera_key="camera",
             sequencer=sequencer,
-            signal_plane=plane,
+            sequencer_key="sequencer",
             pulse_search_paths=(ROOT / "pulses",),
-            expected_centers_xy=installation.world.geometry.site_centers_xy,
+            artifact_directory=tmp_path,
             repeats=30,
         )
         assert calibration_node.camera is camera
         loads_before_task = len([event for event, _ in sequencer.events if event == "load"])
         fires_before_task = len([event for event, _ in sequencer.events if event == "fire"])
+        camera_events_before_task = len(camera.events)
+        signals_before_task = set(plane.freeze().signals)
         task_result = calibration_node.run()
+        task_camera_events = camera.events[camera_events_before_task:]
+        assert set(plane.freeze().signals) == signals_before_task
         assert len(task_result.capture.frames) == 90
-        assert len(task_result.reference.frames) == 60
-        assert len(task_result.short.frames) == 30
+        assert sum(len(group) for group in task_result.reference) == 60
+        assert len(task_result.short) == 30
+        assert [event for event, _ in task_camera_events].count(
+            "configure_measurement"
+        ) == 1
+        assert next(
+            name
+            for name, _ in task_camera_events
+            if name in {"configure_measurement", "arm"}
+        ) == "configure_measurement"
+        assert ("arm", (90, (3,) * 30, 90)) in task_camera_events
+        assert [value for name, value in task_camera_events if name == "read"] == [
+            (3, True)
+        ] * 30
+        assert [name for name, _ in task_camera_events].count("finish") == 1
         assert len([event for event, _ in sequencer.events if event == "load"]) - loads_before_task == 1
         assert len([event for event, _ in sequencer.events if event == "fire"]) - fires_before_task == 30
 
+        calibration_path = task_result.artifact_path
         occupancy_node = descriptors["occupancy"].instantiate(
-            calibration=task_result.calibration,
+            calibration_path=str(calibration_path),
+            source_signal=camera_node.signal_key("frames"),
             signal_plane=plane,
         )
         assert occupancy_node.signal_plane is plane
+        assert occupancy_node.calibration_path == calibration_path.resolve()
         occupancy_result = occupancy_node.process(
-            task_result.short.frames, **_short_stamps(task_result)
+            task_result.short,
+            generation="calibration-task",
+            revision=1,
         )
         assert occupancy_result.counts.shape == (30, 6)
+        assert occupancy_result.valid.shape == occupancy_result.counts.shape
+        assert occupancy_result.frame_judged.shape == (30, 32, 48)
 
-        assert tuple(value.device_key for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
-        assert tuple(value.device_key for value in descriptors["calibration"].device_requirements) == ("camera", "sequencer")
+        assert tuple(value.argument_name for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
+        assert tuple(value.argument_name for value in descriptors["calibration"].device_requirements) == ("camera", "sequencer")
+        assert descriptors["calibration"].outputs == ()
+        assert [
+            (value.name, value.contract_id)
+            for value in descriptors["calibration"].artifact_outputs
+        ] == [("calibration", "calibration.readout.v1")]
+        assert descriptors["calibration"].authoring_schema.field_names == (
+            "pulse_name",
+            "repeats",
+            "reference_exposure_seconds",
+            "readout_exposure_seconds",
+            "roi_x",
+            "roi_y",
+            "roi_width",
+            "roi_height",
+            "integration_method",
+            "threshold_method",
+            "integration_half_width",
+            "reducer",
+            "detection_spot_sigma",
+            "detection_min_distance",
+            "detection_sigma",
+            "timeout_seconds",
+        )
+        with pytest.raises(ValueError, match="all four fields"):
+            descriptors["calibration"].authoring_schema.freeze({"roi_x": 1})
+        with pytest.raises(ValueError, match="cannot exceed"):
+            descriptors["calibration"].authoring_schema.freeze(
+                {
+                    "reference_exposure_seconds": 0.005,
+                    "readout_exposure_seconds": 0.02,
+                }
+            )
         assert descriptors["occupancy"].device_requirements == ()
+        assert descriptors["occupancy"].authoring_schema.field_names == (
+            "calibration_path",
+        )
+        assert len(descriptors["occupancy"].input_specs) == 1
+        assert isinstance(descriptors["occupancy"].input_specs[0], DatasetInputSpec)
+        assert tuple(output.name for output in descriptors["occupancy"].outputs) == (
+            "counts",
+            "occupied",
+            "valid",
+            "rate",
+            "frame_judged",
+        )
         with pytest.raises((TypeError, ValueError)):
-            descriptors["camera_measurement"].instantiate(camera=camera, signal_plane=plane, sequencer=sequencer)
+            descriptors["camera_measurement"].instantiate(
+                camera=camera,
+                camera_key="camera",
+                signal_plane=plane,
+                sequencer=sequencer,
+            )
         with pytest.raises(TypeError):
-            descriptors["occupancy"].instantiate(calibration=task_result.calibration, camera=camera)
+            descriptors["occupancy"].instantiate(
+                calibration=task_result.calibration,
+                source_signal=camera_node.signal_key("frames"),
+                signal_plane=plane,
+            )
     finally:
         plane.close()
         installation.close()
 
 
-def test_calibration_task_safes_sequencer_when_capture_fails() -> None:
+def test_calibration_task_safes_sequencer_when_capture_fails(tmp_path: Path) -> None:
     installation = create_installation("virtual")
     plane = SignalDataPlane()
     try:
@@ -226,14 +343,15 @@ def test_calibration_task_safes_sequencer_when_capture_fails() -> None:
         task = CalibrationTask(
             camera=camera,
             sequencer=sequencer,
-            signal_plane=plane,
-            repeats=1,
+            request=_calibration_request(repeats=1),
             pulse_search_paths=(ROOT / "pulses",),
+            artifact_directory=tmp_path,
         )
         with pytest.raises(RuntimeError, match="fire failure"):
             task.run()
-        assert any(event == "safe" for event, _ in sequencer.events)
-        assert installation.device("camera").capture_state() == (False, 0)
+        assert [event for event, _ in sequencer.events].count("safe") == 1
+        assert [event for event, _ in camera.events].count("finish") == 1
+        assert installation.device("camera").capture_state() is False
     finally:
         plane.close()
         installation.close()

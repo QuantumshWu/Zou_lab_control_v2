@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from enum import Enum
-import hashlib
+from dataclasses import dataclass, field
 import json
-import math
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -16,13 +13,6 @@ from zlc_durable import write_readable_json
 
 from .bimodal import fit_bimodal, finite_mean, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity
 from .psf import extract_psf_window, gaussian_psf_kernel
-
-
-class GridOrder(str, Enum):
-    ROW_MAJOR = "row_major"
-    SERPENTINE = "serpentine"
-    COLUMN_MAJOR = "column_major"
-    COLUMN_SERPENTINE = "column_serpentine"
 
 
 def _shape(value: object, field_name: str) -> tuple[int, int]:
@@ -35,23 +25,6 @@ def _shape(value: object, field_name: str) -> tuple[int, int]:
     return result
 
 
-def site_grid_positions_yx(grid_shape: tuple[int, int], ordering: GridOrder = GridOrder.ROW_MAJOR) -> np.ndarray:
-    """Return normalized ``(row, column)`` grid indices in authored order."""
-
-    rows, columns = _shape(grid_shape, "grid_shape")
-    ordering = GridOrder(ordering)
-    positions: list[tuple[int, int]] = []
-    if ordering in (GridOrder.ROW_MAJOR, GridOrder.SERPENTINE):
-        for row in range(rows):
-            cols = range(columns) if ordering is GridOrder.ROW_MAJOR or row % 2 == 0 else range(columns - 1, -1, -1)
-            positions.extend((row, column) for column in cols)
-    else:
-        for column in range(columns):
-            row_range = range(rows) if ordering is GridOrder.COLUMN_MAJOR or column % 2 == 0 else range(rows - 1, -1, -1)
-            positions.extend((row, column) for row in row_range)
-    return np.asarray(positions, dtype="<i8")
-
-
 @dataclass(frozen=True)
 class FrameContract:
     """Physical image facts on which a calibration is valid."""
@@ -59,6 +32,7 @@ class FrameContract:
     image_shape: tuple[int, int]
     sensor_shape: tuple[int, int] | None = None
     roi_xywh: tuple[int, int, int, int] | None = None
+    binning_yx: tuple[int, int] = (1, 1)
     exposure_seconds: float | None = None
     camera_id: str | None = None
     readout_mode: str | None = None
@@ -66,17 +40,19 @@ class FrameContract:
     def __post_init__(self) -> None:
         image = _shape(self.image_shape, "image_shape")
         object.__setattr__(self, "image_shape", image)
+        binning = _shape(self.binning_yx, "binning_yx")
+        object.__setattr__(self, "binning_yx", binning)
         if self.sensor_shape is not None:
             sensor = _shape(self.sensor_shape, "sensor_shape")
             object.__setattr__(self, "sensor_shape", sensor)
-            if sensor[0] < image[0] or sensor[1] < image[1]:
+            if sensor[0] < image[0] * binning[0] or sensor[1] < image[1] * binning[1]:
                 raise ValueError("sensor_shape cannot be smaller than image_shape")
         if self.roi_xywh is not None:
             roi = tuple(int(item) for item in self.roi_xywh)
             if len(roi) != 4 or roi[0] < 0 or roi[1] < 0 or roi[2] <= 0 or roi[3] <= 0:
                 raise ValueError("roi_xywh must be (x, y, width, height) with positive size")
-            if roi[2:] != (image[1], image[0]):
-                raise ValueError("roi_xywh size must match image_shape")
+            if roi[2:] != (image[1] * binning[1], image[0] * binning[0]):
+                raise ValueError("roi_xywh size and binning must match image_shape")
             if self.sensor_shape is not None and (roi[0] + roi[2] > self.sensor_shape[1] or roi[1] + roi[3] > self.sensor_shape[0]):
                 raise ValueError("roi_xywh lies outside sensor_shape")
             object.__setattr__(self, "roi_xywh", roi)
@@ -94,20 +70,20 @@ class FrameContract:
             raise ValueError(f"image shape {array.shape} differs from calibration {self.image_shape}")
         return array
 
-    @property
-    def fingerprint(self) -> str:
-        payload = {
+    def to_dict(self) -> dict[str, Any]:
+        return {
             "image_shape": self.image_shape,
             "sensor_shape": self.sensor_shape,
             "roi_xywh": self.roi_xywh,
+            "binning_yx": self.binning_yx,
             "exposure_seconds": self.exposure_seconds,
             "camera_id": self.camera_id,
             "readout_mode": self.readout_mode,
         }
-        return hashlib.blake2b(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
-            digest_size=16,
-        ).hexdigest()
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "FrameContract":
+        return cls(**dict(payload))
 
 
 @dataclass(frozen=True)
@@ -225,177 +201,255 @@ def extract_psf_signals(
     return output
 
 
-@dataclass(frozen=True)
-class TrapCalibration:
-    """Immutable site map and thresholds with explicit box/PSF dispatch."""
+def _site_ids(value: object) -> tuple[str, ...]:
+    result = tuple(str(item) for item in value)  # type: ignore[arg-type]
+    if not result or any(not item.strip() for item in result):
+        raise ValueError("site_ids must contain non-empty strings")
+    if len(set(result)) != len(result):
+        raise ValueError("site_ids must be unique")
+    return result
 
-    centers: np.ndarray
-    thresholds: np.ndarray | float
-    frame_contract: FrameContract | None = None
+
+def _nullable_floats(value: object) -> list[float | None]:
+    return [float(item) if np.isfinite(item) else None for item in np.asarray(value, dtype=float).reshape(-1)]
+
+
+def _floats_from_json(value: object) -> np.ndarray:
+    return np.asarray([np.nan if item is None else float(item) for item in value], dtype="<f8")  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class SiteMap:
+    """Measured site identities and image-pixel positions."""
+
+    site_ids: tuple[str, ...]
+    centers_xy: np.ndarray
+    valid_sites: np.ndarray
+    quality: np.ndarray
+    coordinate_frame: str = "image_pixel_xy"
+    topology: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        site_ids = _site_ids(self.site_ids)
+        centers = _immutable_array(self.centers_xy, "<f8", (len(site_ids), 2))
+        if not np.isfinite(centers).all():
+            raise ValueError("site centers must be finite")
+        valid = _immutable_array(self.valid_sites, "?", (len(site_ids),))
+        quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
+        frame = str(self.coordinate_frame).strip()
+        if not frame:
+            raise ValueError("coordinate_frame must be non-empty")
+        if self.topology is not None and not isinstance(self.topology, Mapping):
+            raise TypeError("topology must be a mapping or None")
+        object.__setattr__(self, "site_ids", site_ids)
+        object.__setattr__(self, "centers_xy", centers)
+        object.__setattr__(self, "valid_sites", valid)
+        object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "coordinate_frame", frame)
+        object.__setattr__(self, "topology", None if self.topology is None else dict(self.topology))
+
+    @property
+    def n_sites(self) -> int:
+        return len(self.site_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "site_ids": list(self.site_ids),
+            "centers_xy": self.centers_xy.tolist(),
+            "valid_sites": self.valid_sites.tolist(),
+            "quality": _nullable_floats(self.quality),
+            "coordinate_frame": self.coordinate_frame,
+            "topology": self.topology,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SiteMap":
+        return cls(
+            tuple(payload["site_ids"]),
+            np.asarray(payload["centers_xy"]),
+            np.asarray(payload["valid_sites"]),
+            _floats_from_json(payload["quality"]),
+            str(payload["coordinate_frame"]),
+            payload["topology"],
+        )
+
+
+@dataclass(frozen=True)
+class ReadoutModel:
+    """Per-site integration features, thresholds, usability, and quality."""
+
+    site_ids: tuple[str, ...]
+    thresholds: np.ndarray
+    usable_sites: np.ndarray
+    quality: np.ndarray
     method: str = "box"
-    roi_radius: int = 1
+    integration_half_width: int = 1
     reducer: str = "mean"
+    threshold_method: str = "empirical"
     psf_weights: np.ndarray | None = None
     psf_boxes: np.ndarray | None = None
     background: str = "none"
     psf_padding: int = 3
-    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        centers = _immutable_array(self.centers, "<f8")
-        if centers.ndim != 2 or centers.shape[1] != 2 or not len(centers):
-            raise ValueError("centers must have shape (N, 2)")
+        site_ids = _site_ids(self.site_ids)
         thresholds = np.asarray(self.thresholds, dtype="<f8")
         if thresholds.ndim == 0:
-            thresholds = np.full(len(centers), float(thresholds), dtype="<f8")
-        thresholds = _immutable_array(thresholds.reshape(-1), "<f8", (len(centers),))
-        if self.frame_contract is not None and not isinstance(self.frame_contract, FrameContract):
-            raise TypeError("frame_contract must be FrameContract or None")
+            thresholds = np.full(len(site_ids), float(thresholds), dtype="<f8")
+        thresholds = _immutable_array(thresholds.reshape(-1), "<f8", (len(site_ids),))
+        usable = _immutable_array(self.usable_sites, "?", (len(site_ids),))
+        quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
         method = str(self.method).lower()
         if method not in {"box", "psf", "uniform_psf"}:
             raise ValueError("method must be 'box', 'psf', or 'uniform_psf'")
-        object.__setattr__(self, "centers", centers)
-        object.__setattr__(self, "thresholds", thresholds)
-        object.__setattr__(self, "method", method)
-        radius = int(self.roi_radius)
-        if radius < 0:
-            raise ValueError("roi_radius must be non-negative")
-        object.__setattr__(self, "roi_radius", radius)
-        object.__setattr__(self, "reducer", str(self.reducer).lower())
+        half_width = int(self.integration_half_width)
+        if half_width < 0:
+            raise ValueError("integration_half_width must be non-negative")
+        reducer = str(self.reducer).lower()
+        if reducer not in {"mean", "sum", "median", "max"}:
+            raise ValueError("reducer must be mean, sum, median, or max")
+        threshold_method = str(self.threshold_method).lower()
+        if threshold_method not in {"empirical", "gaussian"}:
+            raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
         background = str(self.background).lower()
         if background not in {"none", "annulus"}:
             raise ValueError("background must be 'none' or 'annulus'")
-        object.__setattr__(self, "background", background)
         padding = int(self.psf_padding)
         if padding <= 0:
             raise ValueError("psf_padding must be positive")
-        object.__setattr__(self, "psf_padding", padding)
+        weights = boxes = None
         if method in {"psf", "uniform_psf"}:
             if self.psf_weights is None or self.psf_boxes is None:
                 raise ValueError("PSF calibration requires psf_weights and psf_boxes")
             weights = _immutable_array(self.psf_weights, "<f8")
             boxes = _immutable_array(self.psf_boxes, "<i8")
-            if weights.ndim != 3 or weights.shape[0] != len(centers) or boxes.shape != (len(centers), 4):
+            if weights.ndim != 3 or weights.shape[0] != len(site_ids) or boxes.shape != (len(site_ids), 4):
                 raise ValueError("PSF arrays have incompatible shapes")
-            object.__setattr__(self, "psf_weights", weights)
-            object.__setattr__(self, "psf_boxes", boxes)
-        else:
-            object.__setattr__(self, "psf_weights", None)
-            object.__setattr__(self, "psf_boxes", None)
-        object.__setattr__(self, "metadata", dict(self.metadata))
-
-    @property
-    def n_sites(self) -> int:
-        return int(self.centers.shape[0])
-
-    @property
-    def fingerprint(self) -> str:
-        payload = {
-            "centers": self.centers.tolist(),
-            "thresholds": self.thresholds.tolist(),
-            "frame_contract": None if self.frame_contract is None else self.frame_contract.fingerprint,
-            "method": self.method,
-            "roi_radius": self.roi_radius,
-            "reducer": self.reducer,
-            "psf_weights": None if self.psf_weights is None else self.psf_weights.tolist(),
-            "psf_boxes": None if self.psf_boxes is None else self.psf_boxes.tolist(),
-            "background": self.background,
-            "psf_padding": self.psf_padding,
-            "metadata": self.metadata,
-        }
-        return hashlib.blake2b(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
-            digest_size=16,
-        ).hexdigest()
-
-    def signals(self, image: object, *, method: str | None = None) -> np.ndarray:
-        array = np.asarray(image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image)
-        if self.frame_contract is not None:
-            array = self.frame_contract.assert_image(array)
-        selected = self.method if method in (None, "") else str(method).lower()
-        if selected != self.method:
-            raise ValueError(f"calibration owns method {self.method!r}, not {selected!r}")
-        if selected == "box":
-            return extract_box_signals(array, self.centers, radius=self.roi_radius, reducer=self.reducer)
-        return extract_psf_signals(
-            array,
-            self.centers,
-            kernels=self.psf_weights,
-            boxes_xywh=self.psf_boxes,
-            background=self.background,
-            radius=(self.psf_weights.shape[1] - 1) // 2,
-            padding=self.psf_padding,
-        )
-
-    def detect(self, image: object, *, method: str | None = None) -> AtomDetection:
-        values = self.signals(image, method=method)
-        occupied = classify_threshold(values, self.thresholds)
-        return AtomDetection(values, occupied, tuple(np.flatnonzero(occupied)), self.thresholds)
-
-    def readout_exposure(self, fallback: float | None = None) -> float | None:
-        if self.frame_contract is None or self.frame_contract.exposure_seconds is None:
-            return fallback
-        return float(self.frame_contract.exposure_seconds)
-
-    def thresholds_for(self, method: str | None = None) -> np.ndarray:
-        selected = self.method if method in (None, "") else str(method).lower()
-        if selected != self.method:
-            raise ValueError(f"calibration owns method {self.method!r}, not {selected!r}")
-        return self.thresholds
-
-    def with_thresholds(self, thresholds: object, **metadata: Any) -> "TrapCalibration":
-        return replace(self, thresholds=thresholds, metadata={**self.metadata, **metadata})
+        object.__setattr__(self, "site_ids", site_ids)
+        object.__setattr__(self, "thresholds", thresholds)
+        object.__setattr__(self, "usable_sites", usable)
+        object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "method", method)
+        object.__setattr__(self, "integration_half_width", half_width)
+        object.__setattr__(self, "reducer", reducer)
+        object.__setattr__(self, "threshold_method", threshold_method)
+        object.__setattr__(self, "psf_weights", weights)
+        object.__setattr__(self, "psf_boxes", boxes)
+        object.__setattr__(self, "background", background)
+        object.__setattr__(self, "psf_padding", padding)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "centers": self.centers.tolist(),
-            "thresholds": self.thresholds.tolist(),
-            "frame_contract": {
-                "image_shape": None if self.frame_contract is None else self.frame_contract.image_shape,
-                "sensor_shape": None if self.frame_contract is None else self.frame_contract.sensor_shape,
-                "roi_xywh": None if self.frame_contract is None else self.frame_contract.roi_xywh,
-                "exposure_seconds": None if self.frame_contract is None else self.frame_contract.exposure_seconds,
-                "camera_id": None if self.frame_contract is None else self.frame_contract.camera_id,
-                "readout_mode": None if self.frame_contract is None else self.frame_contract.readout_mode,
-            } if self.frame_contract is not None else None,
-            "method": self.method,
-            "roi_radius": self.roi_radius,
-            "reducer": self.reducer,
-            "psf_weights": None if self.psf_weights is None else self.psf_weights.tolist(),
-            "psf_boxes": None if self.psf_boxes is None else self.psf_boxes.tolist(),
-            "background": self.background,
-            "psf_padding": self.psf_padding,
-            "metadata": self.metadata,
-            "fingerprint": self.fingerprint,
+            "site_ids": list(self.site_ids),
+            "thresholds": _nullable_floats(self.thresholds),
+            "usable_sites": self.usable_sites.tolist(),
+            "quality": _nullable_floats(self.quality),
+            "threshold_method": self.threshold_method,
+            "integration": {
+                "method": self.method,
+                "half_width": self.integration_half_width,
+                "reducer": self.reducer,
+                "psf_weights": None if self.psf_weights is None else self.psf_weights.tolist(),
+                "psf_boxes": None if self.psf_boxes is None else self.psf_boxes.tolist(),
+                "background": self.background,
+                "padding": self.psf_padding,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ReadoutModel":
+        integration = payload["integration"]
+        return cls(
+            tuple(payload["site_ids"]),
+            _floats_from_json(payload["thresholds"]),
+            np.asarray(payload["usable_sites"]),
+            _floats_from_json(payload["quality"]),
+            method=integration["method"],
+            integration_half_width=integration["half_width"],
+            reducer=integration["reducer"],
+            threshold_method=payload["threshold_method"],
+            psf_weights=None if integration["psf_weights"] is None else np.asarray(integration["psf_weights"]),
+            psf_boxes=None if integration["psf_boxes"] is None else np.asarray(integration["psf_boxes"]),
+            background=integration["background"],
+            psf_padding=integration["padding"],
+        )
+
+
+@dataclass(frozen=True)
+class TrapCalibration:
+    """One aligned SiteMap, readout model, frame contract, and report."""
+
+    site_map: SiteMap
+    readout_model: ReadoutModel
+    frame_contract: FrameContract
+    report: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.site_map, SiteMap):
+            raise TypeError("site_map must be SiteMap")
+        if not isinstance(self.readout_model, ReadoutModel):
+            raise TypeError("readout_model must be ReadoutModel")
+        if not isinstance(self.frame_contract, FrameContract):
+            raise TypeError("frame_contract must be FrameContract")
+        if self.site_map.site_ids != self.readout_model.site_ids:
+            raise ValueError("SiteMap and ReadoutModel site_ids must align")
+        object.__setattr__(self, "report", dict(self.report))
+
+    @property
+    def n_sites(self) -> int:
+        return self.site_map.n_sites
+
+    def signals(self, image: object, *, method: str | None = None) -> np.ndarray:
+        array = np.asarray(image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image)
+        array = self.frame_contract.assert_image(array)
+        model = self.readout_model
+        selected = model.method if method in (None, "") else str(method).lower()
+        if selected != model.method:
+            raise ValueError(f"calibration owns method {model.method!r}, not {selected!r}")
+        if selected == "box":
+            values = extract_box_signals(
+                array,
+                self.site_map.centers_xy,
+                radius=model.integration_half_width,
+                reducer=model.reducer,
+            )
+        else:
+            values = extract_psf_signals(
+                array,
+                self.site_map.centers_xy,
+                kernels=model.psf_weights,
+                boxes_xywh=model.psf_boxes,
+                background=model.background,
+                radius=model.integration_half_width,
+                padding=model.psf_padding,
+            )
+        return np.where(self.site_map.valid_sites & model.usable_sites, values, np.nan)
+
+    def detect(self, image: object, *, method: str | None = None) -> AtomDetection:
+        values = self.signals(image, method=method)
+        thresholds = self.readout_model.thresholds
+        occupied = classify_threshold(values, thresholds)
+        return AtomDetection(values, occupied, tuple(np.flatnonzero(occupied)), thresholds)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "site_map": self.site_map.to_dict(),
+            "readout_model": self.readout_model.to_dict(),
+            "frame_contract": self.frame_contract.to_dict(),
+            "report": dict(self.report),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "TrapCalibration":
-        frame = payload["frame_contract"]
-        contract = None if frame is None else FrameContract(**frame)
-        calibration = cls(
-            np.asarray(payload["centers"]),
-            np.asarray(payload["thresholds"]),
-            contract,
-            method=payload.get("method", "box"),
-            roi_radius=payload.get("roi_radius", 1),
-            reducer=payload.get("reducer", "mean"),
-            psf_weights=None if payload.get("psf_weights") is None else np.asarray(payload["psf_weights"]),
-            psf_boxes=None if payload.get("psf_boxes") is None else np.asarray(payload["psf_boxes"]),
-            background=payload.get("background", "none"),
-            psf_padding=payload.get("psf_padding", 3),
-            metadata=payload.get("metadata", {}),
+        return cls(
+            SiteMap.from_dict(payload["site_map"]),
+            ReadoutModel.from_dict(payload["readout_model"]),
+            FrameContract.from_dict(payload["frame_contract"]),
+            payload["report"],
         )
-        if payload.get("fingerprint") not in (None, calibration.fingerprint):
-            raise ValueError("calibration fingerprint mismatch")
-        return calibration
 
     def save(self, path: str | Path) -> Path:
         target = Path(path)
-        # The same reader-facing layout every saved document in this project
-        # uses, written atomically.  The two json.dumps above are DIGESTS and
-        # stay compact and sorted on purpose: a hash must not move because a
-        # line-wrap rule changed its mind.
         write_readable_json(target, self.to_dict())
         return target
 
@@ -408,15 +462,6 @@ class TrapCalibration:
 class CalibrationResult:
     calibration: TrapCalibration
     report: Mapping[str, Any]
-
-
-def _regular_centers(image_shape: tuple[int, int], grid_shape: tuple[int, int], ordering: GridOrder) -> np.ndarray:
-    rows, columns = _shape(grid_shape, "grid_shape")
-    height, width = image_shape
-    ys = np.linspace(0.18 * height, 0.82 * height, rows)
-    xs = np.linspace(0.18 * width, 0.82 * width, columns)
-    indices = site_grid_positions_yx((rows, columns), ordering)
-    return np.asarray([(xs[column], ys[row]) for row, column in indices], dtype="<f8")
 
 
 def _gaussian_2d(coords: object, offset: float, amplitude: float, x0: float, y0: float, sigma_x: float, sigma_y: float) -> np.ndarray:
@@ -493,101 +538,94 @@ def _refine_center_subpixel(image: np.ndarray, x: float, y: float, half: int = 2
     return x_fit, y_fit
 
 
-def _sort_centers_grid(centers: np.ndarray, grid_shape: tuple[int, int], ordering: GridOrder) -> np.ndarray:
-    centers = np.asarray(centers, dtype=float)
-    rows, columns = grid_shape
-    if centers.shape != (rows * columns, 2):
-        raise ValueError("center count does not match grid_shape")
-    positions = site_grid_positions_yx(grid_shape, ordering)
-    grid = np.empty((rows, columns, 2), dtype=float)
-    if ordering in (GridOrder.ROW_MAJOR, GridOrder.SERPENTINE):
-        for row_index, chunk in enumerate(np.array_split(centers[np.argsort(centers[:, 1])], rows)):
-            grid[row_index, :, :] = chunk[np.argsort(chunk[:, 0])]
-    else:
-        for column_index, chunk in enumerate(np.array_split(centers[np.argsort(centers[:, 0])], columns)):
-            grid[:, column_index, :] = chunk[np.argsort(chunk[:, 1])]
-    return np.stack(tuple(grid[row, column] for row, column in positions))
+def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarray:
+    """Order measured sites top-to-bottom, then left-to-right within a row."""
+
+    rows: list[list[int]] = []
+    for index in np.argsort(centers_xy[:, 1], kind="stable"):
+        if not rows or centers_xy[index, 1] - float(np.mean(centers_xy[rows[-1], 1])) > row_tolerance:
+            rows.append([int(index)])
+        else:
+            rows[-1].append(int(index))
+    return np.asarray(
+        [index for row in rows for index in sorted(row, key=lambda item: centers_xy[item, 0])],
+        dtype=int,
+    )
 
 
-def _robust_axis_lattice(anchors: np.ndarray, count: int) -> np.ndarray:
-    anchors = np.asarray(anchors, dtype=float)
-    if count <= 1:
-        return anchors.copy()
-    indices = np.arange(count, dtype=float)
-    slopes = [(anchors[j] - anchors[i]) / (j - i) for i in range(count) for j in range(i + 1, count)]
-    pitch = float(np.median(slopes)) if slopes else 0.0
-    origin = float(np.median(anchors - pitch * indices))
-    return origin + pitch * indices
-
-
-def _regularize_grid(row_major_centers: np.ndarray, grid_shape: tuple[int, int], image_shape: tuple[int, int]) -> np.ndarray:
-    rows, columns = grid_shape
-    grid = np.asarray(row_major_centers, dtype=float).reshape(rows, columns, 2)
-    height, width = image_shape
-    row_y = _robust_axis_lattice(np.median(grid[:, :, 1], axis=1), rows)
-    column_x = _robust_axis_lattice(np.median(grid[:, :, 0], axis=0), columns)
-    pitches = []
-    if rows > 1:
-        pitches.append(abs(float(row_y[1] - row_y[0])))
-    if columns > 1:
-        pitches.append(abs(float(column_x[1] - column_x[0])))
-    pitches = [value for value in pitches if math.isfinite(value) and value > 0]
-    pitch = float(min(pitches)) if pitches else float(min(height, width))
-    lattice_x = np.broadcast_to(column_x[None, :], (rows, columns))
-    lattice_y = np.broadcast_to(row_y[:, None], (rows, columns))
-    off_node = np.hypot(grid[:, :, 0] - lattice_x, grid[:, :, 1] - lattice_y) > 0.5 * pitch
-    grid[off_node, 0] = lattice_x[off_node]
-    grid[off_node, 1] = lattice_y[off_node]
-    margin = max(1.0, 0.25 * pitch)
-    grid[:, :, 0] = np.clip(grid[:, :, 0], margin, max(margin, width - 1 - margin))
-    grid[:, :, 1] = np.clip(grid[:, :, 1], margin, max(margin, height - 1 - margin))
-    return grid.reshape(rows * columns, 2)
-
-
-def find_site_centers(
+def detect_sites(
     image: object,
-    grid_shape: tuple[int, int],
     *,
-    min_distance: int | None = None,
-    threshold_rel: float = 0.35,
-    ordering: GridOrder = GridOrder.ROW_MAJOR,
-    refine_half: int = 2,
-) -> np.ndarray:
-    """Detect a bright lattice with subpixel refinement and lattice repair."""
+    spot_sigma: float = 1.0,
+    min_distance: int = 3,
+    detection_sigma: float = 6.0,
+) -> SiteMap:
+    """Discover every resolvable bright site without an authored site count."""
 
     from scipy import ndimage
 
     array = np.asarray(image.values if hasattr(image, "values") else image, dtype=float)
-    if array.ndim != 2 or 0 in array.shape or not np.isfinite(array).any():
+    if array.ndim != 2 or 0 in array.shape or not np.isfinite(array).all():
         raise ValueError("image must be a non-empty finite 2D array")
-    grid = _shape(grid_shape, "grid_shape")
-    rows, columns = grid
-    needed = rows * columns
-    if min_distance is None:
-        min_distance = max(3, int(min(array.shape) / max(rows, columns, 1) / 2))
+    spot_sigma = float(spot_sigma)
+    detection_sigma = float(detection_sigma)
     min_distance = int(min_distance)
+    if spot_sigma <= 0 or not np.isfinite(spot_sigma):
+        raise ValueError("spot_sigma must be positive and finite")
+    if detection_sigma <= 0 or not np.isfinite(detection_sigma):
+        raise ValueError("detection_sigma must be positive and finite")
     if min_distance <= 0:
         raise ValueError("min_distance must be positive")
-    smooth = ndimage.gaussian_filter(array, sigma=1.0)
-    cutoff = float(np.nanmin(smooth) + float(threshold_rel) * (np.nanmax(smooth) - np.nanmin(smooth)))
-    local_max = ndimage.maximum_filter(smooth, size=min_distance)
-    is_peak = smooth == local_max
-    candidates_yx = np.argwhere(is_peak & (smooth >= cutoff))
-    if len(candidates_yx) < needed:
-        peaks_yx = np.argwhere(is_peak)
-        if len(peaks_yx) < needed:
-            raise ValueError(f"only {len(peaks_yx)} local maxima for a {rows}x{columns} grid")
-        weights = smooth[peaks_yx[:, 0], peaks_yx[:, 1]]
-        candidates_yx = peaks_yx[np.argsort(weights)[::-1][:needed]]
-    weights = smooth[candidates_yx[:, 0], candidates_yx[:, 1]]
-    selected = candidates_yx[np.argsort(weights)[::-1]][:needed]
-    centers = np.asarray(
-        [_refine_center_subpixel(array, float(column), float(row), half=int(refine_half)) for row, column in selected],
-        dtype=float,
+
+    smooth = ndimage.gaussian_filter(array, sigma=spot_sigma)
+    background = ndimage.gaussian_filter(array, sigma=max(4.0 * spot_sigma, spot_sigma + 2.0))
+    response = smooth - background
+    baseline = float(np.median(response))
+    lower = response[response <= baseline]
+    noise = 1.4826 * float(np.median(np.abs(lower - baseline)))
+    noise = max(
+        noise,
+        np.finfo(float).eps * max(1.0, float(np.max(np.abs(response)))),
     )
-    row_major = _sort_centers_grid(centers, grid, GridOrder.ROW_MAJOR)
-    repaired = _regularize_grid(row_major, grid, array.shape)
-    return _sort_centers_grid(repaired, grid, GridOrder(ordering))
+    cutoff = baseline + detection_sigma * noise
+    local_maxima = response == ndimage.maximum_filter(response, size=3, mode="nearest")
+    candidates = np.argwhere(local_maxima & (response >= cutoff))
+    ranked = sorted(
+        candidates,
+        key=lambda item: (-float(response[tuple(item)]), int(item[0]), int(item[1])),
+    )
+    selected: list[tuple[int, int]] = []
+    for row, column in ranked:
+        point = (int(row), int(column))
+        if all((point[0] - other[0]) ** 2 + (point[1] - other[1]) ** 2 >= min_distance**2 for other in selected):
+            selected.append(point)
+    if not selected:
+        raise ValueError("calibration image contains no detectable sites")
+
+    refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
+    centers = np.asarray(
+        [
+            _refine_center_subpixel(array, float(column), float(row), half=refine_half)
+            for row, column in selected
+        ],
+        dtype="<f8",
+    )
+    quality = np.asarray(
+        [(float(response[row, column]) - baseline) / noise for row, column in selected],
+        dtype="<f8",
+    )
+    order = _stable_site_order(centers, float(min_distance))
+    centers = centers[order]
+    quality = quality[order]
+    site_ids = tuple(f"site_{index:04d}" for index in range(len(centers)))
+    return SiteMap(
+        site_ids,
+        centers,
+        quality >= detection_sigma,
+        quality,
+        "image_pixel_xy",
+        None,
+    )
 
 
 def _annulus_background(image: np.ndarray, box: tuple[int, int, int, int], padding: int) -> float:
@@ -774,16 +812,17 @@ def calibrate(
     short_frames: object,
     *,
     frame_contract: FrameContract,
-    grid_shape: tuple[int, int],
     method: str = "box",
-    roi_radius: int = 1,
+    threshold_method: str = "empirical",
+    integration_half_width: int = 1,
     reducer: str = "mean",
-    expected_centers_xy: object | None = None,
+    detection_spot_sigma: float = 1.0,
+    detection_min_distance: int = 3,
+    detection_sigma: float = 6.0,
     train_fraction: float = 0.9,
     split_seed: int = 0,
     histogram_bins: int = 120,
     max_drop: int = 5,
-    maximum_site_residual_px: float = 0.1,
     psf_padding: int = 3,
 ) -> CalibrationResult:
     """Calibrate using grouped reference labels and held-out short frames."""
@@ -793,24 +832,30 @@ def calibrate(
     if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
         raise ValueError("reference and short frames must share non-empty group counts")
     reference_average = finite_mean(references, axis=(0, 1))
-    centers = find_site_centers(reference_average, grid_shape)
-    if expected_centers_xy is not None:
-        expected = np.asarray(expected_centers_xy, dtype=float).reshape(-1, 2)
-        residual_limit = float(maximum_site_residual_px)
-        if not np.isfinite(residual_limit) or residual_limit <= 0.0:
-            raise ValueError("maximum_site_residual_px must be finite and positive")
-        if expected.shape != centers.shape or np.max(np.linalg.norm(centers - expected, axis=1)) > residual_limit:
-            raise ValueError("detected site centers differ from expected_centers_xy")
-        centers = expected.copy()
+    site_map = detect_sites(
+        reference_average,
+        spot_sigma=detection_spot_sigma,
+        min_distance=detection_min_distance,
+        detection_sigma=detection_sigma,
+    )
+    centers = site_map.centers_xy
     method = str(method).lower()
+    threshold_method = str(threshold_method).lower()
+    if threshold_method not in {"empirical", "gaussian"}:
+        raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
     if method == "box":
-        extractor = lambda frame: extract_box_signals(frame, centers, radius=roi_radius, reducer=reducer)
+        extractor = lambda frame: extract_box_signals(
+            frame,
+            centers,
+            radius=integration_half_width,
+            reducer=reducer,
+        )
         calibration_kwargs: dict[str, Any] = {}
     elif method in {"psf", "uniform_psf"}:
         per_site_weights, uniform_weight, boxes, psf_fit_centers, psf_fit_sigmas, psf_fit_ok = _fit_psf_features(
             reference_average,
             centers,
-            radius=roi_radius,
+            radius=integration_half_width,
             padding=psf_padding,
         )
         weights = per_site_weights if method == "psf" else np.broadcast_to(uniform_weight, per_site_weights.shape).copy()
@@ -820,7 +865,7 @@ def calibrate(
             kernels=weights,
             boxes_xywh=boxes,
             background="annulus",
-            radius=roi_radius,
+            radius=integration_half_width,
             padding=psf_padding,
         )
         calibration_kwargs = {
@@ -830,7 +875,7 @@ def calibrate(
             "psf_padding": psf_padding,
         }
     else:
-        raise ValueError("method must be 'box' or 'psf'")
+        raise ValueError("method must be 'box', 'psf', or 'uniform_psf'")
     reference_signals = np.asarray([[extractor(frame) for frame in group] for group in references], dtype=float)
     short_signals = np.asarray([extractor(frame) for frame in shorts], dtype=float)
     reference_valid = np.isfinite(reference_signals)
@@ -861,6 +906,7 @@ def calibrate(
     site_fidelity_dark = np.full(len(centers), np.nan, dtype=float)
     site_fidelity_bright = np.full(len(centers), np.nan, dtype=float)
     site_model_fidelity = np.full(len(centers), np.nan, dtype=float)
+    gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
     n_test = np.zeros(len(centers), dtype=int)
     n_train_dark = np.zeros(len(centers), dtype=int)
     n_train_bright = np.zeros(len(centers), dtype=int)
@@ -886,9 +932,19 @@ def calibrate(
                 # readout is judged by.  Refusing the site is one answer.
                 n_train_dark[site] = n_train_bright[site] = 0
                 continue
-            threshold = _empirical_threshold(dark, bright_values, edges, bright_above=True, tie_target=gaussian_threshold)
-            if not np.isfinite(threshold):
+            gaussian_thresholds[site] = gaussian_threshold
+            if threshold_method == "gaussian":
                 threshold = gaussian_threshold
+            else:
+                threshold = _empirical_threshold(
+                    dark,
+                    bright_values,
+                    edges,
+                    bright_above=True,
+                    tie_target=gaussian_threshold,
+                )
+                if not np.isfinite(threshold):
+                    threshold = gaussian_threshold
             site_model_fidelity[site] = gaussian_fidelity(dark_mean, dark_sigma, bright_mean, bright_sigma, threshold, True)[2]
             thresholds[site] = threshold
             short_values = short_signals[:, site]
@@ -913,8 +969,35 @@ def calibrate(
     site_fidelity_dark = confusion.dark
     site_fidelity_bright = confusion.bright
     n_test = confusion.tested
-    calibration = TrapCalibration(centers, thresholds, frame_contract, method=method, roi_radius=roi_radius, reducer=reducer, **calibration_kwargs)
+    usable_sites = site_map.valid_sites & np.isfinite(thresholds)
+    readout_model = ReadoutModel(
+        site_map.site_ids,
+        thresholds,
+        usable_sites,
+        site_fidelity,
+        method=method,
+        integration_half_width=integration_half_width,
+        reducer=reducer,
+        threshold_method=threshold_method,
+        **calibration_kwargs,
+    )
+    calibration_report = {
+        "detected_sites": site_map.n_sites,
+        "integration_method": method,
+        "threshold_method": threshold_method,
+        "site_detection_quality": _nullable_floats(site_map.quality),
+        "site_readout_quality": _nullable_floats(site_fidelity),
+        "site_n_test": [int(value) for value in n_test],
+        "site_n_train_dark": [int(value) for value in n_train_dark],
+        "site_n_train_bright": [int(value) for value in n_train_bright],
+    }
+    calibration = TrapCalibration(site_map, readout_model, frame_contract, calibration_report)
     report = {
+        "site_ids": site_map.site_ids,
+        "site_centers_xy": site_map.centers_xy,
+        "site_detection_quality": site_map.quality,
+        "site_valid": site_map.valid_sites,
+        "site_usable": usable_sites,
         "reference_average": reference_average,
         "reference_signals": reference_signals,
         "labels_occupied": labels_occupied,
@@ -922,6 +1005,8 @@ def calibrate(
         "labels_valid": labels_valid,
         "short_signals": short_signals,
         "thresholds": thresholds,
+        "gaussian_thresholds": gaussian_thresholds,
+        "threshold_method": threshold_method,
         "predictions": predictions,
         "site_fidelity": site_fidelity,
         "site_fidelity_dark": site_fidelity_dark,
@@ -972,14 +1057,14 @@ __all__ = [
     "AtomDetection",
     "CalibrationResult",
     "classify_threshold",
+    "detect_sites",
     "FrameContract",
-    "GridOrder",
+    "ReadoutModel",
+    "SiteMap",
     "TrapCalibration",
     "calibrate",
     "detect",
     "extract_box_signals",
     "extract_psf_signals",
-    "find_site_centers",
-    "site_grid_positions_yx",
     "signals",
 ]

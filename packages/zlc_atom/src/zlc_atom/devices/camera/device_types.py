@@ -118,7 +118,7 @@ def _bind_camera(context, key: str, camera: object, identity: str, type_id: str)
             "camera.adapter": camera,
             "camera.working_point": camera.capture_working_point(),
         },
-        close_session=lambda _command: getattr(camera, "finish_record_capture")() if getattr(camera, "capture_state")()[0] else None,
+        close_session=lambda _command: getattr(camera, "finish_record_capture")() if getattr(camera, "capture_state")() else None,
         interrupt_operations={SafetyOperation.DISARM: lambda: getattr(camera, "finish_record_capture")()},
     )
     capabilities = dict(proof.snapshot)
@@ -139,7 +139,13 @@ def _virtual_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
     if config.frame_shape_yx != geometry.image_shape_yx or config.grid_shape_yx != geometry.grid_shape_yx:
         raise ValueError("camera virtual geometry must share SimulationWorld geometry")
-    camera = VirtualCamera(config, frame_source=lambda ordinal: world.render_frame(ordinal, exposure_seconds=config.exposure_seconds))
+    camera = VirtualCamera(
+        config,
+        frame_source=lambda ordinal, exposure: world.render_frame(
+            ordinal,
+            exposure_seconds=exposure,
+        ),
+    )
     world.register_camera(camera)
     return _bind_camera(context, key, camera, f"virtual-camera:{key}", "camera.virtual")
 

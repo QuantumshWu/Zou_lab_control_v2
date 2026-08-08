@@ -180,6 +180,28 @@ def test_a_blank_roi_means_the_full_sensor_not_a_stale_window(fake_pypylon) -> N
     assert camera.Height.GetValue() == camera.HeightMax.GetValue()
 
 
+def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_pypylon) -> None:
+    camera = _FakeCamera()
+    adapter = PylonCameraAdapter(
+        PylonCameraConfig(trigger_source="Line1"),
+        camera=camera,
+    )
+    adapter.open()
+    point = adapter.configure_measurement(
+        exposure_seconds=0.012345,
+        roi_xywh=(101, 51, 641, 481),
+    )
+    assert point.exposure_seconds == pytest.approx(0.012345)
+    assert point.required_external_trigger_interval_seconds == pytest.approx(0.012345)
+    assert point.roi_origin_yx == (50, 100)
+    assert point.roi_shape_yx == (480, 640)
+
+    adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+    with pytest.raises(RuntimeError, match="while armed"):
+        adapter.configure_measurement(exposure_seconds=0.02, roi_xywh=None)
+    adapter.finish_record_capture()
+
+
 def test_free_run_keeps_the_stream_resident_across_arm_and_finish(fake_pypylon) -> None:
     """Restarting a USB3 stream per frame was the live-monitor stutter."""
 

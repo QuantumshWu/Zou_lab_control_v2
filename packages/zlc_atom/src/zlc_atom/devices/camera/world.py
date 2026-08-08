@@ -130,23 +130,25 @@ class SimulationWorld:
         ``count`` is the number of camera windows in the loaded pulse, not the
         number of independent shots.  The sequencer calls this once per
         ``fire``; all windows rendered during that call therefore share the
-        occupancy selected for that shot.
+        occupancy selected for that shot.  A camera working point owns the
+        maximum integration exposure.  An explicitly compiled external gate
+        may shorten an individual window, as the calibration long/readout/long
+        protocol does, but it cannot extend the configured camera exposure.
         """
 
         windows = int(count)
         if windows <= 0:
             raise ValueError("camera window count must be positive")
         if frame_exposures is None:
-            exposures = (0.005,) * windows
+            gates: tuple[float, ...] | None = None
         else:
-            try:
-                exposures = tuple(float(value) for value in frame_exposures)  # type: ignore[arg-type]
-            except (TypeError, ValueError) as exc:
-                raise ValueError("frame_exposures must be a finite sequence") from exc
-            if len(exposures) != windows:
-                raise ValueError("frame_exposures length must equal camera window count")
-            if any(not np.isfinite(value) or value <= 0 for value in exposures):
-                raise ValueError("frame_exposures must contain positive finite values")
+            gates = tuple(float(value) for value in frame_exposures)  # type: ignore[arg-type]
+            if len(gates) != windows or any(
+                not np.isfinite(value) or value <= 0 for value in gates
+            ):
+                raise ValueError(
+                    "frame_exposures must contain one positive finite value per camera window"
+                )
         with self._lock:
             ordinal = self._fire_count
             shot_occupancy = self._occupancy_for_ordinal(ordinal)
@@ -154,7 +156,13 @@ class SimulationWorld:
             # Devices own their protocol; the world only performs explicit
             # trigger routing and never exposes private backend channels.
             for camera in tuple(self._cameras):
-                for exposure in exposures:
+                configured = float(camera.capture_working_point().exposure_seconds)
+                effective = (
+                    (configured,) * windows
+                    if gates is None
+                    else tuple(min(configured, gate) for gate in gates)
+                )
+                for exposure in effective:
                     frame = self.render_frame(
                         ordinal,
                         exposure_seconds=exposure,

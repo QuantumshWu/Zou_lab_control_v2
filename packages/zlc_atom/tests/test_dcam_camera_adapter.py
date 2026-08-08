@@ -187,8 +187,22 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
         assert point.sensor_shape_yx == (12, 16)
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (8, 8)
-        adapter.configure_exposure_seconds(0.015)
-        assert adapter.capture_working_point().exposure_seconds == 0.015
+        point = adapter.configure_measurement(
+            exposure_seconds=0.015,
+            roi_xywh=(5, 5, 7, 7),
+        )
+        assert point.exposure_seconds == 0.015
+        assert point.roi_origin_yx == (4, 4)
+        assert point.roi_shape_yx == (4, 4)
+        adapter.arm(
+            None,
+            source_group_sizes=None,
+            buffer_frame_count=1,
+            timeout=1.0,
+        )
+        with pytest.raises(RuntimeError, match="while armed"):
+            adapter.configure_measurement(exposure_seconds=0.02, roi_xywh=None)
+        adapter.finish_record_capture()
     finally:
         adapter.close()
     owner_threads = {thread_id for _name, thread_id in driver.calls}
@@ -353,7 +367,7 @@ def test_stop_failure_retains_driver_ring_for_explicit_recovery() -> None:
     driver.device.stop_error = RuntimeError("injected stop failure")
     with pytest.raises(RuntimeError, match="injected stop failure"):
         adapter.finish_record_capture()
-    assert adapter.capture_state()[0]
+    assert adapter.capture_state()
     assert driver.device.released == 0
     driver.device.stop_error = None
     adapter.finish_record_capture()

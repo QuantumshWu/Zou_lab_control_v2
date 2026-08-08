@@ -14,7 +14,7 @@ imports this package, runs the virtual backend, and passes the whole suite.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 from typing import Sequence
 
@@ -44,6 +44,20 @@ def _snap_to_increment(value: int, low: int, high: int, increment: int) -> int:
     return int(low) + ((clamped - int(low)) // increment) * increment
 
 
+def _roi_request(
+    value: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    if value is None:
+        return None
+    try:
+        result = tuple(int(item) for item in value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("roi_xywh must contain four integers or be None") from exc
+    if len(result) != 4:
+        raise ValueError("roi_xywh must contain four integers or be None")
+    return result
+
+
 @dataclass(frozen=True)
 class PylonCameraConfig:
     """What an operator writes down to reach and set up one Basler camera."""
@@ -71,9 +85,9 @@ class PylonCameraAdapter:
         self._armed_total: int | None = None
         self._grabbed = 0
         self._armed = False
-        self._roi = config.roi_xywh
+        self._roi = _roi_request(config.roi_xywh)
         self._configured = False
-        self._dropped = 0
+        self._capture_incomplete = False
 
     # ------------------------------------------------------------------ open
 
@@ -189,22 +203,87 @@ class PylonCameraAdapter:
                 camera.Height.SetValue(int(camera.HeightMax.GetValue()))
                 return
             x, y, width, height = self._roi
-            width = _snap_to_increment(width, camera.Width.GetMin(), camera.Width.GetMax(), camera.Width.GetInc())
-            height = _snap_to_increment(height, camera.Height.GetMin(), camera.Height.GetMax(), camera.Height.GetInc())
+            sensor_width = int(camera.WidthMax.GetValue())
+            sensor_height = int(camera.HeightMax.GetValue())
+            width = _snap_to_increment(
+                width,
+                camera.Width.GetMin(),
+                min(camera.Width.GetMax(), sensor_width),
+                camera.Width.GetInc(),
+            )
+            height = _snap_to_increment(
+                height,
+                camera.Height.GetMin(),
+                min(camera.Height.GetMax(), sensor_height),
+                camera.Height.GetInc(),
+            )
             camera.Width.SetValue(width)
             camera.Height.SetValue(height)
-            x = _snap_to_increment(x, camera.OffsetX.GetMin(), camera.OffsetX.GetMax(), camera.OffsetX.GetInc())
-            y = _snap_to_increment(y, camera.OffsetY.GetMin(), camera.OffsetY.GetMax(), camera.OffsetY.GetInc())
+            x = _snap_to_increment(
+                x,
+                camera.OffsetX.GetMin(),
+                min(camera.OffsetX.GetMax(), sensor_width - width),
+                camera.OffsetX.GetInc(),
+            )
+            y = _snap_to_increment(
+                y,
+                camera.OffsetY.GetMin(),
+                min(camera.OffsetY.GetMax(), sensor_height - height),
+                camera.OffsetY.GetInc(),
+            )
             camera.OffsetX.SetValue(x)
             camera.OffsetY.SetValue(y)
             # Record what the sensor actually granted, not what we asked for.
-            self._roi = (x, y, width, height)
+            self._roi = (
+                int(camera.OffsetX.GetValue()),
+                int(camera.OffsetY.GetValue()),
+                int(camera.Width.GetValue()),
+                int(camera.Height.GetValue()),
+            )
 
     # -------------------------------------------------------------- contract
 
     @property
     def timeout(self) -> float:
         return float(self.config.timeout_seconds)
+
+    def configure_measurement(
+        self,
+        *,
+        exposure_seconds: float,
+        roi_xywh: tuple[int, int, int, int] | None,
+    ) -> CameraWorkingPoint:
+        exposure = float(exposure_seconds)
+        if not np.isfinite(exposure) or exposure <= 0:
+            raise ValueError("exposure_seconds must be positive and finite")
+        roi = _roi_request(roi_xywh)
+        if self._armed:
+            raise RuntimeError("pylon settings cannot change while armed")
+        self.open()
+        candidate = replace(
+            self.config,
+            exposure_seconds=exposure,
+            roi_xywh=roi,
+        )
+        self.config = candidate
+        self._roi = roi
+        self._apply_exposure()
+        self._apply_roi()
+        point = self.capture_working_point()
+        actual_roi = None
+        if roi is not None:
+            actual_roi = (
+                point.roi_origin_yx[1],
+                point.roi_origin_yx[0],
+                point.roi_shape_yx[1],
+                point.roi_shape_yx[0],
+            )
+        self.config = replace(
+            candidate,
+            exposure_seconds=point.exposure_seconds,
+            roi_xywh=actual_roi,
+        )
+        return point
 
     def capture_working_point(self) -> CameraWorkingPoint:
         """Read the sensor's state back, rather than repeating what we asked for."""
@@ -217,6 +296,7 @@ class PylonCameraAdapter:
         origin = (int(camera.OffsetY.GetValue()), int(camera.OffsetX.GetValue()))
         pixel_format = str(camera.PixelFormat.GetValue())
         dtype = np.dtype("uint8") if pixel_format.endswith("8") else np.dtype("uint16")
+        exposure = float(camera.ExposureTime.GetValue()) / 1e6
         return CameraWorkingPoint(
             acquisition_mode=(
                 CameraAcquisitionMode.FREE_RUNNING
@@ -230,8 +310,8 @@ class PylonCameraAdapter:
             binning_yx=(1, 1),
             dtype=dtype,
             count_unit="count",
-            exposure_seconds=float(camera.ExposureTime.GetValue()) / 1e6,
-            required_external_trigger_interval_seconds=float(self.config.exposure_seconds),
+            exposure_seconds=exposure,
+            required_external_trigger_interval_seconds=exposure,
             external_trigger_integration_start_offset_seconds=0.0,
             gain=1.0,
             readout_mode=f"pylon-{pixel_format}-{self.config.trigger_source}",
@@ -278,7 +358,7 @@ class PylonCameraAdapter:
         self._armed_total = None if frames is None else int(frames)
         self._grabbed = 0
         self._armed = True
-        self._dropped = 0
+        self._capture_incomplete = False
         if timeout:
             self.config = type(self.config)(**{**self.config.__dict__, "timeout_seconds": float(timeout)})
 
@@ -317,7 +397,7 @@ class PylonCameraAdapter:
                 continue
             try:
                 if not result.GrabSucceeded():
-                    self._dropped += 1
+                    self._capture_incomplete = True
                     continue
                 image = np.array(result.Array, copy=True)
             finally:
@@ -339,10 +419,15 @@ class PylonCameraAdapter:
         if camera is not None and camera.IsGrabbing() and not self.config.free_run:
             camera.StopGrabbing()
         self._armed = False
-        return CameraCaptureTerminalRecord(self._grabbed, True, self._dropped == 0, True)
+        return CameraCaptureTerminalRecord(
+            self._grabbed,
+            True,
+            not self._capture_incomplete,
+            True,
+        )
 
-    def capture_state(self) -> tuple[bool, int]:
-        return self._armed, self._grabbed
+    def capture_state(self) -> bool:
+        return self._armed
 
 
 def _timeout_handling():

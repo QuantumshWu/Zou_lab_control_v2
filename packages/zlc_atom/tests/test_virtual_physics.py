@@ -9,7 +9,7 @@ import pytest
 from zlc_atom.devices.camera.world import SimulationWorld
 from zlc_atom.install import create_installation
 from zlc_atom.nodes._framework.pulse_source import resolve_pulse
-from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_atom.devices.sequencer.virtual import DictRegisterTransport, VirtualPulseStreamer
 from zlc_runtime import SignalDataPlane
@@ -72,10 +72,14 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
     try:
         camera = installation.device("camera")
         sequencer = installation.device("sequencer")
-        measurement = CameraMeasurementNode(camera=camera, signal_plane=plane)
         repeats = 30
+        measurement = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest("camera", 0.02, None, repeats, 3, 2.0),
+            signal_plane=plane,
+        )
         pulse = resolve_pulse("calibration", search_paths=(REPO_ROOT / "pulses",))
-        capture = measurement.prepare(repeat=repeats, frames_per_cycle=3)
+        capture = measurement.prepare()
         sequencer.load(pulse.program)
         expected = []
         for _ in range(repeats):

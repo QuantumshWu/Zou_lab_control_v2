@@ -30,7 +30,7 @@ class VirtualCamera:
         self,
         config: VirtualCameraConfig | None = None,
         *,
-        frame_source: Callable[[int], np.ndarray] | None = None,
+        frame_source: Callable[[int, float], np.ndarray] | None = None,
     ) -> None:
         if frame_source is None or not callable(frame_source):
             raise TypeError("virtual camera requires an injected frame_source")
@@ -42,6 +42,9 @@ class VirtualCamera:
             raise ValueError("exposure_seconds must be positive")
         self._frame_source = frame_source
         self._condition = threading.Condition()
+        self._sensor_shape_yx = shape
+        self._exposure_seconds = float(self.config.exposure_seconds)
+        self._roi_xywh = (0, 0, shape[1], shape[0])
         self._queue: deque[CameraFrameRecord] = deque()
         self._trigger_queue: deque[tuple[int, np.ndarray | None]] = deque()
         self._armed = False
@@ -51,7 +54,6 @@ class VirtualCamera:
         self._next_ordinal = 0
         self._triggered_count = 0
         self._produced_count = 0
-        self._dropped_count = 0
         self._worker: threading.Thread | None = None
         self._worker_stop: threading.Event | None = None
         self._worker_error: BaseException | None = None
@@ -66,22 +68,56 @@ class VirtualCamera:
         return np.dtype("<u2")
 
     def capture_working_point(self) -> CameraWorkingPoint:
-        shape = tuple(int(item) for item in self.config.frame_shape_yx)
+        with self._condition:
+            exposure = self._exposure_seconds
+            x, y, width, height = self._roi_xywh
         return CameraWorkingPoint(
             "EXTERNAL_TRIGGERED",
-            shape,
-            shape,
-            (0, 0),
-            shape,
+            (height, width),
+            self._sensor_shape_yx,
+            (y, x),
+            (height, width),
             (1, 1),
             self.frame_dtype,
             "count",
-            float(self.config.exposure_seconds),
-            float(self.config.exposure_seconds),
+            exposure,
+            exposure,
             0.0,
             1.0,
             "virtual-external-trigger",
         )
+
+    def configure_measurement(
+        self,
+        *,
+        exposure_seconds: float,
+        roi_xywh: tuple[int, int, int, int] | None,
+    ) -> CameraWorkingPoint:
+        exposure = float(exposure_seconds)
+        if not np.isfinite(exposure) or exposure <= 0:
+            raise ValueError("exposure_seconds must be positive and finite")
+        sensor_height, sensor_width = self._sensor_shape_yx
+        if roi_xywh is None:
+            roi = (0, 0, sensor_width, sensor_height)
+        else:
+            try:
+                values = tuple(int(value) for value in roi_xywh)
+            except (TypeError, ValueError) as exc:
+                raise TypeError("roi_xywh must contain four integers or be None") from exc
+            if len(values) != 4:
+                raise ValueError("roi_xywh must contain four integers or be None")
+            x, y, width, height = values
+            x = max(0, min(x, sensor_width - 1))
+            y = max(0, min(y, sensor_height - 1))
+            width = max(1, min(width, sensor_width - x))
+            height = max(1, min(height, sensor_height - y))
+            roi = (x, y, width, height)
+        with self._condition:
+            if self._armed:
+                raise RuntimeError("virtual camera settings cannot change while armed")
+            self._exposure_seconds = exposure
+            self._roi_xywh = roi
+        return self.capture_working_point()
 
     def arm(
         self,
@@ -121,7 +157,6 @@ class VirtualCamera:
             self._next_ordinal = 0
             self._triggered_count = 0
             self._produced_count = 0
-            self._dropped_count = 0
             self._worker_error = None
             self._terminal = None
             stop = threading.Event()
@@ -157,16 +192,24 @@ class VirtualCamera:
                         self._condition.wait()
                     if self._trigger_queue:
                         ordinal, provided = self._trigger_queue.popleft()
+                        exposure = self._exposure_seconds
+                        roi = self._roi_xywh
                     elif not self._accepting or stop.is_set():
                         break
                     else:
                         continue
-                source = provided if provided is not None else self._frame_source(ordinal)
+                source = (
+                    provided
+                    if provided is not None
+                    else self._frame_source(ordinal, exposure)
+                )
                 image = np.asarray(source)
-                if image.shape != tuple(self.config.frame_shape_yx):
+                if image.shape != self._sensor_shape_yx:
                     raise ValueError("virtual frame source returned the wrong shape")
                 if image.dtype.kind not in "iu":
                     raise TypeError("virtual frame source must return an integer image")
+                x, y, width, height = roi
+                image = image[y : y + height, x : x + width]
                 image = np.clip(image, 0, np.iinfo(np.uint16).max).astype("<u2", copy=False)
                 with self._condition:
                     if stop.is_set() or not self._armed:
@@ -184,7 +227,6 @@ class VirtualCamera:
                     )
                     while len(self._queue) >= self._buffer_frame_count:
                         self._queue.popleft()
-                        self._dropped_count += 1
                     self._queue.append(record)
                     self._condition.notify_all()
         except BaseException as error:
@@ -266,13 +308,13 @@ class VirtualCamera:
             self._condition.notify_all()
             return self._terminal
 
-    def capture_state(self) -> tuple[bool, int]:
+    def capture_state(self) -> bool:
         with self._condition:
-            return self._armed, self._dropped_count
+            return self._armed
 
     def close(self) -> None:
         try:
-            if self.capture_state()[0]:
+            if self.capture_state():
                 self.finish_record_capture()
         finally:
             with self._condition:

@@ -29,7 +29,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_runtime.plane import SignalDataPlane
 
 from pulses.calibration import CAMERA_CHANNEL, build
@@ -53,12 +56,17 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 
-        node = CameraMeasurementNode(camera=camera, signal_plane=plane, producer="cm")
         windows = int(metadata["camera_windows"])
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            signal_plane=plane,
+            producer="cm",
+        )
 
         totals: list[float] = []
         for _ in range(3):
-            capture = node.prepare(repeat=1, frames_per_cycle=windows)
+            capture = node.prepare()
             _fire_windows(sequencer, windows)
             result = capture.collect()
             frames = np.asarray(result.publication.value(node.signal_key("frames")).snapshot.block.values)
@@ -126,12 +134,18 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
         program, metadata = build()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
-        node = CameraMeasurementNode(camera=camera, signal_plane=plane, producer="cm")
+        windows = int(metadata["camera_windows"])
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            signal_plane=plane,
+            producer="cm",
+        )
 
         generations = []
         for _ in range(2):
-            capture = node.prepare(repeat=1, frames_per_cycle=int(metadata["camera_windows"]))
-            _fire_windows(sequencer, int(metadata["camera_windows"]))
+            capture = node.prepare()
+            _fire_windows(sequencer, windows)
             result = capture.collect()
             generations.append(result.publication.value(node.signal_key("frames")).snapshot.ref.stream_generation)
 

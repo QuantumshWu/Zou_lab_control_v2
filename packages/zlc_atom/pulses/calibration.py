@@ -16,6 +16,8 @@ hand-writes a lane number: channels are named the way the board names them.
 
 from __future__ import annotations
 
+import math
+
 from zlc_pulse import (
     PulsePeriod,
     PulseSequence,
@@ -52,8 +54,21 @@ def _levels(target, *high: str) -> tuple[int, ...]:
     return tuple(levels)
 
 
-def build() -> tuple[object, dict[str, object]]:
+def build(
+    *,
+    reference_exposure_seconds: float = LONG_SECONDS,
+    readout_exposure_seconds: float = SHORT_SECONDS,
+) -> tuple[object, dict[str, object]]:
     """Compile the bracket for the deployed board and describe its frames."""
+
+    reference_exposure = float(reference_exposure_seconds)
+    readout_exposure = float(readout_exposure_seconds)
+    if not math.isfinite(reference_exposure) or reference_exposure <= 0:
+        raise ValueError("reference_exposure_seconds must be positive and finite")
+    if not math.isfinite(readout_exposure) or readout_exposure <= 0:
+        raise ValueError("readout_exposure_seconds must be positive and finite")
+    if readout_exposure > reference_exposure:
+        raise ValueError("readout exposure cannot exceed reference exposure")
 
     config = load_streamer_config()
     if config["source"] is None:
@@ -69,11 +84,11 @@ def build() -> tuple[object, dict[str, object]]:
         time_step_ns=20.0,
         periods=(
             PulsePeriod("load", 0.002, "s", _levels(target, "cooling", "trap")),
-            PulsePeriod("long_before", LONG_SECONDS, "s", _levels(target, *_IMAGE)),
+            PulsePeriod("long_before", reference_exposure, "s", _levels(target, *_IMAGE)),
             PulsePeriod("gap_0", 0.0001, "s", _levels(target, *_HOLD)),
-            PulsePeriod("short", SHORT_SECONDS, "s", _levels(target, *_IMAGE)),
+            PulsePeriod("short", readout_exposure, "s", _levels(target, *_IMAGE)),
             PulsePeriod("gap_1", 0.0151, "s", _levels(target, *_HOLD)),
-            PulsePeriod("long_after", LONG_SECONDS, "s", _levels(target, *_IMAGE)),
+            PulsePeriod("long_after", reference_exposure, "s", _levels(target, *_IMAGE)),
         ),
     )
     program = compile_sequence(sequence, config["params"], config["clock_hz"])
@@ -91,7 +106,7 @@ def build() -> tuple[object, dict[str, object]]:
         ),
         "reference_frame_indices": (0, 2),
         "short_frame_index": 1,
-        "exposure_seconds": SHORT_SECONDS,
+        "exposure_seconds": readout_exposure,
         "sequence": sequence,
     }
 

@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 
 from zlc_atom.nodes.occupancy import OccupancyProcessor
-from zlc_atom.nodes.calibration.calibration import FrameContract, TrapCalibration, calibrate, classify_threshold
+from zlc_atom.nodes.calibration.calibration import (
+    FrameContract,
+    ReadoutModel,
+    SiteMap,
+    TrapCalibration,
+    calibrate,
+    classify_threshold,
+)
 
 
 ORACLE = Path(__file__).parent / "fixtures" / "main_readout_oracle.npz"
@@ -23,15 +30,13 @@ def test_threshold_plus_17_3_is_rejected_by_frozen_predictions() -> None:
         oracle["input_reference_frames"],
         oracle["input_short_frames"],
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
-        grid_shape=(2, 3),
         method="box",
-        roi_radius=1,
+        integration_half_width=1,
         reducer="mean",
-        expected_centers_xy=oracle["centers_row_major"],
     )
     mutated = classify_threshold(
         result.report["short_signals"],
-        result.calibration.thresholds + 17.3,
+        result.calibration.readout_model.thresholds + 17.3,
     )
     with pytest.raises(AssertionError):
         np.testing.assert_array_equal(mutated, oracle["pred_box"])
@@ -50,13 +55,24 @@ def test_classify_polarity_flip_is_rejected_by_frozen_predictions() -> None:
 
 def test_occupancy_rate_inverse_is_rejected_by_frozen_rate() -> None:
     oracle = _load()
+    site_ids = tuple(f"site_{index:04d}" for index in range(len(oracle["centers_row_major"])))
     calibration = TrapCalibration(
-        oracle["centers_row_major"],
-        oracle["thresholds_box"],
+        SiteMap(
+            site_ids,
+            oracle["centers_row_major"],
+            np.ones(len(site_ids), dtype=bool),
+            np.ones(len(site_ids)),
+        ),
+        ReadoutModel(
+            site_ids,
+            oracle["thresholds_box"],
+            np.ones(len(site_ids), dtype=bool),
+            np.ones(len(site_ids)),
+            method="box",
+            integration_half_width=1,
+            reducer="mean",
+        ),
         FrameContract((34, 40), exposure_seconds=0.005),
-        method="box",
-        roi_radius=1,
-        reducer="mean",
     )
     probe_frames = oracle["input_short_frames"][oracle["runtime_probe_indices"]].reshape(2, 3, 34, 40)
     # Raw arrays from an oracle file, not a run, so the stamps are stated.
@@ -65,6 +81,8 @@ def test_occupancy_rate_inverse_is_rejected_by_frozen_rate() -> None:
     )
     np.testing.assert_allclose(occupancy.counts, oracle["runtime_signals_box"], rtol=1e-12, atol=2e-12)
     np.testing.assert_array_equal(occupancy.occupied, oracle["runtime_occupied_box"])
+    np.testing.assert_array_equal(occupancy.valid, np.ones_like(occupancy.occupied))
+    np.testing.assert_array_equal(occupancy.frame_judged, probe_frames)
     np.testing.assert_allclose(occupancy.rate[..., None], oracle["runtime_rate_box"], rtol=1e-12, atol=2e-12)
     with pytest.raises(AssertionError):
         np.testing.assert_allclose(1.0 - occupancy.rate[..., None], oracle["runtime_rate_box"])

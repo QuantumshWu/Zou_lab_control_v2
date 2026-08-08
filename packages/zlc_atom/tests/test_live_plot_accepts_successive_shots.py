@@ -24,14 +24,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_runtime.plane import SignalDataPlane
 
 from pulses.calibration import build
 
 
 def _shot(node: CameraMeasurementNode, sequencer, windows: int):
-    capture = node.prepare(repeat=1, frames_per_cycle=windows)
+    capture = node.prepare()
     sequencer.fire()
     sequencer.wait_done(1.0)
     return capture.collect()
@@ -51,7 +54,12 @@ def test_successive_shots_carry_strictly_increasing_revisions() -> None:
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])
-        node = CameraMeasurementNode(camera=camera, signal_plane=plane, producer="cm")
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            signal_plane=plane,
+            producer="cm",
+        )
 
         revisions = []
         for _ in range(3):
@@ -80,7 +88,12 @@ def test_a_live_plot_accepts_the_second_shot() -> None:
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])
-        node = CameraMeasurementNode(camera=camera, signal_plane=plane, producer="cm")
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            signal_plane=plane,
+            producer="cm",
+        )
 
         first = _snapshot_of(_shot(node, sequencer, windows), node)
         session = plot.image(

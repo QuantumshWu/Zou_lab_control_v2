@@ -82,7 +82,7 @@ def _acquisition_parameters(node: object) -> dict[str, object]:
     """What was asked of the apparatus, as the node was configured to ask it."""
 
     parameters: dict[str, object] = {}
-    for name in ("repeat", "frames_per_cycle", "timeout", "repeats", "grid_shape", "method", "roi_radius", "reducer"):
+    for name in ("repeat", "frames_per_cycle", "timeout", "repeats", "reducer"):
         value = getattr(node, name, None)
         if value is None or callable(value):
             continue
@@ -122,11 +122,6 @@ def collect_provenance(node: object) -> dict[str, object]:
     parameters = _acquisition_parameters(node)
     if parameters:
         record["acquisition_parameters"] = parameters
-
-    calibration = getattr(node, "calibration", None)
-    fingerprint = getattr(calibration, "fingerprint", None)
-    if fingerprint is not None:
-        record["calibration_fingerprint"] = str(fingerprint)
 
     return record
 

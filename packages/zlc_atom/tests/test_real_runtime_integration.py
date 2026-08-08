@@ -10,8 +10,12 @@ from zlc_pulse.wire import build_fingerprint
 from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, MonitorCapture
-from zlc_atom.nodes.calibration import CalibrationTask
+from zlc_atom.nodes.camera_measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+    MonitorCapture,
+)
+from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes._framework.pulse_source import resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
@@ -29,17 +33,29 @@ def _oracle() -> dict[str, np.ndarray]:
         return {name: np.array(archive[name], copy=True) for name in archive.files}
 
 
-def _short_stamps(result: object) -> dict[str, object]:
-    """The run the short frames came from, which a derived signal inherits."""
+def _calibration_request() -> CalibrationRequest:
+    return CalibrationRequest(
+        camera_key="camera",
+        sequencer_key="sequencer",
+        pulse_name="calibration",
+        repeats=30,
+        reference_exposure_seconds=0.02,
+        readout_exposure_seconds=0.005,
+        roi_xywh=None,
+        integration_method="box",
+        threshold_method="empirical",
+        integration_half_width=1,
+        reducer="mean",
+        detection_spot_sigma=1.0,
+        detection_min_distance=3,
+        detection_sigma=6.0,
+        timeout_seconds=2.0,
+    )
 
-    from zlc_atom.nodes.occupancy.processor import inherited_stamps
 
-    publication = result.short.publication
-    name = next(iter(publication.signals))
-    return inherited_stamps(publication.signals[name].snapshot)
-
-
-def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_oracle() -> None:
+def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_oracle(
+    tmp_path: Path,
+) -> None:
     assert callable(build_fingerprint)
     manifest = json.loads((FIXTURES / "main_readout_oracle.json").read_text(encoding="utf-8"))
     assert manifest["format"] == "main-readout-oracle"
@@ -50,8 +66,8 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
     try:
         measurement = CameraMeasurementNode(
             camera=installation.device("camera"),
+            request=CameraMeasurementRequest("camera", 0.02, None, 0, 1, 1.0),
             signal_plane=plane,
-            timeout=1.0,
         )
         monitor = measurement.monitor(buffer_frames=1)
         assert isinstance(monitor, MonitorCapture)
@@ -67,16 +83,18 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         task_result = CalibrationTask(
             camera=installation.device("camera"),
             sequencer=sequencer,
-            signal_plane=plane,
+            request=_calibration_request(),
             pulse_search_paths=(REPO_ROOT / "pulses",),
-            expected_centers_xy=installation.world.geometry.site_centers_xy,
+            artifact_directory=tmp_path,
         ).run()
         occupancy_node = OccupancyProcessor(
             task_result.calibration,
             signal_plane=plane,
         )
         occupancy = occupancy_node.process(
-            task_result.short.frames, **_short_stamps(task_result)
+            task_result.short,
+            generation="calibration-task",
+            revision=1,
         )
         assert occupancy.counts.shape == (30, 6)
         np.testing.assert_allclose(occupancy.artifacts["rate"].block.values[:, 0, 0], occupancy.rate)
@@ -86,8 +104,6 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             oracle["input_reference_frames"],
             oracle["input_short_frames"],
             frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
-            grid_shape=(2, 3),
-            expected_centers_xy=oracle["centers_row_major"],
         )
         np.testing.assert_array_equal(result.report["predictions"], oracle["pred_box"])
         assert int(np.count_nonzero(result.report["predictions"] != oracle["input_latent_occupancy"])) == 29

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import hashlib
 import importlib.util
 from pathlib import Path
 from types import ModuleType
@@ -50,8 +49,7 @@ def _normalize_result(name: str, path: Path | None, value: object) -> ResolvedPu
 
 
 def _load_module(path: Path, name: str) -> ModuleType:
-    digest = hashlib.blake2b(str(path).encode("utf-8"), digest_size=8).hexdigest()
-    module_name = f"_zlc_atom_pulse_{name.replace('-', '_')}_{digest}"
+    module_name = f"_zlc_atom_pulse_{name.replace('-', '_')}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot create an import specification for pulse {path}")
@@ -65,6 +63,7 @@ def resolve_pulse(
     *,
     search_paths: Sequence[str | Path],
     override: object | None = None,
+    build_parameters: Mapping[str, object] | None = None,
 ) -> ResolvedPulse:
     """Resolve one named ``<name>.py`` pulse definition without fallback.
 
@@ -79,8 +78,10 @@ def resolve_pulse(
     pulse_name = str(name).strip()
     if not pulse_name or Path(pulse_name).name != pulse_name or pulse_name.endswith(".py"):
         raise ValueError("pulse name must be a plain module name without path or .py")
+    parameters = dict(build_parameters or {})
     if override is not None:
-        return _normalize_result(pulse_name, None, override)
+        value = override(**parameters) if callable(override) else override
+        return _normalize_result(pulse_name, None, value)
 
     if isinstance(search_paths, (str, Path)):
         search_paths = (search_paths,)
@@ -93,7 +94,7 @@ def resolve_pulse(
         build = getattr(module, "build", None)
         if not callable(build):
             raise TypeError(f"pulse module {path} must export callable build()")
-        return _normalize_result(pulse_name, path, build())
+        return _normalize_result(pulse_name, path, build(**parameters))
     attempted = "\n".join(f"  - {path}" for path in candidates)
     raise FileNotFoundError(
         f"pulse {pulse_name!r} was not found; searched these paths:\n{attempted}"
