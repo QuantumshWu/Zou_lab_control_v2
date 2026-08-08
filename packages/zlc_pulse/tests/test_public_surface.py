@@ -209,6 +209,8 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # the editor said it as a one-point scan table looping forever -- a state
     # the board is never otherwise asked for, and one where it stopped
     # re-applying the DAC segments while the digital edges kept playing.
+    # 7_310 -> 7_330 corrects that change's shipped line count; the whole-tree
+    # cap below already covered the same implementation and does not move.
     # 7_200 -> 7_230 for align_to_grid: v1 could say where the clock grid is
     # (time_value_per_tick) and this package could only say whether you were on
     # it, so an editor had nothing to round WITH and refused the operator
@@ -276,7 +278,7 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 7_310
+    assert counted <= 7_330
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus

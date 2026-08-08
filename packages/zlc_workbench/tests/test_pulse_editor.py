@@ -1691,8 +1691,8 @@ def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, seque
     assert any("bad sweep" in text for text in presenter.view.warnings)
 
 
-def test_holding_a_point_stops_the_board_and_writes_that_row(presenter, sequence) -> None:
-    """Holding is how a scan is inspected: one row, outputs steady."""
+def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, sequence) -> None:
+    """A held point is resolved into an ordinary repeating pulse."""
 
     board = _Sequencer()
     written: list = []
@@ -1706,18 +1706,19 @@ def test_holding_a_point_stops_the_board_and_writes_that_row(presenter, sequence
     )
 
     presenter.view.scan_hold_requested.emit()
-    assert "safe" in board.events
+    assert board.events[-3:] == ["safe", "load", "fire forever"]
+    assert written == [], "a held point must not become a one-row scan table"
 
     presenter.view.scan_step_requested.emit(1)
-    # 0.002 s at 20 ns per tick.  A held row crosses the same boundary the
-    # uploaded table does, because it is the same number.
-    assert written[-1] == (100_000,)
+    assert board.events[-3:] == ["safe", "load", "fire forever"]
+    assert presenter._held_point == 1
     presenter.view.scan_step_requested.emit(-1)
-    assert written[-1] == (50_000,)
+    assert presenter._held_point == 0
     # It cannot step off either end of the table.
     for _ in range(10):
         presenter.view.scan_step_requested.emit(-1)
-    assert written[-1] == (50_000,)
+    assert presenter._held_point == 0
+    assert written == []
 
 
 def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
@@ -2412,18 +2413,20 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
 
     board.events.clear()
     view.scan_hold_requested.emit()
-    assert board.events == ["safe", "fire forever"], board.events
+    assert board.events == ["safe", "load", "fire forever"], board.events
     assert presenter._held_point == 4
-    held = written[-1]
+    held = board._applied.source
+    assert written == []
 
     board.events.clear()
     view.scan_step_requested.emit(1)
-    assert board.events == ["safe", "fire forever"], "a step must play its point too"
+    assert board.events == ["safe", "load", "fire forever"], "a step must play its point too"
     assert presenter._held_point == 5
-    assert written[-1] != held
+    assert board._applied.source != held
 
     view.scan_step_requested.emit(-1)
-    assert written[-1] == held, "stepping back returns to the same row"
+    assert board._applied.source == held, "stepping back returns to the same row"
+    assert written == []
 
 
 def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:

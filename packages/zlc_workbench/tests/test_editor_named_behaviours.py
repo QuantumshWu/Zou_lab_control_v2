@@ -179,27 +179,28 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     ordinary territory, which is the part that can be checked without hardware.
     """
 
-    import json
-    from pathlib import Path
-
-    from zlc_pulse import load_streamer_config, sequence_from_tree
+    from zlc_pulse import load_streamer_config
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_pulse.wire import CtrlWords
     from zlc_workbench.pulse_editor import PulseEditorPresenter
 
-    from test_pulse_editor import _EditorView
+    from test_pulse_editor import _EditorView, _calibration_sequence
 
-    root = Path(__file__).resolve().parents[3]
-    tree = json.loads((root / "workspace" / "pulses" / "untitled.json").read_text(encoding="utf-8"))
-    sequence = sequence_from_tree(tree)
+    sequence = _calibration_sequence()
     config = load_streamer_config()
     transport = MemoryRegisterTransport(geom=config["params"], auto_done=True)
     board = PulseStreamer(transport, config["params"], config["clock_hz"])
     board.open()
     presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
     try:
-        presenter._take_scan_rows(tree["editor"]["scan_rows"])
+        presenter.view.binding_cycle_requested.emit(
+            "duration", sequence.periods[3].period_id, None
+        )
+        presenter.view.scan_run_requested.emit(
+            "import numpy as np\n"
+            "scan_table = (np.arange(5) + 1).reshape(-1, 1) * 0.001\n"
+        )
         presenter._scan_repeats = 0
         assert presenter.load_into_sequencer() is True
         assert transport.words[CtrlWords.SCAN_COUNT] > 1, (
