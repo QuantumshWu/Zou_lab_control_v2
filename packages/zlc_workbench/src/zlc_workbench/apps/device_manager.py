@@ -7,9 +7,9 @@ start without, and it was the one thing with no window.  This writes
 ``apparatus.json`` in the workspace, the same file every other entry point
 reads.
 
-It opens no device.  Writing down that the bench has a camera at index 2 is a
-different act from reaching for it, and an apparatus has to be editable from a
-laptop with no hardware attached.
+The standalone editor opens no device.  The unified experiment entry injects
+the Init/Shutdown callbacks that retain the one shared session; editing the
+same apparatus still remains possible on a laptop with no hardware attached.
 """
 
 from __future__ import annotations
@@ -47,15 +47,39 @@ def apparatus_path(workspace=None) -> Path:
     return space.apparatus
 
 
-def build(view: object, path: Path) -> object:
+def build(
+    view: object,
+    path: Path,
+    *,
+    initial_config: object | None = None,
+    initialize_session=None,
+    on_initialized=None,
+    shutdown_session=None,
+) -> object:
     """One presenter over one apparatus file, with the view it drives."""
 
     from ..device_manager import DeviceManagerPresenter
 
-    return DeviceManagerPresenter(view, path, confirm_overwrite=lambda _path: True)
+    return DeviceManagerPresenter(
+        view,
+        path,
+        confirm_overwrite=lambda _path: True,
+        initial_config=initial_config,
+        initialize_session=initialize_session,
+        on_initialized=on_initialized,
+        shutdown_session=shutdown_session,
+    )
 
 
-def create_window(*, workspace=None, window_ratio=None):
+def create_window(
+    *,
+    workspace=None,
+    window_ratio=None,
+    initial_config: object | None = None,
+    initialize_session=None,
+    on_initialized=None,
+    shutdown_session=None,
+):
     """Open the apparatus editor and return its window."""
 
     from zlc_ui import open_device_manager
@@ -63,7 +87,15 @@ def create_window(*, workspace=None, window_ratio=None):
     path = apparatus_path(workspace)
     # One call, one handle: this layer never names a widget class.
     window = open_device_manager(title="Devices@Zou lab", window_ratio=window_ratio)
-    window.presenter = build(window, path)
+    window.presenter = build(
+        window,
+        path,
+        initial_config=initial_config,
+        initialize_session=initialize_session,
+        on_initialized=on_initialized,
+        shutdown_session=shutdown_session,
+    )
+    window.closed.connect(window.presenter.close)
     return window
 
 

@@ -11,9 +11,11 @@ declares them: every device type carries an authoring schema, and that schema is
 the form.  A window that listed its own device types would be a second catalog
 to keep in step with the real one.
 
-Nothing here opens a device.  Writing down that the bench has a Basler camera at
-index 2 is a different act from reaching for it, and an apparatus has to be
-editable from a laptop with no hardware attached at all.
+The draft remains plain data, but the v1 lifecycle boundary is restored: an
+embedding application may inject the one operation that turns the current
+``InstallationConfig`` into its shared Experiment/session.  On success this
+presenter retains that exact object until explicit shutdown; it never performs
+a temporary build-and-release test.
 """
 
 from __future__ import annotations
@@ -46,7 +48,20 @@ class DeviceManagerPresenter:
         *,
         device_types: Sequence[Any] | None = None,
         confirm_overwrite: Callable[[str], bool] | None = None,
+        initial_config: InstallationConfig | None = None,
+        initialize_session: Callable[[InstallationConfig], object] | None = None,
+        on_initialized: Callable[[object], None] | None = None,
+        shutdown_session: Callable[[object], None] | None = None,
     ) -> None:
+        if initial_config is not None and not isinstance(initial_config, InstallationConfig):
+            raise TypeError("initial_config must be InstallationConfig or None")
+        for value, name in (
+            (initialize_session, "initialize_session"),
+            (on_initialized, "on_initialized"),
+            (shutdown_session, "shutdown_session"),
+        ):
+            if value is not None and not callable(value):
+                raise TypeError(f"{name} must be callable or None")
         self.view = view
         self.path = Path(path)
         # The real catalog, not a copy of it: a window that listed its own
@@ -61,10 +76,19 @@ class DeviceManagerPresenter:
             )
         }
         self.devices: list[DeviceInstanceConfig] = []
+        self._baseline_devices: tuple[DeviceInstanceConfig, ...] = ()
         self.saved = True
+        self.busy = False
+        self._closed = False
+        self._initial_config = initial_config
+        self._initialize_session = initialize_session
+        self._on_initialized = on_initialized
+        self._shutdown_session = shutdown_session
+        self._active_session: object | None = None
+        self._active_config: InstallationConfig | None = None
         self._confirm_overwrite = confirm_overwrite
         self._connect()
-        self.load()
+        self.load(_use_initial=True)
 
     # ------------------------------------------------------------------ wiring
 
@@ -74,8 +98,12 @@ class DeviceManagerPresenter:
         self.view.role_committed.connect(self.set_role)
         self.view.type_picked.connect(self.set_type)
         self.view.parameter_committed.connect(self.commit_parameters)
+        self.view.template_selected.connect(self.new_from_template)
+        self.view.load_requested.connect(self.load_from_dialog)
         self.view.save_requested.connect(self.save)
-        self.view.test_requested.connect(self.test_devices)
+        self.view.save_as_requested.connect(self.save_as)
+        self.view.cancel_requested.connect(self.cancel)
+        self.view.lifecycle_requested.connect(self.toggle_lifecycle)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
@@ -89,21 +117,43 @@ class DeviceManagerPresenter:
                 for value in sorted(self._unavailable, key=lambda item: item.module)
             ),
         )
+        from zlc_atom.install import INSTALLATION_TEMPLATES
+
+        self.view.set_templates(
+            tuple((name.replace("_", " ").title(), name) for name in INSTALLATION_TEMPLATES)
+        )
 
     # ------------------------------------------------------------------- state
 
-    def load(self) -> bool:
+    def load(
+        self,
+        path: str | Path | None = None,
+        *,
+        _use_initial: bool = False,
+    ) -> bool:
         """Read the apparatus, or start an empty one and say so.
 
         A missing file is the ordinary case -- it is how a new bench begins --
         so it is answered rather than raised.
         """
 
+        if path is not None:
+            self.path = Path(path)
         if not self.path.exists():
-            self.devices = []
+            self.devices = list(
+                self._initial_config.devices
+                if _use_initial and self._initial_config is not None
+                else ()
+            )
+            self._baseline_devices = tuple(self.devices)
             self.saved = True
             self._show()
-            self._report(f"no apparatus at {self.path.name} yet; add devices and save")
+            if self.devices:
+                self._report(
+                    f"new {self._template_name(self.devices) or 'custom'} apparatus draft"
+                )
+            else:
+                self._report(f"no apparatus at {self.path.name} yet; add devices and save")
             return False
         try:
             config = load_installation_config(self.path)
@@ -111,9 +161,75 @@ class DeviceManagerPresenter:
             self._report(f"cannot read {self.path.name}: {error}", severity="error")
             return False
         self.devices = list(config.devices)
+        self._baseline_devices = tuple(self.devices)
         self.saved = True
         self._show()
         self._report(f"{len(self.devices)} device(s) from {self.path.name}")
+        return True
+
+    @property
+    def active_session(self) -> object | None:
+        """The exact session produced by Init, or ``None`` before/after it."""
+
+        return self._active_session
+
+    def new_from_template(self, name: str) -> bool:
+        """Replace the local draft from a domain-owned installation template."""
+
+        from zlc_atom.install import INSTALLATION_TEMPLATES
+
+        specs = INSTALLATION_TEMPLATES.get(str(name))
+        if specs is None:
+            self._report(f"no template called {name!r}", severity="warning")
+            return False
+        devices: list[DeviceInstanceConfig] = []
+        for spec in specs:
+            descriptor = self.types.get(spec.type_id)
+            if descriptor is None:
+                self._report(
+                    f"template {name!r} needs unavailable type {spec.type_id!r}",
+                    severity="warning",
+                )
+                return False
+            devices.append(
+                DeviceInstanceConfig(
+                    instance_id=spec.key,
+                    role=spec.key,
+                    type_id=spec.type_id,
+                    parameters=descriptor.authoring_schema.freeze(
+                        {
+                            key: value
+                            for key, value in spec.config.items()
+                            if key in descriptor.authoring_schema.field_names
+                        }
+                    ),
+                )
+            )
+        self.devices = devices
+        self._touch(f"new {name} apparatus draft")
+        return True
+
+    def load_from_dialog(self) -> bool:
+        ask = getattr(self.view, "ask_open_path", None)
+        if not callable(ask):
+            self._report("this window cannot choose an apparatus file", severity="warning")
+            return False
+        chosen = ask(
+            "Open apparatus",
+            str(self.path.parent),
+            "Apparatus (*.json);;All files (*)",
+        )
+        return bool(chosen) and self.load(chosen)
+
+    def cancel(self) -> bool:
+        """Discard local edits and restore the last loaded/saved baseline."""
+
+        if tuple(self.devices) == self._baseline_devices:
+            return False
+        self.devices = list(self._baseline_devices)
+        self.saved = True
+        self._show()
+        self._report("discarded unsaved apparatus edits")
         return True
 
     def add_device(self, type_id: str) -> str:
@@ -223,45 +339,113 @@ class DeviceManagerPresenter:
             return False
         return self._replace(instance_id, lambda item: replace(item, parameters=frozen))
 
-    # ------------------------------------------------------------------ saving
+    # ------------------------------------------------------------ session life
 
-    def test_devices(self) -> bool:
-        """Bring up what is on screen, say what answered, and let go.
+    def toggle_lifecycle(self) -> bool:
+        """Init the shared session, or shut down the exact active session."""
 
-        A written apparatus is a claim, and the claim is worth checking before
-        a run rather than during one: a role that will not open fails here, in
-        the window built for fixing it, instead of ten minutes into an
-        experiment.  v1 kept the built devices and upgraded the window into a
-        session; here it does not, because in this architecture a SESSION owns
-        devices and a second owner is how a camera ends up held by nobody and
-        everybody at once.  So this proves the configuration and releases it.
-        """
+        if self._active_session is None:
+            return self._initialize_active()
+        return self.shutdown_active()
 
-        from zlc_atom.install import create_installation
-
-        try:
-            config = InstallationConfig(tuple(self.devices))
-        except Exception as error:
-            self._report(f"this apparatus cannot be built: {error}", severity="error")
+    def _initialize_active(self) -> bool:
+        if self._closed:
+            self._report("device manager is closed", severity="error")
             return False
-        try:
-            installation = create_installation(config.specs())
-        except Exception as error:
-            self._report(f"devices did not come up: {error}", severity="error")
+        if self.busy:
             return False
-        try:
-            roles = tuple(sorted(item.role for item in self.devices))
+        if self._initialize_session is None:
             self._report(
-                f"{len(roles)} device(s) came up: {', '.join(roles)}", severity="task"
+                "this Device Manager has no session initializer",
+                severity="warning",
             )
-        finally:
-            close = getattr(installation, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception as error:
-                    self._report(f"released with a complaint: {error}", severity="warning")
+            return False
+        try:
+            candidate = InstallationConfig(tuple(self.devices))
+        except Exception as error:
+            self._report(f"this apparatus cannot be initialized: {error}", severity="error")
+            return False
+
+        self.busy = True
+        self._show()
+        self._report("initializing devices")
+        try:
+            session = self._initialize_session(candidate)
+            if session is None:
+                raise RuntimeError("session initializer returned None")
+        except Exception as error:
+            self.busy = False
+            self._show()
+            self._report(f"devices did not initialize: {error}", severity="error")
+            return False
+
+        self._active_session = session
+        self._active_config = candidate
+        try:
+            if self._on_initialized is not None:
+                self._on_initialized(session)
+        except Exception as error:
+            try:
+                self._retire_session(session)
+            except Exception as shutdown_error:
+                self.busy = False
+                self._show()
+                self._report(
+                    f"window startup failed: {error}; session shutdown failed: "
+                    f"{shutdown_error}",
+                    severity="error",
+                )
+                return False
+            self._active_session = None
+            self._active_config = None
+            self.busy = False
+            self._show()
+            self._report(f"window startup failed: {error}", severity="error")
+            return False
+
+        self.busy = False
+        self._show()
+        roles = ", ".join(item.role for item in candidate.devices)
+        self._report(
+            f"{len(candidate.devices)} device(s) initialized"
+            + (f": {roles}" if roles else "")
+        )
         return True
+
+    def shutdown_active(self) -> bool:
+        """Shut down the retained session once; keep it reachable on failure."""
+
+        session = self._active_session
+        if session is None:
+            return True
+        if self.busy:
+            return False
+        self.busy = True
+        self._show()
+        self._report("shutting down devices")
+        try:
+            self._retire_session(session)
+        except Exception as error:
+            self.busy = False
+            self._show()
+            self._report(f"devices did not shut down: {error}", severity="error")
+            return False
+        self._active_session = None
+        self._active_config = None
+        self.busy = False
+        self._show()
+        self._report("devices shut down")
+        return True
+
+    def _retire_session(self, session: object) -> None:
+        if self._shutdown_session is not None:
+            self._shutdown_session(session)
+            return
+        close = getattr(session, "close", None)
+        if callable(close):
+            close()
+
+    # ------------------------------------------------------------------ saving
 
     def save(self) -> str:
         """Write the apparatus, refusing anything a session could not open.
@@ -289,11 +473,37 @@ class DeviceManagerPresenter:
         except Exception as error:
             self._report(f"cannot write {self.path.name}: {error}", severity="error")
             return ""
+        self._baseline_devices = tuple(self.devices)
         self.saved = True
         # The dot and the [*] follow the file, so the projection runs again.
         self._show()
         self._report(f"saved {len(self.devices)} device(s) to {written.name}", severity="task")
         return str(written)
+
+    def save_as(self) -> str:
+        """Choose another plain apparatus JSON and make it the editing target."""
+
+        ask = getattr(self.view, "ask_save_path", None)
+        if not callable(ask):
+            self._report("this window cannot choose where to save", severity="warning")
+            return ""
+        chosen = ask(
+            "Save apparatus as",
+            str(self.path.parent),
+            "Apparatus (*.json);;All files (*)",
+        )
+        if not chosen:
+            return ""
+        target = Path(chosen)
+        if target.suffix == "":
+            target = target.with_suffix(".json")
+        previous = self.path
+        self.path = target
+        written = self.save()
+        if not written:
+            self.path = previous
+            self._show()
+        return written
 
     # ----------------------------------------------------------------- private
 
@@ -330,7 +540,7 @@ class DeviceManagerPresenter:
         return False
 
     def _touch(self, message: str) -> None:
-        self.saved = False
+        self.saved = tuple(self.devices) == self._baseline_devices
         self._show()
         self._report(message)
 
@@ -374,6 +584,60 @@ class DeviceManagerPresenter:
                     for field in spec.fields
                 ),
             )
+        template = self._template_name(self.devices)
+        self.view.set_installation_source(
+            template,
+            (
+                f"{template.replace('_', ' ').title()} template"
+                if template is not None
+                else "Custom apparatus"
+            )
+            + f" · {len(self.devices)} named device(s)",
+        )
+        active_devices = (
+            ()
+            if self._active_config is None
+            else tuple(
+                (item.instance_id, item.role, item.type_id)
+                for item in self._active_config.devices
+            )
+        )
+        self.view.set_loaded_devices(active_devices)
+        active = self._active_session is not None
+        restart = active and self._active_differs()
+        self.view.set_lifecycle(
+            (
+                "Shutdown for restart"
+                if restart
+                else "Shutdown devices"
+                if active
+                else "Init devices"
+            ),
+            enabled=active or (self._initialize_session is not None and bool(self.devices)),
+            active=active,
+            busy=self.busy,
+        )
+
+    def _template_name(
+        self,
+        devices: Sequence[DeviceInstanceConfig],
+    ) -> str | None:
+        from zlc_atom.install import INSTALLATION_TEMPLATES
+
+        shape = tuple((item.instance_id, item.type_id) for item in devices)
+        for name, specs in INSTALLATION_TEMPLATES.items():
+            if shape == tuple((spec.key, spec.type_id) for spec in specs):
+                return name
+        return None
+
+    def _active_differs(self) -> bool:
+        if self._active_config is None:
+            return False
+        try:
+            candidate = InstallationConfig(tuple(self.devices))
+        except Exception:
+            return True
+        return candidate != self._active_config
 
     def _report(self, text: str, *, severity: str = "task") -> None:
         """One line of what just happened.
@@ -384,5 +648,12 @@ class DeviceManagerPresenter:
 
         self.view.show_status(str(text), str(severity))
 
-    def close(self) -> None:
-        """Nothing is open.  An apparatus editor holds no devices, by design."""
+    def close(self) -> bool:
+        """Idempotently retire the retained shared session and this presenter."""
+
+        if self._closed:
+            return True
+        if not self.shutdown_active():
+            return False
+        self._closed = True
+        return True

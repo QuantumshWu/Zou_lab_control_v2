@@ -15,7 +15,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from zlc_atom.install.configuration import load_installation_config
+from zlc_atom.install.configuration import (
+    DeviceInstanceConfig,
+    InstallationConfig,
+    load_installation_config,
+)
 from zlc_workbench.authoring_form import project_schema, project_values
 from zlc_workbench.device_manager import DeviceManagerPresenter
 
@@ -38,7 +42,11 @@ class _ManagerView:
     def __init__(self) -> None:
         self.device_add_requested = _Signal()
         self.save_requested = _Signal()
-        self.test_requested = _Signal()
+        self.template_selected = _Signal()
+        self.load_requested = _Signal()
+        self.save_as_requested = _Signal()
+        self.cancel_requested = _Signal()
+        self.lifecycle_requested = _Signal()
         self.device_remove_requested = _Signal()
         self.role_committed = _Signal()
         self.type_picked = _Signal()
@@ -57,6 +65,25 @@ class _ManagerView:
         #: What this machine cannot offer, and why -- read back by the test
         #: that proves a missing vendor runtime is named rather than hidden.
         self.unavailable = tuple(unavailable)
+
+    def set_templates(self, templates) -> None:
+        self.templates = tuple(templates)
+
+    def set_installation_source(self, source, detail) -> None:
+        self.installation_source = (source, str(detail))
+
+    def set_lifecycle(
+        self,
+        text: str,
+        *,
+        enabled: bool,
+        active: bool,
+        busy: bool = False,
+    ) -> None:
+        self.lifecycle = (str(text), bool(enabled), bool(active), bool(busy))
+
+    def set_loaded_devices(self, devices) -> None:
+        self.loaded_devices = tuple(devices)
 
     def set_devices(self, devices) -> None:
         self.devices = tuple(devices)
@@ -342,23 +369,76 @@ def test_the_window_says_whether_the_file_has_what_is_on_screen(tmp_path) -> Non
     assert (dirty, saved) == (False, True), "and saving must clear it"
 
 
-def test_the_editor_can_prove_its_apparatus_comes_up(tmp_path) -> None:
-    """A written apparatus is a claim, and the claim is worth checking here.
-
-    A role that will not open should fail in the window built for fixing it,
-    not ten minutes into a run.  v1 kept the devices and upgraded the window
-    into a session; this does not, because in this architecture a SESSION owns
-    devices -- a second owner is how a camera ends up held by nobody and
-    everybody at once.
-    """
+def test_a_standalone_editor_without_a_session_factory_cannot_fake_init(tmp_path) -> None:
+    """No callback means edit-only, never a temporary build-and-release path."""
 
     path = tmp_path / "apparatus.json"
     view = _ManagerView()
     manager = DeviceManagerPresenter(view, path, confirm_overwrite=lambda _p: True)
     manager.add_device("camera.virtual")
 
-    assert manager.test_devices() is True
-    assert any("came up" in text for _severity, text in view.status)
+    assert view.lifecycle[:3] == ("Init devices", False, False)
+    assert manager.toggle_lifecycle() is False
+    assert manager.active_session is None
 
-    # And it holds nothing afterwards: the session is still the only owner.
-    assert not hasattr(manager, "installation")
+
+def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
+    """Init is the shared Experiment boundary, not a build-and-release test."""
+
+    from zlc_atom.install.discovery import discover_device_types
+
+    camera = next(
+        item for item in discover_device_types() if item.type_id == "camera.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="camera",
+                role="camera",
+                type_id=camera.type_id,
+                parameters=camera.authoring_schema.freeze({}),
+            ),
+        )
+    )
+    session = object()
+    initialized: list[object] = []
+    shut_down: list[object] = []
+    candidates: list[InstallationConfig] = []
+
+    def initialize(candidate: InstallationConfig) -> object:
+        candidates.append(candidate)
+        return session
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=initialize,
+        on_initialized=initialized.append,
+        shutdown_session=shut_down.append,
+    )
+
+    assert tuple(manager.devices) == initial.devices
+    assert manager.active_session is None
+    manager.toggle_lifecycle()
+
+    assert candidates == [initial]
+    assert manager.active_session is session
+    assert initialized == [session]
+    assert shut_down == [], "Init must retain the session for both experiment windows"
+    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+
+    manager.set_role("camera", "camera_edited")
+    assert view.lifecycle[:3] == ("Shutdown for restart", True, True)
+    manager.cancel()
+    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+
+    manager.toggle_lifecycle()
+    assert manager.active_session is None
+    assert shut_down == [session]
+    assert view.lifecycle[:3] == ("Init devices", True, False)
+
+    manager.shutdown_active()
+    manager.close()
+    assert shut_down == [session], "shutdown and close are idempotent"

@@ -8,11 +8,16 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+REPO = ROOT.parents[1]
 
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(REPO), str(SRC), environment.get("PYTHONPATH", ""))
+        if value
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -28,7 +33,9 @@ def _run_qt(code: str) -> None:
 
 def test_device_manager_construct_and_plain_data_setters() -> None:
     _run_qt(
-        """
+        """import zou_lab_control_v2
+import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
@@ -50,7 +57,9 @@ assert view._cards['id-1'].role_edit.text() == 'input'
 
 def test_device_manager_qtest_signal_payloads() -> None:
     _run_qt(
-        """
+        """import zou_lab_control_v2
+import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -87,7 +96,9 @@ assert ('remove', 'id-1') in events
 
 def test_device_manager_demo_is_a_reusable_human_entry() -> None:
     _run_qt(
-        """
+        """import zou_lab_control_v2
+import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
 from examples.demo_device_manager import create_window
 from zlc_ui.device_manager import DeviceManagerHandle
 from PyQt5 import QtWidgets
@@ -102,5 +113,50 @@ assert tuple(view._cards) == ('sensor-1', 'camera-1')
 assert view._cards['sensor-1'].form.widget_for('count').value() == 4
 assert view._cards['camera-1'].form.widget_for('count').value() == 2
 assert view.status_strip.text() == 'Offline fake devices · edit only'
+"""
+    )
+
+
+def test_device_manager_keeps_the_v1_config_surface_and_lifecycle_verbs() -> None:
+    _run_qt(
+        """import zou_lab_control_v2
+import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-manager-v1-surface'])
+view = DeviceManagerView()
+view.set_templates((('Virtual', 'virtual'), ('Hardware', 'hardware')))
+assert view.tabs.tabText(0) == 'Config'
+assert view.heading_label.text() == 'Devices'
+assert view.document_name.text() == 'untitled'
+assert view.backend_row._label.text() == 'Backend'
+assert view.installation_group.title() == 'Installation'
+assert view.configured_group.title() == 'Configured devices'
+assert view.available_group.title() == 'Available'
+assert view.loaded_group.title() == 'Loaded (session)'
+assert tuple(view.template_buttons) == ('virtual', 'hardware')
+assert tuple(button.text() for button in view.template_buttons.values()) == ('Virtual', 'Hardware')
+assert view.add_device_row.parent() is view.configured_group
+assert view.new_combo.itemText(0) == 'New…'
+assert view.load_button.text() == 'Load…'
+assert view.save_button.text() == 'Save'
+assert view.save_as_button.text() == 'Save as…'
+assert view.cancel_button.text() == 'Cancel'
+assert view.lifecycle_button.text() == 'Init devices'
+assert not hasattr(view, 'test_button')
+events = []
+view.load_requested.connect(lambda: events.append('load'))
+view.save_as_requested.connect(lambda: events.append('save-as'))
+view.cancel_requested.connect(lambda: events.append('cancel'))
+view.lifecycle_requested.connect(lambda: events.append('lifecycle'))
+view.template_selected.connect(lambda name: events.append(('template', name)))
+for button in (
+    view.load_button,
+    view.save_as_button,
+):
+    button.click()
+view.template_buttons['virtual'].click()
+assert events == ['load', 'save-as', ('template', 'virtual')]
 """
     )
