@@ -162,3 +162,65 @@ def test_the_preview_page_offers_sizes_and_a_show_all_switch() -> None:
     assert combo.isEnabled()
     assert view.preview_include_off is not None
     assert view.preview_include_off.isEnabled(), "show off rows must be reachable"
+
+
+def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
+    """Hold plays an ORDINARY pulse, so the board never sees a one-point scan.
+
+    Reported from a scope: with a scan table loaded, the DAC swept correctly --
+    and the moment Stop-at-hold was pressed it sat at 0 V and stayed there,
+    through every Step, while the TTL channels kept running.
+
+    The two paths differed in exactly one register.  Holding wrote the point as
+    a scan table of length one (SCAN_COUNT=1, SCAN_ENABLE=1) and looped it
+    forever, a state nothing else ever asks the board for, and its bus segments
+    were never re-applied.  v1 never produced that state: it resolved the point
+    into the document and ran a plain pulse.  This asserts the board is back in
+    ordinary territory, which is the part that can be checked without hardware.
+    """
+
+    import json
+    from pathlib import Path
+
+    from zlc_pulse import load_streamer_config, sequence_from_tree
+    from zlc_pulse.device import PulseStreamer
+    from zlc_pulse.transport import MemoryRegisterTransport
+    from zlc_pulse.wire import CtrlWords
+    from zlc_workbench.pulse_editor import PulseEditorPresenter
+
+    from test_pulse_editor import _EditorView
+
+    root = Path(__file__).resolve().parents[3]
+    tree = json.loads((root / "workspace" / "pulses" / "untitled.json").read_text(encoding="utf-8"))
+    sequence = sequence_from_tree(tree)
+    config = load_streamer_config()
+    transport = MemoryRegisterTransport(geom=config["params"], auto_done=True)
+    board = PulseStreamer(transport, config["params"], config["clock_hz"])
+    board.open()
+    presenter = PulseEditorPresenter(_EditorView(), sequence, sequencer=board)
+    try:
+        presenter._take_scan_rows(tree["editor"]["scan_rows"])
+        presenter._scan_repeats = 0
+        assert presenter.load_into_sequencer() is True
+        assert transport.words[CtrlWords.SCAN_COUNT] > 1, (
+            "this fixture is meant to have a scan on the board to begin with"
+        )
+
+        assert presenter._hold(0) is True, presenter.view.warnings
+        assert transport.words[CtrlWords.SCAN_ENABLE] == 0, (
+            "a held point left the board scanning"
+        )
+        assert transport.words[CtrlWords.SCAN_COUNT] == 0, (
+            "a held point left a scan table on the board"
+        )
+        assert transport.words[CtrlWords.REPEAT_FOREVER] == 1, (
+            "a held point must keep playing until something else is asked for"
+        )
+
+        assert presenter.step_scan_point(100) is True, presenter.view.warnings
+        assert transport.words[CtrlWords.SCAN_ENABLE] == 0
+        assert not presenter.view.warnings, presenter.view.warnings
+    finally:
+        presenter.stop()
+        presenter.close()
+        board.close()

@@ -35,7 +35,7 @@ from zlc_pulse.remote import REMOTE_METHODS, RemotePulseStreamer
 #: the author's problem: the template offered offset-binary codes and device
 #: ticks for fields whose own boxes are signed codes and microseconds.  Naming
 #: both directions makes the conversion a place instead of an instruction.
-MAX_PUBLIC_NAMES = 37
+MAX_PUBLIC_NAMES = 38
 EXPECTED_PUBLIC_NAMES = (
     "PulseStreamer",
     "RemotePulseStreamer",
@@ -65,6 +65,7 @@ EXPECTED_PUBLIC_NAMES = (
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
     "align_to_grid",
+    "resolve_scan_point",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
@@ -86,7 +87,11 @@ def test_package_exports_are_the_final_surface_and_not_builtin_shadowing() -> No
     # private meant the editor invented its own answer and got it wrong.  And
     # for align_to_grid: this package could say whether a value was ON the
     # clock grid but not WHERE the grid is, so an editor had nothing to round
-    # with and refused the operator mid-keystroke instead.
+    # with and refused the operator mid-keystroke instead.  And for
+    # resolve_scan_point, because holding one point of a scan is playing an
+    # ORDINARY pulse that carries that row -- with no way to say so, an editor
+    # said it as a scan table of length one instead, and the board it steered
+    # into that corner stopped applying its DAC segments.
     assert len(names) == len(set(names)) == len(EXPECTED_PUBLIC_NAMES)
     assert len(names) <= MAX_PUBLIC_NAMES
     seen_ids: dict[int, str] = {}
@@ -199,6 +204,11 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # "python -m zlc_pulse.remote" loaded that module twice and Python said so
     # on every server start.  A constant must not oblige anyone to load a
     # socket server to read it.
+    # 7_230 -> 7_310 for resolve_scan_point: a held scan point is an ordinary
+    # pulse carrying that row's numbers, and nothing here could say that, so
+    # the editor said it as a one-point scan table looping forever -- a state
+    # the board is never otherwise asked for, and one where it stopped
+    # re-applying the DAC segments while the digital edges kept playing.
     # 7_200 -> 7_230 for align_to_grid: v1 could say where the clock grid is
     # (time_value_per_tick) and this package could only say whether you were on
     # it, so an editor had nothing to round WITH and refused the operator
@@ -266,14 +276,14 @@ def test_source_line_budget_excludes_only_the_rtl_engine_model() -> None:
     # document -- the preview did, a presentation helper that had lost its
     # caller did, and the path that actually fires did not, so a bracket around
     # the whole pulse was drawn faithfully and then run forever anyway.
-    assert counted <= 7_230
+    assert counted <= 7_310
     # The whole-tree cap moves with it, for the same reason: two numbers
     # describing one budget must not drift apart.  It sits a little above the
     # cap plus the excluded model, which is what "the rest of the tree, plus
     # the RTL mirror" means.
     # Moves with the cap above, for the reason stated there: two numbers
     # describing one budget must not drift apart.
-    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_410
+    assert counted + len(excluded.read_text(encoding="utf-8").splitlines()) < 8_490
 
 
 def test_build_tools_live_in_the_fpga_submodule_not_package_exports() -> None:

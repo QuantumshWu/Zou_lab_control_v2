@@ -40,7 +40,12 @@ from zlc_pulse import (
     PulseSequence,
     RepeatRegion,
 )
-from zlc_pulse import TIME_UNIT_CHOICES, TIME_UNIT_TO_NS, align_to_grid
+from zlc_pulse import (
+    TIME_UNIT_CHOICES,
+    TIME_UNIT_TO_NS,
+    align_to_grid,
+    resolve_scan_point,
+)
 from zlc_durable import unique_path, write_readable_json
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui import (
@@ -1361,7 +1366,7 @@ class PulseEditorPresenter:
 
     # ------------------------------------------------------------- hardware
 
-    def compile(self) -> Any:
+    def compile(self, sequence: Any = None) -> Any:
         """The sequence as the board would receive it.
 
 
@@ -1372,7 +1377,8 @@ class PulseEditorPresenter:
 
         from zlc_pulse import compile_sequence, load_streamer_config
 
-        if self.sequence is None:
+        sequence = sequence if sequence is not None else self.sequence
+        if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
         config = load_streamer_config()
         if config["source"] is None:
@@ -1380,7 +1386,7 @@ class PulseEditorPresenter:
                 "no streamer config was found, so the deployed board geometry is "
                 "unknown; refusing to compile against built-in defaults"
             )
-        return compile_sequence(self.sequence, config["params"], config["clock_hz"])
+        return compile_sequence(sequence or self.sequence, config["params"], config["clock_hz"])
 
     def connect_to(self, mode: str, endpoint: str) -> bool:
         """Attach this editor to a sequencer, or say why it could not.
@@ -2425,8 +2431,19 @@ class PulseEditorPresenter:
 
         self._held_point = max(0, min(len(self._scan_rows) - 1, int(point)))
         self.stop()
-        self._write_held_point()
         try:
+            # A held point is an ORDINARY pulse whose scanned fields carry that
+            # row's numbers -- not a scan of length one.  Saying it the other
+            # way round is what broke it: the board was handed a one-point
+            # table looping forever, a state nothing else ever asks it for, and
+            # its DAC segments were never re-applied while the digital edges
+            # kept playing.  So resolve the row into the document and load a
+            # plain pulse, which is what v1 did and what the board has always
+            # been good at.
+            resolved = resolve_scan_point(
+                self.sequence, self._scan_rows[self._held_point]
+            )
+            self.sequencer.load(self.compile(resolved), source=resolved)
             self.sequencer.fire(forever=True)
         except Exception as error:
             self._scan_progress = f"cannot hold that point: {error}"
@@ -2482,23 +2499,6 @@ class PulseEditorPresenter:
         from zlc_pulse import scan_columns_for, scan_rows_to_wire
 
         return scan_rows_to_wire(rows, scan_columns_for(self.sequence))
-
-    def _write_held_point(self) -> None:
-        """Put one scan row on the board, as the values the slots take."""
-
-        if self.sequencer is None or self._held_point is None:
-            return
-        if not self._scan_rows:
-            return
-        row = self._scan_rows[min(self._held_point, len(self._scan_rows) - 1)]
-        # Holding a scan point writes the slots, and writing the slots needs an
-        # idle board for the same reason firing a new program does.
-        if not self._board_ready_for_a_program():
-            return
-        try:
-            self.sequencer.write_slots(self._wire_rows((row,))[0])
-        except Exception as error:
-            self._warn(f"cannot hold that point: {error}")
 
     def _scan_cursor(self) -> int | None:
         cursor = getattr(self.sequencer, "cursor", None)

@@ -16,9 +16,15 @@ a duration's nanosecond range and every point came back clamped.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from .model import FIELD_DAC, PulseSequence
+from .model import (
+    FIELD_DAC,
+    FIELD_DELAY,
+    FIELD_DURATION,
+    PulseSequence,
+    align_to_grid,
+)
 
 
 __all__ = [
@@ -122,6 +128,97 @@ def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
                 )
             )
     return tuple(columns)
+
+
+def resolve_scan_point(sequence: PulseSequence, values: Sequence[float]) -> PulseSequence:
+    """One scan row baked into the fields its slots point at, with no slots left.
+
+    This is how a HELD point is played.  A held point is not a scan of length
+    one -- it is an ordinary pulse whose scanned fields happen to carry that
+    row's numbers -- and saying it the other way round is what broke it: the
+    board was handed a one-point table (SCAN_COUNT=1, SCAN_ENABLE=1) looping
+    forever, a state nothing else ever asks it for, and its DAC segments were
+    never re-applied while the digital edges kept playing.  v1 resolved the
+    point into the document and ran a plain pulse; this is that, in this
+    package's own terms.
+
+    ``values`` are in each field's own unit, the same numbers a scan table row
+    holds -- a signed DAC code, or a duration/delay in the field's unit.
+
+    Times land ON the clock grid, by the same rounding the wire does: a scan
+    row reaches the board as whole ticks, so a held point that kept the typed
+    fraction would play a slightly different point from the one the scan
+    played -- and, being authored rather than packed, would be refused
+    outright as not on the grid.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    row = tuple(values)
+    if len(row) != len(sequence.slots):
+        raise ValueError(
+            f"a scan point has one value per slot: {len(sequence.slots)} "
+            f"slot(s), {len(row)} value(s)"
+        )
+    if not row:
+        return sequence
+
+    periods = list(sequence.periods)
+    delays = list(sequence.delays)
+    for slot, value in zip(sequence.slots, row):
+        reference = slot.field_ref
+        if slot.kind == FIELD_DELAY:
+            index = next(
+                (i for i, item in enumerate(delays) if item.port == reference.port), None
+            )
+            if index is None:
+                raise ValueError(f"slot {slot.slot_id!r} names no delay on this sequence")
+            delays[index] = replace(
+                delays[index],
+                value=_number_for(
+                    align_to_grid(value, delays[index].unit,
+                                  float(sequence.time_step_ns), slot.slot_id,
+                                  minimum=None)
+                ),
+            )
+            continue
+        index = next(
+            (i for i, item in enumerate(periods)
+             if item.period_id == reference.period_id), None
+        )
+        if index is None:
+            raise ValueError(f"slot {slot.slot_id!r} names no period on this sequence")
+        period = periods[index]
+        if slot.kind == FIELD_DURATION:
+            periods[index] = replace(
+                period,
+                duration=_number_for(
+                    align_to_grid(value, period.unit,
+                                  float(sequence.time_step_ns), slot.slot_id)
+                ),
+            )
+            continue
+        steps = list(period.analog_steps)
+        at = next(
+            (i for i, step in enumerate(steps) if step.port == reference.port), None
+        )
+        if at is None:
+            raise ValueError(
+                f"slot {slot.slot_id!r} names no DAC step in period "
+                f"{period.period_id!r}"
+            )
+        steps[at] = replace(steps[at], value=int(round(float(value))))
+        periods[index] = replace(period, analog_steps=tuple(steps))
+
+    # The slots go with the values: what they described is now written down,
+    # and a sequence that still declared them would compile a scan of a pulse
+    # that no longer has anything to sweep.
+    return replace(sequence, periods=tuple(periods), delays=tuple(delays), slots=())
+
+
+def _number_for(value: float) -> int | float:
+    number = float(value)
+    return int(number) if number.is_integer() else number
 
 
 def scan_rows_to_wire(

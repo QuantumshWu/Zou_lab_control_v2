@@ -183,3 +183,58 @@ def test_a_repeated_table_is_seamless_across_a_bank_boundary() -> None:
         played.extend(ordered[:: geometry.num_slots])
 
     assert played == [10, 20, 30] * 3
+
+
+def test_a_resolved_scan_point_is_a_plain_pulse_carrying_that_row() -> None:
+    """A held point is an ordinary pulse, not a scan of length one.
+
+    Saying it the other way round is what broke holding on hardware: the board
+    was handed a one-point table looping forever -- a state nothing else ever
+    asks it for -- and its DAC segments were never re-applied while the digital
+    edges kept playing.  v1 resolved the point into the document and ran a
+    plain pulse; this is that.
+    """
+
+    from zlc_pulse import AnalogStep, resolve_scan_point
+
+    target = pulse_target_from_xdc()
+    lanes = len(target.raw_lanes)
+    dac = next(port for port in target.ports if port.kind == "dac")
+    sequence = PulseSequence(
+        name="scan",
+        target=target,
+        time_step_ns=20.0,
+        periods=(
+            PulsePeriod("load", 2.0, "ms", (0,) * lanes),
+            PulsePeriod("probe", 5.0, "ms", (0,) * lanes,
+                        (AnalogStep(dac.key, "edge", 0),)),
+        ),
+        slots=(
+            PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ms"),
+            PulseSlot("dac", PulseFieldRef("dac", period_id="probe", port=dac.key), "value"),
+        ),
+    )
+
+    resolved = resolve_scan_point(sequence, (7.5, 300))
+
+    assert resolved.slots == (), "a resolved point has nothing left to sweep"
+    probe = next(item for item in resolved.periods if item.period_id == "probe")
+    assert probe.duration == pytest.approx(7.5), "the duration slot did not land"
+    assert probe.analog_steps[0].value == 300, "the DAC slot did not land"
+    assert probe.analog_steps[0].mode == "edge", "resolving changed what it does"
+    # Everything the row did not name is untouched.
+    load = next(item for item in resolved.periods if item.period_id == "load")
+    assert load.duration == pytest.approx(2.0)
+    assert resolved.target is sequence.target
+
+
+def test_a_scan_point_must_have_one_value_per_slot() -> None:
+    """A short row would silently leave a field on yesterday's number."""
+
+    from zlc_pulse import resolve_scan_point
+
+    sequence = _sequence(
+        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ms"),)
+    )
+    with pytest.raises(ValueError, match="one value per slot"):
+        resolve_scan_point(sequence, (1.0, 2.0))

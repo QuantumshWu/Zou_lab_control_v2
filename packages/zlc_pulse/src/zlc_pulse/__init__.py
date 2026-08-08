@@ -31,6 +31,7 @@ from .manifest import pulse_target_from_xdc  # noqa: E402
 from .device import PulseStreamer  # noqa: E402
 from .endpoint import DEFAULT_HOST, DEFAULT_PORT  # noqa: E402
 from .scan import (  # noqa: E402
+    resolve_scan_point,
     scan_columns_for,
     scan_rows_from_wire,
     scan_rows_to_wire,
@@ -75,6 +76,7 @@ __all__ = [
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
     "align_to_grid",
+    "resolve_scan_point",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
