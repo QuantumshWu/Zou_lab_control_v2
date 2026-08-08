@@ -1,7 +1,6 @@
 import zou_lab_control_v2
 
 import json
-import shutil
 import time
 from pathlib import Path
 
@@ -26,7 +25,8 @@ from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.logic import stable_signal_key
 from zlc_workbench.session import ExperimentSession
 
-from test_console_presenter import ATOM_ROOT, _ConsoleView, _Signal, _one_shot
+from test_console_presenter import _ConsoleView, _Signal, _one_shot
+from pulse_fixtures import write_ordinary_pulse
 
 
 CALIBRATION_SENTINEL = "CALIBRATION_BODY_MUST_NOT_BE_EMBEDDED"
@@ -87,10 +87,8 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
     tmp_path, monkeypatch
 ) -> None:
     plot = pytest.importorskip("zlc_plot")
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
     session = ExperimentSession.open(tmp_path, template="virtual")
+    write_ordinary_pulse(tmp_path)
     view = _ConsoleView()
     view.panel_save_figure_requested = _Signal()
 

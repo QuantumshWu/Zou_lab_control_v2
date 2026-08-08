@@ -13,10 +13,8 @@ host, driven by the real scheduler.
 from __future__ import annotations
 
 import os
-import sys
 import time
 from dataclasses import replace
-from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
@@ -43,16 +41,12 @@ from zlc_runtime.presentation import (
 )
 from zlc_workbench.presentation import PlotPanelPort
 from zlc_workbench.image_overlay import ImageOverlayResolver
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
-if str(ATOM_ROOT) not in sys.path:
-    sys.path.insert(0, str(ATOM_ROOT))
-
-from pulses.calibration import build  # noqa: E402
+from zlc_workbench.session import read_pulse
+from pulse_fixtures import write_ordinary_pulse
 
 
 @pytest.fixture
-def live_bench():
+def live_bench(tmp_path):
     """A camera monitoring live, with its frames on the plane."""
 
     plane = SignalDataPlane()
@@ -61,9 +55,13 @@ def live_bench():
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
-        sequencer.load(program)
+        from zlc_pulse import compile_sequence, load_streamer_config
+
+        sequence, _editor = read_pulse(write_ordinary_pulse(tmp_path))
+        config = load_streamer_config()
+        program = compile_sequence(sequence, config["params"], config["clock_hz"])
+        sequencer.camera_trigger_channel = "emCCD"
+        sequencer.load(program, source=sequence)
 
         node = CameraMeasurementNode(
             camera=camera,

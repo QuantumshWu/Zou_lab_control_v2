@@ -17,7 +17,6 @@ Two properties are worth holding still:
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 import pytest
@@ -31,15 +30,12 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.topology import SignalRow, project_signals
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 @pytest.fixture
 def session(tmp_path):
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
+    write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
         yield session
@@ -48,11 +44,11 @@ def session(tmp_path):
 
 
 def _measure(session, producer: str = "cm"):
-    pulse = session.load_pulse("calibration")
+    session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
         request=CameraMeasurementRequest(
-            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+            "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
         ),
         signal_plane=session.signal_plane,
         producer=producer,
@@ -79,11 +75,11 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
     """Ordering is a decision: what is still arriving is what you want first."""
 
     _measure(session, producer="done")
-    pulse = session.load_pulse("calibration")
+    session.load_pulse(PULSE_NAME)
     watching = CameraMeasurementNode(
         camera=session.camera,
         request=CameraMeasurementRequest(
-            "camera", 0.02, None, 0, int(pulse["camera_windows"]), 2.0
+            "camera", 0.02, None, 0, CAMERA_WINDOWS, 2.0
         ),
         signal_plane=session.signal_plane,
         producer="watching",

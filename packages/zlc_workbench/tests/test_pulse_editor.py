@@ -9,15 +9,14 @@ hardware can play.  So every test here checks one of two things:
   the editor keeps the last good one instead of holding something that will
   fail at compile time.
 
-Driven against the real calibration pulse the experiment fires, because a
-hand-made two-lane sequence would not exercise a DAC, a clock port, or the
-62-lane target the bench actually has.
+Driven against an ordinary three-window JSON pulse, independent of the
+Calibration task's template, because a hand-made two-lane sequence would not
+exercise a DAC, a clock port, or the 62-lane target the bench actually has.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import importlib.util
 import os
 from pathlib import Path
 
@@ -33,7 +32,7 @@ from zlc_workbench.pulse_editor import (
     timeline_of,
 )
 
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
 
 class _Signal:
@@ -525,21 +524,15 @@ class _EditorView:
 
 @pytest.fixture
 def sequence():
-    """The real calibration pulse, as the experiment builds it."""
+    """An ordinary product pulse, with Calibration carrying no implicit role."""
 
-    return _calibration_sequence()
+    return _ordinary_sequence()
 
 
-def _calibration_sequence():
+def _ordinary_sequence():
     """The same pulse, reachable without the fixture, for sibling suites."""
 
-    spec = importlib.util.spec_from_file_location(
-        "calibration_pulse", ATOM_ROOT / "pulses" / "calibration.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _program, metadata = module.build()
-    return metadata["sequence"]
+    return ordinary_imaging_sequence()
 
 
 @pytest.fixture
@@ -979,12 +972,7 @@ def test_without_a_sequencer_the_editor_says_so_rather_than_pretending(sequence)
 
 
 def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
-    """An editor that cannot keep an edit is not an editor.
-
-    Save was wired to a refusal whose stated reason -- a pulse is a Python
-    module, do not overwrite the author's file -- was true and answered a
-    different question.  v1 saved a pulse as JSON beside the module.
-    """
+    """An editor keeps an edit in the v2 ``zlc.pulse.v1`` JSON format."""
 
     written = tmp_path / "mine.json"
     view = _EditorView()
@@ -1007,18 +995,18 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
         presenter.close()
 
 
-def test_saving_never_writes_over_a_pulse_module(sequence, tmp_path) -> None:
-    """A generated file over an author's module loses the reasoning with it."""
+def test_saving_refuses_a_non_json_destination(sequence, tmp_path) -> None:
+    """The product format is JSON even when All files is chosen in the dialog."""
 
-    module = tmp_path / "calibration.py"
-    module.write_text("# an author wrote this" + chr(10), encoding="utf-8")
+    other = tmp_path / "pulse.txt"
+    other.write_text("keep me" + chr(10), encoding="utf-8")
     view = _EditorView()
-    view.save_answer = str(module)
+    view.save_answer = str(other)
     presenter = PulseEditorPresenter(view, sequence)
     try:
         assert presenter.save_pulse() == ""
-        assert module.read_text(encoding="utf-8") == "# an author wrote this" + chr(10)
-        assert any("MODULE" in text for text in view.warnings)
+        assert other.read_text(encoding="utf-8") == "keep me" + chr(10)
+        assert any("not a JSON pulse" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1139,11 +1127,11 @@ def test_the_editor_opens_with_no_pulse_at_all() -> None:
         presenter.close()
 
 
-def test_load_opens_a_pulse_file_rather_than_refusing(sequence) -> None:
+def test_load_opens_a_pulse_file_rather_than_refusing(sequence, tmp_path) -> None:
     """Load was wired to the refusal meant for Save.  Loading writes nothing."""
 
     view = _EditorView()
-    view.open_answer = str(ATOM_ROOT / "pulses" / "calibration.py")
+    view.open_answer = str(write_ordinary_pulse(tmp_path))
     presenter = PulseEditorPresenter(view)
     try:
         view.load_requested.emit()
@@ -1153,6 +1141,60 @@ def test_load_opens_a_pulse_file_rather_than_refusing(sequence) -> None:
         assert view.schedule_view.schedule.period_count == len(sequence.periods)
     finally:
         presenter.close()
+
+
+def test_seeded_calibration_template_is_not_the_editor_current_document(
+    tmp_path, monkeypatch
+) -> None:
+    from zlc_workbench.apps.pulse_editor import resolve
+    from zlc_workbench.session import Workspace
+
+    monkeypatch.setenv(Workspace.HOME_VARIABLE, str(tmp_path / "default"))
+    default = Workspace.default()
+    assert (default.pulses / Workspace.IMAGING_TEMPLATE).is_file()
+
+    space, sequence, path = resolve(default.root, None)
+
+    assert space.root == default.root
+    assert sequence is None
+    assert path == ""
+
+
+def test_named_pulse_loader_resolves_the_json_product_document(tmp_path) -> None:
+    """A product pulse is the v2 zlc.pulse.v1 JSON file."""
+
+    target = write_ordinary_pulse(tmp_path, file_stem="ordinary")
+
+    from zlc_workbench.apps.pulse_editor import load_sequence
+
+    loaded, path = load_sequence(tmp_path, "ordinary")
+
+    assert loaded.name == PULSE_NAME
+    assert Path(path) == target
+
+    named, named_path = load_sequence(tmp_path, "ordinary.json")
+    assert named == loaded
+    assert Path(named_path) == target
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        ".",
+        "..",
+        "./ordinary",
+        r".\ordinary",
+        "../ordinary",
+        r"..\ordinary",
+        "folder/ordinary",
+        "ordinary.txt",
+    ),
+)
+def test_named_pulse_loader_refuses_paths_and_non_json_suffixes(tmp_path, name) -> None:
+    from zlc_workbench.apps.pulse_editor import load_sequence
+
+    with pytest.raises(ValueError):
+        load_sequence(tmp_path, name)
 
 
 def test_declining_the_open_dialog_leaves_the_editor_as_it_was(sequence) -> None:
@@ -1168,14 +1210,14 @@ def test_declining_the_open_dialog_leaves_the_editor_as_it_was(sequence) -> None
 
 
 def test_opening_something_that_is_not_a_pulse_says_which_file(tmp_path) -> None:
-    stray = tmp_path / "notes.py"
+    stray = tmp_path / "notes.json"
     stray.write_text("value = 1\n", encoding="utf-8")
     view = _EditorView()
     presenter = PulseEditorPresenter(view)
     try:
         assert presenter.open_pulse(str(stray)) is False
         assert presenter.sequence is None
-        assert any("notes.py" in text for text in view.warnings)
+        assert any("notes.json" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1208,7 +1250,7 @@ def test_add_period_with_nothing_open_starts_a_pulse_on_this_board() -> None:
         presenter.close()
 
 
-def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence) -> None:
+def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence, tmp_path) -> None:
     """Either one missing is a button that cannot work, shown as one.
 
     Only one of the two halves can now go missing on its own: connecting is
@@ -1225,7 +1267,7 @@ def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence) -> None:
         view.connection_requested.emit("virtual", "")
         assert view.schedule_view.can_run is True            # board, and the pulse it opened
 
-        presenter.open_pulse(str(ATOM_ROOT / "pulses" / "calibration.py"))
+        presenter.open_pulse(str(write_ordinary_pulse(tmp_path)))
         assert view.schedule_view.can_run is True            # both
 
         presenter.connect_to("offline", "")
@@ -1399,7 +1441,7 @@ def test_saving_the_preview_writes_the_picture_that_is_shown(presenter, tmp_path
             self.saved = path
             path.write_bytes(b"png")
 
-    presenter.path = str(tmp_path / "calibration.py")
+    presenter.path = str(tmp_path / "imaging_test.json")
     presenter._preview_host = _Savable()
     written = presenter.save_preview_image()
 
@@ -1411,7 +1453,7 @@ def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
     """A step trace is N values over N+1 boundaries.
 
     Passing equal-length arrays meant no DAC trace could ever be built -- and
-    it stayed invisible because the calibration pulse drives no DAC, so the
+    it stayed invisible because the ordinary pulse drives no DAC, so the
     error only appeared the moment someone asked to see every channel.
     """
 

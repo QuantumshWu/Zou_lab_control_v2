@@ -12,15 +12,15 @@ is the part that breaks silently: that everything still fits together.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 @pytest.fixture
@@ -28,13 +28,6 @@ def workspace(tmp_path) -> Path:
     pulses = tmp_path / "pulses"
     pulses.mkdir()
     return tmp_path
-
-
-@pytest.fixture
-def legacy_python_pulse_workspace(workspace) -> Path:
-    pulses = workspace / "pulses"
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
-    return workspace
 
 
 def _run(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
@@ -116,27 +109,33 @@ def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     assert "template='virtual'" in completed.stderr
 
 
-def test_the_figure_viewer_opens_what_the_session_saved(
-    legacy_python_pulse_workspace,
-) -> None:
+def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
     """The other half of saving: a file nobody can reopen was not kept.
 
     Deliberately a separate process with no session, no devices and no
     apparatus file -- which is the situation a figure is actually read in.
     """
 
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
+    write_ordinary_pulse(workspace)
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
+    )
     write = (
         "import zou_lab_control_v2;"
-        "import numpy as np, shutil, sys;"
+        "import numpy as np, sys;"
         "from pathlib import Path;"
+        "from zlc_workbench import session as tested_module;"
+        "print(tested_module.__file__);"
         "from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode, CameraMeasurementRequest;"
         "from zlc_workbench.session import ExperimentSession;"
         "root = Path(r'%s');"
         "session = ExperimentSession.open(root, template='virtual');"
-        "pulse = session.load_pulse('calibration');"
+        "session.load_pulse('%s');"
         "node = CameraMeasurementNode(camera=session.camera,"
-        " request=CameraMeasurementRequest('camera', 0.02, None, 1, int(pulse['camera_windows']), 2.0),"
+        " request=CameraMeasurementRequest('camera', 0.02, None, 1, %d, 2.0),"
         " signal_plane=session.signal_plane, producer='cm');"
         "capture = node.prepare();"
         "session.fire(shots=1);"
@@ -146,7 +145,7 @@ def test_the_figure_viewer_opens_what_the_session_saved(
         " nodes=(node,), panel={'panel-1': {'signal': signal, 'title': 'camera'}});"
         "print(path);"
         "session.close()"
-    ) % legacy_python_pulse_workspace
+    ) % (workspace, PULSE_NAME, CAMERA_WINDOWS)
     written = subprocess.run(
         [sys.executable, "-c", write],
         capture_output=True, text=True, env=environment, timeout=300,
@@ -154,9 +153,14 @@ def test_the_figure_viewer_opens_what_the_session_saved(
     assert written.returncode == 0, written.stderr
     archive = written.stdout.strip().splitlines()[-1]
 
+    viewer_script = (
+        "import zou_lab_control_v2\n"
+        "from zlc_workbench.apps import figure_viewer as tested_module\n"
+        "print(tested_module.__file__)\n"
+        f"raise SystemExit(tested_module.main(['--path', {archive!r}, '--check']))\n"
+    )
     completed = subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.figure_viewer",
-         "--path", archive, "--check"],
+        [sys.executable, "-c", viewer_script],
         capture_output=True, text=True, env=environment, timeout=300,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -174,24 +178,39 @@ def test_the_figure_viewer_starts_without_an_archive(workspace) -> None:
     assert "no archive given" in completed.stdout
 
 
-def test_the_pulse_editor_opens_the_pulse_it_is_told_to(
-    legacy_python_pulse_workspace,
-) -> None:
+def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     """One reader for pulse files, so the window cannot show a different pulse."""
 
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
+    write_ordinary_pulse(workspace)
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
+    )
+    script = (
+        "import zou_lab_control_v2\n"
+        "from zlc_workbench.apps import pulse_editor as tested_module\n"
+        "print(tested_module.__file__)\n"
+        f"raise SystemExit(tested_module.main(['--workspace', {str(workspace)!r}, "
+        f"'--pulse', {PULSE_NAME!r}, '--check']))\n"
+    )
     completed = subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.pulse_editor",
-         "--workspace", str(legacy_python_pulse_workspace), "--pulse", "calibration", "--check"],
+        [sys.executable, "-c", script],
         capture_output=True, text=True, env=environment, timeout=300,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pulse ready: 'calibration'" in completed.stdout
+    assert f"pulse ready: {PULSE_NAME!r}" in completed.stdout
     assert "6 period(s)" in completed.stdout
 
 
 def test_the_pulse_editor_names_the_pulse_it_could_not_find(workspace) -> None:
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
+    )
     completed = subprocess.run(
         [sys.executable, "-m", "zlc_workbench.apps.pulse_editor",
          "--workspace", str(workspace), "--pulse", "absent", "--check"],
@@ -209,7 +228,12 @@ def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(works
     and reported them missing -- from a directory nobody keeps data in.
     """
 
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
+    )
     deep = workspace / "data" / "2026_08_05"
     deep.mkdir(parents=True)
 

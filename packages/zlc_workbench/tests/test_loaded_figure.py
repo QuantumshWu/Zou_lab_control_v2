@@ -10,15 +10,12 @@ to be taught each of those separately, and had been taught none.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
 
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
@@ -27,22 +24,21 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 from zlc_workbench.archive import read_archive
 from zlc_workbench.loaded_figure import LOADED_CONTRACT, ArchiveSession, LoadedFigure
 from zlc_workbench.session import ExperimentSession
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 @pytest.fixture
 def saved(tmp_path):
     """One real run, saved the way the console saves it."""
 
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
+    write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
-        pulse = session.load_pulse("calibration")
+        session.load_pulse(PULSE_NAME)
         node = CameraMeasurementNode(
             camera=session.camera,
             request=CameraMeasurementRequest(
-                "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+                "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
             ),
             signal_plane=session.signal_plane,
             producer="cm",

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from zlc_atom.install import create_installation
+from zlc_atom.nodes import calibration_pulse_template_bytes
 from zlc_atom.nodes.calibration import logic_node as calibration_logic_node
 from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
 from zlc_atom.nodes.occupancy import logic_node as occupancy_logic_node
@@ -23,10 +24,6 @@ from zlc_workbench.logic import (
 )
 import zlc_workbench.image_overlay as image_overlay_module
 from zlc_workbench.image_overlay import ImageOverlayResolver
-
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-PULSE_DIRECTORY = REPO_ROOT / "packages" / "zlc_atom" / "pulses"
 
 
 def _wait_terminal(host: object, *, phase: str, timeout: float = 10.0) -> object:
@@ -98,10 +95,14 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
     plane = SignalDataPlane()
     hosts: list[object] = []
     try:
+        pulse_directory = tmp_path / "pulses"
+        pulse_directory.mkdir()
+        (pulse_directory / "imaging_template.json").write_bytes(
+            calibration_pulse_template_bytes()
+        )
         assert {"calibration", "camera_measurement", "occupancy"} <= set(
             catalog.by_name
         )
-        assert PULSE_DIRECTORY.is_dir()
         camera = installation.capability("camera.adapter", key="camera")
         sequencer = installation.device("sequencer")
         assert sequencer.world is installation.world
@@ -119,7 +120,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
                 "timeout_seconds": 2.0,
             },
             extras={
-                "pulse_search_paths": (PULSE_DIRECTORY,),
+                "pulse_search_paths": (pulse_directory,),
                 "artifact_directory": tmp_path,
             },
             device_keys={"camera": "camera", "sequencer": "sequencer"},

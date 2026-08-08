@@ -8,7 +8,6 @@ a notebook running beside the window.
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -29,8 +28,7 @@ from zlc_workbench.logic import (
 from zlc_workbench.session import ExperimentSession
 
 from test_console_presenter import _CardView, _ConsoleView, _Signal
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
 
 
 from test_console_presenter import _LogicRowView  # noqa: E402
@@ -38,9 +36,7 @@ from test_console_presenter import _LogicRowView  # noqa: E402
 
 @pytest.fixture
 def session(tmp_path):
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
+    write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
         yield session
@@ -126,7 +122,7 @@ def test_a_row_draft_keeps_every_field_and_authored_patch(presenter) -> None:
 
 
 def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None:
-    session.load_pulse("calibration")
+    session.load_pulse(PULSE_NAME)
     node_id = presenter.add_logic(
         "camera_measurement", values={"repeat": 1, "frames_per_cycle": 3}
     )
@@ -152,7 +148,7 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
 
 
 def test_stop_reaches_a_running_node(presenter, session) -> None:
-    session.load_pulse("calibration")
+    session.load_pulse(PULSE_NAME)
     node_id = presenter.add_logic("camera_measurement", values={"repeat": 50})
     presenter.start_logic(node_id)
 
@@ -241,7 +237,7 @@ def test_a_missing_device_is_a_repairable_draft_until_start(presenter) -> None:
 
 def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session) -> None:
 
-    session.load_pulse("calibration")
+    session.load_pulse(PULSE_NAME)
     node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
     presenter.start_logic(node_id)
     current_host = presenter.logic[node_id].host

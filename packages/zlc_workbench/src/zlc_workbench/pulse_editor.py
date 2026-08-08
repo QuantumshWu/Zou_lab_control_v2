@@ -26,13 +26,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-import json
 from pathlib import Path
 from typing import Any
 
 from zlc_pulse import (
     MINIMUM_REPEAT_COUNT,
-    sequence_from_tree,
     sequence_to_tree,
     AnalogStep,
     OutputDelay,
@@ -987,47 +985,27 @@ class PulseEditorPresenter:
     def ask_for_pulse(self) -> bool:
         """Let the operator pick a pulse file, and open it.
 
-        The window owns the dialog; this owns what to do with the answer.  A
-        pulse is a Python module that builds a sequence, so opening one means
-        running its build() -- the same reader the session uses, so the editor
-        cannot show a pulse assembled differently from the one that will fire.
+        The window owns the dialog; this owns what to do with the answer.  The
+        same JSON reader serves the session, so the editor cannot show a pulse
+        assembled differently from the one that will fire.
         """
 
         start = str(Path(self.path).parent if self.path else self.pulses_directory or "")
         chosen = self.view.ask_open_path(
             "Open pulse", start,
-            "Pulses (*.json *.py);;ZLC pulse (*.json);;Pulse modules (*.py);;All files (*)",
+            "ZLC pulse (*.json);;All files (*)",
         )
         if not chosen:
             return False
         return self.open_pulse(chosen)
 
     def open_pulse(self, path: str) -> bool:
-        """Replace what is being edited with the pulse in one file.
-
-        Two kinds of file, because a pulse has two homes.  A ``.py`` is an
-        author's module and is opened by RUNNING its build(), through the same
-        reader the session uses, so the editor can never show a pulse assembled
-        differently from the one that will fire.  A ``.json`` is what this
-        editor itself writes, and is read straight back into the model.
-        """
+        """Replace what is being edited with one ``zlc.pulse.v1`` JSON file."""
 
         from .session import read_pulse
 
-        session: dict[str, Any] = {}
         try:
-            if Path(path).suffix.lower() == ".json":
-                tree = json.loads(Path(path).read_text(encoding="utf-8"))
-                sequence = sequence_from_tree(tree)
-                session = dict(tree.get("editor") or {})
-            else:
-                _program, metadata = read_pulse(path)
-                sequence = metadata.get("sequence")
-            if sequence is None:
-                raise ValueError(
-                    "this pulse builds a program but does not publish its "
-                    "'sequence', so there is nothing to edit"
-                )
+            sequence, session = read_pulse(path)
         except Exception as error:
             self._warn(f"cannot open {Path(path).name}: {error}")
             return False
@@ -1935,15 +1913,7 @@ class PulseEditorPresenter:
         return "dirty-ready" if self.sequence is not None else "idle"
 
     def save_pulse(self) -> str:
-        """Write what is on screen, as a pulse file this editor can reopen.
-
-        An editor that cannot keep an edit is not an editor.  This used to
-        refuse outright, and the reason it gave -- a pulse is a Python module,
-        do not overwrite the author's file with a generated one -- was true and
-        answered a different question.  v1 saved a pulse as JSON beside the
-        module, and that protection is kept: a .py is never written over,
-        because the reasoning inside one cannot be regenerated from a table.
-        """
+        """Write what is on screen as a ``zlc.pulse.v1`` JSON document."""
 
         if self.sequence is None:
             self._warn("there is no pulse to save")
@@ -1960,19 +1930,16 @@ class PulseEditorPresenter:
         target = Path(chosen)
         if target.suffix == "":
             target = target.with_suffix(".json")
-        if target.suffix.lower() == ".py":
+        if target.suffix.lower() != ".json":
             self._warn(
-                f"{target.name} is a pulse MODULE; save as .json rather than "
-                "overwriting the reasoning inside it"
+                f"{target.name} is not a JSON pulse; save with a .json suffix"
             )
             return ""
-        # The pulse, plus the editing session around it.  v1 called its JSON
-        # "the sole persisted source of the scan table", and a scan slot
-        # without the table it indexes is half a scan; which ports are worth
-        # looking at is the operator's, and reopening to all twenty-two rows
-        # throws that away.  The pulse half is zlc_pulse's own tree; this half
-        # is the editor's and is named so, so neither can be mistaken for the
-        # other by whoever reads the file next.
+        # Persist the pulse plus the editing session around it.  A scan slot
+        # without its table is half a scan, while reopening with every channel
+        # visible discards the operator's working view.  zlc_pulse owns the
+        # pulse tree; the explicitly named editor section owns only UI/session
+        # state, so the two responsibilities remain distinct.
         tree = dict(sequence_to_tree(self.sequence))
         tree["editor"] = {
             "visible_ports": (

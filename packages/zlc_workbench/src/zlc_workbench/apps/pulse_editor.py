@@ -1,16 +1,14 @@
 """Open the pulse editor.
 
     python -m zlc_workbench.apps.pulse_editor
-    python -m zlc_workbench.apps.pulse_editor --pulse calibration
+    python -m zlc_workbench.apps.pulse_editor --pulse untitled
     python -m zlc_workbench.apps.pulse_editor --connect remote:127.0.0.1:18861
 
 The window opens whether or not there is a pulse to show; with none it says how
-to get one.  A pulse is a Python module in an experiment's ``pulses/``, read
-through the same loader the session uses, so the window cannot show a pulse
-assembled differently from the one that will fire.
-
-Editing changes the sequence in memory.  A pulse file is experiment code, and
-rewriting it from a window is not something this does behind the author's back.
+to get one.  Product pulses are ``zlc.pulse.v1`` JSON documents in an
+experiment's ``pulses/`` directory, read through the same loader the session
+uses so the window cannot show a pulse assembled differently from the one that
+will fire.
 """
 
 from __future__ import annotations
@@ -174,7 +172,7 @@ def build(
 
 
 def load_sequence(workspace: Path, name: str):
-    """The sequence a named pulse file builds.
+    """The sequence stored in one named JSON pulse document.
 
     Read through the same loader the session uses, so the window cannot show a
     pulse assembled differently from the one that would be fired.
@@ -183,16 +181,10 @@ def load_sequence(workspace: Path, name: str):
     from ..session import Workspace, read_pulse
 
     space = Workspace(workspace)
-    path = space.pulses / f"{name}.py"
+    path = space.pulse(name)
     if not path.is_file():
         raise FileNotFoundError(f"no pulse named {name!r} in {space.pulses}")
-    _program, metadata = read_pulse(path)
-    sequence = metadata.get("sequence")
-    if sequence is None:
-        raise ValueError(
-            f"{path.name} builds a program but does not publish its 'sequence', "
-            "so there is nothing to edit"
-        )
+    sequence, _editor = read_pulse(path)
     return sequence, str(path)
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date as _date
-import importlib.util
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -59,6 +59,24 @@ class Workspace:
     def pulses(self) -> Path:
         return self.root / "pulses"
 
+    def pulse(self, name: str) -> Path:
+        """Resolve one pulse stem or plain JSON filename inside ``pulses/``."""
+
+        text = str(name).strip()
+        requested = Path(text)
+        if (
+            not text
+            or requested.is_absolute()
+            or requested.parent != Path(".")
+            or text != requested.name
+            or requested.name in (".", "..")
+        ):
+            raise ValueError(f"pulse name must be a plain filename: {name!r}")
+        if requested.suffix and requested.suffix.lower() != ".json":
+            raise ValueError(f"pulse files must use a .json suffix: {name!r}")
+        filename = requested.name if requested.suffix else f"{requested.name}.json"
+        return self.pulses / filename
+
     @property
     def apparatus(self) -> Path:
         """The file describing what is in the lab today."""
@@ -86,6 +104,10 @@ class Workspace:
     #: .gitignore keeps it out, so a pull cannot replace a pulse and a reclone
     #: does not carry one machine's experiment to another.
     DEFAULT_HOME = "workspace"
+    #: Calibration's authored project template.  It is merely seeded into the
+    #: default workspace; opening devices and opening the ordinary Pulse Editor
+    #: never load or compile it implicitly.
+    IMAGING_TEMPLATE = "imaging_template.json"
 
     @classmethod
     def default(cls) -> "Workspace":
@@ -111,7 +133,13 @@ class Workspace:
             if root
             else Path(__file__).resolve().parents[4] / cls.DEFAULT_HOME
         )
-        (home / "pulses").mkdir(parents=True, exist_ok=True)
+        pulses = home / "pulses"
+        pulses.mkdir(parents=True, exist_ok=True)
+        template = pulses / cls.IMAGING_TEMPLATE
+        if not template.exists():
+            from zlc_atom.nodes import calibration_pulse_template_bytes
+
+            template.write_bytes(calibration_pulse_template_bytes())
         return cls(home)
 
     @classmethod
@@ -132,24 +160,26 @@ class Workspace:
 
 
 def read_pulse(path: str | os.PathLike[str]) -> tuple[Any, Mapping[str, Any]]:
-    """Build one pulse file and return the program and what it says about itself.
+    """Read one JSON pulse and its editor state through zlc_pulse's codec.
 
-    Shared by the session, which loads the program into a sequencer, and by the
-    editor, which wants the sequence behind it.  One reader means a window can
-    never show a pulse assembled differently from the one that will be fired.
+    Product pulses are data, not executable modules.  Shared by the session and
+    editor so the sequence shown is exactly the sequence compiled for hardware.
     """
 
     source = Path(path)
-    spec = importlib.util.spec_from_file_location(f"_zlc_pulse_{source.stem}", source)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"{source} is not importable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    if source.suffix.lower() != ".json":
+        raise ValueError(f"pulse files must be JSON: {source}")
 
-    build = getattr(module, "build", None)
-    if not callable(build):
-        raise AttributeError(f"{source} defines no build()")
-    return build()
+    from zlc_pulse import sequence_from_tree
+
+    tree = json.loads(source.read_text(encoding="utf-8"))
+    sequence = sequence_from_tree(tree)
+    editor = tree.get("editor", {})
+    if editor is None:
+        editor = {}
+    if not isinstance(editor, Mapping):
+        raise TypeError(f"pulse editor state must be an object: {source}")
+    return sequence, dict(editor)
 
 
 class ExperimentSession:
@@ -241,27 +271,25 @@ class ExperimentSession:
     # ------------------------------------------------------------------ pulse
 
     def load_pulse(self, name: str) -> Mapping[str, Any]:
-        """Compile the named workspace pulse and apply it to the sequencer.
+        """Compile and apply the named workspace ``zlc.pulse.v1`` JSON pulse."""
 
-        Returns the pulse's own description of itself -- how many camera windows
-        it opens, what each frame means -- which the caller needs to collect it
-        correctly and the archive needs to explain it later.
-        """
-
-        path = self.workspace.pulses / f"{name}.py"
+        path = self.workspace.pulse(name)
         if not path.is_file():
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
-        from zlc_atom.nodes import arm_sequencer
+        from zlc_pulse import compile_sequence, load_streamer_config
 
-        program, metadata = read_pulse(path)
-
-        # Through the one rule.  This window and the calibration task each had
-        # their own copy of "tell the device which line triggers the camera,
-        # then load", which is how the two came to differ on the failure path.
-        arm_sequencer(self.sequencer, program, metadata)
-        self._pulse_sequence = metadata.get("sequence")
+        sequence, _editor = read_pulse(path)
+        config = load_streamer_config()
+        if config["source"] is None:
+            raise RuntimeError(
+                "no streamer config was found, so the deployed board geometry is "
+                "unknown; refusing to compile against built-in defaults"
+            )
+        program = compile_sequence(sequence, config["params"], config["clock_hz"])
+        self.sequencer.load(program, source=sequence)
+        self._pulse_sequence = sequence
         self._pulse_path = path
-        self._pulse = {"name": name, **{k: v for k, v in metadata.items() if k != "sequence"}}
+        self._pulse = {"name": sequence.name}
         return self._pulse
 
     @property

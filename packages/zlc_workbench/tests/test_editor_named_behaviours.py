@@ -120,7 +120,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_workbench.pulse_editor import PulseEditorPresenter
 
-    from test_pulse_editor import _EditorView, _calibration_sequence
+    from test_pulse_editor import _EditorView, _ordinary_sequence
 
     config = load_streamer_config()
     streamer = PulseStreamer(
@@ -130,7 +130,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     )
     streamer.open()
     presenter = PulseEditorPresenter(
-        _EditorView(), _calibration_sequence(), sequencer=streamer
+        _EditorView(), _ordinary_sequence(), sequencer=streamer
     )
     try:
         assert presenter.fire() is True, presenter.view.warnings
@@ -185,9 +185,9 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     from zlc_pulse.wire import CtrlWords
     from zlc_workbench.pulse_editor import PulseEditorPresenter
 
-    from test_pulse_editor import _EditorView, _calibration_sequence
+    from test_pulse_editor import _EditorView, _ordinary_sequence
 
-    sequence = _calibration_sequence()
+    sequence = _ordinary_sequence()
     config = load_streamer_config()
     transport = MemoryRegisterTransport(geom=config["params"], auto_done=True)
     board = PulseStreamer(transport, config["params"], config["clock_hz"])

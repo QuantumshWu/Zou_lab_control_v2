@@ -1,9 +1,7 @@
 import zou_lab_control_v2
 
 import os
-import shutil
 import time
-from pathlib import Path
 
 import pytest
 
@@ -20,9 +18,7 @@ from zlc_workbench.logic import stable_signal_key
 from zlc_workbench.session import ExperimentSession
 
 from test_console_presenter import _ConsoleView
-
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 def _wait_until(predicate, presenter, *, timeout: float = 10.0) -> None:
@@ -65,10 +61,8 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
     tmp_path,
 ) -> None:
     plot = pytest.importorskip("zlc_plot")
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
     session = ExperimentSession.open(tmp_path, template="virtual")
+    write_ordinary_pulse(tmp_path)
 
     def kind_of(name):
         return next((item for item in plot.PlotKind if item.value == str(name)), None)
@@ -87,7 +81,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
         spec_for=spec_for,
     )
     try:
-        pulse = session.load_pulse("calibration")
+        session.load_pulse(PULSE_NAME)
         node_id = presenter.add_logic("camera_measurement")
         assert presenter.view.focused_logic_editor == node_id
 
@@ -103,7 +97,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
                     "roi_width": authored_roi[2],
                     "roi_height": authored_roi[3],
                     "repeat": 0,
-                    "frames_per_cycle": int(pulse["camera_windows"]),
+                    "frames_per_cycle": CAMERA_WINDOWS,
                 },
             },
         )

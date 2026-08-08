@@ -12,7 +12,6 @@ layer rather than the presenter is the point: what is under test is the wiring.
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -29,8 +28,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.session import ExperimentSession, Workspace
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 class _Signal:
@@ -371,9 +369,7 @@ class _Chooser:
 
 @pytest.fixture
 def session(tmp_path):
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
+    write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
         yield session
@@ -413,11 +409,11 @@ def presenter(session):
 
 
 def _one_shot(session, producer: str = "cm"):
-    pulse = session.load_pulse("calibration")
+    session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
         request=CameraMeasurementRequest(
-            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+            "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
         ),
         signal_plane=session.signal_plane,
         producer=producer,

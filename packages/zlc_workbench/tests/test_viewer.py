@@ -12,7 +12,6 @@ writer and the reader agree with each other and not with the file.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -31,8 +30,7 @@ from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import FigureViewerPresenter, describe_archive
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
-
-ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 class _Signal:
@@ -101,16 +99,14 @@ class _ViewerView:
 def saved(tmp_path):
     """One real run, saved the way the console saves it."""
 
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
+    write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
-        pulse = session.load_pulse("calibration")
+        session.load_pulse(PULSE_NAME)
         node = CameraMeasurementNode(
             camera=session.camera,
             request=CameraMeasurementRequest(
-                "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+                "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
             ),
             signal_plane=session.signal_plane,
             producer="cm",
@@ -189,7 +185,7 @@ def test_the_description_answers_what_the_apparatus_was_doing(saved) -> None:
     measurement = dict(tabs["Measurement"])
     assert measurement["cm.repeat"] == "1"
     assert measurement["cm.frames_per_cycle"] == "3"
-    assert measurement["pulse.name"] == "calibration"
+    assert measurement["pulse.name"] == PULSE_NAME
 
     plot_rows = dict(tabs["Plot"])
     assert "panel-1" in plot_rows and "uint16" in plot_rows["panel-1"]
@@ -276,18 +272,16 @@ def test_the_projection_needs_no_session_and_no_qt() -> None:
 def saved_pair(tmp_path):
     """An archive with two datasets, which is what a two-panel console saves."""
 
-    pulses = tmp_path / "pulses"
-    pulses.mkdir()
-    shutil.copy(ATOM_ROOT / "pulses" / "calibration.py", pulses / "calibration.py")
+    write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
-        pulse = session.load_pulse("calibration")
+        session.load_pulse(PULSE_NAME)
         arrays = {}
         for name in ("panel-1", "panel-2"):
             node = CameraMeasurementNode(
                 camera=session.camera,
                 request=CameraMeasurementRequest(
-                    "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+                    "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
                 ),
                 signal_plane=session.signal_plane,
                 producer=name.replace("-", ""),
