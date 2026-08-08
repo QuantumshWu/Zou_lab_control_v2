@@ -890,12 +890,42 @@ def test_on_pulse_runs_until_stop(sequence) -> None:
     waiting would hang the window on its own success.
     """
 
+    from zlc_pulse import PulseApiParameter, PulseFieldRef, PulseSlot
+
+    api_period = sequence.periods[1]
+    scan_period = sequence.periods[3]
+    sequence = replace(
+        sequence,
+        slots=(
+            PulseSlot(
+                "duration",
+                PulseFieldRef("duration", scan_period.period_id),
+                scan_period.unit,
+                "scan_probe_duration",
+            ),
+        ),
+        api_parameters=(
+            PulseApiParameter(
+                "api_probe_duration",
+                PulseFieldRef("duration", api_period.period_id),
+                api_period.unit,
+            ),
+        ),
+    )
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
     try:
-        assert presenter.fire() is True
+        view.fire_requested.emit()
         assert board.events == ["load", "fire forever"]
+        assert board._applied.source.slots == ()
+        assert board._applied.source.api_parameters == ()
+        assert board._applied.source.period_by_id[api_period.period_id].duration == (
+            api_period.duration
+        )
+        assert board._applied.source.period_by_id[scan_period.period_id].duration == (
+            scan_period.duration
+        )
         assert presenter.running is True
         # Stop is the live control now, and Run is not offered twice.
         running, _synchronized, _dirty = view.schedule_view.control_state
@@ -1660,13 +1690,17 @@ def test_the_dot_cycles_off_scan_api_off(presenter, sequence) -> None:
     period_id = sequence.periods[3].period_id
 
     presenter.view.binding_cycle_requested.emit("duration", period_id, None)
-    assert not presenter.sequence.slots[0].slot_id.startswith("api_")
-
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
-    assert presenter.sequence.slots[0].slot_id.startswith("api_")
+    assert len(presenter.sequence.slots) == 1
+    assert presenter.sequence.api_parameters == ()
 
     presenter.view.binding_cycle_requested.emit("duration", period_id, None)
     assert presenter.sequence.slots == ()
+    assert len(presenter.sequence.api_parameters) == 1
+    assert presenter.sequence.api_parameters[0].field_ref.period_id == period_id
+
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    assert presenter.sequence.slots == ()
+    assert presenter.sequence.api_parameters == ()
 
 
 def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> None:
@@ -1794,8 +1828,34 @@ def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> Non
     presenter.connect_to("virtual", "")
     assert view.status_token == "dirty-ready"
 
+    # One host-only API parameter plus one scan field with no table still
+    # prepares a fully static source.  If status compiled the authoring
+    # document directly, unresolved API would make its digest empty forever.
+    view.binding_cycle_requested.emit(
+        "duration", sequence.periods[1].period_id, None
+    )
+    view.binding_cycle_requested.emit(
+        "duration", sequence.periods[1].period_id, None
+    )
+    view.binding_cycle_requested.emit(
+        "duration", sequence.periods[3].period_id, None
+    )
     presenter.fire()
     assert view.status_token == "running-synced"
+    assert board._applied.source.api_parameters == ()
+    assert board._applied.source.slots == ()
+
+    # Arming a real table changes only scan state, not PulseSequence revision:
+    # it must still invalidate the prepared-program digest immediately.
+    view.scan_run_requested.emit(
+        "import numpy as np\n"
+        "scan_table = np.array([0.004, 0.005]).reshape(-1, 1)\n"
+    )
+    assert view.status_token == "running-stale"
+    presenter.fire()
+    assert view.status_token == "running-synced"
+    assert len(board._applied.source.slots) == 1
+    assert board._applied.source.api_parameters == ()
 
     # Editing while it runs means the board is playing something older.
     view.duration_committed.emit(sequence.periods[0].period_id, "7", "us")
@@ -2480,10 +2540,16 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
 
     uploaded: list = []
     board = _Sequencer()
-    board.write_scan_table = lambda rows, sweeps=1: uploaded.append((len(rows), sweeps))
+    board.write_scan_table = lambda rows, sweeps=1: uploaded.append(
+        (len(rows), len(rows[0]), sweeps)
+    )
     presenter.sequencer = board
     view = presenter.view
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    view.binding_cycle_requested.emit("duration", sequence.periods[1].period_id, None)
+    view.binding_cycle_requested.emit("duration", sequence.periods[1].period_id, None)
+    assert len(presenter.sequence.slots) == 1
+    assert len(presenter.sequence.api_parameters) == 1
     view.scan_run_requested.emit(
         "import numpy as np\n"
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
@@ -2503,7 +2569,9 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     # register in the RTL, but there is no reason to send the same numbers
     # three times to say so: which row a point takes is decided when a bank
     # is refilled.
-    assert uploaded[-1] == (7, 3), "seven rows, played three times"
+    assert uploaded[-1] == (7, 1, 3), "seven one-scan-slot rows, played three times"
+    assert len(board._applied.source.slots) == 1
+    assert board._applied.source.api_parameters == ()
     # And a counted number of sweeps is a finite run: wrapping it in the outer
     # forever would repeat the whole scan endlessly and the count would mean
     # nothing.
@@ -2512,7 +2580,7 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     view.scan_repeats_committed.emit(0)
     board.events.clear()
     assert presenter.fire() is True
-    assert uploaded[-1] == (7, 1), "zero means until Stop: one sweep, forever"
+    assert uploaded[-1] == (7, 1, 1), "zero means until Stop: one sweep, forever"
     assert "fire forever" in board.events, board.events
 
 

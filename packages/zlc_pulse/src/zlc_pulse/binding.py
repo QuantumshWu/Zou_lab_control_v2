@@ -1,0 +1,215 @@
+"""Resolve named pulse inputs into the physical fields they own."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import replace
+
+from .model import (
+    FIELD_DAC,
+    FIELD_DELAY,
+    FIELD_DURATION,
+    TIME_UNIT_TO_NS,
+    OutputDelay,
+    PulseFieldRef,
+    PulseSequence,
+    align_to_grid,
+)
+
+
+def pulse_field_value(
+    sequence: PulseSequence,
+    reference: PulseFieldRef,
+    unit: str,
+) -> int | float:
+    """Read one referenced field in the unit declared by its binding."""
+
+    _check_inputs(sequence, reference)
+    if reference.kind == FIELD_DELAY:
+        delay = next(
+            (item for item in sequence.delays if item.port == reference.port), None
+        )
+        if delay is None:
+            return 0
+        return _convert_time(delay.value, delay.unit, unit)
+
+    period = sequence.period_by_id.get(str(reference.period_id))
+    if period is None:
+        raise ValueError(f"no period exists with id {reference.period_id!r}")
+    if reference.kind == FIELD_DURATION:
+        return _convert_time(period.duration, period.unit, unit)
+    step = next(
+        (item for item in period.analog_steps if item.port == reference.port), None
+    )
+    if step is None:
+        raise ValueError(
+            f"period {period.period_id!r} has no DAC step on port {reference.port!r}"
+        )
+    if unit != "value":
+        raise ValueError("DAC fields use unit 'value'")
+    return int(step.value)
+
+
+def replace_pulse_field(
+    sequence: PulseSequence,
+    reference: PulseFieldRef,
+    value: int | float,
+    unit: str,
+    *,
+    field_name: str,
+) -> PulseSequence:
+    """Return ``sequence`` with one referenced physical field replaced."""
+
+    _check_inputs(sequence, reference)
+    if reference.kind == FIELD_DELAY:
+        index = next(
+            (i for i, item in enumerate(sequence.delays) if item.port == reference.port),
+            None,
+        )
+        if index is None:
+            authored = align_to_grid(
+                value,
+                unit,
+                float(sequence.time_step_ns),
+                field_name,
+                minimum=None,
+            )
+            return replace(
+                sequence,
+                delays=sequence.delays + (
+                    OutputDelay(reference.port, _number_for(authored), unit),
+                ),
+            )
+        delays = list(sequence.delays)
+        authored = _convert_time(value, unit, delays[index].unit)
+        delays[index] = replace(
+            delays[index],
+            value=_number_for(
+                align_to_grid(
+                    authored,
+                    delays[index].unit,
+                    float(sequence.time_step_ns),
+                    field_name,
+                    minimum=None,
+                )
+            ),
+        )
+        return replace(sequence, delays=tuple(delays))
+
+    index = next(
+        (i for i, item in enumerate(sequence.periods)
+         if item.period_id == reference.period_id),
+        None,
+    )
+    if index is None:
+        raise ValueError(f"{field_name!r} names no period on this sequence")
+    periods = list(sequence.periods)
+    period = periods[index]
+    if reference.kind == FIELD_DURATION:
+        authored = _convert_time(value, unit, period.unit)
+        periods[index] = replace(
+            period,
+            duration=_number_for(
+                align_to_grid(
+                    authored,
+                    period.unit,
+                    float(sequence.time_step_ns),
+                    field_name,
+                )
+            ),
+        )
+        return replace(sequence, periods=tuple(periods))
+
+    if unit != "value":
+        raise ValueError("DAC fields use unit 'value'")
+    steps = list(period.analog_steps)
+    at = next(
+        (i for i, step in enumerate(steps) if step.port == reference.port), None
+    )
+    if at is None:
+        raise ValueError(
+            f"{field_name!r} names no DAC step in period {period.period_id!r}"
+        )
+    steps[at] = replace(steps[at], value=int(round(float(value))))
+    periods[index] = replace(period, analog_steps=tuple(steps))
+    return replace(sequence, periods=tuple(periods))
+
+
+def resolve_api_parameters(
+    sequence: PulseSequence,
+    values: Mapping[str, int | float] | None = None,
+) -> PulseSequence:
+    """Bake every API parameter into its field and remove the declarations.
+
+    With no explicit mapping, the currently authored field values are used.
+    That is the Pulse Editor's ``On Pulse`` meaning: run exactly what is shown.
+    An explicit caller such as Calibration must provide exactly one value for
+    every declared parameter, so misspellings and partially configured runs do
+    not silently execute nominal values.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    expected = tuple(parameter.parameter_id for parameter in sequence.api_parameters)
+    if values is None:
+        resolved_values = {
+            parameter.parameter_id: pulse_field_value(
+                sequence, parameter.field_ref, parameter.unit
+            )
+            for parameter in sequence.api_parameters
+        }
+    else:
+        if not isinstance(values, Mapping):
+            raise TypeError("API parameter values must be a mapping")
+        resolved_values = dict(values)
+        missing = tuple(
+            parameter_id
+            for parameter_id in expected
+            if parameter_id not in resolved_values
+        )
+        extra = tuple(
+            parameter_id
+            for parameter_id in resolved_values
+            if parameter_id not in expected
+        )
+        if missing or extra:
+            raise ValueError(
+                "API parameter values must exactly match the pulse declaration; "
+                f"missing={missing}, extra={extra}"
+            )
+
+    result = sequence
+    for parameter in sequence.api_parameters:
+        result = replace_pulse_field(
+            result,
+            parameter.field_ref,
+            resolved_values[parameter.parameter_id],
+            parameter.unit,
+            field_name=parameter.parameter_id,
+        )
+    return replace(result, api_parameters=())
+
+
+def _check_inputs(sequence: PulseSequence, reference: PulseFieldRef) -> None:
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    if not isinstance(reference, PulseFieldRef):
+        raise TypeError("reference must be PulseFieldRef")
+
+
+def _convert_time(value: int | float, source_unit: str, target_unit: str) -> float:
+    if source_unit not in TIME_UNIT_TO_NS or target_unit not in TIME_UNIT_TO_NS:
+        raise ValueError("time fields require time units")
+    return float(value) * TIME_UNIT_TO_NS[source_unit] / TIME_UNIT_TO_NS[target_unit]
+
+
+def _number_for(value: float) -> int | float:
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
+__all__ = [
+    "pulse_field_value",
+    "replace_pulse_field",
+    "resolve_api_parameters",
+]

@@ -472,6 +472,13 @@ def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: fl
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
+    if sequence.api_parameters:
+        declared = tuple(
+            parameter.parameter_id for parameter in sequence.api_parameters
+        )
+        raise ValueError(
+            f"pulse API parameters must be resolved before compile: {declared}"
+        )
     params = geom
     if not isinstance(params, StreamerParams):
         raise TypeError("geom must be StreamerParams")

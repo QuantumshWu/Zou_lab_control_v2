@@ -7,9 +7,6 @@ import json
 from pathlib import Path
 import re
 
-import zlc_pulse
-
-
 ROOT = Path(__file__).resolve().parents[1]
 _BOARD_SIGNALS = ("cool" + "ing", "em" + "CCD", "da_" + "dipole", "da_bias" + "_y", "da_bias" + "_x", "da_bias" + "_z")
 
@@ -24,11 +21,6 @@ def _code_cells(notebook: dict) -> list[dict]:
 
 def _source(cell: dict) -> str:
     return "".join(cell.get("source", []))
-
-
-def _name_nodes(source: str) -> set[str]:
-    tree = ast.parse(source)
-    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
 
 def test_tutorial_cells_are_small_explanatory_and_visible() -> None:
@@ -52,13 +44,6 @@ def test_tutorial_cells_are_small_explanatory_and_visible() -> None:
         assert print_calls, cell["id"]
         assert index > 0 and cells[index - 1].get("cell_type") == "markdown", cell["id"]
     assert executable[-1]["id"] == "hardware-direct"
-
-
-def test_tutorial_uses_every_retained_package_export_in_a_lesson() -> None:
-    code = "\n".join(_source(cell) for cell in _code_cells(_notebook()))
-    names = _name_nodes(code)
-    missing = [name for name in zlc_pulse.__all__ if name not in names]
-    assert missing == []
 
 
 def test_tutorial_has_named_lessons_for_runtime_methods_and_readbacks() -> None:

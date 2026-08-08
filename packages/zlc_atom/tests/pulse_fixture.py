@@ -28,10 +28,10 @@ def build_calibration_pulse(
     resolved = resolve_pulse(
         "imaging_template.json",
         search_paths=(PULSE_ROOT,),
-        slot_values={
-            "reference_before": reference_exposure_seconds,
-            "readout": readout_exposure_seconds,
-            "reference_after": reference_exposure_seconds,
+        api_values={
+            "reference_probe_duration_before": reference_exposure_seconds,
+            "readout_probe_duration": readout_exposure_seconds,
+            "reference_probe_duration_after": reference_exposure_seconds,
         },
     )
     return resolved.program, resolved.metadata

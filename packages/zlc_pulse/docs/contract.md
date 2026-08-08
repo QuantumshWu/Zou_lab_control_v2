@@ -1,6 +1,6 @@
 # zlc_pulse 对外契约(跨仓唯一权威)
 
-> 本文件是并行仓(zlc_atom 的 sequencer 侧等)写 fake 的唯一依据。**任何签名变更必须先改本文件**。签名来源:docs/survey-pulse-fpga-2026-08-02.md §3(最小 host API)。宪章:设备只提供 on/off・编辑模型・scan table・api slots・applied 被动回声五类能力;设备不替编排数拍子,但保存的最后应用原样记录可被主动询问用于 GUI sync。
+> 本文件是并行仓(zlc_atom 的 sequencer 侧等)写 fake 的唯一依据。**任何签名变更必须先改本文件**。签名来源:docs/survey-pulse-fpga-2026-08-02.md §3(最小 host API)。宪章:脉冲文档显式区分 scan slots 与 host API parameters；API 参数必须先解析为普通物理字段，设备只接收 resolved program 与 scan table。设备不替编排数拍子,但保存的最后应用原样记录可被主动询问用于 GUI sync。
 
 ## Runtime export surface
 
@@ -15,6 +15,7 @@ __all__ = (
     "connect",
     "serve",
     "PulseSequence",
+    "PulseApiParameter",
     "PulsePeriod",
     "AnalogStep",
     "PulsePortSpec",
@@ -39,6 +40,7 @@ __all__ = (
     "TIME_UNIT_TO_NS",
     "align_to_grid",
     "resolve_scan_point",
+    "resolve_api_parameters",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
@@ -171,9 +173,9 @@ only `disconnect`, `__enter__`, and `__exit__` are remote-only lifecycle helpers
 
 ## 模型词汇
 
-PulseSequence:periods(digital states + AnalogStep)/ delays / repeat / **slot 声明(统一 slot,无 api/scan 双命名空间;区别只是 host 写一行表还是多行表)**(kind, field_ref, unit)。CompiledProgram carries the edge table, affine coefficients, bus descriptors, and slot schema; table rows remain writable data.
+`PulseSequence` 包含 periods(digital states + `AnalogStep`)、delays、repeat、scan-only `slots` 与 host-only `api_parameters`。`PulseApiParameter(parameter_id, field_ref, unit)` 与 `PulseSlot` 共用唯一 ID namespace；同一物理 field 只能属于其中一种。`resolve_api_parameters(sequence, values)` 将全部 API 参数写回普通物理字段并删除声明；省略 `values` 时使用文档当前值。`compile_sequence` 拒绝任何尚未解析的 API 参数。CompiledProgram carries the edge table, affine coefficients, bus descriptors, and scan-slot schema; table rows remain writable scan data.
 `PulseTarget`:逻辑口→lane 映射 + `abi_fingerprint`(connect 时一次相等比较)。
-`AppliedState.source` 是 owner 提供的 `PulseSequence` 原样引用,设备不解释、不编排;`slot_values` 与 `scan_rows` 只保留当前生效的 API 一行表或 scan 多行表之一。
+`AppliedState.source` 是 owner 提供的 resolved `PulseSequence` 原样引用,设备不解释、不编排；`slot_values` 与 `scan_rows` 只描述 scan slots，API 参数永不进入设备 slot/table 宽度。
 
 ## 负面清单(永不提供)
 

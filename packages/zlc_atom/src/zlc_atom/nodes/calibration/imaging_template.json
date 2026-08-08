@@ -936,11 +936,11 @@
       "analog_steps": []
     }
   ],
-  "slots": [
+  "slots": [],
+  "api_parameters": [
     {
-      "kind": "duration",
+      "parameter_id": "reference_probe_duration_before",
       "unit": "s",
-      "slot_id": "reference_before",
       "field_ref": {
         "kind": "duration",
         "period_id": "long_before",
@@ -948,9 +948,8 @@
       }
     },
     {
-      "kind": "duration",
+      "parameter_id": "readout_probe_duration",
       "unit": "s",
-      "slot_id": "readout",
       "field_ref": {
         "kind": "duration",
         "period_id": "short",
@@ -958,9 +957,8 @@
       }
     },
     {
-      "kind": "duration",
+      "parameter_id": "reference_probe_duration_after",
       "unit": "s",
-      "slot_id": "reference_after",
       "field_ref": {
         "kind": "duration",
         "period_id": "long_after",

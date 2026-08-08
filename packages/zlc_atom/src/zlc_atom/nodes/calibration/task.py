@@ -328,10 +328,10 @@ class CalibrationTask:
         return resolve_pulse(
             self.request.pulse_template,
             search_paths=self.pulse_search_paths,
-            slot_values={
-                "reference_before": self.request.reference_exposure_seconds,
-                "readout": self.request.readout_exposure_seconds,
-                "reference_after": self.request.reference_exposure_seconds,
+            api_values={
+                "reference_probe_duration_before": self.request.reference_exposure_seconds,
+                "readout_probe_duration": self.request.readout_exposure_seconds,
+                "reference_probe_duration_after": self.request.reference_exposure_seconds,
             },
         )
 
@@ -405,7 +405,7 @@ class CalibrationTask:
                 timeout=self.request.timeout_seconds,
             )
             armed = True
-            arm_sequencer(self.sequencer, pulse.program, pulse.metadata)
+            arm_sequencer(self.sequencer, pulse)
             sequencer_snapshot = _sequencer_snapshot(self.sequencer)
             cycles: list[
                 tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord]

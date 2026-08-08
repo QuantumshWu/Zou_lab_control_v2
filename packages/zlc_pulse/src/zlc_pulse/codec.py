@@ -19,6 +19,7 @@ from typing import Any
 from .model import (
     AnalogStep,
     OutputDelay,
+    PulseApiParameter,
     PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
@@ -87,6 +88,18 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
                 },
             }
             for slot in sequence.slots
+        ],
+        "api_parameters": [
+            {
+                "parameter_id": parameter.parameter_id,
+                "unit": parameter.unit,
+                "field_ref": {
+                    "kind": parameter.field_ref.kind,
+                    "period_id": parameter.field_ref.period_id,
+                    "port": parameter.field_ref.port,
+                },
+            }
+            for parameter in sequence.api_parameters
         ],
         "delays": [
             {"port": delay.port, "value": delay.value, "unit": delay.unit}
@@ -161,7 +174,19 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             unit=str(slot["unit"]),
             slot_id=str(slot["slot_id"]),
         )
-        for slot in tree.get("slots", ())
+        for slot in tree["slots"]
+    )
+    api_parameters = tuple(
+        PulseApiParameter(
+            parameter_id=str(parameter["parameter_id"]),
+            field_ref=PulseFieldRef(
+                kind=str(parameter["field_ref"]["kind"]),
+                period_id=parameter["field_ref"].get("period_id"),
+                port=parameter["field_ref"].get("port"),
+            ),
+            unit=str(parameter["unit"]),
+        )
+        for parameter in tree["api_parameters"]
     )
     delays = tuple(
         OutputDelay(str(delay["port"]), delay["value"], str(delay["unit"]))
@@ -183,6 +208,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         time_step_ns=float(tree["time_step_ns"]),
         periods=periods,
         slots=slots,
+        api_parameters=api_parameters,
         delays=delays,
         repeat=repeat,
     )

@@ -18,17 +18,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
+from .binding import pulse_field_value, replace_pulse_field
 from .model import (
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
     PulseSequence,
-    align_to_grid,
 )
 
 
 __all__ = [
     "ScanColumnSpec",
+    "resolve_scan_point",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
@@ -111,8 +112,8 @@ def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
                 )
             )
         else:
-            unit = _field_unit(sequence, reference)
-            nominal = _nominal_value(sequence, reference, unit)
+            unit = sequence.field_unit(reference)
+            nominal = abs(float(pulse_field_value(sequence, reference, unit)))
             quantum = _quantum(sequence, unit)
             longest = _longest_slot_ticks() / _ticks_per(sequence, unit)
             columns.append(
@@ -130,7 +131,10 @@ def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
     return tuple(columns)
 
 
-def resolve_scan_point(sequence: PulseSequence, values: Sequence[float]) -> PulseSequence:
+def resolve_scan_point(
+    sequence: PulseSequence,
+    values: Sequence[float] | None = None,
+) -> PulseSequence:
     """One scan row baked into the fields its slots point at, with no slots left.
 
     This is how a HELD point is played.  A held point is not a scan of length
@@ -142,8 +146,11 @@ def resolve_scan_point(sequence: PulseSequence, values: Sequence[float]) -> Puls
     point into the document and ran a plain pulse; this is that, in this
     package's own terms.
 
-    ``values`` are in each field's own unit, the same numbers a scan table row
-    holds -- a signed DAC code, or a duration/delay in the field's unit.
+    ``values`` are in each field's authored unit, the same numbers a scan table
+    row holds -- a signed DAC code, or a duration/delay in the unit shown by
+    the field's editor.  With ``None``, the currently authored values are
+    resolved; that is how an editor runs a scan-bound pulse before a table has
+    been authored.
 
     Times land ON the clock grid, by the same rounding the wire does: a scan
     row reaches the board as whole ticks, so a held point that kept the typed
@@ -154,7 +161,18 @@ def resolve_scan_point(sequence: PulseSequence, values: Sequence[float]) -> Puls
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    row = tuple(values)
+    row = (
+        tuple(
+            pulse_field_value(
+                sequence,
+                slot.field_ref,
+                sequence.field_unit(slot.field_ref),
+            )
+            for slot in sequence.slots
+        )
+        if values is None
+        else tuple(values)
+    )
     if len(row) != len(sequence.slots):
         raise ValueError(
             f"a scan point has one value per slot: {len(sequence.slots)} "
@@ -163,62 +181,20 @@ def resolve_scan_point(sequence: PulseSequence, values: Sequence[float]) -> Puls
     if not row:
         return sequence
 
-    periods = list(sequence.periods)
-    delays = list(sequence.delays)
+    result = sequence
     for slot, value in zip(sequence.slots, row):
-        reference = slot.field_ref
-        if slot.kind == FIELD_DELAY:
-            index = next(
-                (i for i, item in enumerate(delays) if item.port == reference.port), None
-            )
-            if index is None:
-                raise ValueError(f"slot {slot.slot_id!r} names no delay on this sequence")
-            delays[index] = replace(
-                delays[index],
-                value=_number_for(
-                    align_to_grid(value, delays[index].unit,
-                                  float(sequence.time_step_ns), slot.slot_id,
-                                  minimum=None)
-                ),
-            )
-            continue
-        index = next(
-            (i for i, item in enumerate(periods)
-             if item.period_id == reference.period_id), None
+        result = replace_pulse_field(
+            result,
+            slot.field_ref,
+            value,
+            result.field_unit(slot.field_ref),
+            field_name=slot.slot_id,
         )
-        if index is None:
-            raise ValueError(f"slot {slot.slot_id!r} names no period on this sequence")
-        period = periods[index]
-        if slot.kind == FIELD_DURATION:
-            periods[index] = replace(
-                period,
-                duration=_number_for(
-                    align_to_grid(value, period.unit,
-                                  float(sequence.time_step_ns), slot.slot_id)
-                ),
-            )
-            continue
-        steps = list(period.analog_steps)
-        at = next(
-            (i for i, step in enumerate(steps) if step.port == reference.port), None
-        )
-        if at is None:
-            raise ValueError(
-                f"slot {slot.slot_id!r} names no DAC step in period "
-                f"{period.period_id!r}"
-            )
-        steps[at] = replace(steps[at], value=int(round(float(value))))
-        periods[index] = replace(period, analog_steps=tuple(steps))
 
     # The slots go with the values: what they described is now written down,
     # and a sequence that still declared them would compile a scan of a pulse
     # that no longer has anything to sweep.
-    return replace(sequence, periods=tuple(periods), delays=tuple(delays), slots=())
-
-
-def _number_for(value: float) -> int | float:
-    number = float(value)
-    return int(number) if number.is_integer() else number
+    return replace(result, slots=())
 
 
 def scan_rows_to_wire(
@@ -275,22 +251,6 @@ def _longest_slot_ticks() -> float:
     return float((1 << (slot_operand_width() - 1)) - 1)
 
 
-def _field_unit(sequence: PulseSequence, reference: object) -> str:
-    """The unit the editor shows for the field this column scans."""
-
-    if reference.period_id is not None:
-        period = next(
-            (item for item in sequence.periods if item.period_id == reference.period_id),
-            None,
-        )
-        if period is not None:
-            return str(period.unit)
-    delay = next(
-        (item for item in sequence.delays if item.port == reference.port), None
-    )
-    return str(delay.unit) if delay is not None else "ns"
-
-
 def _ticks_per(sequence: PulseSequence, unit: str) -> float:
     """How many device ticks one of that unit is worth."""
 
@@ -303,38 +263,6 @@ def _quantum(sequence: PulseSequence, unit: str) -> float:
     """One tick, expressed in the column's unit: the floor a sweep may reach."""
 
     return 1.0 / _ticks_per(sequence, unit)
-
-
-def _nominal_value(sequence: PulseSequence, reference: object, unit: str) -> float:
-    """What the bound field currently is, in the column's own unit."""
-
-    return _nominal_ticks(sequence, reference) / _ticks_per(sequence, unit)
-
-
-def _nominal_ticks(sequence: PulseSequence, reference: object) -> float:
-    """What the bound field currently is, in ticks, so a sweep brackets it.
-
-    Ticks, because that is the unit a slot value is written in.  This used to
-    answer in nanoseconds and the caller labelled the column "ns", so every
-    generated sweep was twenty times too long at 50 MHz.
-    """
-
-    from .model import TIME_UNIT_TO_NS
-
-    step = float(sequence.time_step_ns)
-    if reference.period_id is not None:
-        period = next(
-            (item for item in sequence.periods if item.period_id == reference.period_id),
-            None,
-        )
-        if period is not None:
-            return float(period.duration) * TIME_UNIT_TO_NS[period.unit] / step
-    delay = next(
-        (item for item in sequence.delays if item.port == reference.port), None
-    )
-    if delay is not None:
-        return abs(float(delay.value)) * TIME_UNIT_TO_NS[delay.unit] / step
-    return 100.0
 
 
 def validate_scan_table(

@@ -349,6 +349,31 @@ class PulseSlot:
 
 
 @dataclass(frozen=True)
+class PulseApiParameter:
+    """One named run-time input owned by the pulse API, never by a scan table."""
+
+    parameter_id: str
+    field_ref: PulseFieldRef
+    unit: str
+
+    def __post_init__(self) -> None:
+        parameter_id = _identifier(self.parameter_id, "parameter_id")
+        if not isinstance(self.field_ref, PulseFieldRef):
+            raise TypeError("API parameter field_ref must be PulseFieldRef")
+        unit = _unit(self.unit, "API parameter unit")
+        if self.field_ref.kind == FIELD_DAC and unit != "value":
+            raise ValueError("DAC API parameters use unit 'value'")
+        if self.field_ref.kind != FIELD_DAC and unit == "value":
+            raise ValueError("time API parameters use a time unit")
+        object.__setattr__(self, "parameter_id", parameter_id)
+        object.__setattr__(self, "unit", unit)
+
+    @property
+    def field(self) -> PulseFieldRef:
+        return self.field_ref
+
+
+@dataclass(frozen=True)
 class AnalogStep:
     port: str
     mode: str
@@ -444,10 +469,14 @@ class PulseSequence:
     time_step_ns: float
     periods: tuple[PulsePeriod, ...]
     slots: tuple[PulseSlot, ...]
+    api_parameters: tuple[PulseApiParameter, ...]
     delays: tuple[OutputDelay, ...]
     repeat: RepeatRegion | None
     _period_by_id: Mapping[str, PulsePeriod] = field(init=False, repr=False, compare=False)
     _slot_by_id: Mapping[str, PulseSlot] = field(init=False, repr=False, compare=False)
+    _api_parameter_by_id: Mapping[str, PulseApiParameter] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __init__(
         self,
@@ -456,6 +485,7 @@ class PulseSequence:
         time_step_ns: float = 20.0,
         periods: tuple[PulsePeriod, ...] = (),
         slots: tuple[PulseSlot, ...] = (),
+        api_parameters: tuple[PulseApiParameter, ...] = (),
         delays: tuple[OutputDelay, ...] = (),
         repeat: RepeatRegion | None = None,
     ) -> None:
@@ -503,19 +533,35 @@ class PulseSequence:
             raise ValueError("slot ids must be unique")
         if len({slot.field_ref for slot in slot_values}) != len(slot_values):
             raise ValueError("each physical field can have only one slot")
+        api_values = tuple(api_parameters)
+        if any(not isinstance(parameter, PulseApiParameter) for parameter in api_values):
+            raise TypeError("api_parameters must contain PulseApiParameter values")
+        parameter_ids = tuple(parameter.parameter_id for parameter in api_values)
+        if len(parameter_ids) != len(set(parameter_ids)):
+            raise ValueError("API parameter ids must be unique")
+        if len({parameter.field_ref for parameter in api_values}) != len(api_values):
+            raise ValueError("each physical field can have only one API parameter")
+        all_binding_ids = tuple(slot.slot_id for slot in slot_values) + parameter_ids
+        if len(all_binding_ids) != len(set(all_binding_ids)):
+            raise ValueError("scan slots and API parameters share one unique id namespace")
+        all_fields = tuple(slot.field_ref for slot in slot_values) + tuple(
+            parameter.field_ref for parameter in api_values
+        )
+        if len(all_fields) != len(set(all_fields)):
+            raise ValueError("a physical field cannot be both scan-bound and API-bound")
         by_period = {period.period_id: period for period in periods}
-        for slot in slot_values:
-            ref = slot.field_ref
+        for binding in (*slot_values, *api_values):
+            ref = binding.field_ref
             if ref.kind in (FIELD_DURATION, FIELD_DAC) and ref.period_id not in by_period:
-                raise ValueError(f"slot references missing period {ref.period_id!r}")
+                raise ValueError(f"binding references missing period {ref.period_id!r}")
             if ref.kind == FIELD_DAC:
                 port = target.by_key.get(ref.port)
                 if port is None or port.kind != PORT_DAC:
-                    raise ValueError(f"slot references missing DAC {ref.port!r}")
+                    raise ValueError(f"binding references missing DAC {ref.port!r}")
             if ref.kind == FIELD_DELAY:
                 port = target.by_key.get(ref.port)
                 if port is None or port.kind not in (PORT_DIGITAL, PORT_DAC):
-                    raise ValueError(f"slot references missing delay port {ref.port!r}")
+                    raise ValueError(f"binding references missing delay port {ref.port!r}")
         if repeat is not None:
             if not isinstance(repeat, RepeatRegion):
                 raise TypeError("repeat must be RepeatRegion or None")
@@ -528,10 +574,16 @@ class PulseSequence:
         object.__setattr__(self, "time_step_ns", float(time_step_ns))
         object.__setattr__(self, "periods", periods)
         object.__setattr__(self, "slots", slot_values)
+        object.__setattr__(self, "api_parameters", api_values)
         object.__setattr__(self, "delays", delay_values)
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "_period_by_id", MappingProxyType(by_period))
         object.__setattr__(self, "_slot_by_id", MappingProxyType({slot.slot_id: slot for slot in slot_values}))
+        object.__setattr__(
+            self,
+            "_api_parameter_by_id",
+            MappingProxyType({parameter.parameter_id: parameter for parameter in api_values}),
+        )
 
     @property
     def slot_count(self) -> int:
@@ -577,6 +629,27 @@ class PulseSequence:
     def slot_by_id(self) -> Mapping[str, PulseSlot]:
         return self._slot_by_id
 
+    @property
+    def api_parameter_by_id(self) -> Mapping[str, PulseApiParameter]:
+        return self._api_parameter_by_id
+
+    def field_unit(self, reference: PulseFieldRef) -> str:
+        """The authored unit of one physical field."""
+
+        if not isinstance(reference, PulseFieldRef):
+            raise TypeError("reference must be PulseFieldRef")
+        if reference.kind == FIELD_DAC:
+            return "value"
+        if reference.kind == FIELD_DELAY:
+            delay = next(
+                (item for item in self.delays if item.port == reference.port), None
+            )
+            return str(delay.unit) if delay is not None else "ns"
+        period = self.period_by_id.get(str(reference.period_id))
+        if period is None:
+            raise ValueError(f"no period exists with id {reference.period_id!r}")
+        return str(period.unit)
+
 __all__ = [
     "ANALOG_MODES",
     "DAC_OFFSET_BINARY",
@@ -586,6 +659,7 @@ __all__ = [
     "FIELD_KINDS",
     "OutputDelay",
     "PulseFieldRef",
+    "PulseApiParameter",
     "PulsePeriod",
     "PulsePortSpec",
     "PulseSequence",

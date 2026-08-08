@@ -37,6 +37,7 @@ from .manifest import DEFAULT_XDC_PATH, pulse_target_from_xdc
 from .model import (
     AnalogStep,
     OutputDelay,
+    PulseApiParameter,
     PulseFieldRef as _PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
@@ -84,6 +85,7 @@ _TREE_TYPES = {
         CompiledProgram,
         DoneReport,
         OutputDelay,
+        PulseApiParameter,
         _PulseFieldRef,
         PulsePeriod,
         PulsePortSpec,

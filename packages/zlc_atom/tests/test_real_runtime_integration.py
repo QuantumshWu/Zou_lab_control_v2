@@ -17,7 +17,7 @@ from zlc_atom.nodes.camera_measurement import (
 )
 from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
-from zlc_atom.nodes.calibration.pulse import resolve_pulse
+from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
 from tests.pulse_fixture import PULSE_ROOT
 
@@ -73,17 +73,16 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         monitor = measurement.monitor(buffer_frames=1)
         assert isinstance(monitor, MonitorCapture)
         sequencer = installation.device("sequencer")
-        sequencer.load(
-            resolve_pulse(
-                "imaging_template.json",
-                search_paths=(PULSE_ROOT,),
-                slot_values={
-                    "reference_before": 0.02,
-                    "readout": 0.005,
-                    "reference_after": 0.02,
-                },
-            ).program
+        pulse = resolve_pulse(
+            "imaging_template.json",
+            search_paths=(PULSE_ROOT,),
+            api_values={
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
+            },
         )
+        arm_sequencer(sequencer, pulse)
         sequencer.fire()
         sequencer.wait_done(1.0)
         assert monitor.poll() is not None

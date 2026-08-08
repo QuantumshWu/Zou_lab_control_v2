@@ -9,32 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from zlc_pulse import (
+    PulseSequence,
     compile_sequence,
     load_streamer_config,
-    resolve_scan_point,
+    resolve_api_parameters,
     sequence_from_tree,
 )
 
 
-CALIBRATION_SLOT_IDS = (
-    "reference_before",
-    "readout",
-    "reference_after",
+CALIBRATION_API_PARAMETER_IDS = (
+    "reference_probe_duration_before",
+    "readout_probe_duration",
+    "reference_probe_duration_after",
 )
 CAMERA_TRIGGER_PORT = "emCCD"
-
-
-def arm_sequencer(
-    sequencer: object,
-    program: object,
-    metadata: Mapping[str, Any],
-) -> None:
-    """Apply the pulse's logical camera line, then load its program."""
-
-    channel = metadata.get("camera_trigger_channel")
-    if channel is not None and hasattr(sequencer, "camera_trigger_channel"):
-        sequencer.camera_trigger_channel = str(channel)
-    sequencer.load(program)
 
 
 @dataclass(frozen=True)
@@ -43,8 +31,20 @@ class ResolvedPulse:
 
     name: str
     path: Path
+    sequence: PulseSequence
     program: object
     metadata: Mapping[str, Any]
+
+
+def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
+    """Apply and load one resolved pulse, including its inspectable source."""
+
+    if not isinstance(pulse, ResolvedPulse):
+        raise TypeError("pulse must be ResolvedPulse")
+    channel = pulse.metadata.get("camera_trigger_channel")
+    if channel is not None and hasattr(sequencer, "camera_trigger_channel"):
+        sequencer.camera_trigger_channel = str(channel)
+    sequencer.load(pulse.program, source=pulse.sequence)
 
 
 def _template_filename(value: object) -> str:
@@ -63,9 +63,9 @@ def resolve_pulse(
     template: str,
     *,
     search_paths: Sequence[str | Path],
-    slot_values: Mapping[str, float],
+    api_values: Mapping[str, float],
 ) -> ResolvedPulse:
-    """Load one exact project JSON, resolve its three slots, and compile it."""
+    """Load one exact project JSON, resolve its three API inputs, and compile it."""
 
     filename = _template_filename(template)
     if isinstance(search_paths, (str, Path)):
@@ -82,23 +82,30 @@ def resolve_pulse(
 
     tree = json.loads(path.read_text(encoding="utf-8"))
     sequence = sequence_from_tree(tree)
-    slot_ids = tuple(slot.slot_id for slot in sequence.slots)
-    if slot_ids != CALIBRATION_SLOT_IDS:
+    if sequence.slots:
+        raise ValueError("calibration pulse cannot declare scan slots")
+    parameter_ids = tuple(
+        parameter.parameter_id for parameter in sequence.api_parameters
+    )
+    if parameter_ids != CALIBRATION_API_PARAMETER_IDS:
         raise ValueError(
-            "calibration pulse slots must be "
-            f"{CALIBRATION_SLOT_IDS!r}, got {slot_ids!r}"
+            "calibration pulse API parameters must be "
+            f"{CALIBRATION_API_PARAMETER_IDS!r}, got {parameter_ids!r}"
         )
-    values = dict(slot_values)
-    if set(values) != set(CALIBRATION_SLOT_IDS) or len(values) != len(
-        CALIBRATION_SLOT_IDS
+    values = dict(api_values)
+    if set(values) != set(CALIBRATION_API_PARAMETER_IDS) or len(values) != len(
+        CALIBRATION_API_PARAMETER_IDS
     ):
         raise ValueError(
-            "calibration slot values must contain exactly "
-            f"{CALIBRATION_SLOT_IDS!r}"
+            "calibration API values must contain exactly "
+            f"{CALIBRATION_API_PARAMETER_IDS!r}"
         )
-    resolved = resolve_scan_point(
+    resolved = resolve_api_parameters(
         sequence,
-        tuple(float(values[slot_id]) for slot_id in CALIBRATION_SLOT_IDS),
+        {
+            parameter_id: float(values[parameter_id])
+            for parameter_id in CALIBRATION_API_PARAMETER_IDS
+        },
     )
     config = load_streamer_config()
     if config["source"] is None:
@@ -108,31 +115,30 @@ def resolve_pulse(
         )
     program = compile_sequence(resolved, config["params"], config["clock_hz"])
     exposures = program.camera_window_exposures(CAMERA_TRIGGER_PORT)
-    reference_indices = tuple(
-        index
-        for index, slot_id in enumerate(slot_ids)
-        if slot_id.startswith("reference_")
-    )
-    readout_index = slot_ids.index("readout")
     metadata = {
         "camera_trigger_channel": CAMERA_TRIGGER_PORT,
         "camera_windows": program.camera_window_count(CAMERA_TRIGGER_PORT),
         "frame_exposures": exposures,
-        "frame_semantics": tuple(
-            "short_readout"
-            if slot_id == "readout"
-            else f"reference_long_{slot_id.removeprefix('reference_')}"
-            for slot_id in slot_ids
+        "frame_semantics": (
+            "reference_long_before",
+            "short_readout",
+            "reference_long_after",
         ),
-        "reference_frame_indices": reference_indices,
-        "short_frame_index": readout_index,
+        "reference_frame_indices": (0, 2),
+        "short_frame_index": 1,
         "repeat_forever": program.repeat_forever,
     }
-    return ResolvedPulse(sequence.name, path.resolve(), program, metadata)
+    return ResolvedPulse(
+        sequence.name,
+        path.resolve(),
+        resolved,
+        program,
+        metadata,
+    )
 
 
 __all__ = [
-    "CALIBRATION_SLOT_IDS",
+    "CALIBRATION_API_PARAMETER_IDS",
     "CAMERA_TRIGGER_PORT",
     "ResolvedPulse",
     "arm_sequencer",

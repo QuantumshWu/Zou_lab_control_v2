@@ -42,6 +42,7 @@ from zlc_pulse import (
     TIME_UNIT_CHOICES,
     TIME_UNIT_TO_NS,
     align_to_grid,
+    resolve_api_parameters,
     resolve_scan_point,
 )
 from zlc_durable import unique_path, write_readable_json
@@ -526,9 +527,9 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
     to slot 0 looked exactly like one that was not bound at all -- the bind
     took, and the screen never said so.
 
-    The number is the slot's position on the sequence, which is the column an
-    operator will find it in; api slots share the counting because they share
-    the mechanism -- an api slot IS a scan slot the host writes one row into.
+    Scan and API bindings are distinct domain collections.  Their displayed
+    numbers share one sequence only so every mark on the form is unambiguous;
+    API parameters never add a scan-table column.
     """
 
     if sequence is None:
@@ -536,8 +537,14 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
     found: dict[tuple, tuple[str, int]] = {}
     for index, slot in enumerate(sequence.slots):
         reference = slot.field_ref
-        kind = "api" if str(slot.slot_id).startswith("api_") else "scan"
-        found[(reference.kind, reference.period_id, reference.port)] = (kind, index + 1)
+        found[(reference.kind, reference.period_id, reference.port)] = ("scan", index + 1)
+    offset = len(sequence.slots)
+    for index, parameter in enumerate(sequence.api_parameters):
+        reference = parameter.field_ref
+        found[(reference.kind, reference.period_id, reference.port)] = (
+            "api",
+            offset + index + 1,
+        )
     return found
 
 
@@ -1517,21 +1524,44 @@ class PulseEditorPresenter:
             for period in current.periods
         )
         delays = tuple(delay for delay in current.delays if delay.port in ports)
+        slots = tuple(
+            slot
+            for slot in current.slots
+            if slot.field_ref.port is None or slot.field_ref.port in ports
+        )
+        api_parameters = tuple(
+            parameter
+            for parameter in current.api_parameters
+            if parameter.field_ref.port is None or parameter.field_ref.port in ports
+        )
+        dropped_bindings = sorted(
+            [
+                slot.slot_id
+                for slot in current.slots
+                if slot not in slots
+            ]
+            + [
+                parameter.parameter_id
+                for parameter in current.api_parameters
+                if parameter not in api_parameters
+            ]
+        )
         candidate = PulseSequence(
             name=current.name,
             target=board.target,
             time_step_ns=float(board.time_step_ns),
             periods=periods,
-            slots=(),
+            slots=slots,
+            api_parameters=api_parameters,
             delays=delays,
             repeat=current.repeat,
         )
         self.sequence = candidate
         self.original = candidate
-        if lost or dropped_steps:
-            missing = ", ".join(lost + dropped_steps)
+        if lost or dropped_steps or dropped_bindings:
+            missing = ", ".join(lost + dropped_steps + dropped_bindings)
             self._warn(
-                f"this board has no {missing}; those outputs were dropped from "
+                f"this board has no {missing}; those outputs or bindings were dropped from "
                 "the pulse rather than driven blind"
             )
 
@@ -1644,11 +1674,12 @@ class PulseEditorPresenter:
             self._warn("this editor is not connected to a sequencer")
             return False
         try:
+            source = self._execution_sequence()
             # The source goes with it.  A board that was handed a program and
             # not the document it came from can say what it holds but not what
             # it means, and reading a saved run then depends on whoever was at
             # the keyboard.
-            self.sequencer.load(self.compile(), source=self.sequence)
+            self.sequencer.load(self.compile(source), source=source)
             if self._scan_armed():
                 # The table once, and how many times to play it.  The board
                 # streams it and refills behind the cursor, so a sweep count is
@@ -1664,6 +1695,23 @@ class PulseEditorPresenter:
             return False
         self._poll_board()
         return True
+
+    def _execution_sequence(self) -> PulseSequence:
+        """One executable document prepared from the current authoring state.
+
+        API parameters are always replaced by the values currently shown in
+        the editor.  Scan bindings remain dynamic only when a real table is
+        armed; without a table their authored nominal values become an ordinary
+        static pulse.  Both On Pulse and synchronization digest this same
+        document, so there is only one definition of what the button runs.
+        """
+
+        if self.sequence is None:
+            raise RuntimeError("no pulse is open")
+        source = resolve_api_parameters(self.sequence)
+        if source.slots and not self._scan_armed():
+            source = resolve_scan_point(source)
+        return source
 
     def fire(self, *, forever: bool | None = None) -> bool:
         """On Pulse: load what is on screen and run it the way the pulse says.
@@ -1820,7 +1868,7 @@ class PulseEditorPresenter:
             return ""
         if self._digest_revision != self.revision:
             try:
-                self._digest = self.compile().digest
+                self._digest = self.compile(self._execution_sequence()).digest
             except Exception:
                 # A pulse that does not compile is not one any board can be
                 # holding, which is the honest answer to the question asked.
@@ -2076,7 +2124,7 @@ class PulseEditorPresenter:
         is this.
         """
 
-        from zlc_pulse import PulseFieldRef, PulseSlot
+        from zlc_pulse import PulseApiParameter, PulseFieldRef, PulseSlot
         from zlc_ui import cycle_binding_kind
 
         if self.sequence is None:
@@ -2085,7 +2133,7 @@ class PulseEditorPresenter:
         reference = self._field_reference(kind, period_id, port_key)
         if reference is None:
             return
-        current = next(
+        current_scan = next(
             (
                 slot
                 for slot in self.sequence.slots
@@ -2093,32 +2141,61 @@ class PulseEditorPresenter:
             ),
             None,
         )
-        binding = None if current is None else self._binding_of(current)
+        current_api = next(
+            (
+                parameter
+                for parameter in self.sequence.api_parameters
+                if parameter.field_ref == reference
+            ),
+            None,
+        )
+        binding = "scan" if current_scan is not None else (
+            "api" if current_api is not None else None
+        )
         wanted = cycle_binding_kind(binding, field_kind=kind)
         slots = tuple(
             slot for slot in self.sequence.slots if slot.field_ref != reference
         )
-        if wanted is not None:
+        api_parameters = tuple(
+            parameter
+            for parameter in self.sequence.api_parameters
+            if parameter.field_ref != reference
+        )
+        if wanted == "scan":
             slots = slots + (
                 PulseSlot(
                     reference.kind,
                     reference,
-                    "value" if reference.kind == "dac" else "ns",
-                    slot_id=self._slot_id(reference, wanted),
+                    self.sequence.field_unit(reference),
+                    slot_id=self._binding_id(reference),
                 ),
             )
-        self._apply(self._rebuilt(slots=slots))
+        elif wanted == "api":
+            api_parameters = api_parameters + (
+                PulseApiParameter(
+                    current_scan.slot_id if current_scan is not None else self._binding_id(reference),
+                    reference,
+                    current_scan.unit if current_scan is not None else (
+                        self.sequence.field_unit(reference)
+                    ),
+                ),
+            )
+        self._apply(
+            self._rebuilt(slots=slots, api_parameters=api_parameters)
+        )
         self._refresh_scan_page()
 
     @staticmethod
-    def _binding_of(slot: object) -> str:
-        """Which cycle position a slot represents.
+    def _binding_id(reference: object) -> str:
+        """A stable field-derived id used only for newly authored bindings."""
 
-        An api slot is a scan slot the host writes one row into instead of
-        streaming a table, so the two differ by name, not by mechanism.
-        """
-
-        return "api" if str(slot.slot_id).startswith("api_") else "scan"
+        parts = [str(reference.kind)]
+        parts += [
+            str(part)
+            for part in (reference.period_id, reference.port)
+            if part is not None
+        ]
+        return "_".join(parts)
 
     def _has_scan_slots(self) -> bool:
         """Whether anything is bound, and say what to do when nothing is.
@@ -2136,27 +2213,6 @@ class PulseEditorPresenter:
             "(click a dot in the Edit tab)"
         )
         return False
-
-    @staticmethod
-    def _slot_id(reference: object, binding: str) -> str:
-        """A name for one bound field, built from ALL of what identifies it.
-
-        The model names the parts: a duration is a period, a delay is a port,
-        and a DAC is a period AND a port.  This took ``period_id or port`` --
-        the first part that happened to be set -- so every DAC in one period
-        got the same name, and binding a second one was refused with "slot ids
-        must be unique".  One field per period could be scanned; every other
-        dot on that card answered a rule the operator had not broken.
-        """
-
-        parts = [str(reference.kind)]
-        parts += [
-            str(part)
-            for part in (reference.period_id, reference.port)
-            if part is not None
-        ]
-        prefix = "api_" if binding == "api" else ""
-        return prefix + "_".join(parts)
 
     def _field_reference(self, kind: str, period_id: object, port_key: object):
         from zlc_pulse import PulseFieldRef
@@ -2408,7 +2464,8 @@ class PulseEditorPresenter:
             # plain pulse, which is what v1 did and what the board has always
             # been good at.
             resolved = resolve_scan_point(
-                self.sequence, self._scan_rows[self._held_point]
+                resolve_api_parameters(self.sequence),
+                self._scan_rows[self._held_point],
             )
             self.sequencer.load(self.compile(resolved), source=resolved)
             self.sequencer.fire(forever=True)
@@ -2434,6 +2491,11 @@ class PulseEditorPresenter:
         """
 
         self._scan_rows = tuple(tuple(value for value in row) for row in rows)
+        # Empty versus non-empty changes the executable document from a static
+        # pulse with nominal scan values to a dynamic scan program.  Revision
+        # tracks PulseSequence edits, not table state, so invalidate this cache
+        # at the one place table state changes.
+        self._digest_revision = -1
         self.refresh()
 
     def _scan_armed(self) -> bool:
@@ -2974,6 +3036,7 @@ def replace_sequence(sequence: PulseSequence, **changes: Any) -> PulseSequence:
         "time_step_ns": sequence.time_step_ns,
         "periods": sequence.periods,
         "slots": sequence.slots,
+        "api_parameters": sequence.api_parameters,
         "delays": sequence.delays,
         "repeat": sequence.repeat,
     }

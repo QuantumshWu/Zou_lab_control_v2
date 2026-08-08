@@ -17,6 +17,7 @@ from .model import (
     align_to_grid,
     AnalogStep,
     OutputDelay,
+    PulseApiParameter,
     PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
@@ -26,6 +27,7 @@ from .model import (
     RepeatRegion,
 )
 from .compile import compile_sequence  # noqa: E402
+from .binding import resolve_api_parameters  # noqa: E402
 from .wire import load_streamer_config  # noqa: E402
 from .manifest import pulse_target_from_xdc  # noqa: E402
 from .device import PulseStreamer  # noqa: E402
@@ -53,6 +55,7 @@ __all__ = [
     "connect",
     "serve",
     "PulseSequence",
+    "PulseApiParameter",
     "PulsePeriod",
     "AnalogStep",
     "PulsePortSpec",
@@ -77,6 +80,7 @@ __all__ = [
     "TIME_UNIT_TO_NS",
     "align_to_grid",
     "resolve_scan_point",
+    "resolve_api_parameters",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",

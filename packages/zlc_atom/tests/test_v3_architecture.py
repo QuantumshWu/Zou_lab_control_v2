@@ -5,13 +5,18 @@ import json
 from pathlib import Path
 
 import pytest
-from zlc_pulse import PULSE_TREE_FORMAT, sequence_from_tree, sequence_to_tree
+from zlc_pulse import (
+    PULSE_TREE_FORMAT,
+    resolve_api_parameters,
+    sequence_from_tree,
+    sequence_to_tree,
+)
 from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import calibration_pulse_template_bytes, discover_logic_nodes
 from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
-from zlc_atom.nodes.calibration.pulse import resolve_pulse
+from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 
 
@@ -68,9 +73,9 @@ class _RecordingSequencer:
         self.events: list[tuple[str, object]] = []
         self.fail_on_fire = fail_on_fire
 
-    def load(self, program: object) -> None:
+    def load(self, program: object, *, source: object | None = None) -> None:
         self.events.append(("load", program))
-        self.sequencer.load(program)  # type: ignore[attr-defined]
+        self.sequencer.load(program, source=source)  # type: ignore[attr-defined]
 
     def fire(self) -> None:
         """Fire, and nothing else.
@@ -170,13 +175,13 @@ def test_pulse_resolver_uses_the_project_json_document() -> None:
         "target",
         "periods",
         "slots",
+        "api_parameters",
         "delays",
         "repeat",
     )
     assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse.v1"
     assert not {
         "schema",
-        "api_parameters",
         "PulseDocument",
         "fingerprint",
         "hash",
@@ -184,19 +189,30 @@ def test_pulse_resolver_uses_the_project_json_document() -> None:
     }.intersection(tree)
     sequence = sequence_from_tree(tree)
     assert sequence_to_tree(sequence) == tree
-    assert tuple(slot.slot_id for slot in sequence.slots) == (
-        "reference_before",
-        "readout",
-        "reference_after",
+    assert sequence.slots == ()
+    assert tuple(parameter.parameter_id for parameter in sequence.api_parameters) == (
+        "reference_probe_duration_before",
+        "readout_probe_duration",
+        "reference_probe_duration_after",
     )
+    explicit = resolve_api_parameters(
+        sequence,
+        {
+            "reference_probe_duration_before": 0.031,
+            "readout_probe_duration": 0.006,
+            "reference_probe_duration_after": 0.031,
+        },
+    )
+    assert explicit.api_parameters == ()
+    assert explicit.slots == ()
 
     resolved = resolve_pulse(
         "imaging_template.json",
         search_paths=(PULSE_ROOT,),
-        slot_values={
-            "reference_before": 0.031,
-            "readout": 0.006,
-            "reference_after": 0.031,
+        api_values={
+            "reference_probe_duration_before": 0.031,
+            "readout_probe_duration": 0.006,
+            "reference_probe_duration_after": 0.031,
         },
     )
     assert resolved.path == asset.resolve()
@@ -211,10 +227,10 @@ def test_pulse_resolver_uses_the_project_json_document() -> None:
         resolve_pulse(
             "missing.json",
             search_paths=(PULSE_ROOT,),
-            slot_values={
-                "reference_before": 0.031,
-                "readout": 0.006,
-                "reference_after": 0.031,
+            api_values={
+                "reference_probe_duration_before": 0.031,
+                "readout_probe_duration": 0.006,
+                "reference_probe_duration_after": 0.031,
             },
         )
     except FileNotFoundError as error:
@@ -240,14 +256,15 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         pulse = resolve_pulse(
             "imaging_template.json",
             search_paths=(PULSE_ROOT,),
-            slot_values={
-                "reference_before": 0.02,
-                "readout": 0.005,
-                "reference_after": 0.02,
+            api_values={
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
             },
         )
         capture = camera_node.prepare()
-        sequencer.load(pulse.program)
+        arm_sequencer(sequencer, pulse)
+        assert sequencer.sequencer.applied().source == pulse.sequence
         sequencer.fire()
         sequencer.wait_done(1.0)
         manual_result = capture.collect()
