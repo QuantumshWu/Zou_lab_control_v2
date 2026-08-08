@@ -118,31 +118,6 @@ def build_console(session, *, interval_ms, window_ratio=None):
     return view, presenter
 
 
-def _template_config(name: str | None):
-    """Project one named installation template into DeviceManager's plain draft."""
-
-    if name is None:
-        return None
-    from zlc_atom.install import INSTALLATION_TEMPLATES
-    from zlc_atom.install.configuration import DeviceInstanceConfig, InstallationConfig
-
-    try:
-        specs = INSTALLATION_TEMPLATES[str(name)]
-    except KeyError as error:
-        raise KeyError(f"unknown installation template {name!r}") from error
-    return InstallationConfig(
-        tuple(
-            DeviceInstanceConfig(
-                instance_id=spec.key,
-                role=spec.key,
-                type_id=spec.type_id,
-                parameters=dict(spec.config),
-            )
-            for spec in specs
-        )
-    )
-
-
 class ExperimentGuiFlow:
     """One DeviceManager-owned session shared by TaskConsole and PulseGUI."""
 
@@ -158,6 +133,7 @@ class ExperimentGuiFlow:
 
         self.space = Workspace(workspace) if workspace is not None else Workspace.discover()
         self.template = template
+        self.catalog = None
         self.interval_ms = int(interval_ms)
         self.window_ratio = window_ratio
         self.devices = None
@@ -170,14 +146,27 @@ class ExperimentGuiFlow:
         self._closing_all = False
 
     def open(self) -> "ExperimentGuiFlow":
+        from zlc_atom.install import (
+            discover_device_catalog,
+            installation_config_from_template,
+        )
+
         from .device_manager import create_window as create_device_window
 
         if self.devices is not None:
             return self
+        catalog = discover_device_catalog()
+        initial_config = (
+            None
+            if self.template is None
+            else installation_config_from_template(catalog, str(self.template))
+        )
+        self.catalog = catalog
         self.devices = create_device_window(
             workspace=self.space.root,
             window_ratio=self.window_ratio,
-            initial_config=_template_config(self.template),
+            catalog=catalog,
+            initial_config=initial_config,
             initialize_session=self._initialize_session,
             on_initialized=self._open_work_windows,
             shutdown_session=self._shutdown_session,
@@ -187,7 +176,9 @@ class ExperimentGuiFlow:
     def _initialize_session(self, config: object):
         from ..session import ExperimentSession
 
-        return ExperimentSession.from_config(self.space, config)
+        if self.catalog is None:
+            raise RuntimeError("experiment device catalog is not initialized")
+        return ExperimentSession.from_config(self.space, config, catalog=self.catalog)
 
     def _open_work_windows(self, session: object) -> None:
         from ..board import attach_qt

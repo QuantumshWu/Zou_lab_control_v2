@@ -6,18 +6,25 @@ from .descriptors import (
     InstallationFactoryContext,
     InstalledLeaf,
 )
-from .discovery import discover_device_types
+from .discovery import (
+    DeviceCatalogSnapshot,
+    UnavailableDeviceTypes,
+    discover_device_catalog,
+)
 from .graph import DeviceSpec, Installation, create_installation
-from .templates import INSTALLATION_TEMPLATES
+from .templates import installation_config_from_template, installation_template_names
 
 __all__ = [
     "CAPABILITY_TYPES",
     "DeviceSpec",
+    "DeviceCatalogSnapshot",
     "DeviceTypeDescriptor",
-    "INSTALLATION_TEMPLATES",
     "Installation",
     "InstallationFactoryContext",
     "InstalledLeaf",
+    "UnavailableDeviceTypes",
     "create_installation",
-    "discover_device_types",
+    "discover_device_catalog",
+    "installation_config_from_template",
+    "installation_template_names",
 ]

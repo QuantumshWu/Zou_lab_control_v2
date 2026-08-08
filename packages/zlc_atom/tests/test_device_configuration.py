@@ -27,9 +27,7 @@ from zlc_atom.devices.sequencer.device_types import (
     HARDWARE_SEQUENCER_SCHEMA,
     VIRTUAL_SEQUENCER_SCHEMA,
 )
-from zlc_atom.install import create_installation
-from zlc_atom.install.discovery import discover_device_types
-from zlc_atom.install.templates import INSTALLATION_TEMPLATES
+from zlc_atom.install import create_installation, discover_device_catalog
 
 
 def _fields(schema) -> set[str]:
@@ -69,7 +67,7 @@ def test_every_discovered_type_declares_its_own_parameters() -> None:
     """
 
     schemas = {}
-    for descriptor in discover_device_types():
+    for descriptor in discover_device_catalog().available:
         assert id(descriptor.authoring_schema) not in schemas, (
             f"{descriptor.type_id} shares a schema with {schemas.get(id(descriptor.authoring_schema))}"
         )
@@ -105,25 +103,22 @@ def test_a_configuration_is_enough_to_ask_for_a_real_board() -> None:
 
 
 def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
-    """The boundary in action: this package never imports the pulse client."""
+    """The saved endpoint reaches one real zlc_pulse device surface."""
 
     dialled: list[tuple] = []
 
-    class _Streamer:
-        def open(self): ...
-        def close(self): ...
-        def load(self, prog, **kw): ...
-        def write_slots(self, values): ...
-        def write_scan_table(self, rows): ...
-        def fire(self, *, forever: bool = False): ...
-        def wait_done(self, timeout=None): return None
-        def cursor(self): return 0
-        def safe(self): return None
-        def snapshot(self): return {"opened": True}
-
     def dial(host, port, **kwargs):
+        from zlc_pulse import PulseStreamer, load_streamer_config
+        from zlc_pulse.transport import MemoryRegisterTransport
+
         dialled.append((host, port, kwargs))
-        return _Streamer()
+        config = load_streamer_config()
+        geometry = config["params"]
+        return PulseStreamer(
+            MemoryRegisterTransport(geom=geometry, auto_done=True),
+            geometry,
+            config["clock_hz"],
+        )
 
     installation = create_installation(
         ({"key": "sequencer", "type_id": "sequencer.hardware",
@@ -138,7 +133,20 @@ def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
 
 
 def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
-    assert set(INSTALLATION_TEMPLATES) == {"virtual", "hardware"}
+    from zlc_atom.install import (
+        discover_device_catalog,
+        installation_config_from_template,
+        installation_template_names,
+    )
+
+    catalog = discover_device_catalog()
+    assert set(installation_template_names()) == {"virtual", "hardware"}
+    virtual = installation_config_from_template(catalog, "virtual")
+    assert [item.type_id for item in virtual.devices] == [
+        "camera.virtual",
+        "sequencer.virtual",
+    ]
+    assert virtual.devices[1].parameters == {}
     # Mixing is a list, not a mode: devices are installed one by one.
     mixed = (
         {"key": "camera", "type_id": "camera.virtual"},

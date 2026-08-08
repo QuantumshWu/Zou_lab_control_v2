@@ -8,7 +8,13 @@ import pytest
 
 from tests.fakes import FakePlane
 from zlc_atom.authoring import AuthoringSchema
-from zlc_atom.install import DeviceSpec, DeviceTypeDescriptor, InstalledLeaf, create_installation
+from zlc_atom.install import (
+    DeviceCatalogSnapshot,
+    DeviceSpec,
+    DeviceTypeDescriptor,
+    InstalledLeaf,
+    create_installation,
+)
 from zlc_atom.nodes.camera_measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -166,7 +172,7 @@ def test_installation_isolates_one_factory_failure_and_closes_successful_leaves(
     )
     installation = create_installation(
         (DeviceSpec("good", "test.good"), DeviceSpec("bad", "test.bad")),
-        descriptors=descriptors,
+        catalog=DeviceCatalogSnapshot(descriptors, ()),
     )
     assert set(installation.devices) == {"good"}
     assert isinstance(installation.failures["bad"], RuntimeError)
@@ -186,5 +192,5 @@ def test_missing_dependency_is_a_graph_error_not_a_partial_device() -> None:
     with pytest.raises(ValueError, match="missing dependencies"):
         create_installation(
             (DeviceSpec("dependent", "test.dependent"),),
-            descriptors=(descriptor,),
+            catalog=DeviceCatalogSnapshot((descriptor,), ()),
         )

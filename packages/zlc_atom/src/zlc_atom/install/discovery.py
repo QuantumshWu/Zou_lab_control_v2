@@ -36,6 +36,18 @@ class UnavailableDeviceTypes:
         return parts[-2] if len(parts) > 1 else self.module
 
 
+@dataclass(frozen=True)
+class DeviceCatalogSnapshot:
+    """One indivisible view of what this Python process can and cannot build."""
+
+    available: tuple[DeviceTypeDescriptor, ...]
+    unavailable: tuple[UnavailableDeviceTypes, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "available", tuple(self.available))
+        object.__setattr__(self, "unavailable", tuple(self.unavailable))
+
+
 def _modules() -> tuple[str, ...]:
     root = Path(__file__).resolve().parents[1] / "devices"
     names: list[str] = []
@@ -74,20 +86,15 @@ def _walk() -> tuple[tuple[DeviceTypeDescriptor, ...], tuple[UnavailableDeviceTy
     )
 
 
-def discover_device_types() -> tuple[DeviceTypeDescriptor, ...]:
-    """Every device type this machine can actually build."""
+def discover_device_catalog() -> DeviceCatalogSnapshot:
+    """Discover available and unavailable device families in one filesystem walk."""
 
-    return _walk()[0]
-
-
-def unavailable_device_types() -> tuple[UnavailableDeviceTypes, ...]:
-    """Every device family this machine cannot, and the reason for each."""
-
-    return _walk()[1]
+    available, unavailable = _walk()
+    return DeviceCatalogSnapshot(available, unavailable)
 
 
 __all__ = [
+    "DeviceCatalogSnapshot",
     "UnavailableDeviceTypes",
-    "discover_device_types",
-    "unavailable_device_types",
+    "discover_device_catalog",
 ]

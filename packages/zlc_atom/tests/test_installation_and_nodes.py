@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from zlc_data import OwnedSnapshot, REPEAT, SITE
 
-from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_types
+from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_catalog
 from zlc_atom.nodes import discover_logic_nodes
 from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
@@ -40,7 +40,7 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
 
 
 def test_device_discovery_is_the_leaf_manifest() -> None:
-    descriptors = discover_device_types()
+    descriptors = discover_device_catalog().available
     assert tuple(item.type_id for item in descriptors) == (
         "camera.dcam",
         "camera.pylon",
@@ -235,12 +235,20 @@ def test_a_device_family_that_cannot_import_is_reported_not_raised(monkeypatch) 
 
     real = discovery._modules()
     broken = "zlc_atom.devices.notinstalled.device_types"
-    monkeypatch.setattr(discovery, "_modules", lambda: real + (broken,))
+    walks: list[None] = []
 
-    types = discovery.discover_device_types()
-    assert [value.type_id for value in types], "the families that DO import must still arrive"
+    def modules():
+        walks.append(None)
+        return real + (broken,)
 
-    missing = discovery.unavailable_device_types()
-    assert [value.module for value in missing] == [broken]
-    assert "ModuleNotFoundError" in missing[0].reason
-    assert missing[0].family == "notinstalled"
+    monkeypatch.setattr(discovery, "_modules", modules)
+
+    catalog = discovery.discover_device_catalog()
+    assert [value.type_id for value in catalog.available], (
+        "the families that DO import must still arrive"
+    )
+
+    assert [value.module for value in catalog.unavailable] == [broken]
+    assert "ModuleNotFoundError" in catalog.unavailable[0].reason
+    assert catalog.unavailable[0].family == "notinstalled"
+    assert len(walks) == 1, "available and unavailable must be one atomic discovery"

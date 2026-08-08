@@ -9,11 +9,12 @@ from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.execution import DeviceBroker, ResourceKey, bind_trivial_device
 from zlc_atom.install import (
     CAPABILITY_TYPES,
+    DeviceCatalogSnapshot,
     DeviceSpec,
     DeviceTypeDescriptor,
     InstalledLeaf,
     create_installation,
-    discover_device_types,
+    discover_device_catalog,
 )
 
 
@@ -78,7 +79,7 @@ def test_installation_rejects_wrong_capability_instances_and_uses_one_registry()
     )
     installation = create_installation(
         (DeviceSpec("bad", "test.bad-capability"),),
-        descriptors=(descriptor,),
+        catalog=DeviceCatalogSnapshot((descriptor,), ()),
     )
     assert isinstance(installation.failures["bad"], TypeError)
     assert "wrong type" in str(installation.failures["bad"])
@@ -88,7 +89,10 @@ def test_installation_rejects_wrong_capability_instances_and_uses_one_registry()
 def test_discovered_installation_capabilities_match_declared_types() -> None:
     installation = create_installation("virtual")
     try:
-        descriptors = {descriptor.type_id: descriptor for descriptor in discover_device_types()}
+        descriptors = {
+            descriptor.type_id: descriptor
+            for descriptor in discover_device_catalog().available
+        }
         for key, leaf in installation.devices.items():
             descriptor = descriptors[leaf.type_id]
             assert set(descriptor.capabilities) <= set(leaf.capabilities)

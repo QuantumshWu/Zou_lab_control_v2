@@ -19,12 +19,16 @@ from datetime import date as _date
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from zlc_durable import day_folder
 
 from .archive import write_figure
+
+if TYPE_CHECKING:
+    from zlc_atom.install import DeviceCatalogSnapshot
+    from zlc_atom.install.configuration import InstallationConfig
 
 
 __all__ = ["ExperimentSession", "Workspace", "read_pulse"]
@@ -192,6 +196,7 @@ class ExperimentSession:
         *,
         apparatus: str | os.PathLike[str] | None = None,
         template: str | None = None,
+        catalog: DeviceCatalogSnapshot | None = None,
     ) -> "ExperimentSession":
         """Start a session from a written-down apparatus, or from a template.
 
@@ -200,43 +205,65 @@ class ExperimentSession:
         dialler while the configuration supplies the endpoint.
         """
 
+        from zlc_atom.install import (
+            discover_device_catalog,
+            installation_config_from_template,
+        )
         from zlc_atom.install.configuration import load_installation_config
 
         space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
+        snapshot = catalog if catalog is not None else discover_device_catalog()
         if template is not None:
-            specs: object = template
+            config = installation_config_from_template(snapshot, template)
         else:
             path = Path(apparatus) if apparatus is not None else space.apparatus
             if not path.is_file():
                 raise FileNotFoundError(
                     f"no apparatus at {path}; pass template='virtual' to start from a template"
                 )
-            specs = load_installation_config(path).specs()
+            config = load_installation_config(path)
 
-        return cls._from_specs(space, specs)
+        return cls.from_config(space, config, catalog=snapshot)
 
     @classmethod
     def from_config(
         cls,
         workspace: Workspace | str | os.PathLike[str],
         config: object,
+        *,
+        catalog: DeviceCatalogSnapshot | None = None,
     ) -> "ExperimentSession":
         """Start from the exact DeviceManager draft accepted by its Init action."""
 
+        from zlc_atom.install import discover_device_catalog
         from zlc_atom.install.configuration import InstallationConfig
 
         if not isinstance(config, InstallationConfig):
             raise TypeError("config must be InstallationConfig")
         space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
-        return cls._from_specs(space, config.specs())
+        snapshot = catalog if catalog is not None else discover_device_catalog()
+        return cls._from_config(space, config, snapshot)
 
     @classmethod
-    def _from_specs(cls, space: Workspace, specs: object) -> "ExperimentSession":
+    def _from_config(
+        cls,
+        space: Workspace,
+        config: InstallationConfig,
+        catalog: DeviceCatalogSnapshot,
+    ) -> "ExperimentSession":
         from zlc_atom.install import create_installation
+        from zlc_atom.install.configuration import InstallationConfig
         from zlc_runtime import SignalDataPlane
 
+        if not isinstance(config, InstallationConfig):
+            raise TypeError("config must be InstallationConfig")
+
         return cls(
-            installation=create_installation(specs, connect_pulse=_connect_pulse),
+            installation=create_installation(
+                config.specs(),
+                catalog=catalog,
+                connect_pulse=_connect_pulse,
+            ),
             signal_plane=SignalDataPlane(),
             workspace=space,
         )

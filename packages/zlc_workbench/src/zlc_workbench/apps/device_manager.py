@@ -17,6 +17,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from zlc_atom.install import DeviceCatalogSnapshot
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,6 +55,7 @@ def build(
     view: object,
     path: Path,
     *,
+    catalog: DeviceCatalogSnapshot | None = None,
     initial_config: object | None = None,
     initialize_session=None,
     on_initialized=None,
@@ -63,6 +68,7 @@ def build(
     return DeviceManagerPresenter(
         view,
         path,
+        catalog=catalog,
         confirm_overwrite=lambda _path: True,
         initial_config=initial_config,
         initialize_session=initialize_session,
@@ -75,6 +81,7 @@ def create_window(
     *,
     workspace=None,
     window_ratio=None,
+    catalog: DeviceCatalogSnapshot | None = None,
     initial_config: object | None = None,
     initialize_session=None,
     on_initialized=None,
@@ -90,6 +97,7 @@ def create_window(
     window.presenter = build(
         window,
         path,
+        catalog=catalog,
         initial_config=initial_config,
         initialize_session=initialize_session,
         on_initialized=on_initialized,

@@ -23,7 +23,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
@@ -31,7 +30,12 @@ from zlc_atom.install.configuration import (
     load_installation_config,
     save_installation_config,
 )
-from zlc_atom.install.discovery import discover_device_types, unavailable_device_types
+from zlc_atom.install import (
+    DeviceCatalogSnapshot,
+    discover_device_catalog,
+    installation_config_from_template,
+    installation_template_names,
+)
 from .authoring_form import display_value, project_schema, project_values
 
 
@@ -46,7 +50,7 @@ class DeviceManagerPresenter:
         view: object,
         path: str | Path,
         *,
-        device_types: Sequence[Any] | None = None,
+        catalog: DeviceCatalogSnapshot | None = None,
         confirm_overwrite: Callable[[str], bool] | None = None,
         initial_config: InstallationConfig | None = None,
         initialize_session: Callable[[InstallationConfig], object] | None = None,
@@ -68,12 +72,13 @@ class DeviceManagerPresenter:
         # device types would drift from the ones that can actually be built.
         #: Families this machine cannot build today, named so the picker can
         #: say why rather than leaving a hole where a type used to be.
-        self._unavailable = () if device_types is not None else unavailable_device_types()
+        self.catalog = catalog if catalog is not None else discover_device_catalog()
+        if not isinstance(self.catalog, DeviceCatalogSnapshot):
+            raise TypeError("catalog must be DeviceCatalogSnapshot or None")
+        self._unavailable = self.catalog.unavailable
         self.types = {
             descriptor.type_id: descriptor
-            for descriptor in (
-                discover_device_types() if device_types is None else device_types
-            )
+            for descriptor in self.catalog.available
         }
         self.devices: list[DeviceInstanceConfig] = []
         self._baseline_devices: tuple[DeviceInstanceConfig, ...] = ()
@@ -121,10 +126,11 @@ class DeviceManagerPresenter:
                 for value in sorted(self._unavailable, key=lambda item: item.module)
             ),
         )
-        from zlc_atom.install import INSTALLATION_TEMPLATES
-
         self.view.set_templates(
-            tuple((name.replace("_", " ").title(), name) for name in INSTALLATION_TEMPLATES)
+            tuple(
+                (name.replace("_", " ").title(), name)
+                for name in installation_template_names()
+            )
         )
 
     # ------------------------------------------------------------------- state
@@ -180,36 +186,12 @@ class DeviceManagerPresenter:
     def new_from_template(self, name: str) -> bool:
         """Replace the local draft from a domain-owned installation template."""
 
-        from zlc_atom.install import INSTALLATION_TEMPLATES
-
-        specs = INSTALLATION_TEMPLATES.get(str(name))
-        if specs is None:
-            self._report(f"no template called {name!r}", severity="warning")
+        try:
+            config = installation_config_from_template(self.catalog, str(name))
+        except (KeyError, TypeError, ValueError) as error:
+            self._report(str(error), severity="warning")
             return False
-        devices: list[DeviceInstanceConfig] = []
-        for spec in specs:
-            descriptor = self.types.get(spec.type_id)
-            if descriptor is None:
-                self._report(
-                    f"template {name!r} needs unavailable type {spec.type_id!r}",
-                    severity="warning",
-                )
-                return False
-            devices.append(
-                DeviceInstanceConfig(
-                    instance_id=spec.key,
-                    role=spec.key,
-                    type_id=spec.type_id,
-                    parameters=descriptor.authoring_schema.freeze(
-                        {
-                            key: value
-                            for key, value in spec.config.items()
-                            if key in descriptor.authoring_schema.field_names
-                        }
-                    ),
-                )
-            )
-        self.devices = devices
+        self.devices = list(config.devices)
         self._touch(f"new {name} apparatus draft")
         return True
 
@@ -636,11 +618,15 @@ class DeviceManagerPresenter:
         self,
         devices: Sequence[DeviceInstanceConfig],
     ) -> str | None:
-        from zlc_atom.install import INSTALLATION_TEMPLATES
-
         shape = tuple((item.instance_id, item.type_id) for item in devices)
-        for name, specs in INSTALLATION_TEMPLATES.items():
-            if shape == tuple((spec.key, spec.type_id) for spec in specs):
+        for name in installation_template_names():
+            try:
+                config = installation_config_from_template(self.catalog, name)
+            except KeyError:
+                continue
+            if shape == tuple(
+                (item.instance_id, item.type_id) for item in config.devices
+            ):
                 return name
         return None
 

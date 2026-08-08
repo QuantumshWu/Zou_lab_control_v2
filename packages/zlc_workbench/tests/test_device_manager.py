@@ -116,10 +116,39 @@ def test_a_bench_with_no_apparatus_yet_is_answered_not_refused(manager) -> None:
 def test_the_types_offered_are_the_types_that_can_be_built(manager) -> None:
     """Not a list this window keeps.  A second catalog drifts from the real one."""
 
-    from zlc_atom.install.discovery import discover_device_types
+    from zlc_atom.install import discover_device_catalog
 
     offered = {key for _label, key, _domain in manager.view.choices}
-    assert offered == {item.type_id for item in discover_device_types()}
+    assert offered == {item.type_id for item in discover_device_catalog().available}
+
+
+def test_one_catalog_snapshot_drives_choices_unavailable_and_templates(tmp_path) -> None:
+    """The presenter projects one discovery result; it never discovers again."""
+
+    from zlc_atom.install import (
+        DeviceCatalogSnapshot,
+        discover_device_catalog,
+        installation_config_from_template,
+    )
+
+    catalog = discover_device_catalog()
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        catalog=catalog,
+    )
+
+    assert set(manager.types) == {item.type_id for item in catalog.available}
+    assert view.unavailable == tuple(
+        (item.family, item.reason) for item in catalog.unavailable
+    )
+    assert isinstance(manager.catalog, DeviceCatalogSnapshot)
+    assert manager.new_from_template("virtual") is True
+    assert InstallationConfig(tuple(manager.devices)) == installation_config_from_template(
+        catalog,
+        "virtual",
+    )
 
 
 def test_adding_a_device_sets_it_up_the_way_its_own_schema_says(manager) -> None:
@@ -385,10 +414,12 @@ def test_a_standalone_editor_without_a_session_factory_cannot_fake_init(tmp_path
 def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     """Init is the shared Experiment boundary, not a build-and-release test."""
 
-    from zlc_atom.install.discovery import discover_device_types
+    from zlc_atom.install import discover_device_catalog
 
     camera = next(
-        item for item in discover_device_types() if item.type_id == "camera.virtual"
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "camera.virtual"
     )
     initial = InstallationConfig(
         (

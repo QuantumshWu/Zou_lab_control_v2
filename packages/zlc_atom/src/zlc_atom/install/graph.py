@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .descriptors import CAPABILITY_TYPES, DeviceTypeDescriptor, InstallationFactoryContext, InstalledLeaf
-from .discovery import discover_device_types
+from .discovery import DeviceCatalogSnapshot, discover_device_catalog
 
 
 @dataclass(frozen=True)
@@ -111,24 +111,25 @@ def create_installation(
     *,
     world: object | None = None,
     broker: object | None = None,
-    descriptors: tuple[DeviceTypeDescriptor, ...] | None = None,
+    catalog: DeviceCatalogSnapshot | None = None,
     connect_pulse: object | None = None,
 ) -> Installation:
     from zlc_atom.execution import DeviceBroker
     from zlc_atom.devices.camera.world import SimulationWorld
 
+    snapshot = catalog if catalog is not None else discover_device_catalog()
+    if not isinstance(snapshot, DeviceCatalogSnapshot):
+        raise TypeError("catalog must be DeviceCatalogSnapshot or None")
     if isinstance(specs, str):
-        from .templates import INSTALLATION_TEMPLATES
-        try:
-            specs = INSTALLATION_TEMPLATES[specs]
-        except KeyError as exc:
-            raise KeyError(f"unknown installation template {specs!r}") from exc
+        from .templates import installation_config_from_template
+
+        specs = installation_config_from_template(snapshot, specs).specs()
     normalized = tuple(spec if isinstance(spec, DeviceSpec) else DeviceSpec(**spec) for spec in specs)  # type: ignore[arg-type]
     if world is None:
         world = SimulationWorld(seed=0)
     if broker is None:
         broker = DeviceBroker()
-    found = tuple(descriptors or discover_device_types())
+    found = snapshot.available
     by_type = {value.type_id: value for value in found}
     unknown = {spec.type_id for spec in normalized} - set(by_type)
     if unknown:
