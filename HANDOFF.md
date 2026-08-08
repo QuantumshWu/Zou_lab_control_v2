@@ -1,6 +1,6 @@
 # Zou_lab_control v2 — 交接文档
 
-> **状态快照，不是计划书。** 记录截至 `1547f7b` + `0a3ea89` 的实测状况、已定裁决与已知问题。
+> **状态快照，不是计划书。** 记录截至 `99870de` 的实测状况、已定裁决与已知问题。
 > 第 4 节的裁决是用户当面确认的，优先于仓库里任何历史文档。
 
 ## 0. 路径
@@ -123,10 +123,14 @@ task_console 长到 9461 行，每加一个实验代价越来越高。
 | save→重开读回 / 图片 fit / ROI 派生 / edit tab | ❌ 全部被上板挡住 |
 | 真机接线 | ⛔ 阻塞：qCMOS DCAM SDK 未装、pylon 与 FPGA 不在手 |
 
-**git**：`1547f7b`（回滚点）+ `0a3ea89`（DAC 延时修复）。
-被回滚的 31 个 commit 保在分支 `pre-rollback-2026-08-07`。
-**一处未提交**：`zlc_plot/raster.py` 让启动失败说出真原因（现在任何启动失败都被吞成
-"raster plot host is closing"，真原因存在 `_startup_error` 里没人读）。
+**git**（工作区干净，无未提交改动）：
+
+| commit | 内容 |
+|---|---|
+| `1547f7b` | 回滚点。此前 31 个 commit 被用户回滚，保在分支 `pre-rollback-2026-08-07` |
+| `0a3ea89` | DAC 段延时全部当 0 送板 —— `getattr(bd,"delay",0)` 命中默认值，真字段是 `delay_ticks` |
+| `5441541` | 本文件 |
+| `99870de` | 绘图 host 启动失败时说出真原因，不再一律答「host is closing」 |
 
 ---
 
