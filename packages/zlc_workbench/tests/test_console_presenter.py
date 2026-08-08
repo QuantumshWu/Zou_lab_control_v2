@@ -945,7 +945,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "site_overlay": "centers",
         },
     )
-    second = presenter.add_panel(signal, snapshot, title="again")
+    second = presenter.add_panel(signal, snapshot, title="again", kind="image")
     logic_id = presenter.add_logic(
         "camera_measurement",
         values={"exposure_seconds": 0.037, "repeat": 0},
@@ -998,6 +998,50 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored_logic.draft.device_keys == {"camera": "camera"}
 
 
+def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
+    presenter, session
+) -> None:
+    """The whole saved board is accepted before any current object is retired."""
+
+    node, snapshot = _one_shot(session)
+    panel = presenter.add_panel(
+        node.signal_key("frames"), snapshot, title="current", kind="image"
+    )
+    logic_id = presenter.add_logic(
+        "camera_measurement",
+        values={"exposure_seconds": 0.031, "repeat": 0},
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    old_logic = presenter.logic[logic_id]
+    old_panel = presenter.panels[panel.panel_id]
+    old_card = presenter.view.cards[0]
+    old_row = presenter.view.logic_rows[0]
+    old_host, old_port = old_panel.host, old_panel.port
+    old_layout = presenter.layout()
+
+    document = presenter.layout()
+    document["logic"].append(
+        {
+            "node_id": "bad-last",
+            "api_name": "not_a_registered_logic_node",
+            "values": {},
+            "source_signal": "",
+            "device_keys": {},
+        }
+    )
+
+    assert presenter.apply_layout(document) is False
+    assert presenter.layout() == old_layout
+    assert tuple(presenter.logic) == (logic_id,)
+    assert presenter.logic[logic_id] is old_logic
+    assert tuple(presenter.panels) == (panel.panel_id,)
+    assert presenter.panels[panel.panel_id] is old_panel
+    assert old_panel.host is old_host and old_panel.port is old_port
+    assert presenter.view.logic_rows == (old_row,)
+    assert presenter.view.cards == (old_card,)
+
+
 def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     presenter, session
 ) -> None:
@@ -1005,11 +1049,12 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
-    presenter.add_panel(signal, snapshot, title="here")
+    presenter.add_panel(signal, snapshot, title="here", kind="image")
     document = presenter.layout()
     document["panels"].append(
         {"signal": "nobody.publishes.this", "title": "gone", "kind": "image", "size": "",
-         "interval_ms": 200}
+         "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
+         "site_overlay": "off"}
     )
 
     assert presenter.apply_layout(document) is True

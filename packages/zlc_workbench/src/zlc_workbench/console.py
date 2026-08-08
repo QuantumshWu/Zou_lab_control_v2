@@ -23,6 +23,14 @@ from zlc_plot import parameter_controls
 from zlc_plot.primitives import ImageFrame
 
 from .board import LiveBoard
+from .console_layout import (
+    LAYOUT_FORMAT as CONSOLE_LAYOUT_FORMAT,
+    LayoutDocument,
+    LayoutError,
+    LogicLayoutEntry,
+    ResolvedLayout,
+    resolve_layout,
+)
 from .logic import (
     DeviceClaim,
     LogicBinding,
@@ -121,6 +129,15 @@ class PanelBinding:
     @property
     def size(self) -> str:
         return self.state.size
+
+
+@dataclass(frozen=True)
+class _LayoutCandidate:
+    logic: tuple[LogicBinding, ...]
+    panels: tuple[PanelBinding, ...]
+    panel_serial: int
+    missing_signals: tuple[str, ...] = ()
+    incompatible_panels: tuple[tuple[str, str], ...] = ()
 
 
 class ConsolePresenter:
@@ -1621,9 +1638,24 @@ class ConsolePresenter:
 
     # -------------------------------------------------------------- the board
 
-    #: What a written-down board says it is.  Versioned because a board outlives
-    #: the session that drew it -- it is meant to be reopened tomorrow.
-    LAYOUT_FORMAT = "zlc.console-board/v2"
+    LAYOUT_FORMAT = CONSOLE_LAYOUT_FORMAT
+
+    def _layout_document(self) -> LayoutDocument:
+        """Freeze the current stopped authoring state into its one codec model."""
+
+        return LayoutDocument(
+            tuple(binding.state for binding in self.panels.values()),
+            tuple(
+                LogicLayoutEntry(
+                    binding.node_id,
+                    str(binding.descriptor.api_name),
+                    binding.draft.values,
+                    binding.draft.source_signal,
+                    binding.draft.device_keys,
+                )
+                for binding in self.logic.values()
+            ),
+        )
 
     def layout(self) -> dict[str, Any]:
         """The board as a portable document: what is on it, in what order.
@@ -1638,25 +1670,169 @@ class ConsolePresenter:
         this session's bookkeeping and are rebuilt on the way back in.
         """
 
-        return {
-            "format": self.LAYOUT_FORMAT,
-            "panels": [
-                binding.state.document()
-                for binding in self.panels.values()
-            ],
-            "logic": [
-                {
-                    "node_id": binding.node_id,
-                    "api_name": str(binding.descriptor.api_name),
-                    "values": dict(binding.draft.values),
-                    "source_signal": str(binding.draft.source_signal),
-                    "device_keys": dict(binding.draft.device_keys),
-                }
-                for binding in self.logic.values()
-            ],
-        }
+        return self._layout_document().to_tree()
 
-    def apply_layout(self, document: Mapping[str, Any]) -> bool:
+    def _external_signal_contracts(self) -> tuple[tuple[str, str], ...]:
+        rows: list[tuple[str, str]] = []
+        for node in tuple(getattr(self.session, "nodes", ()) or ()):
+            signal_key = getattr(node, "signal_key", None)
+            if not callable(signal_key):
+                continue
+            for declaration in tuple(
+                getattr(node, "dataset_output_declarations", ()) or ()
+            ):
+                rows.append(
+                    (
+                        str(signal_key(declaration.name)),
+                        str(declaration.contract_id),
+                    )
+                )
+        return tuple(rows)
+
+    def _prepare_layout_panels(self, resolved: ResolvedLayout) -> _LayoutCandidate:
+        """Build every drawable panel off-board before retiring current state."""
+
+        front = self.session.signal_plane.freeze()
+        serial = self._panel_serial
+        panels: list[PanelBinding] = []
+        missing: list[str] = []
+        incompatible: list[tuple[str, str]] = []
+        used_titles: set[str] = set()
+        try:
+            for saved in resolved.panels:
+                serial += 1
+                panel_id = f"panel-{serial}"
+                base_title = self._panel_kind_labels[saved.kind]
+                generated_title = base_title
+                suffix = 2
+                while generated_title in used_titles:
+                    generated_title = f"{base_title} {suffix}"
+                    suffix += 1
+                state = replace(
+                    saved,
+                    size=saved.size or "2x2",
+                    title=saved.title.strip() or generated_title,
+                )
+                used_titles.add(state.title)
+                binding = PanelBinding(panel_id, state)
+                panels.append(binding)
+                if not state.signal:
+                    continue
+                value = front.value(state.signal)
+                if value is None:
+                    missing.append(state.signal)
+                    continue
+                if self._spec_for(value.snapshot, state.kind) is None:
+                    incompatible.append((state.signal, state.kind))
+                    continue
+                publication = front.publication(state.signal)
+                plot_input = self._project_panel_input(
+                    binding,
+                    value,
+                    publication,
+                    state=state,
+                )
+                host = self._make_host(value.snapshot, state.signal, state.kind)
+                try:
+                    self._configure_panel_host(host, state)
+                    self._apply_plot_input_overlay(host, plot_input)
+                    surface = self._describe_panel_parameters(host, state)
+                    state = self._state_with_described_semantics(state, surface)
+                except Exception:
+                    host.close()
+                    raise
+                binding.state = state
+                binding.host = host
+                binding.parameter_surface = surface
+                binding.port = PlotPanelPort(
+                    panel_id,
+                    state.signal,
+                    host,
+                    display_interval_ms=state.interval_ms,
+                    shown=plot_input,
+                    project_input=lambda current, pub, item=binding: (
+                        self._project_panel_input(item, current, pub)
+                    ),
+                    replace_host=lambda projected, current, pub, item=binding: (
+                        self._replace_panel_host(item, projected, current, pub)
+                    ),
+                    on_presented=lambda pub, projected, item=binding: (
+                        self._panel_presented(item, pub, projected)
+                    ),
+                )
+                binding.display_publication = publication
+                binding.frozen_data = self._panel_frozen_data(
+                    binding,
+                    snapshot=value.snapshot,
+                    publication=publication,
+                    plot_input=plot_input,
+                )
+        except Exception as error:
+            for binding in panels:
+                if binding.host is not None:
+                    binding.host.close()
+                    binding.host = None
+                    binding.port = None
+            raise LayoutError(f"cannot prepare the layout panels: {error}") from error
+        return _LayoutCandidate(
+            resolved.logic,
+            tuple(panels),
+            serial,
+            tuple(missing),
+            tuple(incompatible),
+        )
+
+    def _build_layout_candidate(self, document: LayoutDocument) -> _LayoutCandidate:
+        resolved = resolve_layout(
+            document,
+            catalog=self.catalog,
+            installation=self.session.installation,
+            panel_kinds=tuple(self._panel_kind_labels),
+            external_outputs=self._external_signal_contracts(),
+        )
+        return self._prepare_layout_panels(resolved)
+
+    def _commit_layout_candidate(self, candidate: _LayoutCandidate) -> None:
+        """Replace the board once, after its complete candidate already exists."""
+
+        for panel_id, binding in tuple(self.panels.items()):
+            self.close_panel_editor(panel_id)
+            self._release_panel(binding)
+            self.view.remove_panel(panel_id)
+        for node_id, binding in tuple(self.logic.items()):
+            if binding.host is not None:
+                binding.host.shutdown()
+            close_editor = getattr(self.view, "close_logic_editor", None)
+            if callable(close_editor):
+                close_editor(node_id)
+            self.view.remove_logic_row(node_id)
+
+        self.panels.clear()
+        self.logic.clear()
+        self._panel_serial = candidate.panel_serial
+        self._offered_groups = ()
+        self._shown_console_summary = None
+
+        for binding in candidate.logic:
+            self.logic[binding.node_id] = binding
+            kind = str(
+                getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
+            )
+            self.view.add_logic_row(binding.node_id, kind)
+        for binding in candidate.panels:
+            self.panels[binding.panel_id] = binding
+            self.view.add_panel(binding.panel_id, binding.state.title)
+            self.view.show_panel(binding.panel_id, binding.host)
+            self.view.set_panel_selectors_enabled(binding.panel_id, self._deriving)
+            self._publish_panel_state(binding)
+            self._apply_deriving(binding)
+        self._refresh_console_projection()
+        self._refresh_signal_choices()
+
+    def apply_layout(
+        self,
+        document: Mapping[str, Any] | LayoutDocument,
+    ) -> bool:
         """Put a written-down board back, on whatever is publishing now.
 
         The nodes go up first: a panel names a signal, and a signal exists only
@@ -1666,9 +1842,6 @@ class ConsolePresenter:
         is still three quarters of an afternoon's work.
         """
 
-        if str(document.get("format", "")) != self.LAYOUT_FORMAT:
-            self._report("that file is not a saved board", severity="error")
-            return False
         if any(
             binding.pending is not None
             or (binding.host is not None and binding.host.running)
@@ -1679,51 +1852,37 @@ class ConsolePresenter:
                 severity="warning",
             )
             return False
-        for panel_id in tuple(self.panels):
-            self.remove_panel(panel_id)
-        for node_id in tuple(self.logic):
-            self.remove_logic(node_id)
-        for entry in document.get("logic", ()):
-            self.add_logic(
-                str(entry.get("api_name", "")),
-                node_id=str(entry.get("node_id", "")),
-                values=dict(entry.get("values", {})),
-                source_signal=str(entry.get("source_signal", "")),
-                device_keys=dict(entry.get("device_keys", {})),
-                open_editor=False,
+        try:
+            parsed = (
+                document
+                if isinstance(document, LayoutDocument)
+                else LayoutDocument.from_tree(document)
             )
-        front = self.session.signal_plane.freeze()
-        missing: list[str] = []
-        for entry in document.get("panels", ()):
-            signal = str(entry.get("signal", ""))
-            if signal and front.value(signal) is None:
-                missing.append(signal)
-            self.add_blank_panel(
-                str(entry.get("kind", "")),
-                signal=signal,
-                title=str(entry.get("title", "")),
-                size=str(entry.get("size", "")),
-                interval_ms=int(
-                    entry.get("interval_ms", self._default_interval_ms)
-                ),
-                semantic=dict(entry.get("semantic", {})),
-                display=dict(entry.get("display", {})),
-                fit=dict(entry.get("fit", {})),
-                site_overlay=str(entry.get("site_overlay", "off")),
-            )
-        if missing:
+            candidate = self._build_layout_candidate(parsed)
+        except Exception as error:
+            self._report(f"cannot load the layout: {error}", severity="error")
+            return False
+        self._commit_layout_candidate(candidate)
+        if candidate.missing_signals:
             self._report(
-                f"nothing is publishing {', '.join(sorted(set(missing)))}; "
+                "nothing is publishing "
+                f"{', '.join(sorted(set(candidate.missing_signals)))}; "
                 "those panels remain available for rewiring",
                 severity="warning",
             )
-        self._refresh_console_projection()
+        if candidate.incompatible_panels:
+            descriptions = ", ".join(
+                f"{signal} as {kind}"
+                for signal, kind in candidate.incompatible_panels
+            )
+            self._report(
+                f"cannot draw {descriptions}; those panels remain available for rewiring",
+                severity="warning",
+            )
         return True
 
     def save_layout(self) -> str:
         """Write only the stopped, reusable pipeline/layout document."""
-
-        import json
 
         path = self.view.ask_save_path(
             "Save TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
@@ -1731,8 +1890,7 @@ class ConsolePresenter:
         if not path:
             return ""
         try:
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(self.layout(), handle, indent=1, ensure_ascii=False)
+            self._layout_document().write(path)
         except Exception as error:
             self._report(f"cannot save the layout: {error}", severity="error")
             return ""
@@ -1742,16 +1900,13 @@ class ConsolePresenter:
     def load_layout(self) -> bool:
         """Restore a layout as stopped drafts without building devices."""
 
-        import json
-
         path = self.view.ask_open_path(
             "Load TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
         )
         if not path:
             return False
         try:
-            with open(path, encoding="utf-8") as handle:
-                document = json.load(handle)
+            document = LayoutDocument.read(path)
         except Exception as error:
             self._report(f"cannot read that layout: {error}", severity="error")
             return False
