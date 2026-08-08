@@ -4,24 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.nodes._framework.descriptor import DatasetInputSpec, LogicNodeDescriptor, NodeKind, OutputSpec
+from zlc_atom.authoring import AuthoringSchema
+from zlc_atom.nodes._framework.descriptor import (
+    ArtifactInputSpec,
+    DatasetInputSpec,
+    LogicNodeDescriptor,
+    NodeKind,
+    OutputSpec,
+)
 from zlc_atom.nodes.calibration import TrapCalibration
 
 from .processor import OccupancyProcessor
 
 
-OCCUPANCY_SCHEMA = AuthoringSchema(
-    (
-        AuthoringField(
-            "calibration_path",
-            "text",
-            "Calibration file",
-            "",
-            required=True,
-        ),
-    )
-)
+OCCUPANCY_SCHEMA = AuthoringSchema()
 
 
 def _build(
@@ -30,8 +26,7 @@ def _build(
     source_signal: str,
     signal_plane: object | None = None,
 ) -> OccupancyProcessor:
-    authored = OCCUPANCY_SCHEMA.freeze({"calibration_path": calibration_path})
-    text = str(authored["calibration_path"]).strip()
+    text = str(calibration_path).strip()
     if not text:
         raise ValueError("calibration_path must be non-empty")
     selected_source = str(source_signal).strip()
@@ -52,6 +47,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     OCCUPANCY_SCHEMA,
     input_specs=(
         DatasetInputSpec("frames", "camera.frames.v1"),
+        ArtifactInputSpec("calibration_path", "calibration.readout.v1"),
     ),
     outputs=(
         OutputSpec("counts", "occupancy.counts.v1"),

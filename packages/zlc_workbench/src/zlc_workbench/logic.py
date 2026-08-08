@@ -33,6 +33,7 @@ __all__ = [
     "LogicCandidate",
     "LogicCatalog",
     "LogicDraft",
+    "artifact_input_specs",
     "build_arguments",
     "device_key_options",
     "stable_signal_key",
@@ -46,6 +47,7 @@ class LogicDraft:
     values: dict[str, Any] = field(default_factory=dict)
     source_signal: str = ""
     device_keys: dict[str, str] = field(default_factory=dict)
+    artifact_inputs: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,10 @@ class LogicBinding:
     claims: tuple[DeviceClaim, ...] = ()
     pending: LogicCandidate | None = None
     draft_error: str = ""
+    #: Successful declared artifact paths from the current host generation.
+    artifact_results: tuple[Mapping[str, str], ...] = ()
+    artifact_result_host: object | None = field(default=None, compare=False)
+    artifact_completion_order: int = 0
     #: The last state pushed to the row, so an unchanged row is left alone.
     shown: tuple = ()
     #: Asked to go, and still stopping.  The row stays until it has: a node
@@ -112,6 +118,18 @@ def dataset_inputs(descriptor: Any) -> tuple[Any, ...]:
         spec
         for spec in getattr(descriptor, "input_specs", ())
         if isinstance(spec, DatasetInputSpec)
+    )
+
+
+def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:
+    """Saved-file inputs one node reads, as its descriptor declares them."""
+
+    from zlc_atom.nodes import ArtifactInputSpec
+
+    return tuple(
+        spec
+        for spec in getattr(descriptor, "input_specs", ())
+        if isinstance(spec, ArtifactInputSpec)
     )
 
 
@@ -151,7 +169,7 @@ def build_arguments(
     signal_plane: Any,
     values: Mapping[str, Any],
     source_signal: str = "",
-    artifacts: Mapping[str, Any] | None = None,
+    artifact_inputs: Mapping[str, str] | None = None,
     extras: Mapping[str, Any] | None = None,
     device_keys: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -211,15 +229,32 @@ def build_arguments(
             available[key_argument] = selected
     if source_signal:
         available["source_signal"] = str(source_signal)
-    # Artifacts arrive keyed by CONTRACT, and the descriptor's own input specs
-    # say which contract fills which build argument.  Matching on the argument
-    # name instead would be a coincidence between two files that never agreed
-    # to it; the contract id is what both sides actually declare.
-    offered = dict(artifacts or {})
-    for spec in getattr(descriptor, "input_specs", ()):
-        contract = getattr(spec, "contract_id", None)
-        if contract is not None and contract in offered:
-            available[spec.name] = offered[contract]
+    offered_artifacts = dict(artifact_inputs or {})
+    declared_artifacts = artifact_input_specs(descriptor)
+    unknown_artifacts = set(offered_artifacts) - {
+        spec.name for spec in declared_artifacts
+    }
+    if unknown_artifacts:
+        raise ValueError(
+            f"{descriptor.api_name} has no artifact inputs "
+            f"{sorted(unknown_artifacts)!r}"
+        )
+    for spec in declared_artifacts:
+        if spec.name not in offered_artifacts:
+            if spec.required:
+                raise LookupError(
+                    f"{descriptor.api_name} needs artifact input {spec.name}"
+                )
+            continue
+        path = offered_artifacts[spec.name]
+        if not isinstance(path, str):
+            raise TypeError(f"artifact input {spec.name!r} must be a path string")
+        if path.strip():
+            available[spec.name] = path
+        elif spec.required:
+            raise LookupError(
+                f"{descriptor.api_name} needs artifact input {spec.name}"
+            )
     available.update(dict(extras or {}))
 
     arguments = {

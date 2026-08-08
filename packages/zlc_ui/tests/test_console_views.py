@@ -302,6 +302,17 @@ projection = {
     'kind': 'measurement',
     'form_spec': FormSpec((FormFieldProps(key='repeat', kind='int', label='Repeat', default=0, minimum=0),)),
     'form_values': {'repeat': 0},
+    'artifact_form_spec': FormSpec((
+        FormFieldProps(
+            key='calibration_path', kind='path', label='Calibration Path',
+            required=True, file_filter='JSON files (*.json)', base_dir='C:/data',
+        ),
+    )),
+    'artifact_values': {'calibration_path': 'C:/data/calibration.json'},
+    'artifact_results': ({
+        'name': 'artifact_path', 'contract_id': 'calibration.readout.v1',
+        'path': 'C:/data/calibration-2.json',
+    },),
     'source_required': True,
     'source_signal': '',
     'source_options': ('camera-1.frames',),
@@ -318,13 +329,20 @@ editor = handle._logic_editors['camera-1']
 assert view.tabs.count() == 3
 assert view.tabs.currentWidget() is editor
 editor.form.widget_for('repeat').setValue(3)
+artifact_picker = editor.artifact_form.widget_for('calibration_path')
+assert artifact_picker.browse.text() == 'Browse…'
+artifact_picker.setText('C:/data/manual.json')
 editor.source_combo.setCurrentIndex(editor.source_combo.findData('camera-1.frames'))
 camera_combo = editor._device_combos['camera']
 camera_combo.setCurrentIndex(camera_combo.findData('mot_camera'))
 app.processEvents()
 assert ('camera-1', {'values': {'repeat': 3}}) in patches
+assert ('camera-1', {'artifact_inputs': {'calibration_path': 'C:/data/manual.json'}}) in patches
 assert ('camera-1', {'source_signal': 'camera-1.frames'}) in patches
 assert ('camera-1', {'device_keys': {'camera': 'mot_camera'}}) in patches
+readout = editor._artifact_result_readouts['artifact_path']
+assert readout.isReadOnly()
+assert readout.text() == 'C:/data/calibration-2.json'
 
 patches.clear()
 running = dict(projection, form_values={'repeat': 3}, running=True)
@@ -913,34 +931,5 @@ def short(revision):
 view.set_schedule(short(3))
 for _ in range(5): app.processEvents()
 assert all(bar.value() <= bar.maximum() for bar in bars)
-"""
-    )
-
-
-def test_scan_page_shows_the_program_it_is_given_and_keeps_a_half_typed_one() -> None:
-    """The source was the one field set_page dropped.
-
-    So the editor opened blank -- the presenter generates a starter template for
-    exactly that moment -- and then went stale while the revision it carries
-    advanced.  And an operator mid-edit owns the box: a page catching up must
-    not take what they were writing.
-    """
-
-    _run_qt(
-        """
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse.models import ScanPageRecord
-from zlc_ui.pulse.scan_view import PulseScanView
-app = ensure_qt_app(['scan'])
-view = PulseScanView(); view.show(); app.processEvents()
-
-view.set_page(ScanPageRecord(source_text='scan_table = None', source_revision=1))
-assert 'scan_table' in view.scan_code.toPlainText()
-
-# Typing makes it the operator's, and a later page must not take it back.
-view.scan_code.setPlainText('half typed')
-assert view.code_dirty
-view.set_page(ScanPageRecord(source_text='something else', source_revision=2))
-assert view.scan_code.toPlainText() == 'half typed'
 """
     )

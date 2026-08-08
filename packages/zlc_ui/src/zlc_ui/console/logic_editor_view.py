@@ -20,6 +20,7 @@ from zlc_ui.fluent import (
     FluentComboBox,
     FluentFrame,
     FluentLabel,
+    FluentReadoutEdit,
     FluentScrollArea,
     scaled_px,
 )
@@ -46,6 +47,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self.node_id = str(node_id)
         self._projection: dict[str, object] = {}
         self._device_combos: dict[str, FluentComboBox] = {}
+        self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -80,9 +82,23 @@ class LogicEditorView(QtWidgets.QWidget):
         self._body_layout.addWidget(self._selector_frame)
 
         empty = FormSpec(())
+        self.artifact_form = FluentParameterForm(empty, {})
+        self._body_layout.addWidget(self.artifact_form)
+        self.artifact_form.changed.connect(self._artifact_changed)
+
         self.form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.form)
         self.form.changed.connect(self._parameter_changed)
+
+        self._artifact_result_frame = FluentFrame()
+        self._artifact_result_layout = QtWidgets.QFormLayout(
+            self._artifact_result_frame
+        )
+        self._artifact_result_layout.setContentsMargins(
+            margin, margin, margin, margin
+        )
+        self._artifact_result_layout.setSpacing(scaled_px(8, minimum=5))
+        self._body_layout.addWidget(self._artifact_result_frame)
 
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
@@ -113,13 +129,26 @@ class LogicEditorView(QtWidgets.QWidget):
             raise TypeError("logic editor projection needs form_spec: FormSpec")
         if not isinstance(values, Mapping):
             raise TypeError("logic editor projection needs form_values: mapping")
+        artifact_spec = incoming.get("artifact_form_spec", FormSpec(()))
+        artifact_values = incoming.get("artifact_values", {})
+        if not isinstance(artifact_spec, FormSpec):
+            raise TypeError(
+                "logic editor projection needs artifact_form_spec: FormSpec"
+            )
+        if not isinstance(artifact_values, Mapping):
+            raise TypeError(
+                "logic editor projection needs artifact_values: mapping"
+            )
 
         self._projection = incoming
         self.title_label.setText(str(incoming.get("api_name") or self.node_id))
         kind = str(incoming.get("kind") or "logic")
         self.kind_label.setText(f"({kind})")
+        self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
+        self.artifact_form.setVisible(bool(artifact_spec.keys))
         self.form.reconcile(spec, dict(values))
         self._rebuild_selectors(incoming)
+        self._rebuild_artifact_results(incoming.get("artifact_results", ()))
 
         running = bool(incoming.get("running"))
         pending = bool(incoming.get("pending"))
@@ -196,6 +225,36 @@ class LogicEditorView(QtWidgets.QWidget):
             self.status_label.setText(str(error))
             return
         self.draft_changed.emit({"values": {str(key): value}})
+
+    def _artifact_changed(self, key: str) -> None:
+        try:
+            value = self.artifact_form.read_value(str(key))
+        except (TypeError, ValueError) as error:
+            self.status_label.setText(str(error))
+            return
+        self.draft_changed.emit({"artifact_inputs": {str(key): value}})
+
+    def _rebuild_artifact_results(self, rows: object) -> None:
+        while self._artifact_result_layout.rowCount():
+            self._artifact_result_layout.removeRow(0)
+        self._artifact_result_readouts.clear()
+        for raw in tuple(rows or ()):  # type: ignore[arg-type]
+            if not isinstance(raw, Mapping):
+                raise TypeError("logic artifact results must be mappings")
+            name = str(raw.get("name") or "")
+            path = str(raw.get("path") or "")
+            if not name or not path:
+                raise ValueError("logic artifact results need name and path")
+            readout = FluentReadoutEdit(path)
+            readout.setToolTip(str(raw.get("contract_id") or ""))
+            self._artifact_result_readouts[name] = readout
+            self._artifact_result_layout.addRow(
+                name.replace("_", " ").title(),
+                readout,
+            )
+        self._artifact_result_frame.setVisible(
+            bool(self._artifact_result_readouts)
+        )
 
     def _source_changed(self, _index: int) -> None:
         if self.source_combo is None:

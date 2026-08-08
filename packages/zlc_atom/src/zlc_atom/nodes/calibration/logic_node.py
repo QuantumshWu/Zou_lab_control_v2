@@ -176,7 +176,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     CALIBRATION_SCHEMA,
     outputs=(),
     artifact_outputs=(
-        ArtifactOutputSpec("calibration", "calibration.readout.v1"),
+        ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
     ),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),

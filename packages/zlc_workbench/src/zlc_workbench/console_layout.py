@@ -19,6 +19,7 @@ from zlc_durable import write_readable_json
 from .logic import (
     LogicBinding,
     LogicDraft,
+    artifact_input_specs,
     dataset_inputs,
     device_key_options,
     stable_signal_key,
@@ -26,7 +27,7 @@ from .logic import (
 from .panel_state import PanelState
 
 
-LAYOUT_FORMAT = "zlc.console-board/v2"
+LAYOUT_FORMAT = "zlc.console-board/v3"
 
 
 class LayoutError(ValueError):
@@ -40,6 +41,7 @@ class LogicLayoutEntry:
     values: Mapping[str, Any]
     source_signal: str
     device_keys: Mapping[str, str]
+    artifact_inputs: Mapping[str, str]
 
     def __post_init__(self) -> None:
         node_id = str(self.node_id).strip()
@@ -55,6 +57,12 @@ class LogicLayoutEntry:
             "device_keys",
             {str(name): str(key) for name, key in self.device_keys.items()},
         )
+        if any(
+            not isinstance(name, str) or not isinstance(path, str)
+            for name, path in self.artifact_inputs.items()
+        ):
+            raise LayoutError("artifact input names and paths must be strings")
+        object.__setattr__(self, "artifact_inputs", dict(self.artifact_inputs))
 
     def to_tree(self) -> dict[str, Any]:
         return {
@@ -63,6 +71,7 @@ class LogicLayoutEntry:
             "values": dict(self.values),
             "source_signal": self.source_signal,
             "device_keys": dict(self.device_keys),
+            "artifact_inputs": dict(self.artifact_inputs),
         }
 
 
@@ -187,11 +196,34 @@ def resolve_layout(
                     f"{name!r}"
                 )
             selected[name] = key
+        artifact_specs = artifact_input_specs(descriptor)
+        artifact_names = tuple(spec.name for spec in artifact_specs)
+        unknown_artifacts = set(entry.artifact_inputs) - set(artifact_names)
+        if unknown_artifacts:
+            raise LayoutError(
+                f"{entry.node_id}: unknown artifact inputs "
+                f"{sorted(unknown_artifacts)!r}"
+            )
+        missing_artifacts = {
+            spec.name
+            for spec in artifact_specs
+            if spec.required and spec.name not in entry.artifact_inputs
+        }
+        if missing_artifacts:
+            raise LayoutError(
+                f"{entry.node_id}: missing artifact inputs "
+                f"{sorted(missing_artifacts)!r}"
+            )
         bindings.append(
             LogicBinding(
                 entry.node_id,
                 descriptor,
-                LogicDraft(values, entry.source_signal, selected),
+                LogicDraft(
+                    values,
+                    entry.source_signal,
+                    selected,
+                    dict(entry.artifact_inputs),
+                ),
             )
         )
 
@@ -257,19 +289,32 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
     entry = _mapping(value, where)
     _exact_fields(
         entry,
-        {"node_id", "api_name", "values", "source_signal", "device_keys"},
+        {
+            "node_id",
+            "api_name",
+            "values",
+            "source_signal",
+            "device_keys",
+            "artifact_inputs",
+        },
         where,
     )
     values = _mapping(entry["values"], f"{where} values")
     device_keys = _mapping(entry["device_keys"], f"{where} device_keys")
+    artifact_inputs = _mapping(
+        entry["artifact_inputs"], f"{where} artifact_inputs"
+    )
     if any(not isinstance(key, str) for key in device_keys.values()):
         raise LayoutError(f"{where} device values must be strings")
+    if any(not isinstance(path, str) for path in artifact_inputs.values()):
+        raise LayoutError(f"{where} artifact input paths must be strings")
     return LogicLayoutEntry(
         _string(entry["node_id"], f"{where} node_id"),
         _string(entry["api_name"], f"{where} api_name"),
         dict(values),
         _string(entry["source_signal"], f"{where} source_signal"),
         dict(device_keys),
+        dict(artifact_inputs),
     )
 
 

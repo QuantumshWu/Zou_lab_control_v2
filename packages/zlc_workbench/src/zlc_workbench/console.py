@@ -37,6 +37,7 @@ from .logic import (
     LogicCandidate,
     LogicCatalog,
     LogicDraft,
+    artifact_input_specs,
     build_arguments,
     dataset_inputs,
     device_key_options,
@@ -167,6 +168,7 @@ class ConsolePresenter:
         self._open_saved = open_saved
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
+        self._artifact_completion_order = 0
         self.panels: dict[str, PanelBinding] = {}
         #: Monotonic, so a panel id is never handed out twice in one session.
         self._panel_serial = 0
@@ -1652,6 +1654,7 @@ class ConsolePresenter:
                     binding.draft.values,
                     binding.draft.source_signal,
                     binding.draft.device_keys,
+                    binding.draft.artifact_inputs,
                 )
                 for binding in self.logic.values()
             ),
@@ -2118,6 +2121,7 @@ class ConsolePresenter:
         values: Mapping[str, Any] | None = None,
         source_signal: str = "",
         device_keys: Mapping[str, str] | None = None,
+        artifact_inputs: Mapping[str, str] | None = None,
         open_editor: bool = True,
     ) -> str:
         """Create one stopped row draft; Start is the first build boundary."""
@@ -2149,6 +2153,19 @@ class ConsolePresenter:
             )
             for requirement in descriptor.device_requirements
         }
+        selected_artifacts = self._default_artifact_inputs(descriptor)
+        supplied_artifacts = dict(artifact_inputs or {})
+        unknown_artifacts = set(supplied_artifacts) - set(selected_artifacts)
+        if unknown_artifacts:
+            self._report(
+                f"{descriptor.api_name} has no artifact inputs "
+                f"{sorted(unknown_artifacts)!r}",
+                severity="error",
+            )
+            return ""
+        selected_artifacts.update(
+            {str(name): str(path) for name, path in supplied_artifacts.items()}
+        )
         kind = str(getattr(descriptor.kind, "value", descriptor.kind))
         self.view.add_logic_row(selected_id, kind)
         binding = LogicBinding(
@@ -2158,6 +2175,7 @@ class ConsolePresenter:
                 values=drafted_values,
                 source_signal=str(source_signal),
                 device_keys=selected_devices,
+                artifact_inputs=selected_artifacts,
             ),
         )
         self.logic[selected_id] = binding
@@ -2176,12 +2194,19 @@ class ConsolePresenter:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return None
-        from .authoring_form import display_value, project_schema
+        from .authoring_form import (
+            display_value,
+            project_artifact_inputs,
+            project_schema,
+        )
 
         options = device_key_options(
             binding.descriptor,
             installation=self.session.installation,
         )
+        artifact_specs = artifact_input_specs(binding.descriptor)
+        workspace = getattr(self.session, "workspace", None)
+        artifact_base_dir = str(getattr(workspace, "data", ""))
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
@@ -2193,6 +2218,12 @@ class ConsolePresenter:
                 name: display_value(value)
                 for name, value in binding.draft.values.items()
             },
+            "artifact_form_spec": project_artifact_inputs(
+                artifact_specs,
+                base_dir=artifact_base_dir,
+            ),
+            "artifact_values": dict(binding.draft.artifact_inputs),
+            "artifact_results": self._artifact_results(binding),
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_signal": binding.draft.source_signal,
             "source_options": self._source_options(binding.descriptor),
@@ -2232,6 +2263,7 @@ class ConsolePresenter:
         values: Mapping[str, Any] | None = None,
         source_signal: object = _UNCHANGED,
         device_keys: Mapping[str, str] | None = None,
+        artifact_inputs: Mapping[str, str] | None = None,
     ) -> bool:
         """Patch the row draft without mutating its current run."""
 
@@ -2246,6 +2278,10 @@ class ConsolePresenter:
             binding.draft.device_keys.update(
                 {str(name): str(key) for name, key in device_keys.items()}
             )
+        if artifact_inputs is not None:
+            binding.draft.artifact_inputs.update(
+                {str(name): str(path) for name, path in artifact_inputs.items()}
+            )
         binding.draft_error = ""
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
@@ -2258,6 +2294,7 @@ class ConsolePresenter:
             values=patch.get("values"),
             source_signal=source,
             device_keys=patch.get("device_keys"),
+            artifact_inputs=patch.get("artifact_inputs"),
         )
 
     def start_logic(self, node_id: str) -> bool:
@@ -2389,6 +2426,7 @@ class ConsolePresenter:
                     binding.host.poll()
                 except Exception as error:
                     self._report(f"{binding.node_id}: {error}", severity="error")
+                self._capture_artifact_results(binding)
             if binding.removing and (
                 binding.host is None or not binding.host.running
             ):
@@ -2453,7 +2491,8 @@ class ConsolePresenter:
             )
             for name in names
         )
-        shown = (state, status, published)
+        artifacts = self._artifact_results(binding)
+        shown = (state, status, published, artifacts)
         if shown == binding.shown:
             return
         binding.shown = shown
@@ -2510,7 +2549,7 @@ class ConsolePresenter:
             signal_plane=self.session.signal_plane,
             values=dict(binding.draft.values),
             source_signal=binding.draft.source_signal,
-            artifacts=self._logic_artifacts(),
+            artifact_inputs=binding.draft.artifact_inputs,
             extras=self._logic_extras(),
             device_keys=binding.draft.device_keys,
         )
@@ -2597,6 +2636,9 @@ class ConsolePresenter:
         binding.host = candidate.host
         binding.claims = candidate.claims
         binding.pending = None
+        binding.artifact_results = ()
+        binding.artifact_result_host = None
+        binding.artifact_completion_order = 0
         try:
             candidate.host.start()
         except Exception as error:
@@ -2633,29 +2675,68 @@ class ConsolePresenter:
         extras["artifact_directory"] = self.session.day_folder()
         return extras
 
-    def _logic_artifacts(self) -> dict[str, Any]:
-        """Successful task results projected through declared artifact outputs."""
+    def _artifact_results(
+        self,
+        binding: LogicBinding,
+    ) -> tuple[Mapping[str, str], ...]:
+        """Already-observed saved paths from one successful current host."""
 
-        produced: dict[str, Any] = {}
-        for binding in self.logic.values():
-            host = binding.host
-            if (
-                host is None
-                or host.running
-                or not host.terminal
-                or host.observation.error is not None
-                or not host.final_result_resolved
-            ):
+        if binding.artifact_result_host is binding.host:
+            return binding.artifact_results
+        return ()
+
+    def _capture_artifact_results(self, binding: LogicBinding) -> None:
+        """Freeze artifact paths when polling first observes terminal success."""
+
+        host = binding.host
+        if (
+            host is None
+            or host.running
+            or not host.terminal
+            or host.observation.error is not None
+            or not host.final_result_resolved
+        ):
+            return
+        if binding.artifact_result_host is host:
+            return
+        result = host.final_result
+        rows: list[Mapping[str, str]] = []
+        for output in getattr(binding.descriptor, "artifact_outputs", ()):
+            value = (
+                result.get(output.name)
+                if isinstance(result, Mapping)
+                else getattr(result, output.name, None)
+            )
+            if value is None:
                 continue
-            result = host.final_result
-            for output in getattr(binding.descriptor, "artifact_outputs", ()):
-                if isinstance(result, Mapping):
-                    value = result.get(output.name)
-                else:
-                    value = getattr(result, output.name, None)
-                if value is not None:
-                    produced.setdefault(output.contract_id, value)
-        return produced
+            path = str(Path(value).expanduser().resolve())
+            rows.append(
+                {
+                    "name": str(output.name),
+                    "contract_id": str(output.contract_id),
+                    "path": path,
+                }
+            )
+        binding.artifact_result_host = host
+        binding.artifact_results = tuple(rows)
+        if rows:
+            self._artifact_completion_order += 1
+            binding.artifact_completion_order = self._artifact_completion_order
+
+    def _default_artifact_inputs(self, descriptor: object) -> dict[str, str]:
+        """Freeze the latest observed matching artifact into a new row draft."""
+
+        available: dict[str, tuple[int, str]] = {}
+        for binding in self.logic.values():
+            for row in self._artifact_results(binding):
+                contract = str(row["contract_id"])
+                candidate = (binding.artifact_completion_order, str(row["path"]))
+                if candidate[0] >= available.get(contract, (-1, ""))[0]:
+                    available[contract] = candidate
+        return {
+            spec.name: available.get(str(spec.contract_id), (-1, ""))[1]
+            for spec in artifact_input_specs(descriptor)
+        }
 
     def _free_logic_id(self, api_name: str) -> str:
         if api_name not in self.logic:

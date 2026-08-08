@@ -245,7 +245,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             occupancy_descriptor,
             installation=installation,
             signal_plane=plane,
-            values={
+            values={},
+            artifact_inputs={
                 "calibration_path": str(first_calibration.artifact_path),
             },
             source_signal=frames_signal,

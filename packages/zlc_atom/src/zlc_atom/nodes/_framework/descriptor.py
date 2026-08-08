@@ -40,6 +40,8 @@ class DatasetInputSpec:
 
 @dataclass(frozen=True)
 class ArtifactInputSpec:
+    """One explicit saved-artifact path consumed by a run."""
+
     name: str
     contract_id: str
     required: bool = True
@@ -61,7 +63,7 @@ class OutputSpec:
 
 @dataclass(frozen=True)
 class ArtifactOutputSpec:
-    """One task result attribute exposed by semantic contract."""
+    """One saved-artifact path attribute exposed by semantic contract."""
 
     name: str
     contract_id: str

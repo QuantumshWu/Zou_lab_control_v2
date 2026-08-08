@@ -951,6 +951,11 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         values={"exposure_seconds": 0.037, "repeat": 0},
         device_keys={"camera": "camera"},
     )
+    occupancy_id = presenter.add_logic(
+        "occupancy",
+        source_signal=f"@logic/{logic_id}/frames",
+        artifact_inputs={"calibration_path": str(tmp_path / "chosen.json")},
+    )
     assert presenter.logic[logic_id].host is None
 
     import json
@@ -974,6 +979,17 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "values": presenter.logic[logic_id].draft.values,
             "source_signal": "",
             "device_keys": {"camera": "camera"},
+            "artifact_inputs": {},
+        },
+        {
+            "node_id": occupancy_id,
+            "api_name": "occupancy",
+            "values": {},
+            "source_signal": f"@logic/{logic_id}/frames",
+            "device_keys": {},
+            "artifact_inputs": {
+                "calibration_path": str(tmp_path / "chosen.json")
+            },
         }
     ]
 
@@ -996,6 +1012,9 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored_logic.host is None and restored_logic.node is None
     assert restored_logic.draft.values["exposure_seconds"] == 0.037
     assert restored_logic.draft.device_keys == {"camera": "camera"}
+    assert presenter.logic[occupancy_id].draft.artifact_inputs == {
+        "calibration_path": str(tmp_path / "chosen.json")
+    }
 
 
 def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
@@ -1028,6 +1047,7 @@ def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
             "values": {},
             "source_signal": "",
             "device_keys": {},
+            "artifact_inputs": {},
         }
     )
 
@@ -1068,6 +1088,10 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
 def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     assert presenter.apply_layout({"format": "zlc.figure/v1"}) is False
     assert any("not a saved board" in text for _severity, text in presenter.view.status)
+
+    old_layout = presenter.layout()
+    old_layout["format"] = "zlc.console-board/v2"
+    assert presenter.apply_layout(old_layout) is False
 
 
 def test_panel_edit_projects_the_direct_producer_and_apply_uses_start(

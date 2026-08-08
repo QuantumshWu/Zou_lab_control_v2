@@ -13,14 +13,19 @@ and saves a string where the device expected a number.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_ui import FormChoice, FormFieldProps, FormSpec
 
 
-__all__ = ["display_value", "project_schema", "project_values"]
+__all__ = [
+    "display_value",
+    "project_artifact_inputs",
+    "project_schema",
+    "project_values",
+]
 
 
 #: How a declared value type is edited.
@@ -49,6 +54,30 @@ def project_schema(schema: AuthoringSchema) -> FormSpec:
     if not isinstance(schema, AuthoringSchema):
         raise TypeError("project_schema needs an AuthoringSchema")
     return FormSpec(tuple(_project_field(field) for field in schema.fields))
+
+
+def project_artifact_inputs(
+    specs: Sequence[object],
+    *,
+    base_dir: str,
+) -> FormSpec:
+    """Declared artifact paths as one generic JSON-file picker surface."""
+
+    return FormSpec(
+        tuple(
+            FormFieldProps(
+                key=str(spec.name),
+                kind="path",
+                label=str(spec.name).replace("_", " ").title(),
+                default="",
+                required=bool(spec.required),
+                description=f"Artifact contract: {spec.contract_id}",
+                file_filter="JSON files (*.json);;All files (*)",
+                base_dir=str(base_dir),
+            )
+            for spec in specs
+        )
+    )
 
 
 def _project_field(field: AuthoringField) -> FormFieldProps:

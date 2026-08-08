@@ -14,8 +14,12 @@ from zlc_pulse import (
 from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes import calibration_pulse_template_bytes, discover_logic_nodes
-from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
+from zlc_atom.nodes import (
+    ArtifactInputSpec,
+    DatasetInputSpec,
+    calibration_pulse_template_bytes,
+    discover_logic_nodes,
+)
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 
@@ -313,6 +317,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert len([event for event, _ in sequencer.events if event == "fire"]) - fires_before_task == 30
 
         calibration_path = task_result.artifact_path
+        calibration_output = descriptors["calibration"].artifact_outputs[0]
+        assert getattr(task_result, calibration_output.name) == calibration_path
         occupancy_node = descriptors["occupancy"].instantiate(
             calibration_path=str(calibration_path),
             source_signal=camera_node.signal_key("frames"),
@@ -335,7 +341,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert [
             (value.name, value.contract_id)
             for value in descriptors["calibration"].artifact_outputs
-        ] == [("calibration", "calibration.readout.v1")]
+        ] == [("artifact_path", "calibration.readout.v1")]
         assert descriptors["calibration"].authoring_schema.field_names == (
             "pulse_template",
             "repeats",
@@ -364,11 +370,16 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
                 }
             )
         assert descriptors["occupancy"].device_requirements == ()
-        assert descriptors["occupancy"].authoring_schema.field_names == (
-            "calibration_path",
-        )
-        assert len(descriptors["occupancy"].input_specs) == 1
+        assert descriptors["occupancy"].authoring_schema.field_names == ()
+        assert len(descriptors["occupancy"].input_specs) == 2
         assert isinstance(descriptors["occupancy"].input_specs[0], DatasetInputSpec)
+        assert descriptors["occupancy"].input_specs[0].name == "frames"
+        assert descriptors["occupancy"].input_specs[0].contract_id == "camera.frames.v1"
+        assert isinstance(descriptors["occupancy"].input_specs[1], ArtifactInputSpec)
+        assert descriptors["occupancy"].input_specs[1].name == "calibration_path"
+        assert descriptors["occupancy"].input_specs[1].contract_id == (
+            "calibration.readout.v1"
+        )
         assert tuple(output.name for output in descriptors["occupancy"].outputs) == (
             "counts",
             "occupied",

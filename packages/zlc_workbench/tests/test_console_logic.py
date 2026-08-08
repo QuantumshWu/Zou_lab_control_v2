@@ -27,7 +27,7 @@ from zlc_workbench.logic import (
 )
 from zlc_workbench.session import ExperimentSession
 
-from test_console_presenter import _CardView, _ConsoleView, _Signal
+from test_console_presenter import _CardView, _ConsoleView, _Signal, _one_shot
 from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
 
 
@@ -296,6 +296,15 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
                 signal_plane=session.signal_plane,
                 values={},
             )
+        resolved = build_arguments(
+            occupancy,
+            installation=session.installation,
+            signal_plane=session.signal_plane,
+            values={},
+            source_signal="@logic/camera/frames",
+            artifact_inputs={"calibration_path": "picked.json"},
+        )
+        assert resolved["calibration_path"] == "picked.json"
         assert accepted == {"calibration_path", "source_signal", "signal_plane"}
 
 
@@ -466,19 +475,25 @@ def test_the_add_offer_does_not_build_or_gate_unresolved_rows(presenter) -> None
         assert presenter.view.focused_logic_editor == node_id
 
 
-def test_artifacts_come_only_from_a_successful_host_result_and_declaration(presenter) -> None:
+def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
+    presenter,
+) -> None:
     from zlc_atom.authoring import AuthoringSchema
     from zlc_atom.nodes._framework.descriptor import (
+        ArtifactInputSpec,
         ArtifactOutputSpec,
+        DatasetInputSpec,
         LogicNodeDescriptor,
         NodeKind,
+        OutputSpec,
     )
 
-    produced = object()
+    produced = presenter.session.day_folder() / "declared-calibration.json"
+    produced.write_text("{}", encoding="utf-8")
 
     class _Task:
         def execute(self, _context):
-            return SimpleNamespace(calibration=produced)
+            return SimpleNamespace(artifact_path=produced)
 
     built_in: list[Path] = []
 
@@ -491,14 +506,25 @@ def test_artifacts_come_only_from_a_successful_host_result_and_declaration(prese
         NodeKind.TASK,
         AuthoringSchema(),
         artifact_outputs=(
-            ArtifactOutputSpec("calibration", "calibration.readout.v1"),
+            ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
         ),
         build=_build,
     )
-    presenter.catalog = LogicCatalog((descriptor,))
+    consumer = LogicNodeDescriptor(
+        "artifact_consumer",
+        NodeKind.PROCESSOR,
+        AuthoringSchema(),
+        input_specs=(
+            DatasetInputSpec("frames", "camera.frames.v1"),
+            ArtifactInputSpec("calibration_path", "calibration.readout.v1"),
+        ),
+        outputs=(OutputSpec("judged", "judged.v1"),),
+        build=lambda *, calibration_path, source_signal, signal_plane: object(),
+    )
+    presenter.catalog = LogicCatalog((descriptor, consumer))
     node_id = presenter.add_logic("artifact_task")
     assert built_in == [], "Add read the artifact workspace and built the task"
-    assert presenter._logic_artifacts() == {}
+    assert presenter.logic_editor_projection(node_id)["artifact_results"] == ()
     assert presenter.start_logic(node_id) is True
     assert built_in == [presenter.session.day_folder()]
     deadline = time.monotonic() + 2.0
@@ -506,16 +532,59 @@ def test_artifacts_come_only_from_a_successful_host_result_and_declaration(prese
         presenter.poll_logic()
         time.sleep(0.001)
 
-    assert presenter._logic_artifacts() == {
-        "calibration.readout.v1": produced
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["artifact_results"] == (
+        {
+            "name": "artifact_path",
+            "contract_id": "calibration.readout.v1",
+            "path": str(produced.resolve()),
+        },
+    )
+
+    consumer_id = presenter.add_logic("artifact_consumer")
+    assert presenter.logic[consumer_id].draft.artifact_inputs == {
+        "calibration_path": str(produced.resolve())
+    }
+    assert presenter.logic_editor_projection(consumer_id)["artifact_values"] == {
+        "calibration_path": str(produced.resolve())
+    }
+
+    newer = presenter.session.day_folder() / "newer-calibration.json"
+    newer.write_text("{}", encoding="utf-8")
+    produced = newer
+    newer_task = presenter.add_logic("artifact_task")
+    assert presenter.start_logic(newer_task) is True
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and presenter.logic[newer_task].host.running:
+        presenter.poll_logic()
+        time.sleep(0.001)
+    newer_consumer = presenter.add_logic("artifact_consumer")
+    assert presenter.logic[newer_consumer].draft.artifact_inputs == {
+        "calibration_path": str(newer.resolve())
     }
 
 
-def test_a_processor_adds_with_an_unresolved_source_and_no_modal(presenter) -> None:
+def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
+    presenter, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        presenter.session,
+        "day_folder",
+        lambda: pytest.fail("opening Logic Edit created an artifact directory"),
+    )
     node_id = presenter.add_logic("occupancy")
 
     assert node_id == "occupancy"
     assert presenter.logic[node_id].draft.source_signal == ""
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
+    assert presenter.logic[node_id].draft.values == {}
+    assert presenter.view.logic_editors[node_id]["artifact_form_spec"].keys == (
+        "calibration_path",
+    )
+    artifact_field = presenter.view.logic_editors[node_id][
+        "artifact_form_spec"
+    ].fields[0]
+    assert artifact_field.base_dir == str(presenter.session.workspace.data)
     assert presenter.view.logic_editors[node_id]["source_required"] is True
     assert presenter.view.logic_editors[node_id]["source_options"] == ()
 
@@ -524,13 +593,40 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(presenter) -> N
         stable_signal_key(camera_id, "frames"),
     )
 
+    presenter.view.logic_draft_changed.emit(
+        node_id,
+        {"artifact_inputs": {"calibration_path": "manually-picked.json"}},
+    )
+    assert presenter.logic[node_id].draft.artifact_inputs == {
+        "calibration_path": "manually-picked.json"
+    }
+    assert presenter.logic_editor_projection(node_id)["artifact_values"] == {
+        "calibration_path": "manually-picked.json"
+    }
+
 
 def test_an_unresolved_processor_source_fails_only_when_started(presenter) -> None:
-    node_id = presenter.add_logic(
-        "occupancy",
-        values={"calibration_path": "missing.json"},
-    )
+    node_id = presenter.add_logic("occupancy")
 
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is None
     assert "source_signal" in presenter.logic[node_id].draft_error
+
+
+def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
+    presenter, session, tmp_path
+) -> None:
+    camera, _snapshot = _one_shot(session)
+    missing = tmp_path / "missing-calibration.json"
+    node_id = presenter.add_logic(
+        "occupancy",
+        source_signal=camera.signal_key("frames"),
+        artifact_inputs={"calibration_path": str(missing)},
+    )
+
+    assert presenter.start_logic(node_id) is False
+    assert presenter.logic[node_id].host is None
+    assert presenter.logic[node_id].draft.artifact_inputs == {
+        "calibration_path": str(missing)
+    }
+    assert "missing-calibration.json" in presenter.logic[node_id].draft_error

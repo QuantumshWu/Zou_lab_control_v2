@@ -147,7 +147,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         occupancy_id = presenter.add_logic(
             "occupancy",
             node_id="occupancy",
-            values={"calibration_path": str(calibration_path)},
+            artifact_inputs={"calibration_path": str(calibration_path)},
             source_signal=frames_signal,
             open_editor=False,
         )
