@@ -73,9 +73,9 @@ class FigureViewerView(QtWidgets.QWidget):
         self._surface_layout.setContentsMargins(0, 0, window_pad(1), 0)
         self._surface_layout.setSpacing(window_pad(0.5))
 
-        # An archive holds one dataset per panel that was on screen when it was
-        # saved.  Without a way to pick, a viewer shows the first and hides the
-        # rest -- which is indistinguishable from an archive that only kept one.
+        # Panel Save Fig writes one dataset, while notebook-created archives may
+        # contain several.  Keep the generic viewer picker without suggesting
+        # that TaskConsole packages the whole board.
         self._dataset_bar = QtWidgets.QWidget(holder)
         self._dataset_bar.setStyleSheet("background: transparent;")
         bar_layout = QtWidgets.QHBoxLayout(self._dataset_bar)

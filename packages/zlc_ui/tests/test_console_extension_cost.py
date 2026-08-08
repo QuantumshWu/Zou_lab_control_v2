@@ -39,6 +39,9 @@ def test_demo_console_once_echoes_a_view_signal() -> None:
         "panel_signal_picked", "panel_size_picked", "panel_update_ms_picked",
         "panel_title_committed", "panel_remove_requested", "panel_edit_requested",
         "logic_start_requested", "logic_stop_requested", "logic_edit_requested",
-        "logic_remove_requested",
+        "logic_remove_requested", "save_layout_requested",
+        "load_layout_requested", "save_screenshot_requested",
+        "panel_state_changed", "panel_snapshot_refresh_requested",
+        "panel_producer_apply_requested", "panel_save_figure_requested",
     ):
         assert name in demo, name

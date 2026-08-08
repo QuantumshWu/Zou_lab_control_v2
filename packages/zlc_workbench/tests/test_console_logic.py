@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import shutil
 import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +20,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_workbench.console import ConsolePresenter
-from zlc_workbench.logic import LogicCatalog, build_arguments
+from zlc_workbench.logic import (
+    LogicCatalog,
+    build_arguments,
+    device_key_options,
+    stable_signal_key,
+)
 from zlc_workbench.session import ExperimentSession
 
 from test_console_presenter import _CardView, _ConsoleView, _Signal
@@ -76,15 +83,15 @@ def test_the_node_types_offered_are_the_ones_that_exist(presenter) -> None:
     something that then refuses to be built.
     """
 
-    from zlc_atom.nodes._framework.discovery import discover_logic_nodes
+    from zlc_atom.nodes import discover_logic_nodes
 
     offered = {name for name, _kind, _publishes in presenter.catalog.rows()}
     assert offered == {item.api_name for item in discover_logic_nodes()}
     assert "camera_measurement" in offered
 
 
-def test_adding_a_node_hosts_it_without_starting_it(presenter) -> None:
-    """A node that ran on being added would fire before anyone saw its settings."""
+def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(presenter) -> None:
+    """Add is authoring, so it cannot build or acquire before Start."""
 
     node_id = presenter.add_logic("camera_measurement")
 
@@ -92,20 +99,30 @@ def test_adding_a_node_hosts_it_without_starting_it(presenter) -> None:
     assert presenter.view.logic_rows, "the window was never given a row"
     row = presenter.view._rows[node_id]
     assert row.state[0] == "idle"
-    assert not presenter.logic[node_id].host.running
-    # What it will publish is on screen before it has published anything.
+    assert presenter.logic[node_id].host is None
+    assert presenter.logic[node_id].node is None
     assert [name for name, _by, _state in row.publishes] == [
-        presenter.logic[node_id].host.signal_key("frames")
+        stable_signal_key(node_id, "frames")
     ]
+    assert presenter.view.focused_logic_editor == node_id
+    projection = presenter.view.logic_editors[node_id]
+    assert projection["form_spec"].keys == tuple(
+        field.name for field in presenter.logic[node_id].descriptor.authoring_schema.fields
+    )
+    assert projection["device_keys"]["camera"] == "camera"
 
 
-def test_a_node_built_with_settings_keeps_them(presenter) -> None:
+def test_a_row_draft_keeps_every_field_and_authored_patch(presenter) -> None:
     node_id = presenter.add_logic(
         "camera_measurement", values={"repeat": 3, "frames_per_cycle": 2}
     )
 
-    assert presenter.logic[node_id].values["repeat"] == 3
-    assert presenter.logic[node_id].values["frames_per_cycle"] == 2
+    draft = presenter.logic[node_id].draft
+    assert set(draft.values) == set(
+        presenter.logic[node_id].descriptor.authoring_schema.field_names
+    )
+    assert draft.values["repeat"] == 3
+    assert draft.values["frames_per_cycle"] == 2
 
 
 def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None:
@@ -115,8 +132,11 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     )
     row = presenter.view._rows[node_id]
 
-    presenter.start_logic(node_id)
+    assert presenter.start_logic(node_id) is True
     assert row.state[0] == "running"
+    assert presenter.logic[node_id].host.dataset_output_declarations[0].contract_id == (
+        "camera.frames.v1"
+    )
 
     session.fire(shots=1)
     deadline = time.monotonic() + 10.0
@@ -145,15 +165,48 @@ def test_stop_reaches_a_running_node(presenter, session) -> None:
     assert not presenter.logic[node_id].host.running
 
 
+def test_close_keeps_a_row_when_its_worker_has_not_released(presenter) -> None:
+    """A close timeout must not hide a node that still owns its host."""
+
+    node_id = presenter.add_logic("camera_measurement")
+    shutdown: list[bool] = []
+    host = SimpleNamespace(
+        running=True,
+        cancel=lambda _reason: None,
+        poll=lambda: None,
+        shutdown=lambda: shutdown.append(True),
+    )
+    presenter.logic[node_id].host = host
+
+    with pytest.raises(TimeoutError, match=node_id):
+        presenter.close(node_stop_seconds=0.0)
+
+    assert presenter.logic[node_id].host is host
+    assert shutdown == []
+
+    host.running = False
+    def fail_shutdown() -> None:
+        raise RuntimeError("host has not reaped its worker")
+
+    host.shutdown = fail_shutdown
+    with pytest.raises(RuntimeError, match="could not release"):
+        presenter.close(node_stop_seconds=0.0)
+    assert node_id in presenter.logic
+
+    host.shutdown = lambda: shutdown.append(True)
+    presenter.close(node_stop_seconds=0.0)
+    assert node_id not in presenter.logic
+    assert shutdown == [True]
+
+
 def test_removing_a_node_takes_its_row_and_shuts_it_down(presenter) -> None:
     node_id = presenter.add_logic("camera_measurement")
-    host = presenter.logic[node_id].host
 
     presenter.view._rows[node_id].remove_requested.emit()
 
     assert presenter.logic == {}
     assert presenter.view.logic_rows == ()
-    assert not host.running
+    assert node_id not in presenter.view.logic_editors
 
 
 def test_two_nodes_of_one_type_get_their_own_names(presenter) -> None:
@@ -163,12 +216,11 @@ def test_two_nodes_of_one_type_get_their_own_names(presenter) -> None:
     second = presenter.add_logic("camera_measurement")
 
     assert (first, second) == ("camera_measurement", "camera_measurement2")
-    keys = {presenter.logic[name].host.signal_key("frames") for name in (first, second)}
+    keys = {stable_signal_key(name, "frames") for name in (first, second)}
     assert len(keys) == 2
 
 
-def test_a_node_this_bench_cannot_supply_is_refused_with_the_reason(presenter) -> None:
-    """A row stuck at idle forever is the failure this replaces."""
+def test_a_missing_device_is_a_repairable_draft_until_start(presenter) -> None:
 
     class _Bare:
         def capability(self, token, *, key=None):
@@ -176,7 +228,10 @@ def test_a_node_this_bench_cannot_supply_is_refused_with_the_reason(presenter) -
 
     presenter.session.installation, real = _Bare(), presenter.session.installation
     try:
-        assert presenter.add_logic("camera_measurement") == ""
+        node_id = presenter.add_logic("camera_measurement")
+        assert node_id == "camera_measurement"
+        assert presenter.logic[node_id].draft.device_keys == {"camera": ""}
+        assert presenter.start_logic(node_id) is False
     finally:
         presenter.session.installation = real
 
@@ -184,29 +239,33 @@ def test_a_node_this_bench_cannot_supply_is_refused_with_the_reason(presenter) -
     assert "camera.adapter" in presenter.view.status[-1][1]
 
 
-def test_editing_a_running_node_is_refused_rather_than_swapped(presenter, session) -> None:
-    """What it is publishing came from what it was built with.
-
-    Swapping that underneath a run makes the record of the run a lie.
-    """
+def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session) -> None:
 
     session.load_pulse("calibration")
-    presenter._edit_logic = lambda _descriptor, values: {**values, "repeat": 9}
-    node_id = presenter.add_logic("camera_measurement")
+    node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
     presenter.start_logic(node_id)
+    current_host = presenter.logic[node_id].host
+    current_node = presenter.logic[node_id].node
 
-    assert presenter.edit_logic(node_id) is False
-    assert presenter.view.status[-1][0] == "warning"
+    assert presenter.update_logic_draft(node_id, values={"repeat": 9}) is True
+    assert presenter.edit_logic(node_id) is True
+    assert presenter.logic[node_id].draft.values["repeat"] == 9
+    assert presenter.logic[node_id].host is current_host
+    assert presenter.logic[node_id].node is current_node
+    presenter.update_logic_draft(node_id, values={"repeat": -1})
+    assert presenter.start_logic(node_id) is False
+    assert presenter.logic[node_id].host is current_host
+    assert current_host.running, "invalid Restart stopped the valid current run"
     presenter.stop_logic(node_id)
 
 
-def test_editing_an_idle_node_rebuilds_it_with_the_new_settings(presenter) -> None:
-    presenter._edit_logic = lambda _descriptor, values: {**values, "repeat": 9}
+def test_editing_an_idle_row_does_not_build_it(presenter) -> None:
     node_id = presenter.add_logic("camera_measurement")
 
-    assert presenter.edit_logic(node_id) is True
+    assert presenter.update_logic_draft(node_id, values={"repeat": 9}) is True
 
-    assert presenter.logic[node_id].values["repeat"] == 9
+    assert presenter.logic[node_id].draft.values["repeat"] == 9
+    assert presenter.logic[node_id].host is None
 
 
 def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
@@ -239,7 +298,157 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
                 signal_plane=session.signal_plane,
                 values={},
             )
-        assert "calibration" in accepted
+        assert accepted == {"calibration_path", "source_signal", "signal_plane"}
+
+
+def test_named_device_options_and_build_resolution_use_compatible_instances() -> None:
+    from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE
+
+    default_camera = object()
+    mot_camera = object()
+    sequencer = object()
+
+    class _Installation:
+        devices = {
+            "mot_camera": SimpleNamespace(
+                capabilities={"camera.adapter": mot_camera}
+            ),
+            "sequencer": SimpleNamespace(
+                capabilities={"sequencer.streamer": sequencer}
+            ),
+            "camera": SimpleNamespace(
+                capabilities={"camera.adapter": default_camera}
+            ),
+        }
+
+        def capability(self, token, *, key=None):
+            return self.devices[key].capabilities[token]
+
+    descriptor = LOGIC_NODE
+    assert device_key_options(descriptor, installation=_Installation()) == {
+        "camera": ("camera", "mot_camera")
+    }
+
+    def build(*, camera, camera_key, signal_plane):
+        return camera, camera_key, signal_plane
+
+    keyed_descriptor = replace(descriptor, build=build)
+    default = build_arguments(
+        keyed_descriptor,
+        installation=_Installation(),
+        signal_plane="plane",
+        values={},
+    )
+    selected = build_arguments(
+        keyed_descriptor,
+        installation=_Installation(),
+        signal_plane="plane",
+        values={},
+        device_keys={"camera": "mot_camera"},
+    )
+
+    assert default["camera"] is default_camera
+    assert default["camera_key"] == "camera"
+    assert selected["camera"] is mot_camera
+    assert selected["camera_key"] == "mot_camera"
+    with pytest.raises(LookupError, match="does not provide camera.adapter"):
+        build_arguments(
+            keyed_descriptor,
+            installation=_Installation(),
+            signal_plane="plane",
+            values={},
+            device_keys={"camera": "sequencer"},
+        )
+
+
+def _claim_descriptor(api_name: str, access):
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes._framework.descriptor import (
+        DeviceRequirement,
+        LogicNodeDescriptor,
+        NodeKind,
+    )
+
+    class _Hold:
+        def execute(self, context):
+            while not context.cancel_requested():
+                time.sleep(0.001)
+
+    return LogicNodeDescriptor(
+        api_name,
+        NodeKind.TASK,
+        AuthoringSchema(),
+        device_requirements=(
+            DeviceRequirement("camera.adapter", "camera", access),
+        ),
+        build=lambda *, camera: _Hold(),
+    )
+
+
+def test_only_exact_exclusive_device_claims_queue_and_stop_the_old_row(presenter) -> None:
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+
+    first_descriptor = _claim_descriptor("first", DeviceAccess.EXCLUSIVE)
+    second_descriptor = _claim_descriptor("second", DeviceAccess.EXCLUSIVE)
+    presenter.catalog = LogicCatalog((first_descriptor, second_descriptor))
+    first = presenter.add_logic("first")
+    second = presenter.add_logic("second")
+    assert presenter.start_logic(first) is True
+    old_host = presenter.logic[first].host
+
+    assert presenter.start_logic(second) is True
+    assert presenter.logic[second].pending is not None
+    assert presenter.logic[second].host is None
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and presenter.logic[second].pending is not None:
+        presenter.poll_logic()
+        time.sleep(0.001)
+    assert first in presenter.logic, "the conflicting draft row was removed"
+    assert old_host is not None and not old_host.running
+    assert presenter.logic[second].host is not None
+    assert presenter.logic[second].host.running
+
+
+def test_observe_and_exclusive_claims_on_one_device_coexist(presenter) -> None:
+    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+
+    observer = _claim_descriptor("observer", DeviceAccess.OBSERVE)
+    owner = _claim_descriptor("owner", DeviceAccess.EXCLUSIVE)
+    presenter.catalog = LogicCatalog((observer, owner))
+    observer_id = presenter.add_logic("observer")
+    owner_id = presenter.add_logic("owner")
+    assert presenter.start_logic(observer_id) is True
+    observer_host = presenter.logic[observer_id].host
+
+    assert presenter.start_logic(owner_id) is True
+    assert presenter.logic[owner_id].pending is None
+    assert observer_host is not None and observer_host.running
+    assert presenter.logic[owner_id].host is not None
+    assert presenter.logic[owner_id].host.running
+
+
+def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter) -> None:
+    node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
+    assert presenter.start_logic(node_id) is True
+    old_host = presenter.logic[node_id].host
+    assert old_host is not None
+    old_key = old_host.signal_key("frames")
+    old_generation = old_host.generation
+    presenter.update_logic_draft(node_id, values={"exposure_seconds": 0.031})
+
+    assert presenter.start_logic(node_id) is True
+    assert presenter.logic[node_id].host is old_host
+    assert presenter.logic[node_id].pending is not None
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and presenter.logic[node_id].host is old_host:
+        presenter.poll_logic()
+        time.sleep(0.002)
+    replacement = presenter.logic[node_id].host
+    assert replacement is not None and replacement is not old_host
+    assert replacement.signal_key("frames") == old_key
+    assert replacement.generation != old_generation
 
 
 def test_the_summary_counts_what_is_running(presenter) -> None:
@@ -248,75 +457,63 @@ def test_the_summary_counts_what_is_running(presenter) -> None:
     assert "0/1 node(s) running" in presenter.view.summary
 
 
-def test_the_offer_says_what_this_bench_cannot_build_yet(presenter) -> None:
-    """"available" beside every row was a claim made where nothing could check it.
-
-    Only the bench knows what it can supply, so only the presenter can say
-    whether a type is addable -- and the reason comes from actually attempting
-    the build, through the same function ``add_logic`` uses.  A second copy of
-    "what does this need" would be a second answer.
-    """
+def test_the_add_offer_does_not_build_or_gate_unresolved_rows(presenter) -> None:
 
     offer = {name: blocked for name, _kind, _publishes, blocked in presenter.logic_offer()}
-    assert offer["camera_measurement"] == "", "a camera node needs only the camera"
-    assert "calibration" in offer["occupancy"], (
-        "occupancy is built ON a calibration and must say so before it is picked"
+    assert offer["camera_measurement"] == ""
+    assert offer["occupancy"] == ""
+    for api_name in ("calibration", "occupancy"):
+        node_id = presenter.add_logic(api_name)
+        assert presenter.logic[node_id].host is None
+        assert presenter.view.focused_logic_editor == node_id
+
+
+def test_artifacts_come_only_from_a_successful_host_result_and_declaration(presenter) -> None:
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes._framework.descriptor import (
+        ArtifactOutputSpec,
+        LogicNodeDescriptor,
+        NodeKind,
     )
 
+    produced = object()
 
-def test_a_produced_artifact_reaches_the_node_that_is_built_on_it(presenter) -> None:
-    """``build_arguments`` always took artifacts and nobody ever passed any.
+    class _Task:
+        def execute(self, _context):
+            return SimpleNamespace(calibration=produced)
 
-    So a declared artifact input was answered by nothing, and occupancy could
-    not be added before OR after a calibration ran -- which reads as a broken
-    node rather than an order to do things in.  Artifacts are keyed by the
-    contract both sides declare, never by argument name.
-    """
+    built_in: list[Path] = []
 
-    class _Calibrated:
-        """Stands in for a calibration task that has finished."""
+    def _build(*, artifact_directory):
+        built_in.append(Path(artifact_directory))
+        return _Task()
 
-        def __init__(self, produced) -> None:
-            self.calibration = produced
-            self.report = None
-
-    from zlc_atom.nodes.calibration.calibration import TrapCalibration
-
-    produced = TrapCalibration.__new__(TrapCalibration)
-    binding = list(presenter.logic.values())
-    assert not binding, "this bench starts with nothing hosted"
-
-    presenter.add_logic("calibration", values={"repeats": 1})
-    hosted = presenter.logic["calibration"]
-    hosted.node = _Calibrated(produced)
-
-    artifacts = presenter._logic_artifacts()
-    assert artifacts.get("calibration.readout.v1") is produced, (
-        "a finished task's artifact is offered under its declared contract"
+    descriptor = LogicNodeDescriptor(
+        "artifact_task",
+        NodeKind.TASK,
+        AuthoringSchema(),
+        artifact_outputs=(
+            ArtifactOutputSpec("calibration", "calibration.readout.v1"),
+        ),
+        build=_build,
     )
-    offer = {name: blocked for name, _k, _p, blocked in presenter.logic_offer()}
-    assert offer["occupancy"] == "", "with a calibration in hand, occupancy is addable"
+    presenter.catalog = LogicCatalog((descriptor,))
+    node_id = presenter.add_logic("artifact_task")
+    assert built_in == [], "Add read the artifact workspace and built the task"
+    assert presenter._logic_artifacts() == {}
+    assert presenter.start_logic(node_id) is True
+    assert built_in == [presenter.session.day_folder()]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and presenter.logic[node_id].host.running:
+        presenter.poll_logic()
+        time.sleep(0.001)
+
+    assert presenter._logic_artifacts() == {
+        "calibration.readout.v1": produced
+    }
 
 
-def test_a_processor_is_asked_which_signal_it_reads(presenter, session) -> None:
-    """The runtime refuses a reactive node that was never told its source.
-
-    Nothing asked, so Add Logic -> occupancy failed with "reactive node
-    requires exactly one input signal key" -- a sentence about the runtime, in
-    answer to a question nobody put to the operator.  Whether to ask is the
-    descriptor's answer: it declares the dataset it reads.
-    """
-
-    from zlc_atom.nodes.calibration.calibration import TrapCalibration
-
-    presenter.add_logic("calibration", values={"repeats": 1})
-
-    class _Calibrated:
-        calibration = TrapCalibration.__new__(TrapCalibration)
-        report = None
-
-    presenter.logic["calibration"].node = _Calibrated()
-
+def test_a_processor_adds_with_an_unresolved_source_and_no_modal(presenter) -> None:
     asked: list = []
 
     def _pick(rows):
@@ -324,47 +521,26 @@ def test_a_processor_is_asked_which_signal_it_reads(presenter, session) -> None:
         return "@logic/nowhere/frames"
 
     presenter._choose_signal = _pick
-    presenter.add_logic("occupancy")
+    node_id = presenter.add_logic("occupancy")
 
-    assert asked, "a processor must be asked which signal it reads"
-    assert presenter.logic["occupancy"].source_signal == "@logic/nowhere/frames"
+    assert node_id == "occupancy"
+    assert asked == []
+    assert presenter.logic[node_id].draft.source_signal == ""
+    assert presenter.view.logic_editors[node_id]["source_required"] is True
+    assert presenter.view.logic_editors[node_id]["source_options"] == ()
 
-
-def test_declining_the_signal_question_adds_nothing(presenter) -> None:
-    """Cancelling the question is cancelling the node, not building a broken one."""
-
-    from zlc_atom.nodes.calibration.calibration import TrapCalibration
-
-    presenter.add_logic("calibration", values={"repeats": 1})
-
-    class _Calibrated:
-        calibration = TrapCalibration.__new__(TrapCalibration)
-        report = None
-
-    presenter.logic["calibration"].node = _Calibrated()
-    presenter._choose_signal = lambda _rows: None
-
-    assert presenter.add_logic("occupancy") == ""
-    assert "occupancy" not in presenter.logic
-
-
-def test_a_saved_figure_records_the_nodes_started_in_this_window(presenter) -> None:
-    """An archive must describe the apparatus that produced its data.
-
-    Only the session's own nodes were recorded, so a figure saved after running
-    anything in the window carried provenance for the opening monitor and
-    nothing else -- a record of an apparatus that produced none of it.
-    """
-
-    presenter.add_logic("calibration", values={"repeats": 1})
-    hosted = presenter.logic["calibration"].node
-    assert hosted is not None
-
-    recorded = presenter._producing_nodes()
-    assert any(item is hosted for item in recorded), (
-        "a node started in this window produced what is on screen"
+    camera_id = presenter.add_logic("camera_measurement")
+    assert presenter.view.logic_editors[node_id]["source_options"] == (
+        stable_signal_key(camera_id, "frames"),
     )
-    assert all(
-        callable(getattr(getattr(item, "provenance", None), "capture", None))
-        for item in recorded
-    ), "every node the archive records must be able to describe itself"
+
+
+def test_an_unresolved_processor_source_fails_only_when_started(presenter) -> None:
+    node_id = presenter.add_logic(
+        "occupancy",
+        values={"calibration_path": "missing.json"},
+    )
+
+    assert presenter.start_logic(node_id) is False
+    assert presenter.logic[node_id].host is None
+    assert "source_signal" in presenter.logic[node_id].draft_error

@@ -177,7 +177,13 @@ def snapshot_from_manifest(
         )
     referenced: set[str] = set()
     schema = dataset_schema_from_tree(manifest["schema"])
-    ref = dataset_revision_ref_from_tree(manifest["ref"])
+    ref_tree = dict(manifest["ref"])
+    if "schema_fingerprint" not in ref_tree:
+        # Composite figure archives already carry the complete schema.  Reuse
+        # its in-memory identity instead of requiring a redundant persisted
+        # digest solely to rebuild the DatasetRevisionRef.
+        ref_tree["schema_fingerprint"] = schema.fingerprint
+    ref = dataset_revision_ref_from_tree(ref_tree)
     values = _array(arrays, manifest["values_key"], referenced, "manifest.values_key")
     validity = _validity_from_manifest(manifest["validity"], arrays, referenced)
     block = DataBlock(ref.block_id, ref.revision, values, validity, schema)

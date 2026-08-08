@@ -83,7 +83,8 @@ class LogicRowView(FluentFrame):
             f"color: {RED if state == 'error' else GREY}; background: transparent; border: none;"
         )
         running = state == "running"
-        self.start_button.setEnabled(not running)
+        self.start_button.setText("Restart" if running else "Start")
+        self.start_button.setEnabled(True)
         self.stop_button.setEnabled(running)
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:

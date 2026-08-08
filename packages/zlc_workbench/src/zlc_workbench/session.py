@@ -170,9 +170,7 @@ class ExperimentSession:
         dialler while the configuration supplies the endpoint.
         """
 
-        from zlc_atom.install import create_installation
         from zlc_atom.install.configuration import load_installation_config
-        from zlc_runtime import SignalDataPlane
 
         space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
         if template is not None:
@@ -184,6 +182,28 @@ class ExperimentSession:
                     f"no apparatus at {path}; pass template='virtual' to start from a template"
                 )
             specs = load_installation_config(path).specs()
+
+        return cls._from_specs(space, specs)
+
+    @classmethod
+    def from_config(
+        cls,
+        workspace: Workspace | str | os.PathLike[str],
+        config: object,
+    ) -> "ExperimentSession":
+        """Start from the exact DeviceManager draft accepted by its Init action."""
+
+        from zlc_atom.install.configuration import InstallationConfig
+
+        if not isinstance(config, InstallationConfig):
+            raise TypeError("config must be InstallationConfig")
+        space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
+        return cls._from_specs(space, config.specs())
+
+    @classmethod
+    def _from_specs(cls, space: Workspace, specs: object) -> "ExperimentSession":
+        from zlc_atom.install import create_installation
+        from zlc_runtime import SignalDataPlane
 
         return cls(
             installation=create_installation(specs, connect_pulse=_connect_pulse),
@@ -231,7 +251,7 @@ class ExperimentSession:
         path = self.workspace.pulses / f"{name}.py"
         if not path.is_file():
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
-        from zlc_atom.nodes._framework.pulse_source import arm_sequencer
+        from zlc_atom.nodes import arm_sequencer
 
         program, metadata = read_pulse(path)
 
@@ -239,8 +259,18 @@ class ExperimentSession:
         # their own copy of "tell the device which line triggers the camera,
         # then load", which is how the two came to differ on the failure path.
         arm_sequencer(self.sequencer, program, metadata)
+        self._pulse_sequence = metadata.get("sequence")
+        self._pulse_path = path
         self._pulse = {"name": name, **{k: v for k, v in metadata.items() if k != "sequence"}}
         return self._pulse
+
+    @property
+    def pulse_sequence(self) -> object | None:
+        return getattr(self, "_pulse_sequence", None)
+
+    @property
+    def pulse_path(self) -> Path | None:
+        return getattr(self, "_pulse_path", None)
 
     # ------------------------------------------------------------------- shot
 

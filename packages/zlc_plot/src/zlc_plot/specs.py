@@ -640,13 +640,24 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
             )
         )
     if isinstance(spec, ImagePlot):
-        entries.append(
-            ParameterSpec(
-                "show_point_labels",
-                bool,
-                RenderEffect.OVERLAY,
-                default=False,
-                label="Point labels",
+        entries.extend(
+            (
+                ParameterSpec(
+                    "site_overlay",
+                    str,
+                    RenderEffect.OVERLAY,
+                    default="off",
+                    normalizer=_normalize_nonempty_text,
+                    label="Site overlay",
+                    choices=("off", "centers", "occupancy"),
+                ),
+                ParameterSpec(
+                    "show_point_labels",
+                    bool,
+                    RenderEffect.OVERLAY,
+                    default=False,
+                    label="Point labels",
+                ),
             )
         )
     if isinstance(spec, PulseTimelinePlot):

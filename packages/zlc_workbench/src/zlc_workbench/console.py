@@ -19,60 +19,107 @@ from pathlib import Path
 import time
 from typing import Any
 
-from zlc_durable import unique_path
+from zlc_plot import parameter_controls
+from zlc_plot.primitives import ImageFrame
 
 from .board import LiveBoard
 from .logic import (
-    LogicBinding, LogicCatalog, build_arguments, dataset_inputs, make_host,
+    DeviceClaim,
+    LogicBinding,
+    LogicCandidate,
+    LogicCatalog,
+    LogicDraft,
+    build_arguments,
+    dataset_inputs,
+    device_key_options,
+    make_host,
+    stable_signal_key,
 )
+from .image_overlay import ImageOverlayResolver, ResolvedImagePresentation
+from .panel_save import (
+    capture_run_chain,
+    save_panel_figure as _save_panel_figure,
+)
+from .panel_state import PanelFrozenData, PanelState, restore_semantic_choice
 from .presentation import PlotPanelPort
-from .selection import attach_selection_bridge
+from .selection import attach_selection_bridge, subscribe_committed_selection
 from .topology import project_signals
 
 
-__all__ = ["ConsolePresenter", "PanelBinding"]
+__all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
-def _file_stem(text: str) -> str:
-    """One panel's name, as something a filesystem will take.
+_UNCHANGED = object()
 
-    A signal key is "@logic/cm/frames" and a title is whatever the operator
-    typed, so neither can go straight into a path.  Only characters that are
-    safe everywhere survive; a name that reduces to nothing falls back rather
-    than producing a file called ".png".
-    """
 
-    kept = "".join(
-        character if (character.isalnum() or character in "-_.") else "-"
-        for character in str(text).strip()
-    ).strip("-.")
-    while "--" in kept:
-        kept = kept.replace("--", "-")
-    return kept[:60] or "panel"
+_QUICK_DISPLAY_FIELDS: Mapping[str, frozenset[str]] = {
+    "curve": frozenset(
+        {"x_label", "y_label", "show_grid", "relim_mode", "y_min", "y_max"}
+    ),
+    "image": frozenset(
+        {
+            "colormap",
+            "relim_mode",
+            "color_min",
+            "color_max",
+            "show_colorbar",
+        }
+    ),
+    "histogram": frozenset({"bin_count", "density", "log_y"}),
+    "rolling": frozenset({"window", "y_min", "y_max", "show_grid"}),
+    "facet_grid": frozenset({"facet_display_unit", "show_grid"}),
+}
 
 
 @dataclass
 class PanelBinding:
-    """One panel: which signal it shows, and what is drawing it."""
+    """One runtime binding around the panel's single authored state."""
 
     panel_id: str
-    signal: str
+    state: PanelState
     host: Any
     port: PlotPanelPort
-    title: str = ""
-    #: Which kind of plot this panel IS.  Chosen when it was added and kept
-    #: through a retarget: an operator who asked for a curve did not ask for
-    #: it to become an image the moment they point it somewhere else.
-    kind: str = ""
-    #: How big the card is.  Recorded HERE because the card is on the other
-    #: side of the wall now: a board that cannot say how big its own panels
-    #: are cannot be written down and put back.
-    size: str = ""
+    #: Edit deliberately keeps one frozen data revision until Refresh.  It is
+    #: not panel configuration and therefore does not live in ``PanelState``.
+    frozen_data: PanelFrozenData | None = None
+    frozen_stale: bool = False
+    #: Panel Edit owns a second, frozen plotting surface.  It is deliberately
+    #: not the live monitor host and therefore has no PlotPanelPort.
+    editor_host: Any = None
+    editor_selections: Any = None
     #: Live derivation from selections drawn on this panel, if it has one.
     bridge: Any = None
     selections: Any = None
     #: The last failure already shown, so one refusal is reported once.
     reported_error: Any = None
+    #: Exact publication used to construct a not-yet-board-anchored host.
+    display_publication: Any = None
+    #: Image annotation is resolved from exact publications at this composition
+    #: boundary.  Its revision is independent of the dataset snapshot revision.
+    overlay_resolver: ImageOverlayResolver = field(default_factory=ImageOverlayResolver)
+    overlay_revision: int = -1
+    overlay_publication: Any = None
+    image_presentation: ResolvedImagePresentation | None = None
+    #: UI-neutral parameter descriptions projected from this host's public
+    #: zlc_plot control plane.  This is editor metadata, not a second authored
+    #: state; accepted values still live only in ``state``.
+    parameter_surface: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def signal(self) -> str:
+        return self.state.signal
+
+    @property
+    def title(self) -> str:
+        return self.state.title
+
+    @property
+    def kind(self) -> str:
+        return self.state.kind
+
+    @property
+    def size(self) -> str:
+        return self.state.size
 
 
 class ConsolePresenter:
@@ -88,10 +135,7 @@ class ConsolePresenter:
         spec_for: Callable[[object, str], Any] | None = None,
         choose_signal: Callable[[Sequence[tuple]], str | None] | None = None,
         open_saved: Callable[[str], object] | None = None,
-        edit_panel: Callable[[Any, str], object] | None = None,
-        release_bootstrap: Callable[[], object] | None = None,
         choose_logic: Callable[[Sequence[tuple]], str | None] | None = None,
-        edit_logic: Callable[[Any, Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
         intervals: Sequence[int] = (100, 200, 400, 800),
         default_interval_ms: int = 400,
     ) -> None:
@@ -110,19 +154,10 @@ class ConsolePresenter:
         # Reading a saved run is a different window over a different subject,
         # so the console asks for it rather than growing one.
         self._open_saved = open_saved
-        # Opening a panel's own plot controls is Qt work the presenter asks for
-        # rather than does.
-        self._edit_panel = edit_panel
-        # The opening monitor holds the camera armed so the first panel is not
-        # empty.  A camera IS held by one owner at a time, so the first logic
-        # node that wants it cannot have it until this lets go.
-        self._release_bootstrap = release_bootstrap
-        # A logic node is what publishes a signal; a panel only shows one.  The
-        # question "which node type" and the settings form are Qt and arrive as
-        # callables, so the presenter stays headless.  The ROW is not one of
-        # them any more: the window makes its own rows.
+        # Choosing a type remains a small Qt question.  Editing no longer uses
+        # the old modal callback: the view projects the row's one shared draft
+        # through open_logic_editor/update_logic_editor seams instead.
         self._choose_logic = choose_logic
-        self._edit_logic = edit_logic
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         self.panels: dict[str, PanelBinding] = {}
@@ -161,14 +196,12 @@ class ConsolePresenter:
         """
 
         self.view.pause_toggled.connect(self.set_paused)
-        self.view.save_requested.connect(self.save)
-        self.view.save_image_requested.connect(self.save_images)
+        self.view.save_layout_requested.connect(self.save_layout)
+        self.view.load_layout_requested.connect(self.load_layout)
+        self.view.save_screenshot_requested.connect(self.save_screenshot)
         self.view.add_panel_requested.connect(self.add_selected_panel)
         self.view.selectors_toggled.connect(self.set_deriving)
-        self.view.load_requested.connect(self.open_saved)
         self.view.add_logic_requested.connect(self.add_chosen_logic)
-        self.view.save_board_requested.connect(self.save_board)
-        self.view.load_board_requested.connect(self.load_board)
         self.view.panel_order_committed.connect(self.reorder_panels)
         # Every control on a card is a decision about ONE named panel, wired
         # once here rather than re-strung by whoever built the widget.
@@ -182,13 +215,45 @@ class ConsolePresenter:
         self.view.logic_stop_requested.connect(self.stop_logic)
         self.view.logic_edit_requested.connect(self.edit_logic)
         self.view.logic_remove_requested.connect(self.remove_logic)
+        draft_changed = getattr(self.view, "logic_draft_changed", None)
+        if draft_changed is not None:
+            draft_changed.connect(self._logic_draft_changed)
+        panel_changed = getattr(self.view, "panel_state_changed", None)
+        if panel_changed is not None:
+            panel_changed.connect(self.update_panel_state)
+        refresh_requested = getattr(
+            self.view, "panel_snapshot_refresh_requested", None
+        )
+        if refresh_requested is not None:
+            refresh_requested.connect(self.refresh_panel_snapshot)
+        producer_apply = getattr(self.view, "panel_producer_apply_requested", None)
+        if producer_apply is not None:
+            producer_apply.connect(self.apply_panel_producer)
+        save_figure = getattr(self.view, "panel_save_figure_requested", None)
+        if save_figure is not None:
+            save_figure.connect(self.save_panel_figure)
+        editor_closed = getattr(self.view, "panel_editor_closed", None)
+        if editor_closed is not None:
+            editor_closed.connect(self._panel_editor_closed)
         self.set_paused(False)
         self.set_deriving(True)
 
     # ------------------------------------------------------------------ panels
 
     def add_panel(
-        self, signal: str, initial: object, *, title: str = "", kind: str = ""
+        self,
+        signal: str,
+        initial: object,
+        *,
+        title: str = "",
+        kind: str = "",
+        size: str = "",
+        interval_ms: int | None = None,
+        semantic: Mapping[str, Any] | None = None,
+        display: Mapping[str, Any] | None = None,
+        fit: Mapping[str, Any] | None = None,
+        site_overlay: str = "off",
+        initial_publication: object | None = None,
     ) -> PanelBinding:
         """Show a signal, as ``kind`` when one is asked for.
 
@@ -203,15 +268,85 @@ class ConsolePresenter:
         # closed, and two live bridges published derived signals under one name.
         self._panel_serial += 1
         panel_id = f"panel-{self._panel_serial}"
-        host = self._make_host(initial, signal, str(kind))
+        state = PanelState(
+            signal=str(signal),
+            kind=str(kind),
+            size=str(size),
+            interval_ms=(
+                self._default_interval_ms
+                if interval_ms is None
+                else int(interval_ms)
+            ),
+            title=str(title).strip() or str(signal),
+            semantic=dict(semantic or {}),
+            display=dict(display or {}),
+            fit=dict(fit or {}),
+            site_overlay=str(site_overlay),
+        )
+        front = self.session.signal_plane.freeze()
+        current = front.value(state.signal)
+        publication = initial_publication
+        if (
+            publication is None
+            and current is not None
+            and current.snapshot.ref == initial.ref
+        ):
+            publication = front.publication(state.signal)
+        exact_value = self._publication_value(publication, state.signal)
+
+        # Build the binding first so plot projection callbacks share its one
+        # overlay resolver/revision stream from the initial frame onward.
+        binding = PanelBinding(panel_id, state, None, None)
+        plot_input = initial
+        if exact_value is not None and publication is not None:
+            plot_input = self._project_panel_input(
+                binding, exact_value, publication, state=state
+            )
+
+        # Hosts are created from the OwnedSnapshot contract; an Image overlay
+        # is then applied through its public overlay seam.  This keeps host
+        # factories schema-oriented while the panel still presents one atomic
+        # ImageFrame transaction.
+        host = self._make_host(initial, state.signal, state.kind)
+        try:
+            self._configure_panel_host(host, state)
+            self._apply_plot_input_overlay(host, plot_input)
+            if not state.size:
+                state = replace(state, size=self._panel_host_size(host))
+                binding.state = state
+            binding.parameter_surface = self._describe_panel_parameters(host, state)
+            state = self._state_with_described_semantics(
+                state, binding.parameter_surface
+            )
+            binding.state = state
+        except Exception:
+            host.close()
+            raise
         port = PlotPanelPort(
             panel_id,
-            signal,
+            state.signal,
             host,
-            display_interval_ms=self._default_interval_ms,
-            shown=initial,
+            display_interval_ms=state.interval_ms,
+            shown=plot_input,
+            project_input=lambda value, pub: self._project_panel_input(
+                binding, value, pub
+            ),
+            replace_host=lambda projected, value, pub: self._replace_panel_host(
+                binding, projected, value, pub
+            ),
+            on_presented=lambda pub, projected: self._panel_presented(
+                binding, pub, projected
+            ),
         )
-        binding = PanelBinding(panel_id, signal, host, port, title or signal, str(kind))
+        binding.host = host
+        binding.port = port
+        binding.display_publication = publication
+        binding.frozen_data = self._panel_frozen_data(
+            binding,
+            snapshot=initial,
+            publication=publication,
+            plot_input=plot_input,
+        )
         self.panels[panel_id] = binding
 
         # A box drawn on this panel derives a new signal.  The bridge belongs to
@@ -225,12 +360,150 @@ class ConsolePresenter:
         # and by the drop-order path, and asked what to caption itself by the
         # operator.  One argument for both meant every card in the real window
         # was captioned "Panel" and knew its own id as its title.
-        self.view.add_panel(panel_id, binding.title)
+        self.view.add_panel(panel_id, binding.state.title)
         self.view.show_panel(panel_id, host)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
-        self._offer_panel(panel_id)
+        self._publish_panel_state(binding)
         self._summarise()
         return binding
+
+    @staticmethod
+    def _publication_value(publication: object | None, signal: str) -> object | None:
+        value = getattr(publication, "value", None)
+        return value(str(signal)) if callable(value) else None
+
+    def _project_panel_input(
+        self,
+        binding: PanelBinding,
+        value: object,
+        publication: object,
+        *,
+        state: PanelState | None = None,
+    ) -> object:
+        """Compose the exact plot input for one immutable publication."""
+
+        selected = binding.state if state is None else state
+        snapshot = getattr(value, "snapshot", None)
+        if snapshot is None:
+            raise TypeError("a panel signal value must carry an OwnedSnapshot")
+        if selected.kind != "image":
+            return snapshot
+        previous = binding.image_presentation
+        if (
+            binding.overlay_publication is publication
+            and previous is not None
+            and previous.requested_mode == selected.site_overlay
+            and previous.frame.snapshot is snapshot
+        ):
+            return previous.frame
+        binding.overlay_revision += 1
+        presentation = binding.overlay_resolver.resolve(
+            value,
+            publication,
+            mode=selected.site_overlay,
+            overlay_revision=binding.overlay_revision,
+        )
+        binding.overlay_publication = publication
+        binding.image_presentation = presentation
+        return presentation.frame
+
+    def _apply_plot_input_overlay(self, host: object, plot_input: object) -> None:
+        if not isinstance(plot_input, ImageFrame):
+            return
+        update = getattr(host, "update_image_overlay", None)
+        if not callable(update):
+            raise TypeError("an Image panel host must accept a typed point overlay")
+        self._await_panel_operation(update(plot_input.overlay))
+
+    @staticmethod
+    def _overlay_annotation(
+        binding: PanelBinding,
+        publication: object | None,
+        plot_input: object,
+    ) -> dict[str, Any]:
+        presentation = binding.image_presentation
+        if (
+            presentation is None
+            or binding.overlay_publication is not publication
+            or presentation.frame is not plot_input
+        ):
+            return {}
+        annotation: dict[str, Any] = {
+            "requested_mode": presentation.requested_mode,
+            "resolved_mode": presentation.resolved_mode,
+        }
+        if presentation.calibration_path is not None:
+            annotation["calibration_path"] = presentation.calibration_path
+        if presentation.note is not None:
+            annotation["note"] = presentation.note
+        return annotation
+
+    def _panel_frozen_data(
+        self,
+        binding: PanelBinding,
+        *,
+        snapshot: object,
+        publication: object | None,
+        plot_input: object,
+    ) -> PanelFrozenData:
+        return PanelFrozenData(
+            binding.state.signal,
+            publication,
+            snapshot,
+            plot_input,
+            capture_run_chain(self.session.signal_plane, publication),
+            self._overlay_annotation(binding, publication, plot_input),
+        )
+
+    def _panel_presented(
+        self,
+        binding: PanelBinding,
+        publication: object,
+        _plot_input: object,
+    ) -> None:
+        """Track the exact live event separately from Panel Edit's frozen one."""
+
+        binding.display_publication = publication
+        stale = (
+            binding.frozen_data is not None
+            and binding.frozen_data.publication is not publication
+        )
+        if stale != binding.frozen_stale:
+            binding.frozen_stale = stale
+            self.refresh_panel_editor(binding.panel_id)
+
+    def _replace_panel_host(
+        self,
+        binding: PanelBinding,
+        plot_input: object,
+        value: object,
+        publication: object,
+    ) -> object:
+        """Replace a plot host at a signal-generation boundary."""
+
+        host = self._make_host(value.snapshot, binding.state.signal, binding.state.kind)
+        try:
+            self._configure_panel_host(host, binding.state)
+            self._apply_plot_input_overlay(host, plot_input)
+            binding.parameter_surface = self._describe_panel_parameters(
+                host, binding.state
+            )
+        except Exception:
+            host.close()
+            raise
+
+        old_host = binding.host
+        if binding.selections is not None:
+            binding.selections.close()
+        if binding.bridge is not None:
+            binding.bridge.close()
+        binding.bridge = binding.selections = None
+        binding.host = host
+        binding.display_publication = publication
+        self.view.show_panel(binding.panel_id, host)
+        self._apply_deriving(binding)
+        old_host.close()
+        return host
 
     def reorder_panels(self, order: Sequence[str]) -> bool:
         """Take the order the operator dragged the cards into.
@@ -260,12 +533,12 @@ class ConsolePresenter:
         """
 
         self.view.set_panel_signal_choices(
-            panel_id, self.signal_groups(), current=self.panels[panel_id].signal
+            panel_id, self.signal_groups(), current=self.panels[panel_id].state.signal
         )
         # What this panel's redraw interval actually is.  The card used to open
         # its box on a literal of its own.
         self.view.set_panel_update_ms(
-            panel_id, self.panels[panel_id].port.display_interval_ms
+            panel_id, self.panels[panel_id].state.interval_ms
         )
 
     def signal_groups(self) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
@@ -300,58 +573,15 @@ class ConsolePresenter:
         for panel_id in self.view.panel_ids():
             binding = self.panels.get(panel_id)
             self.view.set_panel_signal_choices(
-                panel_id, groups, current=binding.signal if binding is not None else ""
+                panel_id,
+                groups,
+                current=binding.state.signal if binding is not None else "",
             )
 
     def retarget_panel(self, panel_id: str, signal: str) -> bool:
-        """Point one panel at a different signal, keeping its place on the board.
+        """Point one fixed-kind panel at a different compatible signal."""
 
-        Rebuilt rather than mutated: a plotting host is built around the shape
-        of what it draws, and a frame of pixels is not a place to discover that
-        the new signal is an image where the old one was a curve.
-        """
-
-        binding = self.panels.get(panel_id)
-        if binding is None or not signal or signal == binding.signal:
-            return False
-        value = self.session.signal_plane.freeze().value(str(signal))
-        if value is None:
-            self._report(f"{signal} has not published yet", severity="warning")
-            return False
-        title = binding.title if binding.title != binding.signal else str(signal)
-        # The panel keeps the kind it was added as -- unless this data cannot
-        # be drawn that way, in which case the data decides rather than the
-        # card going blank.
-        kind = binding.kind
-        if kind and self._spec_for(value.snapshot, kind) is None:
-            kind = ""
-            self._report(
-                f"{signal} cannot be drawn as a {binding.kind.replace('_', ' ')};"
-                " showing what it fits",
-                severity="warning",
-            )
-        self._release_panel(binding)
-        host = self._make_host(value.snapshot, str(signal), kind)
-        replaced = PanelBinding(
-            panel_id,
-            str(signal),
-            host,
-            PlotPanelPort(
-                panel_id,
-                str(signal),
-                host,
-                display_interval_ms=binding.port.display_interval_ms,
-                shown=value.snapshot,
-            ),
-            title,
-            kind,
-        )
-        self.panels[panel_id] = replaced
-        self.view.show_panel(panel_id, host)
-        self._apply_deriving(replaced)
-        self._report(f"{panel_id} now shows {signal}", severity="task")
-        self._summarise()
-        return True
+        return self.update_panel_state(panel_id, {"signal": str(signal)})
 
     def resize_panel(self, panel_id: str, size: str) -> bool:
         """One panel's size preset, applied to the plot as well as the card.
@@ -360,21 +590,7 @@ class ConsolePresenter:
         a figure that stayed 2x2 is a big card with a small picture in it.
         """
 
-        binding = self.panels.get(panel_id)
-        if binding is None:
-            return False
-        set_size = getattr(binding.host, "set_size", None)
-        if callable(set_size):
-            try:
-                result = set_size(str(size))
-                if hasattr(result, "result"):
-                    result.result()
-            except Exception as error:
-                self._report(f"{panel_id}: {error}", severity="error")
-                return False
-        self.view.set_panel_size(panel_id, str(size))
-        self.panels[panel_id] = replace(binding, size=str(size))
-        return True
+        return self.update_panel_state(panel_id, {"size": str(size)})
 
     def set_panel_interval(self, panel_id: str, interval_ms: int) -> bool:
         """How often one panel redraws.
@@ -384,39 +600,769 @@ class ConsolePresenter:
         wastes the machine or hides the camera.
         """
 
-        binding = self.panels.get(panel_id)
-        if binding is None:
-            return False
-        binding.port.set_display_interval(int(interval_ms))
-        return True
+        return self.update_panel_state(
+            panel_id, {"interval_ms": int(interval_ms)}
+        )
 
     def rename_panel(self, panel_id: str, title: str) -> bool:
-        binding = self.panels.get(panel_id)
-        if binding is None:
-            return False
-        binding.title = str(title).strip() or binding.signal
-        return True
+        return self.update_panel_state(panel_id, {"title": str(title)})
 
     def edit_panel(self, panel_id: str) -> bool:
-        """Open the plot's own semantic controls for one panel.
-
-        What a plot can be told to show belongs to zlc_plot, which already
-        offers the panel of controls; this only puts it in front of the
-        operator for the panel they clicked.
-        """
+        """Open or focus the panel's non-modal Edit projection."""
 
         binding = self.panels.get(panel_id)
         if binding is None:
             return False
-        if self._edit_panel is None:
+        projection = self.panel_editor_projection(panel_id)
+        opened = getattr(self.view, "open_panel_editor", None)
+        focused = getattr(self.view, "focus_panel_editor", None)
+        if callable(opened):
+            opened(panel_id, projection)
+            if binding.editor_host is None:
+                try:
+                    self._replace_panel_editor_host(binding)
+                except Exception as error:
+                    self._report(
+                        f"cannot open {binding.state.title} plot editor: {error}",
+                        severity="error",
+                    )
+                    return False
+        if callable(focused):
+            focused(panel_id)
+        if not callable(opened) and not callable(focused):
             self._report("this console cannot open panel settings", severity="warning")
             return False
-        try:
-            self._edit_panel(binding.host, binding.title)
-        except Exception as error:
-            self._report(f"{binding.title}: {error}", severity="error")
-            return False
         return True
+
+    def update_panel_state(
+        self,
+        panel_id: str,
+        patch: Mapping[str, Any],
+    ) -> bool:
+        """Replace the one state read by the card, editor and plot binding."""
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return False
+        changes = dict(patch)
+        allowed = {
+            "signal",
+            "kind",
+            "size",
+            "interval_ms",
+            "title",
+            "semantic",
+            "display",
+            "fit",
+            "site_overlay",
+        }
+        unknown = tuple(name for name in changes if name not in allowed)
+        if unknown:
+            self._report(
+                f"{panel_id}: unknown panel state field {unknown[0]!r}",
+                severity="error",
+            )
+            return False
+        current = binding.state
+        if "kind" in changes and str(changes["kind"]) != current.kind:
+            self._report(
+                f"{panel_id}: plot kind is fixed; add another panel to use "
+                f"{str(changes['kind']).replace('_', ' ')}",
+                severity="warning",
+            )
+            return False
+
+        signal = str(changes.get("signal", current.signal)).strip()
+        if not signal:
+            self._report(f"{panel_id}: signal must be selected", severity="warning")
+            return False
+        title = str(changes.get("title", current.title)).strip()
+        if signal != current.signal and "title" not in changes and current.title == current.signal:
+            title = signal
+        title = title or signal
+        merged: dict[str, Any] = {
+            "signal": signal,
+            "size": str(changes.get("size", current.size)),
+            "interval_ms": int(changes.get("interval_ms", current.interval_ms)),
+            "title": title,
+            "site_overlay": str(changes.get("site_overlay", current.site_overlay)),
+        }
+        for name in ("semantic", "display", "fit"):
+            values = dict(getattr(current, name))
+            if name in changes:
+                values.update(dict(changes[name]))
+            merged[name] = values
+        try:
+            candidate = replace(current, **merged)
+        except Exception as error:
+            self._report(f"{panel_id}: {error}", severity="error")
+            return False
+        if candidate == current:
+            return False
+
+        host_patch = dict(changes)
+        if candidate.title != current.title:
+            host_patch["title"] = candidate.title
+
+        if candidate.signal != current.signal:
+            front = self.session.signal_plane.freeze()
+            value = front.value(candidate.signal)
+            if value is None:
+                self._report(
+                    f"{candidate.signal} has not published yet",
+                    severity="warning",
+                )
+                return False
+            if candidate.kind and self._spec_for(value.snapshot, candidate.kind) is None:
+                self._report(
+                    f"{candidate.signal} cannot be drawn as a "
+                    f"{candidate.kind.replace('_', ' ')}",
+                    severity="warning",
+                )
+                return False
+            publication = front.publication(candidate.signal)
+            try:
+                plot_input = self._project_panel_input(
+                    binding,
+                    value,
+                    publication,
+                    state=candidate,
+                )
+                host = self._make_host(
+                    value.snapshot, candidate.signal, candidate.kind
+                )
+                self._configure_panel_host(host, candidate)
+                self._apply_plot_input_overlay(host, plot_input)
+                parameter_surface = self._describe_panel_parameters(host, candidate)
+                if binding.editor_host is not None:
+                    self._apply_panel_host_patch(
+                        binding.editor_host, current, candidate, host_patch
+                    )
+            except Exception as error:
+                if "host" in locals():
+                    host.close()
+                self._report(f"{panel_id}: {error}", severity="error")
+                return False
+            self._release_panel(binding)
+            binding.host = host
+            binding.port = PlotPanelPort(
+                panel_id,
+                candidate.signal,
+                host,
+                display_interval_ms=candidate.interval_ms,
+                shown=plot_input,
+                project_input=lambda current_value, pub: self._project_panel_input(
+                    binding, current_value, pub
+                ),
+                replace_host=lambda projected, current_value, pub: self._replace_panel_host(
+                    binding, projected, current_value, pub
+                ),
+                on_presented=lambda pub, projected: self._panel_presented(
+                    binding, pub, projected
+                ),
+            )
+            binding.display_publication = publication
+            binding.state = candidate
+            binding.parameter_surface = parameter_surface
+            binding.frozen_stale = binding.frozen_data is not None
+            binding.reported_error = None
+            self.view.show_panel(panel_id, host)
+            self._apply_deriving(binding)
+            if "site_overlay" in changes:
+                self._refresh_panel_overlay_state(binding, candidate)
+            self._report(
+                f"{panel_id} now shows {candidate.signal}", severity="task"
+            )
+        else:
+            try:
+                self._apply_panel_host_patch(binding.host, current, candidate, host_patch)
+                if binding.editor_host is not None:
+                    self._apply_panel_host_patch(
+                        binding.editor_host, current, candidate, host_patch
+                    )
+                if "site_overlay" in changes:
+                    self._refresh_panel_overlay_state(binding, candidate)
+                if candidate.interval_ms != current.interval_ms:
+                    binding.port.set_display_interval(candidate.interval_ms)
+            except Exception as error:
+                self._report(f"{panel_id}: {error}", severity="error")
+                return False
+            binding.state = candidate
+            binding.parameter_surface = self._describe_panel_parameters(
+                binding.host, candidate
+            )
+
+        self._publish_panel_state(binding)
+        self._summarise()
+        return True
+
+    @staticmethod
+    def _await_panel_operation(operation: object) -> object:
+        return operation.result() if hasattr(operation, "result") else operation
+
+    def _panel_host_size(self, host: object) -> str:
+        describe = getattr(host, "describe_display", None)
+        if not callable(describe):
+            return ""
+        operation = self._await_panel_operation(describe())
+        description = getattr(operation, "value", operation)
+        return str(getattr(description, "size", ""))
+
+    @staticmethod
+    def _plot_operation_value(operation: object) -> object:
+        """Unwrap one public raster operation without knowing its host type."""
+
+        resolved = ConsolePresenter._await_panel_operation(operation)
+        return getattr(resolved, "value", resolved)
+
+    @staticmethod
+    def _control_document(control: object) -> dict[str, object]:
+        """Project zlc_plot's frontend-neutral control into plain typed data."""
+
+        semantic = bool(getattr(control, "semantic", False))
+        choices: list[tuple[str, object]] = []
+        for choice in tuple(getattr(control, "choices", ())):
+            if semantic:
+                value, label = choice
+            else:
+                value, label = choice, str(choice).replace("_", " ").title()
+            choices.append((str(label), value))
+        kind = getattr(getattr(control, "kind", ""), "value", None)
+        return {
+            "key": str(getattr(control, "name")),
+            "label": str(getattr(control, "label")),
+            "kind": str(kind or getattr(control, "kind", "text")),
+            "value": getattr(control, "value", None),
+            "allow_none": bool(getattr(control, "allow_none", False)),
+            "choices": tuple(choices),
+            "minimum": getattr(control, "minimum", None),
+            "maximum": getattr(control, "maximum", None),
+            "step": getattr(control, "step", None),
+        }
+
+    def _describe_panel_parameters(
+        self,
+        host: object,
+        state: PanelState,
+    ) -> Mapping[str, object]:
+        """Read the complete parameter surface from zlc_plot's public host API."""
+
+        describe_display = getattr(host, "describe_display", None)
+        describe_semantics = getattr(host, "describe_semantics", None)
+        if not callable(describe_display) or not callable(describe_semantics):
+            return {}
+        display_description = self._plot_operation_value(describe_display())
+        semantic_description = self._plot_operation_value(describe_semantics())
+        display_controls = parameter_controls(
+            display_description.parameter_schema,
+            display_description.display_state.values,
+            choice_overrides=display_description.parameter_choices,
+        )
+        semantic_entries = tuple(
+            {
+                "key": str(field.name),
+                "label": str(field.label),
+                "kind": "choice",
+                "value": field.value,
+                "allow_none": not bool(field.required),
+                "choices": tuple(
+                    (str(label), value) for value, label in tuple(field.choices)
+                ),
+                "minimum": None,
+                "maximum": None,
+                "step": None,
+            }
+            for field in tuple(semantic_description.fields)
+            if str(field.name) != "kind"
+        )
+        quick = _QUICK_DISPLAY_FIELDS.get(state.kind, frozenset())
+        display_entries: list[dict[str, object]] = []
+        site_overlay: dict[str, object] | None = None
+        for control in display_controls:
+            entry = self._control_document(control)
+            name = str(entry["key"])
+            if name == "site_overlay":
+                site_overlay = entry
+                site_overlay["value"] = state.site_overlay
+                continue
+            # Panel title has a dedicated shared field, so it must not be
+            # offered again as an independent display override.
+            if name == "title":
+                continue
+            entry["quick"] = name in quick
+            display_entries.append(entry)
+
+        models_member = getattr(host, "fit_models", ())
+        models_operation = models_member() if callable(models_member) else models_member
+        models = tuple(self._plot_operation_value(models_operation) or ())
+        current_model = state.fit.get("model")
+        model_choices = [
+            (str(getattr(model, "display_name")), str(getattr(model, "model_id")))
+            for model in models
+        ]
+        if current_model is not None and not any(
+            current_model == value for _label, value in model_choices
+        ):
+            model_choices.insert(0, (str(current_model), current_model))
+        fit_entries = (
+            {
+                "key": "model",
+                "label": "Fit model",
+                "kind": "choice",
+                "value": current_model,
+                "allow_none": True,
+                "choices": tuple(model_choices),
+                "minimum": None,
+                "maximum": None,
+                "step": None,
+            },
+        ) if models or current_model is not None else ()
+        return {
+            "semantic": semantic_entries,
+            "display": tuple(display_entries),
+            "fit": fit_entries,
+            "site_overlay": site_overlay,
+        }
+
+    @staticmethod
+    def _state_with_described_semantics(
+        state: PanelState,
+        surface: Mapping[str, object],
+    ) -> PanelState:
+        """Keep layout-loaded semantic choices typed in the one PanelState."""
+
+        if not state.semantic:
+            return state
+        described = {
+            str(entry["key"]): entry.get("value")
+            for entry in tuple(surface.get("semantic", ()))
+        }
+        resolved = {
+            name: described.get(name, value)
+            for name, value in state.semantic.items()
+        }
+        return replace(state, semantic=resolved)
+
+    def _configure_panel_host(self, host: object, state: PanelState) -> None:
+        """Apply authored overrides through zlc_plot's public control plane."""
+
+        for name, value in state.semantic.items():
+            apply_semantic = getattr(host, "apply_semantic", None)
+            if callable(apply_semantic):
+                self._await_panel_operation(
+                    apply_semantic(
+                        name,
+                        self._restore_panel_semantic(host, name, value),
+                    )
+                )
+        display = dict(state.display)
+        display["title"] = state.title
+        if state.kind == "image":
+            display["site_overlay"] = state.site_overlay
+        if display:
+            set_parameters = getattr(host, "set_parameters", None)
+            if callable(set_parameters):
+                self._await_panel_operation(set_parameters(display))
+        if state.size:
+            set_size = getattr(host, "set_size", None)
+            if callable(set_size):
+                self._await_panel_operation(set_size(state.size))
+        self._apply_panel_fit(host, {}, state.fit)
+
+    def _restore_panel_semantic(
+        self,
+        host: object,
+        name: str,
+        saved: object,
+    ) -> object:
+        """Resolve a JSON layout value through this host's typed choices."""
+
+        describe = getattr(host, "describe_semantics", None)
+        if not callable(describe):
+            return saved
+        description = self._plot_operation_value(describe())
+        return restore_semantic_choice(description, name, saved)
+
+    @staticmethod
+    def _compatible_fit_ids(host: object) -> frozenset[str]:
+        models_member = getattr(host, "fit_models", ())
+        operation = models_member() if callable(models_member) else models_member
+        models = tuple(ConsolePresenter._plot_operation_value(operation) or ())
+        return frozenset(str(getattr(model, "model_id")) for model in models)
+
+    def _apply_panel_fit(
+        self,
+        host: object,
+        current: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+    ) -> None:
+        """Submit a compatible fit asynchronously through the public host API."""
+
+        before = current.get("model")
+        selected = candidate.get("model")
+        if selected == before:
+            return
+        if selected is None:
+            clear_fit = getattr(host, "clear_fit", None)
+            if callable(clear_fit):
+                clear_fit()
+            return
+        if str(selected) not in self._compatible_fit_ids(host):
+            return
+        fit = getattr(host, "fit", None)
+        if callable(fit):
+            # Fit completion intentionally stays asynchronous.  zlc_plot owns
+            # revision/generation acceptance and paints only a current result.
+            fit(str(selected), live=True)
+
+    def _apply_panel_host_patch(
+        self,
+        host: object,
+        current: PanelState,
+        candidate: PanelState,
+        patch: Mapping[str, Any],
+    ) -> None:
+        if "semantic" in patch:
+            apply_semantic = getattr(host, "apply_semantic", None)
+            if callable(apply_semantic):
+                for name, value in dict(patch["semantic"]).items():
+                    self._await_panel_operation(
+                        apply_semantic(
+                            name,
+                            self._restore_panel_semantic(host, name, value),
+                        )
+                    )
+        display_patch = dict(patch.get("display", {}))
+        if "title" in patch:
+            display_patch["title"] = candidate.title
+        if "site_overlay" in patch and candidate.kind == "image":
+            display_patch["site_overlay"] = candidate.site_overlay
+        if display_patch:
+            set_parameters = getattr(host, "set_parameters", None)
+            if callable(set_parameters):
+                self._await_panel_operation(set_parameters(display_patch))
+        if candidate.size != current.size:
+            set_size = getattr(host, "set_size", None)
+            if callable(set_size):
+                self._await_panel_operation(set_size(candidate.size))
+        if "fit" in patch:
+            self._apply_panel_fit(host, current.fit, candidate.fit)
+
+    def _refresh_panel_overlay_state(
+        self,
+        binding: PanelBinding,
+        state: PanelState,
+    ) -> None:
+        """Recompose live and frozen Image annotation for one state change."""
+
+        if state.kind != "image":
+            return
+        frozen = binding.frozen_data
+        if frozen is not None and frozen.publication is not None:
+            frozen_value = self._publication_value(
+                frozen.publication, frozen.signal
+            )
+            if frozen_value is not None:
+                frozen_input = self._project_panel_input(
+                    binding,
+                    frozen_value,
+                    frozen.publication,
+                    state=state,
+                )
+                binding.frozen_data = replace(
+                    frozen,
+                    plot_input=frozen_input,
+                    overlay=self._overlay_annotation(
+                        binding, frozen.publication, frozen_input
+                    ),
+                )
+                if binding.editor_host is not None:
+                    self._apply_plot_input_overlay(
+                        binding.editor_host, frozen_input
+                    )
+                    self._refresh_panel_editor_selection(binding)
+
+        publication = (
+            binding.port.presented_publication() or binding.display_publication
+        )
+        value = self._publication_value(publication, state.signal)
+        if value is None or publication is None:
+            return
+        plot_input = self._project_panel_input(
+            binding,
+            value,
+            publication,
+            state=state,
+        )
+        self._apply_plot_input_overlay(binding.host, plot_input)
+
+    def _direct_producer_node_id(self, signal: str) -> str | None:
+        for binding in self.logic.values():
+            if any(
+                stable_signal_key(binding.node_id, output.name) == str(signal)
+                for output in binding.descriptor.outputs
+            ):
+                return binding.node_id
+        return None
+
+    def panel_editor_projection(self, panel_id: str) -> dict[str, Any] | None:
+        """Plain, widget-free state consumed by the non-modal Panel Edit tab."""
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return None
+        frozen = binding.frozen_data
+        producer_node_id = self._direct_producer_node_id(binding.state.signal)
+        return {
+            "panel_id": binding.panel_id,
+            "state": binding.state.document(),
+            "parameter_surface": binding.parameter_surface,
+            "signal_options": self.signal_groups(),
+            "kind_read_only": True,
+            "frozen_signal": None if frozen is None else frozen.signal,
+            "frozen_publication": None if frozen is None else frozen.publication,
+            "frozen_snapshot": None if frozen is None else frozen.snapshot,
+            "stale": bool(binding.frozen_stale),
+            "producer_node_id": producer_node_id,
+            "producer_logic": (
+                None
+                if producer_node_id is None
+                else self.logic_editor_projection(producer_node_id)
+            ),
+        }
+
+    def refresh_panel_editor(self, panel_id: str) -> bool:
+        projection = self.panel_editor_projection(panel_id)
+        if projection is None:
+            return False
+        update = getattr(self.view, "update_panel_editor", None)
+        if callable(update):
+            update(str(panel_id), projection)
+        return True
+
+    def _replace_panel_editor_host(self, binding: PanelBinding) -> object:
+        """Mount a new independent host for Edit's exact frozen plot input."""
+
+        frozen = binding.frozen_data
+        if frozen is None:
+            raise RuntimeError(f"{binding.panel_id} has no frozen plot input")
+        plot_input = (
+            frozen.snapshot if frozen.plot_input is None else frozen.plot_input
+        )
+        # Host factories choose a spec from the underlying dataset schema.
+        # ImageFrame's independently revisioned overlay is applied below as
+        # part of this same frozen presentation transaction.
+        initial = getattr(plot_input, "snapshot", plot_input)
+        host = self._make_host(initial, frozen.signal, binding.state.kind)
+        selections = None
+        try:
+            self._configure_panel_host(host, binding.state)
+            self._apply_plot_input_overlay(host, plot_input)
+            selections = subscribe_committed_selection(
+                host,
+                lambda selection, expected=frozen, expected_host=host: (
+                    self._route_panel_editor_selection(
+                        binding.panel_id,
+                        expected_host,
+                        expected,
+                        selection,
+                    )
+                ),
+            )
+        except Exception:
+            if selections is not None:
+                selections.close()
+            host.close()
+            raise
+
+        mount = getattr(self.view, "show_panel_editor", None)
+        if not callable(mount):
+            selections.close()
+            host.close()
+            raise RuntimeError("this console cannot mount a Panel Edit plot surface")
+
+        old_host = binding.editor_host
+        old_selections = binding.editor_selections
+        binding.editor_host = host
+        binding.editor_selections = selections
+        try:
+            mount(binding.panel_id, host)
+        except Exception:
+            binding.editor_host = old_host
+            binding.editor_selections = old_selections
+            selections.close()
+            host.close()
+            raise
+        if old_selections is not None:
+            old_selections.close()
+        if old_host is not None:
+            old_host.close()
+        return host
+
+    def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:
+        """Rebind one unchanged editor host to a replaced frozen record."""
+
+        host = binding.editor_host
+        frozen = binding.frozen_data
+        if host is None or frozen is None:
+            return
+        selections = subscribe_committed_selection(
+            host,
+            lambda selection, expected=frozen, expected_host=host: (
+                self._route_panel_editor_selection(
+                    binding.panel_id,
+                    expected_host,
+                    expected,
+                    selection,
+                )
+            ),
+        )
+        previous = binding.editor_selections
+        binding.editor_selections = selections
+        if previous is not None:
+            previous.close()
+
+    def _release_panel_editor(self, binding: PanelBinding) -> None:
+        """Detach and close Edit's subscription and frozen plotting host."""
+
+        host = binding.editor_host
+        selections = binding.editor_selections
+        binding.editor_host = None
+        binding.editor_selections = None
+        mount = getattr(self.view, "show_panel_editor", None)
+        if callable(mount) and host is not None:
+            mount(binding.panel_id, None)
+        try:
+            if selections is not None:
+                selections.close()
+        finally:
+            if host is not None:
+                host.close()
+
+    def _panel_editor_closed(self, panel_id: str) -> None:
+        binding = self.panels.get(str(panel_id))
+        if binding is not None:
+            self._release_panel_editor(binding)
+
+    def close_panel_editor(self, panel_id: str) -> bool:
+        binding = self.panels.get(str(panel_id))
+        if binding is not None:
+            self._release_panel_editor(binding)
+        close = getattr(self.view, "close_panel_editor", None)
+        if callable(close):
+            close(str(panel_id))
+            return True
+        return False
+
+    def refresh_panel_snapshot(self, panel_id: str) -> bool:
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return False
+        front = self.session.signal_plane.freeze()
+        value = front.value(binding.state.signal)
+        if value is None:
+            self._report(
+                f"{binding.state.signal} has not published yet",
+                severity="warning",
+            )
+            return False
+        publication = front.publication(binding.state.signal)
+        plot_input = self._project_panel_input(binding, value, publication)
+        frozen = self._panel_frozen_data(
+            binding,
+            snapshot=value.snapshot,
+            publication=publication,
+            plot_input=plot_input,
+        )
+        previous = binding.frozen_data
+        previous_stale = binding.frozen_stale
+        binding.frozen_data = frozen
+        binding.frozen_stale = False
+        if binding.editor_host is not None:
+            try:
+                self._replace_panel_editor_host(binding)
+            except Exception as error:
+                binding.frozen_data = previous
+                binding.frozen_stale = previous_stale
+                self._report(
+                    f"cannot refresh {binding.state.title} plot editor: {error}",
+                    severity="error",
+                )
+                return False
+        self.refresh_panel_editor(panel_id)
+        return True
+
+    def save_panel_figure(self, panel_id: str) -> object | None:
+        """Save only the exact frozen data currently shown in Panel Edit."""
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return None
+        frozen = binding.frozen_data
+        if frozen is None:
+            self._report(
+                f"{panel_id} has no frozen data to save",
+                severity="warning",
+            )
+            return None
+        selected = self.view.ask_save_path(
+            "Save panel figure",
+            str(self.session.day_folder()),
+            "Panel figure (*.png *.npz)",
+        )
+        if not selected:
+            return None
+        try:
+            written = _save_panel_figure(
+                selected,
+                state=binding.state,
+                frozen=frozen,
+                make_host=self._make_host,
+                configure_host=self._configure_panel_host,
+            )
+        except Exception as error:
+            self._report(
+                f"cannot save {binding.state.title}: {error}",
+                severity="error",
+            )
+            return None
+        self._report(
+            f"panel saved to {written.image.name} and {written.archive.name}",
+            severity="task",
+        )
+        return written
+
+    def apply_panel_producer(self, panel_id: str) -> bool:
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return False
+        producer_node_id = self._direct_producer_node_id(binding.state.signal)
+        if producer_node_id is None:
+            self._report(
+                f"{panel_id} has no editable direct producer",
+                severity="warning",
+            )
+            return False
+        return self.start_logic(producer_node_id)
+
+    def _publish_panel_state(self, binding: PanelBinding) -> None:
+        """Push one accepted replacement to every view of the same state."""
+
+        set_state = getattr(self.view, "set_panel_state", None)
+        if callable(set_state):
+            set_state(binding.panel_id, binding.state)
+        set_parameter_surface = getattr(
+            self.view, "set_panel_parameter_surface", None
+        )
+        if callable(set_parameter_surface):
+            set_parameter_surface(binding.panel_id, binding.parameter_surface)
+        self._offer_panel(binding.panel_id)
+        if binding.state.size:
+            self.view.set_panel_size(binding.panel_id, binding.state.size)
+        set_title = getattr(self.view, "set_panel_title", None)
+        if callable(set_title):
+            set_title(binding.panel_id, binding.state.title)
+        self.refresh_panel_editor(binding.panel_id)
 
     def _release_panel(self, binding: PanelBinding) -> None:
         """Let go of one panel's derivation and its plotting host."""
@@ -458,7 +1404,12 @@ class ConsolePresenter:
                 continue
             if self._spec_for(value.snapshot, wanted) is None:
                 continue
-            binding = self.add_panel(signal, value.snapshot, kind=wanted)
+            binding = self.add_panel(
+                signal,
+                value.snapshot,
+                kind=wanted,
+                initial_publication=frozen.publication(signal),
+            )
             self._report(f"showing {binding.title}", severity="task")
             return binding
         self._report(
@@ -498,7 +1449,9 @@ class ConsolePresenter:
     def remove_panel(self, panel_id: str) -> None:
         binding = self.panels.pop(panel_id, None)
         if binding is not None:
+            self._release_panel_editor(binding)
             self._release_panel(binding)
+        self.close_panel_editor(panel_id)
         self.view.remove_panel(panel_id)
         self._summarise()
 
@@ -546,7 +1499,7 @@ class ConsolePresenter:
 
     #: What a written-down board says it is.  Versioned because a board outlives
     #: the session that drew it -- it is meant to be reopened tomorrow.
-    LAYOUT_FORMAT = "zlc.console-board/v1"
+    LAYOUT_FORMAT = "zlc.console-board/v2"
 
     def layout(self) -> dict[str, Any]:
         """The board as a portable document: what is on it, in what order.
@@ -564,20 +1517,16 @@ class ConsolePresenter:
         return {
             "format": self.LAYOUT_FORMAT,
             "panels": [
-                {
-                    "signal": binding.signal,
-                    "title": binding.title,
-                    "kind": binding.kind,
-                    "size": binding.size,
-                    "interval_ms": int(binding.port.display_interval_ms),
-                }
+                binding.state.document()
                 for binding in self.panels.values()
             ],
             "logic": [
                 {
+                    "node_id": binding.node_id,
                     "api_name": str(binding.descriptor.api_name),
-                    "values": dict(binding.values),
-                    "source_signal": str(binding.source_signal),
+                    "values": dict(binding.draft.values),
+                    "source_signal": str(binding.draft.source_signal),
+                    "device_keys": dict(binding.draft.device_keys),
                 }
                 for binding in self.logic.values()
             ],
@@ -596,6 +1545,16 @@ class ConsolePresenter:
         if str(document.get("format", "")) != self.LAYOUT_FORMAT:
             self._report("that file is not a saved board", severity="error")
             return False
+        if any(
+            binding.pending is not None
+            or (binding.host is not None and binding.host.running)
+            for binding in self.logic.values()
+        ):
+            self._report(
+                "stop running logic before loading a board",
+                severity="warning",
+            )
+            return False
         for panel_id in tuple(self.panels):
             self.remove_panel(panel_id)
         for node_id in tuple(self.logic):
@@ -603,8 +1562,11 @@ class ConsolePresenter:
         for entry in document.get("logic", ()):
             self.add_logic(
                 str(entry.get("api_name", "")),
+                node_id=str(entry.get("node_id", "")),
                 values=dict(entry.get("values", {})),
                 source_signal=str(entry.get("source_signal", "")),
+                device_keys=dict(entry.get("device_keys", {})),
+                open_editor=False,
             )
         front = self.session.signal_plane.freeze()
         missing: list[str] = []
@@ -619,11 +1581,16 @@ class ConsolePresenter:
                 value.snapshot,
                 title=str(entry.get("title", "")),
                 kind=str(entry.get("kind", "")),
+                size=str(entry.get("size", "")),
+                interval_ms=int(
+                    entry.get("interval_ms", self._default_interval_ms)
+                ),
+                semantic=dict(entry.get("semantic", {})),
+                display=dict(entry.get("display", {})),
+                fit=dict(entry.get("fit", {})),
+                site_overlay=str(entry.get("site_overlay", "off")),
+                initial_publication=front.publication(signal),
             )
-            if entry.get("size"):
-                self.resize_panel(binding.panel_id, str(entry["size"]))
-            if entry.get("interval_ms"):
-                self.set_panel_interval(binding.panel_id, int(entry["interval_ms"]))
         if missing:
             self._report(
                 f"nothing is publishing {', '.join(sorted(set(missing)))}; "
@@ -633,13 +1600,13 @@ class ConsolePresenter:
         self._summarise()
         return True
 
-    def save_board(self) -> str:
-        """Write the board down, wherever the operator says."""
+    def save_layout(self) -> str:
+        """Write only the stopped, reusable pipeline/layout document."""
 
         import json
 
         path = self.view.ask_save_path(
-            "Save board", str(self.session.day_folder()), "Boards (*.json)"
+            "Save TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
         )
         if not path:
             return ""
@@ -647,18 +1614,18 @@ class ConsolePresenter:
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(self.layout(), handle, indent=1, ensure_ascii=False)
         except Exception as error:
-            self._report(f"cannot save the board: {error}", severity="error")
+            self._report(f"cannot save the layout: {error}", severity="error")
             return ""
-        self._report(f"board saved to {path}", severity="task")
+        self._report(f"layout saved to {path}", severity="task")
         return str(path)
 
-    def load_board(self) -> bool:
-        """Put a written-down board back."""
+    def load_layout(self) -> bool:
+        """Restore a layout as stopped drafts without building devices."""
 
         import json
 
         path = self.view.ask_open_path(
-            "Load board", str(self.session.day_folder()), "Boards (*.json)"
+            "Load TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
         )
         if not path:
             return False
@@ -666,108 +1633,30 @@ class ConsolePresenter:
             with open(path, encoding="utf-8") as handle:
                 document = json.load(handle)
         except Exception as error:
-            self._report(f"cannot read that board: {error}", severity="error")
+            self._report(f"cannot read that layout: {error}", severity="error")
             return False
         return self.apply_layout(document)
 
-    def save(self) -> object | None:
-        """Write one archive, and say what happened either way."""
+    def save_screenshot(self) -> str:
+        """Save one ordinary image of the whole current TaskConsole GUI."""
 
-        try:
-            return self._save()
-        except Exception as error:
-            self._report(f"cannot save: {error}", severity="error")
-            return None
-
-    def _save(self) -> object | None:
-        """Save every panel's current data, with the record that explains it.
-
-        The snapshots go in whole rather than as their values: an archive that
-        keeps only the numbers cannot be reopened as the figure it was, and the
-        axes are exactly what nobody can reconstruct afterwards.
-        """
-
-        # ONE front for the whole archive.  Freezing per panel let a processor
-        # deliver between the first panel and the last, so a saved figure could
-        # hold half a board from one shot beside half from the next -- the exact
-        # incoherence the board-coherent tick exists to prevent, reintroduced at
-        # the moment the board is written down.
-        front = self.session.signal_plane.freeze()
-        arrays: dict[str, Any] = {}
-        for binding in self.panels.values():
-            value = front.value(binding.signal)
-            if value is None:
-                continue
-            arrays[binding.panel_id] = value.snapshot
-        if not arrays:
-            self._report("no panel has data to save", severity="warning")
-            return None
-        written = self.session.save_figure(
-            "console",
-            arrays=arrays,
-            nodes=self._producing_nodes(),
-            panel={
-                binding.panel_id: {"signal": binding.signal, "title": binding.title}
-                for binding in self.panels.values()
-            },
+        path = self.view.ask_save_path(
+            "Save TaskConsole screenshot",
+            str(self.session.day_folder()),
+            "PNG images (*.png)",
         )
-        # Where it went, because pressing Save and pressing nothing looked the
-        # same: no message on success, none on failure either.
-        self._report(f"saved {len(arrays)} panel(s) to {Path(str(written)).name}", severity="task")
-        return written
-
-    def _producing_nodes(self) -> tuple[Any, ...]:
-        """Everything that produced what is on screen, for the archive to record.
-
-        The session's own nodes AND the ones started in this window.  Only the
-        session's were recorded, so a figure saved after running a calibration
-        or an occupancy processor here carried provenance for the opening
-        monitor and nothing else -- an archive that describes an apparatus
-        which produced none of its data.
-        """
-
-        nodes = list(getattr(self.session, "nodes", ()))
-        for binding in self.logic.values():
-            if binding.node is not None and not any(
-                item is binding.node for item in nodes
-            ):
-                nodes.append(binding.node)
-        return tuple(nodes)
-
-    def save_images(self) -> tuple[str, ...]:
-        """Write every panel as a picture, and say what happened either way."""
-
+        if not path:
+            return ""
+        target = Path(path)
+        if not target.suffix:
+            target = target.with_suffix(".png")
         try:
-            return self._save_images()
+            written = self.view.save_screenshot(str(target))
         except Exception as error:
-            self._report(f"cannot save images: {error}", severity="error")
-            return ()
-
-    def _save_images(self) -> tuple[str, ...]:
-        """Write each panel exactly as it looks, beside the day's data.
-
-        The plotting host renders its own file, so what lands on disk is the
-        panel rather than a second drawing of the same numbers -- and it lands
-        in the day folder the run's data went to, because a picture separated
-        from its dataset is the thing nobody can interpret later.
-        """
-
-        folder = self.session.day_folder()
-        written: list[str] = []
-        for binding in self.panels.values():
-            # Named for what it SHOWS.  Files went out as panel-1.png, panel-2
-            # ... which in a day folder of thirty pictures is a set nobody can
-            # tell apart -- and the panel has always carried a title.
-            path = unique_path(folder, _file_stem(binding.title or binding.signal), ".png")
-            result = binding.host.save(path)
-            if hasattr(result, "result"):
-                result.result()
-            written.append(str(path))
-        if written:
-            self._report(f"saved {len(written)} image(s) to {folder}", severity="task")
-        else:
-            self._report("no panels to save", severity="warning")
-        return tuple(written)
+            self._report(f"cannot save screenshot: {error}", severity="error")
+            return ""
+        self._report(f"screenshot saved to {written}", severity="task")
+        return str(written)
 
     def _apply_deriving(self, binding: PanelBinding) -> None:
         """Attach or release one panel's derivation.
@@ -787,6 +1676,9 @@ class ConsolePresenter:
                 binding.host,
                 binding.signal,
                 bridge_id=binding.panel_id,
+                on_committed=lambda selection: self._route_panel_selection(
+                    binding.panel_id, selection
+                ),
             )
             return
         if binding.selections is not None:
@@ -794,6 +1686,110 @@ class ConsolePresenter:
         if binding.bridge is not None:
             binding.bridge.close()
         binding.bridge = binding.selections = None
+
+    def _route_panel_selection(self, panel_id: str, selection: object) -> None:
+        """Apply one committed semantic selection to its direct producer draft.
+
+        The descriptor owns whether a selection means anything and how its
+        coordinates map to authored fields.  This method only follows the
+        panel's exact signal publication back to the row and supplies public
+        run-time device readback as data-only context.
+        """
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return
+        publication = binding.port.presented_publication()
+        if publication is None:
+            # A newly-created host already displays ``shown`` before the first
+            # board beat anchors its generation.  ``display_publication`` was
+            # frozen beside that exact immutable snapshot; never substitute a
+            # newer latest value for what the operator selected on screen.
+            publication = binding.display_publication
+        self._route_exact_panel_selection(
+            panel_id,
+            binding.state.signal,
+            publication,
+            selection,
+        )
+
+    def _route_panel_editor_selection(
+        self,
+        panel_id: str,
+        host: object,
+        frozen: PanelFrozenData,
+        selection: object,
+    ) -> None:
+        """Route only a commit from the still-current, non-stale frozen view."""
+
+        binding = self.panels.get(str(panel_id))
+        if (
+            binding is None
+            or binding.editor_host is not host
+            or binding.frozen_data is not frozen
+            or binding.frozen_stale
+        ):
+            return
+        self._route_exact_panel_selection(
+            panel_id,
+            frozen.signal,
+            frozen.publication,
+            selection,
+            expected_snapshot=frozen.snapshot,
+        )
+
+    def _route_exact_panel_selection(
+        self,
+        panel_id: str,
+        signal: str,
+        publication: object | None,
+        selection: object,
+        *,
+        expected_snapshot: object | None = None,
+    ) -> None:
+        """Map one selection using only the publication behind its surface."""
+
+        if publication is None:
+            raise RuntimeError(
+                f"{panel_id} selection has no exact displayed publication"
+            )
+        value = self._publication_value(publication, signal)
+        if value is None:
+            raise RuntimeError(
+                f"{panel_id} selection publication does not contain {signal}"
+            )
+        if (
+            expected_snapshot is not None
+            and getattr(value, "snapshot", None) is not expected_snapshot
+        ):
+            raise RuntimeError(
+                f"{panel_id} selection publication is not its frozen snapshot"
+            )
+        producer_node_id = self._direct_producer_node_id(signal)
+        if producer_node_id is None:
+            return
+        producer = self.logic.get(producer_node_id)
+        if producer is None:
+            return
+
+        record = getattr(publication, "run_record", {})
+        snapshots = (
+            record.get("device_snapshots", {})
+            if isinstance(record, Mapping)
+            else {}
+        )
+        context: dict[str, Any] = {"device_snapshots": snapshots}
+        if isinstance(snapshots, Mapping) and len(snapshots) == 1:
+            actual = next(iter(snapshots.values()))
+            if isinstance(actual, Mapping):
+                context.update(actual)
+        patch = producer.descriptor.selection_patch(
+            selection,
+            draft=dict(producer.draft.values),
+            context=context,
+        )
+        if patch is not None:
+            self.update_logic_draft(producer_node_id, values=patch)
 
     def _report_panel_errors(self) -> None:
         """Say what a gesture could not do, once, where an operator looks.
@@ -803,8 +1799,10 @@ class ConsolePresenter:
         """
 
         for panel_id, binding in self.panels.items():
-            error = getattr(binding.selections, "last_error", None) or getattr(
-                binding.port, "last_error", None
+            error = (
+                getattr(binding.editor_selections, "last_error", None)
+                or getattr(binding.selections, "last_error", None)
+                or getattr(binding.port, "last_error", None)
             )
             if error is None or error is binding.reported_error:
                 continue
@@ -824,41 +1822,12 @@ class ConsolePresenter:
     # ------------------------------------------------------------------- logic
 
     def logic_offer(self) -> tuple[tuple[str, str, str, str], ...]:
-        """Every node type, and what stops each one being added HERE.
+        """Every addable row type without resolving or building a run."""
 
-        (api_name, kind, what it publishes, why it cannot be built yet).
-
-        The catalog lists what exists; only this bench knows what it can supply,
-        so only this can say whether a type is addable.  The chooser used to
-        write "available" beside every row -- a claim made by the one place with
-        no way to check it -- so picking a node that needs a calibration this
-        bench has not produced looked like a broken node instead of an order to
-        do things in.
-
-        The reason comes from actually attempting the build, through the same
-        function ``add_logic`` uses.  A second copy of "what does this need"
-        would be a second answer, and the two would disagree exactly when it
-        mattered.
-        """
-
-        offer = []
-        artifacts = self._logic_artifacts()
-        for api_name, kind, publishes in self.catalog.rows():
-            descriptor = self.catalog.get(api_name)
-            blocked = ""
-            try:
-                build_arguments(
-                    descriptor,
-                    installation=self.session.installation,
-                    signal_plane=self.session.signal_plane,
-                    values={},
-                    artifacts=artifacts,
-                    extras=self._logic_extras(),
-                )
-            except Exception as error:
-                blocked = str(error)
-            offer.append((api_name, kind, publishes, blocked))
-        return tuple(offer)
+        return tuple(
+            (api_name, kind, publishes, "")
+            for api_name, kind, publishes in self.catalog.rows()
+        )
 
     def add_chosen_logic(self) -> str:
         """Ask which node type, then add one.  Asking is the window's job."""
@@ -873,140 +1842,223 @@ class ConsolePresenter:
         self,
         api_name: str,
         *,
+        node_id: str = "",
         values: Mapping[str, Any] | None = None,
         source_signal: str = "",
+        device_keys: Mapping[str, str] | None = None,
+        open_editor: bool = True,
     ) -> str:
-        """Host one node of a type, ready to start.
-
-        Built but not started: a node that ran the moment it was added would
-        fire the sequence before the operator had seen its settings.
-        """
+        """Create one stopped row draft; Start is the first build boundary."""
 
         descriptor = self.catalog.get(api_name)
         if descriptor is None:
             self._report(f"no logic node named {api_name!r}", severity="warning")
             return ""
-        wants = dataset_inputs(descriptor)
-        if wants and not source_signal:
-            # A processor is built around the signal it reads, and the runtime
-            # refuses to host a reactive node that was never told which one.
-            # Nothing asked, so Add Logic -> occupancy failed with "reactive
-            # node requires exactly one input signal key" -- a sentence about
-            # the runtime, in answer to a question nobody put to the operator.
-            if self._choose_signal is None:
-                self._report(
-                    f"{api_name} reads a signal and this console cannot ask which",
-                    severity="warning",
-                )
-                return ""
-            self._report(
-                f"which signal should {api_name} read?", severity="task"
-            )
-            source_signal = str(
-                self._choose_signal(self.offered_signals(include_shown=True)) or ""
-            )
-            if not source_signal:
-                return ""
-
-        node_id = self._free_logic_id(descriptor.api_name)
-        if descriptor.device_requirements and self._release_bootstrap is not None:
-            # A node that needs a device cannot share it with the bootstrap
-            # monitor, which armed the camera before any node existed.  Adding
-            # one used to fail with "already armed", which reads as a broken
-            # node rather than an owner that had not let go.
-            release, self._release_bootstrap = self._release_bootstrap, None
-            try:
-                release()
-            except Exception as error:
-                self._report(f"cannot release the opening monitor: {error}", severity="error")
-                return ""
-        try:
-            arguments = build_arguments(
-                descriptor,
-                installation=self.session.installation,
-                signal_plane=self.session.signal_plane,
-                values=dict(values or {}),
-                source_signal=source_signal,
-                artifacts=self._logic_artifacts(),
-                extras=self._logic_extras(),
-            )
-            node = descriptor.instantiate(**arguments)
-            host = make_host(
-                descriptor,
-                node,
-                signal_plane=self.session.signal_plane,
-                instance_id=node_id,
-                request_owner_wake=self.board.wake.request_owner_wake,
-            )
-        except Exception as error:
-            self._report(f"cannot add {api_name}: {error}", severity="error")
+        selected_id = str(node_id).strip() or self._free_logic_id(descriptor.api_name)
+        if selected_id in self.logic:
+            self._report(f"logic row {selected_id!r} already exists", severity="error")
             return ""
-        kind = str(getattr(descriptor.kind, "value", descriptor.kind))
-        self.view.add_logic_row(node_id, kind)
-        binding = LogicBinding(
-            node_id,
+        drafted_values = {
+            field.name: field.default for field in descriptor.authoring_schema.fields
+        }
+        drafted_values.update(dict(values or {}))
+        options = device_key_options(
             descriptor,
-            host,
-            node=node,
-            values=descriptor.authoring_schema.freeze(dict(values or {})),
-            source_signal=str(source_signal),
+            installation=self.session.installation,
         )
-        self.logic[node_id] = binding
+        selected_devices = {
+            requirement.argument_name: str(
+                dict(device_keys or {}).get(
+                    requirement.argument_name,
+                    options[requirement.argument_name][0]
+                    if options[requirement.argument_name]
+                    else "",
+                )
+            )
+            for requirement in descriptor.device_requirements
+        }
+        kind = str(getattr(descriptor.kind, "value", descriptor.kind))
+        self.view.add_logic_row(selected_id, kind)
+        binding = LogicBinding(
+            selected_id,
+            descriptor,
+            LogicDraft(
+                values=drafted_values,
+                source_signal=str(source_signal),
+                device_keys=selected_devices,
+            ),
+        )
+        self.logic[selected_id] = binding
         self._show_logic(binding)
+        for other_id in self.logic:
+            if other_id != selected_id:
+                self.refresh_logic_editor(other_id)
         self._summarise()
-        self._report(f"added {node_id}", severity="task")
-        return node_id
+        if open_editor:
+            self._open_logic_editor(binding)
+        self._report(f"added {selected_id}", severity="task")
+        return selected_id
+
+    def logic_editor_projection(self, node_id: str) -> dict[str, Any] | None:
+        """Plain state consumed by Logic Edit and future producer projections."""
+
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return None
+        from .authoring_form import display_value, project_schema
+
+        options = device_key_options(
+            binding.descriptor,
+            installation=self.session.installation,
+        )
+        return {
+            "node_id": binding.node_id,
+            "api_name": str(binding.descriptor.api_name),
+            "kind": str(
+                getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
+            ),
+            "form_spec": project_schema(binding.descriptor.authoring_schema),
+            "form_values": {
+                name: display_value(value)
+                for name, value in binding.draft.values.items()
+            },
+            "source_required": bool(dataset_inputs(binding.descriptor)),
+            "source_signal": binding.draft.source_signal,
+            "source_options": self._source_options(binding.descriptor),
+            "device_keys": dict(binding.draft.device_keys),
+            "device_options": options,
+            "running": bool(binding.host is not None and binding.host.running),
+            "pending": binding.pending is not None,
+            "error": binding.draft_error,
+        }
+
+    def _open_logic_editor(self, binding: LogicBinding) -> bool:
+        projection = self.logic_editor_projection(binding.node_id)
+        opened = getattr(self.view, "open_logic_editor", None)
+        focused = getattr(self.view, "focus_logic_editor", None)
+        if callable(opened):
+            opened(binding.node_id, projection)
+        if callable(focused):
+            focused(binding.node_id)
+        return callable(opened) or callable(focused)
+
+    def refresh_logic_editor(self, node_id: str) -> bool:
+        projection = self.logic_editor_projection(node_id)
+        if projection is None:
+            return False
+        update = getattr(self.view, "update_logic_editor", None)
+        if callable(update):
+            update(str(node_id), projection)
+        for panel_id, panel in self.panels.items():
+            if self._direct_producer_node_id(panel.state.signal) == str(node_id):
+                self.refresh_panel_editor(panel_id)
+        return True
+
+    def update_logic_draft(
+        self,
+        node_id: str,
+        *,
+        values: Mapping[str, Any] | None = None,
+        source_signal: object = _UNCHANGED,
+        device_keys: Mapping[str, str] | None = None,
+    ) -> bool:
+        """Patch the row draft without mutating its current run."""
+
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return False
+        if values is not None:
+            binding.draft.values.update(dict(values))
+        if source_signal is not _UNCHANGED:
+            binding.draft.source_signal = str(source_signal)
+        if device_keys is not None:
+            binding.draft.device_keys.update(
+                {str(name): str(key) for name, key in device_keys.items()}
+            )
+        binding.draft_error = ""
+        self._show_logic(binding)
+        self.refresh_logic_editor(binding.node_id)
+        return True
+
+    def _logic_draft_changed(self, node_id: str, patch: Mapping[str, Any]) -> None:
+        source = patch["source_signal"] if "source_signal" in patch else _UNCHANGED
+        self.update_logic_draft(
+            node_id,
+            values=patch.get("values"),
+            source_signal=source,
+            device_keys=patch.get("device_keys"),
+        )
 
     def start_logic(self, node_id: str) -> bool:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
         try:
-            binding.host.start()
+            candidate = self._build_logic_candidate(binding)
         except Exception as error:
+            binding.draft_error = str(error)
             self._report(f"{node_id}: {error}", severity="error")
             self._show_logic(binding)
+            self.refresh_logic_editor(binding.node_id)
             return False
-        self._show_logic(binding)
-        self._summarise()
-        self._report(f"{node_id} started", severity="task")
-        return True
+
+        binding.draft_error = ""
+        self._discard_pending(binding)
+        for other in tuple(self.logic.values()):
+            if (
+                other is not binding
+                and other.pending is not None
+                and self._claims_conflict(candidate.claims, other.pending.claims)
+            ):
+                self._discard_pending(other)
+                self._show_logic(other)
+
+        blockers: set[str] = set()
+        if binding.host is not None and binding.host.running:
+            blockers.add(binding.node_id)
+        for other in self.logic.values():
+            if (
+                other is not binding
+                and other.host is not None
+                and other.host.running
+                and self._claims_conflict(candidate.claims, other.claims)
+            ):
+                blockers.add(other.node_id)
+        if blockers:
+            candidate.waiting_for.update(blockers)
+            binding.pending = candidate
+            for blocker_id in blockers:
+                blocker = self.logic.get(blocker_id)
+                if blocker is not None and blocker.host is not None:
+                    blocker.host.cancel(f"{binding.node_id} needs its exclusive device")
+                    self._show_logic(blocker)
+            self._show_logic(binding)
+            self._summarise()
+            self.refresh_logic_editor(binding.node_id)
+            self._report(
+                f"{node_id} queued while {', '.join(sorted(blockers))} stops",
+                severity="task",
+            )
+            return True
+        return self._activate_candidate(binding, candidate)
 
     def stop_logic(self, node_id: str) -> bool:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
-        binding.host.cancel("the operator pressed Stop")
+        self._discard_pending(binding)
+        if binding.host is not None:
+            binding.host.cancel("the operator pressed Stop")
         self._show_logic(binding)
         self._summarise()
+        self.refresh_logic_editor(binding.node_id)
         return True
 
     def edit_logic(self, node_id: str) -> bool:
-        """Change a node's settings.  Rebuilt, because a node IS its settings.
-
-        A running node is not edited underneath itself: what it is publishing
-        was produced by what it was built with, and swapping that mid-run would
-        make the record of the run a lie.
-        """
-
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
-        if self._edit_logic is None:
-            self._report("this console cannot edit node settings", severity="warning")
-            return False
-        if binding.host.running:
-            self._report(f"stop {node_id} before changing it", severity="warning")
-            return False
-        edited = self._edit_logic(binding.descriptor, dict(binding.values))
-        if edited is None:
-            return False
-        descriptor, source = binding.descriptor, binding.source_signal
-        if not self.remove_logic(node_id):
-            return False
-        return bool(
-            self.add_logic(descriptor.api_name, values=edited, source_signal=source)
-        )
+        return self._open_logic_editor(binding)
 
     def remove_logic(self, node_id: str) -> bool:
         """Take a node away, once it has actually stopped.
@@ -1022,10 +2074,11 @@ class ConsolePresenter:
         if binding is None:
             return False
         binding.removing = True
-        if binding.host.running:
+        self._discard_pending(binding)
+        if binding.host is not None and binding.host.running:
             binding.host.cancel("the operator removed this node")
             binding.host.poll()
-        if binding.host.running:
+        if binding.host is not None and binding.host.running:
             self._show_logic(binding)
             self._report(f"{node_id} is stopping", severity="task")
             return False
@@ -1034,12 +2087,28 @@ class ConsolePresenter:
     def _retire_logic(self, binding: LogicBinding) -> bool:
         """Let go of a node that has stopped."""
 
+        self._discard_pending(binding)
+        if binding.host is not None:
+            if binding.host.running:
+                self._report(
+                    f"{binding.node_id} is still stopping",
+                    severity="warning",
+                )
+                return False
+            try:
+                binding.host.shutdown()
+            except Exception as error:
+                self._report(f"{binding.node_id}: {error}", severity="error")
+                return False
         self.logic.pop(binding.node_id, None)
-        try:
-            binding.host.shutdown()
-        except Exception as error:
-            self._report(f"{binding.node_id}: {error}", severity="error")
+        close_editor = getattr(self.view, "close_logic_editor", None)
+        if callable(close_editor):
+            close_editor(binding.node_id)
         self.view.remove_logic_row(binding.node_id)
+        for other_id in self.logic:
+            self.refresh_logic_editor(other_id)
+        for panel_id in self.panels:
+            self.refresh_panel_editor(panel_id)
         self._summarise()
         self._report(f"removed {binding.node_id}", severity="task")
         return True
@@ -1048,14 +2117,34 @@ class ConsolePresenter:
         """One look at every hosted node, and the rows that changed."""
 
         for binding in tuple(self.logic.values()):
-            try:
-                binding.host.poll()
-            except Exception as error:
-                self._report(f"{binding.node_id}: {error}", severity="error")
-            if binding.removing and not binding.host.running:
-                self._retire_logic(binding)
-                continue
+            if binding.host is not None:
+                try:
+                    binding.host.poll()
+                except Exception as error:
+                    self._report(f"{binding.node_id}: {error}", severity="error")
+            if binding.removing and (
+                binding.host is None or not binding.host.running
+            ):
+                if self._retire_logic(binding):
+                    continue
             self._show_logic(binding)
+
+        for binding in tuple(self.logic.values()):
+            candidate = binding.pending
+            if candidate is None:
+                continue
+            candidate.waiting_for = {
+                blocker_id
+                for blocker_id in candidate.waiting_for
+                if self._candidate_still_blocked(
+                    binding,
+                    candidate,
+                    blocker_id,
+                )
+            }
+            if not candidate.waiting_for:
+                binding.pending = None
+                self._activate_candidate(binding, candidate)
 
     def _show_logic(self, binding: LogicBinding) -> None:
         """What one node is doing, pushed only when it changed.
@@ -1064,16 +2153,38 @@ class ConsolePresenter:
         off, because the text they were halfway through replaced itself.
         """
 
-        observed = binding.host.observation
-        if observed.error:
-            state, status = "error", observed.error
-        elif observed.running:
-            state, status = "running", observed.phase
+        host = binding.host
+        if host is None:
+            state = "error" if binding.draft_error else "idle"
+            status = binding.draft_error or "not started"
         else:
-            state, status = "idle", observed.phase
+            observed = host.observation
+            if observed.error:
+                state, status = "error", observed.error
+            elif observed.running:
+                state, status = "running", observed.phase
+            elif binding.draft_error:
+                state, status = "error", binding.draft_error
+            else:
+                state, status = "idle", observed.phase
+        if binding.pending is not None:
+            waiting = ", ".join(sorted(binding.pending.waiting_for))
+            status = f"waiting for {waiting}" if waiting else "restart queued"
+        names = (
+            host.published_signals()
+            if host is not None
+            else tuple(
+                stable_signal_key(binding.node_id, output.name)
+                for output in binding.descriptor.outputs
+            )
+        )
         published = tuple(
-            (name, binding.descriptor.api_name, "live" if observed.running else "held")
-            for name in binding.host.published_signals()
+            (
+                name,
+                binding.descriptor.api_name,
+                "live" if host is not None and host.running else "held",
+            )
+            for name in names
         )
         shown = (state, status, published)
         if shown == binding.shown:
@@ -1081,6 +2192,157 @@ class ConsolePresenter:
         binding.shown = shown
         self.view.set_logic_state(binding.node_id, state, status)
         self.view.set_logic_publishes(binding.node_id, published)
+        self.refresh_logic_editor(binding.node_id)
+
+    def _source_options(self, descriptor: Any) -> tuple[str, ...]:
+        """Stable keys whose declared Dataset contract matches this input."""
+
+        contracts = {
+            str(spec.contract_id) for spec in dataset_inputs(descriptor)
+        }
+        if not contracts:
+            return ()
+        compatible: set[str] = set()
+        for binding in self.logic.values():
+            for output in binding.descriptor.outputs:
+                if str(output.contract_id) in contracts:
+                    compatible.add(stable_signal_key(binding.node_id, output.name))
+        for node in tuple(getattr(self.session, "nodes", ()) or ()):
+            signal_key = getattr(node, "signal_key", None)
+            if not callable(signal_key):
+                continue
+            for declaration in tuple(
+                getattr(node, "dataset_output_declarations", ()) or ()
+            ):
+                if str(getattr(declaration, "contract_id", "")) in contracts:
+                    compatible.add(str(signal_key(declaration.name)))
+        return tuple(sorted(compatible))
+
+    def _validate_dataset_source(self, binding: LogicBinding) -> None:
+        wants = dataset_inputs(binding.descriptor)
+        if not wants:
+            return
+        source = binding.draft.source_signal.strip()
+        if not source:
+            raise ValueError("source_signal must be selected")
+        if source not in self._source_options(binding.descriptor):
+            contracts = ", ".join(spec.contract_id for spec in wants)
+            raise ValueError(
+                f"{source!r} is not declared as a compatible {contracts} Dataset"
+            )
+        if self.session.signal_plane.latest_publication(source) is None:
+            raise LookupError(f"{source!r} has not published a Dataset yet")
+
+    def _build_logic_candidate(self, binding: LogicBinding) -> LogicCandidate:
+        """Freeze and build one complete candidate without touching old runs."""
+
+        self._validate_dataset_source(binding)
+        arguments = build_arguments(
+            binding.descriptor,
+            installation=self.session.installation,
+            signal_plane=self.session.signal_plane,
+            values=dict(binding.draft.values),
+            source_signal=binding.draft.source_signal,
+            artifacts=self._logic_artifacts(),
+            extras=self._logic_extras(),
+            device_keys=binding.draft.device_keys,
+        )
+        node = binding.descriptor.instantiate(**arguments)
+        host = make_host(
+            binding.descriptor,
+            node,
+            signal_plane=self.session.signal_plane,
+            instance_id=binding.node_id,
+            request_owner_wake=self.board.wake.request_owner_wake,
+        )
+        claims = tuple(
+            DeviceClaim(
+                requirement.argument_name,
+                binding.draft.device_keys.get(requirement.argument_name, ""),
+                arguments[requirement.argument_name],
+                requirement.access,
+            )
+            for requirement in binding.descriptor.device_requirements
+        )
+        return LogicCandidate(node, host, claims)
+
+    @staticmethod
+    def _claims_conflict(
+        left: Sequence[DeviceClaim],
+        right: Sequence[DeviceClaim],
+    ) -> bool:
+        """Only two exclusive claims on the same object identity conflict."""
+
+        return any(
+            str(getattr(first.access, "value", first.access)) == "exclusive"
+            and str(getattr(second.access, "value", second.access)) == "exclusive"
+            and first.device is second.device
+            for first in left
+            for second in right
+        )
+
+    def _discard_pending(self, binding: LogicBinding) -> None:
+        candidate, binding.pending = binding.pending, None
+        if candidate is None:
+            return
+        try:
+            candidate.host.shutdown()
+        except Exception as error:
+            self._report(f"{binding.node_id}: {error}", severity="error")
+
+    def _candidate_still_blocked(
+        self,
+        binding: LogicBinding,
+        candidate: LogicCandidate,
+        blocker_id: str,
+    ) -> bool:
+        blocker = self.logic.get(blocker_id)
+        if blocker is None or blocker.host is None or not blocker.host.running:
+            return False
+        if blocker is binding:
+            return True
+        return self._claims_conflict(candidate.claims, blocker.claims)
+
+    def _activate_candidate(
+        self,
+        binding: LogicBinding,
+        candidate: LogicCandidate,
+    ) -> bool:
+        """Replace a stopped generation and start the already-built candidate."""
+
+        old_host = binding.host
+        if old_host is not None:
+            if old_host.running:
+                candidate.waiting_for.add(binding.node_id)
+                binding.pending = candidate
+                old_host.cancel("this row is restarting")
+                self._show_logic(binding)
+                return True
+            try:
+                old_host.shutdown()
+            except Exception as error:
+                candidate.host.shutdown()
+                binding.draft_error = str(error)
+                self._report(f"{binding.node_id}: {error}", severity="error")
+                self._show_logic(binding)
+                return False
+        binding.node = candidate.node
+        binding.host = candidate.host
+        binding.claims = candidate.claims
+        binding.pending = None
+        try:
+            candidate.host.start()
+        except Exception as error:
+            binding.draft_error = str(error)
+            self._report(f"{binding.node_id}: {error}", severity="error")
+            self._show_logic(binding)
+            self._summarise()
+            return False
+        binding.draft_error = ""
+        self._show_logic(binding)
+        self._summarise()
+        self._report(f"{binding.node_id} started", severity="task")
+        return True
 
     def _spec_for(self, snapshot: object, kind: str) -> Any:
         """Whether this data can be drawn as ``kind``, as the plotting package sees it.
@@ -1103,33 +2365,29 @@ class ConsolePresenter:
         workspace = getattr(self.session, "workspace", None)
         if workspace is not None:
             extras["pulse_search_paths"] = (workspace.pulses,)
+        extras["artifact_directory"] = self.session.day_folder()
         return extras
 
     def _logic_artifacts(self) -> dict[str, Any]:
-        """What the nodes already running here have produced, by contract.
-
-        Some nodes are built ON another node's result: occupancy needs the
-        TrapCalibration a calibration task worked out, and declares that as an
-        artifact input.  ``build_arguments`` has always taken artifacts and
-        nobody ever passed any, so the declaration was answered by nothing and
-        occupancy could not be added at all -- before OR after a calibration
-        ran, which reads as a broken node rather than an order to do things in.
-
-        A node's descriptor names its outputs and their contracts, and the node
-        object carries the finished one under that name.  A task that has not
-        run yet raises when asked, which is it saying "not yet", so it is
-        simply not on offer.
-        """
+        """Successful task results projected through declared artifact outputs."""
 
         produced: dict[str, Any] = {}
         for binding in self.logic.values():
-            if binding.node is None:
+            host = binding.host
+            if (
+                host is None
+                or host.running
+                or not host.terminal
+                or host.observation.error is not None
+                or not host.final_result_resolved
+            ):
                 continue
-            for output in getattr(binding.descriptor, "outputs", ()):
-                try:
-                    value = getattr(binding.node, output.name)
-                except Exception:
-                    continue
+            result = host.final_result
+            for output in getattr(binding.descriptor, "artifact_outputs", ()):
+                if isinstance(result, Mapping):
+                    value = result.get(output.name)
+                else:
+                    value = getattr(result, output.name, None)
                 if value is not None:
                     produced.setdefault(output.contract_id, value)
         return produced
@@ -1144,7 +2402,11 @@ class ConsolePresenter:
 
     def _summarise(self) -> None:
         state = "paused" if self._paused else "running"
-        running = sum(1 for item in self.logic.values() if item.host.running)
+        running = sum(
+            1
+            for item in self.logic.values()
+            if item.host is not None and item.host.running
+        )
         nodes = f", {running}/{len(self.logic)} node(s) running" if self.logic else ""
         self.view.set_summary(f"{len(self.panels)} panel(s), {state}{nodes}")
 
@@ -1157,14 +2419,29 @@ class ConsolePresenter:
         deadline = time.monotonic() + float(node_stop_seconds)
         for binding in tuple(self.logic.values()):
             binding.removing = True
-            if binding.host.running:
+            self._discard_pending(binding)
+            if binding.host is not None and binding.host.running:
                 binding.host.cancel("the console is closing")
         while self.logic and time.monotonic() < deadline:
             self.poll_logic()
-            if any(item.host.running for item in self.logic.values()):
+            if any(
+                item.host is not None and item.host.running
+                for item in self.logic.values()
+            ):
                 time.sleep(0.01)
+        running = tuple(
+            binding.node_id
+            for binding in self.logic.values()
+            if binding.host is not None and binding.host.running
+        )
+        if running:
+            names = ", ".join(running)
+            raise TimeoutError(f"logic nodes did not stop before close: {names}")
         for binding in tuple(self.logic.values()):
-            self._retire_logic(binding)
+            if not self._retire_logic(binding):
+                raise RuntimeError(
+                    f"logic node {binding.node_id!r} could not release its host"
+                )
         for panel_id in list(self.panels):
             self.remove_panel(panel_id)
         self.board.close()

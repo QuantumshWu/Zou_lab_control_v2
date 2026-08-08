@@ -20,7 +20,10 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
 
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_workbench.archive import read_archive
 from zlc_workbench.loaded_figure import LOADED_CONTRACT, ArchiveSession, LoadedFigure
 from zlc_workbench.session import ExperimentSession
@@ -38,10 +41,11 @@ def saved(tmp_path):
         pulse = session.load_pulse("calibration")
         node = CameraMeasurementNode(
             camera=session.camera,
+            request=CameraMeasurementRequest(
+                "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+            ),
             signal_plane=session.signal_plane,
             producer="cm",
-            repeat=1,
-            frames_per_cycle=int(pulse["camera_windows"]),
         )
         capture = node.prepare()
         session.fire(shots=1)

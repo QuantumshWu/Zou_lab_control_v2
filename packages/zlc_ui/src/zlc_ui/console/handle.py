@@ -16,12 +16,15 @@ import the package that draws.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from PyQt5 import QtCore
 
 from .logic_row_view import LogicRowView
+from .logic_editor_view import LogicEditorView
 from .panel_card_view import PanelCardView
+from .panel_editor_view import PanelEditorView
 from .signal_chooser import choose_signal
 from .task_console_view import TaskConsoleView
 
@@ -38,11 +41,9 @@ class TaskConsoleHandle(QtCore.QObject):
     add_logic_requested = QtCore.pyqtSignal()
     pause_toggled = QtCore.pyqtSignal(bool)
     selectors_toggled = QtCore.pyqtSignal(bool)
-    save_requested = QtCore.pyqtSignal()
-    load_requested = QtCore.pyqtSignal()
-    save_image_requested = QtCore.pyqtSignal()
-    save_board_requested = QtCore.pyqtSignal()
-    load_board_requested = QtCore.pyqtSignal()
+    save_layout_requested = QtCore.pyqtSignal()
+    load_layout_requested = QtCore.pyqtSignal()
+    save_screenshot_requested = QtCore.pyqtSignal()
     panel_order_committed = QtCore.pyqtSignal(tuple)
 
     # -- one named panel -------------------------------------------------
@@ -52,12 +53,18 @@ class TaskConsoleHandle(QtCore.QObject):
     panel_title_committed = QtCore.pyqtSignal(str, str)
     panel_remove_requested = QtCore.pyqtSignal(str)
     panel_edit_requested = QtCore.pyqtSignal(str)
+    panel_state_changed = QtCore.pyqtSignal(str, object)
+    panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
+    panel_producer_apply_requested = QtCore.pyqtSignal(str)
+    panel_save_figure_requested = QtCore.pyqtSignal(str)
+    panel_editor_closed = QtCore.pyqtSignal(str)
 
     # -- one named logic node --------------------------------------------
     logic_start_requested = QtCore.pyqtSignal(str)
     logic_stop_requested = QtCore.pyqtSignal(str)
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
+    logic_draft_changed = QtCore.pyqtSignal(str, object)
 
     def __init__(self, window: Any, view: TaskConsoleView) -> None:
         super().__init__()
@@ -65,17 +72,20 @@ class TaskConsoleHandle(QtCore.QObject):
         self._view = view
         self._cards: dict[str, PanelCardView] = {}
         self._rows: dict[str, LogicRowView] = {}
+        self._logic_editors: dict[str, LogicEditorView] = {}
+        self._panel_editors: dict[str, PanelEditorView] = {}
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
-            "selectors_toggled", "save_requested", "load_requested",
-            "save_image_requested", "save_board_requested",
-            "load_board_requested", "panel_order_committed",
+            "selectors_toggled", "save_layout_requested",
+            "load_layout_requested", "save_screenshot_requested",
+            "panel_order_committed",
         ):
             getattr(view, name).connect(getattr(self, name))
         if hasattr(view, "close_requested"):
             view.close_requested.connect(self.close_requested)
         if window is not None and hasattr(window, "closed"):
             window.closed.connect(self.closed)
+        view.editor_close_requested.connect(self._editor_close_requested)
 
     # ------------------------------------------------------------ the window
 
@@ -160,6 +170,15 @@ class TaskConsoleHandle(QtCore.QObject):
         )
         return str(path)
 
+    def save_screenshot(self, path: str) -> str:
+        """Write one screenshot of the complete TaskConsole window."""
+
+        target = self._window if self._window is not None else self._view
+        pixmap = target.grab()
+        if pixmap.isNull() or not pixmap.save(str(path), "PNG"):
+            raise OSError(f"could not save TaskConsole screenshot to {path!r}")
+        return str(path)
+
     def show_warning(self, title: str, text: str) -> None:
         """Say what was refused, in the one modal this project owns."""
 
@@ -211,11 +230,16 @@ class TaskConsoleHandle(QtCore.QObject):
             card.edit_requested.connect(
                 lambda _=None, pid=key: self.panel_edit_requested.emit(pid)
             )
+            card.state_changed.connect(
+                lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
+            )
             self._cards[key] = card
         self._view.set_cards(tuple(self._cards.values()))
 
     def remove_panel(self, panel_id: str) -> None:
-        card = self._cards.pop(str(panel_id), None)
+        key = str(panel_id)
+        self.close_panel_editor(key)
+        card = self._cards.pop(key, None)
         if card is not None:
             card.setParent(None)
         self._view.set_cards(tuple(self._cards.values()))
@@ -253,11 +277,82 @@ class TaskConsoleHandle(QtCore.QObject):
     def set_panel_size(self, panel_id: str, size: str) -> None:
         self._cards[str(panel_id)].set_panel_size(size)
 
+    def set_panel_title(self, panel_id: str, title: str) -> None:
+        self._cards[str(panel_id)].set_title(title)
+
+    def set_panel_state(self, panel_id: str, state: object) -> None:
+        """Project one accepted Workbench state into the card Setting view."""
+
+        self._cards[str(panel_id)].set_panel_state(state)
+
+    def set_panel_parameter_surface(self, panel_id: str, surface: object) -> None:
+        """Project plot-owned field metadata into the card's quick Setting."""
+
+        self._cards[str(panel_id)].set_parameter_surface(surface)
+
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
 
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         self._cards[str(panel_id)].set_selectors_enabled(enabled)
+
+    # --------------------------------------------------------- panel editors
+
+    def open_panel_editor(self, panel_id: str, projection: Any) -> None:
+        key = str(panel_id)
+        editor = self._panel_editors.get(key)
+        if editor is None:
+            editor = PanelEditorView(key, projection)
+            editor.state_changed.connect(
+                lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
+            )
+            editor.snapshot_refresh_requested.connect(
+                lambda _=None, pid=key: self.panel_snapshot_refresh_requested.emit(pid)
+            )
+            editor.producer_draft_changed.connect(
+                lambda node_id, patch: self.logic_draft_changed.emit(str(node_id), patch)
+            )
+            editor.producer_apply_requested.connect(
+                lambda _=None, pid=key: self.panel_producer_apply_requested.emit(pid)
+            )
+            editor.save_figure_requested.connect(
+                lambda _=None, pid=key: self.panel_save_figure_requested.emit(pid)
+            )
+            self._panel_editors[key] = editor
+            state = dict(projection).get("state") or {}
+            title = (
+                str(dict(state).get("title") or key)
+                if isinstance(state, Mapping)
+                else key
+            )
+            self._view.add_editor_tab(editor, f"Edit Panel · {title}")
+        else:
+            editor.update_projection(projection)
+            self._view.focus_editor_tab(editor)
+
+    def update_panel_editor(self, panel_id: str, projection: Any) -> bool:
+        editor = self._panel_editors.get(str(panel_id))
+        if editor is None:
+            return False
+        editor.update_projection(projection)
+        return True
+
+    def show_panel_editor(self, panel_id: str, host: Any | None) -> None:
+        """Mount a plotting host without exposing its QWidget to Workbench."""
+
+        editor = self._panel_editors[str(panel_id)]
+        editor.set_surface(None if host is None else host.qt_widget())
+
+    def focus_panel_editor(self, panel_id: str) -> bool:
+        editor = self._panel_editors.get(str(panel_id))
+        return False if editor is None else self._view.focus_editor_tab(editor)
+
+    def close_panel_editor(self, panel_id: str) -> bool:
+        editor = self._panel_editors.pop(str(panel_id), None)
+        if editor is None:
+            return False
+        editor.set_surface(None)
+        return self._view.remove_editor_tab(editor)
 
     # ---------------------------------------------------------- logic rows
 
@@ -282,7 +377,9 @@ class TaskConsoleHandle(QtCore.QObject):
         self._view.set_logic_rows(tuple(self._rows.values()))
 
     def remove_logic_row(self, node_id: str) -> None:
-        row = self._rows.pop(str(node_id), None)
+        key = str(node_id)
+        self.close_logic_editor(key)
+        row = self._rows.pop(key, None)
         if row is not None:
             row.setParent(None)
         self._view.set_logic_rows(tuple(self._rows.values()))
@@ -295,6 +392,58 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def set_logic_publishes(self, node_id: str, rows: tuple[tuple[str, str, str], ...]) -> None:
         self._rows[str(node_id)].set_publishes(rows)
+
+    # --------------------------------------------------------- logic editors
+
+    def open_logic_editor(self, node_id: str, projection: Any) -> None:
+        key = str(node_id)
+        editor = self._logic_editors.get(key)
+        if editor is None:
+            editor = LogicEditorView(key, projection)
+            editor.draft_changed.connect(
+                lambda patch, nid=key: self.logic_draft_changed.emit(nid, patch)
+            )
+            editor.start_requested.connect(
+                lambda _=None, nid=key: self.logic_start_requested.emit(nid)
+            )
+            editor.stop_requested.connect(
+                lambda _=None, nid=key: self.logic_stop_requested.emit(nid)
+            )
+            editor.remove_requested.connect(
+                lambda _=None, nid=key: self.logic_remove_requested.emit(nid)
+            )
+            self._logic_editors[key] = editor
+            title = str(dict(projection).get("api_name") or key)
+            self._view.add_editor_tab(editor, f"Edit · {title}")
+        else:
+            editor.update_projection(projection)
+            self._view.focus_editor_tab(editor)
+
+    def update_logic_editor(self, node_id: str, projection: Any) -> bool:
+        editor = self._logic_editors.get(str(node_id))
+        if editor is None:
+            return False
+        editor.update_projection(projection)
+        return True
+
+    def focus_logic_editor(self, node_id: str) -> bool:
+        editor = self._logic_editors.get(str(node_id))
+        return False if editor is None else self._view.focus_editor_tab(editor)
+
+    def close_logic_editor(self, node_id: str) -> bool:
+        editor = self._logic_editors.pop(str(node_id), None)
+        return False if editor is None else self._view.remove_editor_tab(editor)
+
+    def _editor_close_requested(self, editor: object) -> None:
+        for node_id, candidate in tuple(self._logic_editors.items()):
+            if candidate is editor:
+                self.close_logic_editor(node_id)
+                return
+        for panel_id, candidate in tuple(self._panel_editors.items()):
+            if candidate is editor:
+                self.panel_editor_closed.emit(panel_id)
+                self.close_panel_editor(panel_id)
+                return
 
 
 __all__ = ["TaskConsoleHandle"]

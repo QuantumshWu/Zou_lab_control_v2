@@ -43,7 +43,13 @@ from zlc_data import snapshot_from_manifest, snapshot_manifest
 from zlc_durable import atomic_write_bytes, day_folder, unique_path
 
 
-__all__ = ["FIGURE_SCHEMA", "read_archive", "read_dataset", "write_figure"]
+__all__ = [
+    "FIGURE_SCHEMA",
+    "read_archive",
+    "read_dataset",
+    "write_figure",
+    "write_figure_file",
+]
 
 
 #: Bumped when the layout of ``info`` changes in a way a reader must notice.
@@ -71,15 +77,13 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def write_figure(
-    save_root: str | os.PathLike[str],
+def _figure_bytes(
     name: str,
     *,
     arrays: Mapping[str, np.ndarray],
     sections: Mapping[str, Any],
-    when: _date | None = None,
-) -> Path:
-    """Write one figure archive and return where it landed.
+) -> bytes:
+    """Encode one portable figure without deciding where it lives.
 
     ``arrays`` are stored as arrays; ``sections`` become the JSON ``info``.  Each
     section is named for the subject it describes -- ``provenance``, ``pulse``,
@@ -93,8 +97,9 @@ def write_figure(
     be plotted the way it was plotted.  zlc_data produces that record, because
     what a dataset's identity IS belongs to zlc_data.
 
-    The file is written atomically, so an interrupted save leaves the previous
-    archive intact rather than a truncated one.
+    ``write_figure`` and Panel Edit's explicit Save As path share this exact
+    encoding.  Keeping one encoder prevents the notebook and GUI archives from
+    becoming two formats that merely use the same suffix.
     """
 
     if not arrays:
@@ -106,12 +111,18 @@ def write_figure(
     datasets: dict[str, Any] = {}
     for key, value in arrays.items():
         if isinstance(value, OwnedSnapshot):
-            datasets[str(key)] = snapshot_manifest(
+            manifest = snapshot_manifest(
                 value,
                 stored,
                 values_key=str(key),
                 validity_key=f"{key}.validity",
             )
+            # The full schema is already present beside the revision ref, so
+            # persisting its derived digest again adds no scientific data.
+            ref = dict(manifest["ref"])
+            ref.pop("schema_fingerprint", None)
+            manifest["ref"] = ref
+            datasets[str(key)] = manifest
         else:
             stored[str(key)] = np.asarray(value)
     sections = dict(sections)
@@ -119,9 +130,6 @@ def write_figure(
         if "dataset" in sections:
             raise ValueError("the dataset section is written from the snapshots themselves")
         sections["dataset"] = datasets
-
-    folder = day_folder(save_root, _date.today() if when is None else when)
-    path = unique_path(folder, name, ".npz")
 
     info = json.dumps(
         {"schema": FIGURE_SCHEMA, "name": str(name), "sections": _jsonable(sections)},
@@ -134,7 +142,53 @@ def write_figure(
 
     buffer = BytesIO()
     np.savez_compressed(buffer, **{_INFO_KEY: np.asarray(info), **stored})
-    atomic_write_bytes(path, buffer.getvalue())
+    return buffer.getvalue()
+
+
+def write_figure_file(
+    path: str | os.PathLike[str],
+    *,
+    arrays: Mapping[str, np.ndarray],
+    sections: Mapping[str, Any],
+    name: str | None = None,
+) -> Path:
+    """Write one archive to an explicit Panel Edit Save As path."""
+
+    target = Path(path).expanduser().resolve()
+    if target.suffix.lower() != ".npz":
+        target = target.with_suffix(".npz")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(
+        target,
+        _figure_bytes(
+            target.stem if name is None else str(name),
+            arrays=arrays,
+            sections=sections,
+        ),
+    )
+    return target
+
+
+def write_figure(
+    save_root: str | os.PathLike[str],
+    name: str,
+    *,
+    arrays: Mapping[str, np.ndarray],
+    sections: Mapping[str, Any],
+    when: _date | None = None,
+) -> Path:
+    """Write one uniquely named figure archive and return where it landed.
+
+    The file is written atomically, so an interrupted save leaves the previous
+    archive intact rather than a truncated one.
+    """
+
+    folder = day_folder(save_root, _date.today() if when is None else when)
+    path = unique_path(folder, name, ".npz")
+    atomic_write_bytes(
+        path,
+        _figure_bytes(name, arrays=arrays, sections=sections),
+    )
     return path
 
 

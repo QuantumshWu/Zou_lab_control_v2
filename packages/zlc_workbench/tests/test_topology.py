@@ -25,7 +25,10 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.topology import SignalRow, project_signals
 
@@ -48,10 +51,11 @@ def _measure(session, producer: str = "cm"):
     pulse = session.load_pulse("calibration")
     node = CameraMeasurementNode(
         camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+        ),
         signal_plane=session.signal_plane,
         producer=producer,
-        repeat=1,
-        frames_per_cycle=int(pulse["camera_windows"]),
     )
     capture = node.prepare()
     session.fire(shots=1)
@@ -78,10 +82,11 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
     pulse = session.load_pulse("calibration")
     watching = CameraMeasurementNode(
         camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera", 0.02, None, 0, int(pulse["camera_windows"]), 2.0
+        ),
         signal_plane=session.signal_plane,
         producer="watching",
-        repeat=1,
-        frames_per_cycle=int(pulse["camera_windows"]),
     )
     monitor = watching.monitor(buffer_frames=2)
     try:

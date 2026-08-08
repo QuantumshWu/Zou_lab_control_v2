@@ -21,10 +21,16 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_workbench.archive import read_archive, read_dataset
+from zlc_workbench.panel_save import save_panel_figure
+from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import FigureViewerPresenter, describe_archive
+from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 
 ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
 
@@ -103,10 +109,11 @@ def saved(tmp_path):
         pulse = session.load_pulse("calibration")
         node = CameraMeasurementNode(
             camera=session.camera,
+            request=CameraMeasurementRequest(
+                "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+            ),
             signal_plane=session.signal_plane,
             producer="cm",
-            repeat=1,
-            frames_per_cycle=int(pulse["camera_windows"]),
         )
         capture = node.prepare()
         session.fire(shots=1)
@@ -129,7 +136,7 @@ def presenter():
     plot = pytest.importorskip("zlc_plot")
     view = _ViewerView()
 
-    def make_host(snapshot, name):
+    def make_host(snapshot, name, _kind):
         return plot.RasterPlotHost.from_plot(
             snapshot,
             plot.ImagePlot(
@@ -279,10 +286,11 @@ def saved_pair(tmp_path):
         for name in ("panel-1", "panel-2"):
             node = CameraMeasurementNode(
                 camera=session.camera,
+                request=CameraMeasurementRequest(
+                    "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+                ),
                 signal_plane=session.signal_plane,
                 producer=name.replace("-", ""),
-                repeat=1,
-                frames_per_cycle=int(pulse["camera_windows"]),
             )
             capture = node.prepare()
             session.fire(shots=1)
@@ -414,3 +422,133 @@ def test_the_figure_is_a_panel_with_its_own_decisions(presenter, saved) -> None:
     presenter._edit_figure = lambda host, title: seen.append((host, title))
     presenter.view.figure_edit_requested.emit()
     assert seen and seen[0][0] is presenter._host
+
+
+def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
+    saved,
+    tmp_path,
+) -> None:
+    """The archive is the redraw input; calibration is not reopened."""
+
+    _old_path, snapshot = saved
+    missing_calibration = tmp_path / "calibration-was-moved.json"
+    state = PanelState(
+        signal="@logic/occupancy/frame_judged",
+        kind="image",
+        size="4x4",
+        interval_ms=800,
+        title="site occupancy",
+        semantic={"reduction": "mean"},
+        display={"show_colorbar": False},
+        fit={"model": "anisotropic_gaussian_center", "live": False},
+        site_overlay="occupancy",
+    )
+    overlay = ImagePointOverlay(
+        7,
+        np.asarray(((2.5, 3.5), (7.5, 9.5))),
+        ("site-0", "site-1"),
+        ("0", "1"),
+        (PointStatus.EMPTY, PointStatus.OCCUPIED),
+    )
+    frozen = PanelFrozenData(
+        signal=state.signal,
+        publication=None,
+        snapshot=snapshot,
+        plot_input=ImageFrame(snapshot, overlay),
+        overlay={
+            "resolved_mode": "occupancy",
+            "calibration_path": str(missing_calibration),
+        },
+    )
+
+    class _SavingHost:
+        def update_image_overlay(self, _overlay) -> None:
+            return None
+
+        def save(self, path) -> None:
+            Path(path).write_bytes(b"png")
+
+        def close(self) -> None:
+            return None
+
+    written = save_panel_figure(
+        tmp_path / "panel",
+        state=state,
+        frozen=frozen,
+        make_host=lambda _input, _signal, _kind: _SavingHost(),
+        configure_host=lambda _host, _state: None,
+    )
+    assert not missing_calibration.exists()
+    with np.load(written.archive, allow_pickle=False) as payload:
+        assert "overlay.coordinates" in payload.files
+
+    class _RestoredHost:
+        def __init__(self) -> None:
+            self.semantic = []
+            self.display = {}
+            self.size = ""
+            self.fitted = None
+            self.closed = False
+
+        def apply_semantic(self, name, value) -> None:
+            self.semantic.append((name, value))
+
+        def set_parameters(self, values) -> None:
+            self.display = dict(values)
+
+        def set_size(self, size) -> None:
+            self.size = str(size)
+
+        def fit(self, model, **options) -> None:
+            self.fitted = (str(model), dict(options))
+
+        def close(self) -> None:
+            self.closed = True
+
+    seen = {}
+
+    def make_host(plot_input, label, kind):
+        seen.update(plot_input=plot_input, label=label, kind=kind)
+        host = _RestoredHost()
+        seen["host"] = host
+        return host
+
+    view = _ViewerView()
+    presenter = FigureViewerPresenter(view, make_host=make_host)
+    try:
+        assert presenter.open(str(written.archive)) is not None, view.status
+        assert seen["kind"] == "image", "the saved kind must not be inferred anew"
+        assert seen["label"] == f"site occupancy — {state.signal}"
+        frame = seen["plot_input"]
+        assert isinstance(frame, ImageFrame)
+        np.testing.assert_array_equal(frame.overlay.coordinates, overlay.coordinates)
+        assert frame.overlay.point_ids == overlay.point_ids
+        assert frame.overlay.labels == overlay.labels
+        assert frame.overlay.statuses == overlay.statuses
+
+        host = seen["host"]
+        assert host.semantic == [("reduction", "mean")]
+        assert host.display == {
+            "show_colorbar": False,
+            "site_overlay": "occupancy",
+        }
+        assert host.size == "4x4"
+        assert host.fitted == (
+            "anisotropic_gaussian_center",
+            {"live": False},
+        )
+        assert presenter.panel_state == state
+        assert not missing_calibration.exists()
+    finally:
+        presenter.close()
+
+    from zlc_workbench.apps.figure_viewer import build
+
+    real_view = _ViewerView()
+    real_presenter = build(real_view)
+    try:
+        assert real_presenter.open(str(written.archive)) is not None
+        assert real_presenter._host is not None, real_view.status
+        assert real_presenter.panel_state == state
+    finally:
+        real_presenter.close()

@@ -12,10 +12,9 @@ This binds one to the other and shows the result.
 
 Binding is by declaration, not by name-guessing: a descriptor states which
 devices it needs, which signal it reads, and which settings it takes, and each
-build is handed exactly the arguments it declares out of those facts.  A node
-that asks for something the bench does not have is refused with the reason,
-because the alternative -- a row that says "idle" forever -- is the failure this
-console has been audited for twice.
+Start build is handed exactly the arguments it declares out of those facts.
+Before Start, the row is only an editable draft and may deliberately contain
+an unresolved device, source, or artifact path.
 """
 
 from __future__ import annotations
@@ -25,15 +24,53 @@ from dataclasses import dataclass, field
 import inspect
 from typing import Any
 
-from zlc_runtime import NodeHost
+from zlc_runtime import DatasetOutputDeclaration, NodeHost
 
 
-__all__ = ["LogicBinding", "LogicCatalog", "build_arguments"]
+__all__ = [
+    "DeviceClaim",
+    "LogicBinding",
+    "LogicCandidate",
+    "LogicCatalog",
+    "LogicDraft",
+    "build_arguments",
+    "device_key_options",
+    "stable_signal_key",
+]
+
+
+@dataclass
+class LogicDraft:
+    """The one editable authoring state owned by a TaskConsole row."""
+
+    values: dict[str, Any] = field(default_factory=dict)
+    source_signal: str = ""
+    device_keys: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DeviceClaim:
+    """One exact resolved device object claimed by a candidate run."""
+
+    argument_name: str
+    device_key: str
+    device: object = field(compare=False)
+    access: object
+
+
+@dataclass
+class LogicCandidate:
+    """A fully built run waiting for any old exclusive owners to stop."""
+
+    node: Any
+    host: NodeHost
+    claims: tuple[DeviceClaim, ...] = ()
+    waiting_for: set[str] = field(default_factory=set)
 
 
 @dataclass
 class LogicBinding:
-    """One hosted node: what it is and what is running it.
+    """One stable TaskConsole row and its current or pending run.
 
     It used to carry its ROW as well -- a widget, held by the layer that is
     not allowed to hold one.  The row lives in the window now, and this side
@@ -42,22 +79,23 @@ class LogicBinding:
 
     node_id: str
     descriptor: Any
-    host: NodeHost
-    #: The node object itself.  The console built it, so it keeps it: a task
-    #: that has run carries the artifact a later node is built ON, and reaching
-    #: into the host's private field for it would be reading someone else's
-    #: implementation to recover something this already had.
+    draft: LogicDraft = field(default_factory=LogicDraft)
+    host: NodeHost | None = None
     node: Any = None
-    #: What the operator set, as its schema froze it.  Kept so Edit can show
-    #: what is in effect rather than the defaults again.
-    values: Mapping[str, Any] = field(default_factory=dict)
-    #: Which signal a processor reads, when it reads one.
-    source_signal: str = ""
+    claims: tuple[DeviceClaim, ...] = ()
+    pending: LogicCandidate | None = None
+    draft_error: str = ""
     #: The last state pushed to the row, so an unchanged row is left alone.
     shown: tuple = ()
     #: Asked to go, and still stopping.  The row stays until it has: a node
     #: taken off screen while it still holds a camera is one nobody can reach.
     removing: bool = False
+
+
+def stable_signal_key(node_id: str, output_name: str) -> str:
+    """The stable signal spelling shared by stopped drafts and NodeHost."""
+
+    return f"@logic/{str(node_id)}/{str(output_name)}"
 
 
 def dataset_inputs(descriptor: Any) -> tuple[Any, ...]:
@@ -68,13 +106,42 @@ def dataset_inputs(descriptor: Any) -> tuple[Any, ...]:
     therefore the descriptor's answer, not a guess from the node's kind.
     """
 
-    from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
+    from zlc_atom.nodes import DatasetInputSpec
 
     return tuple(
         spec
         for spec in getattr(descriptor, "input_specs", ())
         if isinstance(spec, DatasetInputSpec)
     )
+
+
+def device_key_options(
+    descriptor: Any,
+    *,
+    installation: Any,
+) -> dict[str, tuple[str, ...]]:
+    """Compatible installed keys for each declared build argument.
+
+    Keys are sorted so the first option is the deterministic headless default.
+    The argument name identifies where the resolved adapter goes; it is never
+    assumed to be the installed device key.
+    """
+
+    devices = getattr(installation, "devices", {})
+    if not isinstance(devices, Mapping):
+        raise TypeError("installation.devices must be a mapping")
+    options: dict[str, tuple[str, ...]] = {}
+    for requirement in descriptor.device_requirements:
+        compatible = tuple(
+            sorted(
+                str(key)
+                for key, leaf in devices.items()
+                if requirement.capability_token
+                in getattr(leaf, "capabilities", {})
+            )
+        )
+        options[requirement.argument_name] = compatible
+    return options
 
 
 def build_arguments(
@@ -86,6 +153,7 @@ def build_arguments(
     source_signal: str = "",
     artifacts: Mapping[str, Any] | None = None,
     extras: Mapping[str, Any] | None = None,
+    device_keys: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Everything one node's build asks for, out of what its descriptor declares.
 
@@ -103,18 +171,44 @@ def build_arguments(
     if build is None:
         raise TypeError(f"{descriptor.api_name} cannot be built")
 
+    parameters = inspect.signature(build).parameters
+    takes_anything = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
     available: dict[str, Any] = {"signal_plane": signal_plane}
+    selected_keys = dict(device_keys or {})
+    options = device_key_options(descriptor, installation=installation)
     for requirement in descriptor.device_requirements:
-        key = requirement.device_key or requirement.capability_token
+        candidates = options[requirement.argument_name]
+        if not candidates:
+            raise LookupError(
+                f"{descriptor.api_name} needs a {requirement.capability_token} "
+                "and this apparatus has none"
+            )
+        selected = (
+            str(selected_keys[requirement.argument_name])
+            if requirement.argument_name in selected_keys
+            else candidates[0]
+        )
+        if selected not in candidates:
+            raise LookupError(
+                f"{selected!r} does not provide {requirement.capability_token}; "
+                f"choose one of {', '.join(candidates)}"
+            )
         try:
-            available[str(key)] = installation.capability(
-                requirement.capability_token, key=requirement.device_key
+            available[requirement.argument_name] = installation.capability(
+                requirement.capability_token,
+                key=selected,
             )
         except Exception as error:
             raise LookupError(
-                f"{descriptor.api_name} needs a {requirement.capability_token} "
-                f"and this apparatus has none: {error}"
+                f"{descriptor.api_name} could not use {selected!r} as its "
+                f"{requirement.capability_token}: {error}"
             ) from error
+        key_argument = f"{requirement.argument_name}_key"
+        if key_argument in parameters:
+            available[key_argument] = selected
     if source_signal:
         available["source_signal"] = str(source_signal)
     # Artifacts arrive keyed by CONTRACT, and the descriptor's own input specs
@@ -128,11 +222,6 @@ def build_arguments(
             available[spec.name] = offered[contract]
     available.update(dict(extras or {}))
 
-    parameters = inspect.signature(build).parameters
-    takes_anything = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
     arguments = {
         name: value for name, value in available.items() if name in parameters
     }
@@ -150,8 +239,7 @@ def build_arguments(
         and name not in arguments
     ]
     if missing:
-        # Read by an operator in the Add Logic list, so it names what is
-        # missing rather than reprs a list of strings at them.
+        # Read at Start, so name the repairable missing bench facts directly.
         raise LookupError(
             f"{descriptor.api_name} needs {', '.join(missing)}, "
             "which nothing on this bench has produced yet"
@@ -169,7 +257,7 @@ class LogicCatalog:
 
     def __init__(self, descriptors: Sequence[Any] | None = None) -> None:
         if descriptors is None:
-            from zlc_atom.nodes._framework.discovery import discover_logic_nodes
+            from zlc_atom.nodes import discover_logic_nodes
 
             descriptors = discover_logic_nodes()
         self.by_name = {item.api_name: item for item in descriptors}
@@ -210,5 +298,8 @@ def make_host(
         signal_plane,
         request_owner_wake,
         instance_id=str(instance_id),
-        output_names=tuple(output.name for output in descriptor.outputs),
+        dataset_output_declarations=tuple(
+            DatasetOutputDeclaration(output.name, output.contract_id)
+            for output in descriptor.outputs
+        ),
     )

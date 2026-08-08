@@ -23,7 +23,10 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.session import ExperimentSession, Workspace
 
@@ -74,6 +77,9 @@ class _CardView:
     def set_panel_size(self, size: str) -> None:
         self.size = str(size)
 
+    def set_title(self, title: str) -> None:
+        self.title = str(title)
+
     def set_update_ms(self, interval_ms: int) -> None:
         self.update_ms = int(interval_ms)
 
@@ -122,13 +128,15 @@ class _ConsoleView:
 
     _SIGNALS = (
         "close_requested", "add_panel_requested", "add_logic_requested",
-        "pause_toggled", "selectors_toggled", "save_requested",
-        "load_requested", "save_image_requested", "save_board_requested",
-        "load_board_requested", "panel_order_committed",
+        "pause_toggled", "selectors_toggled", "save_layout_requested",
+        "load_layout_requested", "save_screenshot_requested",
+        "panel_order_committed",
         "panel_signal_picked", "panel_size_picked", "panel_update_ms_picked",
         "panel_title_committed", "panel_remove_requested",
         "panel_edit_requested", "logic_start_requested", "logic_stop_requested",
-        "logic_edit_requested", "logic_remove_requested",
+        "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
+        "panel_state_changed", "panel_snapshot_refresh_requested",
+        "panel_producer_apply_requested", "panel_editor_closed",
     )
 
     def __init__(self) -> None:
@@ -146,7 +154,16 @@ class _ConsoleView:
         #: What a file dialog would answer; "" is the operator cancelling.
         self.open_answer = ""
         self.save_answer = ""
+        self.screenshot_path = ""
         self.offered: tuple = ()
+        self.logic_editors: dict[str, dict] = {}
+        self.focused_logic_editor = ""
+        self.panel_states: dict[str, object] = {}
+        self.panel_state_updates: list[tuple[str, object]] = []
+        self.panel_parameter_surfaces: dict[str, object] = {}
+        self.panel_editors: dict[str, dict] = {}
+        self.panel_editor_surfaces: dict[str, object] = {}
+        self.focused_panel_editor = ""
 
     # -- what a test reads ------------------------------------------------
 
@@ -190,6 +207,11 @@ class _ConsoleView:
 
     def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
         return self.save_answer
+
+    def save_screenshot(self, path: str) -> str:
+        Path(path).write_bytes(b"plain TaskConsole screenshot")
+        self.screenshot_path = str(path)
+        return str(path)
 
     def run_host_dialog(self, opener, host, *, title: str):
         return opener(host, None, title=title)
@@ -243,11 +265,45 @@ class _ConsoleView:
     def set_panel_size(self, panel_id: str, size: str) -> None:
         self._cards[str(panel_id)].set_panel_size(size)
 
+    def set_panel_title(self, panel_id: str, title: str) -> None:
+        self._cards[str(panel_id)].set_title(title)
+
+    def set_panel_state(self, panel_id: str, state) -> None:
+        key = str(panel_id)
+        self.panel_states[key] = state
+        self.panel_state_updates.append((key, state))
+
+    def set_panel_parameter_surface(self, panel_id: str, surface) -> None:
+        self.panel_parameter_surfaces[str(panel_id)] = surface
+
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
 
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         self._cards[str(panel_id)].set_selectors_enabled(enabled)
+
+    def open_panel_editor(self, panel_id: str, projection) -> None:
+        self.panel_editors[str(panel_id)] = dict(projection)
+
+    def update_panel_editor(self, panel_id: str, projection) -> None:
+        if str(panel_id) in self.panel_editors:
+            self.panel_editors[str(panel_id)] = dict(projection)
+
+    def show_panel_editor(self, panel_id: str, host) -> None:
+        key = str(panel_id)
+        if host is None:
+            self.panel_editor_surfaces.pop(key, None)
+        else:
+            self.panel_editor_surfaces[key] = host
+
+    def focus_panel_editor(self, panel_id: str) -> None:
+        self.focused_panel_editor = str(panel_id)
+
+    def close_panel_editor(self, panel_id: str) -> None:
+        self.panel_editors.pop(str(panel_id), None)
+        self.panel_editor_surfaces.pop(str(panel_id), None)
+        if self.focused_panel_editor == str(panel_id):
+            self.focused_panel_editor = ""
 
     # -- logic rows -------------------------------------------------------
 
@@ -280,6 +336,21 @@ class _ConsoleView:
 
     def set_logic_publishes(self, node_id: str, rows) -> None:
         self._rows[str(node_id)].set_publishes(rows)
+
+    def open_logic_editor(self, node_id: str, projection) -> None:
+        self.logic_editors[str(node_id)] = dict(projection)
+
+    def update_logic_editor(self, node_id: str, projection) -> None:
+        if str(node_id) in self.logic_editors:
+            self.logic_editors[str(node_id)] = dict(projection)
+
+    def focus_logic_editor(self, node_id: str) -> None:
+        self.focused_logic_editor = str(node_id)
+
+    def close_logic_editor(self, node_id: str) -> None:
+        self.logic_editors.pop(str(node_id), None)
+        if self.focused_logic_editor == str(node_id):
+            self.focused_logic_editor = ""
 
 
 class _Chooser:
@@ -345,16 +416,37 @@ def _one_shot(session, producer: str = "cm"):
     pulse = session.load_pulse("calibration")
     node = CameraMeasurementNode(
         camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+        ),
         signal_plane=session.signal_plane,
         producer=producer,
-        repeat=1,
-        frames_per_cycle=int(pulse["camera_windows"]),
     )
     capture = node.prepare()
     session.fire(shots=1)
     result = capture.collect()
     session.nodes = [node]
     return node, result.publication.value(node.signal_key("frames")).snapshot
+
+
+def _commit_area(host) -> None:
+    """Commit one real Area gesture through the mounted raster surface."""
+
+    front = host.wait_for_front(5.0)
+    axes = front.interaction.axes[0]
+    left, bottom, right, top = axes.bounds
+    start = (left + 0.25 * (right - left), bottom + 0.25 * (top - bottom))
+    end = (left + 0.75 * (right - left), bottom + 0.75 * (top - bottom))
+    for action, point in (("press", start), ("move", end), ("release", end)):
+        host._pointer_event(
+            action,
+            point[0],
+            point[1],
+            button=1,
+            identity=front.identity,
+            axes=axes,
+            interaction=front.interaction,
+        ).result()
 
 
 def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
@@ -368,11 +460,18 @@ def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
 
 def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, session) -> None:
     node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frames"), snapshot)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    assert presenter.edit_panel(binding.panel_id)
+    live_host = binding.host
+    editor_host = binding.editor_host
+    editor_selections = binding.editor_selections
+    assert editor_host is not None and editor_selections is not None
 
     presenter.view.cards[0].remove_requested.emit()
     assert presenter.view.cards == ()
     assert presenter.panels == {}
+    assert live_host._closing and editor_host._closing
+    assert editor_selections._releases == []
     assert "0 panel" in presenter.view.summary
 
 
@@ -389,23 +488,24 @@ def test_pausing_stops_the_beat_without_tearing_anything_down(presenter, session
     presenter.beat()
 
 
-def test_save_writes_a_figure_carrying_the_panel_layout(presenter, session) -> None:
-    """The save button and the notebook's save are the same call underneath."""
+def test_header_save_layout_writes_no_panel_dataset(
+    presenter, session, tmp_path
+) -> None:
+    """Header layout persistence is wiring, not a whole-board archive."""
 
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
+    path = tmp_path / "layout.json"
+    presenter.view.save_answer = str(path)
 
-    presenter.view.save_requested.emit()
-    saved = sorted(session.workspace.data.rglob("*.npz"))
-    assert saved, "the save button produced no file"
+    presenter.view.save_layout_requested.emit()
 
-    from zlc_workbench.archive import read_archive
+    import json
 
-    info, arrays = read_archive(saved[0])
-    assert arrays, "the archive carries no data"
-    panel = info["sections"]["panel"]
-    assert any(entry["signal"] == node.signal_key("frames") for entry in panel.values())
-    assert "provenance" in info["sections"], "the record cannot explain itself"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["format"] == presenter.LAYOUT_FORMAT
+    assert document["panels"][0]["signal"] == node.signal_key("frames")
+    assert not tuple(tmp_path.glob("*.npz"))
 
 
 def test_the_presenter_never_imports_qt() -> None:
@@ -511,17 +611,21 @@ def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None
     presenter.set_deriving(True)
     assert card.selectors_enabled is True
 
-def test_saving_images_writes_them_beside_the_days_data(presenter, session) -> None:
-    """A picture separated from its dataset is what nobody can interpret later."""
+def test_header_save_screenshot_writes_one_plain_gui_image(
+    presenter, session, tmp_path
+) -> None:
+    """The header screenshot does not loop over panels or write an archive."""
 
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot)
+    path = tmp_path / "task-console.png"
+    presenter.view.save_answer = str(path)
 
-    presenter.view.save_image_requested.emit()
-    day = session.day_folder()
-    written = sorted(day.glob("*.png"))
-    assert written, "Save image produced nothing"
-    assert all(path.stat().st_size > 0 for path in written)
+    presenter.view.save_screenshot_requested.emit()
+
+    assert presenter.view.screenshot_path == str(path)
+    assert path.read_bytes() == b"plain TaskConsole screenshot"
+    assert not tuple(tmp_path.glob("*.npz"))
 
 
 def test_every_control_on_a_card_is_answered(presenter, session) -> None:
@@ -539,19 +643,26 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
     assert binding.signal in offered
     assert card.chosen == binding.signal
 
+    card.edit_requested.emit()
+    assert presenter.view.focused_panel_editor == binding.panel_id
+    assert presenter.view.panel_editors[binding.panel_id]["state"] == (
+        binding.state.document()
+    )
+
+    presenter.view.panel_state_updates.clear()
     card.title_committed.emit("MOT")
     assert presenter.panels[binding.panel_id].title == "MOT"
+    assert card.title == "MOT"
+    assert presenter.view.panel_state_updates == [
+        (binding.panel_id, presenter.panels[binding.panel_id].state)
+    ]
+    assert presenter.view.panel_editors[binding.panel_id]["state"]["title"] == "MOT"
 
     card.update_ms_picked.emit(100)
     assert binding.port.display_interval_ms == 100
 
     card.size_picked.emit("4x4")
     assert card.size == "4x4"
-
-    edited: list = []
-    presenter._edit_panel = lambda host, title: edited.append(title)
-    card.edit_requested.emit()
-    assert edited == ["MOT"]
 
 
 def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
@@ -565,6 +676,10 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     first = presenter.add_panel(node.signal_key("frames"), snapshot)
     card = presenter.view.cards[0]
     old_host = first.host
+    card.edit_requested.emit()
+    assert presenter.view.panel_editors[first.panel_id]["frozen_snapshot"] is snapshot
+    old_editor_host = first.editor_host
+    assert old_editor_host is not None and old_editor_host is not old_host
 
     # A second producer, so there is something else to point at.
     other, other_snapshot = _one_shot(session, producer="cm2")
@@ -574,6 +689,72 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     assert binding.signal == other.signal_key("frames")
     assert binding.host is not old_host
     assert presenter.view.cards[0] is card, "the card lost its place on the board"
+    editor = presenter.view.panel_editors[first.panel_id]
+    assert editor["stale"] is True
+    assert editor["frozen_snapshot"] is snapshot
+    assert binding.editor_host is old_editor_host
+    assert not old_editor_host._closing
+
+    presenter.view.panel_snapshot_refresh_requested.emit(first.panel_id)
+    editor = presenter.view.panel_editors[first.panel_id]
+    assert editor["stale"] is False
+    assert editor["frozen_signal"] == other.signal_key("frames")
+    assert editor["frozen_snapshot"] is other_snapshot
+    replacement_editor_host = binding.editor_host
+    assert replacement_editor_host is not None
+    assert replacement_editor_host is not old_editor_host
+    assert old_editor_host._closing
+    assert (
+        presenter.view.panel_editor_surfaces[first.panel_id]
+        is replacement_editor_host
+    )
+
+    presenter.view.panel_editor_closed.emit(first.panel_id)
+    assert binding.editor_host is None and binding.editor_selections is None
+    assert replacement_editor_host._closing
+
+
+def test_panel_editor_selection_uses_only_its_current_frozen_publication(
+    presenter, session
+) -> None:
+    """A stale frozen image cannot patch the producer form for a new signal."""
+
+    first_id = presenter.add_logic(
+        "camera_measurement", node_id="camera_first", open_editor=False
+    )
+    second_id = presenter.add_logic(
+        "camera_measurement", node_id="camera_second", open_editor=False
+    )
+    first_node, first_snapshot = _one_shot(session, producer=first_id)
+    second_node, _second_snapshot = _one_shot(session, producer=second_id)
+    panel = presenter.add_panel(
+        first_node.signal_key("frames"), first_snapshot, kind="image"
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    first_editor_host = panel.editor_host
+    assert first_editor_host is not None
+
+    first_before = dict(presenter.logic[first_id].draft.values)
+    second_before = dict(presenter.logic[second_id].draft.values)
+    _commit_area(first_editor_host)
+    first_selected = dict(presenter.logic[first_id].draft.values)
+    assert first_selected != first_before
+    assert presenter.logic[second_id].draft.values == second_before
+
+    assert presenter.retarget_panel(
+        panel.panel_id, second_node.signal_key("frames")
+    )
+    assert panel.frozen_stale and panel.editor_host is first_editor_host
+    _commit_area(first_editor_host)
+    assert presenter.logic[first_id].draft.values == first_selected
+    assert presenter.logic[second_id].draft.values == second_before
+
+    assert presenter.refresh_panel_snapshot(panel.panel_id)
+    second_editor_host = panel.editor_host
+    assert second_editor_host is not None and second_editor_host is not first_editor_host
+    _commit_area(second_editor_host)
+    assert presenter.logic[first_id].draft.values == first_selected
+    assert presenter.logic[second_id].draft.values != second_before
 
 
 def test_pointing_a_panel_at_a_signal_that_never_published_is_refused(
@@ -642,30 +823,6 @@ def test_a_panel_that_could_not_draw_says_so_on_its_own_card(presenter, session)
     assert any("refused this frame" in text for _severity, text in presenter.view.status)
 
 
-def test_a_saved_picture_is_named_for_what_it_shows(presenter, session) -> None:
-    """panel-1.png beside twenty others is a set nobody can tell apart.
-
-    The panel has always carried a title; the file just never used it.  A
-    title is operator text and a signal key has slashes and an @, so neither
-    goes into a path unaltered.
-    """
-
-    from zlc_workbench.console import _file_stem
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
-    presenter.rename_panel(binding.panel_id, "MOT camera / long readout")
-
-    written = presenter.save_images()
-    assert written, "a panel with data writes a picture"
-    assert Path(written[0]).stem == "MOT-camera-long-readout"
-
-    # Nothing that reaches a path may keep what a path cannot hold.
-    assert _file_stem("@logic/cm/frames") == "logic-cm-frames"
-    assert _file_stem("   ") == "panel", "a name that reduces to nothing still names a file"
-    assert _file_stem("a" * 200) == "a" * 60
-
-
 def test_add_panel_adds_a_panel_of_the_kind_chosen_beside_the_button(
     presenter, session
 ) -> None:
@@ -709,9 +866,81 @@ def test_a_panel_keeps_the_kind_it_was_added_as(presenter, session) -> None:
     binding = presenter.add_selected_panel("curve")
     assert binding is not None and binding.kind == "curve"
 
-    other = presenter.add_panel("held", snapshot, title="held")
-    presenter.retarget_panel(binding.panel_id, other.signal)
+    original_state = binding.state
+    assert presenter.update_panel_state(binding.panel_id, {"kind": "image"}) is False
+    assert binding.state is original_state
+
+    other, _other_snapshot = _one_shot(session, producer="cm2")
+    assert presenter.retarget_panel(binding.panel_id, other.signal_key("frames")) is True
     assert presenter.panels[binding.panel_id].kind == "curve"
+
+
+def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session) -> None:
+    """The editor sees plot-declared choices/bounds even with no authored overrides."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+
+    surface = binding.parameter_surface
+    assert presenter.view.panel_parameter_surfaces[binding.panel_id] is surface
+    semantic = {field["key"]: field for field in surface["semantic"]}
+    display = {field["key"]: field for field in surface["display"]}
+    assert "kind" not in semantic, "plot kind is fixed at Add Panel"
+    assert {"x", "y", "reduction"}.issubset(semantic)
+    assert semantic["x"]["choices"] and semantic["x"]["value"] is not None
+    assert display["colormap"]["kind"] == "choice"
+    assert display["colormap"]["choices"]
+    assert display["color_min"]["allow_none"] is True
+    assert display["show_colorbar"]["kind"] == "boolean"
+    assert display["colormap"]["quick"] is True
+    assert display["interpolation"]["quick"] is False
+    assert "site_overlay" not in display
+    assert surface["site_overlay"]["choices"] == (
+        ("Off", "off"),
+        ("Centers", "centers"),
+        ("Occupancy", "occupancy"),
+    )
+    fit_choices = dict(surface["fit"][0]["choices"])
+    assert "anisotropic_gaussian_center" in fit_choices.values()
+
+    presenter.edit_panel(binding.panel_id)
+    projection = presenter.view.panel_editors[binding.panel_id]
+    assert projection["parameter_surface"] is binding.parameter_surface
+    assert binding.editor_host is not None
+    assert binding.editor_host is not binding.host
+    assert presenter.view.panel_editor_surfaces[binding.panel_id] is binding.editor_host
+
+    colormap = next(
+        value
+        for _label, value in display["colormap"]["choices"]
+        if value != display["colormap"]["value"]
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"display": {"colormap": colormap}}
+    )
+    assert binding.state.display["colormap"] == colormap
+    description = presenter._plot_operation_value(binding.host.describe_display())
+    assert description.display_state.values["colormap"] == colormap
+    editor_description = presenter._plot_operation_value(
+        binding.editor_host.describe_display()
+    )
+    assert editor_description.display_state.values["colormap"] == colormap
+
+    reduction = next(
+        value
+        for _label, value in semantic["reduction"]["choices"]
+        if value != semantic["reduction"]["value"]
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {"reduction": reduction}}
+    )
+    assert binding.state.semantic["reduction"] is reduction
+    refreshed = {
+        field["key"]: field for field in binding.parameter_surface["semantic"]
+    }
+    assert refreshed["reduction"]["value"] is reduction
 
 
 def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) -> None:
@@ -726,19 +955,55 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
     first = presenter.add_panel(signal, snapshot, title="camera", kind="image")
+    semantic_field = next(
+        field
+        for field in first.parameter_surface["semantic"]
+        if not isinstance(field["value"], (str, bool, int, float, type(None)))
+    )
+    semantic_key = semantic_field["key"]
+    semantic_value = semantic_field["value"]
     presenter.resize_panel(first.panel_id, "4x4")
     presenter.set_panel_interval(first.panel_id, 800)
+    presenter.update_panel_state(
+        first.panel_id,
+        {
+            "semantic": {semantic_key: semantic_value},
+            "display": {"show_colorbar": False},
+            "fit": {"model": "gaussian"},
+            "site_overlay": "centers",
+        },
+    )
     second = presenter.add_panel(signal, snapshot, title="again")
+    logic_id = presenter.add_logic(
+        "camera_measurement",
+        values={"exposure_seconds": 0.037, "repeat": 0},
+        device_keys={"camera": "camera"},
+    )
+    assert presenter.logic[logic_id].host is None
 
-    document = presenter.layout()
+    import json
+
+    document = json.loads(json.dumps(presenter.layout()))
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert [panel["title"] for panel in document["panels"]] == ["camera", "again"]
     assert document["panels"][0] == {
         "signal": signal, "title": "camera", "kind": "image",
         "size": "4x4", "interval_ms": 800,
+        "semantic": {semantic_key: str(semantic_value)},
+        "display": {"show_colorbar": False},
+        "fit": {"model": "gaussian"}, "site_overlay": "centers",
     }
     # Nothing of this session's bookkeeping: ids are minted fresh on the way in.
     assert not any("panel_id" in panel for panel in document["panels"])
+    assert document["logic"] == [
+        {
+            "node_id": logic_id,
+            "api_name": "camera_measurement",
+            "values": presenter.logic[logic_id].draft.values,
+            "source_signal": "",
+            "device_keys": {"camera": "camera"},
+        }
+    ]
 
     presenter.remove_panel(first.panel_id)
     presenter.remove_panel(second.panel_id)
@@ -750,7 +1015,15 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored[0].kind == "image"
     assert restored[0].size == "4x4"
     assert restored[0].port.display_interval_ms == 800
+    assert restored[0].state.semantic == {semantic_key: semantic_value}
+    assert restored[0].state.display == {"show_colorbar": False}
+    assert restored[0].state.fit == {"model": "gaussian"}
+    assert restored[0].state.site_overlay == "centers"
     assert restored[0].panel_id != first.panel_id, "an id is never handed out twice"
+    restored_logic = presenter.logic[logic_id]
+    assert restored_logic.host is None and restored_logic.node is None
+    assert restored_logic.draft.values["exposure_seconds"] == 0.037
+    assert restored_logic.draft.device_keys == {"camera": "camera"}
 
 
 def test_a_board_naming_a_signal_nobody_publishes_comes_back_in_part(
@@ -775,3 +1048,25 @@ def test_a_board_naming_a_signal_nobody_publishes_comes_back_in_part(
 def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     assert presenter.apply_layout({"format": "zlc.figure/v1"}) is False
     assert any("not a saved board" in text for _severity, text in presenter.view.status)
+
+
+def test_panel_edit_projects_the_direct_producer_and_apply_uses_start(
+    presenter, session, monkeypatch
+) -> None:
+    node_id = presenter.add_logic("camera_measurement")
+    node, snapshot = _one_shot(session, producer=node_id)
+    panel = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+
+    assert presenter.edit_panel(panel.panel_id) is True
+    projection = presenter.view.panel_editors[panel.panel_id]
+    assert projection["producer_node_id"] == node_id
+    assert projection["producer_logic"] == presenter.logic_editor_projection(node_id)
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        presenter,
+        "start_logic",
+        lambda selected: started.append(str(selected)) or True,
+    )
+    presenter.view.panel_producer_apply_requested.emit(panel.panel_id)
+    assert started == [node_id]

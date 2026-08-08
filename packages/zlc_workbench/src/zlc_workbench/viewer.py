@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from .archive import read_archive, read_dataset
+from .panel_save import restore_panel_plot_input
+from .panel_state import PanelState, restore_semantic_choice
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -61,10 +63,8 @@ def describe_archive(
 
     sections = info.get("sections", {})
     provenance = sections.get("provenance", {})
-    panels = sections.get("panel", {})
-
     def _label(key: str) -> str:
-        entry = panels.get(key)
+        entry = _panel_record(sections, key)
         if not isinstance(entry, Mapping):
             return key
         title = str(entry.get("title") or "").strip()
@@ -89,6 +89,45 @@ def describe_archive(
     )
 
 
+def _panel_record(
+    sections: Mapping[str, Any],
+    dataset: str,
+) -> Mapping[str, Any] | None:
+    """Return the panel record which explicitly names ``dataset``."""
+
+    panel = sections.get("panel", {})
+    if not isinstance(panel, Mapping):
+        return None
+    if str(panel.get("dataset", "")) == str(dataset):
+        state = panel.get("state")
+        return state if isinstance(state, Mapping) else panel
+    record = panel.get(str(dataset))
+    return record if isinstance(record, Mapping) else None
+
+
+def _panel_state(
+    sections: Mapping[str, Any],
+    dataset: str,
+) -> PanelState | None:
+    panel = sections.get("panel", {})
+    if not isinstance(panel, Mapping) or str(panel.get("dataset", "")) != str(dataset):
+        return None
+    document = panel.get("state")
+    if not isinstance(document, Mapping):
+        return None
+    return PanelState(
+        signal=str(document.get("signal", "")),
+        kind=str(document.get("kind", "")),
+        size=str(document.get("size", "")),
+        interval_ms=int(document.get("interval_ms", 500)),
+        title=str(document.get("title", "")),
+        semantic=dict(document.get("semantic", {})),
+        display=dict(document.get("display", {})),
+        fit=dict(document.get("fit", {})),
+        site_overlay=str(document.get("site_overlay", "off")),
+    )
+
+
 def _plot_rows(
     sections: Mapping[str, Any],
     arrays: Mapping[str, Any],
@@ -102,10 +141,13 @@ def _plot_rows(
         dtype = getattr(getattr(array, "dtype", None), "name", "")
         reopenable = "" if name in datasets else "  (array only)"
         rows.append((name, f"{shape} {dtype}{reopenable}".strip()))
-    for panel, entry in sorted(sections.get("panel", {}).items()):
+    for dataset in datasets:
+        entry = _panel_record(sections, dataset)
         if isinstance(entry, Mapping):
-            title = entry.get("title") or panel
-            rows.append((f"panel {panel}", f"{title} — {entry.get('signal', '')}"))
+            title = entry.get("title") or dataset
+            rows.append(
+                (f"panel {dataset}", f"{title} — {entry.get('signal', '')}")
+            )
     return tuple(rows)
 
 
@@ -126,9 +168,6 @@ def _measurement_rows(
         for key in ("acquisition_parameters", "source_acquisition_parameters"):
             for label, value in sorted(dict(record.get(key, {})).items()):
                 rows.append((f"{node}.{label}", _text(value)))
-        fingerprint = record.get("calibration_fingerprint")
-        if fingerprint:
-            rows.append((f"{node} calibration", str(fingerprint)))
     for label, value in sorted(dict(sections.get("pulse", {})).items()):
         rows.append((f"pulse.{label}", _text(value)))
     return tuple(rows)
@@ -213,7 +252,7 @@ class FigureViewerPresenter:
         self,
         view: object,
         *,
-        make_host: Callable[[Any, str], Any],
+        make_host: Callable[[Any, str, str], Any],
         edit_figure: Callable[[Any, str], object] | None = None,
     ) -> None:
         self.view = view
@@ -230,6 +269,7 @@ class FigureViewerPresenter:
         self._info: Mapping[str, Any] = {}
         self._arrays: Mapping[str, Any] = {}
         self.dataset = ""
+        self.panel_state: PanelState | None = None
         self._host: Any = None
         self._connect()
 
@@ -298,9 +338,9 @@ class FigureViewerPresenter:
     def show_dataset(self, name: str) -> bool:
         """Draw one of the archive's datasets.
 
-        An archive holds one per panel that was on screen when it was saved, so
-        a viewer that only ever draws the first hides the rest -- which reads
-        exactly like an archive that kept only one.
+        Panel Save Fig writes one dataset; notebook-created figure archives may
+        still contain several.  The viewer therefore keeps the dataset choice
+        explicit without implying that TaskConsole saves the whole board.
         """
 
         if not self._info or not name:
@@ -308,19 +348,103 @@ class FigureViewerPresenter:
         # The plot is titled with what the dataset IS, not the archive's key
         # for it: "panel-2" tells an operator nothing about what they opened.
         label = dict(self.description.datasets).get(str(name), str(name)) if self.description else str(name)
+        host: Any = None
         try:
             snapshot = read_dataset(self._info, self._arrays, str(name))
-            host = self._make_host(snapshot, label)
+            plot_input = restore_panel_plot_input(
+                self._info,
+                self._arrays,
+                str(name),
+                snapshot,
+            )
+            panel_state = _panel_state(self._info.get("sections", {}), str(name))
+            host = self._make_host(
+                plot_input,
+                label,
+                "" if panel_state is None else panel_state.kind,
+            )
+            fit_error = self._configure_host(host, panel_state)
         except Exception as error:
+            if host is not None:
+                close = getattr(host, "close", None)
+                if callable(close):
+                    close()
             self._mount(None)
             self.view.set_status(f"cannot draw {name}: {error}", error=True)
             return False
         self._mount(host)
         self.dataset = str(name)
+        self.panel_state = panel_state
         total = len(self.description.datasets) if self.description else 1
         position = "" if total <= 1 else f"  ({total} datasets in this file)"
-        self.view.set_status(f"showing {name}{position}")
+        suffix = "" if fit_error is None else f"; saved fit was not restored: {fit_error}"
+        self.view.set_status(f"showing {name}{position}{suffix}")
         return True
+
+    @staticmethod
+    def _await(operation: object) -> object:
+        return operation.result() if hasattr(operation, "result") else operation
+
+    @classmethod
+    def _configure_host(
+        cls,
+        host: object,
+        state: PanelState | None,
+    ) -> Exception | None:
+        """Apply the saved panel decisions through the plot host's public API."""
+
+        if state is None:
+            return None
+        apply_semantic = getattr(host, "apply_semantic", None)
+        if callable(apply_semantic):
+            for name, value in state.semantic.items():
+                cls._await(
+                    apply_semantic(
+                        name,
+                        cls._restore_semantic_value(host, name, value),
+                    )
+                )
+
+        display = dict(state.display)
+        if state.kind == "image":
+            display["site_overlay"] = state.site_overlay
+        set_parameters = getattr(host, "set_parameters", None)
+        if display and callable(set_parameters):
+            cls._await(set_parameters(display))
+
+        set_size = getattr(host, "set_size", None)
+        if state.size and callable(set_size):
+            cls._await(set_size(state.size))
+
+        fit = dict(state.fit)
+        model = fit.pop("model", None)
+        run_fit = getattr(host, "fit", None)
+        if model and callable(run_fit):
+            try:
+                cls._await(run_fit(model, **fit))
+            except Exception as error:
+                # The dataset and authored plot state remain useful when a fit
+                # model is no longer available or this archived fit was never
+                # executable.  Report that one omission without discarding the
+                # otherwise exact figure.
+                return error
+        return None
+
+    @classmethod
+    def _restore_semantic_value(
+        cls,
+        host: object,
+        name: str,
+        saved: object,
+    ) -> object:
+        """Resolve JSON values through the host's registry-owned choices."""
+
+        describe = getattr(host, "describe_semantics", None)
+        if not callable(describe):
+            return saved
+        operation = cls._await(describe())
+        description = getattr(operation, "value", operation)
+        return restore_semantic_choice(description, name, saved)
 
     def rename_figure(self, text: str) -> None:
         """Remember what the operator called this figure."""
@@ -382,6 +506,8 @@ class FigureViewerPresenter:
 
     def _mount(self, host: Any) -> None:
         previous, self._host = self._host, host
+        if host is None:
+            self.panel_state = None
         self.view.show_figure(host)
         if previous is not None:
             previous.close()

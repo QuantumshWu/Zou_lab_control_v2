@@ -42,23 +42,31 @@ class FakePresenter:
     built the widget, which is how a card could look configurable and not be.
     """
 
-    def log(self, name: str, *payload: object) -> None:
+    def __init__(self) -> None:
+        pass
+
+    @staticmethod
+    def log(name: str, *payload: object) -> None:
         print(f"{name}{payload!r}", flush=True)
 
     def wire(self, console) -> None:
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
-            "selectors_toggled", "save_requested", "load_requested",
-            "save_image_requested", "panel_order_committed",
+            "selectors_toggled", "save_layout_requested",
+            "load_layout_requested", "save_screenshot_requested",
+            "panel_order_committed",
             "panel_signal_picked", "panel_size_picked", "panel_update_ms_picked",
             "panel_title_committed", "panel_remove_requested",
             "panel_edit_requested", "logic_start_requested",
             "logic_stop_requested", "logic_edit_requested",
-            "logic_remove_requested",
+            "logic_remove_requested", "logic_draft_changed",
+            "panel_state_changed", "panel_snapshot_refresh_requested",
+            "panel_producer_apply_requested", "panel_save_figure_requested",
         ):
-            getattr(console, name).connect(
-                lambda *payload, label=name: self.log(label, *payload)
+            callback = lambda *payload, label=name: print(
+                f"{label}{payload!r}", flush=True
             )
+            getattr(console, name).connect(callback)
 
 
 def _surface(text: str, color: str) -> QtWidgets.QWidget:
@@ -71,7 +79,7 @@ def _surface(text: str, color: str) -> QtWidgets.QWidget:
     return widget
 
 
-def populate(console) -> None:
+def populate(console, *, wire_intents: bool = True) -> None:
     console.set_summary("3 fake cards · mixed 1x4 / 2x2 / 4x2 · 2 fake logic rows")
     console.show_status("ready", "idle")
 
@@ -103,7 +111,10 @@ def populate(console) -> None:
         "processor-1", (("smoothed", "1", "fake derived value"),)
     )
 
-    FakePresenter().wire(console)
+    if wire_intents:
+        presenter = FakePresenter()
+        presenter.wire(console)
+        console._demo_presenter = presenter
     print("console_demo_ready", flush=True)
 
 

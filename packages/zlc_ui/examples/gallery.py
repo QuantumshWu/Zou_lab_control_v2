@@ -469,7 +469,15 @@ class _GalleryBody(QtWidgets.QWidget):
             # A complete GUI is a window behind a handle now; the gallery is
             # inside this package and may still compose a body for its tab.
             view = _console.TaskConsoleView()
-            populate_console_demo(_console.TaskConsoleHandle(None, view))
+            handle = _console.TaskConsoleHandle(None, view)
+            # The handle owns the named intent relays.  A normal window returns
+            # and retains it; the embedded gallery must do the same instead of
+            # dropping the QObject while its relays are still connected.
+            view._gallery_handle = handle
+            # This page is a visual gallery, not a second interactive console
+            # host.  Its real rows/cards remain complete; intent wiring is
+            # exercised by the standalone demo and would have two owners here.
+            populate_console_demo(handle, wire_intents=False)
             return view
         from examples.demo_device_manager import populate as populate_device_demo
 
@@ -479,7 +487,9 @@ class _GalleryBody(QtWidgets.QWidget):
             import zlc_ui.device_manager as _dm
 
             view = _dm.DeviceManagerView()
-            populate_device_demo(_dm.DeviceManagerHandle(None, view))
+            handle = _dm.DeviceManagerHandle(None, view)
+            view._gallery_handle = handle
+            populate_device_demo(handle)
             return view
         from examples.demo_figure_viewer import populate as populate_figure_demo
 
@@ -489,7 +499,9 @@ class _GalleryBody(QtWidgets.QWidget):
             import zlc_ui.figure_viewer as _viewer
 
             view = _viewer.FigureViewerView()
-            populate_figure_demo(_viewer.FigureViewerHandle(None, view))
+            handle = _viewer.FigureViewerHandle(None, view)
+            view._gallery_handle = handle
+            populate_figure_demo(handle)
             return view
         from examples.demo_pulse_editor import populate as populate_pulse_demo
 
@@ -499,7 +511,11 @@ class _GalleryBody(QtWidgets.QWidget):
             # The gallery is inside this package and may still compose one for
             # a tab; the fake data stays in the demo, which is its one source.
             view = _pulse.PulseEditorView()
-            populate_pulse_demo(_pulse.PulseEditorHandle(None, view))
+            # ``populate`` schedules zero-delay emits on the handle itself.
+            # Keep that QObject alive for as long as its embedded page.
+            handle = _pulse.PulseEditorHandle(None, view)
+            view._gallery_handle = handle
+            populate_pulse_demo(handle)
             return view
 
         card, inner = self._section("完整 GUI：TaskConsole / PulseEditor / FigureViewer / DeviceManager")

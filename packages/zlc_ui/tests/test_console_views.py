@@ -8,11 +8,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+REPO_ROOT = ROOT.parents[1]
 
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = os.pathsep.join((str(REPO_ROOT), str(SRC)))
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -259,6 +260,8 @@ row.set_state('running', 'processing fake input')
 row.set_publishes((('out', '1', 'fake output'),))
 assert row.status_label.text() == 'processing fake input'
 assert row.stop_button.isEnabled()
+assert row.start_button.isEnabled()
+assert row.start_button.text() == 'Restart'
 assert 'out' in row.publishes_label.text()
 """
     )
@@ -278,6 +281,233 @@ row.edit_requested.connect(lambda: events.append('edit'))
 QtTest.QTest.mouseClick(row.start_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(row.edit_button, QtCore.Qt.LeftButton)
 assert events == ['start', 'edit']
+"""
+    )
+
+
+def test_logic_editor_is_a_live_closable_draft_projection() -> None:
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtTest
+from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['logic-editor'])
+view = TaskConsoleView()
+handle = TaskConsoleHandle(None, view)
+handle.add_logic_row('camera-1', 'measurement')
+projection = {
+    'node_id': 'camera-1',
+    'api_name': 'camera_measurement',
+    'kind': 'measurement',
+    'form_spec': FormSpec((FormFieldProps(key='repeat', kind='int', label='Repeat', default=0, minimum=0),)),
+    'form_values': {'repeat': 0},
+    'source_required': True,
+    'source_signal': '',
+    'source_options': ('camera-1.frames',),
+    'device_keys': {'camera': 'camera'},
+    'device_options': {'camera': ('camera', 'mot_camera')},
+    'running': False,
+    'pending': False,
+    'error': '',
+}
+patches = []
+handle.logic_draft_changed.connect(lambda node_id, patch: patches.append((node_id, patch)))
+handle.open_logic_editor('camera-1', projection)
+editor = handle._logic_editors['camera-1']
+assert view.tabs.count() == 3
+assert view.tabs.currentWidget() is editor
+editor.form.widget_for('repeat').setValue(3)
+editor.source_combo.setCurrentIndex(editor.source_combo.findData('camera-1.frames'))
+camera_combo = editor._device_combos['camera']
+camera_combo.setCurrentIndex(camera_combo.findData('mot_camera'))
+app.processEvents()
+assert ('camera-1', {'values': {'repeat': 3}}) in patches
+assert ('camera-1', {'source_signal': 'camera-1.frames'}) in patches
+assert ('camera-1', {'device_keys': {'camera': 'mot_camera'}}) in patches
+
+patches.clear()
+running = dict(projection, form_values={'repeat': 3}, running=True)
+handle.update_logic_editor('camera-1', running)
+assert not patches, patches
+assert editor.start_button.text() == 'Restart'
+assert editor.start_button.isEnabled()
+view.editor_close_requested.emit(editor)
+app.processEvents()
+assert view.tabs.count() == 2
+assert 'camera-1' not in handle._logic_editors
+assert handle.logic_row_ids() == ('camera-1',)
+"""
+    )
+
+
+def test_panel_editor_and_setting_are_views_of_the_same_projection() -> None:
+    _run_qt(
+        """
+import zou_lab_control_v2
+import zlc_ui.console.panel_editor_view as tested_module
+print(tested_module.__file__)
+from PyQt5 import QtWidgets
+from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['panel-editor'])
+view = TaskConsoleView()
+handle = TaskConsoleHandle(None, view)
+handle.add_panel('panel-1', 'Camera')
+groups = (('camera', (('frames', '@logic/cm/frames'),)),)
+handle.set_panel_signal_choices(
+    'panel-1', groups, current='@logic/cm/frames'
+)
+state = {
+    'signal': '@logic/cm/frames', 'kind': 'image', 'size': '2x2',
+    'interval_ms': 100, 'title': 'Camera',
+    'semantic': {}, 'display': {}, 'fit': {}, 'site_overlay': 'off',
+}
+surface = {
+    'semantic': ({
+        'key': 'x', 'label': 'X axis', 'kind': 'choice', 'value': 'sensor_x',
+        'allow_none': False,
+        'choices': (('Sensor X', 'sensor_x'), ('Point row', 'point_row')),
+        'minimum': None, 'maximum': None, 'step': None,
+    },),
+    'display': (
+        {'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
+         'value': 'viridis', 'allow_none': False,
+         'choices': (('Viridis', 'viridis'), ('Magma', 'magma')),
+         'minimum': None, 'maximum': None, 'step': None, 'quick': True},
+        {'key': 'show_colorbar', 'label': 'Colorbar', 'kind': 'boolean',
+         'value': True, 'allow_none': False, 'choices': (),
+         'minimum': None, 'maximum': None, 'step': None, 'quick': True},
+        {'key': 'interpolation', 'label': 'Interpolation', 'kind': 'choice',
+         'value': 'nearest', 'allow_none': False,
+         'choices': (('Nearest', 'nearest'), ('Bilinear', 'bilinear')),
+         'minimum': None, 'maximum': None, 'step': None, 'quick': False},
+    ),
+    'fit': ({
+        'key': 'model', 'label': 'Fit model', 'kind': 'choice', 'value': None,
+        'allow_none': True,
+        'choices': (('2-D Gaussian', 'anisotropic_gaussian_center'),),
+        'minimum': None, 'maximum': None, 'step': None,
+    },),
+    'site_overlay': {
+        'key': 'site_overlay', 'label': 'Site overlay', 'kind': 'choice',
+        'value': 'off', 'allow_none': False,
+        'choices': (('Off', 'off'), ('Centers', 'centers'), ('Occupancy', 'occupancy')),
+        'minimum': None, 'maximum': None, 'step': None,
+    },
+}
+handle.set_panel_state('panel-1', state)
+handle.set_panel_parameter_surface('panel-1', surface)
+card = handle._cards['panel-1']
+card._open_settings()
+assert card._settings_form.read_all()['kind'] == 'image'
+assert not card._settings_form.widget_for('kind').isEnabled()
+assert card._settings_form.read_all()['display__show_colorbar'] is True
+assert card._settings_form.read_all()['display__colormap'] == 'viridis'
+assert 'display__interpolation' not in card._settings_form.spec.keys
+
+producer = {
+    'node_id': 'cm', 'api_name': 'camera_measurement', 'kind': 'measurement',
+    'form_spec': FormSpec((
+        FormFieldProps('repeat', 'int', 'Repeat', default=0, minimum=0),
+    )),
+    'form_values': {'repeat': 0},
+    'source_required': False, 'source_signal': '', 'source_options': (),
+    'device_keys': {'camera': 'camera'},
+    'device_options': {'camera': ('camera', 'mot_camera')},
+    'running': True, 'pending': False, 'error': '',
+}
+projection = {
+    'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
+    'parameter_surface': surface,
+    'kind_read_only': True, 'frozen_signal': '@logic/cm/frames',
+    'frozen_publication': object(), 'frozen_snapshot': object(),
+    'stale': False, 'producer_node_id': 'cm', 'producer_logic': producer,
+}
+events = []
+handle.panel_state_changed.connect(
+    lambda panel_id, patch: events.append(('state', panel_id, patch))
+)
+handle.logic_draft_changed.connect(
+    lambda node_id, patch: events.append(('draft', node_id, patch))
+)
+handle.panel_snapshot_refresh_requested.connect(
+    lambda panel_id: events.append(('refresh', panel_id))
+)
+handle.panel_producer_apply_requested.connect(
+    lambda panel_id: events.append(('apply', panel_id))
+)
+handle.panel_save_figure_requested.connect(
+    lambda panel_id: events.append(('save', panel_id))
+)
+handle.panel_editor_closed.connect(
+    lambda panel_id: events.append(('closed', panel_id))
+)
+handle.open_panel_editor('panel-1', projection)
+editor = handle._panel_editors['panel-1']
+class _PlotHost:
+    def __init__(self, text):
+        self.widget = QtWidgets.QLabel(text)
+        self.qt_widget_calls = 0
+    def qt_widget(self):
+        self.qt_widget_calls += 1
+        return self.widget
+first_host = _PlotHost('frozen plot one')
+second_host = _PlotHost('frozen plot two')
+handle.show_panel_editor('panel-1', first_host)
+assert editor._surface is first_host.widget
+assert first_host.qt_widget_calls == 1
+assert first_host.widget.parentWidget() is editor.surface_holder
+handle.show_panel_editor('panel-1', second_host)
+assert editor._surface is second_host.widget
+assert first_host.widget.parentWidget() is None
+assert second_host.widget.parentWidget() is editor.surface_holder
+assert view.tabs.count() == 3 and view.tabs.currentWidget() is editor
+assert editor.kind_label.text() == 'image'
+assert not editor._producer_editor.start_button.isVisible()
+assert editor.parameter_forms['semantic'].spec.keys == ('x',)
+assert editor.parameter_forms['display'].spec.keys == (
+    'colormap', 'show_colorbar', 'interpolation'
+)
+assert editor.parameter_forms['fit'].spec.keys == ('model',)
+semantic_combo = editor.parameter_forms['semantic'].widget_for('x')
+semantic_combo.setCurrentIndex(1)
+semantic_combo.activated.emit(1)
+display_combo = editor.parameter_forms['display'].widget_for('colormap')
+display_combo.setCurrentIndex(1)
+display_combo.activated.emit(1)
+fit_combo = editor.parameter_forms['fit'].widget_for('model')
+fit_combo.setCurrentIndex(1)
+fit_combo.activated.emit(1)
+editor.panel_form.widget_for('interval_ms').setValue(250)
+editor._producer_editor.form.widget_for('repeat').setValue(2)
+editor.refresh_button.click()
+editor.producer_apply_button.click()
+editor.save_button.click()
+app.processEvents()
+assert ('state', 'panel-1', {'interval_ms': 250}) in events
+assert ('state', 'panel-1', {'semantic': {'x': 'point_row'}}) in events
+assert ('state', 'panel-1', {'display': {'colormap': 'magma'}}) in events
+assert ('state', 'panel-1', {
+    'fit': {'model': 'anisotropic_gaussian_center'}
+}) in events
+assert ('draft', 'cm', {'values': {'repeat': 2}}) in events
+assert ('refresh', 'panel-1') in events
+assert ('apply', 'panel-1') in events
+assert ('save', 'panel-1') in events
+
+changed = dict(state, title='Retitled', interval_ms=250)
+handle.set_panel_state('panel-1', changed)
+handle.update_panel_editor('panel-1', dict(projection, state=changed, stale=True))
+assert card.title() == 'Retitled'
+assert editor.panel_form.read_all()['title'] == 'Retitled'
+assert not editor.save_button.isEnabled()
+view.editor_close_requested.emit(editor)
+app.processEvents()
+assert view.tabs.count() == 2 and 'panel-1' not in handle._panel_editors
+assert ('closed', 'panel-1') in events
+assert second_host.widget.parentWidget() is None
 """
     )
 
@@ -381,13 +611,16 @@ view = TaskConsoleView(); view.show(); app.processEvents()
 events = []
 view.add_panel_requested.connect(lambda: events.append(('panel',)))
 view.pause_toggled.connect(lambda value: events.append(('pause', value)))
-view.save_requested.connect(lambda: events.append(('save',)))
+view.save_screenshot_requested.connect(lambda: events.append(('screenshot',)))
+view.save_layout_requested.connect(lambda: events.append(('layout',)))
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
-QtTest.QTest.mouseClick(view.save_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.save_layout_button, QtCore.Qt.LeftButton)
 assert ('panel',) in events
 assert ('pause', True) in events
-assert ('save',) in events
+assert ('screenshot',) in events
+assert ('layout',) in events
 """
     )
 

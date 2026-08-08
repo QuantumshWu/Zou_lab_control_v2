@@ -113,6 +113,9 @@ def build(
     *,
     path: str = "",
     pulses_directory: str = "",
+    sequencer: object | None = None,
+    allow_dial: bool = True,
+    connection_label: str | None = None,
 ) -> object:
     """Wire one editor window, with or without a pulse in it."""
 
@@ -160,10 +163,13 @@ def build(
         sequence,
         make_preview=make_preview,
         update_preview=update_preview,
-        dial=dial,
+        sequencer=sequencer,
+        dial=dial if allow_dial else None,
         pulses_directory=pulses_directory,
         path=path,
-        default_endpoint=default_endpoint(),
+        default_endpoint=(
+            default_endpoint() if connection_label is None else str(connection_label)
+        ),
     )
 
 
@@ -241,6 +247,42 @@ def create_window(
     if connect:
         mode, _, endpoint = str(connect).partition(":")
         window.presenter.connect_to(mode, endpoint)
+    return window
+
+
+def create_bound_window(
+    *,
+    workspace: object,
+    sequence: object,
+    sequencer: object,
+    path: str = "",
+    window_ratio: float | None = None,
+):
+    """Open PulseGUI over a sequencer borrowed from an ExperimentSession.
+
+    This entry has no dial path.  Connection controls therefore cannot replace
+    the experiment's sequencer with a second client, and closing the editor
+    retires only its presenter/preview -- the session remains the device owner.
+    """
+
+    from zlc_ui import open_pulse_editor
+
+    from ..session import Workspace
+
+    space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
+    window = open_pulse_editor(
+        title="PulseGUI@Zou lab", window_ratio=window_ratio
+    )
+    window.presenter = build(
+        window,
+        sequence,
+        path=str(path),
+        pulses_directory=str(space.pulses),
+        sequencer=sequencer,
+        allow_dial=False,
+        connection_label="experiment session",
+    )
+    window.closed.connect(window.presenter.close)
     return window
 
 

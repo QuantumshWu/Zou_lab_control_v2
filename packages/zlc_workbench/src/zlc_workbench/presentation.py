@@ -17,7 +17,7 @@ while an experiment is running.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from zlc_runtime import SurfaceUpdate
 
@@ -36,8 +36,14 @@ class _Prepared:
 def _revision_of(snapshot: object) -> object | None:
     """The data revision a snapshot carries, or None when it carries none."""
 
+    snapshot = getattr(snapshot, "snapshot", snapshot)
     block = getattr(snapshot, "block", None)
     return getattr(block, "revision", None) if block is not None else None
+
+
+def _publication_generation(publication: object) -> object | None:
+    event_ref = getattr(publication, "event_ref", None)
+    return getattr(event_ref, "generation", None)
 
 
 class PlotPanelPort:
@@ -51,19 +57,28 @@ class PlotPanelPort:
         *,
         display_interval_ms: int,
         shown: object | None = None,
+        project_input: Callable[[object, object], object] | None = None,
+        replace_host: Callable[[object, object, object], Any] | None = None,
+        on_presented: Callable[[object, object], None] | None = None,
     ) -> None:
         self._panel_id = str(panel_id)
         self._signal_name = str(signal_name)
         self._host = host
         self._interval_ms = int(display_interval_ms)
         self._presented: object | None = None
+        self._presented_input: object | None = shown
+        self._project_input = project_input
+        self._replace_host = replace_host
+        self._on_presented = on_presented
         #: What the host was BUILT from.  A host constructed from a snapshot is
         #: already holding that revision, and handing it the same one back is
         #: refused -- correctly, but the refusal then arrived as an error on
         #: the card once per beat, forever, because the delivery was never
         #: accepted and so was retried on every tick.
         self._shown_revision = _revision_of(shown)
+        self._shown_generation: object | None = None
         self._serial = 0
+        self._pending_inputs: dict[int, object] = {}
         self.missing: list[str] = []
         #: The last render this panel could not show.  Read on the beat and put
         #: on the card, because a panel that quietly stopped drawing looks
@@ -102,6 +117,15 @@ class PlotPanelPort:
 
         return self._presented
 
+    def presented_input(self) -> object | None:
+        """The exact plot input accepted beside ``presented_publication``."""
+
+        return self._presented_input
+
+    @property
+    def host(self) -> Any:
+        return self._host
+
     # -------------------------------------------------------------- the tick
 
     def prepare(self, value: object, publication: object) -> SurfaceUpdate | None:
@@ -119,15 +143,60 @@ class PlotPanelPort:
         question over and over.
         """
 
-        revision = _revision_of(value.snapshot)
-        if revision is not None and revision == self._shown_revision:
+        publication_generation = _publication_generation(publication)
+        plot_input = (
+            value.snapshot
+            if self._project_input is None
+            else self._project_input(value, publication)
+        )
+        revision = _revision_of(plot_input)
+        if (
+            self._shown_generation is None
+            and revision is not None
+            and revision == self._shown_revision
+        ):
+            # The host was constructed from this exact snapshot before the
+            # board first saw its publication.  Anchor the generation now so a
+            # later Restart with revision=1 cannot be mistaken for this run.
+            self._shown_generation = publication_generation
+            self._presented = publication
+            self._presented_input = plot_input
+            if self._on_presented is not None:
+                self._on_presented(publication, plot_input)
             return None
-        self._shown_revision = revision
+        if (
+            self._shown_generation is not None
+            and publication_generation != self._shown_generation
+        ):
+            if self._replace_host is None:
+                raise RuntimeError(
+                    "signal generation changed; the panel host must be replaced"
+                )
+            replacement = self._replace_host(plot_input, value, publication)
+            if replacement is None or not hasattr(replacement, "host_id"):
+                raise TypeError("panel host replacement must return a plotting host")
+            self._host = replacement
+            self._shown_generation = publication_generation
+            self._shown_revision = revision
+            self._presented = publication
+            self._presented_input = plot_input
+            self.last_error = None
+            if self._on_presented is not None:
+                self._on_presented(publication, plot_input)
+            return None
+        if (
+            publication_generation == self._shown_generation
+            and revision is not None
+            and revision == self._shown_revision
+        ):
+            return None
         self._serial += 1
-        future = self._host.update_data(value.snapshot)
+        serial = self._serial
+        self._pending_inputs[serial] = plot_input
+        future = self._host.update_data(plot_input)
         return SurfaceUpdate(
             panel_id=self._panel_id,
-            serial=self._serial,
+            serial=serial,
             host_token=self._host.host_id,
             publication=publication,
             value=value,
@@ -151,6 +220,12 @@ class PlotPanelPort:
         if not self.can_accept(update, operation):
             return False
         self._presented = update.publication
+        self._presented_input = self._pending_inputs.pop(update.serial, update.value.snapshot)
+        self._shown_generation = _publication_generation(update.publication)
+        self._shown_revision = _revision_of(self._presented_input)
+        self.last_error = None
+        if self._on_presented is not None:
+            self._on_presented(update.publication, self._presented_input)
         return True
 
     def reject(self, update: SurfaceUpdate, error: BaseException | None) -> None:
@@ -161,12 +236,18 @@ class PlotPanelPort:
         arriving, which is the other thing a still panel means.
         """
 
-        del update
+        serial = getattr(update, "serial", None)
+        if serial is not None:
+            self._pending_inputs.pop(serial, None)
         if error is not None:
             self.last_error = error
 
     def finish_unpresented(self, update: SurfaceUpdate) -> None:
         """Release a surface the batch decided not to show."""
+
+        serial = getattr(update, "serial", None)
+        if serial is not None:
+            self._pending_inputs.pop(serial, None)
 
     def report_waiting(self, missing_signal: str) -> None:
         """The signal this panel wants has not arrived on this tick."""

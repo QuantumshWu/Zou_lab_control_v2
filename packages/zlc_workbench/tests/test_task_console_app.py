@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
@@ -32,9 +33,15 @@ def workspace(tmp_path) -> Path:
 
 def _run(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
     environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
+    argv = ["--workspace", str(workspace), *arguments]
+    script = (
+        "import zou_lab_control_v2\n"
+        "from zlc_workbench.apps import task_console as tested_module\n"
+        "print(tested_module.__file__)\n"
+        f"raise SystemExit(tested_module.main({argv!r}))\n"
+    )
     return subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.task_console",
-         "--workspace", str(workspace), *arguments],
+        [sys.executable, "-c", script],
         capture_output=True, text=True, env=environment, timeout=300,
     )
 
@@ -43,8 +50,51 @@ def test_the_console_assembles_and_beats(workspace) -> None:
     completed = _run(workspace, "--template", "virtual", "--check")
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "console ready" in completed.stdout
-    assert "1 panel" in completed.stdout
+    assert "0 panel" in completed.stdout
     assert "3 camera window" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the product launcher is a Windows batch file")
+def test_experiment_batch_is_one_task_console_entry_and_forwards_its_arguments(
+    workspace,
+) -> None:
+    launcher = REPO_ROOT / "bin" / "experiment.bat"
+    source = launcher.read_text(encoding="utf-8").lower()
+    assert 'call "%~dp0_launch.bat" task_console %*' in source
+    assert "pulse_editor" not in source and "device_manager" not in source
+    assert "start " not in source
+
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        ZLC_NO_PAUSE="1",
+        ZLC_PY_CMD=sys.executable,
+    )
+    completed = subprocess.run(
+        [
+            os.environ.get("COMSPEC", "cmd.exe"),
+            "/d",
+            "/c",
+            str(launcher),
+            "--workspace",
+            str(workspace),
+            "--template",
+            "virtual",
+            "--pulse",
+            "calibration",
+            "--check",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPO_ROOT,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "ZLC WORKBENCH - task_console" in completed.stdout
+    assert f"workspace: {workspace}" in completed.stdout
+    assert "pulse 'calibration'" in completed.stdout
 
 
 def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
@@ -61,20 +111,6 @@ def test_a_missing_pulse_names_where_it_looked(workspace) -> None:
     assert "absent" in (completed.stdout + completed.stderr)
 
 
-def _saved_figure(workspace: Path) -> Path:
-    """One run saved through the console's own entry point."""
-
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
-    script = (
-        "import sys;"
-        "from zlc_workbench.apps.task_console import main;"
-        "sys.exit(main(['--workspace', r'%s', '--template', 'virtual', '--check']))"
-    ) % workspace
-    subprocess.run([sys.executable, "-c", script], check=True, env=environment, timeout=300)
-    saved = sorted((workspace / "data").rglob("*.npz"))
-    return saved[0] if saved else workspace / "missing.npz"
-
-
 def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
     """The other half of saving: a file nobody can reopen was not kept.
 
@@ -84,15 +120,17 @@ def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
 
     environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
     write = (
+        "import zou_lab_control_v2;"
         "import numpy as np, shutil, sys;"
         "from pathlib import Path;"
-        "from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode;"
+        "from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode, CameraMeasurementRequest;"
         "from zlc_workbench.session import ExperimentSession;"
         "root = Path(r'%s');"
         "session = ExperimentSession.open(root, template='virtual');"
         "pulse = session.load_pulse('calibration');"
-        "node = CameraMeasurementNode(camera=session.camera, signal_plane=session.signal_plane,"
-        " producer='cm', repeat=1, frames_per_cycle=int(pulse['camera_windows']));"
+        "node = CameraMeasurementNode(camera=session.camera,"
+        " request=CameraMeasurementRequest('camera', 0.02, None, 1, int(pulse['camera_windows']), 2.0),"
+        " signal_plane=session.signal_plane, producer='cm');"
         "capture = node.prepare();"
         "session.fire(shots=1);"
         "result = capture.collect();"
@@ -207,27 +245,91 @@ def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) ->
     assert "editor ready: no pulse open" in completed.stdout
 
 
-def test_a_camera_node_added_in_the_window_can_have_the_camera(workspace) -> None:
-    """The window arms the camera before any node exists, so the first panel is
-    not empty.  A camera is held by one owner at a time, so a camera node added
-    afterwards could never have it -- it failed with "already armed", which
-    reads as a broken node rather than an owner that had not let go."""
+def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace) -> None:
+    """Opening the GUI must not create a hidden camera owner or default panel."""
 
     environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
-    script = (
-        "import sys, time;"
-        "from zlc_ui import ensure_qt_app; ensure_qt_app([]);"
-        "from zlc_workbench.apps.task_console import open_experiment, build_console;"
-        "space, session, node, monitor, loaded = open_experiment(r'%s', 'virtual', 'calibration');"
-        "view, presenter = build_console(session, node, interval_ms=200, release_bootstrap=monitor.close);"
-        "added = presenter.add_logic('camera_measurement', values={'repeat': 1, 'frames_per_cycle': 3});"
-        "print('ADDED' if added else 'REFUSED ' + presenter.view.status[-1][1]);"
-        "presenter.close(); session.close()"
-    ) % workspace
+    script = """import zou_lab_control_v2
+from zlc_ui import ensure_qt_app
+ensure_qt_app([])
+from zlc_workbench.apps import task_console as tested_module
+print(tested_module.__file__)
+space, session, loaded = tested_module.open_experiment(r'%s', 'virtual', 'calibration')
+view, presenter = tested_module.build_console(session, interval_ms=200)
+assert presenter.panels == {}
+assert presenter.logic == {}
+added = presenter.add_logic('camera_measurement')
+assert added and presenter.logic[added].host is None
+print('STOPPED_DRAFT')
+presenter.close()
+session.close()
+""" % workspace
     completed = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True, text=True, env=environment, timeout=300,
     )
 
-    assert "ADDED" in completed.stdout, completed.stdout + completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "STOPPED_DRAFT" in completed.stdout
+
+
+def test_the_experiment_entry_opens_both_work_windows_on_one_session(workspace) -> None:
+    """Device Init lends one session to Console and Pulse, then retires all three."""
+
+    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
+    script = """import zou_lab_control_v2
+from zlc_workbench.apps import task_console as tested_module
+print(tested_module.__file__)
+from zlc_ui import ensure_qt_app
+application = ensure_qt_app([])
+flow = tested_module.create_experiment_flow(
+    workspace=r'%s', template='virtual', pulse='calibration', interval_ms=200,
+)
+try:
+    assert flow.devices.is_visible()
+    assert flow.session is None
+    assert flow.console is None
+    assert flow.pulse is None
+    assert flow.devices.presenter.toggle_lifecycle() is True
+    application.processEvents()
+    assert flow.session is flow.devices.presenter.active_session
+    assert flow.console.is_visible()
+    assert flow.pulse.is_visible()
+    assert flow.console.session is flow.session
+    assert flow.pulse.presenter.sequencer is flow.session.sequencer
+    world = flow.session.installation.world
+    before = world.fire_count
+    flow.pulse.fire_requested.emit()
+    application.processEvents()
+    assert world.fire_count == before + 1
+    assert flow.session.sequencer.snapshot()['firing'] is True
+    flow.pulse.stop_requested.emit()
+    application.processEvents()
+    assert flow.session.sequencer.snapshot()['firing'] is False
+    first_session = flow.session
+finally:
+    flow.close()
+assert flow.session is None
+assert flow.console is None
+assert flow.pulse is None
+again = tested_module.create_experiment_flow(
+    workspace=r'%s', template='virtual', pulse='calibration', interval_ms=200,
+)
+try:
+    assert again.devices.presenter.toggle_lifecycle() is True
+    application.processEvents()
+    assert again.session is again.devices.presenter.active_session
+    assert again.session is not first_session
+    assert again.pulse.presenter.sequencer is again.session.sequencer
+finally:
+    again.close()
+print('SHARED_EXPERIMENT_FLOW')
+""" % (workspace, workspace)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, env=environment, timeout=300,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "SHARED_EXPERIMENT_FLOW" in completed.stdout
 

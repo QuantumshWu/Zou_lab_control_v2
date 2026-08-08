@@ -37,23 +37,35 @@ def build(view: object) -> object:
     from dataclasses import replace
 
     import zlc_plot as plot
+    from zlc_plot.primitives import ImageFrame
 
     from ..viewer import FigureViewerPresenter
 
-    def make_host(snapshot, name: str):
+    def _kind_of(name: str):
+        if not name:
+            return None
+        chosen = next((item for item in plot.PlotKind if item.value == str(name)), None)
+        if chosen is None:
+            raise ValueError(f"unknown saved plot kind {name!r}")
+        return chosen
+
+    def make_host(plot_input, name: str, kind: str):
         # Which plot suits a dataset is a question about the dataset, and the
         # saved schema answers it.  This window used to answer it itself, in a
         # two-branch copy of a rule zlc_plot already owns per kind -- so a
         # dataset that was neither a plain image nor a point table opened as an
         # exception instead of a plot.  Asking zlc_plot means one answer.
-        spec = plot.fitting_spec(snapshot.block.schema)
+        snapshot = plot_input.snapshot if isinstance(plot_input, ImageFrame) else plot_input
+        spec = plot.fitting_spec(snapshot.block.schema, _kind_of(kind))
         if spec is None:
-            raise ValueError(f"nothing in {name!r} has a shape this can plot")
+            raise ValueError(
+                f"nothing in {name!r} can be drawn as {kind or 'an inferred plot'}"
+            )
         # Only the title: axis names come from the payload's own schema when a
         # label is left unset, and the signal's name is the one thing the data
         # does not know about itself.
         return plot.RasterPlotHost.from_plot(
-            snapshot, replace(spec, labels=replace(spec.labels, title=name))
+            plot_input, replace(spec, labels=replace(spec.labels, title=name))
         )
 
     return FigureViewerPresenter(

@@ -1,0 +1,373 @@
+import zou_lab_control_v2
+
+"""Guard A: the formal headless virtual Calibration -> frames -> Occupancy chain."""
+
+import json
+from pathlib import Path
+import time
+from types import SimpleNamespace
+
+import numpy as np
+
+from zlc_atom.install import create_installation
+from zlc_atom.nodes.calibration import logic_node as calibration_logic_node
+from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
+from zlc_atom.nodes.occupancy import logic_node as occupancy_logic_node
+from zlc_runtime import MonitorCoverage, SignalDataPlane
+import zlc_runtime.host as runtime_host
+from zlc_workbench.logic import (
+    LogicCatalog,
+    build_arguments,
+    make_host,
+    stable_signal_key,
+)
+import zlc_workbench.image_overlay as image_overlay_module
+from zlc_workbench.image_overlay import ImageOverlayResolver
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PULSE_DIRECTORY = REPO_ROOT / "packages" / "zlc_atom" / "pulses"
+
+
+def _wait_terminal(host: object, *, phase: str, timeout: float = 10.0) -> object:
+    deadline = time.monotonic() + timeout
+    observation = host.poll()
+    while not observation.terminal and time.monotonic() < deadline:
+        time.sleep(0.005)
+        observation = host.poll()
+    assert observation.terminal, observation
+    assert observation.phase == phase, observation
+    return observation
+
+
+def _wait_armed(host: object, camera: object, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not camera.capture_state() and time.monotonic() < deadline:
+        observation = host.poll()
+        if observation.terminal:
+            break
+        time.sleep(0.005)
+    assert camera.capture_state(), host.observation
+
+
+def _wait_revision(
+    host: object,
+    plane: SignalDataPlane,
+    signal: str,
+    *,
+    after: int,
+    timeout: float = 5.0,
+) -> tuple[object, object, int]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        host.poll()
+        front = plane.freeze()
+        value = front.value(signal)
+        publication = front.publication(signal)
+        if value is not None and publication is not None:
+            revision = int(value.snapshot.ref.revision.value)
+            if revision > after:
+                return publication, value, revision
+        if host.terminal:
+            break
+        time.sleep(0.005)
+    raise AssertionError(f"{signal!r} did not advance beyond revision {after}")
+
+
+def _cleanup_host(host: object) -> None:
+    if host.running:
+        host.cancel("Guard A cleanup")
+        deadline = time.monotonic() + 5.0
+        while host.running and time.monotonic() < deadline:
+            host.poll()
+            time.sleep(0.005)
+    host.shutdown()
+
+
+def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
+    """All P0 nodes run through catalog, descriptor, and NodeHost seams."""
+
+    print(calibration_logic_node.__file__)
+    print(camera_logic_node.__file__)
+    print(occupancy_logic_node.__file__)
+    print(runtime_host.__file__)
+    print(image_overlay_module.__file__)
+
+    catalog = LogicCatalog()
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    hosts: list[object] = []
+    try:
+        assert {"calibration", "camera_measurement", "occupancy"} <= set(
+            catalog.by_name
+        )
+        assert PULSE_DIRECTORY.is_dir()
+        camera = installation.capability("camera.adapter", key="camera")
+        sequencer = installation.device("sequencer")
+        assert sequencer.world is installation.world
+
+        calibration_descriptor = catalog.get("calibration")
+        assert calibration_descriptor is not None
+        calibration_arguments = build_arguments(
+            calibration_descriptor,
+            installation=installation,
+            signal_plane=plane,
+            values={
+                "repeats": 30,
+                "reference_exposure_seconds": 0.02,
+                "readout_exposure_seconds": 0.005,
+                "timeout_seconds": 2.0,
+            },
+            extras={
+                "pulse_search_paths": (PULSE_DIRECTORY,),
+                "artifact_directory": tmp_path,
+            },
+            device_keys={"camera": "camera", "sequencer": "sequencer"},
+        )
+        calibration_node = calibration_descriptor.instantiate(
+            **calibration_arguments
+        )
+        calibration_host = make_host(
+            calibration_descriptor,
+            calibration_node,
+            signal_plane=plane,
+            instance_id="calibration",
+        )
+        hosts.append(calibration_host)
+
+        calibration_host.start()
+        _wait_terminal(calibration_host, phase="done")
+        first_calibration = calibration_host.final_result
+        assert first_calibration is not None
+        assert first_calibration.artifact_path.parent == tmp_path.resolve()
+        assert first_calibration.artifact_path.is_file()
+        assert set(
+            json.loads(first_calibration.artifact_path.read_text(encoding="utf-8"))
+        ) == {"site_map", "readout_model", "frame_contract", "report"}
+        assert first_calibration.calibration.n_sites == len(
+            installation.world.geometry.site_centers_xy
+        )
+        assert plane.freeze().signals == {}
+
+        calibration_host.start()
+        _wait_terminal(calibration_host, phase="done")
+        second_calibration = calibration_host.final_result
+        assert second_calibration is not None
+        assert second_calibration.artifact_path.is_file()
+        assert second_calibration.artifact_path != first_calibration.artifact_path
+        assert {first_calibration.artifact_path.name, second_calibration.artifact_path.name} == {
+            "calibration.json",
+            "calibration-2.json",
+        }
+        assert plane.freeze().signals == {}
+
+        one_window_program = SimpleNamespace(
+            camera_window_count=lambda _channel: 1,
+            camera_window_exposures=lambda _channel: (0.005,),
+        )
+        sequencer.load(one_window_program)
+        camera_descriptor = catalog.get("camera_measurement")
+        assert camera_descriptor is not None
+        finite_arguments = build_arguments(
+            camera_descriptor,
+            installation=installation,
+            signal_plane=plane,
+            values={
+                "exposure_seconds": 0.005,
+                "repeat": 3,
+                "frames_per_cycle": 1,
+                "timeout_seconds": 1.0,
+            },
+            device_keys={"camera": "camera"},
+        )
+        finite_node = camera_descriptor.instantiate(**finite_arguments)
+        finite_host = make_host(
+            camera_descriptor,
+            finite_node,
+            signal_plane=plane,
+            instance_id="camera_measurement",
+        )
+        hosts.append(finite_host)
+        finite_host.start()
+        _wait_armed(finite_host, camera)
+        for _ in range(3):
+            sequencer.fire()
+            assert sequencer.wait_done(1.0) is not None
+        _wait_terminal(finite_host, phase="done")
+        assert finite_host.final_result == {
+            "cycles": 3,
+            "signal": stable_signal_key("camera_measurement", "frames"),
+        }
+        assert camera.capture_state() is False
+
+        frames_signal = finite_host.signal_key("frames")
+        assert frames_signal == stable_signal_key("camera_measurement", "frames")
+        finite_front = plane.freeze()
+        frames_publication = finite_front.publication(frames_signal)
+        frames_value = finite_front.value(frames_signal)
+        assert frames_publication is not None and frames_value is not None
+        assert frames_value.coverage is None
+        assert frames_value.transient is False
+        assert frames_value.shape[:2] == (3, 1)
+        assert not plane.is_generation_live(frames_signal)
+
+        occupancy_descriptor = catalog.get("occupancy")
+        assert occupancy_descriptor is not None
+        occupancy_arguments = build_arguments(
+            occupancy_descriptor,
+            installation=installation,
+            signal_plane=plane,
+            values={
+                "calibration_path": str(first_calibration.artifact_path),
+            },
+            source_signal=frames_signal,
+        )
+        assert set(occupancy_arguments) == {
+            "calibration_path",
+            "source_signal",
+            "signal_plane",
+        }
+        assert occupancy_arguments["source_signal"] == frames_signal
+        occupancy_node = occupancy_descriptor.instantiate(**occupancy_arguments)
+        occupancy_host = make_host(
+            occupancy_descriptor,
+            occupancy_node,
+            signal_plane=plane,
+            instance_id="occupancy",
+        )
+        hosts.append(occupancy_host)
+        occupancy_host.start()
+        _wait_terminal(occupancy_host, phase="done")
+
+        occupancy_front = plane.freeze()
+        counts_signal = occupancy_host.signal_key("counts")
+        occupancy_publication = occupancy_front.publication(counts_signal)
+        assert occupancy_publication is not None
+        expected_outputs = {
+            occupancy_host.signal_key(output.name)
+            for output in occupancy_descriptor.outputs
+        }
+        assert set(occupancy_publication.signals) == expected_outputs
+        assert expected_outputs == {
+            stable_signal_key("occupancy", "counts"),
+            stable_signal_key("occupancy", "occupied"),
+            stable_signal_key("occupancy", "valid"),
+            stable_signal_key("occupancy", "rate"),
+            stable_signal_key("occupancy", "frame_judged"),
+        }
+        counts = occupancy_publication.value(counts_signal)
+        occupied = occupancy_publication.value(
+            occupancy_host.signal_key("occupied")
+        )
+        valid = occupancy_publication.value(occupancy_host.signal_key("valid"))
+        rate = occupancy_publication.value(occupancy_host.signal_key("rate"))
+        frame_judged = occupancy_publication.value(
+            occupancy_host.signal_key("frame_judged")
+        )
+        assert all(
+            value is not None
+            for value in (counts, occupied, valid, rate, frame_judged)
+        )
+        n_sites = first_calibration.calibration.site_map.n_sites
+        assert counts.shape == occupied.shape == valid.shape == (3, n_sites, 1)
+        assert rate.shape == (3, 1, 1)
+        np.testing.assert_array_equal(
+            frame_judged.values,
+            frames_value.values[:, 0],
+        )
+        assert all(
+            value.coverage is None and value.transient is False
+            for value in occupancy_publication.signals.values()
+        )
+        assert plane.direct_parent_publications(occupancy_publication) == (
+            frames_publication,
+        )
+        assert occupancy_publication.run_record["parameters"] == {
+            "frames_signal": frames_signal,
+            "calibration_path": str(first_calibration.artifact_path),
+        }
+        overlay = ImageOverlayResolver().resolve(
+            frame_judged,
+            occupancy_publication,
+            mode="centers",
+            overlay_revision=1,
+        )
+        assert overlay.requested_mode == overlay.resolved_mode == "centers"
+        np.testing.assert_allclose(
+            overlay.frame.overlay.coordinates,
+            first_calibration.calibration.site_map.centers_xy,
+        )
+        assert overlay.frame.overlay.point_ids == (
+            first_calibration.calibration.site_map.site_ids
+        )
+        assert overlay.frame.snapshot is frame_judged.snapshot
+
+        occupancy_host.shutdown()
+        finite_host.shutdown()
+        plane.retire(finite_host)
+        assert plane.freeze().signals == {}
+
+        sequencer.load(one_window_program)
+        infinite_arguments = build_arguments(
+            camera_descriptor,
+            installation=installation,
+            signal_plane=plane,
+            values={
+                "exposure_seconds": 0.005,
+                "repeat": 0,
+                "frames_per_cycle": 1,
+                "timeout_seconds": 0.05,
+            },
+            device_keys={"camera": "camera"},
+        )
+        infinite_node = camera_descriptor.instantiate(**infinite_arguments)
+        infinite_host = make_host(
+            camera_descriptor,
+            infinite_node,
+            signal_plane=plane,
+            instance_id="camera_measurement",
+        )
+        hosts.append(infinite_host)
+        infinite_host.start()
+        _wait_armed(infinite_host, camera)
+
+        live_signal = infinite_host.signal_key("frames")
+        previous_revision = 0
+        live_generation = None
+        for _ in range(2):
+            sequencer.fire()
+            assert sequencer.wait_done(1.0) is not None
+            live_publication, live_value, revision = _wait_revision(
+                infinite_host,
+                plane,
+                live_signal,
+                after=previous_revision,
+            )
+            assert isinstance(live_value.coverage, MonitorCoverage)
+            assert live_value.transient is True
+            assert live_value.run_record["parameters"]["repeat"] == 0
+            generation = live_publication.event_ref.generation
+            if live_generation is None:
+                live_generation = generation
+            else:
+                assert generation == live_generation
+            previous_revision = revision
+
+        infinite_host.cancel("Guard A repeat-zero stop")
+        _wait_terminal(infinite_host, phase="cancelled")
+        assert camera.capture_state() is False
+        assert plane.latest_publication(live_signal) is None
+
+        for host in reversed(hosts):
+            host.shutdown()
+        assert all(
+            host.terminal and not host.running and host.worker_idle for host in hosts
+        )
+        assert plane.freeze().signals == {}
+        assert camera.capture_state() is False
+        assert sequencer.snapshot()["firing"] is False
+    finally:
+        for host in reversed(hosts):
+            _cleanup_host(host)
+        plane.close()
+        installation.close()

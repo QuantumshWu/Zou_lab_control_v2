@@ -43,18 +43,17 @@ class TaskConsoleView(QtWidgets.QWidget):
     add_logic_requested = QtCore.pyqtSignal()
     pause_toggled = QtCore.pyqtSignal(bool)
     selectors_toggled = QtCore.pyqtSignal(bool)
-    save_requested = QtCore.pyqtSignal()
-    load_requested = QtCore.pyqtSignal()
-    save_image_requested = QtCore.pyqtSignal()
-    #: The BOARD, not the data on it: which panels, drawn how, and what is
-    #: producing them.  An arrangement that took an afternoon used to be lost
-    #: with the window, because saving here meant saving numbers.
-    save_board_requested = QtCore.pyqtSignal()
-    load_board_requested = QtCore.pyqtSignal()
+    #: Two deliberately separate header products: a stopped, reusable pipeline
+    #: layout and one ordinary screenshot of the current GUI.  Scientific
+    #: figure data is saved from a panel's Edit tab, never from this header.
+    save_layout_requested = QtCore.pyqtSignal()
+    load_layout_requested = QtCore.pyqtSignal()
+    save_screenshot_requested = QtCore.pyqtSignal()
     #: Re-raised from the board, because a presenter talks to the view it was
     #: given.  Where the operator put the cards is where the panels ARE, and a
     #: figure saved in a different order is a figure of a board nobody saw.
     panel_order_committed = QtCore.pyqtSignal(tuple)
+    editor_close_requested = QtCore.pyqtSignal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -99,14 +98,9 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.pause_button = self.pause_switch
         self._paused = False
         self.selectors_switch = FluentSwitch("Selectors")
-        self.save_image_button = FluentButton("Save image", color=ACCENT)
-        self.save_button = FluentButton("Save data", color=ACCENT)
-        self.load_button = FluentButton("Open figure", color=ORANGE)
-        # Two different acts, and they were one word apart: this pair writes and
-        # restores the BOARD; the pair above writes the numbers on it and opens
-        # a figure someone saved earlier.
-        self.save_board_button = FluentButton("Save board", color=ACCENT)
-        self.load_board_button = FluentButton("Load board", color=ORANGE)
+        self.save_screenshot_button = FluentButton("Save Screenshot", color=ACCENT)
+        self.save_layout_button = FluentButton("Save Layout", color=ACCENT)
+        self.load_layout_button = FluentButton("Load Layout", color=ORANGE)
 
         for widget in (
             self.status_dot,
@@ -119,11 +113,9 @@ class TaskConsoleView(QtWidgets.QWidget):
             self.add_panel_button,
             self.selectors_switch,
             self.pause_switch,
-            self.save_image_button,
-            self.save_button,
-            self.load_button,
-            self.save_board_button,
-            self.load_board_button,
+            self.save_screenshot_button,
+            self.save_layout_button,
+            self.load_layout_button,
         ):
             header.addWidget(widget)
         outer.addWidget(header_frame)
@@ -134,6 +126,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         outer.addWidget(self.status_strip)
 
         self.tabs = FluentTabWidget()
+        self.tabs.tab_close_requested.connect(self.editor_close_requested.emit)
         monitor_page = QtWidgets.QWidget()
         monitor_page.setStyleSheet("background: transparent;")
         monitor_layout = QtWidgets.QVBoxLayout(monitor_page)
@@ -180,11 +173,9 @@ class TaskConsoleView(QtWidgets.QWidget):
             lambda _checked=False: self.pause_toggled.emit(not self._paused)
         )
         self.selectors_switch.toggled.connect(self.selectors_toggled.emit)
-        self.save_button.clicked.connect(self.save_requested.emit)
-        self.load_button.clicked.connect(self.load_requested.emit)
-        self.save_image_button.clicked.connect(self.save_image_requested.emit)
-        self.save_board_button.clicked.connect(self.save_board_requested.emit)
-        self.load_board_button.clicked.connect(self.load_board_requested.emit)
+        self.save_screenshot_button.clicked.connect(self.save_screenshot_requested.emit)
+        self.save_layout_button.clicked.connect(self.save_layout_requested.emit)
+        self.load_layout_button.clicked.connect(self.load_layout_requested.emit)
 
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
         """What kinds of panel this board can add, as (key, label).
@@ -252,6 +243,25 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def set_summary(self, text: str) -> None:
         self.summary_label.setText(str(text))
+
+    def add_editor_tab(self, editor: QtWidgets.QWidget, title: str) -> None:
+        self.tabs.add_closable_tab(editor, str(title), focus=True)
+
+    def focus_editor_tab(self, editor: QtWidgets.QWidget) -> bool:
+        index = self.tabs.indexOf(editor)
+        if index < 0:
+            return False
+        self.tabs.setCurrentIndex(index)
+        return True
+
+    def remove_editor_tab(self, editor: QtWidgets.QWidget) -> bool:
+        index = self.tabs.indexOf(editor)
+        if index < 0:
+            return False
+        self.tabs.removeTab(index)
+        editor.setParent(None)
+        editor.deleteLater()
+        return True
 
 
 __all__ = ["TaskConsoleView"]

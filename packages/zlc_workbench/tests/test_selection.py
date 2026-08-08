@@ -27,8 +27,15 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
-from zlc_workbench.selection import PlotSelectionSource, attach_selection_bridge
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
+from zlc_workbench.selection import (
+    PlotSelectionSource,
+    attach_selection_bridge,
+    subscribe_committed_selection,
+)
 from zlc_workbench.session import ExperimentSession
 
 ATOM_ROOT = Path(__file__).resolve().parents[2] / "zlc_atom"
@@ -53,10 +60,11 @@ def frames(session):
     pulse = session.load_pulse("calibration")
     node = CameraMeasurementNode(
         camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+        ),
         signal_plane=session.signal_plane,
         producer="cm",
-        repeat=1,
-        frames_per_cycle=int(pulse["camera_windows"]),
     )
     capture = node.prepare()
     session.fire(shots=1)
@@ -362,4 +370,19 @@ def test_every_derived_signal_can_be_drawn_by_the_panel_that_derived_it(
         )
     finally:
         bridge.close()
+        source.close()
+
+
+def test_frozen_editor_subscription_reports_commits_without_a_runtime_bridge(
+    image_panel,
+) -> None:
+    """Panel Edit translates one answer and owns only a host subscription."""
+
+    seen: list = []
+    source = subscribe_committed_selection(image_panel, seen.append)
+    try:
+        _draw_area(image_panel)
+        assert len(seen) == 1
+        assert seen[0].selector_kind == "area"
+    finally:
         source.close()

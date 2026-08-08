@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot import (
@@ -8,6 +9,7 @@ from zlc_plot import (
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
+    ImagePlot,
     PlotSession,
     RollingPlot,
 )
@@ -27,6 +29,21 @@ def _snapshot(*, revision: int = 0, repeats: int = 1) -> DatasetSnapshot:
     return DatasetSnapshot(schema, values, revision=revision)
 
 
+def _image_snapshot() -> DatasetSnapshot:
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"sample": np.array([0.0])}),
+        data_axes=(
+            Axis.create("row", size=2),
+            Axis.create("column", size=3),
+        ),
+        dtype=np.float64,
+        generation="public-surface-image",
+    )
+    values = np.arange(6, dtype=np.float64).reshape(1, 1, 2, 3)
+    return DatasetSnapshot(schema, values, revision=0)
+
+
 def test_session_replace_spec_reuses_the_existing_surface() -> None:
     session = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
     figure = session._renderer.figure
@@ -36,6 +53,44 @@ def test_session_replace_spec_reuses_the_existing_surface() -> None:
         assert session._renderer.figure is figure
         assert session.display_state["bin_count"] == 12
     finally:
+        session.close()
+
+
+def test_image_site_overlay_is_plain_roundtrippable_display_state() -> None:
+    snapshot = _image_snapshot()
+    spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
+    session = PlotSession(snapshot, spec)
+    restored: PlotSession | None = None
+    curve = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        described = session.describe_display()
+        declaration = described.parameter_schema["site_overlay"]
+
+        assert declaration.value_type is str
+        assert declaration.default == "off"
+        assert declaration.choices == ("off", "centers", "occupancy")
+        assert described.display_state["site_overlay"] == "off"
+
+        updated = session.set_parameter("site_overlay", "occupancy")
+        assert updated["site_overlay"] == "occupancy"
+        assert session.describe_display().display_state["site_overlay"] == "occupancy"
+
+        # DisplayState values are the plain state read surface; the ordinary
+        # constructor parameter mapping is the matching restore surface.
+        restored = PlotSession(snapshot, spec, parameters=dict(updated.values))
+        assert restored.describe_display().display_state["site_overlay"] == "occupancy"
+
+        curve_description = curve.describe_display()
+        assert "site_overlay" not in curve_description.parameter_schema
+        assert "site_overlay" not in curve_description.display_state.values
+        with pytest.raises(KeyError, match="site_overlay"):
+            curve.set_parameter("site_overlay", "centers")
+        with pytest.raises(ValueError, match="site_overlay"):
+            session.set_parameter("site_overlay", "sites")
+    finally:
+        curve.close()
+        if restored is not None:
+            restored.close()
         session.close()
 
 

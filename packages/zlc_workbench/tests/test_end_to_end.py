@@ -20,7 +20,10 @@ import numpy as np
 import pytest
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.session import ExperimentSession, Workspace
 
@@ -65,10 +68,11 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
 
     node = CameraMeasurementNode(
         camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+        ),
         signal_plane=session.signal_plane,
         producer="cm",
-        repeat=1,
-        frames_per_cycle=int(pulse["camera_windows"]),
     )
     node.sequencer = session.sequencer  # the record wants both devices
 
@@ -117,10 +121,11 @@ def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
     pulse = session.load_pulse("calibration")
     node = CameraMeasurementNode(
         camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+        ),
         signal_plane=session.signal_plane,
         producer="cm",
-        repeat=1,
-        frames_per_cycle=int(pulse["camera_windows"]),
     )
 
     saved = []
@@ -177,10 +182,11 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
 
         node = CameraMeasurementNode(
             camera=session.camera,
+            request=CameraMeasurementRequest(
+                "camera", 0.02, None, 1, int(pulse["camera_windows"]), 2.0
+            ),
             signal_plane=session.signal_plane,
             producer="cm",
-            repeat=1,
-            frames_per_cycle=int(pulse["camera_windows"]),
         )
         capture = node.prepare()
         session.fire(shots=1)

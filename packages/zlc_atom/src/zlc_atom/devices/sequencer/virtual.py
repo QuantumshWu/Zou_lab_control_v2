@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import threading
 import time
 from typing import Any, Sequence
@@ -33,6 +33,18 @@ class DictRegisterTransport:
 CAMERA_TRIGGER_CHANNEL = "emCCD"
 
 
+@dataclass(frozen=True)
+class _VirtualAppliedState:
+    """The editor-facing echo of what this virtual streamer currently holds."""
+
+    program: object
+    source: object | None
+    slot_values: tuple[int, ...] = ()
+    scan_rows: tuple[tuple[int, ...], ...] = ()
+    forever: bool = False
+    loaded_at: float = 0.0
+
+
 class VirtualPulseStreamer:
     """Register-backed PulseStreamer fake with programmable terminal report."""
 
@@ -52,6 +64,7 @@ class VirtualPulseStreamer:
         self._done_report = done_report
         self._opened = False
         self._loaded: object | None = None
+        self._applied: _VirtualAppliedState | None = None
         self._slots: tuple[int, ...] = ()
         self._scan_table: np.ndarray | None = None
         self._cursor: int | None = None
@@ -85,12 +98,19 @@ class VirtualPulseStreamer:
         if self._firing:
             raise RuntimeError("the streamer is already firing")
 
-    def load(self, prog: object) -> None:
+    def load(self, prog: object, *, source: object | None = None) -> None:
         with self._lock:
             if not self._opened:
                 raise RuntimeError("PulseStreamer is closed")
             self._require_idle()
             self._loaded = prog
+            self._applied = _VirtualAppliedState(
+                prog,
+                source,
+                loaded_at=time.monotonic(),
+            )
+            self._slots = ()
+            self._scan_table = None
             self._cursor = 0
 
     def write_slots(self, values: Sequence[int]) -> None:
@@ -99,13 +119,34 @@ class VirtualPulseStreamer:
                 raise RuntimeError("PulseStreamer is closed")
             self._require_idle()
             self._slots = tuple(int(value) for value in values)
+            if self._applied is not None:
+                self._applied = replace(
+                    self._applied,
+                    slot_values=self._slots,
+                    scan_rows=(),
+                )
 
-    def write_scan_table(self, rows: np.ndarray) -> None:
+    def write_scan_table(self, rows: np.ndarray, *, sweeps: int = 1) -> None:
         with self._lock:
             if not self._opened:
                 raise RuntimeError("PulseStreamer is closed")
             self._require_idle()
-            self._scan_table = np.array(rows, copy=True)
+            count = int(sweeps)
+            if count <= 0:
+                raise ValueError("scan sweeps must be positive")
+            table = np.asarray(rows)
+            if table.ndim != 2 or table.shape[0] <= 0:
+                raise ValueError("scan rows must be a non-empty two-dimensional table")
+            self._scan_table = np.tile(table, (count, 1))
+            if self._applied is not None:
+                self._applied = replace(
+                    self._applied,
+                    slot_values=(),
+                    scan_rows=tuple(
+                        tuple(int(value) for value in row)
+                        for row in self._scan_table
+                    ),
+                )
 
     def fire(self, *, forever: bool = False) -> None:
         with self._lock:
@@ -117,6 +158,8 @@ class VirtualPulseStreamer:
             self._firing = True
             self._clk_enable = True
             self._status = 1 if forever else 0
+            if self._applied is not None:
+                self._applied = replace(self._applied, forever=bool(forever))
             self._cursor = 0 if self._cursor is None else self._cursor + 1
         callback = getattr(self.world, "fire", None)
         if callback is not None:
@@ -195,8 +238,16 @@ class VirtualPulseStreamer:
 
     def safe(self) -> SafeReadback:
         with self._lock:
-            word = 1 if self._clk_enable else 0
-            return SafeReadback((self._status, self._status), (word,), True)
+            self._clk_enable = False
+            self._firing = False
+            self._status = 0
+            if self._applied is not None:
+                self._applied = replace(self._applied, forever=False)
+            return SafeReadback((0, 0), (0,), True)
+
+    def applied(self) -> _VirtualAppliedState | None:
+        with self._lock:
+            return self._applied
 
     def snapshot(self) -> dict[str, object]:
         """The same questions the real board answers, in the same words.
@@ -212,7 +263,7 @@ class VirtualPulseStreamer:
                 "opened": self._opened,
                 "loaded": self._loaded is not None,
                 "firing": self._firing,
-                "forever": bool(getattr(self._loaded, "repeat_forever", False)),
+                "forever": bool(self._applied is not None and self._applied.forever),
                 "reloaded_before_fire": False,
                 "cursor": self._cursor,
                 "scan_count": 0 if self._scan_table is None else int(self._scan_table.shape[0]),
@@ -239,14 +290,14 @@ class SequencerDevice:
     def close(self) -> None:
         self.streamer.close()
 
-    def load(self, prog: object) -> None:
-        self.streamer.load(prog)
+    def load(self, prog: object, *, source: object | None = None) -> None:
+        self.streamer.load(prog, source=source)
 
     def write_slots(self, values: Sequence[int]) -> None:
         self.streamer.write_slots(values)
 
-    def write_scan_table(self, rows: np.ndarray) -> None:
-        self.streamer.write_scan_table(rows)
+    def write_scan_table(self, rows: np.ndarray, *, sweeps: int = 1) -> None:
+        self.streamer.write_scan_table(rows, sweeps=sweeps)
 
     def fire(self, *, forever: bool = False) -> None:
         self.streamer.fire(forever=forever)
@@ -262,6 +313,10 @@ class SequencerDevice:
 
     def snapshot(self) -> dict[str, object]:
         return dict(self.streamer.snapshot())
+
+    def applied(self) -> object | None:
+        applied = getattr(self.streamer, "applied", None)
+        return applied() if callable(applied) else applied
 
 
 class VirtualSequencer(SequencerDevice):

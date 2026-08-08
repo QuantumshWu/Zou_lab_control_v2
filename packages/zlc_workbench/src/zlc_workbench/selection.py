@@ -45,7 +45,11 @@ from zlc_runtime import (
 )
 
 
-__all__ = ["PlotSelectionSource", "attach_selection_bridge"]
+__all__ = [
+    "PlotSelectionSource",
+    "attach_selection_bridge",
+    "subscribe_committed_selection",
+]
 
 
 #: Plot kinds the runtime can derive from.  A rolling plot is a curve over the
@@ -246,6 +250,7 @@ def attach_selection_bridge(
     source_signal: str,
     *,
     bridge_id: str,
+    on_committed: Callable[[SelectionState], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
     """Connect one panel's gestures to the plane, deriving as they commit.
 
@@ -256,7 +261,52 @@ def attach_selection_bridge(
     source = PlotSelectionSource(host)
     bridge = SelectionBridge(plane, source_signal, source, source, bridge_id=bridge_id)
     bridge.start()
+    if on_committed is not None:
+        if not callable(on_committed):
+            bridge.close()
+            source.close()
+            raise TypeError("on_committed must be callable or None")
+
+        def _on_selection(
+            change: SelectionChange,
+            selection: SelectionState,
+        ) -> None:
+            if change is SelectionChange.COMMITTED:
+                on_committed(selection)
+
+        source.subscribe_selection(_on_selection)
     return bridge, source
+
+
+def subscribe_committed_selection(
+    host: Any,
+    callback: Callable[[SelectionState], object],
+) -> PlotSelectionSource:
+    """Translate committed gestures without publishing a derived signal.
+
+    Panel Edit uses a frozen plotting host: its selector updates the direct
+    producer draft, but must not create a second runtime derivation beside the
+    live monitor panel.  The returned source owns the host subscription and is
+    the one object the caller closes with that frozen surface.
+    """
+
+    if not callable(callback):
+        raise TypeError("callback must be callable")
+    source = PlotSelectionSource(host)
+
+    def _on_selection(
+        change: SelectionChange,
+        selection: SelectionState,
+    ) -> None:
+        if change is SelectionChange.COMMITTED:
+            callback(selection)
+
+    try:
+        source.subscribe_selection(_on_selection)
+    except Exception:
+        source.close()
+        raise
+    return source
 
 
 # --------------------------------------------------------------- translation
