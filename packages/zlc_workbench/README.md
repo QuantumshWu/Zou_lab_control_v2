@@ -14,11 +14,52 @@ of the split was that each subject has exactly one home.
 The notebook and the GUI drive the **same** session facade. If those two ever
 grow separate paths, the split has failed.
 
+TaskConsole and Pulse Editor are two windows over that same `Experiment`
+session, named devices, virtual world, and sequencer; no second session or IPC
+service is introduced. Workbench arbitrates multiple `OBSERVE` readers and one
+`EXCLUSIVE` Logic Node owner per concrete device instance. It validates a new
+request before stopping only the old nodes that conflict with that instance.
+
+## TaskConsole product wiring
+
+The formal virtual and physical path is Calibration artifact -> Camera frames
+signal -> Occupancy processor -> fixed-kind Plot Panel. Add Logic creates a
+stopped row and opens its non-modal Edit tab. Each row has one shared draft;
+Logic Edit uses Start/Restart, while Panel Edit's Producer Apply sends that same
+draft through the same restart endpoint. Setting and Panel Edit likewise
+project one immutable/replace-style `PanelState`, so signal, size, interval and
+plot parameters cannot drift between two copies.
+
+Committed selectors are routed panel -> exact displayed signal -> direct
+producer descriptor. The descriptor returns a data-only draft patch (for
+example Image Area to sensor ROI); Workbench contains no camera-SDK coordinate
+branch. A new run keeps its stable signal key, gets a new generation, and causes
+the panel to replace its plot host.
+
+## Save boundaries
+
+- Header **Save Layout** writes stopped node drafts, named-device choices,
+  signal wiring and panel layout/state. It does not freeze datasets or save
+  running state/device snapshots.
+- Header **Save Screenshot** writes one ordinary image of the TaskConsole GUI,
+  with no layout, data archive or provenance.
+- Panel Edit **Save Fig** writes only the frozen image/data currently shown by
+  that panel, its plot/overlay state, and the run-time call chain and actual
+  device snapshots already captured when the runs executed. It does not include
+  another panel or the whole monitor board.
+
+Calibration JSON is a separate Task artifact. Panel Save records its actual
+path where relevant, without embedding the JSON or adding fingerprint/hash.
+
 ## Check the environment first
 
 ```bash
-python -m zlc_workbench.tools.check_environment
+python -m zou_lab_control_v2 check
 ```
+
+That root-bootstrap entry prints every resolved production module path before
+reporting success, so the check cannot silently measure an installed sibling
+copy.
 
 Run it from anywhere except the workspace root. Three separate incidents in this
 project came from an import that succeeded while the wrong code ran — a monolith

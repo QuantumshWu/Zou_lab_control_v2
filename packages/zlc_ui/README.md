@@ -1,7 +1,7 @@
 # zlc_ui
 
-`zlc_ui` is the standalone owner of the reusable, domain-independent UI
-layer split out of ZLC v1.  It is deliberately usable without a v1 checkout
+`zlc_ui` is the monorepo owner of the reusable, domain-independent UI
+layer split out of ZLC v1. It is deliberately usable without a v1 checkout
 or any laboratory, plotting, data, or storage package installed.  Its only
 non-standard UI dependency beyond PyQt5 is the reference
 `PyQt5-Frameless-Window` shell used by the original Fluent layer.
@@ -20,30 +20,29 @@ non-standard UI dependency beyond PyQt5 is the reference
      through `*_requested`, `*_picked`, and `*_committed` signals and accept
      idempotent `set_*` inputs.  They do not own data, experiment, scheduling,
      or plotting logic.
-   - Presentation runtime concerns such as surface arbitration, beat
-     scheduling, and host generation replacement belong to a future runtime
-     package.  Views provide `set_surface(QWidget | None)` as their mount
-     point.
+   - Presentation scheduling and surface arbitration belong to `zlc_runtime`;
+     generation replacement and application wiring belong to `zlc_workbench`.
+     Views provide the handle/mount intents needed by those owners without
+     taking over runtime or plot state.
 3. Public signal payloads and `set_*` arguments are restricted to `str`,
    `int`, `float`, `bool`, plain tuples, `QWidget`, and this package's own
    headless value types such as `FormSpec`.  Domain objects do not cross the
    boundary.
-4. This repository is the sole owner of its UI code.  The v1
-   `zlc_frontend` and console UI remain frozen legacy copies; fixes land here.
-   The v1 consumer cut is a separate task, and this package is never vendored
-   back into v1.
+4. This package directory in the `Zou_lab_control_v2` monorepo is the sole
+   owner of current UI code. The v1 `zlc_frontend` and the old standalone
+   package repositories are historical references, not alternate edit trees.
 5. The package name is intentionally `zlc_ui`, distinct from v1's
    `zlc_frontend`, so a shadow import cannot silently select a legacy copy.
-6. The package is independently testable and reviewable.  A clean environment
-   must pass `pip install -e ".[dev]"` followed by `pytest -q`; demos use fake
-   data only.  The interactive console demo echoes outgoing view intents in
-   its in-window log and to stdout; the gallery is a compact control survey.
+6. The package is independently testable and reviewable inside the monorepo;
+   demos use fake data only. The interactive console demo echoes outgoing view
+   intents in its in-window log and to stdout; the gallery is a compact control
+   survey.
 
 ## Development
 
 ```powershell
-pip install -e ".[dev]"
 $env:QT_QPA_PLATFORM = "offscreen"
+python -c "import zou_lab_control_v2; import zlc_ui; print(zlc_ui.__file__)"
 pytest -q
 ```
 
@@ -64,7 +63,8 @@ from zlc_ui import (
 Use these names for the headless contracts and the Qt application lifecycle.
 Concrete feature views stay in their explicit modules (`zlc_ui.console`,
 `zlc_ui.pulse`, and so on), so the facade remains a discoverable, bounded API.
-The complete allow-list is frozen in [`docs/contract.md`](docs/contract.md).
+The current complete allow-list is recorded in
+[`docs/contract.md`](docs/contract.md).
 
 The desktop gallery and console demos live in `examples/`.  The offscreen
 environment is only for object-level automated tests; it does not produce a

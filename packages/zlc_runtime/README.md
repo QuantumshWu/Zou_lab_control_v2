@@ -1,7 +1,7 @@
 # zlc-runtime
 
-`zlc-runtime` is the Qt-free runtime layer for signal data, lossless and
-monitoring consumption, node hosting, and presentation scheduling.  It is a
+`zlc-runtime` is the Qt-free runtime layer for signal data, exact/follow/latest
+consumption, node hosting, and presentation scheduling.  It is a
 small contract package: domain-specific device identity and UI integration
 remain in their owning packages.
 
@@ -20,8 +20,8 @@ implementation details:
 3. The runtime is Qt-free.  Wakeups are injected callbacks; Qt adapters belong
    in `zlc_ui`.
 4. Notebooks are first-class acceptance fixtures, while the top-level facade
-   remains finite and allow-listed.  The authoritative cross-repository
-   contract is [docs/contract.md](docs/contract.md).
+   remains finite and allow-listed. The current package API is recorded in
+   [docs/contract.md](docs/contract.md); that contract is not a repository Goal.
 
 ## Package map
 
@@ -34,8 +34,10 @@ and UI/plot adapters.
 
 `zlc_runtime.host.NodeHost` is deliberately a lifecycle seam.  Domain-side
 descriptors, application contexts, device requirements, and operation binding
-stay outside this package; the host receives only a minimal finite/reactive
-`Node`, its declared outputs, and an injected signal-naming strategy.
+stay outside this package. The host chooses a worker when no source signal is
+bound and a processor when one source is bound. Source extent then selects the
+processor path: finite `FollowTap`, one retained final snapshot, or infinite
+latest. Measurement/Task/Processor role does not select a runtime kind.
 
 ## Dependency boundary
 
@@ -60,8 +62,9 @@ retirement, while `EventRef` remains the lineage identity used for same-shot
 derived-family coherence.
 
 The notebook and `examples/demo_signal_flow.py` remain headless and do not
-depend on `zlc_plot`.  A zlc_plot integration demo is intentionally deferred
-until the separate zlc-data/zlc_plot reconciliation is complete.
+depend on `zlc_plot`. The integrated plot-panel and TaskConsole path lives in
+`zlc_workbench`, which composes this runtime with `zlc_plot` without moving plot
+or device semantics into this package.
 
 The migration size and comparison to the read-only reference are recorded in
 [docs/loc-report-2026-08-03.md](docs/loc-report-2026-08-03.md).

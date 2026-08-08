@@ -1,21 +1,19 @@
-# zlc_runtime 对外契约(跨仓唯一权威)
+# zlc_runtime 当前 public API contract
 
-状态: **FROZEN (P0.3)**
+> 本文件描述当前 monorepo 中 `zlc_runtime` 的公开边界，用于调用方与实现保持一致；它不是仓库 Goal，也不覆盖根目录 `ARCHITECTURE_DESIGN.md` 与 `IMPLEMENTATION_PLAN.md`。
 
-> 本文件是并行仓(zlc_atom 等)写 fake 的唯一依据。**任何签名变更必须先改本文件**(commit message 点名),实现跟随。方法名与语义为硬承诺;个别参数细节在实现落地时校订,校订=改本文件。签名来源:docs/survey-*.md 三份(行号锚点在内)。
-
-## 顶层 facade(allow-list,≤24 名,API 轮冻结)
+## 顶层 facade（allow-list，≤24 名）
 
 `BoardScheduler` `DatasetCoverage` `DatasetOutputDeclaration` `DerivedSignalOutput` `FinalDatasetOutput` `HarmonicClock` `LiveDatasetOutput` `MonitorCoverage` `OwnerChannels` `SurfaceBatchArbiter` `SurfaceUpdate` `SignalDataPlane` `SignalValue` `SignalPublication` `SignalDescription` `AcquisitionStream` `NodeHost` `SelectionBridge` `__version__` `SelectionChange` `SelectionRange` `SelectionState` `FitEventValue`
 
-`MAX_PUBLIC_NAMES = 13` 是真实包级公开命名空间的机械上限；守卫从
+`MAX_PUBLIC_NAMES = 24` 是真实包级公开命名空间的机械上限；守卫从
 `dir(zlc_runtime)` 中排除子模块对象后计数。`__version__` 是 facade 的版本探针，因
 双下划线前缀不计入该公开命名空间计数；`MAX_PUBLIC_NAMES` 本身是守卫元数据，不在
 用户 facade 的 `__all__` 清单中。
 
-撤下的实现只是不再从包顶层 re-export，仍由其所属子模块提供：
+未从包顶层 re-export 的实现仍由其所属子模块提供：
 `SignalFront`、`ExactReservation`、`MonitorTap`、`FollowTap`、`LiveDatasetPort`、
-`Node`、`RunHandleLike`、`BoardScheduler`、`HarmonicClock`、`OwnerChannels`。
+`Node` 与 `RunHandleLike`。
 
 ## SignalDataPlane(信号面门面)
 
@@ -96,7 +94,7 @@ withdraw_derived(owner_id: str) -> None
 
 **核心不变量(派生族 same-shot,自动,非 API)**:任何 `SignalFront` 内,派生信号(ROI/fit/occupancy…)的值必源自当前 front 中其祖先的同一根 publication(沿 `direct_parent_refs` 追根,根集一致),传递到任意深度;族不齐整族回退上一完整拍,绝不撕裂。跨 producer 不承诺,无全局 shot counter。
 
-值类型:`SignalPublication`(event_ref: EventRef, direct_parent_refs: tuple[EventRef,...], 兄弟输出 Mapping)、`SignalValue`(block/schema/values/behind)、`SignalFront`(signals/publication_by_signal/continuous_group())。`EventRef = (stream_id, generation, sequence)` frozen 三元组,lineage 身份词汇。`direct_parent_refs` 是 lineage 身份,不属于设备回传对账协议。
+值类型：`SignalPublication`（`event_ref`、`direct_parent_refs`、兄弟输出 Mapping）、`SignalValue`（`name`、immutable `snapshot`、`coverage`、`transient`、run-time `run_record`，并从 snapshot 投影 block/schema/values）、`SignalFront`（signals/publication_by_signal/continuous_group）。`EventRef = (stream_id, generation, sequence)` 是 frozen lineage 身份三元组。`direct_parent_refs` 是 lineage 身份，不属于设备回传对账协议。
 
 ## 流与消费口(zlc_runtime.streams)
 
@@ -104,19 +102,22 @@ withdraw_derived(owner_id: str) -> None
 AcquisitionStream.create(...) -> (stream, producer)     # producer 持排他写/终止权
 stream.reserve(total_events) -> ExactReservation        # 首发布前接入;一 generation 恰一 formal exact
   reservation.activate() -> cursor; cursor.next() -> Delivery; acknowledge_delivery(...)  # ack 即水位,绝不丢,缺口=StreamGap 异常
-stream.monitor() -> MonitorTap                          # next(timeout) 有序;latest() 跳队尾并记 missed
+stream.monitor() -> MonitorTap                          # next(timeout) 有序；latest() 只保留当时最新值，不计 loss
 stream.follow() -> FollowTap                            # 可中途加入,无 latest(),不回放
 异常族:StreamGap / StreamEndedEarly / SchemaChanged / SourceFailed
 LiveDatasetPort:bind(dataset) / set_change_listener(cb) / updated() / freeze_current() -> snapshot / fail(...) / source_terminal(...) / close()
 ```
 
-## 节点宿主(zlc_runtime.host)
+## 节点宿主（zlc_runtime.host）
 
 ```
-Node 协议:kind ∈ {finite, reactive}
-  finite:  execute(ctx);ctx 六能力 = cancel_requested / start_and_wait(starter) /
-           open_live_dataset(...) / open_exact_dataset(...) / publish_final(outputs) / warn(text)
-  reactive: evaluate(SignalValue) -> Mapping[str, output](非空);恰好一个输入信号键
+Node 协议没有 role -> runtime-kind 映射：
+  未绑定 source：worker，提供 execute(ctx)
+  绑定恰好一个 source：processor，提供 evaluate(SignalValue) -> 非空 output Mapping
+  processor 的 finite FollowTap / retained final one-shot / infinite latest 路径由 source extent 决定
+ctx 能力 = generation / cancel_requested / start_and_wait(starter) /
+           attach_live_outputs(...) / open_live_dataset(...) / open_exact_dataset(...) /
+           publish_final(outputs) / warn(text)
 NodeHost:start() / cancel(reason) / poll() / shutdown();observation 只读状态投影;
   声明了输出却没发布 = 硬失败;同 host 可重启(generation 计数防陈旧完成)
 RunHandleLike 协议:snapshot() / cancel(reason) / result()      # 硬件执行引擎在域侧,本包只经此相望

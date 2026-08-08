@@ -1,32 +1,24 @@
 # zlc-data
 
-`zlc-data` is the independent distribution of the **role-axis** data model used
-by Zou Lab Control. Its source of truth is the role-axis package in the
-migration tree:
+`zlc-data` is the **role-axis** data-model layer inside the
+`Zou_lab_control_v2` monorepo. This package directory is its only current
+source of truth; old standalone repositories and v1 trees are historical
+references, not alternate install or edit locations. Its runtime dependency is
+NumPy only.
 
-`..\Zou_lab_control_v1_claude\Zou_lab_control_v1\zlc_data`
+## Test the monorepo package
 
-This repository is the sole owner of that package from its first commit. The
-runtime dependency is NumPy only; development adds pytest only.
-
-## Important installation warning
-
-The independent `zlc_plot` repository also distributes a top-level package
-named `zlc_data`, but that is a different, name-axis implementation. Never
-install both distributions in editable mode in the same environment. The
-`zlc_plot` migration and pinning work is outside this repository.
-
-## Install and test
+Run from the repository root and bootstrap that checkout before importing any
+`zlc_*` name:
 
 ```text
-python -m pip install -e ".[dev]"
-pytest -q
+python -c "import zou_lab_control_v2; import zlc_data; print(zlc_data.__file__)"
+python -m pytest -q packages/zlc_data/tests
 ```
 
-The package has no compatibility shim for the other `zlc_data` owner. Import
-identity is guarded by `tests/test_package_guards.py`, which checks the
-distribution version and resolves the imported package to this checkout's
-`src/zlc_data` directory.
+The package has no compatibility shim for an old name-axis `zlc_data` copy.
+Import-identity tests require this checkout's `packages/zlc_data/src/zlc_data`
+directory.
 
 The cross-package ownership boundary for canonical units, display conversion,
 and latest-only live ingress is documented in [`docs/contract.md`](docs/contract.md).
@@ -46,7 +38,7 @@ and latest-only live ingress is documented in [`docs/contract.md`](docs/contract
 | `snapshot_projection.py` | Explicit scalar, value, and derived dataset materialization helpers. |
 | `output_contract.py` | Stable semantic ids for explicit authoritative dataset projections. |
 | `io.py` | Pickle-free NPZ persistence through `save_npz`/`load_npz`. |
-| `validation.py` | The seven data-layer validators: `canonical_text`, `exact_mapping`, `finite_real`, `integer`, `nonnegative_integer`, `positive_integer`, and `sha256_text`. |
+| `validation.py` | The seven data-layer validators: `canonical_text`, `exact_mapping`, `finite_real`, `integer`, `nonnegative_integer`, `positive_integer`, and `digest_text`. |
 | `numeric.py` | Canonical numeric dtypes and checked reduction arithmetic. |
 | `_arrays.py`, `_diagnostic.py`, `_tree.py` | Private array immutability, exact diagnostic formatting, and deterministic primitive-tree support. |
 
@@ -73,9 +65,12 @@ helpers in `zlc_data.value`. The exact facade allow-list, including the
 module-scoped boundary, is recorded in [`docs/contract.md`](docs/contract.md)
 and guarded by tests.
 
-Schema fingerprints in this package are defined by `_tree.digest` (JSON plus
-SHA-256), not by the migration tree's `canonical_digest`; the values differ and
-schema fingerprints produced by the old tree are not cross-comparable.
+Schema fingerprints in this package are existing BLAKE2b-128 content names
+defined by `_tree.digest`. They identify a schema used by `zlc_data` codecs and
+committed transforms; they are not Calibration or Panel Save provenance, a
+security feature, or authority to add fingerprints/hashes to those product
+artifacts. Panel archives can rebuild the runtime revision reference from the
+schema they already store instead of persisting the derived name again.
 
 ## Executable usage
 

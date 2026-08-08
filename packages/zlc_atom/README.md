@@ -23,9 +23,10 @@ files, so the composition framework and UI do not need edits. A device type is
 similarly declared in a discovered `device_types.py` module with a factory and
 authoring schema.
 
-The initial device set is deliberately closed to `camera` and `sequencer`;
-the pylon camera adapter and all other device/node leaves are postponed until
-this skeleton has been exercised through several correction rounds.
+The current device set is deliberately closed to camera and sequencer
+capabilities. Virtual, DCAM, and Pylon camera adapters implement the same base
+camera contract; Workbench resolves any compatible named instance such as
+`camera` or `mot_camera` instead of hard-coding an instance name.
 
 ## Leaf tutorial
 
@@ -59,37 +60,41 @@ The runtime has one direction of responsibility:
 | --- | --- | --- |
 | Device | camera/sequencer protocols, buffers, trigger routing, virtual imaging world | calibration policy or analysis |
 | Measurement | arm/read/finish observation and publication of camera frames | pulse selection or `sequencer.load/fire` |
-| Task | pulse resolution, sequencer load/fire, repeated capture, calibration, final report publication | reusable readout mathematics |
+| Task | pulse resolution, sequencer load/fire, repeated capture, calibration, and artifact creation | reusable readout mathematics or signal publication |
 | Processor | consume a frames signal plus calibration and derive counts/occupied/rate with lineage | excitation or camera control |
 
 For a manually controlled experiment, the notebook calls `resolve_pulse`,
 `sequencer.load`, and `sequencer.fire` around a pure camera measurement. For
 an automated experiment, `CalibrationTask.run()` owns that whole sequence and
-returns the calibration/report product; its short-shot publication can be
-passed directly to `OccupancyProcessor`.
+returns a saved calibration/report artifact. Calibration discovers its site
+count and centers from the acquired images; it accepts no grid rows, columns,
+or site count and publishes no calibration/report signal. `OccupancyProcessor`
+instead consumes an explicit frames signal together with the saved calibration
+path.
 
-The supported offline acceptance path is in
-[`notebooks/usage.ipynb`](notebooks/usage.ipynb): virtual installation,
-camera measurement, calibration, and occupancy all run without hardware or a
-GUI.
+The supported headless product path discovers the three logic descriptors and
+hosts them through the real runtime plane: virtual Calibration writes a plain
+workspace JSON, Camera Measurement publishes finite or `Repeat = 0` infinite
+frames, and Occupancy consumes the frames key plus JSON path. Virtual and
+physical cameras differ only below the adapter boundary.
 
 ## Executable integration path
 
-Install the three local packages in editable mode from the workspace parent,
-then install this package:
+Run from the monorepo after importing the root bootstrap before any `zlc_*`
+package, so the checkout under test cannot be confused with an older editable
+installation:
 
 ```powershell
-python -m pip install -e ..\zlc_data -e ..\zlc_runtime -e ..\zlc_pulse -e .
+python -c "import zou_lab_control_v2; import zlc_atom; print(zlc_atom.__file__)"
 pytest -q
-python -m jupyter nbconvert --to notebook --execute notebooks/usage.ipynb --inplace
 ```
 
-The notebook uses the real `zlc_runtime.SignalDataPlane` and executes both
-paths: explicit user-owned pulse load/fire plus finite/monitor observation,
-then one-call `CalibrationTask` orchestration followed by occupancy lineage.
-It also runs the frozen oracle calibration with the required 29/360 error
-count. `zlc_pulse` remains a separate protocol package; the virtual sequencer
-has no alternate analysis path or `if virtual` branch.
+The formal virtual guard uses the real `zlc_runtime.SignalDataPlane`, catalog,
+descriptor and `NodeHost` paths. Finite processors drain ordered `FollowTap`
+events or consume a retained final snapshot once; infinite sources expose only
+latest data and no loss telemetry. `zlc_pulse` remains a separate protocol
+package, and the virtual sequencer has no alternate analysis path or
+`if virtual` branch.
 
 ## Migration line-count report
 

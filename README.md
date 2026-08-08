@@ -2,9 +2,31 @@
 
 Neutral-atom experiment control: one repository, one distribution, eight layers.
 
+The current product path uses the same descriptor/catalog/NodeHost/TaskConsole
+route for virtual and physical adapters:
+
+```text
+Calibration Task -> calibration JSON (SiteMap + readout model)
+Camera Measurement -> frames signal
+Occupancy Processor(frames + calibration path) -> occupancy data
+Image/other Plot Panel -> Panel Edit Save Fig
+```
+
+TaskConsole and Pulse Editor are two windows on the same `Experiment` session,
+named devices, virtual world, and sequencer; they do not create a second session
+or IPC service. Calibration discovers sites from its images and writes an
+artifact rather than a signal. Camera Measurement owns per-run exposure/ROI and
+uses `Repeat = 0` for infinite acquisition.
+
+The three TaskConsole save actions are intentionally separate: header **Save
+Layout** writes stopped pipeline/layout wiring without data, header **Save
+Screenshot** writes one ordinary image of the GUI, and Panel Edit **Save Fig**
+writes only that panel's displayed frozen image/data plus its run-time call-chain
+metadata and actual device snapshots.
+
 ```
 bin\install_requirements.bat   once per machine: numpy, matplotlib, PyQt5, ...
-bin\experiment.bat             the apparatus, then the console, then the pulse editor
+bin\experiment.bat             one experiment flow: Device Manager Init, then TaskConsole + Pulse UI
 bin\pulse_editor.bat           the pulse window on its own
 bin\update.bat                 git pull, re-check dependencies, prove it still imports
 bin\run_server.bat             the pulse server, on the machine wired to the board

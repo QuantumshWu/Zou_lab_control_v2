@@ -1,4 +1,10 @@
-# Launchers
+# Package launchers
+
+The formal experiment entry is the repository-root `bin\experiment.bat`. It
+opens Device Manager first and, after `Init devices`, opens TaskConsole and
+Pulse UI in the same process over one shared session. The wrappers in this
+package directory are developer/package entry points, not a second experiment
+workflow.
 
 Double-click, or run from the directory holding your experiment's `pulses/`,
 `data/` and `apparatus.json`. The workspace defaults to **where you started the
@@ -7,7 +13,7 @@ data directory.
 
 | Launcher | Window | First run |
 |---|---|---|
-| `task_console.bat` | Live experiment: devices, panels, the display beat | `task_console.bat --template virtual` |
+| `task_console.bat` | Developer wrapper for the same unified experiment app | `task_console.bat --template virtual` |
 | `pulse_editor.bat` | Edit a pulse, preview it, fire it | `pulse_editor.bat --connect virtual` |
 | `figure_viewer.bat` | Open a saved figure and read what it was | `figure_viewer.bat --path data\2026_08_05\run.npz` |
 
