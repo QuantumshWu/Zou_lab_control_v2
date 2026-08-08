@@ -32,10 +32,10 @@ def _validate_calibration(values: dict[str, object]) -> None:
 CALIBRATION_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
-            "pulse_name",
+            "pulse_template",
             "text",
-            "Calibration pulse",
-            "calibration",
+            "Calibration pulse template",
+            "imaging_template.json",
             required=True,
         ),
         AuthoringField("repeats", "int", "Samples", 30, minimum=1),
@@ -130,7 +130,6 @@ def _build(
     sequencer_key: str,
     pulse_search_paths: object,
     artifact_directory: object,
-    pulse_override: object | None = None,
     **values: object,
 ) -> CalibrationTask:
     authored = CALIBRATION_SCHEMA.freeze(values)
@@ -150,7 +149,7 @@ def _build(
         request=CalibrationRequest(
             camera_key=camera_key,
             sequencer_key=sequencer_key,
-            pulse_name=str(authored["pulse_name"]),
+            pulse_template=str(authored["pulse_template"]),
             repeats=int(authored["repeats"]),
             reference_exposure_seconds=float(
                 authored["reference_exposure_seconds"]
@@ -168,7 +167,6 @@ def _build(
         ),
         pulse_search_paths=paths,
         artifact_directory=artifact_directory,  # type: ignore[arg-type]
-        pulse_override=pulse_override,
     )
 
 

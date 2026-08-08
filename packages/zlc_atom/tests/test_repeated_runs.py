@@ -35,7 +35,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_runtime.plane import SignalDataPlane
 
-from pulses.calibration import CAMERA_CHANNEL, build
+from tests.pulse_fixture import CAMERA_CHANNEL, build_calibration_pulse
 
 
 def _fire_windows(sequencer, windows: int) -> None:
@@ -52,7 +52,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         assert installation.failures == {}
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
+        program, metadata = build_calibration_pulse()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 
@@ -82,7 +82,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
 def test_the_pulse_declares_its_own_camera_bracket() -> None:
     """The frame count is a property of the pulse, not a constant in the task."""
 
-    _program, metadata = build()
+    _program, metadata = build_calibration_pulse()
     assert metadata["camera_windows"] == 3
     assert len(metadata["frame_exposures"]) == metadata["camera_windows"]
     assert metadata["reference_frame_indices"] == (0, 2)
@@ -103,24 +103,9 @@ def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> N
 
     from zlc_atom.devices.sequencer.virtual import CAMERA_TRIGGER_CHANNEL
 
-    _program, metadata = build()
+    _program, metadata = build_calibration_pulse()
     assert metadata["camera_trigger_channel"] == CAMERA_CHANNEL
     assert CAMERA_CHANNEL == CAMERA_TRIGGER_CHANNEL
-
-
-def test_the_pulse_takes_its_lane_map_and_geometry_from_the_board() -> None:
-    """No hand-written lane numbers, no hand-written clock.
-
-    The definition used to carry 62 lane names and a table mapping them to
-    signal names -- a copy of the XDC that could drift from the board it claims
-    to describe.
-    """
-
-    source = (ROOT / "pulses" / "calibration.py").read_text(encoding="utf-8")
-    assert "pulse_target_from_xdc" in source
-    assert "load_streamer_config" in source
-    assert "ch11" not in source and "ch00" not in source, "lane numbers are hand-written again"
-    assert "50_000_000" not in source, "the clock is hardcoded again"
 
 
 def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
@@ -131,7 +116,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
+        program, metadata = build_calibration_pulse()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])

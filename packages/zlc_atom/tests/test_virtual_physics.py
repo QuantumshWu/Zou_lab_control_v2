@@ -8,11 +8,12 @@ import pytest
 
 from zlc_atom.devices.camera.world import SimulationWorld
 from zlc_atom.install import create_installation
-from zlc_atom.nodes._framework.pulse_source import resolve_pulse
+from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_atom.devices.sequencer.virtual import DictRegisterTransport, VirtualPulseStreamer
 from zlc_runtime import SignalDataPlane
+from tests.pulse_fixture import PULSE_ROOT
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -78,7 +79,15 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
             request=CameraMeasurementRequest("camera", 0.02, None, repeats, 3, 2.0),
             signal_plane=plane,
         )
-        pulse = resolve_pulse("calibration", search_paths=(REPO_ROOT / "pulses",))
+        pulse = resolve_pulse(
+            "imaging_template.json",
+            search_paths=(PULSE_ROOT,),
+            slot_values={
+                "reference_before": 0.02,
+                "readout": 0.005,
+                "reference_after": 0.02,
+            },
+        )
         capture = measurement.prepare()
         sequencer.load(pulse.program)
         expected = []

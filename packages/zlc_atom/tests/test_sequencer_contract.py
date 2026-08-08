@@ -56,9 +56,9 @@ def _real_streamer():
 def _virtual_streamer():
     """The twin, with a program shaped like the one the real host takes."""
 
-    from pulses.calibration import build
+    from tests.pulse_fixture import build_calibration_pulse
 
-    program, _metadata = build()
+    program, _metadata = build_calibration_pulse()
     streamer = VirtualPulseStreamer(world=SimulationWorld(seed=0))
     streamer.open()
     return streamer, program

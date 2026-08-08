@@ -30,7 +30,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_runtime.plane import SignalDataPlane
 
-from pulses.calibration import build
+from tests.pulse_fixture import build_calibration_pulse
 
 
 def _shot(node: CameraMeasurementNode, sequencer, windows: int):
@@ -50,7 +50,7 @@ def test_successive_shots_carry_strictly_increasing_revisions() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
+        program, metadata = build_calibration_pulse()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])
@@ -84,7 +84,7 @@ def test_a_live_plot_accepts_the_second_shot() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
+        program, metadata = build_calibration_pulse()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])

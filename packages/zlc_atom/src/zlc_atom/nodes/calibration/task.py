@@ -16,7 +16,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from zlc_atom.nodes._framework.pulse_source import (
+from .pulse import (
     ResolvedPulse,
     arm_sequencer,
     resolve_pulse,
@@ -65,7 +65,7 @@ class CalibrationRequest:
 
     camera_key: str
     sequencer_key: str
-    pulse_name: str
+    pulse_template: str
     repeats: int
     reference_exposure_seconds: float
     readout_exposure_seconds: float
@@ -82,7 +82,7 @@ class CalibrationRequest:
     def __post_init__(self) -> None:
         camera_key = _non_empty_key(self.camera_key, "camera_key")
         sequencer_key = _non_empty_key(self.sequencer_key, "sequencer_key")
-        pulse_name = _non_empty_key(self.pulse_name, "pulse_name")
+        pulse_template = _non_empty_key(self.pulse_template, "pulse_template")
         repeats = int(self.repeats)
         if repeats <= 0:
             raise ValueError("repeats must be positive")
@@ -121,7 +121,7 @@ class CalibrationRequest:
         timeout_seconds = _positive_float(self.timeout_seconds, "timeout_seconds")
         object.__setattr__(self, "camera_key", camera_key)
         object.__setattr__(self, "sequencer_key", sequencer_key)
-        object.__setattr__(self, "pulse_name", pulse_name)
+        object.__setattr__(self, "pulse_template", pulse_template)
         object.__setattr__(self, "repeats", repeats)
         object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
         object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
@@ -139,7 +139,7 @@ class CalibrationRequest:
         return {
             "camera_key": self.camera_key,
             "sequencer_key": self.sequencer_key,
-            "pulse_name": self.pulse_name,
+            "pulse_template": self.pulse_template,
             "repeats": self.repeats,
             "reference_exposure_seconds": self.reference_exposure_seconds,
             "readout_exposure_seconds": self.readout_exposure_seconds,
@@ -290,7 +290,6 @@ class CalibrationTask:
         request: CalibrationRequest,
         pulse_search_paths: Sequence[str | Path],
         artifact_directory: str | Path,
-        pulse_override: object | None = None,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
@@ -310,7 +309,6 @@ class CalibrationTask:
         self._request = request
         self.pulse_search_paths = paths
         self.artifact_directory = directory
-        self.pulse_override = pulse_override
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
 
@@ -328,14 +326,12 @@ class CalibrationTask:
 
     def _resolve_pulse(self) -> ResolvedPulse:
         return resolve_pulse(
-            self.request.pulse_name,
+            self.request.pulse_template,
             search_paths=self.pulse_search_paths,
-            override=self.pulse_override,
-            build_parameters={
-                "reference_exposure_seconds": (
-                    self.request.reference_exposure_seconds
-                ),
-                "readout_exposure_seconds": self.request.readout_exposure_seconds,
+            slot_values={
+                "reference_before": self.request.reference_exposure_seconds,
+                "readout": self.request.readout_exposure_seconds,
+                "reference_after": self.request.reference_exposure_seconds,
             },
         )
 

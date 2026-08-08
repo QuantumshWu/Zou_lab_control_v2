@@ -75,13 +75,3 @@ def test_nothing_is_declared_that_the_source_never_imports() -> None:
 
     unused = _declared_distributions() - _imported_distributions()
     assert unused == set(), f"declared but never imported: {sorted(unused)}"
-
-
-def test_the_pulse_client_is_not_imported_by_this_package() -> None:
-    """The boundary: this package says WHERE a board is, never HOW to reach it.
-
-    The endpoint lives in a device configuration and the composition root
-    supplies the dialler, so the domain stays independent of the device packages.
-    """
-
-    assert "zlc-pulse" not in _imported_distributions()

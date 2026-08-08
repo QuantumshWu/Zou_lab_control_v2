@@ -28,7 +28,7 @@ from zlc_runtime import SelectionRange, SelectionState
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
-from pulses.calibration import build
+from tests.pulse_fixture import build_calibration_pulse
 
 
 class _DetachRecordingPlane(SignalDataPlane):
@@ -160,7 +160,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
+        program, metadata = build_calibration_pulse()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])
@@ -236,7 +236,7 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build()
+        program, metadata = build_calibration_pulse()
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 

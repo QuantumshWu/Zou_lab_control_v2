@@ -12,6 +12,7 @@ from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
 from tests.fakes import FakePlane
+from tests.pulse_fixture import PULSE_ROOT
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -22,7 +23,7 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
     return CalibrationRequest(
         camera_key="camera",
         sequencer_key="sequencer",
-        pulse_name="calibration",
+        pulse_template="imaging_template.json",
         repeats=repeats,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
@@ -98,7 +99,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
             request=_calibration_request(),
-            pulse_search_paths=(REPO_ROOT / "pulses",),
+            pulse_search_paths=(PULSE_ROOT,),
             artifact_directory=tmp_path,
         ).run()
         assert plane.freeze().signals == {}
@@ -106,7 +107,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
             request=_calibration_request(),
-            pulse_search_paths=(REPO_ROOT / "pulses",),
+            pulse_search_paths=(PULSE_ROOT,),
             artifact_directory=tmp_path,
         ).run()
         assert result.artifact_path.name == "calibration.json"
@@ -159,7 +160,7 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
             request=_calibration_request(),
-            pulse_search_paths=(REPO_ROOT / "pulses",),
+            pulse_search_paths=(PULSE_ROOT,),
             artifact_directory=tmp_path,
         ).run()
         occupancy = OccupancyProcessor(result.calibration).process(

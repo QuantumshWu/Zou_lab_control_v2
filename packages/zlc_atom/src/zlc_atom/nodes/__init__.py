@@ -1,7 +1,23 @@
 """Public, headless logic-node declarations and composition helpers."""
 
+from importlib.resources import files
+
 from ._framework.descriptor import DatasetInputSpec
 from ._framework.discovery import discover_logic_nodes
-from ._framework.pulse_source import arm_sequencer
 
-__all__ = ["DatasetInputSpec", "arm_sequencer", "discover_logic_nodes"]
+
+def calibration_pulse_template_bytes() -> bytes:
+    """Return the shipped v2 imaging template exactly as packaged."""
+
+    return (
+        files("zlc_atom.nodes.calibration")
+        .joinpath("imaging_template.json")
+        .read_bytes()
+    )
+
+
+__all__ = [
+    "DatasetInputSpec",
+    "calibration_pulse_template_bytes",
+    "discover_logic_nodes",
+]

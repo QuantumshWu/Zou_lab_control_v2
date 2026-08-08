@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
+from zlc_pulse import PULSE_TREE_FORMAT, sequence_from_tree, sequence_to_tree
 from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes import discover_logic_nodes
+from zlc_atom.nodes import calibration_pulse_template_bytes, discover_logic_nodes
 from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
-from zlc_atom.nodes._framework.pulse_source import resolve_pulse
+from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 
 
 ROOT = Path(__file__).parents[1]
+PULSE_ROOT = ROOT / "src" / "zlc_atom" / "nodes" / "calibration"
 
 
 class _RecordingCamera:
@@ -108,7 +111,7 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
     return CalibrationRequest(
         camera_key="camera",
         sequencer_key="sequencer",
-        pulse_name="calibration",
+        pulse_template="imaging_template.json",
         repeats=repeats,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
@@ -155,35 +158,67 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     assert edges == {("occupancy", "calibration")}
 
 
-def test_pulse_resolver_has_one_named_source_and_clear_missing_paths() -> None:
-    resolved = resolve_pulse("calibration", search_paths=(ROOT / "pulses",))
-    assert resolved.path == (ROOT / "pulses" / "calibration.py").resolve()
-    assert resolved.metadata["camera_windows"] == 3
-    assert resolved.metadata["frame_exposures"] == (0.02, 0.005, 0.02)
+def test_pulse_resolver_uses_the_project_json_document() -> None:
+    asset = PULSE_ROOT / "imaging_template.json"
+    packaged = calibration_pulse_template_bytes()
+    assert packaged == asset.read_bytes()
+    tree = json.loads(packaged)
+    assert tuple(tree) == (
+        "format",
+        "name",
+        "time_step_ns",
+        "target",
+        "periods",
+        "slots",
+        "delays",
+        "repeat",
+    )
+    assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse.v1"
+    assert not {
+        "schema",
+        "api_parameters",
+        "PulseDocument",
+        "fingerprint",
+        "hash",
+        "editor",
+    }.intersection(tree)
+    sequence = sequence_from_tree(tree)
+    assert sequence_to_tree(sequence) == tree
+    assert tuple(slot.slot_id for slot in sequence.slots) == (
+        "reference_before",
+        "readout",
+        "reference_after",
+    )
 
-    authored = resolve_pulse(
-        "calibration",
-        search_paths=(ROOT / "pulses",),
-        build_parameters={
-            "reference_exposure_seconds": 0.031,
-            "readout_exposure_seconds": 0.007,
+    resolved = resolve_pulse(
+        "imaging_template.json",
+        search_paths=(PULSE_ROOT,),
+        slot_values={
+            "reference_before": 0.031,
+            "readout": 0.006,
+            "reference_after": 0.031,
         },
     )
-    assert authored.metadata["frame_exposures"] == (0.031, 0.007, 0.031)
-
-    override_program = object()
-    overridden = resolve_pulse(
-        "does_not_need_a_file",
-        search_paths=(),
-        override=(override_program, {"camera_windows": 2}),
+    assert resolved.path == asset.resolve()
+    assert resolved.metadata["camera_windows"] == 3
+    assert resolved.metadata["frame_exposures"] == pytest.approx(
+        (0.031, 0.006, 0.031)
     )
-    assert overridden.program is override_program
-    assert overridden.metadata["camera_windows"] == 2
+    assert resolved.program.slot_count == 0
+    assert resolved.metadata["camera_trigger_channel"] == "emCCD"
 
     try:
-        resolve_pulse("missing", search_paths=(ROOT / "pulses",))
+        resolve_pulse(
+            "missing.json",
+            search_paths=(PULSE_ROOT,),
+            slot_values={
+                "reference_before": 0.031,
+                "readout": 0.006,
+                "reference_after": 0.031,
+            },
+        )
     except FileNotFoundError as error:
-        assert str(ROOT / "pulses" / "missing.py") in str(error)
+        assert str(PULSE_ROOT / "missing.json") in str(error)
     else:
         raise AssertionError("missing pulse unexpectedly resolved")
 
@@ -202,7 +237,15 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             frames_per_cycle=3,
         )
         assert camera_node.camera is camera
-        pulse = resolve_pulse("calibration", search_paths=(ROOT / "pulses",))
+        pulse = resolve_pulse(
+            "imaging_template.json",
+            search_paths=(PULSE_ROOT,),
+            slot_values={
+                "reference_before": 0.02,
+                "readout": 0.005,
+                "reference_after": 0.02,
+            },
+        )
         capture = camera_node.prepare()
         sequencer.load(pulse.program)
         sequencer.fire()
@@ -221,7 +264,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
-            pulse_search_paths=(ROOT / "pulses",),
+            pulse_search_paths=(PULSE_ROOT,),
             artifact_directory=tmp_path,
             repeats=30,
         )
@@ -277,7 +320,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             for value in descriptors["calibration"].artifact_outputs
         ] == [("calibration", "calibration.readout.v1")]
         assert descriptors["calibration"].authoring_schema.field_names == (
-            "pulse_name",
+            "pulse_template",
             "repeats",
             "reference_exposure_seconds",
             "readout_exposure_seconds",
@@ -344,7 +387,7 @@ def test_calibration_task_safes_sequencer_when_capture_fails(tmp_path: Path) -> 
             camera=camera,
             sequencer=sequencer,
             request=_calibration_request(repeats=1),
-            pulse_search_paths=(ROOT / "pulses",),
+            pulse_search_paths=(PULSE_ROOT,),
             artifact_directory=tmp_path,
         )
         with pytest.raises(RuntimeError, match="fire failure"):

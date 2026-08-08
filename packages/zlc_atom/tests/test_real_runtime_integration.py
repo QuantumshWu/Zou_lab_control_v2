@@ -17,8 +17,9 @@ from zlc_atom.nodes.camera_measurement import (
 )
 from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
-from zlc_atom.nodes._framework.pulse_source import resolve_pulse
+from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
+from tests.pulse_fixture import PULSE_ROOT
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -37,7 +38,7 @@ def _calibration_request() -> CalibrationRequest:
     return CalibrationRequest(
         camera_key="camera",
         sequencer_key="sequencer",
-        pulse_name="calibration",
+        pulse_template="imaging_template.json",
         repeats=30,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
@@ -72,7 +73,17 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         monitor = measurement.monitor(buffer_frames=1)
         assert isinstance(monitor, MonitorCapture)
         sequencer = installation.device("sequencer")
-        sequencer.load(resolve_pulse("calibration", search_paths=(REPO_ROOT / "pulses",)).program)
+        sequencer.load(
+            resolve_pulse(
+                "imaging_template.json",
+                search_paths=(PULSE_ROOT,),
+                slot_values={
+                    "reference_before": 0.02,
+                    "readout": 0.005,
+                    "reference_after": 0.02,
+                },
+            ).program
+        )
         sequencer.fire()
         sequencer.wait_done(1.0)
         assert monitor.poll() is not None
@@ -84,7 +95,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             camera=installation.device("camera"),
             sequencer=sequencer,
             request=_calibration_request(),
-            pulse_search_paths=(REPO_ROOT / "pulses",),
+            pulse_search_paths=(PULSE_ROOT,),
             artifact_directory=tmp_path,
         ).run()
         occupancy_node = OccupancyProcessor(
