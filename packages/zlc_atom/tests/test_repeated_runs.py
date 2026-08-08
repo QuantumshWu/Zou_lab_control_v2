@@ -52,7 +52,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         assert installation.failures == {}
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build_calibration_pulse()
+        program, metadata = build_calibration_pulse(sequencer.describe())
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 
@@ -82,7 +82,13 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
 def test_the_pulse_declares_its_own_camera_bracket() -> None:
     """The frame count is a property of the pulse, not a constant in the task."""
 
-    _program, metadata = build_calibration_pulse()
+    installation = create_installation("virtual")
+    try:
+        _program, metadata = build_calibration_pulse(
+            installation.device("sequencer").describe()
+        )
+    finally:
+        installation.close()
     assert metadata["camera_windows"] == 3
     assert len(metadata["frame_exposures"]) == metadata["camera_windows"]
     assert metadata["reference_frame_indices"] == (0, 2)
@@ -103,7 +109,13 @@ def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> N
 
     from zlc_atom.devices.sequencer.virtual import CAMERA_TRIGGER_CHANNEL
 
-    _program, metadata = build_calibration_pulse()
+    installation = create_installation("virtual")
+    try:
+        _program, metadata = build_calibration_pulse(
+            installation.device("sequencer").describe()
+        )
+    finally:
+        installation.close()
     assert metadata["camera_trigger_channel"] == CAMERA_CHANNEL
     assert CAMERA_CHANNEL == CAMERA_TRIGGER_CHANNEL
 
@@ -116,7 +128,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build_calibration_pulse()
+        program, metadata = build_calibration_pulse(sequencer.describe())
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = int(metadata["camera_windows"])

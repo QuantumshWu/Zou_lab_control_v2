@@ -7,12 +7,16 @@ from pathlib import Path
 import pytest
 from zlc_pulse import (
     PULSE_TREE_FORMAT,
+    PulseTarget,
     resolve_api_parameters,
     sequence_from_tree,
     sequence_to_tree,
 )
+from zlc_pulse.device import BoardDescription
 from zlc_runtime import SignalDataPlane
 
+import zlc_atom.nodes.calibration.pulse as calibration_pulse_module
+from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ArtifactInputSpec,
@@ -80,6 +84,10 @@ class _RecordingSequencer:
     def load(self, program: object, *, source: object | None = None) -> None:
         self.events.append(("load", program))
         self.sequencer.load(program, source=source)  # type: ignore[attr-defined]
+
+    def describe(self):
+        self.events.append(("describe", None))
+        return self.sequencer.describe()  # type: ignore[attr-defined]
 
     def fire(self) -> None:
         """Fire, and nothing else.
@@ -167,7 +175,9 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     assert edges == {("occupancy", "calibration")}
 
 
-def test_pulse_resolver_uses_the_project_json_document() -> None:
+def test_pulse_resolver_uses_the_project_json_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     asset = PULSE_ROOT / "imaging_template.json"
     packaged = calibration_pulse_template_bytes()
     assert packaged == asset.read_bytes()
@@ -199,48 +209,69 @@ def test_pulse_resolver_uses_the_project_json_document() -> None:
         "readout_probe_duration",
         "reference_probe_duration_after",
     )
-    explicit = resolve_api_parameters(
-        sequence,
-        {
-            "reference_probe_duration_before": 0.031,
-            "readout_probe_duration": 0.006,
-            "reference_probe_duration_after": 0.031,
-        },
-    )
+    api_values = {
+        "reference_probe_duration_before": 0.031,
+        "readout_probe_duration": 0.006,
+        "reference_probe_duration_after": 0.031,
+    }
+    explicit = resolve_api_parameters(sequence, api_values)
     assert explicit.api_parameters == ()
     assert explicit.slots == ()
 
-    resolved = resolve_pulse(
-        "imaging_template.json",
-        search_paths=(PULSE_ROOT,),
-        api_values={
-            "reference_probe_duration_before": 0.031,
-            "readout_probe_duration": 0.006,
-            "reference_probe_duration_after": 0.031,
-        },
-    )
-    assert resolved.path == asset.resolve()
-    assert resolved.metadata["camera_windows"] == 3
-    assert resolved.metadata["frame_exposures"] == pytest.approx(
-        (0.031, 0.006, 0.031)
-    )
-    assert resolved.program.slot_count == 0
-    assert resolved.metadata["camera_trigger_channel"] == "emCCD"
-
+    sequencer = VirtualPulseStreamer()
+    sequencer.open()
     try:
-        resolve_pulse(
-            "missing.json",
-            search_paths=(PULSE_ROOT,),
-            api_values={
-                "reference_probe_duration_before": 0.031,
-                "readout_probe_duration": 0.006,
-                "reference_probe_duration_after": 0.031,
-            },
+        board = sequencer.describe()
+        monkeypatch.setattr(
+            calibration_pulse_module,
+            "load_streamer_config",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("calibration resolution read process-global board config")
+            ),
+            raising=False,
         )
-    except FileNotFoundError as error:
-        assert str(PULSE_ROOT / "missing.json") in str(error)
-    else:
-        raise AssertionError("missing pulse unexpectedly resolved")
+        resolved = resolve_pulse(
+            "imaging_template.json",
+            board=board,
+            search_paths=(PULSE_ROOT,),
+            api_values=api_values,
+        )
+        assert resolved.path == asset.resolve()
+        assert resolved.metadata["camera_windows"] == 3
+        assert resolved.metadata["frame_exposures"] == pytest.approx(
+            (0.031, 0.006, 0.031)
+        )
+        assert resolved.program.slot_count == 0
+        assert resolved.program.clock_hz == board.clock_hz
+        assert resolved.program.channels == board.target.raw_lanes
+        assert resolved.metadata["camera_trigger_channel"] == "emCCD"
+
+        incompatible_board = BoardDescription(
+            target=PulseTarget(
+                raw_lanes=tuple(reversed(board.target.raw_lanes)),
+                ports=board.target.ports,
+            ),
+            geometry=board.geometry,
+            clock_hz=board.clock_hz,
+        )
+        with pytest.raises(ValueError, match="target.*connected board"):
+            resolve_pulse(
+                "imaging_template.json",
+                board=incompatible_board,
+                search_paths=(PULSE_ROOT,),
+                api_values=api_values,
+            )
+
+        with pytest.raises(FileNotFoundError) as error:
+            resolve_pulse(
+                "missing.json",
+                board=board,
+                search_paths=(PULSE_ROOT,),
+                api_values=api_values,
+            )
+        assert str(PULSE_ROOT / "missing.json") in str(error.value)
+    finally:
+        sequencer.close()
 
 
 def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Path) -> None:
@@ -259,6 +290,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert camera_node.camera is camera
         pulse = resolve_pulse(
             "imaging_template.json",
+            board=sequencer.describe(),
             search_paths=(PULSE_ROOT,),
             api_values={
                 "reference_probe_duration_before": 0.02,

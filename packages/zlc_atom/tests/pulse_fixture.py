@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from zlc_pulse.device import BoardDescription
+
 from zlc_atom.nodes.calibration.pulse import (
     CAMERA_TRIGGER_PORT,
     resolve_pulse,
@@ -21,12 +23,14 @@ CAMERA_CHANNEL = CAMERA_TRIGGER_PORT
 
 
 def build_calibration_pulse(
+    board: BoardDescription,
     *,
     reference_exposure_seconds: float = 0.020,
     readout_exposure_seconds: float = 0.005,
 ) -> tuple[object, object]:
     resolved = resolve_pulse(
         "imaging_template.json",
+        board=board,
         search_paths=(PULSE_ROOT,),
         api_values={
             "reference_probe_duration_before": reference_exposure_seconds,

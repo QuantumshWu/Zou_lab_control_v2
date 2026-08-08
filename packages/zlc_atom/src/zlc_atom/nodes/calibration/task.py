@@ -293,7 +293,7 @@ class CalibrationTask:
     ) -> None:
         if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
-        for name in ("load", "fire", "wait_done", "safe", "snapshot"):
+        for name in ("describe", "load", "fire", "wait_done", "safe", "snapshot"):
             if not callable(getattr(sequencer, name, None)):
                 raise TypeError(f"sequencer must expose {name}")
         if not isinstance(request, CalibrationRequest):
@@ -327,6 +327,7 @@ class CalibrationTask:
     def _resolve_pulse(self) -> ResolvedPulse:
         return resolve_pulse(
             self.request.pulse_template,
+            board=self.sequencer.describe(),
             search_paths=self.pulse_search_paths,
             api_values={
                 "reference_probe_duration_before": self.request.reference_exposure_seconds,

@@ -43,13 +43,13 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
 
 def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
     world = SimulationWorld(seed=1)
-    program, _metadata = build_calibration_pulse()
     streamer = VirtualPulseStreamer(
         world=world,
         camera_trigger_channel=CAMERA_CHANNEL,
     )
     streamer.open()
     try:
+        program, _metadata = build_calibration_pulse(streamer.describe())
         streamer.load(program)
         streamer.fire(forever=True)
         deadline = time.monotonic() + 0.5
@@ -78,6 +78,7 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         )
         pulse = resolve_pulse(
             "imaging_template.json",
+            board=sequencer.describe(),
             search_paths=(PULSE_ROOT,),
             api_values={
                 "reference_probe_duration_before": 0.02,

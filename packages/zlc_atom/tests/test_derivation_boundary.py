@@ -47,7 +47,7 @@ def bench():
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build_calibration_pulse()
+        program, metadata = build_calibration_pulse(sequencer.describe())
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         yield plane, camera, sequencer, int(metadata["camera_windows"])

@@ -11,10 +11,10 @@ from typing import Any
 from zlc_pulse import (
     PulseSequence,
     compile_sequence,
-    load_streamer_config,
     resolve_api_parameters,
     sequence_from_tree,
 )
+from zlc_pulse.device import BoardDescription
 
 
 CALIBRATION_API_PARAMETER_IDS = (
@@ -62,11 +62,14 @@ def _template_filename(value: object) -> str:
 def resolve_pulse(
     template: str,
     *,
+    board: BoardDescription,
     search_paths: Sequence[str | Path],
     api_values: Mapping[str, float],
 ) -> ResolvedPulse:
     """Load one exact project JSON, resolve its three API inputs, and compile it."""
 
+    if not isinstance(board, BoardDescription):
+        raise TypeError("board must be BoardDescription")
     filename = _template_filename(template)
     if isinstance(search_paths, (str, Path)):
         search_paths = (search_paths,)
@@ -107,13 +110,11 @@ def resolve_pulse(
             for parameter_id in CALIBRATION_API_PARAMETER_IDS
         },
     )
-    config = load_streamer_config()
-    if config["source"] is None:
-        raise RuntimeError(
-            "no streamer config was found, so the deployed board geometry is "
-            "unknown"
+    if resolved.target != board.target:
+        raise ValueError(
+            "calibration pulse target is incompatible with the connected board"
         )
-    program = compile_sequence(resolved, config["params"], config["clock_hz"])
+    program = compile_sequence(resolved, board.geometry, board.clock_hz)
     exposures = program.camera_window_exposures(CAMERA_TRIGGER_PORT)
     metadata = {
         "camera_trigger_channel": CAMERA_TRIGGER_PORT,

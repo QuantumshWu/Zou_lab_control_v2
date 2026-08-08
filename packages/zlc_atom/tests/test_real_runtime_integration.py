@@ -75,6 +75,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         sequencer = installation.device("sequencer")
         pulse = resolve_pulse(
             "imaging_template.json",
+            board=sequencer.describe(),
             search_paths=(PULSE_ROOT,),
             api_values={
                 "reference_probe_duration_before": 0.02,

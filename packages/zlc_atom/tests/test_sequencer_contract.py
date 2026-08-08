@@ -63,9 +63,9 @@ def _virtual_streamer():
 
     from tests.pulse_fixture import build_calibration_pulse
 
-    program, _metadata = build_calibration_pulse()
     streamer = VirtualPulseStreamer(world=SimulationWorld(seed=0))
     streamer.open()
+    program, _metadata = build_calibration_pulse(streamer.describe())
     return streamer, program
 
 
