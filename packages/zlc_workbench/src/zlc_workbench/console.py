@@ -61,16 +61,6 @@ from .panel_catalog import (
 from .panel_state import PanelFrozenData, PanelState, restore_semantic_choice
 from .presentation import PlotPanelPort
 from .selection import attach_selection_bridge, subscribe_committed_selection
-from .prepared_panel import (
-    PreparedPanelSurface,
-    create_prepared_panel_surface,
-)
-from .task_reports import (
-    TaskReportCoordinator,
-    TaskReportEvent,
-    TaskReportReady,
-    TaskReportRegistry,
-)
 from .topology import project_signals
 
 
@@ -114,11 +104,6 @@ class PanelBinding:
     #: zlc_plot control plane.  This is editor metadata, not a second authored
     #: state; accepted values still live only in ``state``.
     parameter_surface: Mapping[str, object] = field(default_factory=dict)
-    #: A report page is an exact frozen publication rendered by the same host,
-    #: but it deliberately has no live PlotPanelPort.
-    prepared_surface: PreparedPanelSurface | None = None
-    editor_prepared_surface: PreparedPanelSurface | None = None
-
     @property
     def signal(self) -> str:
         return self.state.signal
@@ -156,7 +141,6 @@ class ConsolePresenter:
         make_host: Callable[[object, PanelState], Any],
         spec_for: Callable[[object, str, str], Any] | None = None,
         open_saved: Callable[[str], object] | None = None,
-        task_reports: TaskReportRegistry | None = None,
     ) -> None:
         self.session = session
         self.view = view
@@ -167,9 +151,6 @@ class ConsolePresenter:
         # Reading a saved run is a different window over a different subject,
         # so the console asks for it rather than growing one.
         self._open_saved = open_saved
-        self._task_report_coordinator = TaskReportCoordinator(
-            task_reports or TaskReportRegistry()
-        )
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         # Task identity is a command-admission projection only.  Its lifecycle,
@@ -715,19 +696,6 @@ class ConsolePresenter:
     def rename_panel(self, panel_id: str, title: str) -> bool:
         return self.update_panel_state(panel_id, {"title": str(title)})
 
-    def _report_panel_mutation_blocked(
-        self,
-        panel_id: str,
-        action: str,
-    ) -> bool:
-        if not self._task_report_coordinator.panel_locked(str(panel_id)):
-            return False
-        self._report(
-            f"{panel_id}: cannot {action} until its canonical report is saved",
-            severity="warning",
-        )
-        return True
-
     def edit_panel(self, panel_id: str) -> bool:
         """Open or focus the panel's non-modal Edit projection."""
 
@@ -736,8 +704,6 @@ class ConsolePresenter:
 
         binding = self.panels.get(panel_id)
         if binding is None:
-            return False
-        if self._report_panel_mutation_blocked(panel_id, "edit this panel"):
             return False
         projection = self.panel_editor_projection(panel_id)
         opened = getattr(self.view, "open_panel_editor", None)
@@ -771,8 +737,6 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return False
-        if self._report_panel_mutation_blocked(panel_id, "change this panel"):
-            return False
         changes = dict(patch)
         allowed = {
             "signal",
@@ -794,16 +758,6 @@ class ConsolePresenter:
             )
             return False
         current = binding.state
-        if (
-            binding.prepared_surface is not None
-            and "signal" in changes
-            and str(changes["signal"]).strip() != current.signal
-        ):
-            self._report(
-                f"{panel_id}: a Task report is frozen to its terminal publication",
-                severity="warning",
-            )
-            return False
         if "kind" in changes and str(changes["kind"]) != current.kind:
             self._report(
                 f"{panel_id}: plot kind is fixed; add another panel to use "
@@ -861,7 +815,6 @@ class ConsolePresenter:
         )
         needs_mount = (
             bool(candidate.signal)
-            and binding.prepared_surface is None
             and (
                 appearance_changed
                 or binding.host is None
@@ -1011,36 +964,15 @@ class ConsolePresenter:
                 f"{panel_id} now shows {candidate.signal}", severity="task"
             )
         else:
-            if binding.host is None or (
-                binding.port is None and binding.prepared_surface is None
-            ):
+            if binding.host is None or binding.port is None:
                 binding.state = candidate
                 binding.parameter_surface = self._unbound_panel_parameters(candidate)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 return True
-            if binding.prepared_surface is not None:
-                try:
-                    self._apply_panel_host_patch(
-                        binding.host, current, candidate, changes
-                    )
-                    if binding.editor_host is not None:
-                        self._apply_panel_host_patch(
-                            binding.editor_host, current, candidate, changes
-                        )
-                except Exception as error:
-                    self._report(f"{panel_id}: {error}", severity="error")
-                    return False
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
             binding.state = candidate
-            if binding.prepared_surface is not None:
-                binding.parameter_surface = self._describe_panel_parameters(
-                    binding.host, candidate
-                )
-
-        if binding.prepared_surface is not None:
-            binding.prepared_surface.state = candidate
 
         self._publish_panel_state(binding)
         self._refresh_console_projection()
@@ -1261,7 +1193,7 @@ class ConsolePresenter:
 
         for binding in tuple(self.panels.values()):
             host = binding.host
-            if host is not None and binding.prepared_surface is None:
+            if host is not None:
                 metadata, error = host.initial_state
                 if metadata is not None or error is not None:
                     if error is not None:
@@ -1297,7 +1229,6 @@ class ConsolePresenter:
             editor = binding.editor_host
             if (
                 editor is not None
-                and binding.editor_prepared_surface is None
                 and binding.editor_selections is None
                 and binding.frozen_data is not None
             ):
@@ -1405,39 +1336,6 @@ class ConsolePresenter:
             # revision/generation acceptance and paints only a current result.
             fit(str(selected), live=True)
 
-    def _apply_panel_host_patch(
-        self,
-        host: object,
-        current: PanelState,
-        candidate: PanelState,
-        patch: Mapping[str, Any],
-    ) -> None:
-        if "semantic" in patch:
-            apply_semantic = getattr(host, "apply_semantic", None)
-            if callable(apply_semantic):
-                for name, value in dict(patch["semantic"]).items():
-                    self._await_panel_operation(
-                        apply_semantic(
-                            name,
-                            self._restore_panel_semantic(host, name, value),
-                        )
-                    )
-        display_patch = dict(patch.get("display", {}))
-        if "title" in patch:
-            display_patch["title"] = candidate.title
-        if "site_overlay" in patch and candidate.kind == "image":
-            display_patch["site_overlay"] = candidate.site_overlay
-        if display_patch:
-            set_parameters = getattr(host, "set_parameters", None)
-            if callable(set_parameters):
-                self._await_panel_operation(set_parameters(display_patch))
-        if candidate.size != current.size:
-            set_size = getattr(host, "set_size", None)
-            if callable(set_size):
-                self._await_panel_operation(set_size(candidate.size))
-        if "fit" in patch:
-            self._apply_panel_fit(host, current.fit, candidate.fit)
-
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
             if any(
@@ -1452,8 +1350,6 @@ class ConsolePresenter:
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
-            return None
-        if self._report_panel_mutation_blocked(panel_id, "save this panel"):
             return None
         frozen = binding.frozen_data
         producer_node_id = self._direct_producer_node_id(binding.state.signal)
@@ -1490,34 +1386,6 @@ class ConsolePresenter:
         frozen = binding.frozen_data
         if frozen is None:
             raise RuntimeError(f"{binding.panel_id} has no frozen plot input")
-        if binding.prepared_surface is not None:
-            surface = create_prepared_panel_surface(
-                binding.prepared_surface.page,
-                state=binding.state,
-            )
-            mount = getattr(self.view, "show_panel_editor", None)
-            if not callable(mount):
-                surface.close()
-                raise RuntimeError(
-                    "this console cannot mount a Panel Edit plot surface"
-                )
-            previous_surface = binding.editor_prepared_surface
-            previous_host = binding.editor_host
-            binding.editor_prepared_surface = surface
-            binding.editor_host = surface.host
-            binding.editor_selections = None
-            try:
-                mount(binding.panel_id, surface.host)
-            except Exception:
-                binding.editor_prepared_surface = previous_surface
-                binding.editor_host = previous_host
-                surface.close()
-                raise
-            if previous_surface is not None:
-                previous_surface.close()
-            elif previous_host is not None:
-                self._retire_plot_host(previous_host)
-            return surface.host
         plot_input = (
             frozen.snapshot if frozen.plot_input is None else frozen.plot_input
         )
@@ -1575,10 +1443,8 @@ class ConsolePresenter:
 
         host = binding.editor_host
         selections = binding.editor_selections
-        prepared = binding.editor_prepared_surface
         binding.editor_host = None
         binding.editor_selections = None
-        binding.editor_prepared_surface = None
         mount = getattr(self.view, "show_panel_editor", None)
         if callable(mount) and host is not None:
             mount(binding.panel_id, None)
@@ -1586,9 +1452,7 @@ class ConsolePresenter:
             if selections is not None:
                 selections.close()
         finally:
-            if prepared is not None:
-                prepared.close()
-            elif host is not None:
+            if host is not None:
                 self._retire_plot_host(host)
 
     def _panel_editor_closed(self, panel_id: str) -> None:
@@ -1617,12 +1481,6 @@ class ConsolePresenter:
             return False
         binding = self.panels.get(str(panel_id))
         if binding is None:
-            return False
-        if binding.prepared_surface is not None:
-            self._report(
-                f"{binding.state.title} is frozen to its Task terminal publication",
-                severity="warning",
-            )
             return False
         front = self.session.signal_plane.freeze()
         value = front.value(binding.state.signal)
@@ -1690,40 +1548,12 @@ class ConsolePresenter:
             ) -> object:
                 return self._make_host(frozen.snapshot, binding.state)
 
-            make_host = make_saved_host
-            configure_host = self._configure_panel_host
-            if binding.prepared_surface is not None:
-                created: dict[int, PreparedPanelSurface] = {}
-
-                def make_prepared_host(
-                    _initial: object,
-                    _signal: str,
-                    _kind: str,
-                    _cell_kind: str,
-                ) -> object:
-                    surface = create_prepared_panel_surface(
-                        binding.prepared_surface.page,
-                        state=binding.state,
-                    )
-                    created[id(surface.host)] = surface
-                    return surface.host
-
-                def await_prepared_host(host: object, _state: PanelState) -> None:
-                    created[id(host)].wait()
-
-                make_host = make_prepared_host
-                configure_host = await_prepared_host
             written = _save_panel_figure(
                 selected,
                 state=binding.state,
                 frozen=frozen,
-                make_host=make_host,
-                configure_host=configure_host,
-                annotations=(
-                    None
-                    if binding.prepared_surface is None
-                    else binding.prepared_surface.annotations
-                ),
+                make_host=make_saved_host,
+                configure_host=self._configure_panel_host,
             )
         except Exception as error:
             self._report(
@@ -1766,9 +1596,6 @@ class ConsolePresenter:
     def _release_panel(self, binding: PanelBinding) -> None:
         """Let go of one panel's derivation and its plotting host."""
 
-        prepared = binding.prepared_surface
-        if prepared is not None:
-            self._task_report_coordinator.release_panel(binding.panel_id)
         if binding.selections is not None:
             binding.selections.close()
         if binding.bridge is not None:
@@ -1777,10 +1604,7 @@ class ConsolePresenter:
         host = binding.host
         binding.host = None
         binding.port = None
-        binding.prepared_surface = None
-        if prepared is not None:
-            prepared.close()
-        elif host is not None:
+        if host is not None:
             self._retire_plot_host(host)
 
     def _retire_plot_host(self, host: object) -> None:
@@ -1858,8 +1682,6 @@ class ConsolePresenter:
 
     def remove_panel(self, panel_id: str) -> None:
         if self._task_command_blocked("removing a panel"):
-            return
-        if self._report_panel_mutation_blocked(panel_id, "remove this panel"):
             return
         if self._remove_panel_now(panel_id):
             self._refresh_console_projection()
@@ -2120,13 +1942,6 @@ class ConsolePresenter:
 
         if self._task_command_blocked("loading a layout"):
             return False
-        if self._task_report_coordinator.exporting:
-            self._report(
-                "wait for canonical Task reports to finish saving before "
-                "loading a layout",
-                severity="warning",
-            )
-            return False
 
         if any(
             binding.pending is not None
@@ -2235,15 +2050,6 @@ class ConsolePresenter:
         reopened would have to decide what its old generation now means.
         """
 
-        if binding.prepared_surface is not None:
-            # A frozen report still admits local raster zoom/pan/selection,
-            # but it has no live port or producer draft to publish into.
-            if binding.selections is not None:
-                binding.selections.close()
-            if binding.bridge is not None:
-                binding.bridge.close()
-            binding.bridge = binding.selections = None
-            return
         if self._deriving:
             if (
                 binding.host is None
@@ -2492,153 +2298,6 @@ class ConsolePresenter:
                 self._transient_task_previews.setdefault(binding.node_id, {})[
                     panel.panel_id
                 ] = signal
-
-    def _ensure_task_reports(self, binding: LogicBinding) -> None:
-        """Hand exact trigger publications to the report lifecycle owner."""
-
-        if not self._is_task(binding):
-            return
-        reports = tuple(getattr(binding.descriptor, "task_reports", ()))
-        if not reports:
-            return
-        front = self.session.signal_plane.freeze()
-        for report_spec in reports:
-            trigger = stable_signal_key(
-                binding.node_id,
-                str(report_spec.trigger_output_name),
-            )
-            publication = front.publication(trigger)
-            if publication is None:
-                continue
-            self._task_report_coordinator.observe(
-                node_id=binding.node_id,
-                descriptor=binding.descriptor,
-                report_spec=report_spec,
-                publication=publication,
-                trigger_signal=trigger,
-                artifact_results=self._artifact_results(binding),
-                signal_for_output=lambda name, node_id=binding.node_id: (
-                    stable_signal_key(node_id, name)
-                ),
-                interval_ms=self._default_interval_ms,
-            )
-
-    def _mount_task_report_surface(
-        self,
-        ready: TaskReportReady,
-        surface: PreparedPanelSurface,
-    ) -> PanelBinding:
-        """Mount one fully-described report page as an ordinary frozen panel."""
-
-        display, semantics, models = surface.description_values()
-        state = surface.state
-        parameter_surface = self._parameter_surface_from_descriptions(
-            state,
-            display,
-            semantics,
-            tuple(models),
-        )
-        self._panel_serial += 1
-        panel_id = f"panel-{self._panel_serial}"
-        frozen = PanelFrozenData(
-            state.signal,
-            ready.report.publication,
-            getattr(surface.page.plot_input, "snapshot", surface.page.plot_input),
-            surface.page.plot_input,
-            capture_run_chain(
-                self.session.signal_plane,
-                ready.report.publication,
-            ),
-            {},
-        )
-        binding = PanelBinding(
-            panel_id,
-            state,
-            host=surface.host,
-            frozen_data=frozen,
-            display_publication=ready.report.publication,
-            parameter_surface=parameter_surface,
-            prepared_surface=surface,
-        )
-        self.panels[panel_id] = binding
-        added = False
-        try:
-            self.view.add_panel(panel_id, state.title)
-            added = True
-            self.view.show_panel(panel_id, surface.host)
-            self.view.set_panel_selectors_enabled(panel_id, self._deriving)
-            self._publish_panel_state(binding)
-        except Exception:
-            self.panels.pop(panel_id, None)
-            if added:
-                self.view.remove_panel(panel_id)
-            raise
-        return binding
-
-    def _project_task_report_event(self, event: TaskReportEvent) -> None:
-        for panel_id in event.panel_ids:
-            if panel_id in self.panels and event.panel_status:
-                self.view.set_panel_status(
-                    panel_id,
-                    event.panel_status,
-                    error=event.panel_error,
-                )
-        if event.message:
-            self._report(event.message, severity=event.severity)
-
-    def _poll_task_reports(self) -> None:
-        """Mount ready groups and project coordinator events without waiting."""
-
-        self._task_report_coordinator.poll()
-        for ready in self._task_report_coordinator.take_ready():
-            mounted: list[PanelBinding] = []
-            try:
-                for surface in ready.surfaces:
-                    mounted.append(
-                        self._mount_task_report_surface(ready, surface)
-                    )
-                self._task_report_coordinator.activate(
-                    ready,
-                    tuple(binding.panel_id for binding in mounted),
-                )
-            except Exception as error:
-                mounted_surfaces = {
-                    id(binding.prepared_surface)
-                    for binding in mounted
-                    if binding.prepared_surface is not None
-                }
-                for binding in reversed(mounted):
-                    self._remove_panel_now(binding.panel_id)
-                for surface in ready.surfaces:
-                    if id(surface) not in mounted_surfaces:
-                        surface.close()
-                self._report(
-                    f"{ready.node_id} report could not be mounted: {error}",
-                    severity="error",
-                )
-            else:
-                self._report(
-                    f"{ready.report.title}: {len(mounted)} pages ready",
-                    severity="task",
-                )
-        # A writer may finish immediately after activation; observing it here
-        # also releases the per-panel mutation gate in this same beat.
-        self._task_report_coordinator.poll()
-        for event in self._task_report_coordinator.take_events():
-            self._project_task_report_event(event)
-        self._refresh_console_projection()
-
-    def _project_task_report_locks(self) -> None:
-        """Keep UI admission aligned with the coordinator's export ownership."""
-
-        setter = getattr(self.view, "set_panel_mutation_enabled", None)
-        if not callable(setter):
-            return
-        for panel_id in self._task_report_coordinator.panel_ids:
-            setter(
-                panel_id,
-                not self._task_report_coordinator.panel_locked(panel_id),
-            )
 
     def _remove_task_transient_previews(self, binding: LogicBinding) -> None:
         tracked = self._transient_task_previews.pop(binding.node_id, {})
@@ -3127,7 +2786,6 @@ class ConsolePresenter:
                     self._report(f"{binding.node_id}: {error}", severity="error")
                 self._capture_artifact_results(binding)
                 self._ensure_task_previews(binding)
-                self._ensure_task_reports(binding)
                 if not binding.host.running and binding.lease is not None:
                     binding.lease.release()
                     binding.lease = None
@@ -3144,9 +2802,7 @@ class ConsolePresenter:
             if not candidate.waiting_for:
                 binding.pending = None
                 self._activate_candidate(binding, candidate)
-        self._poll_task_reports()
         self._sync_task_takeover()
-        self._project_task_report_locks()
         self._refresh_console_projection()
 
     @staticmethod
@@ -3520,10 +3176,6 @@ class ConsolePresenter:
                 raise RuntimeError(
                     f"logic node {binding.node_id!r} could not release its host"
                 )
-        # Report sources must outlive their exporter.  A timeout is fail-closed:
-        # leave every panel and the board intact so the background owner cannot
-        # touch a host that this window has already released.
-        self._task_report_coordinator.close(timeout=float(node_stop_seconds))
         for panel_id in list(self.panels):
             self._remove_panel_now(panel_id)
         self.board.close()

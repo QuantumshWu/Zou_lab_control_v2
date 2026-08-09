@@ -469,10 +469,10 @@ session.close()
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
 
 
-def test_calibration_terminal_publication_mounts_its_three_report_panels(
+def test_calibration_terminal_writes_four_images_without_report_panels(
     workspace,
 ) -> None:
-    """The human Start path ends with FINAL capture plus the full v1 report."""
+    """The Task owns its files; Workbench only owns the live preview."""
 
     from zlc_atom.nodes import calibration_pulse_template_bytes
 
@@ -514,7 +514,7 @@ def until(predicate, timeout=60.0):
         f'active={presenter._active_task_id!r}, '
         f'running={observed.running!r}, phase={observed.phase!r}, '
         f'error={observed.error!r}, panels='
-        f'{[(panel.state.signal, panel.prepared_surface is not None) for panel in presenter.panels.values()]!r}'
+        f'{[panel.state.signal for panel in presenter.panels.values()]!r}'
     )
 
 task_index = next(
@@ -529,84 +529,39 @@ editor.form.widget_for('repeats').setValue(30)
 application.processEvents()
 QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
 
-until(lambda: presenter._active_task_id is None and len([
-    panel for panel in presenter.panels.values()
-    if panel.prepared_surface is not None
-]) == 3)
-reports = tuple(
-    panel for panel in presenter.panels.values()
-    if panel.prepared_surface is not None
-)
-until(lambda: all(panel.prepared_surface.configured for panel in reports))
+until(lambda: presenter._active_task_id is None and bool(
+    presenter.logic['calibration'].artifact_results
+))
 for _ in range(20):
     presenter.beat()
     application.processEvents()
-assert len([
-    panel for panel in presenter.panels.values()
-    if panel.prepared_surface is not None
-]) == 3
 
 artifact_row = presenter.logic['calibration'].artifact_results[0]
 artifact_path = Path(artifact_row['path'])
 report_root = artifact_path.with_suffix('') / 'report'
 expected_report_files = {
-    report_root / f'{stem}.{suffix}'
-    for stem in ('site_map', 'fidelity', 'distribution')
-    for suffix in ('png', 'npz')
+    report_root / f'{stem}.png'
+    for stem in ('site_map', 'box', 'psf', 'uniform_psf')
 }
-until(lambda: not presenter._task_report_coordinator.exporting and all(
+until(lambda: all(
     path.is_file() and path.stat().st_size > 0
     for path in expected_report_files
 ))
+assert {path.name for path in report_root.iterdir()} == {
+    'site_map.png', 'box.png', 'psf.png', 'uniform_psf.png',
+}
 
 front = presenter.session.signal_plane.freeze()
 capture_signal = '@logic/calibration/capture_preview'
-trigger_signal = '@logic/calibration/fidelity_threshold'
-capture_value = front.value(capture_signal)
-terminal_publication = front.publication(trigger_signal)
-assert capture_value is not None
-assert capture_value.coverage is None and not capture_value.transient
-capture = next(
-    panel for panel in presenter.panels.values()
-    if panel.state.signal == capture_signal
+assert tuple(front.names()) == (capture_signal,)
+assert all(
+    panel.state.signal == capture_signal
+    for panel in presenter.panels.values()
 )
-until(lambda: capture.port.presented_publication() is terminal_publication)
-
-assert tuple(panel.prepared_surface.page.key for panel in reports) == (
-    'site_map', 'fidelity', 'distribution',
-)
-assert len(presenter.panels) == 4
-assert len(reports[0].prepared_surface.page.plot_input.overlay.point_ids) == 35
-for panel in reports:
-    assert panel.port is None
-    assert panel.bridge is None and panel.selections is None
-    assert panel.frozen_data.publication is terminal_publication
-    assert panel.prepared_surface.host.front is not None
-    assert view._cards[panel.panel_id]._surface is not None
-    assert view._cards[panel.panel_id]._selectors_on is True
-    parameters = panel.parameter_surface
-    assert parameters['semantic_unavailable'] == ''
-    assert parameters['display_unavailable'] == ''
-    assert parameters['fit_unavailable'] == ''
-assert reports[-1].state.kind == 'facet_grid'
-assert reports[-1].state.cell_kind == 'histogram'
-assert reports[-1].state.size == '4x4'
-assert {path.name for path in expected_report_files} == {
-    'site_map.png', 'site_map.npz',
-    'fidelity.png', 'fidelity.npz',
-    'distribution.png', 'distribution.npz',
-}
-view._view.selectors_switch.setChecked(False)
-application.processEvents()
-assert all(view._cards[panel.panel_id]._selectors_on is False for panel in reports)
-assert all(panel.bridge is None and panel.selections is None for panel in reports)
-view._view.selectors_switch.setChecked(True)
-application.processEvents()
-assert all(view._cards[panel.panel_id]._selectors_on is True for panel in reports)
-assert all(panel.bridge is None and panel.selections is None for panel in reports)
+assert not hasattr(presenter, '_task_report_coordinator')
 assert not view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
-print('CALIBRATION_FINAL_REPORT_OK')
+print('CALIBRATION_FILES_WITHOUT_REPORT_UI_OK')
 presenter.close()
 session.close()
 """ % workspace
@@ -618,7 +573,7 @@ session.close()
         timeout=300,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "CALIBRATION_FINAL_REPORT_OK" in completed.stdout
+    assert "CALIBRATION_FILES_WITHOUT_REPORT_UI_OK" in completed.stdout
 
 
 def test_the_experiment_entry_opens_both_work_windows_on_one_session(workspace) -> None:

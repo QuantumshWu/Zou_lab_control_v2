@@ -583,45 +583,6 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         real_presenter.close()
 
 
-def test_ordinary_viewer_replays_exported_calibration_facet_thresholds(
-    tmp_path,
-) -> None:
-    """Open Saved uses the generic annotation seam, not a Calibration loader."""
-
-    from test_archive import _calibration_outputs
-    from zlc_workbench.apps.figure_viewer import build
-    from zlc_workbench.calibration_report import export_calibration_report
-
-    files = export_calibration_report(tmp_path / "calibration-report", _calibration_outputs())
-    distribution = next(
-        path for path in files.archives if path.name == "distribution.npz"
-    )
-    info, arrays = read_archive(distribution)
-    assert info["sections"]["plot_annotations"] == {
-        "dataset": "data",
-        "facet_thresholds": [0.0, 1.0, None],
-    }
-    assert not any(name.startswith("calibration.threshold") for name in arrays)
-
-    view = _ViewerView()
-    presenter = build(view)
-    try:
-        assert presenter.open(str(distribution)) is not None, view.status
-        assert presenter.plot_annotations.facet_thresholds == (0.0, 1.0, None)
-        host = presenter._host
-        assert host is not None
-        assert tuple(host._session._facet_thresholds) == (0.0, 1.0, None)
-        annotated = host.front
-        assert annotated is not None
-        cleared = host.set_facet_thresholds(
-            (None, None, None),
-            display=False,
-        ).result(timeout=10)
-        assert cleared.front.buffer.pixels != annotated.buffer.pixels
-    finally:
-        presenter.close()
-
-
 def test_panel_save_annotation_roundtrip_keeps_canonical_units(tmp_path) -> None:
     """A saved V threshold stays V after reopening a panel displayed in mV."""
 

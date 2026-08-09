@@ -207,19 +207,14 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert tuple(
             (output.name, output.contract_id)
             for output in calibration_descriptor.outputs
-        ) == (
-            ("capture_preview", "calibration.capture-preview.v1"),
-            ("site_map", "calibration.site-map.v1"),
-            ("fidelity_site", "calibration.site-fidelity.v1"),
-            ("fidelity_centers", "calibration.site-centers.v1"),
-            ("readout_samples", "calibration.readout-samples.v1"),
-            ("fidelity_threshold", "calibration.site-threshold.v1"),
-        )
-        calibration_signals = {
-            calibration_host.signal_key(output.name)
-            for output in calibration_descriptor.outputs
-        }
-        assert set(plane.freeze().signals) == calibration_signals
+        ) == (("capture_preview", "calibration.capture-preview.v1"),)
+        assert {
+            path.name
+            for path in (
+                first_calibration.artifact_path.with_suffix("") / "report"
+            ).iterdir()
+        } == {"site_map.png", "box.png", "psf.png", "uniform_psf.png"}
+        assert plane.freeze().signals == {}
 
         plane.retire(calibration_host)
         assert plane.freeze().signals == {}
@@ -233,7 +228,13 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "calibration.json",
             "calibration-2.json",
         }
-        assert set(plane.freeze().signals) == calibration_signals
+        assert {
+            path.name
+            for path in (
+                second_calibration.artifact_path.with_suffix("") / "report"
+            ).iterdir()
+        } == {"site_map.png", "box.png", "psf.png", "uniform_psf.png"}
+        assert plane.freeze().signals == {}
 
         one_window_program = _one_camera_window_program()
         sequencer.load(one_window_program)
@@ -402,7 +403,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         occupancy_host.shutdown()
         finite_host.shutdown()
         plane.retire(finite_host)
-        assert set(plane.freeze().signals) == calibration_signals
+        assert plane.freeze().signals == {}
 
         sequencer.load(one_window_program)
         infinite_finalization = finalize_logic_draft(
@@ -469,7 +470,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert all(
             host.terminal and not host.running and host.worker_idle for host in hosts
         )
-        assert set(plane.freeze().signals) == calibration_signals
+        assert plane.freeze().signals == {}
         plane.retire(calibration_host)
         assert plane.freeze().signals == {}
         assert camera.capture_state() is False

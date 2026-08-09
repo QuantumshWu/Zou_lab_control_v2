@@ -75,7 +75,6 @@ def build_console(session, *, window_ratio=None):
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
     from ..panel_state import compose_panel_spec
-    from ..task_reports import default_task_report_registry
 
     # One call, one handle: this layer never names a widget class.
     view = open_task_console(title="TaskConsole@Zou lab", window_ratio=window_ratio)
@@ -112,7 +111,6 @@ def build_console(session, *, window_ratio=None):
         make_host=_make_host,
         spec_for=_spec_for,
         open_saved=lambda start: _open_saved_figure(view, start),
-        task_reports=default_task_report_registry(),
     )
     return view, presenter
 
