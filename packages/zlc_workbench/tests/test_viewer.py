@@ -441,7 +441,7 @@ def test_the_figure_is_a_panel_with_its_own_decisions(presenter, saved) -> None:
     presenter.view.figure_title_committed.emit("reopened run")
     assert presenter.figure_title == "reopened run"
 
-    assert presenter.resize_figure("4x4") is True
+    assert presenter.resize_figure("4x4") is True, presenter.view.status
     assert presenter._host.logical_size is not None
 
     seen = []
@@ -488,9 +488,6 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     )
 
     class _SavingHost:
-        def update_image_overlay(self, _overlay) -> None:
-            return None
-
         def save(self, path) -> None:
             Path(path).write_bytes(b"png")
 
@@ -502,7 +499,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         state=state,
         frozen=frozen,
         make_host=lambda _input, _signal, _kind, _cell_kind: _SavingHost(),
-        configure_host=lambda _host, _state: None,
+        configure_host=lambda _host, _state, _overlay: None,
     )
     assert not missing_calibration.exists()
     with np.load(written.archive, allow_pickle=False) as payload:
@@ -515,11 +512,9 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             self.fitted = None
             self.closed = False
 
-        def set_parameters(self, values) -> None:
-            self.display = dict(values)
-
-        def set_size(self, size) -> None:
-            self.size = str(size)
+        def configure(self, *, parameters=None, size=None) -> None:
+            self.display = dict(parameters or {})
+            self.size = str(size or "")
 
         def fit(self, model, **options) -> None:
             self.fitted = (str(model), dict(options))
@@ -623,7 +618,7 @@ def test_panel_save_annotation_roundtrip_keeps_canonical_units(tmp_path) -> None
         state=state,
         frozen=frozen,
         make_host=lambda *_args: _SavingHost(),
-        configure_host=lambda _host, _state: None,
+        configure_host=lambda _host, _state, _overlay: None,
         annotations=PanelPlotAnnotations((1.0, 2.0)),
     )
 

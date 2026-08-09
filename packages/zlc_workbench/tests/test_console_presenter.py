@@ -582,7 +582,7 @@ def test_site_grid_add_fixes_curve_cells_before_a_signal_exists(presenter) -> No
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     presenter, session, monkeypatch
 ) -> None:
-    """The signal picker completes a panel; it is not a creation precondition."""
+    """Only a new signal/schema replaces a host; plot settings configure it."""
 
     presenter.view.add_panel_requested.emit("image")
     binding = next(iter(presenter.panels.values()))
@@ -595,25 +595,27 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert binding.host is not None
     assert binding.port is not None
     first_host = binding.host
-    close_timeouts = []
-    close_first_host = first_host.close
+    first_editor_host = binding.editor_host
+    assert first_editor_host is not None
 
-    def record_close(*, timeout=None):
-        close_timeouts.append(timeout)
-        return close_first_host(timeout=timeout)
+    def unexpected_close(*, timeout=None):
+        raise AssertionError(f"a parameter edit closed the live host ({timeout=})")
 
-    monkeypatch.setattr(first_host, "close", record_close)
+    monkeypatch.setattr(first_host, "close", unexpected_close)
     assert presenter.update_panel_state(
         binding.panel_id, {"title": "Camera without owner-thread wait"}
     )
-    assert binding.host is not first_host
-    assert close_timeouts and close_timeouts[0] == 0.0
-    first_front = binding.host.wait_for_front(timeout=10.0)
-    assert first_front.identity.sequence == 1, (
-        "initial panel state was applied as repeated renders instead of one "
-        "precomposed host"
+    assert binding.host is first_host
+    assert binding.editor_host is first_editor_host
+    described = presenter._plot_operation_value(binding.host.describe_display())
+    assert described.display_state.values["title"] == "Camera without owner-thread wait"
+    editor_description = presenter._plot_operation_value(
+        binding.editor_host.describe_display()
     )
-    assert binding.editor_host is not None
+    assert (
+        editor_description.display_state.values["title"]
+        == "Camera without owner-thread wait"
+    )
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
 
@@ -983,7 +985,7 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     )
     _settle_panel_hosts(
         presenter,
-        lambda: not binding.parameter_surface["semantic_unavailable"],
+        lambda: binding.configuration is None,
     )
     assert binding.state.display["colormap"] == colormap
     description = presenter._plot_operation_value(binding.host.describe_display())
@@ -1003,7 +1005,13 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     )
     _settle_panel_hosts(
         presenter,
-        lambda: not binding.parameter_surface["semantic_unavailable"],
+        lambda: binding.configuration is None
+        and next(
+            field["value"]
+            for field in binding.parameter_surface["semantic"]
+            if field["key"] == "reduction"
+        )
+        is reduction,
     )
     assert binding.state.semantic["reduction"] is reduction
     refreshed = {

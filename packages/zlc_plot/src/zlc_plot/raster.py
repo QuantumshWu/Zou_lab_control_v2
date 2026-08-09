@@ -381,6 +381,9 @@ class _WorkerSessionAdapter:
     def set_parameters(self, values: Mapping[str, object]) -> object:
         return self._session().set_parameters(values)
 
+    def configure(self, **configuration: object) -> object:
+        return self._session().configure(**configuration)
+
     def describe_display(self) -> object:
         return self._session().describe_display()
 
@@ -1151,6 +1154,33 @@ class RasterPlotHost:
             prepared,
             _mode=_DispatchMode.PUBLISH,
             coalesce_key=("parameters", tuple(sorted(prepared))),
+        )
+
+    def configure(
+        self,
+        *,
+        semantic: Mapping[str, object] | None = None,
+        parameters: Mapping[str, object] | None = None,
+        size: str | None = None,
+        image_overlay: "ImagePointOverlay | None | object" = _UNSET,
+        fit_model: str | None | object = _UNSET,
+    ) -> Future[RasterOperation["DisplayDescription"]]:
+        """Submit the complete desired state as one coalesced worker job."""
+
+        configuration = {
+            "semantic": None if semantic is None else dict(semantic),
+            "parameters": None if parameters is None else dict(parameters),
+            "size": size,
+        }
+        if image_overlay is not _UNSET:
+            configuration["image_overlay"] = image_overlay
+        if fit_model is not _UNSET:
+            configuration["fit_model"] = fit_model
+        return self._dispatch_session(
+            self._worker_adapter.configure,
+            _mode=_DispatchMode.PUBLISH,
+            coalesce_key="configuration",
+            **configuration,
         )
 
     def describe_display(self) -> Future[RasterOperation["DisplayDescription"]]:

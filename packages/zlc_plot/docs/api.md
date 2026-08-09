@@ -235,6 +235,11 @@ from zlc_plot import PlotSession
 session = PlotSession(snapshot, curve, size="2x2")
 session.set_parameters({"title": "Signal", "show_grid": True})
 session.set_size("2x4")
+session.configure(
+    semantic=session.describe_semantics().values,
+    parameters={"title": "Signal", "show_grid": True},
+    size="2x4",
+)
 session.save("curve.png")
 rgba = session.rgba()
 ```
@@ -294,9 +299,10 @@ handler admits the schema; `axis_choices` is the stable ordered set of
 `AxisRef` values declared by that schema; and `fields` contains the current
 `kind`, `x`, `y`, `group`, `reduction`, `samples`, `facet_rows` and
 `facet_cols` values that apply to the current kind. Every `zlc_plot.semantics.SemanticField` is
-marked `rebuild=True`: a semantic edit must be sent to
-`session.replace_spec(new_spec)` (or `RasterPlotHost.replace_spec`) and never
-through a display-parameter setter. `facet_cols` is optional, must differ
+marked `rebuild=True`. A frontend that owns a complete form submits its whole
+semantic/display/size/overlay/fit target once through `configure()`; `zlc_plot`
+composes the typed spec and chooses the minimum render path. Code that already
+owns a complete typed spec may call `replace_spec()` directly. `facet_cols` is optional, must differ
 from `facet_rows`, and `facet_max_cells` is the layout-declared capacity for a
 grid. Histogram `samples` is a multi-choice field. `zlc_plot.ui.semantic_controls()`
 projects this exact description into the same toolkit-neutral

@@ -150,7 +150,7 @@ def save_panel_figure(
     state: PanelState,
     frozen: PanelFrozenData,
     make_host: Callable[[object, str, str, str], object],
-    configure_host: Callable[[object, PanelState], None],
+    configure_host: Callable[[object, PanelState, ImagePointOverlay | None], None],
     annotations: PanelPlotAnnotations | None = None,
 ) -> PanelFigureFiles:
     """Save the Edit tab's exact frozen input without asking the plane again."""
@@ -167,12 +167,11 @@ def save_panel_figure(
         frozen.snapshot, state.signal, state.kind, state.cell_kind
     )
     try:
-        configure_host(host, state)
-        if isinstance(plot_input, ImageFrame):
-            update_overlay = getattr(host, "update_image_overlay", None)
-            if not callable(update_overlay):
-                raise TypeError("an Image panel host cannot restore its point overlay")
-            _await(update_overlay(plot_input.overlay))
+        configure_host(
+            host,
+            state,
+            plot_input.overlay if isinstance(plot_input, ImageFrame) else None,
+        )
         save = getattr(host, "save", None)
         if not callable(save):
             raise TypeError("panel plotting host cannot save an image")

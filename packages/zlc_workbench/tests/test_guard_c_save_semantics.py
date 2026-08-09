@@ -173,7 +173,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             judged.snapshot,
             title="occupancy image",
             kind="image",
-            fit={"model": "gaussian"},
+            fit={"model": "anisotropic_gaussian_center"},
             site_overlay="centers",
         )
         other = presenter.add_panel(
@@ -251,7 +251,8 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         archives = [path for path in created if path.suffix == ".npz"]
         images = [path for path in created if path.suffix == ".png"]
         assert len(archives) == 1 and len(images) == 1, (
-            "Panel Edit Save Fig has no formal image + data archive intent seam"
+            "Panel Edit Save Fig has no formal image + data archive intent seam; "
+            f"status={view.status!r}"
         )
 
         with np.load(archives[0], allow_pickle=False) as payload:
@@ -267,7 +268,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         panel_section = sections["panel"]
         panel_state = panel_section.get("state", panel_section)
         assert panel_state["kind"] == "image"
-        assert panel_state["fit"] == {"model": "gaussian"}
+        assert panel_state["fit"] == {"model": "anisotropic_gaussian_center"}
         assert panel_state["site_overlay"] == "centers"
         assert sections["overlay"]["resolved_mode"] == "centers"
 

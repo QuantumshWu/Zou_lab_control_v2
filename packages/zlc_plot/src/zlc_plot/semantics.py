@@ -426,7 +426,6 @@ def describe_semantics(
         )
 
     kind_choices = _choice_pairs(kinds, _kind_label)
-    axis_choices = _choice_pairs(axes, lambda value: _axis_label(schema, value))
     semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
     x = getattr(semantic, "x", None)
     y = getattr(semantic, "y", None)
@@ -435,17 +434,29 @@ def describe_semantics(
     used = tuple(item for item in (x, y, group) if isinstance(item, AxisRef))
     facet_axes = _without(axes, used)
 
+    def _axes_with_current(current: object) -> tuple[SemanticChoice, ...]:
+        values = axes
+        if isinstance(current, AxisRef) and current not in values:
+            values = (*values, current)
+        return _choice_pairs(values, lambda value: _axis_label(schema, value))
+
     fields: list[SemanticField] = []
     for name in _field_names(spec):
         if name == "kind":
             fields.append(_field(name, "Plot kind", spec.kind, kind_choices, True))
         elif name == "x":
-            fields.append(_field(name, "X axis", x, axis_choices, True))
+            fields.append(_field(name, "X axis", x, _axes_with_current(x), True))
         elif name == "y":
-            fields.append(_field(name, "Y axis", y, axis_choices, True))
+            fields.append(_field(name, "Y axis", y, _axes_with_current(y), True))
         elif name == "group":
             fields.append(
-                _field(name, "Group", group, ((None, "(none)"), *axis_choices), False)
+                _field(
+                    name,
+                    "Group",
+                    group,
+                    ((None, "(none)"), *_axes_with_current(group)),
+                    False,
+                )
             )
         elif name == "reduction":
             fields.append(

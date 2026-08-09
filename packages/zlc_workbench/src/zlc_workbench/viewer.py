@@ -409,13 +409,12 @@ class FigureViewerPresenter:
             display = dict(state.display)
             if state.kind == "image":
                 display["site_overlay"] = state.site_overlay
-            set_parameters = getattr(host, "set_parameters", None)
-            if display and callable(set_parameters):
-                cls._await(set_parameters(display))
-
-            set_size = getattr(host, "set_size", None)
-            if state.size and callable(set_size):
-                cls._await(set_size(state.size))
+            cls._await(
+                host.configure(
+                    parameters=display,
+                    size=state.size,
+                )
+            )
 
         selected_annotations = (
             PanelPlotAnnotations() if annotations is None else annotations
@@ -460,11 +459,8 @@ class FigureViewerPresenter:
 
         if self._host is None:
             return False
-        set_size = getattr(self._host, "set_size", None)
-        if not callable(set_size):
-            return False
         try:
-            result = set_size(str(size))
+            result = self._host.configure(size=str(size))
             if hasattr(result, "result"):
                 result.result()
         except Exception as error:

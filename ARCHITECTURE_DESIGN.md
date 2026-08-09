@@ -322,7 +322,7 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 
 依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。多 frame/cycle 数据还要投影明确的 frame-index choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
 
-Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动，不能先闪现一个脱离 panel 的临时顶层窗口再重建。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState` 并走同一异步 render/swap 路径，Display interval 也必须立即生效。
+Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动，不能先闪现一个脱离 panel 的临时顶层窗口再重建。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
 
 改 Signal 只换这个 panel 的绑定，不改 Occupancy 等 Logic Node 的 input binding，也不改 plot kind。
 
@@ -344,7 +344,7 @@ Edit 是一个 tab，不是 modal。它包含：
 
 Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `PanelState`，两个 view 和 monitor panel 都收到同一次更新。不写“Setting -> Edit”和“Edit -> Setting”两套手工拷贝逻辑。Edit 中的 frozen data snapshot 与 `PanelState` 分开：参数始终同步；如果换了 signal，旧 frozen 图标为 stale，用户 Refresh 后取新 signal 的 snapshot。
 
-Panel Setting/Edit 每次字段 commit 都在 owner thread 一次性冻结最终 `PanelState + PlotSpec + overlay`，再把可并行的 panel preparation/render 交给 worker；owner thread 不调用 `.result()` 等待。worker 只返回可安装的 prepared result，owner thread对 generation/revision 做 stale rejection 后一次 swap 到 monitor/Edit host，并且只触发一次 initial render/front。不能先同步建空图、随后多轮 rebuild/reflow，也不能让旧 commit 的结果覆盖新 state。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
+Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc_plot`：semantic mapping、整张 display parameter mapping、size、Image overlay 和 fit choice。Workbench 不判断哪一个字段能原位更新，也不循环调用单字段 setter；`zlc_plot` 用当前 `PlotSpec`、`ParameterSchema`、layout、overlay 和 fit 状态比较差异，合并需要的 render effects，并在同一个 worker job 中最多发布一张同步 front。只要 signal/schema 兼容，就保留同一个 host 和 Figure；只有 signal 改变、generation 改变或 schema 不兼容才替换 host。Fit 求解本身继续是异步科学计算，完成后再发布 fit overlay。owner thread 不调用 `.result()` 等待，旧的完整配置 job 由同一 coalescing key 淘汰。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
 
 ### 10.4 各 plot kind 的理想参数
 

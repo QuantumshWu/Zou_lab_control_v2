@@ -238,6 +238,53 @@ def test_a_semantic_edit_that_changes_nothing_does_not_rebuild() -> None:
         host.close(timeout=10)
 
 
+def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
+    """An embedder states the desired plot; it does not choose the render path."""
+
+    from zlc_plot import PlotKind
+
+    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        first = host.wait_for_front(timeout=10)
+        identity = host.host_id
+
+        configured = host.configure(
+            semantic={"kind": PlotKind.CURVE},
+            parameters={"title": "Configured once", "show_grid": True},
+            size="2x2",
+        ).result(timeout=10)
+
+        assert host.host_id == identity
+        assert configured.value.display_state.values["title"] == "Configured once"
+        assert configured.value.display_state.values["show_grid"] is True
+        assert configured.value.size == "2x2"
+        assert configured.front.identity.sequence == first.identity.sequence + 1
+        assert configured.front.identity.display_revision > first.identity.display_revision
+        assert configured.front.identity.layout_revision == first.identity.layout_revision
+
+        reshaped = host.configure(
+            semantic={"kind": PlotKind.HISTOGRAM},
+            parameters={"title": "Distribution", "bin_count": 8},
+            size="2x4",
+        ).result(timeout=10)
+        assert reshaped.value.kind is PlotKind.HISTOGRAM
+        assert reshaped.value.display_state.values["title"] == "Distribution"
+        assert reshaped.value.display_state.values["bin_count"] == 8
+        assert reshaped.value.size == "2x4"
+        assert reshaped.front.identity.sequence == configured.front.identity.sequence + 1
+        assert reshaped.front.identity.layout_revision > configured.front.identity.layout_revision
+
+        unchanged = host.configure(
+            semantic={"kind": PlotKind.HISTOGRAM},
+            parameters={"title": "Distribution", "bin_count": 8},
+            size="2x4",
+        ).result(timeout=10)
+        assert unchanged.value.display_state.revision == reshaped.value.display_state.revision
+        assert unchanged.value.size == reshaped.value.size
+    finally:
+        host.close(timeout=10)
+
+
 def test_a_host_that_could_not_start_says_why_not_that_it_is_closing() -> None:
     """The refusal must carry the reason, not the symptom.
 

@@ -186,9 +186,11 @@ controls = parameter_controls(
 实际 widgets。具体应用只负责页面布局和业务流程。`describe_semantics(schema, spec)`
 及 `session.describe_semantics()` 从 kind registry 机械生成 kind、AxisRef、group、
 reduction、samples、facet_rows/facet_cols 的编辑域；`zlc_plot.ui.semantic_controls()` 复用同一
-control 管线并把每个语义控件标成 `rebuild=True`。语义修改统一调用
-`session.replace_spec(new_spec)` / `RasterPlotHost.replace_spec(new_spec)`，保留可重验证的
-显示参数和兼容 viewport，并原子清空 selector/fit；不会为切 kind 复制一套 session/host。
+control 管线。拥有完整表单状态的宿主一次调用
+`session.configure(...)` / `RasterPlotHost.configure(...)`，同时提交 semantic mapping、
+display mapping、size、Image overlay 和 fit choice；宿主不判断原位更新还是重排。
+`zlc_plot` 比较当前状态、合并 `RenderEffect`，并保留同一个 Figure。
+`replace_spec()` 仍供已经拥有完整 typed `PlotSpec` 的代码直接使用。
 
 参数 schema 用 `RenderEffect` flags 声明每个修改真正失效的投影、geometry、style、
 axis transform、text/chrome、overlay 或 layout。一次 transaction 合并所有 effects，

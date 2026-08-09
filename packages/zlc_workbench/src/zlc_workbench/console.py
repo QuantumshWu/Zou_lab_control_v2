@@ -58,7 +58,7 @@ from .panel_catalog import (
     task_console_panel_identity,
     task_console_panel_kind,
 )
-from .panel_state import PanelFrozenData, PanelState, restore_semantic_choice
+from .panel_state import PanelFrozenData, PanelState
 from .presentation import PlotPanelPort
 from .selection import attach_selection_bridge, subscribe_committed_selection
 from .topology import project_signals
@@ -104,6 +104,9 @@ class PanelBinding:
     #: zlc_plot control plane.  This is editor metadata, not a second authored
     #: state; accepted values still live only in ``state``.
     parameter_surface: Mapping[str, object] = field(default_factory=dict)
+    configuration: Any = None
+    editor_configuration: Any = None
+
     @property
     def signal(self) -> str:
         return self.state.signal
@@ -809,14 +812,10 @@ class ConsolePresenter:
         except Exception as error:
             self._report(f"{panel_id}: {error}", severity="error")
             return False
-        appearance_changed = bool(
-            set(changes)
-            & {"signal", "size", "title", "semantic", "display", "fit", "site_overlay"}
-        )
         needs_mount = (
             bool(candidate.signal)
             and (
-                appearance_changed
+                candidate.signal != current.signal
                 or binding.host is None
                 or binding.port is None
             )
@@ -972,6 +971,63 @@ class ConsolePresenter:
                 return True
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
+            parameters = dict(candidate.display)
+            parameters["title"] = candidate.title
+            if candidate.kind == "image":
+                parameters["site_overlay"] = candidate.site_overlay
+            configuration: dict[str, object] = {
+                "semantic": dict(candidate.semantic),
+                "parameters": parameters,
+                "size": candidate.size,
+                "fit_model": candidate.fit.get("model"),
+            }
+            editor_configuration = dict(configuration)
+            if (
+                candidate.kind == "image"
+                and candidate.site_overlay != current.site_overlay
+            ):
+                publication = binding.display_publication
+                value = self._publication_value(publication, candidate.signal)
+                if value is not None:
+                    plot_input = self._project_panel_input(
+                        binding,
+                        value,
+                        publication,
+                        state=candidate,
+                    )
+                    if isinstance(plot_input, ImageFrame):
+                        configuration["image_overlay"] = plot_input.overlay
+                frozen = binding.frozen_data
+                if frozen is not None and frozen.publication is not None:
+                    frozen_value = self._publication_value(
+                        frozen.publication,
+                        frozen.signal,
+                    )
+                    if frozen_value is not None:
+                        frozen_input = self._project_panel_input(
+                            binding,
+                            frozen_value,
+                            frozen.publication,
+                            state=candidate,
+                        )
+                        binding.frozen_data = replace(
+                            frozen,
+                            plot_input=frozen_input,
+                            overlay=self._overlay_annotation(
+                                binding,
+                                frozen.publication,
+                                frozen_input,
+                            ),
+                        )
+                        if isinstance(frozen_input, ImageFrame):
+                            editor_configuration["image_overlay"] = (
+                                frozen_input.overlay
+                            )
+            binding.configuration = binding.host.configure(**configuration)
+            if binding.editor_host is not None:
+                binding.editor_configuration = binding.editor_host.configure(
+                    **editor_configuration
+                )
             binding.state = candidate
 
         self._publish_panel_state(binding)
@@ -1193,6 +1249,43 @@ class ConsolePresenter:
 
         for binding in tuple(self.panels.values()):
             host = binding.host
+            pending = binding.configuration
+            if pending is not None and pending.done():
+                binding.configuration = None
+                if not pending.cancelled():
+                    try:
+                        description = pending.result().value
+                    except Exception as error:
+                        if binding.reported_error is not error:
+                            binding.reported_error = error
+                            self._report(
+                                f"{binding.panel_id}: {error}", severity="error"
+                            )
+                    else:
+                        surface = self._parameter_surface_from_descriptions(
+                            binding.state,
+                            description,
+                            description.semantics,
+                            description.fit_models,
+                        )
+                        binding.state = self._state_with_described_semantics(
+                            binding.state,
+                            surface,
+                        )
+                        binding.parameter_surface = surface
+                        binding.reported_error = None
+                        self._publish_panel_state(binding)
+            editor_pending = binding.editor_configuration
+            if editor_pending is not None and editor_pending.done():
+                binding.editor_configuration = None
+                if not editor_pending.cancelled():
+                    try:
+                        editor_pending.result()
+                    except Exception as error:
+                        self._report(
+                            f"cannot update {binding.state.title} plot editor: {error}",
+                            severity="error",
+                        )
             if host is not None:
                 metadata, error = host.initial_state
                 if metadata is not None or error is not None:
@@ -1264,77 +1357,26 @@ class ConsolePresenter:
                         severity="error",
                     )
 
-    def _configure_panel_host(self, host: object, state: PanelState) -> None:
-        """Apply authored overrides through zlc_plot's public control plane."""
+    def _configure_panel_host(
+        self,
+        host: object,
+        state: PanelState,
+        image_overlay: object | None = None,
+    ) -> None:
+        """Submit the saved panel appearance as one zlc_plot configuration."""
 
-        for name, value in state.semantic.items():
-            apply_semantic = getattr(host, "apply_semantic", None)
-            if callable(apply_semantic):
-                self._await_panel_operation(
-                    apply_semantic(
-                        name,
-                        self._restore_panel_semantic(host, name, value),
-                    )
-                )
         display = dict(state.display)
         display["title"] = state.title
         if state.kind == "image":
             display["site_overlay"] = state.site_overlay
-        if display:
-            set_parameters = getattr(host, "set_parameters", None)
-            if callable(set_parameters):
-                self._await_panel_operation(set_parameters(display))
-        if state.size:
-            set_size = getattr(host, "set_size", None)
-            if callable(set_size):
-                self._await_panel_operation(set_size(state.size))
-        self._apply_panel_fit(host, {}, state.fit)
-
-    def _restore_panel_semantic(
-        self,
-        host: object,
-        name: str,
-        saved: object,
-    ) -> object:
-        """Resolve a JSON layout value through this host's typed choices."""
-
-        describe = getattr(host, "describe_semantics", None)
-        if not callable(describe):
-            return saved
-        description = self._plot_operation_value(describe())
-        return restore_semantic_choice(description, name, saved)
-
-    @staticmethod
-    def _compatible_fit_ids(host: object) -> frozenset[str]:
-        models_member = getattr(host, "fit_models", ())
-        operation = models_member() if callable(models_member) else models_member
-        models = tuple(ConsolePresenter._plot_operation_value(operation) or ())
-        return frozenset(str(getattr(model, "model_id")) for model in models)
-
-    def _apply_panel_fit(
-        self,
-        host: object,
-        current: Mapping[str, Any],
-        candidate: Mapping[str, Any],
-    ) -> None:
-        """Submit a compatible fit asynchronously through the public host API."""
-
-        before = current.get("model")
-        selected = candidate.get("model")
-        if selected == before:
-            return
-        if selected is None:
-            clear_fit = getattr(host, "clear_fit", None)
-            if callable(clear_fit):
-                clear_fit()
-            return
-        if str(selected) not in self._compatible_fit_ids(host):
-            return
-        fit = getattr(host, "fit", None)
-        if callable(fit):
-            # Fit completion intentionally stays asynchronous.  zlc_plot owns
-            # revision/generation acceptance and paints only a current result.
-            fit(str(selected), live=True)
+        self._await_panel_operation(
+            host.configure(
+                parameters=display,
+                size=state.size,
+                image_overlay=image_overlay if state.kind == "image" else None,
+                fit_model=state.fit.get("model"),
+            )
+        )
 
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
@@ -1443,6 +1485,7 @@ class ConsolePresenter:
 
         host = binding.editor_host
         selections = binding.editor_selections
+        binding.editor_configuration = None
         binding.editor_host = None
         binding.editor_selections = None
         mount = getattr(self.view, "show_panel_editor", None)
@@ -1583,6 +1626,24 @@ class ConsolePresenter:
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
 
+        surface = dict(binding.parameter_surface)
+        for section in ("semantic", "display", "fit"):
+            authored = dict(getattr(binding.state, section))
+            surface[section] = tuple(
+                {
+                    **dict(field),
+                    "value": authored.get(str(field["key"]), field.get("value")),
+                }
+                for field in tuple(surface.get(section, ()))
+            )
+        overlay = surface.get("site_overlay")
+        if isinstance(overlay, Mapping):
+            surface["site_overlay"] = {
+                **dict(overlay),
+                "value": binding.state.site_overlay,
+            }
+        binding.parameter_surface = surface
+
         set_projection = getattr(self.view, "set_panel_projection", None)
         if callable(set_projection):
             set_projection(
@@ -1601,6 +1662,7 @@ class ConsolePresenter:
         if binding.bridge is not None:
             binding.bridge.close()
         binding.bridge = binding.selections = None
+        binding.configuration = None
         host = binding.host
         binding.host = None
         binding.port = None

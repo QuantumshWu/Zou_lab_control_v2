@@ -237,7 +237,9 @@ owner thread 调用 `present_front()`。`RasterIdentity` 的 generation/revision
 `RasterPlotHost` 的 worker adapter 为每个公开操作提供一个显式委托方法；提交模式
 （CONTROL/PUBLISH/PRESENTATION）与 coalesce key 作为 dispatch 参数传入。查询和
 prepare/finalize 不发布 front，普通热更新 latest-only 合并，selector/fit 保序，一次
-live commit 则按 capture → promote → finalize 原子发布。facade 保留显式公共签名，
+live commit 则按 capture → promote → finalize 原子发布。宿主提交完整表单时只调用一次
+`configure()`；semantic/display/size/Image overlay 的差异与 `RenderEffect` 合并都在
+session 内完成，同步部分最多发布一张 front，宿主不循环调用单字段 setter。facade 保留显式公共签名，
 没有动态属性转发或另一份 GUI dispatch switch。
 
 六个 authored plot kind 通过 `_kinds` 的闭集 `KindHandler` 注册表连接 projection

@@ -203,6 +203,7 @@ class DisplayDescription:
     limits: RectangleRange
     viewport: RectangleRange | None
     semantics: SemanticDescription
+    fit_models: tuple[FitModelSpec, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PlotKind):
@@ -218,6 +219,7 @@ class DisplayDescription:
             raise TypeError("display description requires DisplayState")
         if not isinstance(self.semantics, SemanticDescription):
             raise TypeError("display description requires SemanticDescription")
+        object.__setattr__(self, "fit_models", tuple(self.fit_models))
         parameter_choices = {
             str(name): tuple(values)
             for name, values in self.parameter_choices.items()
@@ -851,6 +853,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 limits=self._current_display_limits(),
                 viewport=self._viewport,
                 semantics=semantics,
+                fit_models=self.fit_models,
             )
 
     def describe_semantics(self) -> SemanticDescription:
@@ -1363,6 +1366,79 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def set_parameter(self, name: str, value: object) -> DisplayState:
         return self.set_parameters({name: value})
 
+    def configure(
+        self,
+        *,
+        semantic: Mapping[str, object] | None = None,
+        parameters: Mapping[str, object] | None = None,
+        size: str | None = None,
+        image_overlay: ImagePointOverlay | None | object = _UNSET,
+        fit_model: str | None | object = _UNSET,
+    ) -> DisplayDescription:
+        """Apply one complete desired plot configuration.
+
+        The caller supplies state, not a render strategy.  Semantic choices are
+        composed in memory, display values are differenced as one mapping, and
+        size/overlay effects join the same renderer update.  A fit remains an
+        asynchronous analysis and is only restarted when its selected model
+        actually changes.
+        """
+
+        if semantic is not None and not isinstance(semantic, Mapping):
+            raise TypeError("semantic must be a mapping or None")
+        if parameters is not None and not isinstance(parameters, Mapping):
+            raise TypeError("parameters must be a mapping or None")
+        semantic_values = {} if semantic is None else dict(semantic)
+        display_values = {} if parameters is None else dict(parameters)
+        with self._lock:
+            self._assert_open()
+            data = self._projection.data
+            schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
+            candidate_spec = self._spec
+            for name, value in semantic_values.items():
+                candidate_spec = updated_spec(
+                    schema,
+                    candidate_spec,
+                    str(name),
+                    value,
+                )
+            spec_changed = candidate_spec != self._spec
+
+        if spec_changed:
+            description = self.replace_spec(
+                candidate_spec,
+                parameters=display_values,
+                size=size,
+                image_overlay=image_overlay,
+            )
+        else:
+            self._set_configuration_values(
+                display_values,
+                size=_UNSET if size is None else size,
+                image_overlay=image_overlay,
+            )
+            description = self.describe_display()
+
+        if fit_model is not _UNSET:
+            if fit_model is not None:
+                if not isinstance(fit_model, str) or not fit_model.strip():
+                    raise ValueError("fit_model must be a non-empty string or None")
+                selected_fit = fit_model.strip()
+            else:
+                selected_fit = None
+            with self._lock:
+                request = self._live_fit_request
+                current_fit = (
+                    None if request is None else str(request.model.model_id)
+                )
+                has_fit = request is not None or self._accepted_fit is not None
+            if selected_fit is None:
+                if has_fit:
+                    self.clear_fit()
+            elif selected_fit != current_fit:
+                self.fit_async(selected_fit, live=True)
+        return description
+
     def set_labels(
         self,
         *,
@@ -1550,6 +1626,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
 
     def set_parameters(self, values: Mapping[str, object]) -> DisplayState:
+        """Apply one complete display mapping through the effect-owned path."""
+
+        return self._set_configuration_values(values)
+
+    def _set_configuration_values(
+        self,
+        values: Mapping[str, object],
+        *,
+        size: str | object = _UNSET,
+        image_overlay: ImagePointOverlay | None | object = _UNSET,
+    ) -> DisplayState:
+        """Commit display, layout and Image overlay with one renderer update."""
+
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -1574,13 +1663,57 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     for name in self._parameter_schema.names
                     if previous.values[name] != candidate[name]
                 )
-                if not accepted_changes:
-                    return previous
-                accepted_effects = self._parameter_schema.effects_for(
+                parameter_effects = self._parameter_schema.effects_for(
                     accepted_changes
+                ) if accepted_changes else RenderEffect.NONE
+                selected_size = (
+                    self.surface_plan.preset
+                    if size is _UNSET
+                    else self._defaults.layout.validate_preset(size)
                 )
+                size_changed = (
+                    size is not _UNSET
+                    and selected_size != self.surface_plan.preset
+                )
+                previous_overlay = self._image_overlay
+                if image_overlay is _UNSET:
+                    selected_overlay = previous_overlay
+                    overlay_changed = False
+                else:
+                    if image_overlay is not None and not isinstance(
+                        image_overlay, ImagePointOverlay
+                    ):
+                        raise TypeError(
+                            "image_overlay must be ImagePointOverlay or None"
+                        )
+                    selected_overlay = image_overlay
+                    if selected_overlay is not None:
+                        if not isinstance(self._spec, ImagePlot):
+                            raise TypeError("image overlay requires ImagePlot")
+                        self._validate_image_frame_overlay(
+                            previous_overlay,
+                            selected_overlay,
+                        )
+                    overlay_changed = (
+                        previous_overlay is not selected_overlay
+                        and (
+                            previous_overlay is None
+                            or selected_overlay is None
+                            or not self._same_image_overlay(
+                                previous_overlay,
+                                selected_overlay,
+                            )
+                        )
+                    )
+                effects = parameter_effects
+                if size_changed:
+                    effects |= RenderEffect.LAYOUT
+                if overlay_changed:
+                    effects |= RenderEffect.OVERLAY
+                if effects == RenderEffect.NONE:
+                    return previous
                 unit_affecting = bool(
-                    accepted_effects & RenderEffect.VIEW_PROJECTION
+                    parameter_effects & RenderEffect.VIEW_PROJECTION
                 )
                 canonical_viewport = (
                     self._projected._viewport_in_canonical()
@@ -1589,7 +1722,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     and self._view is not None
                     else None
                 )
-                if accepted_effects & (
+                if effects & (
                     RenderEffect.INTERACTION_REPROJECT | RenderEffect.LAYOUT
                 ):
                     self._cancel_gesture()
@@ -1602,12 +1735,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._accepted_fit,
                     self._fit_context_generation,
                     self._layout_revision,
+                    self._size,
+                    self._image_overlay,
                 )
-                state = self._display_store._commit_prepared(previous, candidate)
+                state = (
+                    self._display_store._commit_prepared(previous, candidate)
+                    if accepted_changes
+                    else previous
+                )
                 fit_cancel: Event | None = None
                 layout_attempted = False
                 try:
-                    changed = state.changed_names
+                    changed = accepted_changes
                     if (
                         isinstance(self._spec, PulseTimelinePlot)
                         and "x_display_unit" in changed
@@ -1633,7 +1772,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             ),
                             self._viewport.y,
                         )
-                    effects = state.effects
                     unit_projection_changed = bool(
                         effects & RenderEffect.VIEW_PROJECTION
                     )
@@ -1658,6 +1796,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._accepted_fit = self._refresh_accepted_fit_overlays(
                             self._accepted_fit
                         )
+                    if size_changed:
+                        self._size = selected_size
+                    if overlay_changed:
+                        self._image_overlay = selected_overlay
                     plan = (
                         self._resolve_plan()
                         if effects & RenderEffect.LAYOUT
@@ -1666,13 +1808,16 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if plan is not None:
                         self._layout_revision += 1
                 except Exception:
-                    self._display_store._restore_prepared(state, previous)
+                    if accepted_changes:
+                        self._display_store._restore_prepared(state, previous)
                     self._projection = previous_projection
                     (
                         self._viewport,
                         self._accepted_fit,
                         self._fit_context_generation,
                         self._layout_revision,
+                        self._size,
+                        self._image_overlay,
                     ) = previous_values
                     raise
             try:
@@ -1684,18 +1829,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     )
                 else:
                     self._render_current(
-                        state.effects,
+                        effects,
                         schedule_fit=False,
                     )
             except Exception:
                 with self._lock:
-                    self._display_store._restore_prepared(state, previous)
+                    if accepted_changes:
+                        self._display_store._restore_prepared(state, previous)
                     self._projection = previous_projection
                     (
                         self._viewport,
                         self._accepted_fit,
                         self._fit_context_generation,
                         self._layout_revision,
+                        self._size,
+                        self._image_overlay,
                     ) = previous_values
                 try:
                     if layout_attempted or self.surface_plan != old_plan:
@@ -1713,13 +1861,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 raise
             if fit_cancel is not None:
                 fit_cancel.set()
-        self._notify_display(state)
+        if accepted_changes:
+            self._notify_display(state)
         return state
 
     def _prepare_replacement(
         self,
         spec: PlotSpec,
         parameters: Mapping[str, object] | None,
+        size: str,
     ) -> tuple[Any, Any, DisplayStateStore, int | None, FitProjection]:
         """Build and validate everything a spec replacement would commit.
 
@@ -1737,7 +1887,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             spec,
             old_state.values,
             schema,
-            size=self._size or self.surface_plan.preset,
+            size=size,
             viewport=self._viewport,
             parameters=parameters,
         )
@@ -1793,8 +1943,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         spec: PlotSpec,
         *,
         parameters: Mapping[str, object] | None = None,
+        size: str | None = None,
+        image_overlay: ImagePointOverlay | None | object = _UNSET,
     ) -> DisplayDescription:
-        """Atomically replace plot semantics on the existing Figure."""
+        """Atomically replace semantics and final presentation on one Figure."""
 
         if not isinstance(spec, (CurvePlot, ImagePlot, HistogramPlot, RollingPlot,
                                  FacetGridPlot, PulseTimelinePlot)):
@@ -1804,13 +1956,30 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         with self._render_lock:
             with self._lock:
                 self._assert_open()
+                selected_size = self._defaults.layout.validate_preset(
+                    self.surface_plan.preset if size is None else size
+                )
+                if image_overlay is not _UNSET:
+                    if image_overlay is not None and not isinstance(
+                        image_overlay, ImagePointOverlay
+                    ):
+                        raise TypeError(
+                            "image_overlay must be ImagePointOverlay or None"
+                        )
+                    if image_overlay is not None and not isinstance(spec, ImagePlot):
+                        raise TypeError("image overlay requires ImagePlot")
+                    if image_overlay is not None:
+                        self._validate_image_frame_overlay(
+                            self._image_overlay,
+                            image_overlay,
+                        )
                 (
                     schema,
                     initial_state,
                     display_store,
                     focused,
                     projection,
-                ) = self._prepare_replacement(spec, parameters)
+                ) = self._prepare_replacement(spec, parameters, selected_size)
                 assert self._renderer is not None
                 renderer = self._renderer
                 old_plan = renderer.plan
@@ -1828,6 +1997,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._facet_thresholds,
                     self._rolling_history,
                     self._layout_revision,
+                    self._size,
                 )
                 self._cancel_gesture()
                 self._spec = spec
@@ -1836,8 +2006,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._projection = projection
                 self._selector_controller = _SelectorController()
                 self._image_overlay = (
-                    self._image_overlay if isinstance(spec, ImagePlot) else None
+                    (
+                        self._image_overlay
+                        if image_overlay is _UNSET
+                        else image_overlay
+                    )
+                    if isinstance(spec, ImagePlot)
+                    else None
                 )
+                self._size = selected_size
                 self._viewport = initial_state.viewport
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
@@ -1875,6 +2052,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._facet_thresholds,
                         self._rolling_history,
                         self._layout_revision,
+                        self._size,
                     ) = previous
                     renderer.spec = self._spec
                 renderer.relayout(

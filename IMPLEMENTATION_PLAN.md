@@ -241,15 +241,15 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 6. Logic Edit 和同 producer 的 Panel Edit 共享同一 row draft；一处修改同步到其他打开投影。
 7. 只处理 committed selection。Logic descriptor 用 data-only mapping 把 Image Area 等转成 typed measurement draft patch，Workbench 负责路由，不写 camera-specific branch。
 8. Producer Restart 直接调同一 Start/Restart endpoint，一次按键完成停旧 run -> 配置 request -> 立即启动新 run；不另造 Apply action。
-9. Panel appearance 的每次字段 commit 在 owner thread 冻结最终 state/spec/overlay 后异步 prepare/render；owner thread 不 `.result()`，只在 generation/revision 仍匹配时一次 swap，并且只有一次 initial render/front。旧结果必须丢弃，不得同步创建空 host 后多轮 rebuild/reflow。产品 UI 没有 Apply。
-10. node id/signal key 保持不变，成功启动创建新 generation。Panel 在 generation boundary 替换 plot host；同 generation 内复用 snapshot revision 拒绝晚到异步结果。不新建第二套 revision。
+9. Panel appearance 的每次字段 commit 把完整 semantic/display/size/overlay/fit 目标配置一次提交给当前 `zlc_plot` host。Workbench 不分类字段、不循环单参数 setter；`zlc_plot` 自己比较当前状态、合并 render effects，并在一个 worker job 中最多产生一张同步 front。owner thread 不 `.result()`，同一配置 key 的旧 job 被新 job 淘汰。产品 UI 没有 Apply。
+10. node id/signal key 保持不变，成功启动创建新 generation。同一 signal/schema 始终保留 host/Figure；只有 signal、generation 或 schema compatibility 边界才替换 plot host。同 generation 内复用 snapshot revision 拒绝晚到数据结果，不新建第二套 revision。
 11. active downstream 保留 row/binding 并对新 source 重校验；ROI/exposure 使 calibration frame contract 不相容时显示 blocked。
 
 ### 完成标准
 
 - selector -> ROI draft 在非零 origin/binning 下仍使用正确 sensor coordinates。
 - 只按一次 Producer Restart 就已运行新 measurement；它就是同一个 Start/Restart action。
-- blank panel 首帧前就有完整稳定 Setting surface；合法 interval 立即生效且不会使 scheduler 崩溃，字段 commit 到可见首图的 owner-thread blocking/rebuild 次数经 profiling 证明已收敛。
+- blank panel 首帧前就有完整稳定 Setting surface；合法 interval 立即生效且不会使 scheduler 崩溃；profiling 证明同一 signal/schema 的完整配置提交不重建 host/Figure、不在 owner thread 等待，并且同步 front 只增加一次。
 - Guard B 通过，不增加字段级 GUI 测试矩阵。
 
 ## 12. Phase 9：实现三种 Save
@@ -357,7 +357,7 @@ Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本�
 - TaskConsole/Pulse Editor 使用同一 Experiment/session/sequencer/world，Pulse Editor 不被虚构成长期 device owner。
 - Task active 时 header takeover 显示 progress 和唯一 Stop Task，其他状态改变禁用；Monitor preview 和 terminal cleanup 正确。
 - combined `Add Panel` 的 Logic entry 自动进 Edit；没有独立 Add Logic 控件；产品 UI 没有 Apply；Panel Producer Restart 复用同一个 Start/Restart endpoint。
-- combined `Add Panel` 只有规定的五种 Plot entries，可在无 signal 时创建 blank fixed-kind panel；Setting 初始显示完整 schema、限定在 panel 内并可滚动，interval 只能从 100/200/400/800 ComboBox 选择且修改立即生效。Panel/Edit 共享唯一 `PanelState`，selector 可联动 producer；字段 commit 异步、无 owner-thread wait、一次 initial render 并拒绝 stale result。
+- combined `Add Panel` 只有规定的五种 Plot entries，可在无 signal 时创建 blank fixed-kind panel；Setting 初始显示完整 schema、限定在 panel 内并可滚动，interval 只能从 100/200/400/800 ComboBox 选择且修改立即生效。Panel/Edit 共享唯一 `PanelState`，selector 可联动 producer；完整配置一次交给 `zlc_plot`，同一 signal/schema 不重建 host/Figure、无 owner-thread wait且只增加一张同步 front。
 - Pulse template/editor/generator 只通过 `zlc.pulse.v1` readable JSON 单一路径读写，没有 `.py` pulse 或第二 serializer。
 - SiteMap 不是 plot kind；site/occupancy markers 是固定 `Image` plot kind 的 `Site overlay` 参数。
 - Header Layout、Header Screenshot、Panel Save Fig 三者分开；Panel data 包含正确调用链参数/device snapshots，不打包整个 monitor tab。
