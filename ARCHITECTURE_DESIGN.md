@@ -52,6 +52,7 @@ Plot Panel
 5. latest buffer 只保存当前值，不记录、展示或存档丢了多少/哪些。
 6. 测试守卫尽量修改现有测试。只增加少量能在原缺陷下变红的纵向行为测试。
 7. 保持稳定的只有整体骨架：plugin discovery、descriptor/contract、NodeHost 生命周期、session/device ownership 和公共 signal/plot 能力。每个 Logic Node、device plugin 以及 Workbench 功能都在该骨架内用最短实现完成自己的业务；Workbench 只做基本逻辑和接线。单个 plugin 的需求不得升级成新的通用 registry/coordinator/transaction/DTO/adapter 层，现有单消费者框架应直接删除。
+8. `zlc_atom` foundation 与 concrete plugin 的依赖边界必须分开：顶层基础模块、公共 contract、install/runtime glue 和 `nodes/_framework` 保持 headless，不依赖 Qt、`zlc_plot` 或 `zlc_ui`；具体 `nodes/<plugin>`、`devices/<plugin>` 可以在自己的目录内声明并实现本插件独有的 plot/UI，并调用 `zlc_plot`/`zlc_ui` 公共 API。该局部能力不得反向进入 foundation，也不得被 Workbench 收编成通用 plugin-specific 框架。
 
 ## 3. Experiment、GUI 和设备所有权
 
@@ -107,7 +108,7 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 | `zlc_plot` | plot spec/projection/display/fit/selector/renderer/image export | device、TaskConsole layout、measurement form |
 | `zlc_ui` | window/tab/form/widget、operator intent | device 访问、物理规则、runtime 调度 |
 | `zlc_pulse` | pulse model/compiler/slot/scan、sequencer transport | measurement、TaskConsole 管线 |
-| `zlc_atom` | device base capability/adapter，logic descriptor/request，calibration/site-map/occupancy 物理；Calibration Task 调用公开 `zlc_plot` API 生成业务 report | Qt、TaskConsole panel/layout/archive UI、renderer 实现 |
+| `zlc_atom` | foundation 拥有 device capability/adapter、logic contract/host-facing descriptor；具体 plugin 目录拥有自身物理、专有 plot/UI 声明与实现。Calibration Task 在自己的 plugin 目录调用公开 `zlc_plot` API 生成业务 report | foundation 不拥有 Qt/plot/UI；不拥有 TaskConsole panel/layout/archive 或 renderer 实现；plugin-local UI 不得反向进入 foundation |
 | `zlc_workbench` | Experiment 接线、row draft、资源仲裁、Start/Restart、panel-producer 联动、save 组装 | 相机 SDK 分支、site 检测算法、plot 参数合法性 |
 
 ## 5. Logic 模型：role 与数据 extent 正交

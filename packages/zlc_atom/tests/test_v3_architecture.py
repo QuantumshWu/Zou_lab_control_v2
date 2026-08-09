@@ -6,14 +6,6 @@ from pathlib import Path
 import time
 
 import pytest
-from zlc_data import (
-    AxisId,
-    COMPONENT,
-    SITE,
-    SPATIAL_X,
-    SPATIAL_Y,
-    CoordinateFrameId,
-)
 from zlc_durable import readable_json_bytes
 from zlc_pulse import (
     PULSE_TREE_FORMAT,
@@ -361,7 +353,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         loads_before_task = len([event for event, _ in sequencer.events if event == "load"])
         fires_before_task = len([event for event, _ in sequencer.events if event == "fire"])
         camera_events_before_task = len(camera.events)
-        signals_before_task = set(plane.freeze().signals)
         calibration_host = NodeHost(calibration_node, plane)
         calibration_host.start()
         deadline = time.monotonic() + 10.0
@@ -375,103 +366,23 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         task_result = calibration_node.result
         assert task_result is not None
         task_camera_events = camera.events[camera_events_before_task:]
-        front = plane.freeze()
-        calibration_signals = {
-            f"@logic/calibration/{name}"
-            for name in (
-                "capture_preview",
-                "site_map",
-                "fidelity_site",
-                "fidelity_centers",
-                "readout_samples",
-                "fidelity_threshold",
-            )
-        }
-        assert set(front.signals) == signals_before_task | calibration_signals
         assert plane.calibration_coverages == [
             (current, 30) for current in range(1, 31)
         ]
         assert len(set(plane.calibration_schema_fingerprints)) == 1
-        assert front.value("@logic/calibration/capture_preview").shape == (
-            30,
-            1,
-            3,
-            96,
-            128,
-        )
-        assert front.value("@logic/calibration/site_map").shape == (
-            1,
-            1,
-            96,
-            128,
-        )
-        assert front.value("@logic/calibration/fidelity_site").shape == (
-            1,
-            35,
-            1,
-        )
-        assert front.value("@logic/calibration/fidelity_centers").shape == (
-            1,
-            35,
-            2,
-        )
-        assert front.value("@logic/calibration/readout_samples").shape == (
-            30,
-            35,
-            1,
-        )
-        assert front.value("@logic/calibration/fidelity_threshold").shape == (
-            1,
-            35,
-            1,
-        )
-        site_values = tuple(
-            front.value(f"@logic/calibration/{name}")
-            for name in (
-                "fidelity_site",
-                "fidelity_centers",
-                "readout_samples",
-                "fidelity_threshold",
+        report_images = tuple(
+            sorted(
+                path.name
+                for path in (
+                    task_result.artifact_path.with_suffix("") / "report"
+                ).glob("*.png")
             )
         )
-        assert all(value is not None for value in site_values)
-        site_columns = tuple(
-            value.schema.point_table.columns[0]  # type: ignore[union-attr]
-            for value in site_values
-        )
-        assert all(column is site_columns[0] for column in site_columns)
-        assert site_columns[0].coordinate_id == AxisId("calibration.site")
-        assert site_columns[0].role is SITE
-        assert site_columns[0].values == task_result.calibration.site_map.site_ids
-
-        coordinate_frame = CoordinateFrameId(
-            task_result.calibration.site_map.coordinate_frame
-        )
-        assert coordinate_frame == CoordinateFrameId("image_pixel_xy")
-        site_map_value = front.value("@logic/calibration/site_map")
-        assert site_map_value is not None
-        site_map_axes = {
-            axis.role: axis for axis in site_map_value.cell_schema.data_axes
-        }
-        assert set(site_map_axes) == {SPATIAL_Y, SPATIAL_X}
-        assert all(
-            site_map_axes[role].unit == "pixel"
-            and site_map_axes[role].coordinate_frame == coordinate_frame
-            for role in (SPATIAL_Y, SPATIAL_X)
-        )
-
-        centers_value = front.value("@logic/calibration/fidelity_centers")
-        assert centers_value is not None
-        component_axis = centers_value.cell_schema.data_axes[0]
-        assert component_axis.role is COMPONENT
-        assert component_axis.coordinates == ("x", "y")
-        assert component_axis.unit == "pixel"
-        assert component_axis.coordinate_frame == coordinate_frame
-        assert centers_value.cell_schema.value_unit == "pixel"
-        assert all(
-            front.value(name).coverage is None
-            and front.value(name).transient is False
-            for name in calibration_signals
+        assert report_images == (
+            "box.png",
+            "psf.png",
+            "site_map.png",
+            "uniform_psf.png",
         )
         assert len(task_result.capture.frames) == 90
         assert sum(len(group) for group in task_result.reference) == 60
@@ -520,34 +431,12 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(
             (value.name, value.contract_id)
             for value in descriptors["calibration"].outputs
-        ) == (
-            ("capture_preview", "calibration.capture-preview.v1"),
-            ("site_map", "calibration.site-map.v1"),
-            ("fidelity_site", "calibration.site-fidelity.v1"),
-            ("fidelity_centers", "calibration.site-centers.v1"),
-            ("readout_samples", "calibration.readout-samples.v1"),
-            ("fidelity_threshold", "calibration.site-threshold.v1"),
-        )
+        ) == (("capture_preview", "calibration.capture-preview.v1"),)
         assert tuple(
             (preview.output_name, preview.plot_kind)
             for preview in descriptors["calibration"].task_previews
         ) == (("capture_preview", "image"),)
-        assert tuple(
-            (
-                report.adapter_key,
-                report.output_names,
-                report.trigger_output_name,
-            )
-            for report in descriptors["calibration"].task_reports
-        ) == (
-            (
-                "calibration.report.v1",
-                tuple(
-                    output.name for output in descriptors["calibration"].outputs
-                ),
-                "fidelity_threshold",
-            ),
-        )
+        assert not hasattr(descriptors["calibration"], "task_reports")
         assert [
             (value.name, value.contract_id)
             for value in descriptors["calibration"].artifact_outputs

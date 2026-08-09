@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from zlc_data import AxisId, PointColumn, SITE, SPATIAL_X, SPATIAL_Y
 from zlc_durable import unique_path
 from zlc_pulse import PulseSequence
 
@@ -31,9 +32,10 @@ from .calibration import (
     calibrate,
 )
 from .outputs import (
-    CALIBRATION_DATASET_DECLARATIONS,
+    CAPTURE_PREVIEW_DECLARATION,
     CalibrationCapturePreviewSlot,
-    calibration_final_outputs,
+    _image_axis_specs,
+    _snapshot,
 )
 
 
@@ -234,6 +236,106 @@ class CalibrationRunResult:
         object.__setattr__(self, "run_record", dict(self.run_record))
 
 
+def _save_report_images(result: CalibrationRunResult) -> Path:
+    """Render the SiteMap and each readout model directly through zlc_plot."""
+
+    from zlc_plot import (
+        AxisRef,
+        HistogramPlot,
+        ImagePointOverlay,
+        PlotLabels,
+        PointStatus,
+        facet_grid,
+        image,
+    )
+
+    calibration = result.calibration
+    site_map = calibration.site_map
+    report_root = result.artifact_path.with_suffix("") / "report"
+    report_root.mkdir(parents=True)
+    generation = result.artifact_path.stem
+    revision = len(result.capture.cycles)
+
+    site_map_snapshot = _snapshot(
+        np.asarray(result.report["reference_average"], dtype="<f8")[np.newaxis, ...],
+        signal="site_map",
+        roles=(SPATIAL_Y, SPATIAL_X),
+        axis_specs=_image_axis_specs(
+            calibration.frame_contract.image_shape,
+            site_map.coordinate_frame,
+        ),
+        generation=generation,
+        revision=revision,
+    )
+    overlay = ImagePointOverlay(
+        revision,
+        site_map.centers_xy,
+        point_ids=site_map.site_ids,
+        labels=tuple(str(index + 1) for index in range(site_map.n_sites)),
+        statuses=tuple(
+            PointStatus.UNKNOWN if valid else PointStatus.INVALID
+            for valid in site_map.valid_sites
+        ),
+    )
+    with image(
+        site_map_snapshot,
+        AxisRef.data("calibration.image.x"),
+        AxisRef.data("calibration.image.y"),
+        overlay=overlay,
+        labels=PlotLabels(title="Site map", x="x (pixel)", y="y (pixel)"),
+        size="4x4",
+    ) as plot:
+        plot.save(report_root / "site_map.png")
+
+    site_column = PointColumn(
+        AxisId("calibration.site"),
+        "site",
+        SITE,
+        PointColumn.TEXT,
+        site_map.site_ids,
+    )
+    labels_valid = np.asarray(result.report["labels_valid"], dtype=bool)
+    model_reports = result.report["models"]
+    for model in calibration.models:
+        model_report = model_reports[model.kind.value]
+        short_signals = np.asarray(model_report["short_signals"], dtype="<f8")
+        site_valid = (
+            site_map.valid_sites
+            & model.usable_sites
+            & np.isfinite(model.thresholds)
+        )
+        samples = _snapshot(
+            short_signals,
+            signal=f"{model.kind.value}_readout_samples",
+            roles=(SITE,),
+            point_columns={SITE: site_column},
+            generation=generation,
+            revision=revision,
+            cell_validity=(
+                labels_valid
+                & np.isfinite(short_signals)
+                & site_valid[np.newaxis, :]
+            ),
+        )
+        thresholds = tuple(
+            float(value) if valid else None
+            for value, valid in zip(model.thresholds, site_valid, strict=True)
+        )
+        title = f"{model.kind.value.replace('_', ' ')} readout"
+        with facet_grid(
+            samples,
+            AxisRef.point("calibration.site"),
+            HistogramPlot(PlotLabels(x="Readout signal", y="Count")),
+            labels=PlotLabels(title=title),
+            size="4x4",
+        ) as plot:
+            plot.set_facet_thresholds(thresholds, display=False)
+            plot.fit("bimodal_gaussian", live=False, fit_all_facets=True)
+            plot.save(report_root / f"{model.kind.value}.png")
+
+    return report_root
+
+
 def _camera_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
     roi_y, roi_x = point.roi_origin_yx
     roi_height, roi_width = point.roi_shape_yx
@@ -295,7 +397,7 @@ def _sequencer_snapshot(sequencer: object) -> dict[str, object]:
 
 
 class CalibrationTask:
-    """Drive one protocol and publish its preview, diagnostics, and artifact."""
+    """Drive one protocol, publish its preview, and save its result and plots."""
 
     instance_id = "calibration"
 
@@ -344,7 +446,7 @@ class CalibrationTask:
 
     @property
     def dataset_output_declarations(self):
-        return CALIBRATION_DATASET_DECLARATIONS
+        return (CAPTURE_PREVIEW_DECLARATION,)
 
     def _resolve_pulse(self) -> ResolvedPulse:
         return resolve_pulse(
@@ -617,21 +719,15 @@ class CalibrationTask:
                 pulse_facts,
                 run_record,
             )
+            if context is not None:
+                context.report_progress("Saving calibration report")
+            _save_report_images(result)
             self._result = result
             if context is not None:
                 context.report_progress(
                     "Calibration complete",
                     current=self.request.repeats,
                     total=self.request.repeats,
-                )
-                context.publish_final(
-                    calibration_final_outputs(
-                        calibration=calibration,
-                        capture_cycles=capture.cycles,
-                        report=analysis.report,
-                        generation=context.generation,
-                        run_record=run_record,
-                    )
                 )
             return result
         except BaseException:

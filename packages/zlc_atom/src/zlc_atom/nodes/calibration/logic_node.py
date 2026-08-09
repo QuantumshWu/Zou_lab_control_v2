@@ -1,4 +1,4 @@
-"""Discoverable calibration task with typed previews, final data, and artifact."""
+"""Discoverable calibration task with one live preview and saved results."""
 
 from __future__ import annotations
 
@@ -12,13 +12,12 @@ from zlc_atom.nodes._framework.descriptor import (
     OutputSpec,
     ResolvedWorkspaceResource,
     TaskPreviewSpec,
-    TaskReportSpec,
     WorkspaceResourceSpec,
 )
 from zlc_pulse import PulseSequence
 
 from .calibration import ReadoutModelKind
-from .outputs import CALIBRATION_DATASET_DECLARATIONS
+from .outputs import CAPTURE_PREVIEW_DECLARATION
 from .pulse import load_calibration_pulse_template
 from .task import CalibrationRequest, CalibrationTask
 
@@ -227,21 +226,13 @@ LOGIC_NODE = LogicNodeDescriptor(
     "calibration",
     NodeKind.TASK,
     CALIBRATION_SCHEMA,
-    outputs=tuple(
-        OutputSpec(declaration.name, declaration.contract_id)
-        for declaration in CALIBRATION_DATASET_DECLARATIONS
-    ),
-    task_previews=(TaskPreviewSpec("capture_preview", "image"),),
-    task_reports=(
-        TaskReportSpec(
-            "calibration.report.v1",
-            tuple(
-                declaration.name
-                for declaration in CALIBRATION_DATASET_DECLARATIONS
-            ),
-            "fidelity_threshold",
+    outputs=(
+        OutputSpec(
+            CAPTURE_PREVIEW_DECLARATION.name,
+            CAPTURE_PREVIEW_DECLARATION.contract_id,
         ),
     ),
+    task_previews=(TaskPreviewSpec("capture_preview", "image"),),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
     ),

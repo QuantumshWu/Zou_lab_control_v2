@@ -12,6 +12,11 @@ They constrain implementation method; product and architecture truth remain in
 - **骨架上的一切功能都取最简实现。** 每个 Logic Node、device plugin 和
   Workbench feature 只在自己的现有 owner 内写完成该业务所必需的直接逻辑；
   Workbench 只做基本组合、状态投影和接线，不承载 plugin 科学逻辑。
+- **Atom foundation 与 concrete plugin 分开。** `zlc_atom` 的顶层基础模块、
+  common contract、install/runtime glue 和 `nodes/_framework` 不得依赖 Qt、
+  `zlc_plot` 或 `zlc_ui`。具体 `nodes/<plugin>`、`devices/<plugin>` 可以在自己
+  的目录内声明并实现该插件独有的 plot/UI，并只调用公共 API；这种依赖不得反向
+  进入 foundation，也不得被提升成 Workbench 通用框架。
 - **默认删，不默认抽象。** 单消费者 helper/framework、plugin-specific
   registry/coordinator/transaction/adapter/DTO、平行 lifecycle/state 和防御型
   代码应直接删除。不得为了“以后可能复用”、兼容旧测试或防范假想误用而保留。

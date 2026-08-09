@@ -82,11 +82,26 @@ def test_top_level_submodules_remain_explicitly_importable() -> None:
     assert "nodes" not in _real_public_names(zlc_atom)
 
 
-def test_forbidden_imports_are_absent_from_the_package() -> None:
+def test_foundation_stays_headless_while_concrete_plugins_may_own_views() -> None:
     paths = _python_files("")
-    text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
-    for forbidden in ("PyQt5", "matplotlib", "zlc_plot", "zlc_ui", "zlc_neutral_atom", "_VirtualSequencerConnection"):
-        assert forbidden not in text
+    package_text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    for forbidden in ("zlc_neutral_atom", "_VirtualSequencerConnection"):
+        assert forbidden not in package_text
+
+    foundation = tuple(
+        path
+        for path in paths
+        if not (
+            len(path.relative_to(SRC).parts) >= 3
+            and path.relative_to(SRC).parts[0] in {"nodes", "devices"}
+            and path.relative_to(SRC).parts[1] != "_framework"
+        )
+    )
+    foundation_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in foundation
+    )
+    for forbidden in ("PyQt5", "matplotlib", "zlc_plot", "zlc_ui"):
+        assert forbidden not in foundation_text
 
 
 def test_b_half_parallel_import_policy_is_explicit() -> None:

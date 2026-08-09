@@ -53,6 +53,7 @@
 9. 不把任何 `packages/*/GOAL.md`、旧 design、README、contract 或 HANDOFF 当作实施目标。它们只能用来理解现状；一旦冲突，以本计划和 `ARCHITECTURE_DESIGN.md` 为准。分派任何子任务时也必须明示携带这个权威边界。
 10. 凡计划明确要求“参考 v1”，必须从绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1` 读取并记录具体文件；禁止使用其他副本。同时不得把该参考扩张为重做 v2 架构的依据。
 11. 只保持整体 plugin/host/session/device/signal/plot 骨架稳定；Logic Node、device plugin 和 Workbench 功能都必须在现有骨架内采用最简单的本地实现，Workbench 只做基本逻辑和接线。未经用户明确批准，禁止把任何 plugin 的需求提升成新的通用抽象；已有单消费者 registry/coordinator/transaction/DTO/adapter 直接删除，不保留兼容层。
+12. `zlc_atom` foundation（顶层基础模块、公共 contract、install/runtime glue、`nodes/_framework`）继续禁止 Qt/`zlc_plot`/`zlc_ui` 依赖；具体 `nodes/<plugin>`、`devices/<plugin>` 可在本插件目录内声明和实现独有 plot/UI，只调用公共 API。测试必须分别守住 foundation 禁令与 plugin 局部许可，不能用一个全包字符串禁令抹掉 plugin 能力，也不能让 plugin 依赖渗回 foundation。
 
 ## 1.1 Phase 0：隔离错误目标入口（已完成）
 

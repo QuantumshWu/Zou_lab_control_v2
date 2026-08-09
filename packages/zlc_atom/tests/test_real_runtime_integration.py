@@ -105,6 +105,15 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         ).run()
+        report_directory = task_result.artifact_path.with_suffix("") / "report"
+        report_images = tuple(sorted(report_directory.glob("*.png")))
+        assert tuple(path.name for path in report_images) == (
+            "box.png",
+            "psf.png",
+            "site_map.png",
+            "uniform_psf.png",
+        )
+        assert all(path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for path in report_images)
         occupancy_node = OccupancyProcessor(
             task_result.calibration,
             signal_plane=plane,

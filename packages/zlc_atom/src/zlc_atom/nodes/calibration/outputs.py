@@ -1,4 +1,4 @@
-"""Typed live and FINAL Dataset outputs owned by Calibration."""
+"""The live camera preview published while Calibration is running."""
 
 from __future__ import annotations
 
@@ -10,11 +10,9 @@ from zlc_data import (
     AxisId,
     AxisRoleId,
     AxisSpec,
-    COMPONENT,
     CoordinateFrameId,
     PointColumn,
     READOUT_EVENT,
-    SITE,
     SPATIAL_X,
     SPATIAL_Y,
     CellValidity,
@@ -24,41 +22,14 @@ from zlc_data import (
 from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 
-from .calibration import TrapCalibration
-
-
 CAPTURE_PREVIEW_DECLARATION = DatasetOutputDeclaration(
     "capture_preview", "calibration.capture-preview.v1"
-)
-SITE_MAP_DECLARATION = DatasetOutputDeclaration(
-    "site_map", "calibration.site-map.v1"
-)
-FIDELITY_SITE_DECLARATION = DatasetOutputDeclaration(
-    "fidelity_site", "calibration.site-fidelity.v1"
-)
-FIDELITY_CENTERS_DECLARATION = DatasetOutputDeclaration(
-    "fidelity_centers", "calibration.site-centers.v1"
-)
-READOUT_SAMPLES_DECLARATION = DatasetOutputDeclaration(
-    "readout_samples", "calibration.readout-samples.v1"
-)
-FIDELITY_THRESHOLD_DECLARATION = DatasetOutputDeclaration(
-    "fidelity_threshold", "calibration.site-threshold.v1"
-)
-CALIBRATION_DATASET_DECLARATIONS = (
-    CAPTURE_PREVIEW_DECLARATION,
-    SITE_MAP_DECLARATION,
-    FIDELITY_SITE_DECLARATION,
-    FIDELITY_CENTERS_DECLARATION,
-    READOUT_SAMPLES_DECLARATION,
-    FIDELITY_THRESHOLD_DECLARATION,
 )
 
 
@@ -244,144 +215,7 @@ class CalibrationCapturePreviewSlot:
         self._listener = None
 
 
-def calibration_final_outputs(
-    *,
-    calibration: TrapCalibration,
-    capture_cycles: Sequence[Sequence[CameraFrameRecord]],
-    report: Mapping[str, object],
-    generation: object,
-    run_record: Mapping[str, object],
-) -> dict[str, FinalDatasetOutput]:
-    """Materialize the complete preview and five report-facing FINAL outputs."""
-
-    if not isinstance(calibration, TrapCalibration):
-        raise TypeError("calibration must be TrapCalibration")
-    cycles = tuple(tuple(cycle) for cycle in capture_cycles)
-    if not cycles:
-        raise ValueError("calibration final outputs require captured cycles")
-    frame_shape = calibration.frame_contract.image_shape
-    capture_values = np.stack(
-        [
-            _cycle_array(cycle, frame_shape, np.asarray(cycle[0].image).dtype)
-            for cycle in cycles
-        ],
-        axis=0,
-    )
-    model = calibration.select_model()
-    models_report = report.get("models")
-    if not isinstance(models_report, Mapping):
-        raise TypeError("calibration report models must be a mapping")
-    model_report = models_report.get(model.kind.value)
-    if not isinstance(model_report, Mapping):
-        raise KeyError(model.kind.value)
-    reference_average = np.asarray(report["reference_average"], dtype="<f8")
-    centers = np.asarray(calibration.site_map.centers_xy, dtype="<f8")
-    short_signals = np.asarray(model_report["short_signals"], dtype="<f8")
-    labels_valid = np.asarray(report["labels_valid"], dtype=bool)
-    site_valid = (
-        calibration.site_map.valid_sites
-        & model.usable_sites
-        & np.isfinite(model.thresholds)
-    )
-    sample_valid = (
-        labels_valid
-        & np.isfinite(short_signals)
-        & site_valid[np.newaxis, :]
-    )
-    coordinate_frame = CoordinateFrameId(calibration.site_map.coordinate_frame)
-    site_column = PointColumn(
-        AxisId("calibration.site"),
-        "site",
-        SITE,
-        PointColumn.TEXT,
-        calibration.site_map.site_ids,
-    )
-    site_columns = {SITE: site_column}
-    image_axes = _image_axis_specs(frame_shape, coordinate_frame)
-    center_component_axis = AxisSpec(
-        AxisId("calibration.site-center.component"),
-        "coordinate",
-        COMPONENT,
-        2,
-        coordinates=("x", "y"),
-        unit="pixel",
-        coordinate_frame=coordinate_frame,
-    )
-    final_revision = len(cycles)
-    snapshots = {
-        "capture_preview": _snapshot(
-            capture_values,
-            signal="capture_preview",
-            roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-            axis_specs=image_axes,
-            generation=generation,
-            revision=final_revision,
-        ),
-        "site_map": _snapshot(
-            reference_average[np.newaxis, ...],
-            signal="site_map",
-            roles=(SPATIAL_Y, SPATIAL_X),
-            axis_specs=image_axes,
-            generation=generation,
-            revision=final_revision,
-        ),
-        "fidelity_site": _snapshot(
-            model.quality[np.newaxis, :],
-            signal="fidelity_site",
-            roles=(SITE,),
-            point_columns=site_columns,
-            generation=generation,
-            revision=final_revision,
-            cell_validity=(site_valid & np.isfinite(model.quality))[np.newaxis, :],
-        ),
-        "fidelity_centers": _snapshot(
-            centers[np.newaxis, ...],
-            signal="fidelity_centers",
-            roles=(SITE, COMPONENT),
-            axis_specs={COMPONENT: center_component_axis},
-            point_columns=site_columns,
-            value_unit="pixel",
-            generation=generation,
-            revision=final_revision,
-            cell_validity=(
-                calibration.site_map.valid_sites
-                & np.all(np.isfinite(centers), axis=1)
-            )[np.newaxis, :],
-        ),
-        "readout_samples": _snapshot(
-            short_signals,
-            signal="readout_samples",
-            roles=(SITE,),
-            point_columns=site_columns,
-            generation=generation,
-            revision=final_revision,
-            cell_validity=sample_valid,
-        ),
-        "fidelity_threshold": _snapshot(
-            model.thresholds[np.newaxis, :],
-            signal="fidelity_threshold",
-            roles=(SITE,),
-            point_columns=site_columns,
-            generation=generation,
-            revision=final_revision,
-            cell_validity=site_valid[np.newaxis, :],
-        ),
-    }
-    declarations = {
-        declaration.name: declaration
-        for declaration in CALIBRATION_DATASET_DECLARATIONS
-    }
-    if tuple(snapshots) != tuple(declarations):
-        raise RuntimeError("calibration final output order changed")
-    return {
-        name: FinalDatasetOutput(declarations[name], snapshot, run_record)
-        for name, snapshot in snapshots.items()
-    }
-
-
 __all__ = [
-    "CALIBRATION_DATASET_DECLARATIONS",
     "CAPTURE_PREVIEW_DECLARATION",
     "CalibrationCapturePreviewSlot",
-    "calibration_final_outputs",
 ]

@@ -31,7 +31,6 @@ from .calibration import (
     signals,
 )
 from .logic_node import LOGIC_NODE
-from .outputs import CALIBRATION_DATASET_DECLARATIONS
 from .psf import gaussian_psf_kernel, normalized_psf_kernel
 from .task import (
     CalibrationCapture,
@@ -49,7 +48,6 @@ __all__ = [
     "CalibrationRunResult",
     "CalibrationTask",
     "CALIBRATION_ARTIFACT_CODEC",
-    "CALIBRATION_DATASET_DECLARATIONS",
     "DEFAULT_READOUT_MODEL_CHOICE",
     "FrameContract",
     "LOGIC_NODE",

@@ -16,7 +16,6 @@ from ._framework.descriptor import (
     ResolvedWorkspaceResource,
     SelectionMapping,
     TaskPreviewSpec,
-    TaskReportSpec,
     WorkspaceResourceSpec,
 )
 from ._framework.discovery import discover_logic_nodes
@@ -46,7 +45,6 @@ __all__ = [
     "ResolvedWorkspaceResource",
     "SelectionMapping",
     "TaskPreviewSpec",
-    "TaskReportSpec",
     "WorkspaceResourceSpec",
     "calibration_pulse_template_bytes",
     "discover_logic_nodes",
