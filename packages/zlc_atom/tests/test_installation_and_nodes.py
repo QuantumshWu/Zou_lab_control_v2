@@ -123,9 +123,9 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         assert result.calibration.n_sites == len(
             installation.world.geometry.site_centers_xy
         )
-        assert result.calibration.frame_contract.image_shape == (32, 48)
-        assert result.calibration.frame_contract.sensor_shape == (32, 48)
-        assert result.calibration.frame_contract.roi_xywh == (0, 0, 48, 32)
+        assert result.calibration.frame_contract.image_shape == (96, 128)
+        assert result.calibration.frame_contract.sensor_shape == (96, 128)
+        assert result.calibration.frame_contract.roi_xywh == (0, 0, 128, 96)
         assert result.calibration.frame_contract.exposure_seconds == 0.005
         assert result.calibration.frame_contract.camera_id == "camera"
         json.dumps(result.run_record)
@@ -139,7 +139,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             revision=1,
         )
         np.testing.assert_array_equal(occupancy.rate, np.mean(occupancy.occupied, axis=-1))
-        assert occupancy.counts.shape == (30, 6)
+        assert occupancy.counts.shape == (30, 35)
         assert occupancy.rate.shape == (30,)
         np.testing.assert_array_equal(occupancy.artifacts["counts"].block.values[:, :, 0], occupancy.counts)
         assert len(result.capture.frames) == 90
@@ -168,14 +168,14 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             generation="calibration-task",
             revision=1,
         )
-        assert occupancy.counts.shape == (30, 6)
+        assert occupancy.counts.shape == (30, 35)
         assert occupancy.rate.shape == (30,)
         counts_artifact = occupancy.artifacts["counts"]
         rate_artifact = occupancy.artifacts["rate"]
         assert isinstance(counts_artifact, OwnedSnapshot)
         assert counts_artifact.block.schema.repeat_axis.role is REPEAT
         assert counts_artifact.block.schema.point_table.column(counts_artifact.block.schema.point_table.columns[0].coordinate_id).role is SITE
-        assert counts_artifact.block.values.shape == (30, 6, 1)
+        assert counts_artifact.block.values.shape == (30, 35, 1)
         assert rate_artifact.block.schema.cell_schema.is_scalar
         assert rate_artifact.block.values.shape == (30, 1, 1)
     finally:

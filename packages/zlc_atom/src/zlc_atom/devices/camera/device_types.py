@@ -9,7 +9,13 @@ from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
 from zlc_atom.devices.camera.virtual import VirtualCamera, VirtualCameraConfig
 from zlc_atom.execution import DeviceIdentityEvidenceKind, PhysicalDeviceIdentity, ResourceKey, SafetyOperation, bind_verified_device
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
-from .world import SimulationWorld
+from .world import (
+    DEFAULT_SIMULATION_GRID_SHAPE_YX,
+    DEFAULT_SIMULATION_IMAGE_SHAPE_YX,
+    SimulationGeometry,
+    SimulationWorld,
+    SimulationWorldConfig,
+)
 
 
 # Each camera type declares the parameters IT has.  One shared schema meant the
@@ -20,8 +26,12 @@ from .world import SimulationWorld
 
 VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
     (
-        AuthoringField("frame_shape_yx", "pair", "Frame shape (Y,X)", (32, 48)),
-        AuthoringField("grid_shape_yx", "pair", "Grid shape (Y,X)", (2, 3)),
+        AuthoringField(
+            "frame_shape_yx", "pair", "Frame shape (Y,X)", DEFAULT_SIMULATION_IMAGE_SHAPE_YX
+        ),
+        AuthoringField(
+            "grid_shape_yx", "pair", "Grid shape (Y,X)", DEFAULT_SIMULATION_GRID_SHAPE_YX
+        ),
         AuthoringField("seed", "int", "Seed", 0, minimum=0),
         AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9),
     )
@@ -150,6 +160,17 @@ def _virtual_factory(context, key: str, values: dict) -> InstalledLeaf:
     return _bind_camera(context, key, camera, f"virtual-camera:{key}", "camera.virtual")
 
 
+def _world_config(values: dict) -> SimulationWorldConfig:
+    authored = VIRTUAL_CAMERA_SCHEMA.freeze(values)
+    return SimulationWorldConfig(
+        SimulationGeometry(
+            grid_shape_yx=tuple(authored["grid_shape_yx"]),
+            image_shape_yx=tuple(authored["frame_shape_yx"]),
+        ),
+        seed=int(authored["seed"]),
+    )
+
+
 def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Open a Hamamatsu qCMOS from a written-down configuration.
 
@@ -199,6 +220,7 @@ DEVICE_TYPES = (
         VIRTUAL_CAMERA_SCHEMA,
         ("camera.adapter", "camera.working_point"),
         factory=_virtual_factory,
+        world_config=_world_config,
     ),
 )
 

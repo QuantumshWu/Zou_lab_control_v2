@@ -9,14 +9,18 @@ from typing import Any
 import numpy as np
 
 
+DEFAULT_SIMULATION_GRID_SHAPE_YX = (5, 7)
+DEFAULT_SIMULATION_IMAGE_SHAPE_YX = (96, 128)
+DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
+
+
 @dataclass(frozen=True)
 class SimulationGeometry:
     """One source of truth for virtual site geometry and authoring defaults."""
 
-    grid_shape_yx: tuple[int, int] = (2, 3)
-    image_shape_yx: tuple[int, int] = (32, 48)
-    site_sigma_pixels: float = 1.2
-    site_spacing_fraction: tuple[float, float] = (0.6, 0.6)
+    grid_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_GRID_SHAPE_YX
+    image_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
+    site_spacing_pixels: float = DEFAULT_SIMULATION_SITE_SPACING_PIXELS
 
     def __post_init__(self) -> None:
         grid = tuple(int(item) for item in self.grid_shape_yx)
@@ -25,16 +29,36 @@ class SimulationGeometry:
             raise ValueError("simulation geometry dimensions must be positive")
         object.__setattr__(self, "grid_shape_yx", grid)
         object.__setattr__(self, "image_shape_yx", image)
-        if float(self.site_sigma_pixels) <= 0:
-            raise ValueError("site_sigma_pixels must be positive")
+        spacing = float(self.site_spacing_pixels)
+        if not np.isfinite(spacing) or spacing <= 0:
+            raise ValueError("site_spacing_pixels must be positive and finite")
+        if (grid[0] - 1) * spacing >= image[0] or (grid[1] - 1) * spacing >= image[1]:
+            raise ValueError("simulation site grid does not fit inside the image")
+        object.__setattr__(self, "site_spacing_pixels", spacing)
 
     @property
     def site_centers_xy(self) -> np.ndarray:
         rows, columns = self.grid_shape_yx
         height, width = self.image_shape_yx
-        y_values = np.linspace((1.0 - self.site_spacing_fraction[0]) * 0.5 * height, (1.0 + self.site_spacing_fraction[0]) * 0.5 * height, rows)
-        x_values = np.linspace((1.0 - self.site_spacing_fraction[1]) * 0.5 * width, (1.0 + self.site_spacing_fraction[1]) * 0.5 * width, columns)
+        spacing = self.site_spacing_pixels
+        y0 = (height - (rows - 1) * spacing) * 0.5
+        x0 = (width - (columns - 1) * spacing) * 0.5
+        y_values = y0 + np.arange(rows, dtype=float) * spacing
+        x_values = x0 + np.arange(columns, dtype=float) * spacing
         return np.asarray([(x, y) for y in y_values for x in x_values], dtype="<f8")
+
+
+@dataclass(frozen=True)
+class SimulationWorldConfig:
+    """Resolved apparatus contribution used to construct one shared world."""
+
+    geometry: SimulationGeometry
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.geometry, SimulationGeometry):
+            raise TypeError("geometry must be SimulationGeometry")
+        object.__setattr__(self, "seed", int(self.seed))
 
 
 class SimulationWorld:
@@ -175,4 +199,11 @@ class SimulationWorld:
                     callback(ordinal)
 
 
-__all__ = ["SimulationGeometry", "SimulationWorld"]
+__all__ = [
+    "DEFAULT_SIMULATION_GRID_SHAPE_YX",
+    "DEFAULT_SIMULATION_IMAGE_SHAPE_YX",
+    "DEFAULT_SIMULATION_SITE_SPACING_PIXELS",
+    "SimulationGeometry",
+    "SimulationWorld",
+    "SimulationWorldConfig",
+]

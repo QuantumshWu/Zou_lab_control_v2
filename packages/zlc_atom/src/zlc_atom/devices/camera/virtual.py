@@ -11,14 +11,15 @@ from typing import Callable
 import numpy as np
 
 from .contract import CameraCaptureTerminalRecord, CameraFrameRecord, CameraWorkingPoint
+from .world import DEFAULT_SIMULATION_GRID_SHAPE_YX, DEFAULT_SIMULATION_IMAGE_SHAPE_YX
 
 
 @dataclass(frozen=True)
 class VirtualCameraConfig:
     """Geometry and exposure only; imaging physics belongs to SimulationWorld."""
 
-    frame_shape_yx: tuple[int, int] = (32, 48)
-    grid_shape_yx: tuple[int, int] = (2, 3)
+    frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
+    grid_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_GRID_SHAPE_YX
     seed: int = 0
     exposure_seconds: float = 0.02
 

@@ -363,9 +363,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             generation="calibration-task",
             revision=1,
         )
-        assert occupancy_result.counts.shape == (30, 6)
+        assert occupancy_result.counts.shape == (30, 35)
         assert occupancy_result.valid.shape == occupancy_result.counts.shape
-        assert occupancy_result.frame_judged.shape == (30, 32, 48)
+        assert occupancy_result.frame_judged.shape == (30, 96, 128)
 
         assert tuple(value.argument_name for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
         assert tuple(value.argument_name for value in descriptors["calibration"].device_requirements) == ("camera", "sequencer")

@@ -122,7 +122,7 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     assert reopened["pulse"] == PULSE_NAME
     assert reopened["repeat"] == 1
     assert reopened["exposure"] > 0
-    assert reopened["roi"] == [32, 48]
+    assert reopened["roi"] == [96, 128]
     # A block is (repeat, point, *data); one shot of a three-window bracket is
     # one repeat, one point, three frames.
     assert reopened["frames"][:3] == [1, 1, 3], f"unexpected block shape {reopened['frames']}"
@@ -193,7 +193,16 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
     save_installation_config(
         InstallationConfig(
             (
-                DeviceInstanceConfig("camera", "camera", "camera.virtual", {"seed": 3}),
+                DeviceInstanceConfig(
+                    "camera",
+                    "camera",
+                    "camera.virtual",
+                    {
+                        "frame_shape_yx": [80, 110],
+                        "grid_shape_yx": [4, 6],
+                        "seed": 3,
+                    },
+                ),
                 DeviceInstanceConfig(
                     "sequencer", "sequencer", "sequencer.virtual", {"camera_key": "camera"}
                 ),
@@ -205,6 +214,8 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
     session = ExperimentSession.open(tmp_path)
     try:
         assert session.failures == {}
+        assert session.installation.world.geometry.grid_shape_yx == (4, 6)
+        assert session.installation.world.geometry.image_shape_yx == (80, 110)
         session.load_pulse(PULSE_NAME)
 
         node = CameraMeasurementNode(
@@ -237,5 +248,10 @@ def test_a_template_still_works_for_a_bench_with_nothing_written_down(tmp_path) 
     try:
         assert session.failures == {}
         assert session.camera is not None
+        geometry = session.installation.world.geometry
+        assert geometry.grid_shape_yx == (5, 7)
+        assert geometry.image_shape_yx == (96, 128)
+        assert geometry.site_centers_xy.shape == (35, 2)
+        np.testing.assert_allclose(geometry.site_centers_xy[[0, -1]], ((37, 30), (91, 66)))
     finally:
         session.close()

@@ -107,7 +107,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             generation="calibration-task",
             revision=1,
         )
-        assert occupancy.counts.shape == (30, 6)
+        assert occupancy.counts.shape == (30, 35)
         np.testing.assert_allclose(occupancy.artifacts["rate"].block.values[:, 0, 0], occupancy.rate)
 
         oracle = _oracle()

@@ -106,6 +106,33 @@ def _topological(specs: tuple[DeviceSpec, ...], descriptors: Mapping[str, Device
     return tuple(result)
 
 
+def _world_from_apparatus(
+    specs: tuple[DeviceSpec, ...],
+    descriptors: Mapping[str, DeviceTypeDescriptor],
+) -> object:
+    """Build one shared world from device-declared apparatus contributions."""
+
+    from zlc_atom.devices.camera.world import SimulationWorld, SimulationWorldConfig
+
+    configs = tuple(
+        descriptor.world_config(
+            descriptor.authoring_schema.freeze(spec.config)
+        )
+        for spec in specs
+        for descriptor in (descriptors[spec.type_id],)
+        if descriptor.world_config is not None
+    )
+    if not configs:
+        return SimulationWorld()
+    if not all(isinstance(config, SimulationWorldConfig) for config in configs):
+        raise TypeError("device world_config returned the wrong type")
+    unique = set(configs)
+    if len(unique) != 1:
+        raise ValueError("devices in one installation declared different simulation worlds")
+    config = next(iter(unique))
+    return SimulationWorld(config.geometry, seed=config.seed)
+
+
 def create_installation(
     specs: tuple[DeviceSpec, ...] | list[DeviceSpec] | str,
     *,
@@ -115,8 +142,6 @@ def create_installation(
     connect_pulse: object | None = None,
 ) -> Installation:
     from zlc_atom.execution import DeviceBroker
-    from zlc_atom.devices.camera.world import SimulationWorld
-
     snapshot = catalog if catalog is not None else discover_device_catalog()
     if not isinstance(snapshot, DeviceCatalogSnapshot):
         raise TypeError("catalog must be DeviceCatalogSnapshot or None")
@@ -125,15 +150,15 @@ def create_installation(
 
         specs = installation_config_from_template(snapshot, specs).specs()
     normalized = tuple(spec if isinstance(spec, DeviceSpec) else DeviceSpec(**spec) for spec in specs)  # type: ignore[arg-type]
-    if world is None:
-        world = SimulationWorld(seed=0)
-    if broker is None:
-        broker = DeviceBroker()
     found = snapshot.available
     by_type = {value.type_id: value for value in found}
     unknown = {spec.type_id for spec in normalized} - set(by_type)
     if unknown:
         raise KeyError(f"unknown device types: {sorted(unknown)}")
+    if world is None:
+        world = _world_from_apparatus(normalized, by_type)
+    if broker is None:
+        broker = DeviceBroker()
     ordered = _topological(normalized, by_type)
     installed: dict[str, InstalledLeaf] = {}
     failures: dict[str, BaseException] = {}

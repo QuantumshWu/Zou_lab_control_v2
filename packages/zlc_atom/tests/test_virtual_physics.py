@@ -31,9 +31,10 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
 
     exposure = 0.02
     assert world.atom_rate * exposure == pytest.approx(22.0)
-    world.set_occupancy(np.zeros(6, dtype=bool))
+    site_count = len(world.geometry.site_centers_xy)
+    world.set_occupancy(np.zeros(site_count, dtype=bool))
     dark = np.asarray([world.render_frame(index, exposure_seconds=exposure) for index in range(24)])
-    world.set_occupancy(np.ones(6, dtype=bool))
+    world.set_occupancy(np.ones(site_count, dtype=bool))
     bright = np.asarray([world.render_frame(index, exposure_seconds=exposure) for index in range(24)])
     assert dark.dtype == np.dtype("<u2")
     assert bright.dtype == np.dtype("<u2")

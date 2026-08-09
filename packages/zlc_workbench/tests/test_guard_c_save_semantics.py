@@ -57,9 +57,9 @@ def _calibration(path: Path) -> TrapCalibration:
             np.asarray((1.0, 1.0)),
         ),
         FrameContract(
-            (32, 48),
-            sensor_shape=(32, 48),
-            roi_xywh=(0, 0, 48, 32),
+            (96, 128),
+            sensor_shape=(96, 128),
+            roi_xywh=(0, 0, 128, 96),
             exposure_seconds=0.02,
             camera_id="camera",
             readout_mode="virtual-external-trigger",

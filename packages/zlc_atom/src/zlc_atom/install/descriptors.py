@@ -9,7 +9,7 @@ from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.devices.camera.contract import CameraAdapter, CameraWorkingPoint
 from zlc_atom.execution.capabilities import CAPABILITY_TYPES
 from zlc_atom.execution.ports import BoundDevice
-from zlc_atom.devices.camera.world import SimulationWorld
+from zlc_atom.devices.camera.world import SimulationWorld, SimulationWorldConfig
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,7 @@ class DeviceTypeDescriptor:
     capabilities: tuple[str, ...]
     dependencies: tuple[str, ...] = ()
     factory: Callable[[InstallationFactoryContext, str, Mapping[str, Any]], InstalledLeaf] | None = None
+    world_config: Callable[[Mapping[str, Any]], SimulationWorldConfig] | None = None
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.domain:
@@ -65,6 +66,8 @@ class DeviceTypeDescriptor:
             raise ValueError("device type cannot depend on itself")
         if self.factory is None or not callable(self.factory):
             raise TypeError("device type factory must be callable")
+        if self.world_config is not None and not callable(self.world_config):
+            raise TypeError("device type world_config must be callable or None")
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "dependencies", dependencies)
 
