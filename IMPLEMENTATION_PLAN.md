@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Simulation物理/MOT camera切片已提交a5d600b并通过完整Atom；Panel默认标题和全局10 Hz display tick已完成focused验证，正在运行完整Runtime/Workbench；Calibration PSF kernel grid仍待独立切片。`
-- Last completed action：`HarmonicClock现固定以allowed最小谐波100 ms推进，TaskConsole产品timer默认100 ms；每panel仍保留100/200/400/800间隔，现有continuous-group + SurfaceBatchArbiter让same-shot siblings按group最大间隔在同一global tick成批接受。blank panel第一次接signal时，若标题仍为自动plot-kind名称则改为signal；自定义标题保持。旧生产三条分别以base=200、title=2D image、parser=200红；修改后三条和same-shot batch守卫通过，相关presentation/console/app合组53 passed。Simulation完整zlc_atom为146 passed。`
-- Last verified tests：`22fd0eb前的旧生产真实Qt守卫精确红：Card Setting访问semantic__x时报KeyError；修改后focused 1 passed、相关真实Qt 25 passed、完整zlc_ui 79 passed；Workbench完整配置纵向1 passed、console presenter 30 passed、完整zlc_workbench 333 passed。buffer切片此前完整zlc_atom 143 passed，Auto切片此前完整zlc_plot 206 passed。当前机器基线71c2ab9上Guard A/B/C + end-to-end + 正式TaskConsole app合组26 passed；主工作树全树1152 passed in 170.77s；随后精确71c2ab9 detached临时树全树1152 passed in 181.12s，实际Atom/Plot/UI/Workbench导入均来自该临时树。临时worktree已移除，DIRECTORY_EXISTS=False、REGISTERED=False，项目Python进程为0。`
-- Pending acceptance gates：`先完成并验证以下当前缺口：SimulationWorld仍用奇偶两套occupancy且全部site共用一个圆对称PSF；virtual模板没有mot_camera；blank Panel首次接signal后标题仍只是plot kind；TaskConsole Qt timer为200 ms而HarmonicClock每tick推进默认400 ms；Calibration report只有site map和三种classifier grid，缺per-site PSF kernel FacetGrid[Image]。随后重新运行受影响/full/detached机器门，最后仍由用户亲自在可见bin\\experiment.bat判断视觉/交互。`
-- Next action：`运行完整zlc_runtime和zlc_workbench，修正确有语义变化的旧clock/title断言后提交display切片；随后用现有zlc_plot FacetGrid[Image]补PSF kernel report并做profiling。`
+- Current phase：`Simulation物理/MOT camera切片已提交a5d600b；Panel默认标题和全局10 Hz display tick已提交cf9e0a6。按最新用户裁决，Repeat=0共同raw buffer已从16提高到64个完整cycle，正在跑受影响相机契约；Calibration fidelity/PSF report的未完成工作树保持原样。`
+- Last completed action：`Camera Measurement共同层现在一次给Virtual/DCAM/Pylon传入64 * frames_per_cycle，并继续按完整cycle整数倍对齐；没有新增设备分支、类、文件或用户参数。frames_per_cycle=3的默认容量由48提高到192帧。旧生产在193帧压力下前三次读取末ordinal为147；修改后仍保留ordinal 1..192，丢弃未对齐1/2后从3/4/5发布完整shot。`
+- Last verified tests：`64-cycle原缺陷纵向守卫在旧生产精确1 failed，实得source_ordinal=147而期望3；修改后同一测试1 passed，Monitor/Virtual/Pylon/DCAM受影响组41 passed。此前cf9e0a6相关presentation/console/app合组53 passed、完整zlc_runtime 143 passed、完整zlc_workbench 334 passed；a5d600b后完整zlc_atom 146 passed。当前机器基线71c2ab9上主工作树全树1152 passed，detached临时树全树1152 passed；这些旧全树结果不是当前最终验收。`
+- Pending acceptance gates：`完成64-cycle受影响相机测试并独立提交；继续当前Calibration fidelity + per-site PSF kernel report切片和profiling；随后重新运行受影响/full/detached机器门，最后仍由用户亲自在可见bin\\experiment.bat判断视觉/交互。`
+- Next action：`运行Monitor/Virtual/Pylon/DCAM受影响组；只stage权威文档、measurement.py和既有纵向测试提交buffer切片，再恢复Calibration report当前工作树。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
@@ -130,7 +130,7 @@
 2. finite-source processor 接 `FollowTap`，按提交顺序无损处理。
 3. source 已结束时，让 processor 可对 retained final `OwnedSnapshot` 处理一次，不重跑设备。
 4. infinite Camera Measurement 在自己的 worker 上读 camera 并覆盖 latest slot；UI beat 只从 plane freeze。
-5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 至少是 `16 * frames_per_cycle` 且按完整 cycle 对齐；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。
+5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 至少是 `64 * frames_per_cycle` 且按完整 cycle 对齐；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。
 6. infinite-source processor 只处理当前 latest，不追历史。
 7. 删除 `missed_events/current_gap/behind/missed` 等 loss telemetry；保留 keyed sweep 断续时清 stale cells 的科学正确性规则。
 

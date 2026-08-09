@@ -269,7 +269,7 @@ cycle，不会把不同 shot 的 frame 拼在一起。Virtual/DCAM/Pylon 只负�
 frame counter、buffer overrun 和 failed grab 如实投影到该共同契约，不各自实现
 `frames_per_cycle` 业务规则。Pylon 的 `LatestImageOnly` 只可用于真正的自由运行设备
 预览；Camera Measurement 的 `Repeat=0` 必须使用 external-triggered ordered stream。
-连续采集的内部 raw buffer 至少容纳十六个完整 cycle，容量始终向
+连续采集的内部 raw buffer 至少容纳六十四个完整 cycle，容量始终向
 `frames_per_cycle` 的整数倍取整；这给短时 worker 调度、绘图和 UI 停顿留出读取
 余量。该容量由 Camera Measurement 一次决定，Virtual deque、DCAM ring 和 Pylon
 `MaxNumBuffer` 必须落实同一个帧数，不得只接收参数却继续使用 driver 默认值。它不是
