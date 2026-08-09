@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`科学链、Sitemap/Distribution、same-shot camera、Panel操作面与性能切片均已提交到22fd0eb；当前工作树全树复验已绿，正在提交验证Checkpoint并做detached复验。`
+- Current phase：`全部机器验证门已通过；停止自动打开可见GUI，等待用户亲自执行bin\\experiment.bat正式按钮验收。`
 - Last completed action：`Panel Setting与Panel Edit现消费同一semantic/display/fit parameter surface并即时更新同一PanelState；fit choice继续一次提交完整semantic/display/size/overlay/fit_model给现有RasterPlotHost.configure。该切片已提交22fd0eb。更早已提交的Sitemap/explicit overlay/site ordinal与透明度、Distribution独立classifier、Calibration四图、camera same-shot grouping和16-cycle buffer不得重做。`
-- Last verified tests：`22fd0eb前的旧生产真实Qt守卫精确红：Card Setting访问semantic__x时报KeyError；修改后focused 1 passed、相关真实Qt 25 passed、完整zlc_ui 79 passed；Workbench完整配置纵向1 passed、console presenter 30 passed、完整zlc_workbench 333 passed。buffer切片此前完整zlc_atom 143 passed，Auto切片此前完整zlc_plot 206 passed。当前22fd0eb上Guard A/B/C + end-to-end + 正式TaskConsole app合组26 passed；随后当前工作树全树1152 passed in 170.77s。所有Python验证首行import v2 root并打印实际Atom/Plot/UI/Workbench路径；各阶段diff-check clean、项目Python进程为零。`
-- Pending acceptance gates：`detached精确提交全树复验、正式offscreen入口/关闭零残留最终核对；最后由用户亲自走可见bin\\experiment.bat按钮验收。`
-- Next action：`提交本Checkpoint；从该精确HEAD建立临时detached worktree，打印临时树实际导入路径并跑全树pytest，完成后git worktree remove并双重确认目录与注册均不存在。`
+- Last verified tests：`22fd0eb前的旧生产真实Qt守卫精确红：Card Setting访问semantic__x时报KeyError；修改后focused 1 passed、相关真实Qt 25 passed、完整zlc_ui 79 passed；Workbench完整配置纵向1 passed、console presenter 30 passed、完整zlc_workbench 333 passed。buffer切片此前完整zlc_atom 143 passed，Auto切片此前完整zlc_plot 206 passed。当前机器基线71c2ab9上Guard A/B/C + end-to-end + 正式TaskConsole app合组26 passed；主工作树全树1152 passed in 170.77s；随后精确71c2ab9 detached临时树全树1152 passed in 181.12s，实际Atom/Plot/UI/Workbench导入均来自该临时树。临时worktree已移除，DIRECTORY_EXISTS=False、REGISTERED=False，项目Python进程为0。`
+- Pending acceptance gates：`仅剩用户亲自在可见bin\\experiment.bat中按第13节走完整按钮链并判断视觉/交互；机器验证不能替代该门。`
+- Next action：`不由自动代理再开可见窗口。用户开始验收后，只处理其新报告的具体失败；不得回到已完成Sitemap/Distribution/Calibration/Setting/preview阶段重做。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。`
 
 ## 1. 执行纪律
