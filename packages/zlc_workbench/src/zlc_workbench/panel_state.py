@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from zlc_plot import PlotKind
+
 
 __all__ = ["PanelFrozenData", "PanelState"]
 
@@ -51,6 +53,7 @@ class PanelState:
     size: str
     interval_ms: int
     title: str
+    cell_kind: str = ""
     semantic: Mapping[str, Any] = field(default_factory=dict)
     display: Mapping[str, Any] = field(default_factory=dict)
     fit: Mapping[str, Any] = field(default_factory=dict)
@@ -60,8 +63,23 @@ class PanelState:
         interval = int(self.interval_ms)
         if interval <= 0:
             raise ValueError("a display interval must be positive")
+        kind = str(self.kind)
+        cell_kind = str(self.cell_kind)
+        resolved_kind = PlotKind(kind)
+        if resolved_kind is PlotKind.FACET_GRID:
+            if cell_kind not in {
+                PlotKind.CURVE.value,
+                PlotKind.IMAGE.value,
+                PlotKind.HISTOGRAM.value,
+            }:
+                raise ValueError(
+                    "FacetGrid cell kind must be curve, image, or histogram"
+                )
+        elif cell_kind:
+            raise ValueError("only a FacetGrid panel has a cell kind")
         object.__setattr__(self, "signal", str(self.signal))
-        object.__setattr__(self, "kind", str(self.kind))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "cell_kind", cell_kind)
         object.__setattr__(self, "size", str(self.size))
         object.__setattr__(self, "interval_ms", interval)
         object.__setattr__(self, "title", str(self.title))
@@ -77,6 +95,7 @@ class PanelState:
             "signal": self.signal,
             "title": self.title,
             "kind": self.kind,
+            "cell_kind": self.cell_kind,
             "size": self.size,
             "interval_ms": self.interval_ms,
             "semantic": _document_value(self.semantic),

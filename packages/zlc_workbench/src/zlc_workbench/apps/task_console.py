@@ -45,7 +45,7 @@ def _parser() -> argparse.ArgumentParser:
         "--interval-ms",
         type=int,
         default=200,
-        help="display beat in milliseconds (default: 200)",
+        help="TaskConsole event-loop beat in milliseconds (default: 200)",
     )
     return parser
 
@@ -65,7 +65,7 @@ def open_experiment(workspace=None, template=None):
     return space, session
 
 
-def build_console(session, *, interval_ms, window_ratio=None):
+def build_console(session, *, window_ratio=None):
     """One console presenter over one session, with the view it drives."""
 
     import zlc_plot as plot
@@ -73,33 +73,24 @@ def build_console(session, *, interval_ms, window_ratio=None):
     from zlc_ui import open_task_console
 
     from ..console import ConsolePresenter
+    from ..panel_catalog import task_console_fitting_spec
 
     # One call, one handle: this layer never names a widget class.
     view = open_task_console(title="TaskConsole@Zou lab", window_ratio=window_ratio)
 
-    def _kind_of(name: str):
-        return next((item for item in plot.PlotKind if item.value == str(name)), None)
-
-    def _spec_for(snapshot, kind: str = ""):
+    def _spec_for(snapshot, kind: str = "", cell_kind: str = ""):
         """The spec this data admits, as the chosen kind or as its own shape."""
 
-        return plot.fitting_spec(snapshot.block.schema, _kind_of(kind))
-
-    def _panel_kinds():
-        """Plot kinds that belong on TaskConsole's live signal board."""
-
-        return tuple(
-            row
-            for row in plot.panel_kinds()
-            if row[0] != plot.PlotKind.PULSE_TIMELINE.value
+        return task_console_fitting_spec(
+            snapshot.block.schema, kind, cell_kind
         )
 
-    def _make_host(initial, signal, kind=""):
+    def _make_host(initial, signal, kind="", cell_kind=""):
         # The operator's kind when they chose one, the signal's own schema when
         # they did not.  Every panel used to be built as an image against two
         # named spatial axes, so Add Panel on anything that is not a camera
         # frame -- an ROI total, a fit centre, a scan curve -- could not draw.
-        spec = _spec_for(initial, kind)
+        spec = _spec_for(initial, kind, cell_kind)
         if spec is None:
             raise ValueError(f"{signal!r} cannot be drawn as {kind or 'anything'}")
         return plot.RasterPlotHost.from_plot(
@@ -110,10 +101,8 @@ def build_console(session, *, interval_ms, window_ratio=None):
         session,
         view,
         make_host=_make_host,
-        panel_kinds=_panel_kinds,
         spec_for=_spec_for,
         open_saved=lambda start: _open_saved_figure(view, start),
-        default_interval_ms=interval_ms,
     )
     return view, presenter
 
@@ -190,7 +179,6 @@ class ExperimentGuiFlow:
         try:
             console, presenter = build_console(
                 session,
-                interval_ms=self.interval_ms,
                 window_ratio=self.window_ratio,
             )
             pulse = create_bound_window(
@@ -338,7 +326,6 @@ def create_console_window(
     # layer composes and wires, and no longer knows what a window is made of.
     window, presenter = build_console(
         session,
-        interval_ms=interval_ms,
         window_ratio=window_ratio,
     )
     # The presenter's beat, not the board's: the board is one step of it.
@@ -448,7 +435,6 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _view, presenter = build_console(
                 session,
-                interval_ms=arguments.interval_ms,
             )
             for _beat in range(3):
                 presenter.beat()

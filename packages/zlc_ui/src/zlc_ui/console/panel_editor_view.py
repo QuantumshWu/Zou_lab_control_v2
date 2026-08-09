@@ -34,9 +34,7 @@ from zlc_ui.form import (
 
 from ._panel_projection import (
     decode_parameter_value,
-    decode_mapping_value,
-    mapping_form_spec,
-    mapping_form_values,
+    interval_form_field,
     panel_state_document,
     parameter_fields,
     parameter_form_spec,
@@ -60,11 +58,6 @@ class PanelEditorView(QtWidgets.QWidget):
         self.panel_id = str(panel_id)
         self._projection: dict[str, object] = {}
         self._state: dict[str, Any] = {}
-        self._mapping_values: dict[str, dict[str, object]] = {
-            "semantic": {},
-            "display": {},
-            "fit": {},
-        }
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
             "semantic": {},
             "display": {},
@@ -108,6 +101,7 @@ class PanelEditorView(QtWidgets.QWidget):
 
         self.parameter_groups: dict[str, FluentGroupBox] = {}
         self.parameter_forms: dict[str, FluentParameterForm] = {}
+        self.parameter_unavailable: dict[str, FluentLabel] = {}
         for section, title in (
             ("semantic", "Semantic parameters"),
             ("display", "Display / interaction parameters"),
@@ -116,6 +110,12 @@ class PanelEditorView(QtWidgets.QWidget):
             group = FluentGroupBox(title)
             layout = QtWidgets.QVBoxLayout(group)
             layout.setContentsMargins(margin, margin, margin, margin)
+            unavailable = FluentLabel("")
+            unavailable.setWordWrap(True)
+            unavailable.setStyleSheet(
+                f"color: {GREY}; background: transparent; border: none;"
+            )
+            layout.addWidget(unavailable)
             form = FluentParameterForm(FormSpec(()), {})
             form.changed.connect(
                 lambda key, name=section: self._mapping_value_changed(name, str(key))
@@ -123,6 +123,7 @@ class PanelEditorView(QtWidgets.QWidget):
             layout.addWidget(form)
             self.parameter_groups[section] = group
             self.parameter_forms[section] = form
+            self.parameter_unavailable[section] = unavailable
             body_layout.addWidget(group)
 
         snapshot_group = FluentGroupBox("Frozen snapshot")
@@ -200,7 +201,10 @@ class PanelEditorView(QtWidgets.QWidget):
         self._projection = incoming
         self._state = state
         self.title_label.setText(state["title"] or self.panel_id)
-        self.kind_label.setText(state["kind"].replace("_", " ") or "automatic")
+        kind_text = state["kind"].replace("_", " ") or "automatic"
+        if state["cell_kind"]:
+            kind_text += f" · {state['cell_kind'].replace('_', ' ')} cells"
+        self.kind_label.setText(kind_text)
 
         choices = signal_form_choices(incoming.get("signal_options"), state["signal"])
         fields: list[FormFieldProps] = [
@@ -221,14 +225,9 @@ class PanelEditorView(QtWidgets.QWidget):
                 default=state["size"],
                 choices=self._size_choices(state["size"]),
             ),
-            FormFieldProps(
-                "interval_ms",
-                "int",
-                "Update interval",
-                default=state["interval_ms"],
-                unit="ms",
-                minimum=1,
-                maximum=60_000,
+            interval_form_field(
+                incoming.get("interval_choices"),
+                state["interval_ms"],
             ),
         ]
         values: dict[str, object] = {
@@ -250,8 +249,6 @@ class PanelEditorView(QtWidgets.QWidget):
         self.panel_form.reconcile(FormSpec(tuple(fields)), values)
 
         for section in ("semantic", "display", "fit"):
-            mapping = dict(state[section])
-            self._mapping_values[section] = mapping
             declared = parameter_fields(surface, section)
             self._parameter_fields[section] = {
                 str(field["key"]): field for field in declared
@@ -260,10 +257,17 @@ class PanelEditorView(QtWidgets.QWidget):
                 spec = parameter_form_spec(declared)
                 form_values = parameter_form_values(declared)
             else:
-                spec = mapping_form_spec(mapping)
-                form_values = mapping_form_values(mapping)
+                spec = FormSpec(())
+                form_values = {}
+            unavailable = str(
+                surface.get(f"{section}_unavailable") or ""
+            ) if isinstance(surface, Mapping) else ""
+            self.parameter_unavailable[section].setText(unavailable)
+            self.parameter_unavailable[section].setVisible(bool(unavailable))
             self.parameter_forms[section].reconcile(spec, form_values)
-            self.parameter_groups[section].setVisible(bool(spec.fields))
+            self.parameter_groups[section].setVisible(
+                bool(spec.fields) or bool(unavailable)
+            )
 
         stale = bool(incoming.get("stale"))
         snapshot = incoming.get("frozen_snapshot")
@@ -328,11 +332,9 @@ class PanelEditorView(QtWidgets.QWidget):
         try:
             raw = self.parameter_forms[section].read_value(key)
             declared = self._parameter_fields[section].get(key)
-            value = (
-                decode_parameter_value(declared, raw)
-                if declared is not None
-                else decode_mapping_value(self._mapping_values[section][key], raw)
-            )
+            if declared is None:
+                raise KeyError(key)
+            value = decode_parameter_value(declared, raw)
         except (KeyError, TypeError, ValueError) as error:
             self.snapshot_label.setText(str(error))
             return

@@ -27,6 +27,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_workbench.console import ConsolePresenter
+from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.session import ExperimentSession, Workspace
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
@@ -53,10 +54,6 @@ class _CardView:
         self.title = title
         self.surface = None
         self.remove_requested = _Signal()
-        self.signal_picked = _Signal()
-        self.size_picked = _Signal()
-        self.update_ms_picked = _Signal()
-        self.title_committed = _Signal()
         self.edit_requested = _Signal()
         self.dropped = _Signal()
         self.drag_started = _Signal()
@@ -64,22 +61,12 @@ class _CardView:
         self.choices: tuple = ()
         self.chosen = ""
         self.size = ""
-        self.update_ms = 0
         self.selectors_enabled = True
         self.status: tuple = ("", False)
 
     def set_signal_choices(self, groups, *, current: str = "") -> None:
         self.choices = tuple(groups)
         self.chosen = str(current or self.chosen)
-
-    def set_panel_size(self, size: str) -> None:
-        self.size = str(size)
-
-    def set_title(self, title: str) -> None:
-        self.title = str(title)
-
-    def set_update_ms(self, interval_ms: int) -> None:
-        self.update_ms = int(interval_ms)
 
     def set_selectors_enabled(self, enabled: bool) -> None:
         self.selectors_enabled = bool(enabled)
@@ -129,8 +116,7 @@ class _ConsoleView:
         "pause_toggled", "selectors_toggled", "save_layout_requested",
         "load_layout_requested", "save_screenshot_requested",
         "panel_order_committed",
-        "panel_signal_picked", "panel_size_picked", "panel_update_ms_picked",
-        "panel_title_committed", "panel_remove_requested",
+        "panel_remove_requested",
         "panel_edit_requested", "logic_start_requested", "logic_stop_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
@@ -160,6 +146,7 @@ class _ConsoleView:
         self.panel_states: dict[str, object] = {}
         self.panel_state_updates: list[tuple[str, object]] = []
         self.panel_parameter_surfaces: dict[str, object] = {}
+        self.panel_intervals: tuple[int, ...] = ()
         self.panel_editors: dict[str, dict] = {}
         self.panel_editor_surfaces: dict[str, object] = {}
         self.focused_panel_editor = ""
@@ -178,6 +165,9 @@ class _ConsoleView:
 
     def set_panel_kinds(self, kinds, current: str = "") -> None:
         self.kinds = tuple(kinds)
+
+    def set_panel_intervals(self, intervals) -> None:
+        self.panel_intervals = tuple(int(value) for value in intervals)
 
     def set_logic_kinds(self, kinds) -> None:
         self.logic_kinds = tuple(kinds)
@@ -227,18 +217,6 @@ class _ConsoleView:
             card.remove_requested.connect(
                 lambda _=None, pid=key: self.panel_remove_requested.emit(pid)
             )
-            card.signal_picked.connect(
-                lambda name, pid=key: self.panel_signal_picked.emit(pid, str(name))
-            )
-            card.size_picked.connect(
-                lambda size, pid=key: self.panel_size_picked.emit(pid, str(size))
-            )
-            card.update_ms_picked.connect(
-                lambda ms, pid=key: self.panel_update_ms_picked.emit(pid, int(ms))
-            )
-            card.title_committed.connect(
-                lambda text, pid=key: self.panel_title_committed.emit(pid, str(text))
-            )
             card.edit_requested.connect(
                 lambda _=None, pid=key: self.panel_edit_requested.emit(pid)
             )
@@ -261,22 +239,18 @@ class _ConsoleView:
     def set_panel_signal_choices(self, panel_id: str, *args, **kwargs) -> None:
         self._cards[str(panel_id)].set_signal_choices(*args, **kwargs)
 
-    def set_panel_update_ms(self, panel_id: str, interval_ms: int) -> None:
-        self._cards[str(panel_id)].set_update_ms(interval_ms)
-
-    def set_panel_size(self, panel_id: str, size: str) -> None:
-        self._cards[str(panel_id)].set_panel_size(size)
-
-    def set_panel_title(self, panel_id: str, title: str) -> None:
-        self._cards[str(panel_id)].set_title(title)
-
-    def set_panel_state(self, panel_id: str, state) -> None:
+    def set_panel_projection(
+        self,
+        panel_id: str,
+        state: object,
+        parameter_surface: object,
+    ) -> None:
         key = str(panel_id)
         self.panel_states[key] = state
         self.panel_state_updates.append((key, state))
-
-    def set_panel_parameter_surface(self, panel_id: str, surface) -> None:
-        self.panel_parameter_surfaces[str(panel_id)] = surface
+        self.panel_parameter_surfaces[key] = parameter_surface
+        self._cards[key].title = state.title
+        self._cards[key].size = state.size
 
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
@@ -369,22 +343,20 @@ def session(tmp_path):
 def presenter(session):
     plot = pytest.importorskip("zlc_plot")
 
-    def kind_of(name):
-        return next((item for item in plot.PlotKind if item.value == str(name)), None)
+    def spec_for(snapshot, kind="", cell_kind=""):
+        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def spec_for(snapshot, kind=""):
-        return plot.fitting_spec(snapshot.block.schema, kind_of(kind))
-
-    def make_host(initial, _signal, kind=""):
+    def make_host(initial, _signal, kind="", cell_kind=""):
         # The same rule the real composition root uses.  A double that builds
         # its hosts a different way is a double that stops being evidence.
-        return plot.RasterPlotHost.from_plot(initial, spec_for(initial, kind))
+        return plot.RasterPlotHost.from_plot(
+            initial, spec_for(initial, kind, cell_kind)
+        )
 
     presenter = ConsolePresenter(
         session,
         _ConsoleView(),
         make_host=make_host,
-        panel_kinds=plot.panel_kinds,
         spec_for=spec_for,
     )
     try:
@@ -508,6 +480,13 @@ def test_the_presenter_never_imports_qt() -> None:
 def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None:
     """Panel authoring is independent of whether a producer has run yet."""
 
+    assert presenter.view.kinds == (
+        ("image", "2D image"),
+        ("curve", "1D vector"),
+        ("rolling", "Rolling trace"),
+        ("histogram", "Distribution"),
+        ("facet_grid", "Site grid"),
+    )
     presenter.view.add_panel_requested.emit("image")
     assert len(presenter.panels) == 1
     binding = next(iter(presenter.panels.values()))
@@ -516,6 +495,39 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     assert binding.host is None
     assert binding.port is None
     assert presenter.view.cards
+    assert presenter.view.panel_intervals == (100, 200, 400, 800)
+    assert binding.state.interval_ms == 400
+    display = {
+        str(field["key"]): field
+        for field in binding.parameter_surface["display"]
+    }
+    assert {
+        "colormap",
+        "color_min",
+        "color_max",
+        "interpolation",
+        "show_colorbar",
+    }.issubset(display)
+    assert binding.parameter_surface["site_overlay"]["value"] == "off"
+    original_state = binding.state
+    assert presenter.set_panel_interval(binding.panel_id, 500) is False
+    assert binding.state is original_state
+
+
+def test_site_grid_add_fixes_curve_cells_before_a_signal_exists(presenter) -> None:
+    binding = presenter.add_selected_panel("facet_grid")
+
+    assert binding is not None
+    assert binding.state.kind == "facet_grid"
+    assert binding.state.cell_kind == "curve"
+    assert binding.parameter_surface["display_unavailable"] == ""
+    assert binding.parameter_surface["display"]
+
+    original = binding.state
+    assert presenter.update_panel_state(
+        binding.panel_id, {"cell_kind": "image"}
+    ) is False
+    assert binding.state is original
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
@@ -628,7 +640,7 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
     )
 
     presenter.view.panel_state_updates.clear()
-    card.title_committed.emit("MOT")
+    presenter.update_panel_state(binding.panel_id, {"title": "MOT"})
     assert presenter.panels[binding.panel_id].title == "MOT"
     assert card.title == "MOT"
     assert presenter.view.panel_state_updates == [
@@ -636,10 +648,10 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
     ]
     assert presenter.view.panel_editors[binding.panel_id]["state"]["title"] == "MOT"
 
-    card.update_ms_picked.emit(100)
+    presenter.set_panel_interval(binding.panel_id, 100)
     assert binding.port.display_interval_ms == 100
 
-    card.size_picked.emit("4x4")
+    presenter.resize_panel(binding.panel_id, "4x4")
     assert card.size == "4x4"
 
 
@@ -661,7 +673,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
 
     # A second producer, so there is something else to point at.
     other, other_snapshot = _one_shot(session, producer="cm2")
-    card.signal_picked.emit(other.signal_key("frames"))
+    presenter.retarget_panel(first.panel_id, other.signal_key("frames"))
 
     binding = presenter.panels[first.panel_id]
     assert binding.signal == other.signal_key("frames")
@@ -742,7 +754,7 @@ def test_pointing_a_panel_at_a_signal_that_never_published_is_refused(
     binding = presenter.add_panel(node.signal_key("frames"), snapshot)
     card = presenter.view.cards[0]
 
-    card.signal_picked.emit("@logic/nobody/frames")
+    presenter.retarget_panel(binding.panel_id, "@logic/nobody/frames")
 
     assert presenter.panels[binding.panel_id].signal == node.signal_key("frames")
     assert any("has not published" in text for _severity, text in presenter.view.status)
@@ -866,8 +878,6 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     assert display["colormap"]["choices"]
     assert display["color_min"]["allow_none"] is True
     assert display["show_colorbar"]["kind"] == "boolean"
-    assert display["colormap"]["quick"] is True
-    assert display["interpolation"]["quick"] is False
     assert "site_overlay" not in display
     assert surface["site_overlay"]["choices"] == (
         ("Off", "off"),
@@ -965,6 +975,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert [panel["title"] for panel in document["panels"]] == ["camera", "again"]
     assert document["panels"][0] == {
         "signal": signal, "title": "camera", "kind": "image",
+        "cell_kind": "",
         "size": "4x4", "interval_ms": 800,
         "semantic": {semantic_key: str(semantic_value)},
         "display": {"show_colorbar": False},
@@ -1062,6 +1073,28 @@ def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
     assert presenter.view.cards == (old_card,)
 
 
+def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None:
+    document = presenter.layout()
+    document["panels"].append(
+        {
+            "signal": "",
+            "title": "Report-only image facets",
+            "kind": "facet_grid",
+            "cell_kind": "image",
+            "size": "4x4",
+            "interval_ms": 400,
+            "semantic": {},
+            "display": {},
+            "fit": {},
+            "site_overlay": "off",
+        }
+    )
+
+    assert presenter.apply_layout(document) is False
+    assert presenter.panels == {}
+    assert any("fixed as curve" in text for _severity, text in presenter.view.status)
+
+
 def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     presenter, session
 ) -> None:
@@ -1072,7 +1105,8 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     presenter.add_panel(signal, snapshot, title="here", kind="image")
     document = presenter.layout()
     document["panels"].append(
-        {"signal": "nobody.publishes.this", "title": "gone", "kind": "image", "size": "",
+        {"signal": "nobody.publishes.this", "title": "gone", "kind": "image",
+         "cell_kind": "", "size": "",
          "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
          "site_overlay": "off"}
     )

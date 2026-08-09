@@ -27,7 +27,7 @@ from .logic import (
 from .panel_state import PanelState
 
 
-LAYOUT_FORMAT = "zlc.console-board/v3"
+LAYOUT_FORMAT = "zlc.console-board/v4"
 
 
 class LayoutError(ValueError):
@@ -327,6 +327,7 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
             "signal",
             "title",
             "kind",
+            "cell_kind",
             "size",
             "interval_ms",
             "semantic",
@@ -341,6 +342,7 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
             signal=_string(entry["signal"], f"{where} signal"),
             title=_string(entry["title"], f"{where} title"),
             kind=_string(entry["kind"], f"{where} kind"),
+            cell_kind=_string(entry["cell_kind"], f"{where} cell_kind"),
             size=_string(entry["size"], f"{where} size"),
             interval_ms=_integer(entry["interval_ms"], f"{where} interval_ms"),
             semantic=dict(_mapping(entry["semantic"], f"{where} semantic")),

@@ -88,6 +88,31 @@ def parameter_controls(
     return tuple(result)
 
 
+def parameter_controls_for_kind(
+    kind: object,
+    values: Mapping[str, object] | None = None,
+    *,
+    facet_cell_kind: object | None = None,
+) -> tuple[ParameterControl, ...]:
+    """Describe a blank authored kind without constructing data or a host.
+
+    The same schema builder serves a live :class:`PlotSession`; this entry
+    point only seeds that schema from its defaults plus authored overrides.
+    Semantic axis choices and fit models remain dataset-dependent.
+    """
+
+    from .config import DEFAULTS
+    from .specs import parameter_schema_for_kind
+
+    schema = parameter_schema_for_kind(
+        kind,
+        style=DEFAULTS.style,
+        facet_cell_kind=facet_cell_kind,
+    )
+    state = schema.initial_values(values)
+    return parameter_controls(schema, state)
+
+
 def semantic_controls(
     description: SemanticDescription,
 ) -> tuple[ParameterControl, ...]:
@@ -140,4 +165,10 @@ def _control_kind(value_type: object, choices: tuple[object, ...]) -> ControlKin
     raise TypeError("parameter value type has no standard UI control mapping")
 
 
-__all__ = ["ControlKind", "ParameterControl", "parameter_controls", "semantic_controls"]
+__all__ = [
+    "ControlKind",
+    "ParameterControl",
+    "parameter_controls",
+    "parameter_controls_for_kind",
+    "semantic_controls",
+]

@@ -36,6 +36,15 @@ from zlc_ui.console import PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
 card.set_signal_choices((('source', (('Temperature', 'temperature'),)),))
+state = {
+    'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
+    'title': 'Card', 'semantic': {}, 'display': {}, 'fit': {},
+    'site_overlay': 'off',
+}
+surface_projection = {
+    'semantic': (), 'display': (), 'fit': (), 'site_overlay': None,
+}
+card.set_panel_projection(state, surface_projection)
 class _GatedSurface(QtWidgets.QLabel):
     # What a plot widget is, as far as this card is concerned: something you
     # can stop the operator dragging on.
@@ -47,20 +56,20 @@ card.set_surface(surface)
 card.set_status('ready', error=False)
 card.set_selectors_enabled(False)
 assert card.panel_id == 'panel-1'
-assert card.signal_combo.count() == 2
+signal_field = next(field for field in card._form_spec().fields if field.key == 'signal')
+assert len(signal_field.choices) == 1
 assert surface.parentWidget() is not None
 # The switch is about dragging on the PLOT, not about the card's own controls:
 # turning it off used to grey out this combo and never reach the plot at all.
 assert surface.interaction is False
-assert card.signal_combo.isEnabled()
 card.set_selectors_enabled(True)
 assert surface.interaction is True
 card.set_surface(None)
 assert not card._placeholder.isHidden()
-card.set_panel_size('1x4')
-assert card.size_combo.currentData() == '1x4'
+card.set_panel_projection(dict(state, size='1x4'), surface_projection)
+assert card.panel_size == '1x4'
 try:
-    card.set_panel_size('not-a-v1-size')
+    card.set_panel_projection(dict(state, size='not-a-v1-size'), surface_projection)
 except ValueError:
     pass
 else:
@@ -77,26 +86,38 @@ from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
+card.set_interval_choices((100, 200, 400, 800))
+card.set_panel_projection({
+    'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 400,
+    'title': 'Card', 'semantic': {}, 'display': {}, 'fit': {},
+    'site_overlay': 'off',
+}, {
+    'semantic': (), 'display': (), 'fit': (), 'site_overlay': None,
+    'semantic_unavailable': '', 'display_unavailable': '',
+    'fit_unavailable': '',
+})
 card.show(); app.processEvents()
 events = []
 card.remove_requested.connect(lambda: events.append(('remove',)))
 card.edit_requested.connect(lambda: events.append(('edit',)))
-card.title_committed.connect(lambda value: events.append(('title', value)))
+card.state_changed.connect(lambda patch: events.append(('state', patch)))
 # The operator's own route: Edit and Remove live in the Setting popup, beside
 # every other per-panel decision.  Reached any other way they were hidden
 # widgets nothing ever showed, so a panel could not be removed at all.
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+title = card._settings_form.widget_for('title')
+title.setText('Card changed')
+QtTest.QTest.mouseClick(card.apply_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
-card.title_edit.setFocus()
-QtTest.QTest.keyClicks(card.title_edit, ' changed')
-QtTest.QTest.keyClick(card.title_edit, QtCore.Qt.Key_Return)
 assert ('edit',) in events
 assert ('remove',) in events
-assert ('title', 'Card changed') in events
+assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 """
     )
 
@@ -419,6 +440,7 @@ from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['panel-editor'])
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
+handle.set_panel_intervals((100, 200, 400, 800))
 handle.add_panel('panel-1', 'Camera')
 groups = (('camera', (('frames', '@logic/cm/frames'),)),)
 handle.set_panel_signal_choices(
@@ -440,14 +462,14 @@ surface = {
         {'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
          'value': 'viridis', 'allow_none': False,
          'choices': (('Viridis', 'viridis'), ('Magma', 'magma')),
-         'minimum': None, 'maximum': None, 'step': None, 'quick': True},
+         'minimum': None, 'maximum': None, 'step': None},
         {'key': 'show_colorbar', 'label': 'Colorbar', 'kind': 'boolean',
          'value': True, 'allow_none': False, 'choices': (),
-         'minimum': None, 'maximum': None, 'step': None, 'quick': True},
+         'minimum': None, 'maximum': None, 'step': None},
         {'key': 'interpolation', 'label': 'Interpolation', 'kind': 'choice',
          'value': 'nearest', 'allow_none': False,
          'choices': (('Nearest', 'nearest'), ('Bilinear', 'bilinear')),
-         'minimum': None, 'maximum': None, 'step': None, 'quick': False},
+         'minimum': None, 'maximum': None, 'step': None},
     ),
     'fit': ({
         'key': 'model', 'label': 'Fit model', 'kind': 'choice', 'value': None,
@@ -462,15 +484,24 @@ surface = {
         'minimum': None, 'maximum': None, 'step': None,
     },
 }
-handle.set_panel_state('panel-1', state)
-handle.set_panel_parameter_surface('panel-1', surface)
+handle.set_panel_projection('panel-1', state, surface)
 card = handle._cards['panel-1']
 card._open_settings()
 assert card._settings_form.read_all()['kind'] == 'image'
 assert not card._settings_form.widget_for('kind').isEnabled()
 assert card._settings_form.read_all()['display__show_colorbar'] is True
 assert card._settings_form.read_all()['display__colormap'] == 'viridis'
-assert 'display__interpolation' not in card._settings_form.spec.keys
+assert 'display__interpolation' in card._settings_form.spec.keys
+interval_combo = card._settings_form.widget_for('interval_ms')
+assert isinstance(interval_combo, QtWidgets.QComboBox)
+assert tuple(interval_combo.itemData(index) for index in range(interval_combo.count())) == (
+    100, 200, 400, 800,
+)
+facet_state = dict(state, kind='facet_grid', cell_kind='curve', title='Site grid')
+handle.set_panel_projection('panel-1', facet_state, surface)
+assert card._settings_form.read_all()['cell_kind'] == 'curve'
+assert not card._settings_form.widget_for('cell_kind').isEnabled()
+handle.set_panel_projection('panel-1', state, surface)
 
 producer = {
     'node_id': 'cm', 'api_name': 'camera_measurement', 'kind': 'measurement',
@@ -485,6 +516,7 @@ producer = {
 }
 projection = {
     'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
+    'interval_choices': (100, 200, 400, 800),
     'parameter_surface': surface,
     'kind_read_only': True, 'frozen_signal': '@logic/cm/frames',
     'frozen_publication': object(), 'frozen_snapshot': object(),
@@ -530,6 +562,10 @@ assert first_host.widget.parentWidget() is None
 assert second_host.widget.parentWidget() is editor.surface_holder
 assert view.tabs.count() == 3 and view.tabs.currentWidget() is editor
 assert editor.kind_label.text() == 'image'
+facet_projection = dict(projection, state=facet_state)
+assert handle.update_panel_editor('panel-1', facet_projection)
+assert editor.kind_label.text() == 'facet grid · curve cells'
+assert handle.update_panel_editor('panel-1', projection)
 assert not editor._producer_editor.start_button.isVisible()
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)
 assert editor.parameter_forms['display'].spec.keys == (
@@ -545,13 +581,16 @@ display_combo.activated.emit(1)
 fit_combo = editor.parameter_forms['fit'].widget_for('model')
 fit_combo.setCurrentIndex(1)
 fit_combo.activated.emit(1)
-editor.panel_form.widget_for('interval_ms').setValue(250)
+editor_interval = editor.panel_form.widget_for('interval_ms')
+assert isinstance(editor_interval, QtWidgets.QComboBox)
+editor_interval.setCurrentIndex(editor_interval.findData(800))
+editor_interval.activated.emit(editor_interval.currentIndex())
 editor._producer_editor.form.widget_for('repeat').setValue(2)
 editor.refresh_button.click()
 editor.producer_apply_button.click()
 editor.save_button.click()
 app.processEvents()
-assert ('state', 'panel-1', {'interval_ms': 250}) in events
+assert ('state', 'panel-1', {'interval_ms': 800}) in events
 assert ('state', 'panel-1', {'semantic': {'x': 'point_row'}}) in events
 assert ('state', 'panel-1', {'display': {'colormap': 'magma'}}) in events
 assert ('state', 'panel-1', {
@@ -562,8 +601,8 @@ assert ('refresh', 'panel-1') in events
 assert ('apply', 'panel-1') in events
 assert ('save', 'panel-1') in events
 
-changed = dict(state, title='Retitled', interval_ms=250)
-handle.set_panel_state('panel-1', changed)
+changed = dict(state, title='Retitled', interval_ms=800)
+handle.set_panel_projection('panel-1', changed, surface)
 handle.update_panel_editor('panel-1', dict(projection, state=changed, stale=True))
 assert card.title() == 'Retitled'
 assert editor.panel_form.read_all()['title'] == 'Retitled'
@@ -737,6 +776,7 @@ assert ('logic', 'camera_measurement') in events
 assert ('pause', True) in events
 assert ('screenshot',) in events
 assert ('layout',) in events
+
 """
     )
 

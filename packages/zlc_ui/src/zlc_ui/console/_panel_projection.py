@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import Enum
-import json
 from typing import Any
 
 from zlc_ui.board import DEFAULT_PANEL_SIZE
@@ -14,6 +13,7 @@ from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
 _STATE_KEYS = (
     "signal",
     "kind",
+    "cell_kind",
     "size",
     "interval_ms",
     "title",
@@ -49,6 +49,7 @@ def panel_state_document(state: object) -> dict[str, Any]:
     return {
         "signal": str(incoming.get("signal") or ""),
         "kind": str(incoming.get("kind") or ""),
+        "cell_kind": str(incoming.get("cell_kind") or ""),
         "size": str(incoming.get("size") or DEFAULT_PANEL_SIZE),
         "interval_ms": int(incoming.get("interval_ms") or 100),
         "title": str(incoming.get("title") or incoming.get("signal") or "Panel"),
@@ -61,68 +62,6 @@ def panel_state_document(state: object) -> dict[str, Any]:
 
 def _pretty_key(key: object) -> str:
     return str(key).replace("_", " ").strip().title()
-
-
-def _json_text(value: object) -> str:
-    try:
-        return json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
-    except TypeError:
-        return str(value)
-
-
-def mapping_form_spec(values: Mapping[str, object]) -> FormSpec:
-    """Build a UI-only scalar editor for an owner-supplied parameter mapping."""
-
-    fields: list[FormFieldProps] = []
-    for raw_key, value in values.items():
-        key = str(raw_key)
-        if isinstance(value, bool):
-            kind, default = "bool", value
-        elif isinstance(value, int):
-            kind, default = "int", value
-        elif isinstance(value, float):
-            kind, default = "number", value
-        elif isinstance(value, str):
-            kind, default = "text", value
-        else:
-            kind, default = "text", "" if value is None else _json_text(value)
-        fields.append(
-            FormFieldProps(key=key, kind=kind, label=_pretty_key(key), default=default)
-        )
-    return FormSpec(tuple(fields))
-
-
-def mapping_form_values(values: Mapping[str, object]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for raw_key, value in values.items():
-        key = str(raw_key)
-        if value is None:
-            result[key] = ""
-        elif isinstance(value, (dict, list, tuple)):
-            result[key] = _json_text(value)
-        else:
-            result[key] = value
-    return result
-
-
-def decode_mapping_value(original: object, edited: object) -> object:
-    """Recover the JSON-shaped type of a data-driven text field."""
-
-    if original is None:
-        text = str(edited).strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
-    if isinstance(original, (dict, list, tuple)):
-        try:
-            decoded = json.loads(str(edited))
-        except json.JSONDecodeError as error:
-            raise ValueError(f"{error.msg} at character {error.pos}") from error
-        return tuple(decoded) if isinstance(original, tuple) else decoded
-    return edited
 
 
 def parameter_fields(surface: object, section: str) -> tuple[dict[str, object], ...]:
@@ -233,11 +172,31 @@ def signal_form_choices(groups: object, current: str) -> tuple[FormChoice, ...]:
     return tuple(choices)
 
 
+def interval_form_field(intervals: object, current: object) -> FormFieldProps:
+    """Project the scheduler's closed refresh domain as a choice control."""
+
+    values = tuple(int(value) for value in tuple(intervals or ()))
+    if not values:
+        raise ValueError("panel refresh intervals were not projected")
+    if any(value <= 0 for value in values) or len(set(values)) != len(values):
+        raise ValueError("panel refresh intervals must be unique positive integers")
+    selected = int(current)
+    if selected not in values:
+        raise ValueError(
+            f"display interval {selected} is not in {values}"
+        )
+    return FormFieldProps(
+        "interval_ms",
+        "choice",
+        "Update interval",
+        default=selected,
+        choices=tuple(FormChoice(f"{value} ms", value) for value in values),
+    )
+
+
 __all__ = [
     "decode_parameter_value",
-    "decode_mapping_value",
-    "mapping_form_spec",
-    "mapping_form_values",
+    "interval_form_field",
     "panel_state_document",
     "parameter_fields",
     "parameter_form_spec",

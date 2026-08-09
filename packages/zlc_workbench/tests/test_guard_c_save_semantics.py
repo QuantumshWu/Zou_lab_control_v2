@@ -23,6 +23,7 @@ from zlc_runtime import NodeHost
 from zlc_workbench.archive import read_archive, read_dataset
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.logic import stable_signal_key
+from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.session import ExperimentSession
 
 from test_console_presenter import _ConsoleView, _Signal, _one_shot
@@ -92,20 +93,18 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
     view = _ConsoleView()
     view.panel_save_figure_requested = _Signal()
 
-    def kind_of(name):
-        return next((item for item in plot.PlotKind if item.value == str(name)), None)
+    def spec_for(snapshot, kind="", cell_kind=""):
+        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def spec_for(snapshot, kind=""):
-        return plot.fitting_spec(snapshot.block.schema, kind_of(kind))
-
-    def make_host(initial, _signal, kind=""):
-        return plot.RasterPlotHost.from_plot(initial, spec_for(initial, kind))
+    def make_host(initial, _signal, kind="", cell_kind=""):
+        return plot.RasterPlotHost.from_plot(
+            initial, spec_for(initial, kind, cell_kind)
+        )
 
     presenter = ConsolePresenter(
         session,
         view,
         make_host=make_host,
-        panel_kinds=plot.panel_kinds,
         spec_for=spec_for,
     )
     occupancy_host = None

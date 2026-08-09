@@ -24,7 +24,6 @@ from zlc_ui.fluent import (
     FluentLineEdit,
     FluentPopup,
     FluentSettingsPopupAnchor,
-    FluentSpinBox,
     FluentStatusDot,
     GREY,
     ORANGE,
@@ -37,9 +36,7 @@ from zlc_ui.form.qt_form import FormRuntimeContext, FluentParameterForm
 
 from ._panel_projection import (
     decode_parameter_value,
-    decode_mapping_value,
-    mapping_form_spec,
-    mapping_form_values,
+    interval_form_field,
     panel_state_document,
     parameter_fields,
     parameter_form_spec,
@@ -66,7 +63,6 @@ class PanelCardView(FluentGroupBox):
 
     signal_picked = QtCore.pyqtSignal(str)
     size_picked = QtCore.pyqtSignal(str)
-    update_ms_picked = QtCore.pyqtSignal(int)
     title_committed = QtCore.pyqtSignal(str)
     remove_requested = QtCore.pyqtSignal()
     edit_requested = QtCore.pyqtSignal()
@@ -74,6 +70,7 @@ class PanelCardView(FluentGroupBox):
     dropped = QtCore.pyqtSignal(tuple)
     drag_started = QtCore.pyqtSignal(tuple)
     drag_moved = QtCore.pyqtSignal(tuple)
+    geometry_changed = QtCore.pyqtSignal()
 
     def __init__(self, panel_id: str, title: str = "Panel", parent=None) -> None:
         super().__init__(str(title), parent)
@@ -96,6 +93,7 @@ class PanelCardView(FluentGroupBox):
             }
         )
         self._parameter_surface: Mapping[str, object] = {}
+        self._interval_choices: tuple[int, ...] = ()
         self._drag_offset: QtCore.QPoint | None = None
 
         # This is copied from v1 PanelCard: the title strip is supplied by
@@ -129,18 +127,15 @@ class PanelCardView(FluentGroupBox):
         )
         self.settings_button.clicked.connect(self._open_settings)
 
-        # Compatibility handles for the presenter-facing lightweight API.
-        # They are deliberately not placed on the card face: v1 exposes these
-        # edits from Setting, not as a second invented toolbar.
         self.status_dot = FluentStatusDot(size=12, parent=self)
         self.status_dot.hide()
         self.status_label = FluentLabel("", parent=self)
         self.status_label.hide()
+        # FigureViewer also embeds this card and exposes these lightweight
+        # handles through its own port. TaskConsole state never reads them.
         self.title_edit = FluentLineEdit(str(title), parent=self)
-        self.title_edit.setPlaceholderText("panel title…")
         self.title_edit.hide()
         self.title_edit.editingFinished.connect(self._commit_title)
-
         self.signal_combo = FluentComboBox(parent=self)
         self.signal_combo.hide()
         self.signal_combo.currentIndexChanged[int].connect(self._signal_changed)
@@ -150,13 +145,6 @@ class PanelCardView(FluentGroupBox):
         self.size_combo.setCurrentIndex(self.size_combo.findData(DEFAULT_PANEL_SIZE))
         self.size_combo.hide()
         self.size_combo.currentIndexChanged[int].connect(self._size_changed)
-        self.update_spin = FluentSpinBox(parent=self)
-        self.update_spin.setRange(1, 60_000)
-        self.update_spin.hide()
-        self.update_spin.valueChanged.connect(
-            lambda value: self.update_ms_picked.emit(int(value))
-        )
-
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self._selectors_on = True
         self._apply_card_size(DEFAULT_PANEL_SIZE)
@@ -195,40 +183,47 @@ class PanelCardView(FluentGroupBox):
         """
 
         self._live = bool(live)
-        self.update_spin.setVisible(self._live)
         remove = getattr(self, "remove_button", None)
         if remove is not None:
             remove.setVisible(self._live)
 
-    def set_update_ms(self, interval_ms: int) -> None:
-        """Show how often this panel actually redraws.
+    def set_interval_choices(self, intervals: object) -> None:
+        """Receive the scheduler's one finite refresh policy."""
 
-        Told, never assumed.  This box used to open on a literal 100 while the
-        panel behind it redrew on the board's own default, so the one number an
-        operator reads to answer "how fast is this going" was the one number
-        nothing had asked.
-        """
-
-        value = int(interval_ms)
-        if value <= 0:
-            raise ValueError("a redraw interval must be positive")
-        self._state_projection["interval_ms"] = value
-        with signals_blocked(self.update_spin):
-            self.update_spin.setValue(value)
+        values = tuple(int(value) for value in tuple(intervals or ()))
+        # The shared helper validates both the domain and the current state.
+        interval_form_field(values, values[0] if values else 0)
+        self._interval_choices = values
+        self._rebuild_settings_form()
 
     def set_panel_state(self, state: object) -> None:
         """Project the one Workbench-owned state into this Setting view."""
 
+        self._apply_panel_state(self._validated_panel_state(state))
+
+    def _validated_panel_state(self, state: object) -> dict[str, object]:
         incoming = panel_state_document(state)
-        self._state_projection = incoming
-        self._base_title = incoming["title"] or "Panel"
-        self.setTitle(self._base_title)
-        with signals_blocked(
-            self.title_edit,
-            self.signal_combo,
-            self.size_combo,
-            self.update_spin,
+        if incoming["size"] not in PANEL_SIZES:
+            raise ValueError(
+                f"unknown panel size {incoming['size']!r}; choose from "
+                f"{', '.join(PANEL_SIZES)}"
+            )
+        if (
+            self._interval_choices
+            and int(incoming["interval_ms"]) not in self._interval_choices
         ):
+            raise ValueError(
+                f"display interval {incoming['interval_ms']} is not in "
+                f"{self._interval_choices}"
+            )
+        return incoming
+
+    def _apply_panel_state(self, incoming: Mapping[str, object]) -> None:
+        previous_size = str(self._state_projection.get("size") or "")
+        self._state_projection = dict(incoming)
+        self._base_title = incoming["title"] or "Panel"
+        self.setTitle(str(self._base_title))
+        with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
             self.title_edit.setText(self._base_title)
             signal_index = self.signal_combo.findData(incoming["signal"])
             if signal_index >= 0:
@@ -236,36 +231,31 @@ class PanelCardView(FluentGroupBox):
             size_index = self.size_combo.findData(incoming["size"])
             if size_index >= 0:
                 self.size_combo.setCurrentIndex(size_index)
-            self.update_spin.setValue(int(incoming["interval_ms"]))
-        self._apply_card_size(incoming["size"])
+        self._apply_card_size(str(incoming["size"]))
+        if incoming["size"] != previous_size:
+            self.geometry_changed.emit()
         self._rebuild_settings_form()
 
-    def set_parameter_surface(self, surface: object) -> None:
-        """Project host-owned editor metadata; authored values stay in state."""
-
-        self._parameter_surface = dict(surface) if isinstance(surface, Mapping) else {}
-        self._rebuild_settings_form()
+    @property
+    def panel_size(self) -> str:
+        return str(self._state_projection["size"])
 
     def set_title(self, title: str) -> None:
-        """Project an accepted title without raising another edit intent."""
-
         incoming = dict(self._state_projection)
         incoming["title"] = str(title)
         self.set_panel_state(incoming)
 
     def set_panel_size(self, size: str) -> None:
-        """Project one v1 panel-size preset without exposing the hidden combo."""
+        incoming = dict(self._state_projection)
+        incoming["size"] = str(size)
+        self.set_panel_state(incoming)
 
-        key = str(size).strip().lower().replace(" ", "")
-        index = self.size_combo.findData(key)
-        if index < 0:
-            raise ValueError(
-                f"unknown panel size {size!r}; choose from {', '.join(PANEL_SIZES)}"
-            )
-        with signals_blocked(self.size_combo):
-            self.size_combo.setCurrentIndex(index)
-        self._state_projection["size"] = key
-        self._apply_card_size(key)
+    def set_panel_projection(self, state: object, surface: object) -> None:
+        """Replace state and plot metadata before reconciling the form once."""
+
+        incoming = self._validated_panel_state(state)
+        self._parameter_surface = dict(surface) if isinstance(surface, Mapping) else {}
+        self._apply_panel_state(incoming)
 
     def _place_settings_button(self) -> None:
         button = getattr(self, "settings_button", None)
@@ -309,25 +299,13 @@ class PanelCardView(FluentGroupBox):
         *,
         current: str = "",
     ) -> None:
-        """Replace opaque signal choices grouped by a producer label.
-
-        ``current`` names the one to show as chosen.  A card built for a signal
-        has to be told which it is: an empty combo has nothing to preserve, so
-        without this the card that IS showing the camera opens claiming to show
-        nothing.  Left empty, whatever is selected stays selected, which is what
-        a refresh of the offer wants.
-        """
+        """Replace the signal domain used by the Setting form."""
 
         self._groups = tuple(
             (str(producer), tuple((str(display), str(key)) for display, key in leaves))
             for producer, leaves in groups
         )
-        current = str(
-            current
-            or self._state_projection.get("signal")
-            or self.signal_combo.currentData()
-            or ""
-        )
+        current = str(current or self._state_projection.get("signal") or "")
         if current:
             self._state_projection["signal"] = current
         with signals_blocked(self.signal_combo):
@@ -337,13 +315,11 @@ class PanelCardView(FluentGroupBox):
                 header = self.signal_combo.model().item(self.signal_combo.count() - 1)
                 if header is not None:
                     header.setEnabled(False)
-                    font = header.font()
-                    font.setBold(True)
-                    header.setFont(font)
                 for display, key in leaves:
                     self.signal_combo.addItem(f"    {display}", key)
             index = self.signal_combo.findData(current)
-            self.signal_combo.setCurrentIndex(index)
+            if index >= 0:
+                self.signal_combo.setCurrentIndex(index)
         self._rebuild_settings_form()
 
     def set_status(self, text: str, *, error: bool) -> None:
@@ -368,8 +344,6 @@ class PanelCardView(FluentGroupBox):
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()
-        self._base_title = value or "Panel"
-        self.setTitle(self._base_title)
         self.title_committed.emit(value)
 
     def _signal_changed(self, index: int) -> None:
@@ -380,7 +354,6 @@ class PanelCardView(FluentGroupBox):
     def _size_changed(self, index: int) -> None:
         value = self.size_combo.itemData(index)
         if isinstance(value, str):
-            self._apply_card_size(value)
             self.size_picked.emit(value)
 
     def _form_spec(self) -> FormSpec:
@@ -399,7 +372,18 @@ class PanelCardView(FluentGroupBox):
                 "Plot kind",
                 default=str(state.get("kind") or "automatic"),
             ),
-            FormFieldProps("title", "text", "Title", default=self.title_edit.text()),
+        ]
+        if state.get("cell_kind"):
+            fields.append(
+                FormFieldProps(
+                    "cell_kind",
+                    "text",
+                    "Cell kind",
+                    default=str(state["cell_kind"]),
+                )
+            )
+        fields.extend([
+            FormFieldProps("title", "text", "Title", default=state["title"]),
             FormFieldProps(
                 "signal",
                 "choice",
@@ -413,20 +397,15 @@ class PanelCardView(FluentGroupBox):
                 "size",
                 "choice",
                 "Size",
-                default=self.size_combo.currentData() or DEFAULT_PANEL_SIZE,
+                default=state["size"],
                 choices=tuple(FormChoice(value, value) for value in PANEL_SIZES),
             ),
-        ]
-        if self._live:
+        ])
+        if self._live and self._interval_choices:
             fields.append(
-                FormFieldProps(
-                    "interval_ms",
-                    "int",
-                    "Update interval",
-                    default=int(self.update_spin.value()),
-                    unit="ms",
-                    minimum=1,
-                    maximum=60_000,
+                interval_form_field(
+                    self._interval_choices,
+                    state["interval_ms"],
                 )
             )
         overlay = dict(self._parameter_surface.get("site_overlay") or {})
@@ -434,76 +413,73 @@ class PanelCardView(FluentGroupBox):
             overlay["value"] = str(state.get("site_overlay") or "off")
             fields.append(parameter_form_spec((overlay,)).fields[0])
         declared_display = tuple(
-            field
-            for field in parameter_fields(self._parameter_surface, "display")
-            if bool(field.get("quick"))
+            parameter_fields(self._parameter_surface, "display")
         )
-        if declared_display:
-            for declared in declared_display:
-                field = parameter_form_spec((declared,)).fields[0]
-                fields.append(
-                    FormFieldProps(
-                        key=f"display__{str(declared['key'])}",
-                        kind=field.kind,
-                        label=field.label,
-                        default=field.default,
-                        required=field.required,
-                        minimum=field.minimum,
-                        maximum=field.maximum,
-                        choices=field.choices,
-                        allow_blank=field.allow_blank,
-                    )
+        for declared in declared_display:
+            field = parameter_form_spec((declared,)).fields[0]
+            fields.append(
+                FormFieldProps(
+                    key=f"display__{str(declared['key'])}",
+                    kind=field.kind,
+                    label=field.label,
+                    default=field.default,
+                    required=field.required,
+                    minimum=field.minimum,
+                    maximum=field.maximum,
+                    choices=field.choices,
+                    allow_blank=field.allow_blank,
                 )
-        else:
-            for key, value in dict(state.get("display") or {}).items():
-                field = mapping_form_spec({str(key): value}).fields[0]
-                fields.append(
-                    FormFieldProps(
-                        key=f"display__{str(key)}",
-                        kind=field.kind,
-                        label=field.label,
-                        default=field.default,
-                        allow_blank=field.allow_blank,
-                    )
+            )
+        display_unavailable = str(
+            self._parameter_surface.get("display_unavailable") or ""
+        )
+        if display_unavailable:
+            fields.append(
+                FormFieldProps(
+                    "display_unavailable",
+                    "text",
+                    "Display parameters",
+                    default=display_unavailable,
                 )
+            )
         return FormSpec(tuple(fields))
 
     def _form_values(self) -> dict[str, object]:
-        signal = self.signal_combo.currentData()
-        if not isinstance(signal, str):
-            signal = str(self._state_projection.get("signal") or "") or None
+        signal = str(self._state_projection.get("signal") or "") or None
         values: dict[str, object] = {
             "kind": str(self._state_projection.get("kind") or "automatic"),
-            "title": self.title_edit.text(),
+            "title": str(self._state_projection.get("title") or "Panel"),
             "signal": signal,
-            "size": self.size_combo.currentData() or DEFAULT_PANEL_SIZE,
+            "size": str(self._state_projection.get("size") or DEFAULT_PANEL_SIZE),
         }
-        if self._live:
-            values["interval_ms"] = int(self.update_spin.value())
+        if self._state_projection.get("cell_kind"):
+            values["cell_kind"] = str(self._state_projection["cell_kind"])
+        if self._live and self._interval_choices:
+            values["interval_ms"] = int(self._state_projection["interval_ms"])
         if "site_overlay" in self._form_spec().keys:
             values["site_overlay"] = str(
                 self._state_projection.get("site_overlay") or "off"
             )
         declared_display = tuple(
-            field
-            for field in parameter_fields(self._parameter_surface, "display")
-            if bool(field.get("quick"))
+            parameter_fields(self._parameter_surface, "display")
         )
-        if declared_display:
-            declared_values = parameter_form_values(declared_display)
-            for key, value in declared_values.items():
-                values[f"display__{key}"] = value
-        else:
-            for key, value in dict(self._state_projection.get("display") or {}).items():
-                values[f"display__{str(key)}"] = mapping_form_values(
-                    {str(key): value}
-                )[str(key)]
+        declared_values = parameter_form_values(declared_display)
+        for key, value in declared_values.items():
+            values[f"display__{key}"] = value
+        if "display_unavailable" in self._form_spec().keys:
+            values["display_unavailable"] = str(
+                self._parameter_surface.get("display_unavailable") or ""
+            )
         return values
 
     def _rebuild_settings_form(self) -> None:
         if self._settings_form is not None:
             self._settings_form.reconcile(self._form_spec(), self._form_values())
             self._settings_form.widget_for("kind").setEnabled(False)
+            if "cell_kind" in self._settings_form.spec.keys:
+                self._settings_form.widget_for("cell_kind").setEnabled(False)
+            if "display_unavailable" in self._settings_form.spec.keys:
+                self._settings_form.widget_for("display_unavailable").setEnabled(False)
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
@@ -519,12 +495,16 @@ class PanelCardView(FluentGroupBox):
                 parent=popup,
             )
             self._settings_form.widget_for("kind").setEnabled(False)
+            if "cell_kind" in self._settings_form.spec.keys:
+                self._settings_form.widget_for("cell_kind").setEnabled(False)
+            if "display_unavailable" in self._settings_form.spec.keys:
+                self._settings_form.widget_for("display_unavailable").setEnabled(False)
             layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()
             buttons.setContentsMargins(0, 0, 0, 0)
             buttons.setSpacing(max(1, scaled_px(5)))
-            apply_button = FluentButton("Apply")
-            apply_button.clicked.connect(self._apply_settings)
+            self.apply_button = FluentButton("Apply")
+            self.apply_button.clicked.connect(self._apply_settings)
             # Here rather than on the card face, which is where every other
             # per-panel decision already lives.  They existed as hidden widgets
             # nothing ever showed, so a panel opened in the real window could
@@ -534,7 +514,7 @@ class PanelCardView(FluentGroupBox):
             self.remove_button = FluentButton("Remove", color=ORANGE)
             self.remove_button.clicked.connect(self._request_remove)
             self.remove_button.setVisible(self._live)
-            buttons.addWidget(apply_button)
+            buttons.addWidget(self.apply_button)
             buttons.addWidget(self.edit_button)
             buttons.addStretch(1)
             buttons.addWidget(self.remove_button)
@@ -559,22 +539,16 @@ class PanelCardView(FluentGroupBox):
             return
         values = self._settings_form.read_all()
         display: dict[str, object] = {}
-        originals = dict(self._state_projection.get("display") or {})
         declared = {
             str(field["key"]): field
             for field in parameter_fields(self._parameter_surface, "display")
-            if bool(field.get("quick"))
         }
         for form_key, value in values.items():
             if not str(form_key).startswith("display__"):
                 continue
             key = str(form_key).split("__", 1)[1]
             try:
-                display[key] = (
-                    decode_parameter_value(declared[key], value)
-                    if key in declared
-                    else decode_mapping_value(originals[key], value)
-                )
+                display[key] = decode_parameter_value(declared[key], value)
             except (KeyError, TypeError, ValueError) as error:
                 self.set_status(str(error), error=True)
                 return

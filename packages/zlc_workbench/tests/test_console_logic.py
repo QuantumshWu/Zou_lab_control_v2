@@ -25,6 +25,7 @@ from zlc_workbench.logic import (
     device_key_options,
     stable_signal_key,
 )
+from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.session import ExperimentSession
 
 from test_console_presenter import _CardView, _ConsoleView, _Signal, _one_shot
@@ -48,22 +49,20 @@ def session(tmp_path):
 def presenter(session):
     plot = pytest.importorskip("zlc_plot")
 
-    def kind_of(name):
-        return next((item for item in plot.PlotKind if item.value == str(name)), None)
+    def spec_for(snapshot, kind="", cell_kind=""):
+        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def spec_for(snapshot, kind=""):
-        return plot.fitting_spec(snapshot.block.schema, kind_of(kind))
-
-    def make_host(initial, _signal, kind=""):
+    def make_host(initial, _signal, kind="", cell_kind=""):
         # The same rule the real composition root uses.  A double that builds
         # its hosts a different way is a double that stops being evidence.
-        return plot.RasterPlotHost.from_plot(initial, spec_for(initial, kind))
+        return plot.RasterPlotHost.from_plot(
+            initial, spec_for(initial, kind, cell_kind)
+        )
 
     presenter = ConsolePresenter(
         session,
         _ConsoleView(),
         make_host=make_host,
-        panel_kinds=plot.panel_kinds,
         spec_for=spec_for,
     )
     try:

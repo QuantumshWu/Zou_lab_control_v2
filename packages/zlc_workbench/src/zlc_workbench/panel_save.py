@@ -118,7 +118,7 @@ def save_panel_figure(
     *,
     state: PanelState,
     frozen: PanelFrozenData,
-    make_host: Callable[[object, str, str], object],
+    make_host: Callable[[object, str, str, str], object],
     configure_host: Callable[[object, PanelState], None],
 ) -> PanelFigureFiles:
     """Save the Edit tab's exact frozen input without asking the plane again."""
@@ -131,7 +131,9 @@ def save_panel_figure(
     image_path = selected.with_suffix(".png")
     plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
 
-    host = make_host(frozen.snapshot, state.signal, state.kind)
+    host = make_host(
+        frozen.snapshot, state.signal, state.kind, state.cell_kind
+    )
     try:
         configure_host(host, state)
         if isinstance(plot_input, ImageFrame):

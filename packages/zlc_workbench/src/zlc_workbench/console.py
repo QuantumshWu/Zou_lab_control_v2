@@ -19,8 +19,9 @@ from pathlib import Path
 import time
 from typing import Any
 
-from zlc_plot import parameter_controls
+from zlc_plot import DEFAULTS
 from zlc_plot.primitives import ImageFrame
+from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 
 from .board import LiveBoard
 from .console_layout import (
@@ -49,6 +50,12 @@ from .panel_save import (
     capture_run_chain,
     save_panel_figure as _save_panel_figure,
 )
+from .panel_catalog import (
+    TASK_CONSOLE_PANEL_CATALOG,
+    panel_kind_choices,
+    task_console_panel_identity,
+    task_console_panel_kind,
+)
 from .panel_state import PanelFrozenData, PanelState, restore_semantic_choice
 from .presentation import PlotPanelPort
 from .selection import attach_selection_bridge, subscribe_committed_selection
@@ -59,25 +66,6 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
 _UNCHANGED = object()
-
-
-_QUICK_DISPLAY_FIELDS: Mapping[str, frozenset[str]] = {
-    "curve": frozenset(
-        {"x_label", "y_label", "show_grid", "relim_mode", "y_min", "y_max"}
-    ),
-    "image": frozenset(
-        {
-            "colormap",
-            "relim_mode",
-            "color_min",
-            "color_max",
-            "show_colorbar",
-        }
-    ),
-    "histogram": frozenset({"bin_count", "density", "log_y"}),
-    "rolling": frozenset({"window", "y_min", "y_max", "show_grid"}),
-    "facet_grid": frozenset({"facet_display_unit", "show_grid"}),
-}
 
 
 @dataclass
@@ -149,19 +137,15 @@ class ConsolePresenter:
         session: object,
         view: object,
         *,
-        make_host: Callable[[object, str, str], Any],
-        panel_kinds: Callable[[], Sequence[tuple[str, str]]] | None = None,
-        spec_for: Callable[[object, str], Any] | None = None,
+        make_host: Callable[[object, str, str, str], Any],
+        spec_for: Callable[[object, str, str], Any] | None = None,
         open_saved: Callable[[str], object] | None = None,
-        intervals: Sequence[int] = (100, 200, 400, 800),
-        default_interval_ms: int = 400,
     ) -> None:
         self.session = session
         self.view = view
         self._make_host = make_host
         # What kinds of panel exist, and whether one dataset admits one.  Both
         # belong to the plotting package; this only asks.
-        self._panel_kinds = panel_kinds
         self._spec_probe = spec_for
         # Reading a saved run is a different window over a different subject,
         # so the console asks for it rather than growing one.
@@ -180,9 +164,13 @@ class ConsolePresenter:
         self._shown_console_summary: str | None = None
         #: How often a new panel redraws.  The board's default, kept so a panel
         #: and the card that reports it cannot state different numbers.
-        self._default_interval_ms = int(default_interval_ms)
+        live_policy = DEFAULTS.live
+        self._default_interval_ms = live_policy.default_refresh_interval_ms
 
-        kinds = tuple(self._panel_kinds() if self._panel_kinds is not None else ())
+        kinds = panel_kind_choices()
+        self._panel_kind_definitions = {
+            entry.key: entry for entry in TASK_CONSOLE_PANEL_CATALOG
+        }
         self._panel_kind_labels = {
             str(key): str(label or key) for key, label in kinds
         }
@@ -201,9 +189,13 @@ class ConsolePresenter:
                 for binding in self.panels.values()
                 if binding.port is not None
             ),
-            intervals=intervals,
-            default_interval_ms=default_interval_ms,
+            intervals=live_policy.refresh_intervals_ms,
+            default_interval_ms=live_policy.default_refresh_interval_ms,
         )
+        self._intervals = self.board.intervals
+        interval_setter = getattr(self.view, "set_panel_intervals", None)
+        if callable(interval_setter):
+            interval_setter(self._intervals)
         self._connect()
 
     # ------------------------------------------------------------------ wiring
@@ -226,10 +218,6 @@ class ConsolePresenter:
         # Every control on a card is a decision about ONE named panel, wired
         # once here rather than re-strung by whoever built the widget.
         self.view.panel_remove_requested.connect(self.remove_panel)
-        self.view.panel_signal_picked.connect(self.retarget_panel)
-        self.view.panel_size_picked.connect(self.resize_panel)
-        self.view.panel_update_ms_picked.connect(self.set_panel_interval)
-        self.view.panel_title_committed.connect(self.rename_panel)
         self.view.panel_edit_requested.connect(self.edit_panel)
         self.view.logic_start_requested.connect(self.start_logic)
         self.view.logic_stop_requested.connect(self.stop_logic)
@@ -260,6 +248,16 @@ class ConsolePresenter:
 
     # ------------------------------------------------------------------ panels
 
+    def _panel_interval(self, value: object) -> int:
+        """Validate against the scheduler policy before state can hold it."""
+
+        normalized = int(value)
+        if normalized not in self._intervals:
+            raise ValueError(
+                f"display interval {normalized} is not in {self._intervals}"
+            )
+        return normalized
+
     def add_blank_panel(
         self,
         kind: str,
@@ -289,6 +287,15 @@ class ConsolePresenter:
                 severity="warning",
             )
             return None
+        definition = self._panel_kind_definitions[wanted]
+
+        try:
+            selected_interval = self._panel_interval(
+                self._default_interval_ms if interval_ms is None else interval_ms
+            )
+        except (TypeError, ValueError) as error:
+            self._report(str(error), severity="warning")
+            return None
 
         self._panel_serial += 1
         panel_id = f"panel-{self._panel_serial}"
@@ -302,19 +309,20 @@ class ConsolePresenter:
         state = PanelState(
             signal=str(signal).strip(),
             kind=wanted,
+            cell_kind=definition.cell_key,
             size=str(size or "2x2"),
-            interval_ms=(
-                self._default_interval_ms
-                if interval_ms is None
-                else int(interval_ms)
-            ),
+            interval_ms=selected_interval,
             title=str(title).strip() or generated_title,
             semantic=dict(semantic or {}),
             display=dict(display or {}),
             fit=dict(fit or {}),
             site_overlay=str(site_overlay),
         )
-        binding = PanelBinding(panel_id, state)
+        binding = PanelBinding(
+            panel_id,
+            state,
+            parameter_surface=self._unbound_panel_parameters(state),
+        )
         self.panels[panel_id] = binding
         self.view.add_panel(panel_id, state.title)
         self.view.show_panel(panel_id, None)
@@ -354,17 +362,25 @@ class ConsolePresenter:
         # anything was removed -- and the second panel to hold it overwrote the
         # first in place: its plotting host and selection bridge were never
         # closed, and two live bridges published derived signals under one name.
+        wanted = str(kind)
+        if not wanted:
+            inferred = self._spec_for(initial, "")
+            inferred_kind = getattr(getattr(inferred, "kind", None), "value", None)
+            if not inferred_kind:
+                raise ValueError("this signal has no TaskConsole plot kind")
+            wanted = str(inferred_kind)
+        definition = task_console_panel_kind(wanted)
+        selected_interval = self._panel_interval(
+            self._default_interval_ms if interval_ms is None else interval_ms
+        )
         self._panel_serial += 1
         panel_id = f"panel-{self._panel_serial}"
         state = PanelState(
             signal=str(signal),
-            kind=str(kind),
+            kind=definition.key,
+            cell_kind=definition.cell_key,
             size=str(size),
-            interval_ms=(
-                self._default_interval_ms
-                if interval_ms is None
-                else int(interval_ms)
-            ),
+            interval_ms=selected_interval,
             title=str(title).strip() or str(signal),
             semantic=dict(semantic or {}),
             display=dict(display or {}),
@@ -395,7 +411,9 @@ class ConsolePresenter:
         # is then applied through its public overlay seam.  This keeps host
         # factories schema-oriented while the panel still presents one atomic
         # ImageFrame transaction.
-        host = self._make_host(initial, state.signal, state.kind)
+        host = self._make_host(
+            initial, state.signal, state.kind, state.cell_kind
+        )
         try:
             self._configure_panel_host(host, state)
             self._apply_plot_input_overlay(host, plot_input)
@@ -569,7 +587,12 @@ class ConsolePresenter:
     ) -> object:
         """Replace a plot host at a signal-generation boundary."""
 
-        host = self._make_host(value.snapshot, binding.state.signal, binding.state.kind)
+        host = self._make_host(
+            value.snapshot,
+            binding.state.signal,
+            binding.state.kind,
+            binding.state.cell_kind,
+        )
         try:
             self._configure_panel_host(host, binding.state)
             self._apply_plot_input_overlay(host, plot_input)
@@ -612,22 +635,10 @@ class ConsolePresenter:
         return True
 
     def _offer_panel(self, panel_id: str) -> None:
-        """Tell one card what it may show and how often it is redrawing.
-
-        Its six intents are wired once, at the port, rather than per card:
-        every control on a card is a decision about THAT panel, and each used
-        to be re-connected by whoever built the widget -- six wires per panel
-        across the wall, and a builder that forgot one left a control that
-        looked configurable and was not.
-        """
+        """Tell one card which currently published signals it may show."""
 
         self.view.set_panel_signal_choices(
             panel_id, self.signal_groups(), current=self.panels[panel_id].state.signal
-        )
-        # What this panel's redraw interval actually is.  The card used to open
-        # its box on a literal of its own.
-        self.view.set_panel_update_ms(
-            panel_id, self.panels[panel_id].state.interval_ms
         )
 
     def signal_groups(self) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
@@ -746,6 +757,7 @@ class ConsolePresenter:
         allowed = {
             "signal",
             "kind",
+            "cell_kind",
             "size",
             "interval_ms",
             "title",
@@ -769,6 +781,23 @@ class ConsolePresenter:
                 severity="warning",
             )
             return False
+        if (
+            "cell_kind" in changes
+            and str(changes["cell_kind"]) != current.cell_kind
+        ):
+            self._report(
+                f"{panel_id}: FacetGrid cell kind is fixed at Add Panel",
+                severity="warning",
+            )
+            return False
+        if "interval_ms" in changes:
+            try:
+                changes["interval_ms"] = self._panel_interval(
+                    changes["interval_ms"]
+                )
+            except (TypeError, ValueError) as error:
+                self._report(f"{panel_id}: {error}", severity="error")
+                return False
 
         signal = str(changes.get("signal", current.signal)).strip()
         title = str(changes.get("title", current.title)).strip()
@@ -814,7 +843,7 @@ class ConsolePresenter:
                 self._release_panel(binding)
                 self.view.show_panel(panel_id, None)
             binding.state = candidate
-            binding.parameter_surface = {}
+            binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.frozen_data = None
             binding.frozen_stale = False
             binding.display_publication = None
@@ -833,7 +862,7 @@ class ConsolePresenter:
                     )
                     return False
                 binding.state = candidate
-                binding.parameter_surface = {}
+                binding.parameter_surface = self._unbound_panel_parameters(candidate)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 self._report(
@@ -841,7 +870,9 @@ class ConsolePresenter:
                     severity="warning",
                 )
                 return True
-            if candidate.kind and self._spec_for(value.snapshot, candidate.kind) is None:
+            if candidate.kind and self._spec_for(
+                value.snapshot, candidate.kind, candidate.cell_kind
+            ) is None:
                 if candidate.signal != current.signal and binding.host is not None:
                     self._report(
                         f"{candidate.signal} cannot be drawn as a "
@@ -850,7 +881,7 @@ class ConsolePresenter:
                     )
                     return False
                 binding.state = candidate
-                binding.parameter_surface = {}
+                binding.parameter_surface = self._unbound_panel_parameters(candidate)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 self._report(
@@ -868,7 +899,10 @@ class ConsolePresenter:
                     state=candidate,
                 )
                 host = self._make_host(
-                    value.snapshot, candidate.signal, candidate.kind
+                    value.snapshot,
+                    candidate.signal,
+                    candidate.kind,
+                    candidate.cell_kind,
                 )
                 self._configure_panel_host(host, candidate)
                 self._apply_plot_input_overlay(host, plot_input)
@@ -939,6 +973,7 @@ class ConsolePresenter:
         else:
             if binding.host is None or binding.port is None:
                 binding.state = candidate
+                binding.parameter_surface = self._unbound_panel_parameters(candidate)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 return True
@@ -1008,6 +1043,69 @@ class ConsolePresenter:
             "step": getattr(control, "step", None),
         }
 
+    def _parameter_surface(
+        self,
+        controls: Sequence[object],
+        state: PanelState,
+        *,
+        semantic: Sequence[Mapping[str, object]] = (),
+        fit: Sequence[Mapping[str, object]] = (),
+        semantic_unavailable: str = "",
+        display_unavailable: str = "",
+        fit_unavailable: str = "",
+    ) -> Mapping[str, object]:
+        """Project one plot-owned display declaration for every panel view."""
+
+        display_entries: list[dict[str, object]] = []
+        site_overlay: dict[str, object] | None = None
+        for control in controls:
+            entry = self._control_document(control)
+            name = str(entry["key"])
+            if name == "site_overlay":
+                site_overlay = entry
+                site_overlay["value"] = state.site_overlay
+                continue
+            # Panel title has a dedicated shared field, so it is not a second
+            # independently authored display override.
+            if name != "title":
+                display_entries.append(entry)
+        return {
+            "semantic": tuple(semantic),
+            "display": tuple(display_entries),
+            "fit": tuple(fit),
+            "site_overlay": site_overlay,
+            "semantic_unavailable": str(semantic_unavailable),
+            "display_unavailable": str(display_unavailable),
+            "fit_unavailable": str(fit_unavailable),
+        }
+
+    def _unbound_panel_parameters(self, state: PanelState) -> Mapping[str, object]:
+        """Describe a fixed kind before a compatible dataset is connected."""
+
+        values = dict(state.display)
+        values["title"] = state.title
+        if state.kind == "image":
+            values["site_overlay"] = state.site_overlay
+        try:
+            controls = parameter_controls_for_kind(
+                state.kind,
+                values,
+                facet_cell_kind=state.cell_kind or None,
+            )
+        except (TypeError, ValueError, KeyError) as error:
+            controls = ()
+            display_unavailable = str(error)
+        else:
+            display_unavailable = ""
+        data_reason = "Choose a compatible signal to resolve dataset-dependent choices."
+        return self._parameter_surface(
+            controls,
+            state,
+            semantic_unavailable=data_reason,
+            display_unavailable=display_unavailable,
+            fit_unavailable=data_reason,
+        )
+
     def _describe_panel_parameters(
         self,
         host: object,
@@ -1018,7 +1116,7 @@ class ConsolePresenter:
         describe_display = getattr(host, "describe_display", None)
         describe_semantics = getattr(host, "describe_semantics", None)
         if not callable(describe_display) or not callable(describe_semantics):
-            return {}
+            return self._unbound_panel_parameters(state)
         display_description = self._plot_operation_value(describe_display())
         semantic_description = self._plot_operation_value(describe_semantics())
         display_controls = parameter_controls(
@@ -1043,23 +1141,6 @@ class ConsolePresenter:
             for field in tuple(semantic_description.fields)
             if str(field.name) != "kind"
         )
-        quick = _QUICK_DISPLAY_FIELDS.get(state.kind, frozenset())
-        display_entries: list[dict[str, object]] = []
-        site_overlay: dict[str, object] | None = None
-        for control in display_controls:
-            entry = self._control_document(control)
-            name = str(entry["key"])
-            if name == "site_overlay":
-                site_overlay = entry
-                site_overlay["value"] = state.site_overlay
-                continue
-            # Panel title has a dedicated shared field, so it must not be
-            # offered again as an independent display override.
-            if name == "title":
-                continue
-            entry["quick"] = name in quick
-            display_entries.append(entry)
-
         models_member = getattr(host, "fit_models", ())
         models_operation = models_member() if callable(models_member) else models_member
         models = tuple(self._plot_operation_value(models_operation) or ())
@@ -1085,12 +1166,12 @@ class ConsolePresenter:
                 "step": None,
             },
         ) if models or current_model is not None else ()
-        return {
-            "semantic": semantic_entries,
-            "display": tuple(display_entries),
-            "fit": fit_entries,
-            "site_overlay": site_overlay,
-        }
+        return self._parameter_surface(
+            display_controls,
+            state,
+            semantic=semantic_entries,
+            fit=fit_entries,
+        )
 
     @staticmethod
     def _state_with_described_semantics(
@@ -1323,7 +1404,12 @@ class ConsolePresenter:
         # ImageFrame's independently revisioned overlay is applied below as
         # part of this same frozen presentation transaction.
         initial = getattr(plot_input, "snapshot", plot_input)
-        host = self._make_host(initial, frozen.signal, binding.state.kind)
+        host = self._make_host(
+            initial,
+            frozen.signal,
+            binding.state.kind,
+            binding.state.cell_kind,
+        )
         selections = None
         try:
             self._configure_panel_host(host, binding.state)
@@ -1520,20 +1606,14 @@ class ConsolePresenter:
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
 
-        set_state = getattr(self.view, "set_panel_state", None)
-        if callable(set_state):
-            set_state(binding.panel_id, binding.state)
-        set_parameter_surface = getattr(
-            self.view, "set_panel_parameter_surface", None
-        )
-        if callable(set_parameter_surface):
-            set_parameter_surface(binding.panel_id, binding.parameter_surface)
+        set_projection = getattr(self.view, "set_panel_projection", None)
+        if callable(set_projection):
+            set_projection(
+                binding.panel_id,
+                binding.state,
+                binding.parameter_surface,
+            )
         self._offer_panel(binding.panel_id)
-        if binding.state.size:
-            self.view.set_panel_size(binding.panel_id, binding.state.size)
-        set_title = getattr(self.view, "set_panel_title", None)
-        if callable(set_title):
-            set_title(binding.panel_id, binding.state.title)
         self.refresh_panel_editor(binding.panel_id)
 
     def _release_panel(self, binding: PanelBinding) -> None:
@@ -1715,9 +1795,14 @@ class ConsolePresenter:
                     saved,
                     size=saved.size or "2x2",
                     title=saved.title.strip() or generated_title,
+                    interval_ms=self._panel_interval(saved.interval_ms),
                 )
                 used_titles.add(state.title)
-                binding = PanelBinding(panel_id, state)
+                binding = PanelBinding(
+                    panel_id,
+                    state,
+                    parameter_surface=self._unbound_panel_parameters(state),
+                )
                 panels.append(binding)
                 if not state.signal:
                     continue
@@ -1725,7 +1810,9 @@ class ConsolePresenter:
                 if value is None:
                     missing.append(state.signal)
                     continue
-                if self._spec_for(value.snapshot, state.kind) is None:
+                if self._spec_for(
+                    value.snapshot, state.kind, state.cell_kind
+                ) is None:
                     incompatible.append((state.signal, state.kind))
                     continue
                 publication = front.publication(state.signal)
@@ -1735,7 +1822,9 @@ class ConsolePresenter:
                     publication,
                     state=state,
                 )
-                host = self._make_host(value.snapshot, state.signal, state.kind)
+                host = self._make_host(
+                    value.snapshot, state.signal, state.kind, state.cell_kind
+                )
                 try:
                     self._configure_panel_host(host, state)
                     self._apply_plot_input_overlay(host, plot_input)
@@ -1786,6 +1875,11 @@ class ConsolePresenter:
         )
 
     def _build_layout_candidate(self, document: LayoutDocument) -> _LayoutCandidate:
+        try:
+            for state in document.panels:
+                task_console_panel_identity(state.kind, state.cell_kind)
+        except (TypeError, ValueError) as error:
+            raise LayoutError(str(error)) from error
         resolved = resolve_layout(
             document,
             catalog=self.catalog,
@@ -2651,17 +2745,17 @@ class ConsolePresenter:
         self._report(f"{binding.node_id} started", severity="task")
         return True
 
-    def _spec_for(self, snapshot: object, kind: str) -> Any:
+    def _spec_for(self, snapshot: object, kind: str, cell_kind: str = "") -> Any:
         """Whether this data can be drawn as ``kind``, as the plotting package sees it.
 
         A probe, not a guess: the same call that builds the spec answers it, so
         offering a kind and building it cannot disagree.
         """
 
-        if self._spec_probe is None or not kind:
+        if self._spec_probe is None:
             return object()
         try:
-            return self._spec_probe(snapshot, kind)
+            return self._spec_probe(snapshot, kind, cell_kind)
         except Exception:
             return None
 

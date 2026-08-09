@@ -45,7 +45,7 @@ assert isinstance(console, TaskConsoleHandle)
 # Reaching the view is this package's own business; the demo cannot.
 view = console._view
 cards = tuple(view.board._cards.values())
-assert tuple(card.size_combo.currentData() for card in cards) == ('1x4', '2x2', '4x2')
+assert tuple(card.panel_size for card in cards) == ('1x4', '2x2', '4x2')
 assert len({card.geometry().width() for card in cards}) >= 2
 assert len({card.geometry().y() for card in cards}) >= 2
 console.close()

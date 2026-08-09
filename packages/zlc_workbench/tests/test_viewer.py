@@ -28,9 +28,39 @@ from zlc_workbench.archive import read_archive, read_dataset
 from zlc_workbench.panel_save import save_panel_figure
 from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_workbench.session import ExperimentSession
-from zlc_workbench.viewer import FigureViewerPresenter, describe_archive
+from zlc_workbench.viewer import FigureViewerPresenter, _panel_state, describe_archive
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
+
+
+@pytest.mark.parametrize("cell_kind", ("curve", "image", "histogram"))
+def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None:
+    state = PanelState(
+        signal="report/distribution",
+        kind="facet_grid",
+        cell_kind=cell_kind,
+        size="4x4",
+        interval_ms=400,
+        title="Calibration report",
+    )
+    restored = _panel_state(
+        {"panel": {"dataset": "data", "state": state.document()}},
+        "data",
+    )
+
+    assert restored == state
+
+
+def test_generic_saved_state_does_not_use_the_task_console_menu_as_plot_policy() -> None:
+    state = PanelState(
+        signal="pulse/preview",
+        kind="pulse_timeline",
+        size="4x2",
+        interval_ms=400,
+        title="Pulse",
+    )
+
+    assert state.document()["kind"] == "pulse_timeline"
 
 
 class _Signal:
@@ -132,7 +162,7 @@ def presenter():
     plot = pytest.importorskip("zlc_plot")
     view = _ViewerView()
 
-    def make_host(snapshot, name, _kind):
+    def make_host(snapshot, name, _kind, _cell_kind):
         return plot.RasterPlotHost.from_plot(
             snapshot,
             plot.ImagePlot(
@@ -469,7 +499,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         tmp_path / "panel",
         state=state,
         frozen=frozen,
-        make_host=lambda _input, _signal, _kind: _SavingHost(),
+        make_host=lambda _input, _signal, _kind, _cell_kind: _SavingHost(),
         configure_host=lambda _host, _state: None,
     )
     assert not missing_calibration.exists()
@@ -501,8 +531,13 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
     seen = {}
 
-    def make_host(plot_input, label, kind):
-        seen.update(plot_input=plot_input, label=label, kind=kind)
+    def make_host(plot_input, label, kind, cell_kind):
+        seen.update(
+            plot_input=plot_input,
+            label=label,
+            kind=kind,
+            cell_kind=cell_kind,
+        )
         host = _RestoredHost()
         seen["host"] = host
         return host
@@ -512,6 +547,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     try:
         assert presenter.open(str(written.archive)) is not None, view.status
         assert seen["kind"] == "image", "the saved kind must not be inferred anew"
+        assert seen["cell_kind"] == ""
         assert seen["label"] == f"site occupancy — {state.signal}"
         frame = seen["plot_input"]
         assert isinstance(frame, ImageFrame)

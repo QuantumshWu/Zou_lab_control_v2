@@ -303,7 +303,7 @@ from PyQt5 import QtCore, QtTest
 from zlc_workbench.apps import task_console as tested_module
 print(tested_module.__file__)
 space, session = tested_module.open_experiment(r'%s', 'virtual')
-view, presenter = tested_module.build_console(session, interval_ms=200)
+view, presenter = tested_module.build_console(session)
 assert presenter.panels == {}
 assert presenter.logic == {}
 logic_index = next(
@@ -323,24 +323,37 @@ image_index = next(
 view._view.kind_combo.setCurrentIndex(image_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
+panel = next(iter(presenter.panels.values()))
+assert panel.state.interval_ms == 400, 'GUI beat cadence is not panel refresh policy'
+assert tuple(view._cards[panel.panel_id]._interval_choices) == (100, 200, 400, 800)
 assert len(presenter.panels) == 1
 blank = next(iter(presenter.panels.values()))
 assert blank.kind == 'image' and blank.signal == ''
 assert blank.host is None and blank.port is None
 catalog = tuple(
-    view._view.kind_combo.itemData(index)
+    (view._view.kind_combo.itemText(index), view._view.kind_combo.itemData(index))
     for index in range(view._view.kind_combo.count())
 )
 assert catalog == (
-    ('plot', 'curve'),
-    ('plot', 'image'),
-    ('plot', 'histogram'),
-    ('plot', 'rolling'),
-    ('plot', 'facet_grid'),
-    ('logic', 'camera_measurement'),
-    ('logic', 'occupancy'),
-    ('logic', 'calibration'),
+    ('Plot: 2D image', ('plot', 'image')),
+    ('Plot: 1D vector', ('plot', 'curve')),
+    ('Plot: Rolling trace', ('plot', 'rolling')),
+    ('Plot: Distribution', ('plot', 'histogram')),
+    ('Plot: Site grid', ('plot', 'facet_grid')),
+    ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
+    ('Processor: Occupancy', ('logic', 'occupancy')),
+    ('Task: Calibration', ('logic', 'calibration')),
 )
+facet_index = next(
+    index for index in range(view._view.kind_combo.count())
+    if view._view.kind_combo.itemData(index) == ('plot', 'facet_grid')
+)
+view._view.kind_combo.setCurrentIndex(facet_index)
+QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+application.processEvents()
+site_grid = tuple(presenter.panels.values())[-1]
+assert site_grid.state.cell_kind == 'curve'
+assert site_grid.parameter_surface['display_unavailable'] == ''
 print('STOPPED_DRAFT')
 presenter.close()
 session.close()

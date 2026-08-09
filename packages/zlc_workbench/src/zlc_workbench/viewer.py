@@ -118,6 +118,7 @@ def _panel_state(
     return PanelState(
         signal=str(document.get("signal", "")),
         kind=str(document.get("kind", "")),
+        cell_kind=str(document.get("cell_kind", "")),
         size=str(document.get("size", "")),
         interval_ms=int(document.get("interval_ms", 500)),
         title=str(document.get("title", "")),
@@ -252,7 +253,7 @@ class FigureViewerPresenter:
         self,
         view: object,
         *,
-        make_host: Callable[[Any, str, str], Any],
+        make_host: Callable[[Any, str, str, str], Any],
         edit_figure: Callable[[Any, str], object] | None = None,
     ) -> None:
         self.view = view
@@ -362,6 +363,7 @@ class FigureViewerPresenter:
                 plot_input,
                 label,
                 "" if panel_state is None else panel_state.kind,
+                "" if panel_state is None else panel_state.cell_kind,
             )
             fit_error = self._configure_host(host, panel_state)
         except Exception as error:

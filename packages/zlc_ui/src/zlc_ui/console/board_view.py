@@ -80,8 +80,8 @@ class ConsoleBoardView(QtWidgets.QWidget):
                 card.dropped.connect(
                     lambda point, current=card: self._card_dropped(current, point)
                 )
-                card.size_picked.connect(
-                    lambda _size, current=card: self._card_size_changed(current)
+                card.geometry_changed.connect(
+                    lambda current=card: self._card_size_changed(current)
                 )
                 self._wired_cards.add(card)
         self._order = tuple(card.panel_id for card in incoming)
@@ -96,7 +96,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
             self._pack_current()
 
     def _size_key(self, card: PanelCardView) -> str:
-        return str(card.size_combo.currentData() or DEFAULT_PANEL_SIZE)
+        return str(card.panel_size or DEFAULT_PANEL_SIZE)
 
     def _board_width(self, order: tuple[str, ...]) -> int:
         proxies = [GeomProxy(self._size_key(self._cards[panel_id])) for panel_id in order]

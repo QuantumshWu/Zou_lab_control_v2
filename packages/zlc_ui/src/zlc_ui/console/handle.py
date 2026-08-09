@@ -47,10 +47,6 @@ class TaskConsoleHandle(QtCore.QObject):
     panel_order_committed = QtCore.pyqtSignal(tuple)
 
     # -- one named panel -------------------------------------------------
-    panel_signal_picked = QtCore.pyqtSignal(str, str)
-    panel_size_picked = QtCore.pyqtSignal(str, str)
-    panel_update_ms_picked = QtCore.pyqtSignal(str, int)
-    panel_title_committed = QtCore.pyqtSignal(str, str)
     panel_remove_requested = QtCore.pyqtSignal(str)
     panel_edit_requested = QtCore.pyqtSignal(str)
     panel_state_changed = QtCore.pyqtSignal(str, object)
@@ -74,6 +70,7 @@ class TaskConsoleHandle(QtCore.QObject):
         self._rows: dict[str, LogicRowView] = {}
         self._logic_editors: dict[str, LogicEditorView] = {}
         self._panel_editors: dict[str, PanelEditorView] = {}
+        self._panel_intervals: tuple[int, ...] = ()
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
             "selectors_toggled", "save_layout_requested",
@@ -125,6 +122,16 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
         self._view.set_panel_kinds(kinds, current)
+
+    def set_panel_intervals(self, intervals: object) -> None:
+        """Project the scheduler's finite refresh policy to every panel view."""
+
+        values = tuple(int(value) for value in tuple(intervals or ()))
+        if not values:
+            raise ValueError("panel interval choices must not be empty")
+        self._panel_intervals = values
+        for card in self._cards.values():
+            card.set_interval_choices(values)
 
     def set_logic_kinds(
         self, kinds: tuple[tuple[str, str, str, str], ...]
@@ -217,18 +224,6 @@ class TaskConsoleHandle(QtCore.QObject):
         card = self._cards.get(key)
         if card is None:
             card = PanelCardView(key, str(title))
-            card.signal_picked.connect(
-                lambda name, pid=key: self.panel_signal_picked.emit(pid, str(name))
-            )
-            card.size_picked.connect(
-                lambda size, pid=key: self.panel_size_picked.emit(pid, str(size))
-            )
-            card.update_ms_picked.connect(
-                lambda ms, pid=key: self.panel_update_ms_picked.emit(pid, int(ms))
-            )
-            card.title_committed.connect(
-                lambda text, pid=key: self.panel_title_committed.emit(pid, str(text))
-            )
             card.remove_requested.connect(
                 lambda _=None, pid=key: self.panel_remove_requested.emit(pid)
             )
@@ -239,6 +234,8 @@ class TaskConsoleHandle(QtCore.QObject):
                 lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
             )
             self._cards[key] = card
+            if self._panel_intervals:
+                card.set_interval_choices(self._panel_intervals)
         self._view.set_cards(tuple(self._cards.values()))
 
     def remove_panel(self, panel_id: str) -> None:
@@ -276,24 +273,15 @@ class TaskConsoleHandle(QtCore.QObject):
     def set_panel_signal_choices(self, panel_id: str, *args: Any, **kwargs: Any) -> None:
         self._cards[str(panel_id)].set_signal_choices(*args, **kwargs)
 
-    def set_panel_update_ms(self, panel_id: str, interval_ms: int) -> None:
-        self._cards[str(panel_id)].set_update_ms(interval_ms)
+    def set_panel_projection(
+        self,
+        panel_id: str,
+        state: object,
+        parameter_surface: object,
+    ) -> None:
+        """Project one atomic Setting state/schema replacement."""
 
-    def set_panel_size(self, panel_id: str, size: str) -> None:
-        self._cards[str(panel_id)].set_panel_size(size)
-
-    def set_panel_title(self, panel_id: str, title: str) -> None:
-        self._cards[str(panel_id)].set_title(title)
-
-    def set_panel_state(self, panel_id: str, state: object) -> None:
-        """Project one accepted Workbench state into the card Setting view."""
-
-        self._cards[str(panel_id)].set_panel_state(state)
-
-    def set_panel_parameter_surface(self, panel_id: str, surface: object) -> None:
-        """Project plot-owned field metadata into the card's quick Setting."""
-
-        self._cards[str(panel_id)].set_parameter_surface(surface)
+        self._cards[str(panel_id)].set_panel_projection(state, parameter_surface)
 
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
@@ -305,9 +293,11 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def open_panel_editor(self, panel_id: str, projection: Any) -> None:
         key = str(panel_id)
+        incoming = dict(projection)
+        incoming["interval_choices"] = self._panel_intervals
         editor = self._panel_editors.get(key)
         if editor is None:
-            editor = PanelEditorView(key, projection)
+            editor = PanelEditorView(key, incoming)
             editor.state_changed.connect(
                 lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
             )
@@ -324,7 +314,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 lambda _=None, pid=key: self.panel_save_figure_requested.emit(pid)
             )
             self._panel_editors[key] = editor
-            state = dict(projection).get("state") or {}
+            state = incoming.get("state") or {}
             title = (
                 str(dict(state).get("title") or key)
                 if isinstance(state, Mapping)
@@ -332,14 +322,16 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             self._view.add_editor_tab(editor, f"Edit Panel · {title}")
         else:
-            editor.update_projection(projection)
+            editor.update_projection(incoming)
             self._view.focus_editor_tab(editor)
 
     def update_panel_editor(self, panel_id: str, projection: Any) -> bool:
         editor = self._panel_editors.get(str(panel_id))
         if editor is None:
             return False
-        editor.update_projection(projection)
+        incoming = dict(projection)
+        incoming["interval_choices"] = self._panel_intervals
+        editor.update_projection(incoming)
         return True
 
     def show_panel_editor(self, panel_id: str, host: Any | None) -> None:

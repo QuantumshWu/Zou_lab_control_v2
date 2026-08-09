@@ -556,9 +556,16 @@ def _validate_limit_state(values: Mapping[str, object]) -> None:
         raise ValueError("log count limits require a positive y_min")
 
 
-def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> ParameterSchema:
-    """Return the introspectable, complete UI parameter contract for ``spec``."""
+@dataclass(frozen=True, slots=True)
+class _ParameterSchemaContext:
+    """The semantic facts that change a display-parameter schema."""
 
+    kind: PlotKind
+    semantic_kind: PlotKind
+    labels: PlotLabels
+
+
+def _parameter_schema_context(spec: PlotSpec) -> _ParameterSchemaContext:
     if not isinstance(
         spec,
         (
@@ -571,27 +578,37 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
         ),
     ):
         raise TypeError("unsupported plot specification")
+    semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
+    return _ParameterSchemaContext(spec.kind, semantic.kind, spec.labels)
+
+
+def _parameter_schema_for_context(
+    context: _ParameterSchemaContext,
+    *,
+    style: PlotStyleConfig,
+) -> ParameterSchema:
+    """Build the one schema used by bound sessions and unbound authoring UI."""
+
     if not isinstance(style, PlotStyleConfig):
         raise TypeError("style must be PlotStyleConfig")
+    kind = context.kind
+    semantic_kind = context.semantic_kind
+    labels = context.labels
     entries: list[ParameterSpec[object]] = [
-        _title_parameter(spec.labels.title),
-        _label_parameter("x_label", spec.labels.x, "X label"),
-        _label_parameter("y_label", spec.labels.y, "Y label"),
-        _label_parameter("value_label", spec.labels.value, "Value label"),
-        _show_grid_parameter(default=isinstance(spec, PulseTimelinePlot)),
+        _title_parameter(labels.title),
+        _label_parameter("x_label", labels.x, "X label"),
+        _label_parameter("y_label", labels.y, "Y label"),
+        _label_parameter("value_label", labels.value, "Value label"),
+        _show_grid_parameter(default=kind is PlotKind.PULSE_TIMELINE),
     ]
-    semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
-    if isinstance(spec, PulseTimelinePlot):
+    if kind is PlotKind.PULSE_TIMELINE:
         entries.append(_PULSE_X_UNIT_PARAMETER)
     else:
-        if (
-            isinstance(getattr(semantic, "x", None), AxisRef)
-            and not isinstance(semantic, RollingPlot)
-        ):
+        if semantic_kind in {PlotKind.CURVE, PlotKind.IMAGE}:
             entries.append(_unit_parameter("x_display_unit"))
-        if isinstance(semantic, ImagePlot):
+        if semantic_kind is PlotKind.IMAGE:
             entries.append(_unit_parameter("y_display_unit"))
-        if isinstance(spec, FacetGridPlot):
+        if kind is PlotKind.FACET_GRID:
             entries.append(
                 _unit_parameter(
                     "facet_display_unit",
@@ -599,23 +616,23 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
                 )
             )
         entries.append(_unit_parameter("value_display_unit"))
-    if isinstance(semantic, (CurvePlot, RollingPlot)):
+    if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())
-    if isinstance(semantic, HistogramPlot):
+    if semantic_kind is PlotKind.HISTOGRAM:
         entries.extend(_histogram_parameters())
-    if isinstance(semantic, ImagePlot):
+    if semantic_kind is PlotKind.IMAGE:
         entries.extend(
             _image_parameters(
                 style,
                 default_interpolation=(
                     style.render.facet_image_interpolation
-                    if isinstance(spec, FacetGridPlot)
+                    if kind is PlotKind.FACET_GRID
                     else style.render.image_default_interpolation
                 ),
-                include_colorbar=not isinstance(spec, FacetGridPlot),
+                include_colorbar=kind is not PlotKind.FACET_GRID,
             )
         )
-    if isinstance(spec, RollingPlot):
+    if kind is PlotKind.ROLLING:
         entries.extend(
             (
                 _bin_count_parameter(_ROLLING_DISTRIBUTION_BIN_EFFECTS),
@@ -639,7 +656,7 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
                 ),
             )
         )
-    if isinstance(spec, ImagePlot):
+    if kind is PlotKind.IMAGE:
         entries.extend(
             (
                 ParameterSpec(
@@ -660,7 +677,7 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
                 ),
             )
         )
-    if isinstance(spec, PulseTimelinePlot):
+    if kind is PlotKind.PULSE_TIMELINE:
         entries.append(
             ParameterSpec(
                 "show_scan_regions",
@@ -682,6 +699,53 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
     )
 
 
+def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> ParameterSchema:
+    """Return the introspectable, complete UI parameter contract for ``spec``."""
+
+    return _parameter_schema_for_context(
+        _parameter_schema_context(spec),
+        style=style,
+    )
+
+
+def parameter_schema_for_kind(
+    kind: PlotKind | str,
+    *,
+    style: PlotStyleConfig,
+    facet_cell_kind: PlotKind | str | None = None,
+) -> ParameterSchema:
+    """Return the data-independent display contract for an authored kind.
+
+    Semantic axis choices and fit models require a dataset. Display controls
+    do not, so a blank panel exposes the same surface before its signal is
+    wired. A facet grid is the one exception: its display contract depends on
+    the cell kind, which must therefore already be authored.
+    """
+
+    resolved = PlotKind(kind)
+    semantic_kind = resolved
+    if resolved is PlotKind.FACET_GRID:
+        if facet_cell_kind is None:
+            raise ValueError(
+                "facet grid display parameters require a fixed cell kind"
+            )
+        semantic_kind = PlotKind(facet_cell_kind)
+        if semantic_kind not in {
+            PlotKind.CURVE,
+            PlotKind.IMAGE,
+            PlotKind.HISTOGRAM,
+        }:
+            raise ValueError(
+                "facet grid cell kind must be curve, image, or histogram"
+            )
+    elif facet_cell_kind is not None:
+        raise ValueError("facet_cell_kind is only valid for a facet grid")
+    return _parameter_schema_for_context(
+        _ParameterSchemaContext(resolved, semantic_kind, PlotLabels()),
+        style=style,
+    )
+
+
 __all__ = [
     "CellPlot",
     "CurvePlot",
@@ -695,4 +759,5 @@ __all__ = [
     "RelimMode",
     "RollingPlot",
     "parameter_schema_for",
+    "parameter_schema_for_kind",
 ]

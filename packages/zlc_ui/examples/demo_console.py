@@ -55,8 +55,7 @@ class FakePresenter:
             "selectors_toggled", "save_layout_requested",
             "load_layout_requested", "save_screenshot_requested",
             "panel_order_committed",
-            "panel_signal_picked", "panel_size_picked", "panel_update_ms_picked",
-            "panel_title_committed", "panel_remove_requested",
+            "panel_remove_requested",
             "panel_edit_requested", "logic_start_requested",
             "logic_stop_requested", "logic_edit_requested",
             "logic_remove_requested", "logic_draft_changed",
@@ -87,7 +86,26 @@ def populate(console, *, wire_intents: bool = True) -> None:
     for index in range(1, 4):
         panel_id = f"panel-{index}"
         console.add_panel(panel_id, f"Fake card {index}")
-        console.set_panel_size(panel_id, demo_sizes[index - 1])
+        console.set_panel_projection(
+            panel_id,
+            {
+                "signal": "",
+                "kind": "image",
+                "size": demo_sizes[index - 1],
+                "interval_ms": 100,
+                "title": f"Fake card {index}",
+                "semantic": {},
+                "display": {},
+                "fit": {},
+                "site_overlay": "off",
+            },
+            {
+                "semantic": (),
+                "display": (),
+                "fit": (),
+                "site_overlay": None,
+            },
+        )
         console.set_panel_signal_choices(
             panel_id,
             (("Fake source", (("Temperature", "temperature"), ("Count", "count"))),),

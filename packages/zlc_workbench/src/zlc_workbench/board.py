@@ -80,12 +80,19 @@ class LiveBoard:
         self._channels = OwnerChannels(self.wake)
         self._arbiter = SurfaceBatchArbiter(self._channels)
         self._ports = ports
+        self._clock = HarmonicClock(tuple(intervals), int(default_interval_ms))
         self._scheduler = BoardScheduler(
             plane,
-            HarmonicClock(tuple(intervals), int(default_interval_ms)),
+            self._clock,
             self._arbiter,
             ports,
         )
+
+    @property
+    def intervals(self) -> tuple[int, ...]:
+        """The exact refresh domain enforced by this board's scheduler."""
+
+        return self._clock.intervals
 
     def tick(self) -> object:
         """Freeze one front and stage whatever is due.  NOT the GUI thread."""

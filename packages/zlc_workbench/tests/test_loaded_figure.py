@@ -23,6 +23,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_workbench.archive import read_archive
 from zlc_workbench.loaded_figure import LOADED_CONTRACT, ArchiveSession, LoadedFigure
+from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.session import ExperimentSession
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
@@ -85,12 +86,11 @@ def test_a_console_runs_over_a_saved_archive_with_no_devices(saved) -> None:
     import test_console_presenter as console_tests
     from zlc_workbench.console import ConsolePresenter
 
-    def _spec_for(snapshot, kind: str = ""):
-        chosen = next((item for item in plot.PlotKind if item.value == str(kind)), None)
-        return plot.fitting_spec(snapshot.block.schema, chosen)
+    def _spec_for(snapshot, kind: str = "", cell_kind: str = ""):
+        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def _make_host(initial, signal, kind: str = ""):
-        spec = _spec_for(initial, kind)
+    def _make_host(initial, signal, kind: str = "", cell_kind: str = ""):
+        spec = _spec_for(initial, kind, cell_kind)
         assert spec is not None, f"{signal} cannot be drawn"
         return plot.RasterPlotHost.from_plot(
             initial, replace(spec, labels=replace(spec.labels, title=str(signal)))
@@ -100,7 +100,7 @@ def test_a_console_runs_over_a_saved_archive_with_no_devices(saved) -> None:
     session = ArchiveSession(saved, info, arrays)
     view = console_tests._ConsoleView()
     presenter = ConsolePresenter(
-        session, view, make_host=_make_host, panel_kinds=plot.panel_kinds,
+        session, view, make_host=_make_host,
         spec_for=_spec_for,
     )
     try:
