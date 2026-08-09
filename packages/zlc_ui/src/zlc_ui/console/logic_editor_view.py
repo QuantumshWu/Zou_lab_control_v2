@@ -194,6 +194,9 @@ class LogicEditorView(QtWidgets.QWidget):
         if has_source:
             current = str(projection.get("source_signal") or "")
             options = tuple(str(item) for item in projection.get("source_options", ()))
+            source_labels = projection.get("source_labels") or {}
+            if not isinstance(source_labels, Mapping):
+                raise TypeError("logic editor source labels must be a mapping")
             if self.source_combo is None:
                 self.source_combo = FluentComboBox()
                 self.source_combo.currentIndexChanged[int].connect(
@@ -202,7 +205,13 @@ class LogicEditorView(QtWidgets.QWidget):
                 self._selector_layout.insertRow(
                     0, "Frames signal", self.source_combo
                 )
-            self._fill_combo(self.source_combo, current, options, blank=True)
+            self._fill_combo(
+                self.source_combo,
+                current,
+                options,
+                blank=True,
+                labels={str(key): str(value) for key, value in source_labels.items()},
+            )
         elif self.source_combo is not None:
             self._retire_selector(self.source_combo)
             self.source_combo = None
@@ -249,6 +258,7 @@ class LogicEditorView(QtWidgets.QWidget):
         options: tuple[str, ...],
         *,
         blank: bool,
+        labels: Mapping[str, str] | None = None,
     ) -> None:
         ordered: list[str] = []
         if blank:
@@ -256,7 +266,11 @@ class LogicEditorView(QtWidgets.QWidget):
         if current and current not in options:
             ordered.append(current)
         ordered.extend(item for item in options if item not in ordered)
-        desired = tuple((value or "(not selected)", value) for value in ordered)
+        names = {} if labels is None else dict(labels)
+        desired = tuple(
+            ((names.get(value, value) if value else "(not selected)"), value)
+            for value in ordered
+        )
         existing = tuple(
             (combo.itemText(index), combo.itemData(index))
             for index in range(combo.count())

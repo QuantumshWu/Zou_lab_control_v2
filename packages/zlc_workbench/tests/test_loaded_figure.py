@@ -47,7 +47,7 @@ def saved(tmp_path):
         capture = node.prepare()
         session.fire(shots=1)
         result = capture.collect()
-        signal = node.signal_key("frames")
+        signal = node.signal_key("frame_0")
         snapshot = result.publication.value(signal).snapshot
         yield session.save_figure(
             "run", arrays={"panel-1": snapshot}, nodes=(node,)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import numpy as np
-from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_runtime import MonitorCoverage
 from zlc_runtime import (
     DatasetOutputDeclaration,
@@ -25,7 +25,18 @@ from zlc_atom.nodes._framework.generation import ProducerRuns
 from zlc_atom.nodes._framework.provenance import ProvenanceRecorder
 
 
-_FRAMES_DECLARATION = DatasetOutputDeclaration("frames", "camera.frames.v1")
+_CAMERA_FRAME_CONTRACT = "camera.frames.v1"
+
+
+def camera_frame_output_declarations(
+    frames_per_cycle: int,
+) -> tuple[DatasetOutputDeclaration, ...]:
+    """Declare one ordinary 2-D signal for each frame in a camera cycle."""
+
+    return tuple(
+        DatasetOutputDeclaration(f"frame_{index}", _CAMERA_FRAME_CONTRACT)
+        for index in range(int(frames_per_cycle))
+    )
 
 
 def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
@@ -103,23 +114,12 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "timeout_seconds", timeout)
 
 
-def _frames_array(cycles: tuple[tuple[CameraFrameRecord, ...], ...]) -> np.ndarray:
-    """Materialize one finite camera publication without carrying record objects."""
-
-    if not cycles:
-        raise ValueError("camera publication requires at least one cycle")
-    return np.stack(
-        [np.stack([np.asarray(record.image) for record in cycle], axis=0) for cycle in cycles],
-        axis=0,
-    )
-
-
 class _CameraMonitorSlot:
     """Application-owned live slot consumed by the runtime plane."""
 
     def __init__(self, node: "CameraMeasurementNode") -> None:
         self.node = node
-        self.latest: CameraFrameRecord | None = None
+        self.latest: tuple[CameraFrameRecord, ...] | None = None
         self.revision = 0
         self.closed = False
         self._change_listener: Callable[[], None] | None = None
@@ -133,42 +133,46 @@ class _CameraMonitorSlot:
             raise RuntimeError("camera monitor slot already has a change listener")
         self._change_listener = listener
 
-    def update(self, record: CameraFrameRecord) -> None:
+    def update(self, records: tuple[CameraFrameRecord, ...]) -> None:
         if self.closed:
             raise RuntimeError("camera monitor slot is closed")
         listener = self._change_listener
         if listener is None:
             raise RuntimeError("camera monitor slot is not attached")
-        self.latest = record
+        if len(records) != self.node.frames_per_cycle:
+            raise ValueError("camera monitor update must contain one complete cycle")
+        self.latest = records
         self.revision += 1
         listener()
 
     def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
         if self.closed:
             raise RuntimeError("camera monitor slot is closed")
-        record = self.latest
-        if record is None:
-            raise RuntimeError("camera monitor slot has no accepted frame")
-        array = np.asarray(record.image)[None, None, ...]
-        snapshot = snapshot_from_array(
-            array,
-            producer=self.node.instance_id,
-            signal="frames",
-            roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-            generation=self.node.runs.generation,
-            revision=self.node.runs.next_revision(),
-        )
+        records = self.latest
+        if records is None:
+            raise RuntimeError("camera monitor slot has no accepted cycle")
+        revision = self.node.runs.next_revision()
         coverage = MonitorCoverage(
             written_cells=1,
             total_cells=1,
         )
         return {
-            "frames": LiveDatasetOutput(
-                _FRAMES_DECLARATION,
-                snapshot,
+            declaration.name: LiveDatasetOutput(
+                declaration,
+                snapshot_from_array(
+                    np.asarray(records[index].image)[None, ...],
+                    producer=self.node.instance_id,
+                    signal=declaration.name,
+                    roles=(SPATIAL_Y, SPATIAL_X),
+                    generation=self.node.runs.generation,
+                    revision=revision,
+                ),
                 coverage,
                 self.node._require_run_record(),
-            ),
+            )
+            for index, declaration in enumerate(
+                self.node.dataset_output_declarations
+            )
         }
 
     def close(self) -> None:
@@ -265,6 +269,7 @@ class MonitorCapture:
         self.owns_generation = bool(owns_generation)
         self.closed = False
         self.latest_record: CameraFrameRecord | None = None
+        self._pending_records: list[CameraFrameRecord] = []
         self.slot = _CameraMonitorSlot(node)
         if self.owns_generation:
             if attach_live_outputs is not None:
@@ -284,8 +289,12 @@ class MonitorCapture:
         records = self.camera.read_frame_records(1, timeout=self.timeout, exact=False)
         if not records:
             return None
+        for record in records:
+            self._pending_records.append(record)
+            if len(self._pending_records) == self.node.frames_per_cycle:
+                self.slot.update(tuple(self._pending_records))
+                self._pending_records.clear()
         self.latest_record = records[-1]
-        self.slot.update(self.latest_record)
         return self.latest_record
 
     def close(self) -> CameraCaptureTerminalRecord:
@@ -313,7 +322,7 @@ class MonitorCapture:
 
 
 class CameraMeasurementNode:
-    """One atomic camera cycle yields one publication containing all frames."""
+    """One atomic camera cycle publishes one ordinary signal per frame."""
 
     def __init__(
         self,
@@ -379,12 +388,15 @@ class CameraMeasurementNode:
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
-        return (_FRAMES_DECLARATION,)
+        return camera_frame_output_declarations(self.frames_per_cycle)
 
     def signal_key(self, output_name: str) -> str:
-        if str(output_name) != "frames":
+        name = str(output_name)
+        if name not in {
+            declaration.name for declaration in self.dataset_output_declarations
+        }:
             raise KeyError(f"unknown camera output {output_name!r}")
-        return f"@logic/{self.instance_id}/frames"
+        return f"@logic/{self.instance_id}/{name}"
 
     def _configure_for_run(self) -> CameraWorkingPoint:
         self._actual_working_point = None
@@ -484,10 +496,21 @@ class CameraMeasurementNode:
                     capture.poll()
             finally:
                 capture.close()
-            return {"signal": self.signal_key("frames")}
+            return {
+                "signals": tuple(
+                    self.signal_key(value.name)
+                    for value in self.dataset_output_declarations
+                )
+            }
         capture = self.prepare(owns_generation=False)
         result = capture.collect(publish=context.publish_final)
-        return {"cycles": len(result.cycles), "signal": self.signal_key("frames")}
+        return {
+            "cycles": len(result.cycles),
+            "signals": tuple(
+                self.signal_key(value.name)
+                for value in self.dataset_output_declarations
+            ),
+        }
 
     def monitor(
         self,
@@ -536,25 +559,31 @@ class CameraMeasurementNode:
         *,
         publish: object | None = None,
     ) -> MeasurementResult:
-        snapshot = snapshot_from_array(
-            _frames_array(cycles),
-            producer=self.instance_id,
-            signal="frames",
-            roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-            generation=self.runs.generation,
-            revision=self.runs.next_revision(),
-        )
+        if not cycles:
+            raise ValueError("camera publication requires at least one cycle")
+        revision = self.runs.next_revision()
         outputs = {
-            "frames": FinalDatasetOutput(
-                _FRAMES_DECLARATION,
-                snapshot,
+            declaration.name: FinalDatasetOutput(
+                declaration,
+                snapshot_from_array(
+                    np.stack(
+                        [np.asarray(cycle[index].image) for cycle in cycles],
+                        axis=0,
+                    ),
+                    producer=self.instance_id,
+                    signal=declaration.name,
+                    roles=(SPATIAL_Y, SPATIAL_X),
+                    generation=self.runs.generation,
+                    revision=revision,
+                ),
                 self._require_run_record(),
             )
+            for index, declaration in enumerate(self.dataset_output_declarations)
         }
         published = publish(outputs) if publish is not None else self.signal_plane.publish_final(self, outputs)
         if not isinstance(published, dict) and not hasattr(published, "keys"):
             raise TypeError("signal_plane.publish_final must return a signal mapping")
-        publication = self.signal_plane.latest_publication(self.signal_key("frames"))
+        publication = self.signal_plane.latest_publication(self.signal_key("frame_0"))
         if not isinstance(publication, SignalPublication):
             raise RuntimeError("signal plane did not expose the final camera publication")
         return MeasurementResult(cycles, publication, terminal)
@@ -566,4 +595,5 @@ __all__ = [
     "FiniteCapture",
     "MeasurementResult",
     "MonitorCapture",
+    "camera_frame_output_declarations",
 ]

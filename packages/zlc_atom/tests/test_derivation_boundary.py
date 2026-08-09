@@ -79,14 +79,14 @@ def _finished_shot(plane, camera, sequencer, windows):
 def test_a_finished_measurement_carries_no_coverage_and_that_is_correct(bench) -> None:
     plane, camera, sequencer, windows = bench
     node, result = _finished_shot(plane, camera, sequencer, windows)
-    value = result.publication.value(node.signal_key("frames"))
+    value = result.publication.value(node.signal_key("frame_0"))
     assert value.coverage is None, "a finished dataset has nothing left to keep up with"
 
 
 def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: Path) -> None:
     plane, camera, sequencer, windows = bench
     node, result = _finished_shot(plane, camera, sequencer, windows)
-    source_name = node.signal_key("frames")
+    source_name = node.signal_key("frame_0")
     source = result.publication.value(source_name)
     assert source is not None
     height, width = source.values.shape[-2:]
@@ -221,7 +221,7 @@ def test_a_live_monitor_signal_does_carry_coverage(bench) -> None:
         deadline = time.monotonic() + 5.0
         while monitor.poll() is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        value = plane.freeze().value(node.signal_key("frames"))
+        value = plane.freeze().value(node.signal_key("frame_0"))
         assert value is not None, "the monitor published nothing"
         assert value.coverage is not None, "a live signal reports its current window"
     finally:

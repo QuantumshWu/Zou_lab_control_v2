@@ -25,6 +25,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
+from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
@@ -223,14 +224,27 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         assert host.final_result is not None
         assert node.actual_working_point is not None
         assert node.actual_working_point.exposure_seconds == 0.02
-        publication = plane.latest_publication(host.signal_key("frames"))
+        declarations = host.dataset_output_declarations
+        assert tuple(value.name for value in declarations) == tuple(
+            f"frame_{index}" for index in range(windows)
+        )
+        publication = plane.latest_publication(host.signal_key("frame_0"))
         assert publication is not None
-        value = publication.value(host.signal_key("frames"))
-        assert value is not None
-        frames = np.asarray(value.snapshot.block.values)
-        assert frames.size
+        frames = []
+        for index in range(windows):
+            value = publication.value(host.signal_key(f"frame_{index}"))
+            assert value is not None
+            assert tuple(
+                axis.role for axis in value.snapshot.block.schema.cell_schema.data_axes
+            ) == (SPATIAL_Y, SPATIAL_X)
+            frame = np.asarray(value.snapshot.block.values)
+            assert frame.shape[:2] == (1, 1)
+            frames.append(frame)
         record = publication.run_record
-        assert value.run_record == record
+        assert all(
+            publication.value(host.signal_key(f"frame_{index}")).run_record == record
+            for index in range(windows)
+        )
         assert record["node"] == "cm"
         assert record["parameters"] == {
             "exposure_seconds": 0.02,
@@ -242,8 +256,8 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         assert record["named_devices"] == {"camera": "camera"}
         actual = record["device_snapshots"]["camera"]
         assert actual["exposure_seconds"] == 0.02
-        assert tuple(actual["frame_shape_yx"]) == tuple(frames.shape[-2:])
-        assert actual["dtype"] == frames.dtype.str
+        assert tuple(actual["frame_shape_yx"]) == tuple(frames[0].shape[-2:])
+        assert actual["dtype"] == frames[0].dtype.str
         json.dumps(dict(record))
     finally:
         if host is not None:
@@ -288,7 +302,7 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
 
         sequencer.fire()
         sequencer.wait_done(1.0)
-        signal_key = host.signal_key("frames")
+        signal_key = host.signal_key("frame_0")
         live_value = None
         deadline = time.monotonic() + 5.0
         while live_value is None and time.monotonic() < deadline:

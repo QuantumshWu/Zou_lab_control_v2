@@ -355,6 +355,7 @@ projection = {
     'source_required': True,
     'source_signal': '',
     'source_options': ('camera-1.frames',),
+    'source_labels': {'camera-1.frames': 'frames  [1 × 1 × (3×96×128)]'},
     'device_keys': {'camera': 'camera'},
     'device_options': {'camera': ('camera', 'mot_camera')},
     'running': False,
@@ -379,6 +380,7 @@ def accept_and_refresh(node_id, patch):
 handle.logic_draft_changed.connect(accept_and_refresh)
 handle.open_logic_editor('camera-1', projection)
 editor = handle._logic_editors['camera-1']
+assert editor.source_combo.itemText(1) == 'frames  [1 × 1 × (3×96×128)]'
 handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()

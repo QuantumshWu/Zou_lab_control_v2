@@ -99,7 +99,7 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(presenter) ->
     assert presenter.logic[node_id].host is None
     assert presenter.logic[node_id].node is None
     assert [name for name, _by, _state in row.publishes] == [
-        stable_signal_key(node_id, "frames")
+        stable_signal_key(node_id, "frame_0")
     ]
     assert presenter.view.focused_logic_editor == node_id
     projection = presenter.view.logic_editors[node_id]
@@ -132,9 +132,13 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     assert presenter.start_logic(node_id) is True
     assert row.state[0] == "running"
     assert "1/1 node(s) running" in presenter.view.summary
-    assert presenter.logic[node_id].host.dataset_output_declarations[0].contract_id == (
-        "camera.frames.v1"
+    declarations = presenter.logic[node_id].host.dataset_output_declarations
+    assert tuple(value.name for value in declarations) == (
+        "frame_0",
+        "frame_1",
+        "frame_2",
     )
+    assert {value.contract_id for value in declarations} == {"camera.frames.v1"}
 
     session.fire(shots=1)
     deadline = time.monotonic() + 10.0
@@ -146,8 +150,23 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     assert row.state[0] != "error", row.state
     assert "0/1 node(s) running" in presenter.view.summary
     # The signal it declared is on the plane, ready for a panel.
-    published = presenter.logic[node_id].host.signal_key("frames")
-    assert session.signal_plane.freeze().value(published) is not None
+    published = tuple(
+        presenter.logic[node_id].host.signal_key(f"frame_{index}")
+        for index in range(3)
+    )
+    values = tuple(session.signal_plane.freeze().value(signal) for signal in published)
+    assert all(value is not None for value in values)
+    shapes = tuple(value.shape for value in values)
+    expected = tuple(
+        f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
+        for shape in shapes
+    )
+    assert tuple(value[1] for value in row.publishes) == expected
+    occupancy_id = presenter.add_logic("occupancy")
+    assert presenter.logic_editor_projection(occupancy_id)["source_labels"] == {
+        signal: f"frame_{index}  [{expected[index]}]"
+        for index, signal in enumerate(published)
+    }
 
 
 def test_stop_reaches_a_running_node(presenter, session) -> None:
@@ -215,7 +234,7 @@ def test_two_nodes_of_one_type_get_their_own_names(presenter) -> None:
     second = presenter.add_logic("camera_measurement")
 
     assert (first, second) == ("camera_measurement", "camera_measurement2")
-    keys = {stable_signal_key(name, "frames") for name in (first, second)}
+    keys = {stable_signal_key(name, "frame_0") for name in (first, second)}
     assert len(keys) == 2
 
 
@@ -657,7 +676,7 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert presenter.start_logic(node_id) is True
     old_host = presenter.logic[node_id].host
     assert old_host is not None
-    old_key = old_host.signal_key("frames")
+    old_key = old_host.signal_key("frame_0")
     old_generation = old_host.generation
     presenter.update_logic_draft(
         node_id,
@@ -678,7 +697,7 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert presenter.logic[node_id].node.camera is session.installation.capability(
         "camera.adapter", key="mot_camera"
     )
-    assert replacement.signal_key("frames") == old_key
+    assert replacement.signal_key("frame_0") == old_key
     assert replacement.generation != old_generation
 
 
@@ -825,7 +844,7 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
 
     camera_id = presenter.add_logic("camera_measurement")
     assert presenter.view.logic_editors[node_id]["source_options"] == (
-        stable_signal_key(camera_id, "frames"),
+        stable_signal_key(camera_id, "frame_0"),
     )
 
     presenter.view.logic_draft_changed.emit(
@@ -858,7 +877,7 @@ def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
     missing = tmp_path / "missing-calibration.json"
     node_id = presenter.add_logic(
         "occupancy",
-        source_signal=camera.signal_key("frames"),
+        source_signal=camera.signal_key("frame_0"),
         artifact_inputs={"calibration_path": str(missing)},
     )
 

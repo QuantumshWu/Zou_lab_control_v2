@@ -41,7 +41,7 @@ def _shot(node: CameraMeasurementNode, sequencer, windows: int):
 
 
 def _snapshot_of(result, node) -> object:
-    return result.publication.value(node.signal_key("frames")).snapshot
+    return result.publication.value(node.signal_key("frame_0")).snapshot
 
 
 def test_successive_shots_carry_strictly_increasing_revisions() -> None:

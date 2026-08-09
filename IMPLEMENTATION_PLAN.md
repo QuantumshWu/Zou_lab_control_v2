@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Stage A 正在把用户最新裁决写回权威文档并逐项核对当前实现；Calibration JSON artifact、四张 task-owned report 图片、唯一 Monitor preview、Setting 即时 commit、restart lifecycle 和全部正式复验都不得凭旧实现或旧测试宣称完成。`
+- Current phase：`Camera Measurement 已收敛为按 authored request 发布 frame_0...frame_N 普通二维 signals，所有 selector 投影 signal shape；正在进入 Monitor/Setting 收敛。Calibration JSON artifact、四张 task-owned report 图片、唯一 Monitor preview、Setting 即时 commit、restart lifecycle 和全部正式复验都不得凭旧实现或旧测试宣称完成。`
 - Last completed action：撤销旧六-site、旧 panel surface、旧单模型/artifact-only Calibration 所产生的伪完成结论，并把最新共同契约和验收门写回两份权威文档。
-- Last verified tests：`没有可作为当前最终交付证据的 test run；旧通过数字和旧 detached/UI 记录全部撤回，受影响 tests、Guard A/B/C、全树和独立路径验证待最新实现收敛后重跑。`
-- Pending acceptance gates：`Calibration 单次 result -> JSON + site-map/三模型四张 report 图片；Task progress/preview/terminal cleanup；terminal generation restart；Task takeover；Occupancy model choice；35-site simulation；panel finite ComboBox/full initial schema/Setting 即时 commit 性能；signal shape/frame selection；受影响与全树 tests；正式 experiment.bat 真实按钮全流程；Stop/close 零残留。`
-- Next action：先按两份权威文档逐项审计当前实现并在现有 owner 内修正 Calibration restart/report/Monitor lifecycle，再修 Setting/scroll/shape/frame selection；每个窄阶段通过受影响 tests 后才进入全树和正式按钮验收，并在每次 GUI probe 后立即确认窗口与进程归零。
+- Last verified tests：`当前未提交 Camera/shape 阶段：zlc_atom 143、zlc_runtime 142、zlc_workbench 333、zlc_ui 79 全部通过；这些只证明该阶段，不代替剩余 Calibration/Setting、全树和正式按钮验收。`
+- Pending acceptance gates：`Calibration 单次 result -> JSON + site-map/三模型四张 report 图片；Task progress/preview/terminal cleanup；terminal generation restart；Task takeover；Occupancy model choice；35-site simulation；panel finite ComboBox/full initial schema/Setting 即时 commit 性能；受影响与全树 tests；正式 experiment.bat 真实按钮全流程；Stop/close 零残留。`
+- Next action：修 Monitor 左侧整体滚动和 Setting 的 panel 内边界/内滚动/无 Apply/即时高效更新，再在现有 Calibration plugin 内修正 file picker、Samples=300、restart/report/preview lifecycle；每个窄阶段通过受影响 tests 后才进入全树和正式按钮验收，并在每次 GUI probe 后立即确认窗口与进程归零。
 - New decisions since architecture review：Simulation 只位于独立 devices/simulation 且复用真实设备契约；默认 virtual geometry 是 35 sites/96 x 128；Calibration JSON artifact 保留 SiteMap、三模型、default kind 和 frame contract，Calibration Task 另用同一结果调用 `zlc_plot` 保存 site-map + 三模型 grid 四张 report 图片；Workbench 不显示 report，Monitor 只自动显示 measurement preview；Occupancy readout-model choice 是科学模式而非 extent mode；Task active 时 takeover；TaskConsole 只有五种固定 plot kind，interval 是有限 ComboBox，blank panel 初始显示完整 schema，Setting 没有 Apply、字段 commit 即时异步生效并拒绝 stale result；pulse 只有 readable `zlc.pulse.v1` JSON 单一路径。旧 Goal tombstones 保持不动。
 
 ## 1. 执行纪律
@@ -286,7 +286,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 1. Device Manager `Init devices` -> 同一 session 同时出现 Pulse UI 与 TaskConsole；无 calibration pulse 预载、小窗口闪现或第二个 session。
 2. `Add Calibration` -> 自动 Edit -> 用 project `pulses` file picker 选 JSON，确认 Samples 默认 300，选 virtual camera/sequencer，设 reference/readout exposure + camera ROI + default readout model -> Start；验证 header takeover/progress/唯一 Stop Task、Monitor 唯一循环 preview、35-site result、三模型 JSON artifact 和由同一 result 直接画出的 site-map + 三模型 grid report。完成后再次 Start 及 Remove/re-add 均产生新 generation。
 3. `Add Camera Measurement` -> 自动 Edit -> 选 camera -> 设 exposure/ROI -> `Repeat=0` -> Start。
-4. 从同一 Experiment 的 Pulse UI Load readable `imaging_template.json` 并 On Pulse；Camera worker 持续产生 frames，GUI beat 不读 camera。所有 signal selector 显示 dataset shape；`Frames per cycle > 1` 时还必须明确选择 frame index。
+4. 从同一 Experiment 的 Pulse UI Load readable `imaging_template.json` 并 On Pulse；Camera worker 持续产生 frames，GUI beat 不读 camera。Camera Measurement 按 authored `Frames per cycle` 发布 `frame_0...frame_N` 普通二维 signals，所有 signal selector 分别列出它们并显示 dataset shape；`zlc_plot` 不实现 camera-specific frame selector。
 5. `Add Occupancy` -> 自动 Edit -> 选 frames signal + calibration path；依次验证 default/box/psf/uniform_psf choice -> Start。
 6. 依固定顺序创建全部五种 blank panels；在接 signal 前确认完整 initial schema 和 `100/200/400/800` ComboBox，Setting 始终留在 panel 边界内并可滚动，修改 signal/interval/display 后无需 Apply 立即生效，首图及时出现且没有 UI freeze/重复 rebuild。Image 用 SiteMap centers 画 35-site occupancy circles；可选标签最多为小号 ordinal，颜色/透明度与对应圈一致。
 7. Panel Edit 中 Area selector 改 Camera Measurement ROI draft -> 单次 Producer Restart -> 新 measurement 已运行，旧 calibration 不相容时 Occupancy 显示 blocked。

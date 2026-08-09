@@ -409,7 +409,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert isinstance(calibration_input, ArtifactInputSpec)
         occupancy_node = descriptors["occupancy"].instantiate(
             calibration=calibration_input.codec.resolve(calibration_path),
-            source_signal=camera_node.signal_key("frames"),
+            source_signal=camera_node.signal_key("frame_0"),
             signal_plane=plane,
             model_kind="uniform_psf",
         )
@@ -501,7 +501,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         with pytest.raises(TypeError):
             descriptors["occupancy"].instantiate(
                 calibration=task_result.calibration,
-                source_signal=camera_node.signal_key("frames"),
+                source_signal=camera_node.signal_key("frame_0"),
                 signal_plane=plane,
             )
     finally:

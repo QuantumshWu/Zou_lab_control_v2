@@ -261,6 +261,7 @@ class LogicNodeDescriptor:
     authoring_schema: AuthoringSchema
     input_specs: tuple[DatasetInputSpec | ArtifactInputSpec, ...] = ()
     outputs: tuple[OutputSpec, ...] = ()
+    resolve_outputs: Callable[[Mapping[str, object]], tuple[OutputSpec, ...]] | None = None
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     task_previews: tuple[TaskPreviewSpec, ...] = ()
@@ -290,6 +291,10 @@ class LogicNodeDescriptor:
             raise TypeError("input_specs contain an unsupported input type")
         if any(not isinstance(value, OutputSpec) for value in outputs):
             raise TypeError("outputs must contain OutputSpec values")
+        if self.resolve_outputs is not None and not callable(self.resolve_outputs):
+            raise TypeError("resolve_outputs must be callable or None")
+        if outputs and self.resolve_outputs is not None:
+            raise ValueError("static outputs and resolve_outputs are exclusive")
         if any(not isinstance(value, TaskPreviewSpec) for value in task_previews):
             raise TypeError("task_previews must contain TaskPreviewSpec values")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
@@ -405,6 +410,19 @@ class LogicNodeDescriptor:
         if self.build is None:
             return self
         return self.build(**kwargs)
+
+    def outputs_for(self, values: Mapping[str, object]) -> tuple[OutputSpec, ...]:
+        """Resolve the outputs declared by one exact authored request."""
+
+        if self.resolve_outputs is None:
+            return self.outputs
+        authored = self.authoring_schema.project_values(values)
+        outputs = tuple(self.resolve_outputs(authored))
+        if any(not isinstance(value, OutputSpec) for value in outputs):
+            raise TypeError("resolve_outputs must return OutputSpec values")
+        if len({value.name for value in outputs}) != len(outputs):
+            raise ValueError("resolved output names must be unique")
+        return outputs
 
     def selection_patch(
         self,

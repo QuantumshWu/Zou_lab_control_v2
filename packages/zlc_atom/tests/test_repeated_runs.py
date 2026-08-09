@@ -69,7 +69,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
             capture = node.prepare()
             _fire_windows(sequencer, windows)
             result = capture.collect()
-            frames = np.asarray(result.publication.value(node.signal_key("frames")).snapshot.block.values)
+            frames = np.asarray(result.publication.value(node.signal_key("frame_0")).snapshot.block.values)
             assert frames.size, "a shot produced no frames"
             totals.append(float(frames.sum()))
 
@@ -144,7 +144,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
             capture = node.prepare()
             _fire_windows(sequencer, windows)
             result = capture.collect()
-            generations.append(result.publication.value(node.signal_key("frames")).snapshot.ref.stream_generation)
+            generations.append(result.publication.value(node.signal_key("frame_0")).snapshot.ref.stream_generation)
 
         assert generations[0] != generations[1]
     finally:

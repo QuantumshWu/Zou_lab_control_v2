@@ -180,6 +180,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         calibration_host = make_host(
             calibration_descriptor,
             calibration_node,
+            authored_values=calibration_finalization.values,
             signal_plane=plane,
             instance_id="calibration",
         )
@@ -264,6 +265,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         finite_host = make_host(
             camera_descriptor,
             finite_node,
+            authored_values=finite_finalization.values,
             signal_plane=plane,
             instance_id="camera_measurement",
         )
@@ -276,12 +278,12 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         _wait_terminal(finite_host, phase="done")
         assert finite_host.final_result == {
             "cycles": 3,
-            "signal": stable_signal_key("camera_measurement", "frames"),
+            "signals": (stable_signal_key("camera_measurement", "frame_0"),),
         }
         assert camera.capture_state() is False
 
-        frames_signal = finite_host.signal_key("frames")
-        assert frames_signal == stable_signal_key("camera_measurement", "frames")
+        frames_signal = finite_host.signal_key("frame_0")
+        assert frames_signal == stable_signal_key("camera_measurement", "frame_0")
         finite_front = plane.freeze()
         frames_publication = finite_front.publication(frames_signal)
         frames_value = finite_front.value(frames_signal)
@@ -328,6 +330,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         occupancy_host = make_host(
             occupancy_descriptor,
             occupancy_node,
+            authored_values=occupancy_finalization.values,
             signal_plane=plane,
             instance_id="occupancy",
         )
@@ -369,7 +372,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert rate.shape == (3, 1, 1)
         np.testing.assert_array_equal(
             frame_judged.values,
-            frames_value.values[:, 0],
+            frames_value.values,
         )
         assert all(
             value.coverage is None and value.transient is False
@@ -430,6 +433,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         infinite_host = make_host(
             camera_descriptor,
             infinite_node,
+            authored_values=infinite_finalization.values,
             signal_plane=plane,
             instance_id="camera_measurement",
         )
@@ -437,7 +441,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         infinite_host.start()
         _wait_armed(infinite_host, camera)
 
-        live_signal = infinite_host.signal_key("frames")
+        live_signal = infinite_host.signal_key("frame_0")
         previous_revision = 0
         live_generation = None
         for _ in range(2):

@@ -65,7 +65,7 @@ def frames(session):
     capture = node.prepare()
     session.fire(shots=1)
     result = capture.collect()
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     return signal, result.publication.value(signal).snapshot
 
 

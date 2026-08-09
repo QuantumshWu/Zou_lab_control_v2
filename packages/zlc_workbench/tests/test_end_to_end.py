@@ -107,7 +107,7 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     capture = node.prepare()
     session.fire(shots=1)
     result = capture.collect()
-    frames = np.asarray(result.publication.value(node.signal_key("frames")).snapshot.block.values)
+    frames = np.asarray(result.publication.value(node.signal_key("frame_0")).snapshot.block.values)
 
     path = session.save_figure("first light", arrays={"frames": frames}, nodes=[node])
     assert path.parent.parent == session.workspace.data
@@ -136,9 +136,11 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     assert reopened["repeat"] == 1
     assert reopened["exposure"] > 0
     assert reopened["roi"] == [96, 128]
-    # A block is (repeat, point, *data); one shot of a three-window bracket is
-    # one repeat, one point, three frames.
-    assert reopened["frames"][:3] == [1, 1, 3], f"unexpected block shape {reopened['frames']}"
+    # Each camera-frame signal is an ordinary 2-D image block.  The other
+    # windows in the cycle are published as frame_1, frame_2, ... signals.
+    assert reopened["frames"] == [1, 1, 96, 128], (
+        f"unexpected block shape {reopened['frames']}"
+    )
 
 
 def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
@@ -159,7 +161,7 @@ def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
         capture = node.prepare()
         session.fire(shots=1)
         result = capture.collect()
-        frames = np.asarray(result.publication.value(node.signal_key("frames")).snapshot.block.values)
+        frames = np.asarray(result.publication.value(node.signal_key("frame_0")).snapshot.block.values)
         saved.append(session.save_figure("shot", arrays={"frames": frames}, nodes=[node]))
 
     assert len({path.name for path in saved}) == 3, "an afternoon save must not overwrite the morning"
@@ -240,7 +242,7 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
         capture = node.prepare()
         session.fire(shots=1)
         frames = np.asarray(
-            capture.collect().publication.value(node.signal_key("frames")).snapshot.block.values
+            capture.collect().publication.value(node.signal_key("frame_0")).snapshot.block.values
         )
         assert frames.size
         assert session.save_figure("from-file", arrays={"frames": frames}, nodes=[node]).exists()

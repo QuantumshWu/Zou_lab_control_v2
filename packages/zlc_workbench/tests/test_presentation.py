@@ -93,7 +93,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
     plot = pytest.importorskip("zlc_plot")
     plane, node, sequencer, monitor = live_bench
 
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     front = plane.freeze()
     value = front.value(signal)
     assert value is not None, "the monitor published nothing to present"
@@ -156,7 +156,7 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     plot = pytest.importorskip("zlc_plot")
     plane, node, _sequencer, _monitor = live_bench
 
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     value = plane.freeze().value(signal)
     assert value is not None
     publication = plane.latest_publication(signal)
@@ -193,7 +193,7 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     from concurrent.futures import Future
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -236,7 +236,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
     from zlc_data import owned_snapshot_from_arrays
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -310,7 +310,7 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
 
     plot = pytest.importorskip("zlc_plot")
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -366,7 +366,7 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
     from zlc_workbench.logic import stable_signal_key
 
     plane, node, _sequencer, _monitor = live_bench
-    source = plane.freeze().value(node.signal_key("frames"))
+    source = plane.freeze().value(node.signal_key("frame_0"))
     assert source is not None
     shape = tuple(int(value) for value in source.snapshot.block.values.shape[-2:])
     site_ids = ("a", "b", "c")
@@ -472,7 +472,7 @@ def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None
     from zlc_workbench.board import LiveBoard
 
     plane, node, sequencer, monitor = live_bench
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     value = plane.freeze().value(signal)
     assert value is not None
 

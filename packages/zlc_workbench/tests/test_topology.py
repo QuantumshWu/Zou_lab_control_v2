@@ -29,7 +29,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_workbench.session import ExperimentSession
-from zlc_workbench.topology import SignalRow, project_signals
+from zlc_workbench.topology import SignalRow, format_signal_shape, project_signals
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
@@ -63,8 +63,10 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(session) ->
     node = _measure(session)
     rows = project_signals(session.signal_plane)
     assert rows, "a run that produced data offered nothing to look at"
-    row = next(row for row in rows if row.name == node.signal_key("frames"))
-    assert row.label == "frames", "the qualified name is not what a person reads"
+    row = next(row for row in rows if row.name == node.signal_key("frame_0"))
+    value = session.signal_plane.freeze().value(row.name)
+    assert value is not None
+    assert row.label == f"frame_0  [{format_signal_shape(value.shape)}]"
     assert row.producer == "cm"
     assert row.state == "finished"
     assert row.derived_from == ""
@@ -87,7 +89,11 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
     monitor = watching.monitor(buffer_frames=2)
     try:
         session.fire(shots=1)
-        monitor.poll()
+        live_signal = watching.signal_key("frame_0")
+        for _ in range(CAMERA_WINDOWS - 1):
+            assert monitor.poll() is not None
+            assert session.signal_plane.latest_publication(live_signal) is None
+        assert monitor.poll() is not None
         rows = project_signals(session.signal_plane)
         states = [row.state for row in rows]
         assert states.index("live") < states.index("finished")
@@ -97,7 +103,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
 
 def test_a_panel_already_showing_a_signal_says_so(session) -> None:
     node = _measure(session)
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     rows = project_signals(session.signal_plane, shown={signal})
     assert next(row for row in rows if row.name == signal).shown
 

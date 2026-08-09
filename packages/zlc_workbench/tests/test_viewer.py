@@ -146,7 +146,7 @@ def saved(tmp_path):
         capture = node.prepare()
         session.fire(shots=1)
         result = capture.collect()
-        signal = node.signal_key("frames")
+        signal = node.signal_key("frame_0")
         snapshot = result.publication.value(signal).snapshot
         path = session.save_figure(
             "run",
@@ -232,7 +232,7 @@ def test_the_flow_tab_says_where_a_number_came_from(saved) -> None:
     flow = dict(tabs["Flow"])
     assert "cm" in flow
     assert "camera" in flow["cm"]
-    assert "@logic/cm/frames" in flow["cm"]
+    assert "@logic/cm/frame_0" in flow["cm"]
 
 
 def test_the_raw_tab_hides_nothing(saved) -> None:
@@ -321,15 +321,15 @@ def saved_pair(tmp_path):
             capture = node.prepare()
             session.fire(shots=1)
             result = capture.collect()
-            arrays[name] = result.publication.value(node.signal_key("frames")).snapshot
+            arrays[name] = result.publication.value(node.signal_key("frame_0")).snapshot
         yield session.save_figure(
             "two",
             arrays=arrays,
             # What the console records beside each dataset: what the panel was
             # called and which signal it was showing.
             panel={
-                "panel-1": {"title": "before", "signal": "@logic/panel1/frames"},
-                "panel-2": {"title": "after", "signal": "@logic/panel2/frames"},
+                "panel-1": {"title": "before", "signal": "@logic/panel1/frame_0"},
+                "panel-2": {"title": "after", "signal": "@logic/panel2/frame_0"},
             },
         )
     finally:
@@ -350,8 +350,8 @@ def test_every_dataset_in_an_archive_can_be_reached(presenter, saved_pair) -> No
     # "panel-1" and "panel-2" and nothing else, so an operator had to guess
     # which of them was the camera.
     assert presenter.view.datasets == (
-        ("panel-1", "before — @logic/panel1/frames"),
-        ("panel-2", "after — @logic/panel2/frames"),
+        ("panel-1", "before — @logic/panel1/frame_0"),
+        ("panel-2", "after — @logic/panel2/frame_0"),
     )
     assert presenter.dataset == "panel-1"
     first = presenter._host

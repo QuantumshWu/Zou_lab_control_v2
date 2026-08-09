@@ -61,7 +61,7 @@ from .panel_catalog import (
 from .panel_state import PanelFrozenData, PanelState
 from .presentation import PlotPanelPort
 from .selection import attach_selection_bridge, subscribe_committed_selection
-from .topology import project_signals
+from .topology import format_signal_shape, project_signals
 
 
 __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
@@ -1382,10 +1382,21 @@ class ConsolePresenter:
         for binding in self.logic.values():
             if any(
                 stable_signal_key(binding.node_id, output.name) == str(signal)
-                for output in binding.descriptor.outputs
+                for output in self._logic_outputs(binding)
             ):
                 return binding.node_id
         return None
+
+    @staticmethod
+    def _logic_outputs(binding: LogicBinding) -> tuple[object, ...]:
+        """Outputs of the active run, or of the exact stopped draft."""
+
+        if binding.host is not None:
+            return tuple(binding.host.dataset_output_declarations)
+        try:
+            return tuple(binding.descriptor.outputs_for(binding.draft.values))
+        except (TypeError, ValueError):
+            return ()
 
     def panel_editor_projection(self, panel_id: str) -> dict[str, Any] | None:
         """Plain, widget-free state consumed by the non-modal Panel Edit tab."""
@@ -2600,6 +2611,7 @@ class ConsolePresenter:
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_signal": binding.draft.source_signal,
             "source_options": self._source_options(binding.descriptor),
+            "source_labels": self._source_labels(binding.descriptor),
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
             "running": bool(binding.host is not None and binding.host.running),
@@ -2929,13 +2941,18 @@ class ConsolePresenter:
             if host is not None
             else tuple(
                 stable_signal_key(binding.node_id, output.name)
-                for output in binding.descriptor.outputs
+                for output in self._logic_outputs(binding)
             )
         )
+        descriptions = {
+            item.name: item for item in self.session.signal_plane.describe_signals()
+        }
         published = tuple(
             (
                 name,
-                binding.descriptor.api_name,
+                format_signal_shape(
+                    None if descriptions.get(name) is None else descriptions[name].shape
+                ),
                 "live" if host is not None and host.running else "held",
             )
             for name in names
@@ -2968,7 +2985,7 @@ class ConsolePresenter:
             return ()
         compatible: set[str] = set()
         for binding in self.logic.values():
-            for output in binding.descriptor.outputs:
+            for output in self._logic_outputs(binding):
                 if str(output.contract_id) in contracts:
                     compatible.add(stable_signal_key(binding.node_id, output.name))
         for node in tuple(getattr(self.session, "nodes", ()) or ()):
@@ -2981,6 +2998,14 @@ class ConsolePresenter:
                 if str(getattr(declaration, "contract_id", "")) in contracts:
                     compatible.add(str(signal_key(declaration.name)))
         return tuple(sorted(compatible))
+
+    def _source_labels(self, descriptor: Any) -> dict[str, str]:
+        compatible = set(self._source_options(descriptor))
+        return {
+            row.name: row.label
+            for row in project_signals(self.session.signal_plane)
+            if row.name in compatible
+        }
 
     def _build_logic_candidate(
         self,
@@ -2999,6 +3024,7 @@ class ConsolePresenter:
         host = make_host(
             binding.descriptor,
             node,
+            authored_values=finalization.values,
             signal_plane=self.session.signal_plane,
             instance_id=binding.node_id,
             request_owner_wake=self.board.wake.request_owner_wake,

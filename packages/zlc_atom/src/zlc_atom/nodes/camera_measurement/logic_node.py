@@ -19,7 +19,11 @@ from zlc_atom.nodes._framework.descriptor import (
     SelectionMapping,
 )
 
-from .measurement import CameraMeasurementNode, CameraMeasurementRequest
+from .measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+    camera_frame_output_declarations,
+)
 
 
 _ROI_FIELDS = ("roi_x", "roi_y", "roi_width", "roi_height")
@@ -167,11 +171,20 @@ def _build(
     )
 
 
+def _outputs(values: Mapping[str, object]) -> tuple[OutputSpec, ...]:
+    return tuple(
+        OutputSpec(value.name, value.contract_id)
+        for value in camera_frame_output_declarations(
+            int(values["frames_per_cycle"])
+        )
+    )
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "camera_measurement",
     NodeKind.MEASUREMENT,
     CAMERA_MEASUREMENT_SCHEMA,
-    outputs=(OutputSpec("frames", "camera.frames.v1"),),
+    resolve_outputs=_outputs,
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
     ),

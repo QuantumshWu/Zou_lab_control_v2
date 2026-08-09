@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-__all__ = ["SignalRow", "project_signals"]
+__all__ = ["SignalRow", "format_signal_shape", "project_signals"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +64,10 @@ def project_signals(
     rows = [
         SignalRow(
             name=description.name,
-            label=_label(description.name),
+            label=(
+                f"{_label(description.name)}  "
+                f"[{format_signal_shape(description.shape)}]"
+            ),
             producer=_producer(description.name, description.owner_id),
             state=_state(description),
             derived_from=description.source_name or "",
@@ -73,6 +76,18 @@ def project_signals(
         for description in plane.describe_signals()
     ]
     return tuple(sorted(rows, key=lambda row: (row.state != "live", row.producer, row.name)))
+
+
+def format_signal_shape(shape: object) -> str:
+    """Spell one published physical ``R × P × cell`` tensor."""
+
+    if shape is None:
+        return "—"
+    dimensions = tuple(int(value) for value in shape)  # type: ignore[arg-type]
+    if len(dimensions) < 3:
+        return " × ".join(str(value) for value in dimensions)
+    cell = "×".join(str(value) for value in dimensions[2:])
+    return f"{dimensions[0]} × {dimensions[1]} × ({cell})"
 
 
 def _state(description: object) -> str:

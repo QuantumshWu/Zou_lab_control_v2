@@ -255,8 +255,10 @@ Edit 中的理想参数：
 | Repeat | `0 = infinite`，正数为 finite cycles |
 | Frames per cycle | 每个外部时序 cycle 期望的 frame 数 |
 
-当 `Frames per cycle > 1` 时，signal chooser 必须同时显示 dataset shape，并让用户
-明确选择 cycle 内的 frame index；不能把多帧 signal 当作一张未说明的 image。
+Camera Measurement 按本次 authored `Frames per cycle` 声明
+`frame_0 ... frame_N`。每个输出都是一个普通二维 image Dataset signal；同一 cycle
+内的不同 frame 不塞进一个额外 data axis，也不由 `zlc_plot` 解释 camera-specific
+`frame_index`。signal chooser 逐项列出这些 signals，并在每项旁显示 dataset shape。
 等待/触发超时属于 adapter/session 内部采集策略，不作为普通用户 authoring 字段。
 
 Camera Measurement 不驱动 pulse。它监听外部时序，独占 camera、最多只读 sequencer 状态。Driver/internal buffer 大小不进用户表单。
@@ -320,7 +322,7 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 - title/labels、limits 和当前 kind 声明的全部 data-independent display/interaction 参数；
 - Edit / Remove。
 
-依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。多 frame/cycle 数据还要投影明确的 frame-index choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
+依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。Camera cycle 的各个 frame 已经是普通独立 signals，plot 参数层不再增加 camera-specific frame choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
 
 Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动，不能先闪现一个脱离 panel 的临时顶层窗口再重建。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
 

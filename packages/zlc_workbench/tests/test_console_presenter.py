@@ -415,7 +415,7 @@ def _one_shot(session, producer: str = "cm"):
     session.fire(shots=1)
     result = capture.collect()
     session.nodes = [node]
-    return node, result.publication.value(node.signal_key("frames")).snapshot
+    return node, result.publication.value(node.signal_key("frame_0")).snapshot
 
 
 def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
@@ -450,7 +450,7 @@ def _commit_area(host) -> None:
 
 def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
     node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot, title="frames")
 
     assert presenter.view.cards, "the view was never given a card"
     assert presenter.view.cards[0].surface is binding.host
@@ -459,7 +459,7 @@ def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
 
 def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, session) -> None:
     node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)
     assert presenter.edit_panel(binding.panel_id)
     _settle_panel_hosts(
         presenter, lambda: binding.editor_selections is not None
@@ -479,7 +479,7 @@ def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, ses
 
 def test_pausing_stops_the_beat_without_tearing_anything_down(presenter, session) -> None:
     node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frames"), snapshot)
+    presenter.add_panel(node.signal_key("frame_0"), snapshot)
 
     presenter.view.pause_toggled.emit(True)
     assert "paused" in presenter.view.summary
@@ -496,7 +496,7 @@ def test_header_save_layout_writes_no_panel_dataset(
     """Header layout persistence is wiring, not a whole-board archive."""
 
     node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
+    presenter.add_panel(node.signal_key("frame_0"), snapshot, title="frames")
     path = tmp_path / "layout.json"
     presenter.view.save_answer = str(path)
 
@@ -506,7 +506,7 @@ def test_header_save_layout_writes_no_panel_dataset(
 
     document = json.loads(path.read_text(encoding="utf-8"))
     assert document["format"] == presenter.LAYOUT_FORMAT
-    assert document["panels"][0]["signal"] == node.signal_key("frames")
+    assert document["panels"][0]["signal"] == node.signal_key("frame_0")
     assert not tuple(tmp_path.glob("*.npz"))
 
 
@@ -589,7 +589,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert presenter.edit_panel(binding.panel_id) is True
     assert binding.editor_host is None
     node, _snapshot = _one_shot(session)
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     assert presenter.retarget_panel(binding.panel_id, signal) is True
     assert binding.signal == signal
     assert binding.host is not None
@@ -640,7 +640,7 @@ def test_turning_selectors_off_stops_panels_deriving(presenter, session) -> None
     """
 
     node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)
     _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
     assert binding.bridge is not None and binding.bridge.started
 
@@ -662,7 +662,7 @@ def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None
     """
 
     node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frames"), snapshot)
+    presenter.add_panel(node.signal_key("frame_0"), snapshot)
     card = presenter.view.cards[0]
     assert card.selectors_enabled is True
 
@@ -678,7 +678,7 @@ def test_header_save_screenshot_writes_one_plain_gui_image(
     """The header screenshot does not loop over panels or write an archive."""
 
     node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frames"), snapshot)
+    presenter.add_panel(node.signal_key("frame_0"), snapshot)
     path = tmp_path / "task-console.png"
     presenter.view.save_answer = str(path)
 
@@ -694,14 +694,21 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
     raised and dropped.  Each is a decision about THAT panel."""
 
     node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot, title="camera")
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot, title="camera")
     card = presenter.view.cards[0]
 
     # It offers its own signal among the choices, or it cannot name itself.
     # Grouped under the producer that publishes it, which is the shape the real
     # card's combo renders.
-    offered = {key for _producer, leaves in card.choices for _display, key in leaves}
+    offered = {
+        key: display
+        for _producer, leaves in card.choices
+        for display, key in leaves
+    }
     assert binding.signal in offered
+    shape = snapshot.block.values.shape
+    shape_text = f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
+    assert offered[binding.signal] == f"frame_0  [{shape_text}]"
     assert card.chosen == binding.signal
 
     card.edit_requested.emit()
@@ -734,7 +741,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     image arrived where a curve was."""
 
     node, snapshot = _one_shot(session)
-    first = presenter.add_panel(node.signal_key("frames"), snapshot)
+    first = presenter.add_panel(node.signal_key("frame_0"), snapshot)
     card = presenter.view.cards[0]
     old_host = first.host
     card.edit_requested.emit()
@@ -744,10 +751,10 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
 
     # A second producer, so there is something else to point at.
     other, other_snapshot = _one_shot(session, producer="cm2")
-    presenter.retarget_panel(first.panel_id, other.signal_key("frames"))
+    presenter.retarget_panel(first.panel_id, other.signal_key("frame_0"))
 
     binding = presenter.panels[first.panel_id]
-    assert binding.signal == other.signal_key("frames")
+    assert binding.signal == other.signal_key("frame_0")
     assert binding.host is not old_host
     assert presenter.view.cards[0] is card, "the card lost its place on the board"
     editor = presenter.view.panel_editors[first.panel_id]
@@ -759,7 +766,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     presenter.view.panel_snapshot_refresh_requested.emit(first.panel_id)
     editor = presenter.view.panel_editors[first.panel_id]
     assert editor["stale"] is False
-    assert editor["frozen_signal"] == other.signal_key("frames")
+    assert editor["frozen_signal"] == other.signal_key("frame_0")
     assert editor["frozen_snapshot"] is other_snapshot
     replacement_editor_host = binding.editor_host
     assert replacement_editor_host is not None
@@ -789,7 +796,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     first_node, first_snapshot = _one_shot(session, producer=first_id)
     second_node, _second_snapshot = _one_shot(session, producer=second_id)
     panel = presenter.add_panel(
-        first_node.signal_key("frames"), first_snapshot, kind="image"
+        first_node.signal_key("frame_0"), first_snapshot, kind="image"
     )
     assert presenter.edit_panel(panel.panel_id)
     first_editor_host = panel.editor_host
@@ -806,7 +813,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.logic[second_id].draft.values == second_before
 
     assert presenter.retarget_panel(
-        panel.panel_id, second_node.signal_key("frames")
+        panel.panel_id, second_node.signal_key("frame_0")
     )
     assert panel.frozen_stale and panel.editor_host is first_editor_host
     _commit_area(first_editor_host)
@@ -828,12 +835,12 @@ def test_pointing_a_panel_at_a_signal_that_never_published_is_refused(
     presenter, session
 ) -> None:
     node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)
     card = presenter.view.cards[0]
 
     presenter.retarget_panel(binding.panel_id, "@logic/nobody/frames")
 
-    assert presenter.panels[binding.panel_id].signal == node.signal_key("frames")
+    assert presenter.panels[binding.panel_id].signal == node.signal_key("frame_0")
     assert any("has not published" in text for _severity, text in presenter.view.status)
 
 
@@ -847,8 +854,8 @@ def test_the_order_the_operator_dragged_the_cards_into_is_the_panel_order(
     """
 
     node, snapshot = _one_shot(session)
-    first = presenter.add_panel(node.signal_key("frames"), snapshot, title="one")
-    second = presenter.add_panel(node.signal_key("frames"), snapshot, title="two")
+    first = presenter.add_panel(node.signal_key("frame_0"), snapshot, title="one")
+    second = presenter.add_panel(node.signal_key("frame_0"), snapshot, title="two")
     assert list(presenter.panels) == [first.panel_id, second.panel_id]
 
     presenter.view.panel_order_committed.emit((second.panel_id, first.panel_id))
@@ -861,8 +868,8 @@ def test_an_order_naming_a_panel_that_left_keeps_every_panel(presenter, session)
     """A drop that raced a Remove must not drop the panel it did not name."""
 
     node, snapshot = _one_shot(session)
-    first = presenter.add_panel(node.signal_key("frames"), snapshot)
-    second = presenter.add_panel(node.signal_key("frames"), snapshot)
+    first = presenter.add_panel(node.signal_key("frame_0"), snapshot)
+    second = presenter.add_panel(node.signal_key("frame_0"), snapshot)
 
     presenter.view.panel_order_committed.emit(("panel-gone", second.panel_id))
 
@@ -879,7 +886,7 @@ def test_a_panel_that_could_not_draw_says_so_on_its_own_card(presenter, session)
     """
 
     node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot, title="camera")
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot, title="camera")
 
     binding.port.reject(object(), RuntimeError("the renderer refused this frame"))
     presenter.beat()
@@ -932,7 +939,7 @@ def test_a_panel_keeps_the_kind_it_was_added_as(presenter, session) -> None:
     assert binding.state is original_state
 
     other, _other_snapshot = _one_shot(session, producer="cm2")
-    assert presenter.retarget_panel(binding.panel_id, other.signal_key("frames")) is True
+    assert presenter.retarget_panel(binding.panel_id, other.signal_key("frame_0")) is True
     assert presenter.panels[binding.panel_id].kind == "curve"
 
 
@@ -941,7 +948,7 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(
-        node.signal_key("frames"), snapshot, kind="image"
+        node.signal_key("frame_0"), snapshot, kind="image"
     )
     _settle_panel_hosts(
         presenter,
@@ -1030,7 +1037,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     """
 
     node, snapshot = _one_shot(session)
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     first = presenter.add_panel(signal, snapshot, title="camera", kind="image")
     _settle_panel_hosts(
         presenter,
@@ -1062,7 +1069,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     )
     occupancy_id = presenter.add_logic(
         "occupancy",
-        source_signal=f"@logic/{logic_id}/frames",
+        source_signal=f"@logic/{logic_id}/frame_0",
         artifact_inputs={"calibration_path": str(tmp_path / "chosen.json")},
     )
     assert presenter.logic[logic_id].host is None
@@ -1095,7 +1102,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "node_id": occupancy_id,
             "api_name": "occupancy",
             "values": {"model_kind": "default"},
-            "source_signal": f"@logic/{logic_id}/frames",
+            "source_signal": f"@logic/{logic_id}/frame_0",
             "device_keys": {},
             "artifact_inputs": {
                 "calibration_path": str(tmp_path / "chosen.json")
@@ -1141,7 +1148,7 @@ def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
 
     node, snapshot = _one_shot(session)
     panel = presenter.add_panel(
-        node.signal_key("frames"), snapshot, title="current", kind="image"
+        node.signal_key("frame_0"), snapshot, title="current", kind="image"
     )
     logic_id = presenter.add_logic(
         "camera_measurement",
@@ -1207,7 +1214,7 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     """An unresolved wire is editable layout state, not a reason to drop it."""
 
     node, snapshot = _one_shot(session)
-    signal = node.signal_key("frames")
+    signal = node.signal_key("frame_0")
     presenter.add_panel(signal, snapshot, title="here", kind="image")
     document = presenter.layout()
     document["panels"].append(
@@ -1239,7 +1246,7 @@ def test_panel_edit_projects_the_direct_producer_and_restart_uses_start(
 ) -> None:
     node_id = presenter.add_logic("camera_measurement")
     node, snapshot = _one_shot(session, producer=node_id)
-    panel = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    panel = presenter.add_panel(node.signal_key("frame_0"), snapshot, kind="image")
 
     assert presenter.edit_panel(panel.panel_id) is True
     projection = presenter.view.panel_editors[panel.panel_id]
@@ -1271,6 +1278,7 @@ def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
 
     class TaskHost:
         def __init__(self) -> None:
+            self.dataset_output_declarations = ()
             self.running = False
             self.terminal = False
             self.final_result_resolved = False

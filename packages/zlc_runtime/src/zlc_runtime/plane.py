@@ -223,6 +223,7 @@ class SignalDescription:
     live: bool
     source_name: str | None
     revision: int
+    shape: tuple[int, ...] | None
     failure: str | None = None
 
     @property
@@ -1057,6 +1058,11 @@ class SignalDataPlane:
                 if state.retired:
                     continue
                 for name in state.output_names:
+                    value = (
+                        None
+                        if state.publication is None
+                        else state.publication.signals.get(name)
+                    )
                     descriptions.append(
                         SignalDescription(
                             name=name,
@@ -1069,6 +1075,7 @@ class SignalDataPlane:
                                 if state.publication is None
                                 else state.publication.event_ref.sequence
                             ),
+                            shape=None if value is None else value.shape,
                             failure=state.failure,
                         )
                     )

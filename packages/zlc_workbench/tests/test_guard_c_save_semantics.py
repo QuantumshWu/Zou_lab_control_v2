@@ -130,7 +130,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         camera_node, camera_snapshot = _one_shot(
             session, producer="camera_measurement"
         )
-        frames_signal = camera_node.signal_key("frames")
+        frames_signal = camera_node.signal_key("frame_0")
         calibration_path = tmp_path / "calibration.json"
         calibration = _calibration(calibration_path)
         occupancy_node = OccupancyProcessor(

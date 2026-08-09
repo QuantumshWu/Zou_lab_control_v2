@@ -996,6 +996,7 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
         assert frame.owner_id == "camera"
         assert frame.kind == "producer"
         assert frame.live and not frame.derived
+        assert frame.shape == (1, 1, 4, 3)
 
         events.emit_selection(
             SelectionChange.COMMITTED,

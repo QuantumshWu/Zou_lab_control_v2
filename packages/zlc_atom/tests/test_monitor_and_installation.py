@@ -85,7 +85,7 @@ def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame(
         assert any(call[0] == "reserve" for call in plane.calls)
         assert any(call[0] == "mark_changed" for call in plane.calls)
         front = plane.freeze()
-        signal_key = measurement.signal_key("frames")
+        signal_key = measurement.signal_key("frame_0")
         publication = plane.latest_publication(signal_key)
         assert publication is not None
         assert publication.value(signal_key) is not None
