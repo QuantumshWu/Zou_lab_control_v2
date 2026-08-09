@@ -2,10 +2,10 @@
 
 > 仓库绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2`
 > 本文绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
-> 凡本文或用户明确要求“参考 v1”时，唯一允许读取的 v1 树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。`ZLC_main`、`_reference\Zou_lab_control_v1` 和其他副本都不得代替它。这个路径裁决不把 v1 升格为产品规格；v2 仍只按用户裁决和本文设计实施，目前只明确用 v1 参考 Device Manager 的可见 UI/操作面。
+> 凡本文或用户明确要求“参考 v1”时，唯一允许读取的 v1 树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。`ZLC_main`、`_reference\Zou_lab_control_v1` 和其他副本都不得代替它。这个路径裁决不把 v1 升格为产品规格；v1 只作为用户逐项点名的 Device Manager、TaskConsole/运行中 Task 操作面、Calibration report 和 virtual apparatus 默认值的行为参考，v2 package boundary 和唯一真相源仍只按用户裁决和本文实施。
 > 设计基线：`0243aa6`。完成状态与实测证据以 `IMPLEMENTATION_PLAN.md` Checkpoint 为准；package/full-tree 测试不能替代真实实验入口和可见 GUI 的验收。
 > 权威顺序：用户当前裁决 > 简单且可维护的边界 > v2 当前实现 > v1 参考。v1 不是规格。
-> 根目录 `HANDOFF.md` 已在最初接手阶段完整读取，其有效要求和现状已吸收到本文与实施计划。Goal 启动后它只是历史输入，不是续跑权威，也不需要在每次上下文恢复时重读。
+> 根目录 `HANDOFF.md` 只是指向这两份权威文档的 historical/inactive pointer，不保存产品快照、Checkpoint 或验收结论，也不需要在上下文恢复时重读。
 
 ### 封闭的目标权威集合
 
@@ -29,10 +29,12 @@ Goal 启动后，仅下列两份磁盘文档定义目标和实施方向：
 
 ```text
 Calibration Task
-    -> calibration JSON (SiteMap + per-site readout model)
+    -> progress + capture_preview LIVE -> Monitor panel
+    -> typed FINAL sibling bundle -> three-page calibration report
+    -> calibration JSON (SiteMap + box/psf/uniform_psf models)
 Camera Measurement
     -> frames signal
-Occupancy Processor(frames + calibration path)
+Occupancy Processor(frames + calibration path + readout-model choice)
     -> occupancy data
 Plot Panel
     -> Panel Edit Save Fig(image + data)
@@ -84,6 +86,13 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 - Calibration 或真正执行 scan points 的 Logic Node 在运行期间可以 `EXCLUSIVE` 占用 sequencer。
 - Pulse Editor 的普通 prepare/fire 使用同一 session 中的 sequencer 实例，不引入另一套 device owner 机制。当有长时间 exclusive scan/task 时，UI 按 session 当前状态禁用或拒绝冲突的驱动命令即可。
 
+### 3.3 Simulation 设备与共同契约
+
+1. 所有 virtual apparatus 实现只位于 `packages/zlc_atom/src/zlc_atom/devices/simulation/`：`camera.py`、`sequencer.py`、`world.py` 和 `device_types.py`。真相机/真 sequencer 目录只保留共同契约、binding 和硬件 leaf，不再寄存 virtual 类或 SimulationWorld。
+2. Camera 的共同契约是 runtime-checkable `CameraAdapter` Protocol，不虚构另一个 `BaseCamera`。`VirtualCamera`、DCAM 和 Pylon 都通过同一 adapter/binding 契约，安装时校验该 Protocol。Sequencer 的共同契约是 nominal `SequencerDevice`，`VirtualSequencer` 必须继承它。
+3. Virtual camera/sequencer 与硬件一样由 `DeviceTypeDescriptor -> InstalledLeaf -> binding` 组成，Logic Node 只按 capability 取设备，不写 `if virtual` 分支。
+4. `SimulationWorld` 是 virtual 成像物理、site geometry、seed 和 trigger routing 的唯一所有者。默认 virtual apparatus 是 `5 x 7 = 35` sites 和 `96 x 128` image；这是模拟装置的可测真值，不能倒流成 Calibration request 的 grid/count 输入。
+
 ## 4. Package 责任边界
 
 `zlc_workbench` 是 composition root，但不拥有科学或绘图规则。
@@ -104,10 +113,12 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 | Role | 责任 | finite/infinite 语义 |
 |---|---|---|
 | Measurement | 使用设备并产生 dataset | 每次 run 可 finite 或 infinite |
-| Task | 编排 measurement/分析并生成 artifact/report | 不用 finite/infinite 给 Task 分类 |
+| Task | 编排 measurement/分析，发布 progress、LIVE preview 和 typed FINAL diagnostics，并生成 artifact/report | 不用 finite/infinite 给 Task 分类 |
 | Processor | 消费上游 signal 并产生派生 dataset | 消费方式由当前上游决定 |
 
 因此删除 `MEASUREMENT -> finite / TASK -> finite / PROCESSOR -> reactive` 的硬映射。
+
+Task 的 Dataset outputs 是 descriptor 声明的、可在 Monitor/report 中消费的 typed data，不是另一个 Calibration object 或 report blob signal。Artifact path、typed FINAL sibling publication 和 report 投影各有自己的契约，不能用“Task 不发 signal”把三者一起删掉。
 
 Camera Measurement 中：
 
@@ -134,7 +145,7 @@ Revision 不是安全或文件版本。它唯一有用的场景是 plot/fit work
 
 ### 7.1 参数的所有权
 
-`camera`、`mot_camera` 等是 Device Manager 安装的 named instances，它们可以是不同 `BaseCamera` 子类。Camera Measurement/Calibration 只声明需要 camera capability，Workbench 在 Edit 中列出所有匹配实例供用户选择。
+`camera`、`mot_camera` 等是 Device Manager 安装的 named instances，它们可以是不同 `CameraAdapter` 实现。Camera Measurement/Calibration 只声明需要 `camera.adapter` capability，Workbench 在 Edit 中列出所有匹配实例供用户选择。
 
 exposure、ROI、repeat 等是 measurement request 的参数：
 
@@ -142,7 +153,7 @@ exposure、ROI、repeat 等是 measurement request 的参数：
 Logic/Panel Edit shared row draft
     -> build CameraMeasurementRequest(camera instance, exposure, ROI, repeat, ...)
     -> resource arbitration
-    -> CameraMeasurement configures selected BaseCamera adapter
+    -> CameraMeasurement configures selected CameraAdapter
     -> adapter validates/snaps SDK constraints and returns actual readback
     -> acquisition worker starts
 ```
@@ -186,12 +197,14 @@ Calibration 不接受 grid rows、columns、site count 或预先 `SiteLayout`。
 1. 按所选 calibration pulse/protocol 采集样本帧；“bracket”不作为 UI 概念或用户参数。
 2. 从标定图像自动发现 site candidates，根据局部对比度/噪声、最小间距和 spot 尺度去重。
 3. 精修每个 site 的 pixel center，生成稳定 site id/排序。若能从坐标推断拓扑，拓扑也是输出，不是必需输入。
-4. 以同一 site axis 为对齐键，另外构建 readout model：每个 site 的 integration feature/PSF、threshold、usable/quality。
-5. 写出 plain calibration JSON/report，不发布 `calibration`/`report` signal。
+4. 只生成一份 site labels 和 train/held-out split，以同一 site axis 同时训练三种 `ReadoutModelKind`：`box`、`psf` (per-site PSF) 和 `uniform_psf`。每个模型都保存自己的 integration feature/PSF、threshold、usable/quality，artifact 另存一个 `default_model_kind`。
+5. 运行中通过 NodeHost 发布 progress 和 `capture_preview` LIVE Dataset；成功时原子发布同一 generation/revision 的 typed FINAL sibling bundle，并写出 plain calibration JSON。不发布并行的 Calibration object/report blob signal。
 
 Calibration 的 `Reference exposure` 与 `Readout exposure` 是显式 protocol 参数：相机 adapter 以 reference exposure 配置本次 run 的最大积分时间，编译后的 long/readout/long 外部门宽分别使用两项 authored 值。外部门宽可以按真实物理缩短某个 frame 的有效曝光，但不能把已配置的 camera exposure 延长；普通 Camera Measurement 仍只由自己的 request 配置 exposure，不能被一个无声明的 pulse metadata 替代。这样三帧继续共享同一 shot occupancy，同时 exposure 归属没有第二份隐式真相。
 
 Calibration Edit 的 pulse/template 参数指向 project `pulses` 目录中的 v2 pulse JSON，默认 `imaging_template.json`。该文件使用唯一的 `zlc_pulse` tree 格式 `format: "zlc.pulse.v1"`：`slots` 只表示 scan 维度，三项 Calibration duration 则由显式 `PulseApiParameter/api_parameters` 分别绑定 `reference_probe_duration_before`、`readout_probe_duration`、`reference_probe_duration_after`。只有用户 Start Calibration 时，Calibration Logic 才通过 `sequence_from_tree()`、`resolve_api_parameters()` 和连接板卡的 `BoardDescription` 编译；未解析 API parameter 的 sequence 不能被 compile。不得另造 `PulseDocument`、按名字前缀猜 API/scan、把 API parameter 塞进 scan table，或保留第二套 pulse model。产品链不把 Python module 当 pulse 文档，也不由 TaskConsole 启动或 Device Manager `Init devices` 偷偷预载 Calibration pulse。
+
+Pulse 的唯一文件写路径是 `PulseEditorState -> state_to_tree() -> sequence_to_tree() -> write_readable_json()`，读路径严格反向。标量 list 保持紧凑并在可读宽度换行，带结构的 list 才展开。Shipped `imaging_template.json`、Pulse UI Save 和以后的 template generator 都必须经这一条序列化路径；不得手写第二套 `json.dump` 排版，也不得恢复 `.py` pulse 文档。
 
 `SiteMap` 至少包含：
 
@@ -201,7 +214,22 @@ Calibration Edit 的 pulse/template 参数指向 project `pulses` 目录中的 v
 - 可选的自动推断 topology/order；
 - 每个 site 的 validity/quality。
 
-SiteMap 只负责“site 在哪里、身份如何对齐”。科学积分框/PSF kernel 和 threshold 属于 readout model，不塞进 SiteMap。Calibration artifact 同时保存 SiteMap、与其 site axis 对齐的 readout model、及实际 frame contract（camera、sensor shape、ROI、binning、exposure/readout mode）。Occupancy 用 readout model 提取各 site 读数并套 threshold。
+SiteMap 只负责“site 在哪里、身份如何对齐”。科学积分框/PSF kernel 和 threshold 属于 readout models，不塞进 SiteMap。Calibration artifact 同时保存 SiteMap、与其 site axis 对齐的三种 readout models、`default_model_kind` 及实际 frame contract（camera、sensor shape、ROI、binning、exposure/readout mode）。Occupancy 显式选择 default 或其中一种模型提取各 site 读数并套该模型 threshold。
+
+Calibration 的 Dataset outputs 是：
+
+| Output | 生命周期 | 语义 |
+|---|---|---|
+| `capture_preview` | LIVE，terminal 时同 key 提升为 FINAL | repeat x long/readout/long 图像 |
+| `site_map` | FINAL | reference-average image，X/Y 为 `image_pixel_xy`/pixel |
+| `fidelity_site` | FINAL | per-site held-out fidelity |
+| `fidelity_centers` | FINAL | per-site `(x,y)` pixel centers |
+| `readout_samples` | FINAL | held-out per-site readout values |
+| `fidelity_threshold` | FINAL | per-site thresholds |
+
+`fidelity_site`、`fidelity_centers`、`readout_samples` 和 `fidelity_threshold` 必须共享同一 `SITE` PointColumn identity 和 SiteMap 的实际 `site_ids`；不允许每个 output 自造 ordinal axis。`site_map` 与 centers 共享同一 pixel coordinate frame。
+
+Workbench 仅通过 descriptor 的 `TaskReportSpec` 和一个通用 report-adapter registry 把该 FINAL sibling bundle 投影成三页普通 `zlc_plot` surfaces：(1) site-map image + centers；(2) per-site held-out fidelity curve；(3) per-site `FacetGrid[Histogram]` + thresholds + bimodal Gaussian fits。Atom 不持有 PlotSpec/Matplotlib/Qt，Workbench 不实现另一个 Calibration renderer。
 
 `SiteMap` 不是 plot kind，UI 中也不存在 `SiteMap Plot`。它是 Calibration artifact 里的 domain data。固定的 `Image` plot kind 有 `Site overlay` 参数，需要时用 SiteMap centers 画 site/occupancy markers。绘图圈半径是 Image display 属性（可由 site spacing 自动给出），不与科学 integration half-width 混为一个参数。
 
@@ -213,7 +241,7 @@ Edit 中的理想参数：
 
 | 参数 | 语义 |
 |---|---|
-| Camera | 从所有 `BaseCamera`-compatible named instances 中选择 |
+| Camera | 从所有满足 runtime-checkable `CameraAdapter` 的 named instances 中选择 |
 | Exposure | 本次 measurement 的 exposure，传给选中 camera |
 | ROI | 本次 measurement 的 sensor ROI，可由 Image selector 反写 |
 | Repeat | `0 = infinite`，正数为 finite cycles |
@@ -230,8 +258,9 @@ Edit 中的理想参数：
 |---|---|
 | Frames signal | 显式选择一个 contract-compatible image/frame signal |
 | Calibration file | 显式选择 calibration JSON path |
+| Readout model | `default` / `box` / `psf` / `uniform_psf`；`default` 解析 artifact 的 `default_model_kind` |
 
-没有 device、finite/infinite mode、buffer 或 loss 参数。Start 时加载 calibration，核对 frames 的 sensor/ROI/binning/exposure/readout contract，然后按 SiteMap + threshold 产生 per-site counts/occupied/rate 等 dataset。Finite source 顺序处理/可处理已完成的 frozen dataset；infinite source 只处理 latest。
+没有 device、finite/infinite extent mode、buffer 或 loss 参数。Readout-model choice 是 Occupancy 必须显式拥有的科学算法模式，不是被删除的 extent mode。Start 时加载 calibration，核对 frames 的 sensor/ROI/binning/exposure/readout contract，然后按 SiteMap + 所选 readout model 的 feature/threshold 产生 per-site counts/occupied/rate 等 dataset。Finite source 顺序处理/可处理已完成的 frozen dataset；infinite source 只处理 latest。
 
 ## 9. TaskConsole Logic UI
 
@@ -247,28 +276,39 @@ Edit 中的理想参数：
 
 | Node | 字段 | 明确不显示 |
 |---|---|---|
-| Calibration | Camera instance；Sequencer instance；Calibration pulse/protocol；Samples/repetitions；Reference exposure；Readout exposure；Camera ROI；threshold method；site integration half-width；按 method 显示的 reducer/PSF 参数；必要的高级检测参数；完成后只读 Detected sites | grid rows/columns/site count；`bracket`；output signal |
+| Calibration | Camera instance；Sequencer instance；Calibration pulse/protocol；Samples/repetitions；Reference exposure；Readout exposure；Camera ROI；默认 readout model；box/PSF 训练参数；必要的高级检测参数；完成后只读 Detected sites | grid rows/columns/site count；`bracket`；用户填写的 output signal |
 | Camera Measurement | Camera instance；Exposure；ROI；Repeat (`0=infinite`)；Frames per cycle；Advanced timeout | 独立 mode；user buffer；loss 计数；pulse drive |
-| Occupancy | Frames signal；Calibration file；只读输出摘要 | Device；mode；buffer；隐式“current calibration” |
+| Occupancy | Frames signal；Calibration file；Readout model (`default` / `box` / `psf` / `uniform_psf`)；只读输出摘要 | Device；finite/infinite extent mode；buffer；隐式“current calibration” |
 
 Calibration 中所谓“必要的高级检测参数”只能是算法确实需要暴露的噪声门限、最小间距或 spot 尺度之类调整项；它们不能变相成“用户先告诉 site 数量/形状”。默认自动模式应当不需要用户调它们。
+
+### 9.3 Task takeover、LIVE preview 与 terminal 清理
+
+- Task descriptor 用通用 `TaskPreviewSpec` 声明 LIVE outputs 如何进入 Monitor；Calibration 的 `capture_preview` 不能经过一个私有窗口或第二条 renderer。Task descriptor 另用 `TaskReportSpec` 声明 FINAL sibling bundle 如何生成 report。
+- Task active 时，TaskConsole header 的可操作区切换为唯一的 task status strip：显示当前阶段、进度和唯一 `Stop Task`。所有会改变系统状态的 header controls、logic rows/cards、Setting/Edit controls、Add/Start/Restart/Stop/Remove/Apply 都禁用，不能与 exclusive Task 并行改写 draft 或设备状态。
+- Monitor 中 selector、zoom、pan、fit inspection 只允许 view-only；Task active 时 selector commit 不能回写任何 producer draft。
+- 每个 task generation 的 LIVE publications 都带明确生命周期。terminal 时仅用于瞬时观察的 previews 被移除；descriptor 声明要提升的同 key output（例如 `capture_preview`）作为 FINAL 保留，typed FINAL siblings 原子出现。失败/取消不能留下貌似仍在运行的 LIVE 数据。
 
 ## 10. Plot Panel UI
 
 ### 10.1 Add Panel
 
-在 header combined 下拉框选中 `Plot: ...` 后，同一个 `Add Panel` 按钮只创建该固定 kind 的 blank panel；它不要求 signal 已存在，也不自动挑 signal。空卡显示 `Pick a signal in Setting`，随后由 Setting/Edit 选择 signal。Plot kind 一旦创建就固定；Setting/Edit 只读显示，需要另一种 kind 就新建 panel。Facet Grid 的 cell kind 也在 Add 时固定。
+TaskConsole 的 Plot catalog 顺序和标签固定为：`2D image` (`Image`)、`1D vector` (`Curve`)、`Rolling trace` (`Rolling`)、`Distribution` (`Histogram`)、`Site grid` (`FacetGrid`，cell kind 固定为 Curve)。`PulseTimeline` 属于 Pulse UI，不得出现在 TaskConsole catalog。
+
+在 header combined 下拉框选中 `Plot: ...` 后，同一个 `Add Panel` 按钮只创建该固定 kind 的 blank panel；它不要求 signal 已存在，也不自动挑 signal。空卡显示 `Pick a signal in Setting`，随后由 Setting/Edit 选择 signal。Plot kind 一旦创建就固定；Setting/Edit 只读显示，需要另一种 kind 就新建 panel。
 
 ### 10.2 Setting frame
 
-Setting 是 monitor board 上的快速配置，包含：
+Setting 是 monitor board 上的完整初始配置面，而不是 Apply 后才补齐字段的简化表单。它从同一份 `zlc_plot` kind schema 构造，blank panel 创建时就显示全部 data-independent 参数：
 
 - Plot kind（只读）；
 - Signal；
 - Panel size；
-- Update interval；
-- title/labels 和当前 kind 最常用的 display 参数；
+- Display interval：只用有限值 `100 / 200 / 400 / 800 ms` 的 ComboBox，默认 `400 ms`，不能用可输入非法值的 SpinBox；
+- title/labels、limits 和当前 kind 声明的全部 data-independent display/interaction 参数；
 - Edit / Remove。
+
+依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
 
 改 Signal 只换这个 panel 的绑定，不改 Occupancy 等 Logic Node 的 input binding，也不改 plot kind。
 
@@ -278,7 +318,7 @@ Setting 是 monitor board 上的快速配置，包含：
 
 Edit 是一个 tab，不是 modal。它包含：
 
-- Plot kind（只读）、Signal、Panel size、Update interval；这三个可编辑字段与 Setting 重复显示，两处直接绑定同一 `PanelState`；
+- Plot kind（只读）、Signal、Panel size、有限值 Display interval ComboBox；后三个可编辑字段与 Setting 重复显示，两处直接绑定同一 `PanelState`；
 - 当前图形和 `Refresh snapshot`；
 - 完整 semantic/display/fit 参数和结果；
 - selector/zoom/pan；
@@ -290,15 +330,17 @@ Edit 是一个 tab，不是 modal。它包含：
 
 Setting 或 Edit 从任一边提交修改时，controller 替换同一 `PanelState`，两个 view 和 monitor panel 都收到同一次更新。不写“Setting -> Edit”和“Edit -> Setting”两套手工拷贝逻辑。Edit 中的 frozen data snapshot 与 `PanelState` 分开：参数始终同步；如果换了 signal，旧 frozen 图标为 stale，用户 Refresh 后取新 signal 的 snapshot。
 
+Panel Setting/Edit 的 `Apply` 先在 owner thread 一次性冻结最终 `PanelState + PlotSpec + overlay`，再把可并行的 panel preparation/render 交给 worker；owner thread 不调用 `.result()` 等待。worker 只返回可安装的 prepared result，owner thread 对 generation/revision 做 stale rejection 后一次 swap 到 monitor/Edit host，并且只触发一次 initial render/front。不能先同步建空图、随后多轮 rebuild/reflow，也不能让旧 Apply 的结果覆盖新 state。Producer `Apply` 仍是第 9.1 节的 producer Restart endpoint，与 panel appearance Apply 不混用。
+
 ### 10.4 各 plot kind 的理想参数
 
-| Kind | Edit 中的 semantic 参数 | Edit 中的 display/interaction | Setting 中的快速子集 |
+| TaskConsole label / kind | schema 中的 semantic 参数 | schema 中的 display/interaction | Setting 初始 data-independent surface |
 |---|---|---|---|
-| Curve | X axis；Group by；Reduction | labels/units；grid；limits；X-range selector；compatible fit | title；X/Y labels；grid；limits |
-| Image | X/Y axes；Reduction；`Site overlay = Off / Centers / Occupancy` | colormap；color limits；interpolation；colorbar；site labels；marker radius/style；empty/occupied/invalid colors；Area selector；2-D fit | title；colormap；color limits；colorbar；Site overlay on/off |
-| Histogram | value/reduction selection | bins；density；cumulative；log Y；range selector；compatible fit | title；bins；density；log Y |
-| Rolling | Group by；Reduction | window；Y limits；side distribution；X-range；compatible fit | title；window；Y limits；grid |
-| Facet Grid | Facet axis；fixed cell-kind semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing |
+| `2D image` / Image | X/Y axes；Reduction；`Site overlay = Off / Centers / Occupancy` | colormap；color limits；interpolation；colorbar；site labels；marker radius/style；empty/occupied/invalid colors；Area selector；2-D fit | title；colormap；color limits；interpolation；colorbar；all overlay/marker styling；selector display |
+| `1D vector` / Curve | X axis；Group by；Reduction | labels/units；grid；limits；X-range selector；compatible fit | title；X/Y labels；units；grid；limits；selector display |
+| `Distribution` / Histogram | value/reduction selection | bins；density；cumulative；log Y；range selector；compatible fit | title；bins；density；cumulative；log Y；range/limits |
+| `Rolling trace` / Rolling | Group by；Reduction | window；Y limits；side distribution；X-range；compatible fit | title；window；Y limits；grid；side-distribution display；selector display |
+| `Site grid` / FacetGrid[Curve] | Facet axis；fixed Curve cell semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing；focus/cell display；Curve display parameters |
 
 Fit model 和参数兼容性由 `zlc_plot` 声明，UI 不写死列表。`Site overlay` 是 `Image` plot kind 的参数：`Centers` 使用 calibration SiteMap centers，`Occupancy` 再结合当前 occupied/valid 值绘制状态，不从 grid shape 生成圈。
 
@@ -332,19 +374,26 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 | 新 Logic Node 占用同一 device | 旧冲突 node 被停止 | 旧 generation terminal | 可保留明确 frozen/stale 图 | 依赖该 source 的 active processor 停止/等新 source |
 | Panel 换 Signal | 不变 | Logic signal 不变 | 该 panel 换绑 | 不变 |
 
-## 13. 当前实现状态
+## 13. 当前实现和验收状态
 
-本文定义的产品链已经在当前树实现，并通过正式人类 UI 路径验收：根 `bin\experiment.bat` 的 Device Manager 用 `Init devices` 建立唯一 session，不加载 pulse；同一进程随后显示 TaskConsole 与 PulseGUI。操作者经 combined catalog 和同一个 `Add Panel` 依次完成 Calibration、`Repeat=0` Camera Measurement、PulseGUI `Load`/`On Pulse`、Occupancy、无 signal 也可创建的 blank Image panel、Setting 中的 signal 接线和 `Site overlay = Occupancy`，最终图像显示实测六个 site circles。验收结束先 `Stop Pulse`，再关闭 TaskConsole；两个窗口、session 和项目 Python 进程均归零。精确 HEAD、提交、测试和产物证据只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
+本文不作完成声明。此前基于六个 sites、旧 plot surface 和旧 Calibration artifact/report 的所谓正式 UI 验收已经撤销，不能作为当前树的产品证据；virtual apparatus 的默认验收目标是 `5 x 7 = 35` sites 和 `96 x 128` frames。
+
+最新实现完成后必须从根 `bin\experiment.bat` 重新走一次真实按钮路径，而不是调用 presenter/private API 代替点击：Device Manager `Init devices` -> 同 session 同时出现 Pulse UI 和 TaskConsole -> Calibration Task takeover/progress/Monitor LIVE preview/Stop Task/三页 report -> `Repeat=0` Camera Measurement -> Pulse JSON Load/On -> Occupancy readout-model choice -> 五种固定 panel kind 的 blank/full-schema/finite interval/异步 Apply -> signal/overlay/selector/Producer Apply -> 三种 Save -> Stop Pulse -> close。随后还必须验证窗口、session、workers、claims 和项目 Python 进程归零。当前真实按钮复验、性能复验、受影响测试和全树测试的未完成状态只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
 
 ## 14. 本轮 review 的结论和非问题
 
 以下已经定案，实施时不应再当成待决定项：
 
 - Calibration 自动发现 sites；无 grid shape/count 输入。
+- Calibration 用同一 labels/split 训练 `box`、per-site `psf`、`uniform_psf` 三种模型；Occupancy 显式选择 default/具体模型。
+- Calibration Task 用通用 preview/report contract 发布 LIVE preview、typed FINAL siblings 和三页 `zlc_plot` report；Task active 时 header takeover 并阻止所有状态改写，只保留 `Stop Task`。
+- Virtual devices 只位于独立 simulation package，满足与真实设备相同的 `CameraAdapter`/`SequencerDevice` 契约，默认 `5 x 7 = 35` sites、`96 x 128` image。
+- Pulse 文件只有 `zlc.pulse.v1` JSON 和一条 readable writer/readback 路径，不存在 `.py` pulse 或第二套排版。
 - exposure/ROI 是 measurement 参数，由 UI 接线层维护共享 draft 并在 Start/Apply 时传给 device。
 - `Repeat=0` 是 infinite。
 - combined `Add Panel` 选择 Logic entry 后创建 stopped row 并自动进 Edit tab；没有独立 `Add Logic` 按钮或弹窗。
 - Plot kind 在 Add Panel 时固定。
+- TaskConsole 只提供五种固定 plot kind；Display interval 是有限 ComboBox，blank panel 初始即显示完整 schema，panel appearance Apply 异步准备并拒绝 stale result。
 - Panel Edit 重复显示 panel 参数和 direct producer 参数，selector 更新同一 measurement draft，Producer Apply 立即重启 measurement。
 - Setting frame 和 Panel Edit 直接绑定同一 `PanelState`，对应参数天然双向同步；不存在两份 panel config。
 - SiteMap 是 calibration domain data，不是 plot kind；site/occupancy circles 是固定 `Image` kind 的 `Site overlay` 参数和 annotation。
