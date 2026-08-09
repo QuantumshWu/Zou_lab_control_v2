@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Repeat=0 多帧 complete-cycle latest 已完成回归，正在独立提交；下一步返回 Panel Save Fig/limits/fit 的真实操作面验收。`
-- Last completed action：`tree picker 已独立提交 f1e3a4a。随后只在现有 Camera Measurement/adapter 文件内实现共同 cycle 边界：Camera Measurement 按 source_ordinal 对齐且连续地组装 N 帧，只有完整 tuple 才更新 live slot；adapter 通过已有 source_group_sizes=(N,) 接收无限 external group。Virtual/DCAM 只如实保留 ordinal/overrun，Pylon 将该模式映射为 external OneByOne；source_group_sizes=None 的真正 free-run preview 仍独立保留。没有新文件、新类或 per-device shot grouping。`
-- Last verified tests：`旧生产纵向红已实跑：frames_per_cycle=3 时 raw buffer 在 4 triggers 后给出 ordinals [1,2,3]，旧 monitor 把它发布成 publication。修后同一现有测试在该点不发布，等 ordinals 3/4/5 完整后才一次发布 frame_0/frame_1/frame_2，三者是同一 SignalPublication。camera/host/DCAM/Pylon/real-runtime 相关 46 passed；完整 zlc_atom 143 passed；Guard A + Console Logic + end-to-end 38 passed；Pylon 全包 16 passed（含 triggered continuous failed frame fail-loud）。所有 Python 进程首行 import v2 root并打印被测 production module 路径。`
-- Pending acceptance gates：`独立提交 complete-cycle latest；随后继续 Save Fig/limits/fit 的正式按钮验收与最终 Experiment flow close/零残留。`
-- Next action：`diff/check 与唯一 grouping owner 扫描通过后独立提交本 cycle 边界；随后从 Panel Edit 的 Save Fig、Auto/limits 和 fit controls 继续真实按钮验收。`
+- Current phase：`Repeat=0 的四-cycle内部 buffer margin 已完成回归，正在独立提交；下一步返回 Panel Save Fig/limits/fit 的真实操作面验收。`
+- Last completed action：`提交 24b19d9 后确认产品默认此前只申请 N 帧，即 frames_per_cycle=3 时只有一个三帧 cycle，且 Pylon 只校验 buffer_frame_count、没有写入 SDK。现已在既有 Camera Measurement monitor 中把内部最小容量改为 4*N 并向完整 cycle 取整；Virtual/DCAM 沿已有 arm 参数落实容量，Pylon 额外写入并读回 MaxNumBuffer。没有新增文件、类、用户参数或 per-device grouping。`
+- Last verified tests：`旧生产新纵向红已实跑：默认 monitor 在 13 triggers 后只保留最后三帧，前三次读取末 ordinal=12，而期望四-cycle buffer 应为 ordinal=3；Pylon MaxNumBuffer 没有任何写入。生产修改后同两项 2 passed；受影响 Virtual/DCAM/Pylon/Monitor 42 passed；完整 zlc_atom 143 passed；Guard A + Console Logic + end-to-end 38 passed。每个 Python 进程首行 import v2 root 并打印被测 production module 路径；diff-check clean，项目 Python 进程为零。`
+- Pending acceptance gates：`独立提交本 buffer margin；随后继续 Save Fig/limits/fit 的正式按钮验收与最终 Experiment flow close/零残留。`
+- Next action：`提交本 cycle-aligned buffer slice；随后从 Panel Edit Save Fig、Auto/limits 和 fit controls 继续真实按钮验收。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。`
 
 ## 1. 执行纪律
@@ -130,7 +130,7 @@
 2. finite-source processor 接 `FollowTap`，按提交顺序无损处理。
 3. source 已结束时，让 processor 可对 retained final `OwnedSnapshot` 处理一次，不重跑设备。
 4. infinite Camera Measurement 在自己的 worker 上读 camera 并覆盖 latest slot；UI beat 只从 plane freeze。
-5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。
+5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 至少是 `4 * frames_per_cycle` 且按完整 cycle 对齐；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。
 6. infinite-source processor 只处理当前 latest，不追历史。
 7. 删除 `missed_events/current_gap/behind/missed` 等 loss telemetry；保留 keyed sweep 断续时清 stale cells 的科学正确性规则。
 

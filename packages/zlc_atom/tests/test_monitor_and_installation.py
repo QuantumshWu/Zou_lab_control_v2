@@ -69,27 +69,29 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
             ),
             signal_plane=plane,
         )
-        monitor = measurement.monitor(buffer_frames=3)
+        monitor = measurement.monitor()
         assert isinstance(monitor, MonitorCapture)
         camera = installation.device("camera")
 
-        # The three frames 0/1/2 are one shot.  Let the raw three-frame buffer
-        # advance once more before the consumer reads: a per-frame latest queue
-        # now contains 1/2/3, which must never be published as a camera cycle.
-        camera.trigger(4)
+        # Continuous capture keeps four whole cycles.  Let that twelve-frame
+        # raw buffer advance once before the consumer reads: it now contains
+        # ordinals 1..12.  The leading 1/2 cannot be combined with 3, and the
+        # retained capacity must still leave 3/4/5 available as the next shot.
+        camera.trigger(13)
         deadline = time.monotonic() + 1.0
-        while camera.produced_count < 4 and time.monotonic() < deadline:
+        while camera.produced_count < 13 and time.monotonic() < deadline:
             time.sleep(0.001)
         for _ in range(3):
             monitor.poll()
+        assert monitor.latest_record is not None
+        assert monitor.latest_record.source_ordinal == 3
         signal_keys = tuple(
             measurement.signal_key(f"frame_{index}") for index in range(3)
         )
         plane.freeze()
         assert plane.latest_publication(signal_keys[0]) is None
 
-        # Completing physical ordinals 3/4/5 makes the next whole shot visible.
-        camera.trigger(2)
+        # Physical ordinals 4/5 complete the already retained 3/4/5 shot.
         publication = None
         deadline = time.monotonic() + 1.0
         while publication is None and time.monotonic() < deadline:

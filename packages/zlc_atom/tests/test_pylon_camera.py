@@ -99,6 +99,7 @@ class _FakeCamera:
         self.OffsetX = _Node(0, 0, 1904, 4)
         self.OffsetY = _Node(0, 0, 1152, 2)
         self.ExposureTime = _Node(1000, 1, 10_000_000, 1)
+        self.MaxNumBuffer = _Node(8, 1, 256, 1)
         self.PixelFormat = _StringNode("Mono8")
         self.TriggerSelector = _StringNode()
         self.TriggerMode = _StringNode()
@@ -285,6 +286,7 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     assert camera.TriggerMode.GetValue() == "On"
     assert camera.TriggerSource.GetValue() == "Line1"
     assert camera.grab_calls[-1] == "StartGrabbing(one)"
+    assert camera.MaxNumBuffer.writes[-1] == 3
     assert len(adapter.read_frame_records(3, timeout=0.5, exact=False)) == 3
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()

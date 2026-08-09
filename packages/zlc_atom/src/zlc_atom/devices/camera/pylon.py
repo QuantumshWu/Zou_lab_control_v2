@@ -488,6 +488,9 @@ class PylonCameraAdapter:
                 camera.StopGrabbing()
             if camera.IsGrabbing():
                 raise RuntimeError("pylon remained grabbing after StopGrabbing")
+            camera.MaxNumBuffer.SetValue(buffer_frame_count)
+            if int(camera.MaxNumBuffer.GetValue()) != buffer_frame_count:
+                raise RuntimeError("pylon did not apply the requested frame-buffer capacity")
             self._apply_trigger(monitor=monitor)
             if monitor:
                 camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)

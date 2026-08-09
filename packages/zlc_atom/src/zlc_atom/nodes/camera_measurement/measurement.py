@@ -533,14 +533,20 @@ class CameraMeasurementNode:
     def monitor(
         self,
         *,
-        buffer_frames: int = 1,
+        buffer_frames: int | None = None,
         owns_generation: bool = True,
         attach_live_outputs: Callable[[object], None] | None = None,
     ) -> MonitorCapture:
-        buffer_frames = int(buffer_frames)
-        if buffer_frames <= 0:
-            raise ValueError("buffer_frames must be positive")
-        buffer_frames = max(buffer_frames, self.frames_per_cycle)
+        cycle_size = self.frames_per_cycle
+        minimum_frames = 4 * cycle_size
+        if buffer_frames is None:
+            buffer_frames = minimum_frames
+        else:
+            buffer_frames = int(buffer_frames)
+            if buffer_frames <= 0:
+                raise ValueError("buffer_frames must be positive")
+            buffer_frames = max(buffer_frames, minimum_frames)
+            buffer_frames = ((buffer_frames + cycle_size - 1) // cycle_size) * cycle_size
         if self.request.repeat != 0:
             raise ValueError("monitor requires request.repeat equal to zero")
         owns_generation = bool(owns_generation)
