@@ -75,9 +75,6 @@ class _LiveFrameSnapshot:
     base_data_revision: int
     image_overlay: ImagePointOverlay | None
     image_overlay_authority: ImagePointOverlay | None
-    fit_request: _LiveFitRequest | None
-    fit_context_generation: int
-    fit_request_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,18 +108,11 @@ class _PreparedLiveFrame:
     image_overlay: ImagePointOverlay | None
     image_overlay_authority: ImagePointOverlay | None
     projection: FitProjection
-    fit_request: _LiveFitRequest | None
-    fit: _ResolvedFit | None
-    fit_context_generation: int
-    fit_request_generation: int
 
 @dataclass(frozen=True, slots=True)
 class _LiveFrameFinalization:
     session_identity: object
-    fit_event: object | None
-    logical_completion: Future["FitResult | FacetFitBatchResult"] | None
     presentation: "_ProjectionPresentation"
-    fit_cancel: Event
 
 
 @dataclass(frozen=True, slots=True)

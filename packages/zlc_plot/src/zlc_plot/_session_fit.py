@@ -369,7 +369,7 @@ class FitSessionMixin:
                         if logical_completion is None or not live:
                             raise
                 previous_fit_cancel = self._fit_cancel
-                previous_clock_fit_cancel = self._clock_fit_cancel
+                previous_live_prepare_cancel = self._live_prepare_cancel
                 self._fit_context_generation += 1
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
@@ -391,10 +391,53 @@ class FitSessionMixin:
                     else None
                 )
             previous_fit_cancel.set()
-            previous_clock_fit_cancel.set()
+            previous_live_prepare_cancel.set()
         if superseded is not None and not superseded.done():
             superseded.set_exception(FitCancelled("fit request superseded"))
         return started
+
+    def _restart_live_fit_for_current_data(self) -> None:
+        """Cancel the previous solve and fit only the data now on screen."""
+
+        started: _StartedFitRequest | None = None
+        with self._render_lock:
+            with self._lock:
+                self._assert_open()
+                previous_cancel = self._fit_cancel
+                request = self._live_fit_request
+                self._fit_context_generation += 1
+                context_generation = self._fit_context_generation
+                request_generation = self._fit_request_generation
+                cancellation = Event()
+                self._fit_cancel = cancellation
+                projection = self._projected
+                if request is not None:
+                    selection = None
+                    selectable = True
+                    if not request.all_facets:
+                        try:
+                            selection = projection.fit_selection(
+                                request.model,
+                                selector_kind=request.selector_kind,
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            selectable = False
+                    if selectable:
+                        started = _StartedFitRequest(
+                            request=request,
+                            selection=selection,
+                            projection=projection,
+                            cancellation=cancellation,
+                            context_generation=context_generation,
+                            request_generation=request_generation,
+                        )
+            previous_cancel.set()
+        if started is not None:
+            self._submit_started_fit(
+                started,
+                live=True,
+                logical_completion=None,
+            )
 
     def _prepare_fit_request(
         self,
@@ -882,6 +925,7 @@ class FitSessionMixin:
                 error = caught
             except Exception as caught:
                 error = caught
+                self._forget_fit_warm_starts(started.request_generation)
                 # A solver failure completes this explicit fit request.  A
                 # later data revision is the only automatic opportunity to
                 # solve again through the live-frame pipeline.
@@ -1097,7 +1141,7 @@ class FitSessionMixin:
                     self._accepted_fit,
                 )
                 fit_cancel = self._fit_cancel
-                clock_fit_cancel = self._clock_fit_cancel
+                live_prepare_cancel = self._live_prepare_cancel
                 self._live_fit_completion = None
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
@@ -1127,6 +1171,6 @@ class FitSessionMixin:
                     self.redraw_surface()
                 raise
             fit_cancel.set()
-            clock_fit_cancel.set()
+            live_prepare_cancel.set()
         if logical_completion is not None and not logical_completion.done():
             logical_completion.set_exception(FitCancelled("fit request cleared"))

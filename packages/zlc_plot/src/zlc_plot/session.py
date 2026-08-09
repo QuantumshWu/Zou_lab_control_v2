@@ -170,7 +170,7 @@ _ResultT = TypeVar("_ResultT")
 
 
 _FIT_THREAD_PREFIX = "zlc-fit"
-_CLOCK_FIT_THREAD_PREFIX = "zlc-live-fit"
+_LIVE_PREPARE_THREAD_PREFIX = "zlc-live-prepare"
 _UNSET = object()
 
 
@@ -451,13 +451,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             max_workers=defaults.runtime.analysis_worker_count,
             thread_name_prefix=_FIT_THREAD_PREFIX,
         )
-        self._clock_fit_executor = ThreadPoolExecutor(
+        self._live_prepare_executor = ThreadPoolExecutor(
             max_workers=defaults.runtime.analysis_worker_count,
-            thread_name_prefix=_CLOCK_FIT_THREAD_PREFIX,
+            thread_name_prefix=_LIVE_PREPARE_THREAD_PREFIX,
         )
         self._fit_cancel = Event()
-        self._clock_fit_cancel = Event()
-        self._clock_fit_future: Future[_PreparedLiveFrame] | None = None
+        self._live_prepare_cancel = Event()
+        self._live_prepare_future: Future[_PreparedLiveFrame] | None = None
         self._fit_context_generation = 0
         self._fit_request_generation = 0
         self._live_fit_request: _LiveFitRequest | None = None
@@ -2125,7 +2125,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
                 self._fit_cancel.set()
-                self._clock_fit_cancel.set()
+                self._live_prepare_cancel.set()
                 completion = self._live_fit_completion
                 self._live_fit_completion = None
                 self._live_fit_request = None
@@ -2495,10 +2495,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         OwnedSnapshot keeps its intrinsic revision. PulseTimeline callers may
         provide the revision from a live transport envelope; direct
         calls without one advance the current session revision by exactly one.
-        Once automatic live fit is armed, callers must publish through
-        :class:`LivePlotController`, which prepares matching data and fit before
-        either becomes visible; synchronous ``update_data`` is rejected rather
-        than blocking an owner/UI thread or painting a mismatched frame.
+        If automatic live fit is armed, the data front is presented first and
+        the previous solve is replaced by one background fit for this revision.
+        Callers therefore use this same method with or without fitting.
         """
 
         data, image_frame = self._split_image_frame(data, self._spec)
@@ -2516,12 +2515,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         with self._render_lock:
             with self._lock:
                 self._assert_open()
-                if self._live_fit_request is not None:
-                    raise RuntimeError(
-                        "update_data cannot present while automatic live fit is "
-                        "armed; publish immutable revisions through "
-                        "LivePlotController so data and fit are promoted together"
-                    )
                 if isinstance(data, OwnedSnapshot):
                     assert isinstance(self._projection.data, OwnedSnapshot)
                     data_revision = snapshot_revision(data)
@@ -2576,7 +2569,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 image_overlay=accepted_overlay,
                 accepted_fit=None,
             )
-            self._invalidate_fit_context()
+            self._restart_live_fit_for_current_data()
 
     def update_image_frame(self, frame: ImageFrame) -> ImageFrame:
         """Present image data and its point layer in one render transaction."""
@@ -3159,7 +3152,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._accepted_fit,
                 )
                 fit_cancel = self._fit_cancel
-                clock_fit_cancel = self._clock_fit_cancel
+                live_prepare_cancel = self._live_prepare_cancel
                 request = self._live_fit_request
                 bound_request = bool(
                     request is not None and request.selector_kind is state.kind
@@ -3208,7 +3201,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if affects_fit:
                 fit_cancel.set()
                 if bound_request:
-                    clock_fit_cancel.set()
+                    live_prepare_cancel.set()
         self._emit_selection(SelectionChange.REMOVED, state)
         if cancelled_fit is not None and not cancelled_fit.done():
             cancelled_fit.set_exception(
@@ -3893,7 +3886,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._closed = True
                 self._cancel_gesture()
                 self._fit_cancel.set()
-                self._clock_fit_cancel.set()
+                self._live_prepare_cancel.set()
                 self._fit_context_generation += 1
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
@@ -3911,8 +3904,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             wait=not caller_name.startswith(f"{_FIT_THREAD_PREFIX}_"),
             cancel_futures=True,
         )
-        self._clock_fit_executor.shutdown(
-            wait=not caller_name.startswith(f"{_CLOCK_FIT_THREAD_PREFIX}_"),
+        self._live_prepare_executor.shutdown(
+            wait=not caller_name.startswith(f"{_LIVE_PREPARE_THREAD_PREFIX}_"),
             cancel_futures=True,
         )
 

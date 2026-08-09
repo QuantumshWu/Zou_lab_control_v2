@@ -141,6 +141,26 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
         assert presented is not None, (
             f"the board never committed a surface; panel missing={port.missing}"
         )
+
+        models = host.fit_models().result(timeout=10).value
+        assert models
+        host.fit(models[0].model_id, live=True).result(timeout=30)
+        previous = presented
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            sequencer.fire()
+            sequencer.wait_done(1.0)
+            monitor.poll()
+            scheduler.on_tick()
+            arbiter.drain(
+                lambda panel_id: port if panel_id == port.panel_id else None
+            )
+            presented = port.presented_publication()
+            if presented is not None and presented is not previous:
+                break
+            time.sleep(0.05)
+        assert presented is not None and presented is not previous
+        assert port.last_error is None
     finally:
         host.close()
 

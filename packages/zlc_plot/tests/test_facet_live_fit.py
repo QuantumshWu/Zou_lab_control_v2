@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
@@ -39,6 +41,24 @@ def _spec() -> FacetGridPlot:
         AxisRef.point("facet"),
         CurvePlot(AxisRef.point("x")),
     )
+
+
+def _wait_for_fit_revision(
+    session: PlotSession,
+    revision: int,
+    *,
+    timeout: float = 10.0,
+) -> FacetFitBatchResult:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = session.last_fit
+        if (
+            isinstance(result, FacetFitBatchResult)
+            and result.source_revision == revision
+        ):
+            return result
+        time.sleep(0.005)
+    raise AssertionError(f"fit revision {revision} was not accepted")
 
 
 def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
@@ -147,9 +167,7 @@ def test_facet_live_fit_replaces_the_whole_batch_on_new_revision() -> None:
         assert finalization is not None
         session.finalize_live_frame(finalization)
 
-        accepted = session.last_fit
-        assert isinstance(accepted, FacetFitBatchResult)
-        assert accepted.source_revision == 1
+        accepted = _wait_for_fit_revision(session, 1)
         assert len(accepted.overlays) == 2
         assert all(overlay.polylines for overlay in accepted.overlays)
         assert session.fit_status == "current"

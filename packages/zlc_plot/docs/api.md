@@ -547,7 +547,7 @@ table contains only immutable NumPy arrays and strings; it never constructs or
 imports a data/runtime snapshot. Facet failure messages are exposed as
 `batch.failure_messages`, separate from parameter standard errors.
 
-`fit()` / `fit_async()` 默认启用 live fit。`fit_async(..., live=True)` 返回的 Future 绑定到这一次逻辑请求，而不是某一个很快过期的数据 revision。`LivePlotController` 把普通 data fit 纳入同一个 cadence frame：incoming snapshot 在独立 immutable projection context 中计算，只有 data 与该 snapshot 的 fit 都完成后才一次 commit/draw/promotion；慢 fit 期间当前完整 front 不变，capacity-one ingress 继续只保留最新 revision。selector、viewport、unit 和 resize 只更新交互/显示状态，不会因为没有新 data 而重新求解；已接受的旧 fit 保持稳定并标为 `lagging`，下一次 data revision 才按当时的 selector/viewport 计算新的 data+fit frame。Future 在本请求第一个结果真正 promoted 后完成。新的 fit 请求、`clear_fit()` 与 session close 会明确终止尚未完成的旧请求。删除由 `selector_kind=` 显式绑定的 selector 会立即 disarm 该 live request、清除旧 overlay，并让尚未完成的逻辑 Future 以 `FitCancelled` 结束；自动选择请求仍保持 armed，下一次 data revision 使用剩余 authority。
+`fit()` / `fit_async()` 默认启用 live fit。`fit_async(..., live=True)` 返回的 Future 绑定到这一次逻辑请求，而不是某一个很快过期的数据 revision。之后每次 `update_data()` 都先提交并 promotion 新 data front，同时清除旧 revision 的 fit overlay；session 随后取消旧 solver，只对当前最新 revision 后台拟合。只有仍匹配当前 data revision 和 request generation 的结果才发布 overlay/`FitEvent` 并完成逻辑 Future。`LivePlotController` 仅在同一入口前增加 capacity-one ingress 与 cadence。selector、viewport、unit 和 resize 不会因为没有新 data 而自动求解；需要立刻按新选择重算时显式调用 `fit()`。新的 fit 请求、`clear_fit()` 与 session close 会明确终止尚未完成的旧请求。删除由 `selector_kind=` 显式绑定的 selector 会立即 disarm 该 live request、清除旧 overlay，并让尚未完成的逻辑 Future 以 `FitCancelled` 结束；自动选择请求仍保持 armed，下一次 data revision 使用剩余 authority。
 
 `zlc_plot.fit.FitResult.parameters` 始终使用 canonical units。外部 GUI/Notebook 若要显示与图内一致的公式、参数、单位和 uncertainty，应订阅 accepted fit event：
 
@@ -634,9 +634,10 @@ Selector 或 pan gesture 不暂停 live consumer、render 或 live fit；可见 
 The producer revision is passed through to `PlotSession`; it becomes the
 session, selection-event, selected-data, and fit data revision. Direct
 `update_data(pulse)` calls without an envelope advance the current
-session revision by one while automatic live fit is not armed. Once live fit
-is armed, all data revisions must enter through `LivePlotController.publish()`
-so data and the matching fit are promoted atomically.
+session revision by one. The same `update_data()` path remains valid while live
+fit is armed: data is promoted first, the previous solve is cancelled, and only
+the latest matching fit result may add an overlay. `LivePlotController.publish()`
+adds only capacity-one ingress and cadence.
 
 ## Notebook
 
@@ -779,7 +780,7 @@ size.currentTextChanged.connect(
 ```
 
 Qt live producer 使用 `plot_host.live_controller(initial)`；prepare/finalize 走不发布 raster 的
-control queue，只有完整 data/fit frame 的 commit 才 render 并 promotion。事件订阅使用
+control queue；data frame 先 render/promotion，匹配该 revision 的 fit overlay完成后再独立 promotion。事件订阅使用
 `plot_host.subscribe_display/subscribe_selection/subscribe_fit`，回调若要修改 Qt 控件，
 再经 `widget.dispatch` 回到 UI thread。Notebook 与 Qt 同时打开时，应基于同一 immutable
 snapshot 分别创建 session。

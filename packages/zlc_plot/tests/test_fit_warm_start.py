@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from test_facet_live_fit import _facet_snapshot, _spec
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
-from zlc_plot.fit import FacetFitBatchResult
+from zlc_plot.fit import FacetFitBatchResult, FitResult
 from zlc_plot.fit import FitEngine
 
 
@@ -60,6 +62,24 @@ def _dense_spec() -> FacetGridPlot:
     return FacetGridPlot(AxisRef.point("facet"), CurvePlot(AxisRef.point("x")))
 
 
+def _present_and_wait(
+    session: PlotSession,
+    snapshot: DatasetSnapshot,
+    revision: int,
+) -> FitResult | FacetFitBatchResult:
+    prepared = session.prepare_live_frame(snapshot).result(timeout=10.0)
+    finalization = session.commit_live_frame(prepared)
+    assert finalization is not None
+    session.finalize_live_frame(finalization)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        result = session.last_fit
+        if result is not None and result.source_revision == revision:
+            return result
+        time.sleep(0.005)
+    raise AssertionError(f"fit revision {revision} was not accepted")
+
+
 def test_live_facet_revision_reuses_last_accepted_cell_parameters() -> None:
     engine = _RecordingFitEngine()
     session = PlotSession(_facet_snapshot(), _spec(), fit_engine=engine)
@@ -71,10 +91,11 @@ def test_live_facet_revision_reuses_last_accepted_cell_parameters() -> None:
         assert all(initial is None for initial in engine.initials)
         assert all(warm is None for warm in engine.warm_starts)
 
-        prepared = session.prepare_live_frame(
-            _facet_snapshot(revision=1, scale=1.001)
-        ).result(timeout=10.0)
-        assert prepared.fit is not None
+        _present_and_wait(
+            session,
+            _facet_snapshot(revision=1, scale=1.001),
+            1,
+        )
         assert len(engine.initials) == first_initial_count + 2
         for index, warm in enumerate(engine.warm_starts[-2:]):
             assert warm is not None
@@ -91,18 +112,14 @@ def test_live_warm_start_keeps_the_facet_result_within_solver_tolerance() -> Non
     try:
         cold_session.fit("gaussian_offset", live=True)
         cold_session._fit_warm_starts.clear()
-        cold_prepared = cold_session.prepare_live_frame(revision).result(timeout=10.0)
-        assert cold_prepared.fit is not None
-        cold = cold_prepared.fit.result
+        cold = _present_and_wait(cold_session, revision, 1)
     finally:
         cold_session.close()
 
     warm_session = PlotSession(data, _dense_spec())
     try:
         warm_session.fit("gaussian_offset", live=True)
-        warm_prepared = warm_session.prepare_live_frame(revision).result(timeout=10.0)
-        assert warm_prepared.fit is not None
-        warm = warm_prepared.fit.result
+        warm = _present_and_wait(warm_session, revision, 1)
         assert isinstance(cold, FacetFitBatchResult)
         assert isinstance(warm, FacetFitBatchResult)
         for cold_result, warm_result in zip(cold.results, warm.results, strict=True):
@@ -135,13 +152,21 @@ def test_fit_warm_cache_is_cleared_after_solver_exception() -> None:
         first = session.fit("gaussian_offset", live=True)
         assert first.success
         engine.fail_next = True
-        with np.testing.assert_raises(RuntimeError):
-            session.prepare_live_frame(
-                _dense_facet_snapshot(revision=1, scale=1.001)
-            ).result(timeout=10.0)
-        session.prepare_live_frame(
-            _dense_facet_snapshot(revision=2, scale=1.002)
+        prepared = session.prepare_live_frame(
+            _dense_facet_snapshot(revision=1, scale=1.001)
         ).result(timeout=10.0)
+        finalization = session.commit_live_frame(prepared)
+        assert finalization is not None
+        session.finalize_live_frame(finalization)
+        deadline = time.monotonic() + 10.0
+        while engine.fail_next and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert not engine.fail_next
+        _present_and_wait(
+            session,
+            _dense_facet_snapshot(revision=2, scale=1.002),
+            2,
+        )
         assert engine.warm_starts[-1] is None
     finally:
         session.close()

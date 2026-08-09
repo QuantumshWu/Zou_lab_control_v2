@@ -68,7 +68,8 @@ capacity-one producer handoff.  It accepts real `zlc_data.OwnedSnapshot`
 objects, validates one fixed schema fingerprint, and exposes `replace`,
 `patch`, `rolling`, `take_latest` and `metrics`.  The public
 `LivePlotController` adds the configured 100/200/400/800 ms presentation clock
-(default 400 ms, maximum 10 Hz) and atomically presents data plus live fit.
+(default 400 ms, maximum 10 Hz), presents each latest data front first, and
+then accepts only the matching latest live-fit result.
 
 Pulse timelines use the public `LiveDataRevision` envelope because
 `PulseTimelineData` intentionally has no intrinsic revision.  Image point

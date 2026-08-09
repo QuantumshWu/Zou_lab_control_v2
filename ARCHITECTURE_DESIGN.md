@@ -367,6 +367,8 @@ Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `Pa
 
 Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc_plot`：semantic mapping、整张 display parameter mapping、size、Image overlay 和 fit choice。Workbench 不判断哪一个字段能原位更新，也不循环调用单字段 setter；`zlc_plot` 用当前 `PlotSpec`、`ParameterSchema`、layout、overlay 和 fit 状态比较差异，合并需要的 render effects，并在同一个 worker job 中最多发布一张同步 front。只要 signal/schema 兼容，就保留同一个 host 和 Figure；只有 signal 改变、generation 改变或 schema 不兼容才替换 host。Fit 求解本身继续是异步科学计算，完成后再发布 fit overlay。owner thread 不调用 `.result()` 等待，旧的完整配置 job 由同一 coalescing key 淘汰。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
 
+Live fit 不改变外部 data API：有无 fit 都只调用同一个 `RasterPlotHost.update_data()`。每个新 revision 先投影并发布 data front，立即撤下不再对应当前数据的旧 fit overlay；随后取消前一 solver，只在 `zlc_plot` 的既有 analysis worker 中拟合当前最新 revision。fit 完成后仍须通过当前 data revision/request generation 校验才可发布 overlay 和 `FitEvent`，所以晚到结果不能覆盖新图。`LivePlotController` 只提供 capacity-one/latest ingress 与 cadence，不拥有第二套 fit 状态机，也不要求 data 等 fit 完成后才显示。
+
 Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display 参数，和通用 fit 完全独立。打开后由 `zlc_plot` 自己执行 bimodal Gaussian classification fit，显示左右 Gaussian、总和、可拖动 threshold，以及当前 threshold 对应的 fitted population 左/右占比（两者严格合计 100%）和 balanced fidelity；初值是 equal-prior 最优 threshold。普通 fit 的启停、model、结果和状态不得创建、移动或清除 classifier，classifier 也不得写普通 `fit_status`。FacetGrid[Histogram] 对每个 cell 使用同一 classifier，overview 中保留三条曲线、threshold 和较小字号的三项数值；focus 后只把该 cell 的 threshold 变成可交互 selector。外部若已有模型 threshold，就把 toggle 与整组 canonical thresholds 放进同一次 `configure()`，不先画静态线再另跑普通 fit。
 
 ### 10.4 各 plot kind 的理想参数

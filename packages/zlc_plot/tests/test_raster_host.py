@@ -3,6 +3,7 @@ from __future__ import annotations
 from threading import Event
 from concurrent.futures import Future
 from pathlib import Path
+import time
 
 import numpy as np
 import pytest
@@ -17,7 +18,7 @@ from zlc_plot import (
     SelectorKind,
     parameter_controls,
 )
-from zlc_plot.fit import FacetFitBatchResult
+from zlc_plot.fit import FacetFitBatchResult, FitCancelled, FitEngine
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
 from zlc_plot.ui import ControlKind
@@ -148,6 +149,87 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         assert operation.front.identity.sequence > first.identity.sequence
         assert host.front is operation.front
     finally:
+        host.close(timeout=10)
+
+
+def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
+    monkeypatch,
+) -> None:
+    x = np.linspace(-4.0, 4.0, 81)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": x}),
+        dtype=np.float64,
+        generation="raster-live-fit-latest",
+    )
+
+    def snapshot(revision: int, center: float) -> DatasetSnapshot:
+        values = 2.0 * np.exp(-0.5 * ((x - center) / 0.9) ** 2) + 0.1
+        return DatasetSnapshot(schema, values.reshape(1, -1), revision=revision)
+
+    engine = FitEngine()
+    original_fit = engine.fit
+    first_started = Event()
+    first_cancelled = Event()
+    latest_started = Event()
+    release_latest = Event()
+
+    def controlled_fit(model, coordinates, observations=None, **kwargs):
+        revision = int(kwargs["data_revision"])
+        cancelled = kwargs.get("cancelled")
+        if revision == 1:
+            first_started.set()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if cancelled is not None and cancelled():
+                    first_cancelled.set()
+                    raise FitCancelled("superseded live fit")
+                time.sleep(0.002)
+            raise AssertionError("revision 1 fit was not cancelled")
+        if revision == 2:
+            latest_started.set()
+            if not release_latest.wait(5.0):
+                raise AssertionError("revision 2 fit was not released")
+        return original_fit(model, coordinates, observations, **kwargs)
+
+    monkeypatch.setattr(engine, "fit", controlled_fit)
+    host = RasterPlotHost.from_plot(
+        snapshot(0, 0.0),
+        CurvePlot(AxisRef.point("x")),
+        fit_engine=engine,
+    )
+    accepted: list[int] = []
+    accepted_latest = Event()
+    release_subscription = None
+    try:
+        host.wait_for_front(timeout=10)
+        host.fit("gaussian_offset", live=True).result(timeout=30)
+        release_subscription = host.subscribe_fit(
+            lambda event: (
+                accepted.append(int(event.result.source_revision)),
+                accepted_latest.set()
+                if int(event.result.source_revision) == 2
+                else None,
+            )
+        ).result(timeout=10).value
+
+        host.update_data(snapshot(1, 0.1)).result(timeout=5)
+        assert host.front is not None
+        assert host.front.identity.data_revision == 1
+        assert first_started.wait(2.0)
+
+        host.update_data(snapshot(2, 0.2)).result(timeout=5)
+        assert host.front is not None
+        assert host.front.identity.data_revision == 2
+        assert first_cancelled.wait(2.0)
+        assert latest_started.wait(2.0)
+        release_latest.set()
+        assert accepted_latest.wait(10.0)
+        assert accepted == [2]
+    finally:
+        release_latest.set()
+        if release_subscription is not None:
+            release_subscription().result(timeout=10)
         host.close(timeout=10)
 
 

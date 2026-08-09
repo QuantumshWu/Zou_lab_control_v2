@@ -277,7 +277,7 @@ robust losses and covariance, without a full meshgrid or dense Jacobian. Custom
 Image models remain on the general expansion/solver path unless they provide
 their own specialization.
 
-Live data-fit 使用一条 capacity-one clock lane：owner 冻结 base data revision、display/selector/view authority 和 causal Image overlay authority，analysis worker 在 isolated projection context 中为 incoming immutable snapshot 构建 payload、FitSelection 和结果；owner 最后通过一次 CAS install 与一次 draw 提交 data+matching fit。这样 history-dependent histogram domain 不会从过期 base 提交，准备中的 ImageFrame 也不会倒退覆盖独立接受的新点层。Raster control dispatch 不发布 prepare/finalize 阶段，只有 commit 产生新 front。慢 fit 不暴露半帧，中间 ingress revision 由 latest-only mailbox 合并。selector、viewport、unit 和 resize 不启动独立 fit lane：它们提交自己的完整交互/显示 front，保留旧 fit；下一条 data revision 冻结当时的全部 authority，和对应 fit 一起提交。显式绑定 selector 被删除时，其 request generation 立即退休、solver cancellation event 被置位、overlay 清除；自动选择请求则下一条 data revision 使用剩余 authority。
+Live data 使用一条 capacity-one clock lane：owner 冻结 base data revision、display/view authority 和 causal Image overlay authority，analysis worker 在 isolated projection context 中构建 incoming immutable payload；owner 通过 CAS install 提交 data front。若 live fit 已 armed，data promotion 后立即取消旧 solver，再在既有 fit worker 中冻结当前 projection/selector authority并只求解最新 revision。完成结果必须匹配当前 data revision 与 request generation 才能提交 overlay 和 `FitEvent`。因此慢 fit 不阻止新图，也不会把旧 overlay 画在新 data 上；中间 ingress revision 仍由 latest-only mailbox 合并。selector、viewport、unit 和 resize 不自动启动求解；显式绑定 selector 被删除时，其 request generation 立即退休、solver cancellation event 被置位、overlay 清除。
 
 Manual fit and data-frame fit completions use the same host presentation transaction:
 accept and render, capture/promote the complete raster front, then publish the

@@ -105,6 +105,48 @@ The first plot in a fresh Python process can additionally pay font discovery
 and Matplotlib initialization; that one-time cost is excluded from the warm
 medians.
 
+## Current virtual-camera, Distribution and live-fit profile (2026-08-09)
+
+This pass used the current checkout on Windows 11 / Python 3.13.12 with the
+public `PlotSession`, `RasterPlotHost`, and `LivePlotController` APIs. Ten fresh
+processes constructed one `96 x 128` Image session at `2x2`; the cold session
+median/p95 was 190.83 / 194.77 ms. A 30-frame, 30 Hz `128 x 128` camera run at
+the 100 ms display cadence measured projection 0.77 / 1.06 ms, artist render
+15.21 / 17.24 ms, complete render pipeline 16.35 / 18.42 ms, and observed
+front interval 101.11 / 111.26 ms median/p95. It promoted 11 latest fronts,
+reached revision 30, and reported no error or timeout.
+
+The fit/classifier cases used ten warm complete session transactions. The Image
+case was an anisotropic Gaussian over a regular `96 x 128` field. Distribution
+used 300 bimodal samples; the grid used the same 300 samples for each of 35
+sites. Classifier measurements time only Off -> On (the untimed reset prepares
+the next sample).
+
+| Operation | Median / p95 ms |
+|---|---:|
+| 2-D anisotropic Image fit + overlay front | 43.47 / 45.74 |
+| one Distribution generic bimodal fit | 10.55 / 10.88 |
+| one Distribution threshold classifier enable | 14.03 / 15.43 |
+| 35-cell FacetGrid[Histogram] threshold classifier enable | 217.05 / 220.15 |
+| 35-cell FacetGrid[Histogram] generic bimodal fit | 177.19 / 183.14 |
+
+Histogram fitting consumed the painted histogram centers/counts through the
+existing `FitSelection`; it did not submit the 300 raw samples to a second fit
+path. Calibration uses only the independent threshold classifier, not the
+generic 35-cell fit row.
+
+A controlled 250 ms solver quantified the live-fit correction with the same
+10 Hz producer and public `LivePlotController` path. Before the correction
+(`f4095be`), data waited for fit: only revisions 1/4/7/9/13/15 appeared and
+front intervals were 295.62 / 314.89 ms median/p95; all six stale-in-between
+fits were accepted. After the correction, 14 of 15 latest data revisions
+appeared at 97.60 / 146.38 ms and only final fit revision 15 was accepted.
+The TaskConsole path calls `RasterPlotHost.update_data()` directly; its same
+96 x 128 workload took 17.79 / 19.45 ms per data front and maintained
+100.11 / 101.98 ms intervals while only fit revision 15 survived. Thus slow
+analysis no longer changes data cadence, and neither Workbench nor the live
+controller owns a second fit state machine.
+
 ## Dense-image data and display paths
 
 Dense image data and display pixels have different responsibilities.  The
@@ -245,8 +287,8 @@ including overlay presentation, measured 204 / 151 ms cold/warm at 1024² and
 332 / 325 ms at 2048² on the reference machine. Both returned the exact
 all-pixel sample count, full fitted/residual/index arrays, finite parameter
 uncertainties and a current overlay. If a live fit exceeds the display cadence,
-the current complete data+fit front remains visible and incoming revisions
-continue to coalesce; there is no half-frame or catch-up burst. Custom Image
+incoming data fronts continue immediately, the old solver is cancelled, and
+only the latest matching result may add an overlay; there is no catch-up burst. Custom Image
 models remain on the general coordinate-expansion solver path unless they
 provide a specialization.
 

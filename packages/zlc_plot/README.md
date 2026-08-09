@@ -140,7 +140,7 @@ session.set_size("2x4")
 
 `session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
-Live fit 的唯一自动触发源是新的 data revision：selector、viewport、unit 和 resize 只更新交互/显示层，保留旧 fit front 并将其标为 lagging；需要立即按新选择重算时显式调用 `fit()`。
+Live fit 的唯一自动触发源是新的 data revision：`update_data()` 先发布新 data front并撤下旧 revision 的 fit overlay，再取消旧 solver、后台拟合当前最新 revision；fit 晚到时仍须通过 revision/request-generation 校验。selector、viewport、unit 和 resize 只更新交互/显示层；需要立即按新选择重算时显式调用 `fit()`。
 
 Rolling 的静态快照也保留 R 轴的逐 shot 历史种子，因此 static 与 live 共用同一
 projection 语义；live 端仍以严格递增 revision 和 capacity-one latest-only lane
@@ -247,7 +247,7 @@ while live.worker_alive:
 live.close(timeout=0)
 ```
 
-每个 cadence tick 只接纳 capacity-one ingress 中的 latest revision。未启用 fit 时它直接组成一张完整 data frame；启用 live fit 时，data projection 与同 revision fit 都准备好之后才一次性提交，因此不会出现“新 data + 旧 fit”或随后补画 fit 的第二张 front。若 fit 超过一个周期，当前完整 front 保持不变，中间 producer revision 继续被 latest-only 合并；完成后下一周期处理当时最新 revision。Area/X 拖动只更新交互场景，不进入 fit worker；只有显式 fit 或新的 data revision 才会求解。只有应用显式 stop/pause 时，尚未呈现的 active revision 才会作为单个 latest 值保留给 resume/pump。可直接运行的
+每个 cadence tick 只接纳 capacity-one ingress 中的 latest revision。新 data projection 完成后立即提交；若 live fit 已启用，同一 session 随后取消旧 solver并只拟合当前 revision，完成后以单独 overlay front 发布。新 data 绝不等待慢 fit，也不会带着旧 revision overlay；中间 producer revision 继续由 capacity-one ingress 合并。Area/X 拖动只更新交互场景，不进入 fit worker；只有显式 fit 或新的 data revision才会求解。只有应用显式 stop/pause 时，尚未呈现的 active revision 才会作为单个 latest 值保留给 resume/pump。可直接运行的
 PyQt5 持续 live 窗口是：
 
 ```bash
@@ -267,7 +267,7 @@ assert pulse_session.data_revision == 1
 pulse_live.close()
 ```
 
-Pending capacity 固定为 1。Producer 不等待 render；当生产速度高于显示刷新时，只保留最新 revision。Envelope revision 会原样成为 session、selection event 与 selected data 的 data revision；未启用 automatic live fit 时，直接调用 `update_data(pulse)` 会从当前 revision 自动加一。启用 automatic live fit 后必须通过 `LivePlotController.publish()` 更新；同步 `update_data()` 会明确拒绝，避免在 owner/UI 线程等待 fit，或产生 new data + old fit。刷新选项集中配置为 100/200/400/800 ms，默认 400 ms，最高 10 Hz。
+Pending capacity 固定为 1。Producer 不等待 render；当生产速度高于显示刷新时，只保留最新 revision。Envelope revision 会原样成为 session、selection event 与 selected data 的 data revision；PulseTimeline 直接调用 `update_data(pulse)` 时从当前 revision 自动加一。有无 automatic live fit 都使用同一个 `update_data()`；`LivePlotController.publish()` 只增加 capacity-one ingress 和 100/200/400/800 ms cadence（默认 400 ms，最高 10 Hz），不增加另一套 fit 状态机。
 
 `stop()` 停止 consumer 但不关闭 controller，可用 `start()` 恢复；`close()` 是终止并释放 ingress 的操作。Notebook 的持续 producer 与完整 cleanup 写法见唯一的 `notebooks/usage.ipynb`。
 
@@ -361,7 +361,7 @@ image_session.set_parameter("show_point_labels", True)
 
 点环尺寸和状态颜色由 package style 统一解析，不属于可变显示参数。
 
-同一 shot 的 image 与动态坐标/状态必须作为一个 `ImageFrame` 发布；frame revision 只来自 snapshot，不建立第二个 frame 时钟，live controller 只会一次提交 data、overlay 与同 revision fit。overlay 自身仍保持单调 revision；清空点层使用 `ImagePointOverlay.empty(revision)`。如果 frame 在后台准备期间点层被独立更新，旧 frame 的 CAS 会失败，而不是覆盖较新的点层：
+同一 shot 的 image 与动态坐标/状态必须作为一个 `ImageFrame` 发布；frame revision 只来自 snapshot，不建立第二个 frame 时钟。data 与 overlay 作为同一 frame 提交；live fit随后只针对该当前 revision运行。overlay 自身仍保持单调 revision；清空点层使用 `ImagePointOverlay.empty(revision)`。如果 frame 在后台准备期间点层被独立更新，旧 frame 的 CAS 会失败，而不是覆盖较新的点层：
 
 ```python
 from zlc_data import owned_snapshot_from_arrays
