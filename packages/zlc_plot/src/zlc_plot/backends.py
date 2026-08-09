@@ -1173,7 +1173,11 @@ def _qt5_plot_widget_class() -> type[Any]:
             event.accept()
 
         def wheelEvent(self, event: object) -> None:
-            if self._closed or self._pointer_button is not None:
+            if (
+                self._closed
+                or self._pointer_button is not None
+                or not self._interaction_gate.enabled
+            ):
                 event.ignore()
                 return
             delta = float(event.angleDelta().y())

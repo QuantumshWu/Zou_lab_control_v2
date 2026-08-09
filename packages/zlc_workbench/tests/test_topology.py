@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import time
 
 import pytest
 
@@ -90,10 +91,16 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
     try:
         session.fire(shots=1)
         live_signal = watching.signal_key("frame_0")
-        for _ in range(CAMERA_WINDOWS - 1):
-            assert monitor.poll() is not None
-            assert session.signal_plane.latest_publication(live_signal) is None
-        assert monitor.poll() is not None
+        seen = 0
+        deadline = time.monotonic() + 10.0
+        while seen < CAMERA_WINDOWS and time.monotonic() < deadline:
+            if monitor.poll() is None:
+                time.sleep(0.001)
+                continue
+            seen += 1
+            if seen < CAMERA_WINDOWS:
+                assert session.signal_plane.latest_publication(live_signal) is None
+        assert seen == CAMERA_WINDOWS
         rows = project_signals(session.signal_plane)
         states = [row.state for row in rows]
         assert states.index("live") < states.index("finished")

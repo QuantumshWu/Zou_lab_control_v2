@@ -175,7 +175,7 @@ class ConsolePresenter:
         # the offer really changed.
         self._offered_groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
         self._paused = False
-        self._deriving = True
+        self._deriving = False
         self._shown_console_summary: str | None = None
         #: How often a new panel redraws.  The board's default, kept so a panel
         #: and the card that reports it cannot state different numbers.
@@ -261,7 +261,7 @@ class ConsolePresenter:
         if editor_closed is not None:
             editor_closed.connect(self._panel_editor_closed)
         self.set_paused(False)
-        self.set_deriving(True)
+        self.set_deriving(False)
 
     # ------------------------------------------------------------------ panels
 

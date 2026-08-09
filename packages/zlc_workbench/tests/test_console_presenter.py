@@ -641,6 +641,10 @@ def test_turning_selectors_off_stops_panels_deriving(presenter, session) -> None
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    assert binding.bridge is None
+
+    presenter.view.selectors_toggled.emit(True)
     _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
     assert binding.bridge is not None and binding.bridge.started
 
@@ -662,15 +666,16 @@ def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None
     """
 
     node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frame_0"), snapshot)
+    binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
     card = presenter.view.cards[0]
+    assert card.selectors_enabled is False
+
+    presenter.set_deriving(True)
     assert card.selectors_enabled is True
 
     presenter.set_deriving(False)
     assert card.selectors_enabled is False, "the card must say the bridge is gone"
-
-    presenter.set_deriving(True)
-    assert card.selectors_enabled is True
 
 def test_header_save_screenshot_writes_one_plain_gui_image(
     presenter, session, tmp_path

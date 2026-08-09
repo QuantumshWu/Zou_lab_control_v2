@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Camera Measurement 已收敛为按 authored request 发布 frame_0...frame_N 普通二维 signals，所有 selector 投影 signal shape；正在进入 Monitor/Setting 收敛。Calibration JSON artifact、四张 task-owned report 图片、唯一 Monitor preview、Setting 即时 commit、restart lifecycle 和全部正式复验都不得凭旧实现或旧测试宣称完成。`
-- Last completed action：撤销旧六-site、旧 panel surface、旧单模型/artifact-only Calibration 所产生的伪完成结论，并把最新共同契约和验收门写回两份权威文档。
-- Last verified tests：`当前未提交 Camera/shape 阶段：zlc_atom 143、zlc_runtime 142、zlc_workbench 333、zlc_ui 79 全部通过；这些只证明该阶段，不代替剩余 Calibration/Setting、全树和正式按钮验收。`
+- Current phase：`Camera Measurement 已收敛为 frame_0...frame_N 普通二维 signals；Monitor/Setting 已恢复默认 Selectors=OFF、wheel 回到 board scroll、card 内滚动/无 Apply/即时异步配置，并通过受影响 package 回归。现在进入 Calibration plugin 的 file picker、Samples=300、restart、唯一 preview 与四图收敛。`
+- Last completed action：`Camera/shape 和 Monitor/Setting-scroll 两个窄阶段已分别以当前源码与完整受影响 package tests 验证；没有新增文件、窗口层或 camera-specific plot 语义。`
+- Last verified tests：`当前 Camera/shape + Monitor/Setting-scroll 阶段：zlc_atom 143、zlc_plot 204、zlc_runtime 142、zlc_workbench 333、zlc_ui 79 全部通过；这些只证明受影响 package，不代替剩余 Calibration、全树和正式按钮验收。`
 - Pending acceptance gates：`Calibration 单次 result -> JSON + site-map/三模型四张 report 图片；Task progress/preview/terminal cleanup；terminal generation restart；Task takeover；Occupancy model choice；35-site simulation；panel finite ComboBox/full initial schema/Setting 即时 commit 性能；受影响与全树 tests；正式 experiment.bat 真实按钮全流程；Stop/close 零残留。`
-- Next action：修 Monitor 左侧整体滚动和 Setting 的 panel 内边界/内滚动/无 Apply/即时高效更新，再在现有 Calibration plugin 内修正 file picker、Samples=300、restart/report/preview lifecycle；每个窄阶段通过受影响 tests 后才进入全树和正式按钮验收，并在每次 GUI probe 后立即确认窗口与进程归零。
+- Next action：在现有 Calibration plugin/Workbench 接线内修正 project pulses file picker、Samples=300、terminal restart generation、唯一 Monitor preview 和同一 result 保存 JSON + site-map/三模型四图；每个窄阶段通过受影响 tests 后才进入全树和正式按钮验收，并在每次 GUI probe 后立即确认窗口与进程归零。
 - New decisions since architecture review：Simulation 只位于独立 devices/simulation 且复用真实设备契约；默认 virtual geometry 是 35 sites/96 x 128；Calibration JSON artifact 保留 SiteMap、三模型、default kind 和 frame contract，Calibration Task 另用同一结果调用 `zlc_plot` 保存 site-map + 三模型 grid 四张 report 图片；Workbench 不显示 report，Monitor 只自动显示 measurement preview；Occupancy readout-model choice 是科学模式而非 extent mode；Task active 时 takeover；TaskConsole 只有五种固定 plot kind，interval 是有限 ComboBox，blank panel 初始显示完整 schema，Setting 没有 Apply、字段 commit 即时异步生效并拒绝 stale result；pulse 只有 readable `zlc.pulse.v1` JSON 单一路径。旧 Goal tombstones 保持不动。
 
 ## 1. 执行纪律

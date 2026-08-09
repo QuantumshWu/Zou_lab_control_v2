@@ -148,10 +148,10 @@ class PanelCardView(FluentGroupBox):
         self.size_combo.hide()
         self.size_combo.currentIndexChanged[int].connect(self._size_changed)
         self.setCursor(QtCore.Qt.OpenHandCursor)
-        self._selectors_on = True
+        self._selectors_on = False
         self._apply_card_size(DEFAULT_PANEL_SIZE)
         self.set_status("", error=False)
-        self.set_selectors_enabled(True)
+        self.set_selectors_enabled(False)
 
     @staticmethod
     def card_size(size: str) -> tuple[int, int]:

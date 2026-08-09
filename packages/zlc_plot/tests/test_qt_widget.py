@@ -50,6 +50,27 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
             app.processEvents()
             time.sleep(0.005)
         assert widget.presented_front is not None
+
+        class WheelEvent:
+            accepted = False
+            ignored = False
+
+            @staticmethod
+            def angleDelta():
+                return QPoint(0, 120)
+
+            def accept(self):
+                self.accepted = True
+
+            def ignore(self):
+                self.ignored = True
+
+        widget.set_interaction_enabled(False)
+        wheel = WheelEvent()
+        widget.wheelEvent(wheel)
+        assert wheel.ignored and not wheel.accepted
+        widget.set_interaction_enabled(True)
+
         width, height = widget.width(), widget.height()
         start = QPoint(max(2, width // 3), max(2, height // 3))
         end = QPoint(max(3, width * 2 // 3), max(3, height * 2 // 3))

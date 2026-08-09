@@ -54,7 +54,6 @@ class _GatedSurface(QtWidgets.QLabel):
 surface = _GatedSurface('fake surface')
 card.set_surface(surface)
 card.set_status('ready', error=False)
-card.set_selectors_enabled(False)
 assert card.panel_id == 'panel-1'
 signal_field = next(field for field in card._form_spec().fields if field.key == 'signal')
 assert len(signal_field.choices) == 1
@@ -64,6 +63,8 @@ assert surface.parentWidget() is not None
 assert surface.interaction is False
 card.set_selectors_enabled(True)
 assert surface.interaction is True
+card.set_selectors_enabled(False)
+assert surface.interaction is False
 card.set_surface(None)
 assert not card._placeholder.isHidden()
 card.set_panel_projection(dict(state, size='1x4'), surface_projection)

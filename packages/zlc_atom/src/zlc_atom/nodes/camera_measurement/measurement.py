@@ -522,6 +522,7 @@ class CameraMeasurementNode:
         buffer_frames = int(buffer_frames)
         if buffer_frames <= 0:
             raise ValueError("buffer_frames must be positive")
+        buffer_frames = max(buffer_frames, self.frames_per_cycle)
         if self.request.repeat != 0:
             raise ValueError("monitor requires request.repeat equal to zero")
         owns_generation = bool(owns_generation)

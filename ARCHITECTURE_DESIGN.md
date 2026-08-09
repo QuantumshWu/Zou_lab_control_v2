@@ -326,6 +326,8 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 
 Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动，不能先闪现一个脱离 panel 的临时顶层窗口再重建。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
 
+Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不消费 wheel，滚轮交给外层 board scroll；打开后 wheel 才属于 plot 的 zoom/selection interaction。这个开关直接调用同一 plot widget 的 interaction gate，不重建 panel。
+
 改 Signal 只换这个 panel 的绑定，不改 Occupancy 等 Logic Node 的 input binding，也不改 plot kind。
 
 每个 panel 只有一份 Workbench-owned `PanelState`，其中包含 signal binding、size、update interval、plot semantic/display/fit 参数和固定 plot kind。Setting frame 和 Panel Edit 都是这一份 state 的 view/controller，不各自保存副本。
