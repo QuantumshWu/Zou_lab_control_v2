@@ -126,12 +126,12 @@ class _FakeCamera:
     def IsGrabbing(self):
         return self._grabbing
 
-    def StartGrabbing(self, _strategy):
+    def StartGrabbing(self, strategy):
         if self._fail_start_once:
             self._fail_start_once = False
             raise RuntimeError("injected start failure")
         self._grabbing = True
-        self.grab_calls.append("StartGrabbing")
+        self.grab_calls.append(f"StartGrabbing({strategy})")
 
     def StartGrabbingMax(self, count, _strategy):
         self._grabbing = True
@@ -261,13 +261,15 @@ def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(
     assert camera.TriggerSource.GetValue() == "Line1"
 
 
-def test_a_triggered_session_is_bounded_and_stops_when_done(fake_pypylon) -> None:
+def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
+    fake_pypylon,
+) -> None:
     """One trigger, one frame, one shot -- strictly.
 
     A resident latest-only stream could hand shot K+1 a late frame from shot K.
     """
 
-    camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 3)
+    camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 6)
     adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
 
@@ -279,9 +281,17 @@ def test_a_triggered_session_is_bounded_and_stops_when_done(fake_pypylon) -> Non
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
 
+    adapter.arm(None, source_group_sizes=(3,), buffer_frame_count=3, timeout=0.5)
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
+    assert camera.grab_calls[-1] == "StartGrabbing(one)"
+    assert len(adapter.read_frame_records(3, timeout=0.5, exact=False)) == 3
+    adapter.finish_record_capture()
+    assert not camera.IsGrabbing()
+
 
 def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
-    """A monitor returns short; a lost finite trigger raises."""
+    """A free-run preview returns short; every triggered mode fails loud."""
 
     quiet = PylonCameraAdapter(_config(), camera=_FakeCamera(frames=[]))
     quiet.open()
@@ -293,6 +303,23 @@ def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
     loud.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.05)
     with pytest.raises(RuntimeError, match="lost trigger"):
         loud.read_frame_records(2, timeout=0.05, exact=True)
+
+    continuous = PylonCameraAdapter(
+        _config(),
+        camera=_FakeCamera(frames=[np.zeros((4, 4), np.uint8)], succeed=False),
+    )
+    continuous.open()
+    continuous.arm(
+        None,
+        source_group_sizes=(2,),
+        buffer_frame_count=2,
+        timeout=0.05,
+    )
+    with pytest.raises(RuntimeError, match="failed frame"):
+        continuous.read_frame_records(2, timeout=0.05, exact=False)
+    quiet.finish_record_capture()
+    loud.finish_record_capture()
+    continuous.finish_record_capture()
 
 
 def test_mono8_is_verified_from_sdk_readback(fake_pypylon) -> None:

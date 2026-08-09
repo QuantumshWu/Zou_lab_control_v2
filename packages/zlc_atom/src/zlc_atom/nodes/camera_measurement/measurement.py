@@ -290,12 +290,30 @@ class MonitorCapture:
         if not records:
             return None
         for record in records:
-            self._pending_records.append(record)
-            if len(self._pending_records) == self.node.frames_per_cycle:
-                self.slot.update(tuple(self._pending_records))
-                self._pending_records.clear()
+            self._accept_record(record)
         self.latest_record = records[-1]
         return self.latest_record
+
+    def _accept_record(self, record: CameraFrameRecord) -> None:
+        """Publish only a physically aligned, contiguous camera cycle."""
+
+        cycle_size = self.node.frames_per_cycle
+        ordinal = int(record.source_ordinal)
+        pending = self._pending_records
+        if not pending:
+            if ordinal % cycle_size:
+                return
+            pending.append(record)
+        else:
+            expected = pending[0].source_ordinal + len(pending)
+            if ordinal != expected:
+                pending.clear()
+                if ordinal % cycle_size:
+                    return
+            pending.append(record)
+        if len(pending) == cycle_size:
+            self.slot.update(tuple(pending))
+            pending.clear()
 
     def close(self) -> CameraCaptureTerminalRecord:
         """Release this capture and always disarm the camera.
@@ -537,7 +555,7 @@ class CameraMeasurementNode:
         self.provenance.capture(self)
         self.camera.arm(
             None,
-            source_group_sizes=None,
+            source_group_sizes=(self.frames_per_cycle,),
             buffer_frame_count=buffer_frames,
             timeout=self.timeout_seconds,
         )

@@ -135,10 +135,10 @@ class VirtualCamera:
         if buffer_count <= 0:
             raise ValueError("buffer_frame_count must be positive")
         if frames is None:
-            if source_group_sizes is not None:
-                raise ValueError("monitor arm cannot declare source groups")
             expected = None
-            groups = None
+            groups = tuple(int(item) for item in (source_group_sizes or ()))
+            if groups and (len(groups) != 1 or groups[0] <= 0):
+                raise ValueError("continuous external capture requires one positive source group")
         else:
             expected = int(frames)
             groups = tuple(int(item) for item in (source_group_sizes or ()))

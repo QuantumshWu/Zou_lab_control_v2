@@ -422,9 +422,12 @@ class DcamCameraAdapter:
         source_group_sizes: tuple[int, ...] | None,
     ) -> tuple[int | None, tuple[int, ...] | None]:
         if frames is None:
-            if source_group_sizes is not None:
-                raise ValueError("monitor arm cannot declare source_group_sizes")
-            return None, None
+            groups = tuple(int(value) for value in (source_group_sizes or ()))
+            if groups and (len(groups) != 1 or groups[0] <= 0):
+                raise ValueError(
+                    "continuous external capture requires one positive source group"
+                )
+            return None, groups or None
         expected = positive_integer(frames, "frames")
         if not isinstance(source_group_sizes, tuple):
             raise TypeError("finite arm requires tuple source_group_sizes")

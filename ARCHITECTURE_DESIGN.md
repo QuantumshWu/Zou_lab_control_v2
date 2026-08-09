@@ -260,6 +260,15 @@ Camera Measurement 按本次 authored `Frames per cycle` 声明
 `frame_0 ... frame_N`。每个输出都是一个普通二维 image Dataset signal；同一 cycle
 内的不同 frame 不塞进一个额外 data axis，也不由 `zlc_plot` 解释 camera-specific
 `frame_index`。signal chooser 逐项列出这些 signals，并在每项旁显示 dataset shape。
+`frames_per_cycle` 的 shot 分组只有一个所有者：Camera Measurement 的共同采集实现。
+所有 `CameraAdapter` 只交付按物理采集顺序编号的 `CameraFrameRecord`，不得在丢帧后
+重新编号成无缺口序列；共同实现按连续且对齐的 source ordinal 组装完整 cycle，任何
+缺帧、错位或 overrun 都不能跨 shot 补齐。只有完整 tuple 才一次发布全部 sibling，
+`Repeat=0` 的 latest slot 也只以完整 tuple 为单位覆盖，因此慢 consumer 最多跳过完整
+cycle，不会把不同 shot 的 frame 拼在一起。Virtual/DCAM/Pylon 只负责把各自 driver 的
+frame counter、buffer overrun 和 failed grab 如实投影到该共同契约，不各自实现
+`frames_per_cycle` 业务规则。Pylon 的 `LatestImageOnly` 只可用于真正的自由运行设备
+预览；Camera Measurement 的 `Repeat=0` 必须使用 external-triggered ordered stream。
 等待/触发超时属于 adapter/session 内部采集策略，不作为普通用户 authoring 字段。
 
 Camera Measurement 不驱动 pulse。它监听外部时序，独占 camera、最多只读 sequencer 状态。Driver/internal buffer 大小不进用户表单。

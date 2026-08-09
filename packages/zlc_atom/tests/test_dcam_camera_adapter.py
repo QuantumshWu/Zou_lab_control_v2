@@ -198,8 +198,8 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
         assert point.roi_shape_yx == (4, 4)
         adapter.arm(
             None,
-            source_group_sizes=None,
-            buffer_frame_count=1,
+            source_group_sizes=(3,),
+            buffer_frame_count=3,
             timeout=1.0,
         )
         with pytest.raises(RuntimeError, match="while armed"):

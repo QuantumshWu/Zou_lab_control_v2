@@ -5,10 +5,9 @@ contract.  Not a byte-copy -- the old driver was written against a different
 base class -- but every behaviour that was learned the hard way is carried over,
 and each is commented where it lives.
 
-The camera never touches a sequencer.  Finite arms nevertheless have a fixed
-hardware contract: ``FrameStart`` is externally triggered from the configured
-line.  A monitor arm temporarily disables that trigger and uses latest-image
-free-run, then restores the finite working point when it finishes.
+The camera never touches a sequencer.  Triggered finite and continuous arms use
+``FrameStart`` from the configured line.  Only a source-less device preview
+temporarily uses latest-image free-run, then restores the external working point.
 
 ``pypylon`` is imported lazily, so a machine with no Basler runtime still
 imports this package, runs the virtual backend, and passes the whole suite.
@@ -427,9 +426,10 @@ class PylonCameraAdapter:
     ) -> None:
         """Start the grab session, with the strategy each mode's semantics need.
 
-        MONITOR acquisition is free-running only for this arm.  Latest-image-only
-        means a slow viewer sees the current image rather than a stale backlog;
-        finish stops the stream and restores the external-trigger working point.
+        A source-less MONITOR acquisition is free-running only for this arm.
+        A repeating source group is the Camera Measurement continuous mode and
+        remains externally triggered and ordered.  Finish restores the external
+        working point in either case.
 
         HARDWARE TRIGGER gets one bounded session per arm, stopped when done:
         one trigger, one frame, one shot, strictly.  A resident latest-only
@@ -439,9 +439,12 @@ class PylonCameraAdapter:
         """
 
         if frames is None:
-            if source_group_sizes is not None:
-                raise ValueError("monitor arm cannot declare source_group_sizes")
             expected = None
+            groups = tuple(int(value) for value in (source_group_sizes or ()))
+            if groups and (len(groups) != 1 or groups[0] <= 0):
+                raise ValueError(
+                    "continuous external capture requires one positive source group"
+                )
         else:
             if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
                 raise ValueError("frames must be a positive integer or None")
@@ -459,6 +462,7 @@ class PylonCameraAdapter:
             ):
                 raise ValueError("source_group_sizes must exactly cover frames")
             expected = frames
+            groups = source_group_sizes
         if (
             isinstance(buffer_frame_count, bool)
             or not isinstance(buffer_frame_count, int)
@@ -478,7 +482,7 @@ class PylonCameraAdapter:
         camera = self._camera
         if self._armed:
             raise RuntimeError("pylon camera is already armed")
-        monitor = expected is None
+        monitor = expected is None and not groups
         try:
             if camera.IsGrabbing():
                 camera.StopGrabbing()
@@ -487,6 +491,8 @@ class PylonCameraAdapter:
             self._apply_trigger(monitor=monitor)
             if monitor:
                 camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            elif expected is None:
+                camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
             else:
                 camera.StartGrabbingMax(expected, pylon.GrabStrategy_OneByOne)
         except BaseException as primary:
@@ -539,6 +545,10 @@ class PylonCameraAdapter:
             try:
                 if not result.GrabSucceeded():
                     self._capture_incomplete = True
+                    if not self._monitor_mode:
+                        raise RuntimeError(
+                            "a triggered acquisition returned a failed frame"
+                        )
                     continue
                 image = np.array(result.Array, copy=True)
                 if image.dtype != np.dtype("uint8"):

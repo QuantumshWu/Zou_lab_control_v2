@@ -53,7 +53,7 @@ def _one_camera_window_program():
     return compile_sequence(sequence, config["params"], config["clock_hz"])
 
 
-def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame() -> None:
+def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle() -> None:
     installation = create_installation("virtual")
     plane = FakePlane()
     try:
@@ -64,37 +64,58 @@ def test_repeat_zero_monitor_updates_runtime_live_slot_and_freezes_latest_frame(
                 exposure_seconds=0.02,
                 roi_xywh=(2, 3, 20, 16),
                 repeat=0,
-                frames_per_cycle=1,
+                frames_per_cycle=3,
                 timeout_seconds=1.0,
             ),
             signal_plane=plane,
         )
-        monitor = measurement.monitor(buffer_frames=1)
+        monitor = measurement.monitor(buffer_frames=3)
         assert isinstance(monitor, MonitorCapture)
-        sequencer = installation.device("sequencer")
-        sequencer.load(_one_camera_window_program())
-        sequencer.fire()
-        sequencer.wait_done(1.0)
-        record = monitor.poll()
-        assert record is not None
-        assert record.image.shape == (16, 20)
-        assert record.image.dtype.str == "<u2"
+        camera = installation.device("camera")
+
+        # The three frames 0/1/2 are one shot.  Let the raw three-frame buffer
+        # advance once more before the consumer reads: a per-frame latest queue
+        # now contains 1/2/3, which must never be published as a camera cycle.
+        camera.trigger(4)
+        deadline = time.monotonic() + 1.0
+        while camera.produced_count < 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        for _ in range(3):
+            monitor.poll()
+        signal_keys = tuple(
+            measurement.signal_key(f"frame_{index}") for index in range(3)
+        )
+        plane.freeze()
+        assert plane.latest_publication(signal_keys[0]) is None
+
+        # Completing physical ordinals 3/4/5 makes the next whole shot visible.
+        camera.trigger(2)
+        publication = None
+        deadline = time.monotonic() + 1.0
+        while publication is None and time.monotonic() < deadline:
+            monitor.poll()
+            plane.freeze()
+            publication = plane.latest_publication(signal_keys[0])
+        assert publication is not None
+        assert set(publication.signals) == set(signal_keys)
+        assert all(plane.latest_publication(key) is publication for key in signal_keys)
+        for key in signal_keys:
+            value = publication.value(key)
+            assert value is not None
+            assert value.snapshot.block.values.shape[-2:] == (16, 20)
+            assert value.snapshot.block.values.dtype.str == "<u2"
         assert measurement.request.roi_xywh == (2, 3, 20, 16)
         assert measurement.actual_working_point is not None
         assert measurement.actual_working_point.roi_origin_yx == (3, 2)
         assert any(call[0] == "reserve" for call in plane.calls)
         assert any(call[0] == "mark_changed" for call in plane.calls)
         front = plane.freeze()
-        signal_key = measurement.signal_key("frame_0")
-        publication = plane.latest_publication(signal_key)
-        assert publication is not None
-        assert publication.value(signal_key) is not None
-        assert signal_key in front.signals
+        assert all(key in front.signals for key in signal_keys)
         terminal = monitor.close()
         assert terminal.source_stopped and terminal.joined
         assert monitor.slot.closed
         assert measurement.camera.capture_state() is False
-        assert plane.latest_publication(signal_key) is None
+        assert all(plane.latest_publication(key) is None for key in signal_keys)
     finally:
         plane.close()
         installation.close()
