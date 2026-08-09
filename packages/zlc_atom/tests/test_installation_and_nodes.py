@@ -51,6 +51,7 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "camera.dcam",
         "camera.pylon",
         "camera.virtual",
+        "camera.virtual_mot",
         "sequencer.hardware",
         "sequencer.virtual",
     )

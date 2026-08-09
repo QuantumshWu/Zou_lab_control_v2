@@ -15,6 +15,7 @@ from zlc_pulse.transport import MemoryRegisterTransport
 
 #: The board line wired to the camera trigger, named as ``board.xdc`` names it.
 CAMERA_TRIGGER_CHANNEL = "emCCD"
+TRAP_CHANNEL = "trap"
 
 
 class VirtualPulseStreamer(PulseStreamer):
@@ -132,9 +133,48 @@ class VirtualPulseStreamer(PulseStreamer):
         if exposures:
             if any(not math.isfinite(value) or value <= 0 for value in exposures):
                 raise ValueError("loaded program camera window exposures must be positive")
-            callback(windows, frame_exposures=exposures)
+            callback(
+                windows,
+                frame_exposures=exposures,
+                trap_off_seconds=_trap_off_before_camera(
+                    program,
+                    camera_channel=self.camera_trigger_channel,
+                ),
+            )
         else:
-            callback(windows)
+            callback(
+                windows,
+                trap_off_seconds=_trap_off_before_camera(
+                    program,
+                    camera_channel=self.camera_trigger_channel,
+                ),
+            )
+
+
+def _trap_off_before_camera(
+    program: CompiledProgram,
+    *,
+    camera_channel: str,
+) -> float:
+    """Return the trap-low time before the first camera window."""
+
+    from zlc_pulse.schedule import trigger_windows
+
+    camera_windows = trigger_windows(program, camera_channel)
+    if not camera_windows:
+        return 0.0
+    first_camera_tick = int(camera_windows[0][0])
+    if first_camera_tick <= 0:
+        return 0.0
+    try:
+        trap_windows = trigger_windows(program, TRAP_CHANNEL)
+    except ValueError:
+        return 0.0
+    trap_on_ticks = sum(
+        max(0, min(end, first_camera_tick) - max(start, 0))
+        for start, end in trap_windows
+    )
+    return max(0.0, (first_camera_tick - trap_on_ticks) / float(program.clock_hz))
 
 
 class VirtualSequencer(SequencerDevice):
@@ -164,4 +204,9 @@ class VirtualSequencer(SequencerDevice):
         self.streamer.camera_trigger_channel = channel
 
 
-__all__ = ["CAMERA_TRIGGER_CHANNEL", "VirtualPulseStreamer", "VirtualSequencer"]
+__all__ = [
+    "CAMERA_TRIGGER_CHANNEL",
+    "TRAP_CHANNEL",
+    "VirtualPulseStreamer",
+    "VirtualSequencer",
+]

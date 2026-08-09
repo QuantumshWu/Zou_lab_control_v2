@@ -20,12 +20,14 @@ independent of the device packages.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA, PYLON_CAMERA_SCHEMA
 from zlc_atom.devices.sequencer.device_types import HARDWARE_SEQUENCER_SCHEMA
 from zlc_atom.devices.simulation.device_types import (
     VIRTUAL_CAMERA_SCHEMA,
+    VIRTUAL_MOT_CAMERA_SCHEMA,
     VIRTUAL_SEQUENCER_SCHEMA,
 )
 from zlc_atom.install import create_installation, discover_device_catalog
@@ -69,6 +71,10 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
 def test_the_virtual_camera_keeps_its_own_vocabulary() -> None:
     assert _fields(VIRTUAL_CAMERA_SCHEMA) >= {"grid_shape_yx", "seed"}
     assert "device_index" not in _fields(VIRTUAL_CAMERA_SCHEMA)
+    assert _fields(VIRTUAL_MOT_CAMERA_SCHEMA) == {
+        "frame_shape_yx",
+        "exposure_seconds",
+    }
 
 
 def test_a_real_board_has_an_endpoint_and_a_virtual_one_does_not() -> None:
@@ -169,8 +175,31 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
     assert [item.type_id for item in virtual.devices] == [
         "camera.virtual",
         "sequencer.virtual",
+        "camera.virtual_mot",
     ]
     assert virtual.devices[1].parameters == {}
+    assert virtual.devices[2].instance_id == "mot_camera"
+    installation = create_installation("virtual")
+    try:
+        mot_camera = installation.device("mot_camera")
+        assert mot_camera.capture_working_point().sensor_shape_yx == (1200, 1920)
+        mot_camera.configure_measurement(
+            exposure_seconds=0.05,
+            roi_xywh=(100, 50, 320, 240),
+        )
+        mot_camera.arm(
+            1,
+            source_group_sizes=(1,),
+            buffer_frame_count=1,
+            timeout=1.0,
+        )
+        installation.world.fire()
+        record = mot_camera.read_frame_records(1, timeout=2.0, exact=True)[0]
+        assert record.image.shape == (240, 320)
+        assert float(np.std(record.image)) > 0.0
+        mot_camera.finish_record_capture()
+    finally:
+        installation.close()
     # Mixing is a list, not a mode: devices are installed one by one.
     mixed = (
         {"key": "camera", "type_id": "camera.virtual"},

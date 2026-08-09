@@ -45,6 +45,49 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     assert float(np.var(dark)) > 0.0
 
 
+def test_virtual_sites_have_repeatable_efficiency_and_psf_diversity() -> None:
+    world = SimulationWorld(seed=4)
+    efficiency = world.site_efficiency
+    sigma_xy = world.site_psf_sigma_xy
+    angles = world.site_psf_angle_radians
+    skew = world.site_psf_skew
+
+    assert efficiency.shape == (35,)
+    assert float(np.max(efficiency) / np.min(efficiency)) == pytest.approx(
+        2.0, rel=0.10
+    )
+    assert sigma_xy.shape == (35, 2)
+    assert float(np.ptp(sigma_xy[:, 0])) > 0.05
+    assert float(np.ptp(sigma_xy[:, 1])) > 0.05
+    assert float(np.ptp(angles)) > 0.05
+    assert float(np.ptp(skew)) > 0.05
+    np.testing.assert_allclose(
+        SimulationWorld(seed=4).site_efficiency,
+        efficiency,
+    )
+
+
+def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> None:
+    world = SimulationWorld(seed=11)
+    patterns: list[np.ndarray] = []
+    for _ in range(8):
+        world.fire()
+        patterns.append(world.occupancy)
+
+    assert len({pattern.tobytes() for pattern in patterns}) > 2
+    assert any(
+        not np.array_equal(right, np.logical_not(left))
+        for left, right in zip(patterns, patterns[1:], strict=True)
+    )
+
+
+def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
+    world = SimulationWorld(seed=3)
+    world.set_occupancy(np.ones(35, dtype=bool))
+    world.fire(trap_off_seconds=1.0)
+    assert not np.any(world.occupancy)
+
+
 def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
     world = SimulationWorld(seed=1)
     streamer = VirtualPulseStreamer(
@@ -100,8 +143,8 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         arm_sequencer(sequencer, pulse)
         expected = []
         for _ in range(repeats):
-            expected.append(installation.world.occupancy)
             sequencer.fire()
+            expected.append(installation.world.occupancy)
             sequencer.wait_done(1.0)
         result = capture.collect()
         labels = np.asarray(expected, dtype=bool)
