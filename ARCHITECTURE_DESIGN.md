@@ -238,7 +238,7 @@ SiteMap 只负责“site 在哪里、身份如何对齐”。科学积分框/PSF
 
 Calibration result 中的所有 site 数据共享 SiteMap 的实际 `site_ids` 和同一 pixel coordinate frame。每种模型都在这个结果中保存自己的 held-out samples、fidelity、thresholds 和 fit 所需数据；不能只保留 default model 后再重算另外两种模型。
 
-循环结束后的代码路径保持直接：Calibration Task 先把该结果写成 calibration JSON，然后把同一个 Python result 交给现有 `zlc_plot` 公开 API，保存四张 report 图片：(1) site-map image + centers；(2) box 模型的 per-site grid；(3) per-site PSF 模型的 per-site grid；(4) uniform PSF 模型的 per-site grid。JSON 和四张图是同一次 Calibration 的两种文件输出，不是两次分析。TaskConsole 不显示、挂载或自动打开 report；Monitor 只显示循环中的 measurement-linked preview。Calibration Task 决定 report 内容，`zlc_plot` 实现绘图；Task 不持有 Qt、TaskConsole panel state 或另一个 renderer，也不为这一条路径引入通用 report registry/coordinator/transaction 框架。
+循环结束后的代码路径保持直接：Calibration Task 先把该结果写成 calibration JSON，然后把同一个 Python result 交给现有 `zlc_plot` 公开 API，保存四张 report 图片：(1) site-map image + centers；(2) box 模型的 per-site grid；(3) per-site PSF 模型的 per-site grid；(4) uniform PSF 模型的 per-site grid。三个 Distribution grid 都启用 plot-owned threshold classifier，并在同一次 `configure()` 中使用该 readout model 已算出的 per-site thresholds；不得再启用普通 `bimodal_gaussian` fit 伪装 classifier。JSON 和四张图是同一次 Calibration 的两种文件输出，不是两次分析。TaskConsole 不显示、挂载或自动打开 report；Monitor 只显示循环中的 measurement-linked preview。Calibration Task 决定 report 内容，`zlc_plot` 实现绘图；Task 不持有 Qt、TaskConsole panel state 或另一个 renderer，也不为这一条路径引入通用 report registry/coordinator/transaction 框架。
 
 `SiteMap` 不是 plot kind，UI 中也不存在 `SiteMap Plot`。它是 Calibration artifact 里的 domain data。Occupancy 在与 `frame_judged` 相同的 publication 中显式发布 typed `site_overlay` sibling：canonical site ids、人类短标签、pixel centers 和当前 status。固定的 `Image` panel 分别选择 Image signal 与可选 Overlay signal；Workbench 只核对二者属于同一 publication，不从 run record 偷读 calibration JSON，也不从 signal 名称猜 SiteMap。`zlc_plot` 只把这份通用 point-overlay data 画成 markers。绘图圈半径是 Image display 属性（可由 point spacing 自动给出），不与科学 integration half-width 混为一个参数。
 
@@ -351,13 +351,15 @@ Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `Pa
 
 Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc_plot`：semantic mapping、整张 display parameter mapping、size、Image overlay 和 fit choice。Workbench 不判断哪一个字段能原位更新，也不循环调用单字段 setter；`zlc_plot` 用当前 `PlotSpec`、`ParameterSchema`、layout、overlay 和 fit 状态比较差异，合并需要的 render effects，并在同一个 worker job 中最多发布一张同步 front。只要 signal/schema 兼容，就保留同一个 host 和 Figure；只有 signal 改变、generation 改变或 schema 不兼容才替换 host。Fit 求解本身继续是异步科学计算，完成后再发布 fit overlay。owner thread 不调用 `.result()` 等待，旧的完整配置 job 由同一 coalescing key 淘汰。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
 
+Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display 参数，和通用 fit 完全独立。打开后由 `zlc_plot` 自己执行 bimodal Gaussian classification fit，显示左右 Gaussian、总和、可拖动 threshold，以及当前 threshold 对应的 L/R correctness 和 balanced fidelity；初值是 equal-prior 最优 threshold。普通 fit 的启停、model、结果和状态不得创建、移动或清除 classifier，classifier 也不得写普通 `fit_status`。FacetGrid[Histogram] 对每个 cell 使用同一 classifier，overview 中保留三条曲线、threshold 和较小字号的三项数值；focus 后只把该 cell 的 threshold 变成可交互 selector。外部若已有模型 threshold，就把 toggle 与整组 canonical thresholds 放进同一次 `configure()`，不先画静态线再另跑普通 fit。
+
 ### 10.4 各 plot kind 的理想参数
 
 | TaskConsole label / kind | schema 中的 semantic 参数 | schema 中的 display/interaction | Setting 初始 data-independent surface |
 |---|---|---|---|
 | `2D image` / Image | X/Y axes；Reduction；optional typed Overlay signal | colormap；color limits；interpolation；colorbar；optional small point labels；marker radius/style；empty/occupied/invalid colors；Area selector；2-D fit | title；colormap；color limits；interpolation；colorbar；all overlay/marker styling；selector display |
 | `1D vector` / Curve | X axis；Group by；Reduction | labels/units；grid；limits；X-range selector；compatible fit | title；X/Y labels；units；grid；limits；selector display |
-| `Distribution` / Histogram | value/reduction selection | bins；density；cumulative；log Y；range selector；compatible fit | title；bins；density；cumulative；log Y；range/limits |
+| `Distribution` / Histogram | value/reduction selection | bins；density；cumulative；log Y；range selector；独立 threshold-classifier switch/selector；compatible fit | title；bins；density；cumulative；log Y；classifier switch；range/limits |
 | `Rolling trace` / Rolling | Group by；Reduction | window；Y limits；side distribution；X-range；compatible fit | title；window；Y limits；grid；side-distribution display；selector display |
 | `Site grid` / FacetGrid[Curve] | Facet axis；fixed Curve cell semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing；focus/cell display；Curve display parameters |
 

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.ndimage import median_filter
-from scipy.optimize import least_squares, minimize
+from scipy.optimize import least_squares, minimize, minimize_scalar
 from scipy.signal import find_peaks
 
 from ._validation import finite_real as _finite_real
@@ -201,7 +201,6 @@ class FitPresentationSpec:
     """Backend-neutral metadata for additive curves or one ellipse glyph."""
 
     components: tuple[FitComponentSpec, ...] = ()
-    crossover_components: tuple[str, str] | None = None
     ellipse_glyph: FitEllipseGlyphSpec | None = None
 
     def __post_init__(self) -> None:
@@ -211,31 +210,13 @@ class FitPresentationSpec:
         component_ids = tuple(item.component_id for item in components)
         if len(component_ids) != len(set(component_ids)):
             raise ValueError("fit presentation component ids must be unique")
-        crossover = self.crossover_components
-        if crossover is not None:
-            crossover = tuple(
-                _text(name, "fit crossover component id") for name in crossover
-            )
-            if (
-                len(crossover) != 2
-                or crossover[0] == crossover[1]
-            ):
-                raise ValueError("fit crossover requires two distinct component ids")
-            unknown = set(crossover) - set(component_ids)
-            if unknown:
-                raise ValueError(
-                    f"fit crossover names unknown components: {sorted(unknown)}"
-                )
         if self.ellipse_glyph is not None and not isinstance(
             self.ellipse_glyph, FitEllipseGlyphSpec
         ):
             raise TypeError("ellipse_glyph must be FitEllipseGlyphSpec or None")
-        if self.ellipse_glyph is not None and (
-            components or crossover is not None
-        ):
+        if self.ellipse_glyph is not None and components:
             raise ValueError("ellipse glyph presentation cannot also define components")
         object.__setattr__(self, "components", components)
-        object.__setattr__(self, "crossover_components", crossover)
 
 
 @dataclass(frozen=True, slots=True)
@@ -940,6 +921,49 @@ class FitResult:
 
     def with_parameter_units(self, units: Mapping[str, str]) -> "FitResult":
         return replace(self, parameter_units=units)
+
+
+def _bimodal_classifier_metrics(
+    result: FitResult,
+    threshold: float | None = None,
+) -> tuple[float, float, float, float]:
+    """Return threshold, left/right correctness, and balanced fidelity."""
+
+    if result.model.model_id != "bimodal_gaussian" or not result.success:
+        raise ValueError("threshold classification requires a successful bimodal fit")
+    values = result.parameters
+    center = float(values["center"])
+    separation = float(values["center_splitting"])
+    left_mean = center - 0.5 * separation
+    right_mean = center + 0.5 * separation
+    left_sigma = max(abs(float(values["left_sigma"])), np.finfo(float).eps)
+    right_sigma = max(abs(float(values["right_sigma"])), np.finfo(float).eps)
+
+    def cdf(value: float, mean: float, sigma: float) -> float:
+        return 0.5 * (
+            1.0 + math.erf((value - mean) / (sigma * math.sqrt(2.0)))
+        )
+
+    def error(value: float) -> float:
+        return 0.5 * (
+            1.0 - cdf(value, left_mean, left_sigma)
+            + cdf(value, right_mean, right_sigma)
+        )
+
+    if threshold is None:
+        lower, upper = sorted((left_mean, right_mean))
+        if upper <= lower:
+            threshold = lower
+        else:
+            optimum = minimize_scalar(error, bounds=(lower, upper), method="bounded")
+            threshold = float(
+                optimum.x if optimum.success else 0.5 * (lower + upper)
+            )
+    else:
+        threshold = float(threshold)
+    left = cdf(threshold, left_mean, left_sigma)
+    right = 1.0 - cdf(threshold, right_mean, right_sigma)
+    return threshold, left, right, 0.5 * (left + right)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2322,7 +2346,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     FitComponentSpec("left", _bimodal_left),
                     FitComponentSpec("right", _bimodal_right),
                 ),
-                crossover_components=("left", "right"),
             ),
             default_for=(FitTarget.HISTOGRAM,),
         ),

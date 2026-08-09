@@ -20,10 +20,17 @@ from ._session_state import (
     _StartedFitRequest,
     FitEvent,
 )
-from .fit import FacetFitBatchResult, FitCancelled, FitModelSpec, FitOptions, FitResult
+from .fit import (
+    FacetFitBatchResult,
+    FitCancelled,
+    FitModelSpec,
+    FitOptions,
+    FitResult,
+    _bimodal_classifier_metrics,
+)
 from .parameters import RenderEffect
-from .selectors import SelectorKind
-from .specs import FacetGridPlot
+from .selectors import SelectorKind, SelectorState
+from .specs import FacetGridPlot, HistogramPlot
 
 if TYPE_CHECKING:
     from .session import PlotSession
@@ -571,6 +578,163 @@ class FitSessionMixin:
         return result.with_parameter_units(
             projection._fit_parameter_units(model)
         )
+
+    def _threshold_classifier_enabled(self) -> bool:
+        semantic = (
+            self._spec.cell
+            if isinstance(self._spec, FacetGridPlot)
+            else self._spec
+        )
+        return bool(
+            isinstance(semantic, HistogramPlot)
+            and self.display_state.values.get("threshold_classifier", False)
+        )
+
+    def _refresh_threshold_classifier(self) -> None:
+        """Solve the Distribution classifier without touching accepted fit state."""
+
+        if not self._threshold_classifier_enabled():
+            self._classifier_results = ()
+            self._classifier_overlays = ()
+            self._classifier_thresholds = ()
+            try:
+                self._selector_controller.remove(SelectorKind.THRESHOLD)
+            except KeyError:
+                pass
+            return
+
+        projection = self._projected
+        model = self._resolve_fit_model("bimodal_gaussian")
+        if isinstance(self._spec, FacetGridPlot):
+            batch, _selections = self._fit_facet_batch(
+                projection,
+                model,
+                initial=None,
+                bounds=None,
+                options=None,
+                cancelled=None,
+            )
+            results = batch.results
+            overlays = batch.overlays
+        else:
+            selection = projection.fit_selection(model)
+            result = self._solve_fit_selection(
+                projection,
+                model,
+                selection,
+                initial=None,
+                bounds=None,
+                options=None,
+                cancelled=None,
+            )
+            results = (result,)
+            overlays = (projection._make_fit_overlay(result, selection),)
+        self._classifier_results = tuple(results)
+        self._classifier_overlays = tuple(overlays)
+        self._classifier_thresholds = tuple(
+            None
+            if result is None or not result.success
+            else _bimodal_classifier_metrics(result)[0]
+            for result in results
+        )
+        try:
+            self._selector_controller.remove(SelectorKind.THRESHOLD)
+        except KeyError:
+            pass
+
+    def _classifier_thresholds_for_render(self) -> tuple[float | None, ...]:
+        thresholds = list(self._classifier_thresholds)
+        if not thresholds:
+            return ()
+        snapshot = self._selector_controller.snapshot()
+        selected = (
+            snapshot.candidate
+            if snapshot.candidate is not None
+            and snapshot.candidate.kind is SelectorKind.THRESHOLD
+            else next(
+                (
+                    state
+                    for state in snapshot.committed
+                    if state.kind is SelectorKind.THRESHOLD
+                ),
+                None,
+            )
+        )
+        if selected is not None:
+            index = 0 if selected.facet_index is None else selected.facet_index
+            if 0 <= index < len(thresholds):
+                thresholds[index] = float(selected.value)
+        return tuple(thresholds)
+
+    def _classifier_labels(
+        self,
+        thresholds: tuple[float | None, ...],
+        display_thresholds: tuple[float | None, ...],
+    ) -> tuple[str, ...]:
+        labels: list[str] = []
+        for result, threshold, displayed in zip(
+            self._classifier_results,
+            thresholds,
+            display_thresholds,
+            strict=True,
+        ):
+            if (
+                result is None
+                or threshold is None
+                or displayed is None
+                or not result.success
+            ):
+                labels.append("")
+                continue
+            _threshold, left, right, fidelity = _bimodal_classifier_metrics(
+                result,
+                threshold,
+            )
+            labels.append(
+                f"Threshold {displayed:.4g}\n"
+                f"L/R {100.0 * left:.1f}%/{100.0 * right:.1f}%\n"
+                f"Fidelity {100.0 * fidelity:.1f}%"
+            )
+        return tuple(labels)
+
+    def _derived_threshold_classifier_selector(self) -> SelectorState | None:
+        if not self._threshold_classifier_enabled() or not self._classifier_thresholds:
+            return None
+        index = 0 if self._focused_facet_index is None else self._focused_facet_index
+        if index < 0 or index >= len(self._classifier_thresholds):
+            return None
+        threshold = self._classifier_thresholds[index]
+        if threshold is None:
+            return None
+        return SelectorState(
+            SelectorKind.THRESHOLD,
+            float(threshold),
+            facet_index=(index if isinstance(self._spec, FacetGridPlot) else None),
+        )
+
+    def _set_classifier_thresholds_state(
+        self,
+        thresholds: Sequence[float | None],
+    ) -> None:
+        if not self._threshold_classifier_enabled():
+            raise RuntimeError("threshold classifier is not enabled")
+        selected = tuple(thresholds)
+        if len(selected) != len(self._classifier_results):
+            raise ValueError("classifier thresholds must match the distributions")
+        normalized: list[float | None] = []
+        for value in selected:
+            if value is None:
+                normalized.append(None)
+                continue
+            numeric = float(value)
+            if not np.isfinite(numeric):
+                raise ValueError("classifier thresholds must be finite or None")
+            normalized.append(numeric)
+        self._classifier_thresholds = tuple(normalized)
+        try:
+            self._selector_controller.remove(SelectorKind.THRESHOLD)
+        except KeyError:
+            pass
 
     def _schedule_fit_completion(
         self,

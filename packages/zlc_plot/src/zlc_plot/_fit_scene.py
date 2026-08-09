@@ -42,7 +42,6 @@ class FitOverlay:
 
     polylines: tuple[FitPolyline, ...] = ()
     ellipse_glyph: FitEllipseGlyph | None = None
-    suggested_threshold: float | None = None
     success: bool = True
     formula: str = ""
     parameter_display: tuple[FitParameterDisplay, ...] = ()

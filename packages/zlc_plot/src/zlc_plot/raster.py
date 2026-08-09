@@ -9,7 +9,7 @@ All plot mutations and raster capture run on the single worker owned by
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
 from enum import Enum
@@ -470,14 +470,6 @@ class _WorkerSessionAdapter:
 
     def set_threshold_selector(self, value: float, *, display: bool = True) -> object:
         return self._session().set_threshold_selector(value, display=display)
-
-    def set_facet_thresholds(
-        self,
-        thresholds: tuple[float | None, ...],
-        *,
-        display: bool = True,
-    ) -> object:
-        return self._session().set_facet_thresholds(thresholds, display=display)
 
     def set_crosshair_selector(self, x: float, y: float, *, display: bool = True) -> object:
         return self._session().set_crosshair_selector(x, y, display=display)
@@ -1164,6 +1156,7 @@ class RasterPlotHost:
         size: str | None = None,
         image_overlay: "ImagePointOverlay | None | object" = _UNSET,
         fit_model: str | None | object = _UNSET,
+        classifier_thresholds: Sequence[float | None] | object = _UNSET,
     ) -> Future[RasterOperation["DisplayDescription"]]:
         """Submit the complete desired state as one coalesced worker job."""
 
@@ -1176,6 +1169,8 @@ class RasterPlotHost:
             configuration["image_overlay"] = image_overlay
         if fit_model is not _UNSET:
             configuration["fit_model"] = fit_model
+        if classifier_thresholds is not _UNSET:
+            configuration["classifier_thresholds"] = tuple(classifier_thresholds)
         return self._dispatch_session(
             self._worker_adapter.configure,
             _mode=_DispatchMode.PUBLISH,
@@ -1550,20 +1545,6 @@ class RasterPlotHost:
             value,
             display=display,
             _mode=_DispatchMode.PUBLISH,
-        )
-
-    def set_facet_thresholds(
-        self,
-        thresholds: tuple[float | None, ...] | list[float | None],
-        *,
-        display: bool = True,
-    ) -> Future[RasterOperation[tuple[float | None, ...]]]:
-        return self._dispatch_session(
-            self._worker_adapter.set_facet_thresholds,
-            tuple(thresholds),
-            display=display,
-            _mode=_DispatchMode.PUBLISH,
-            coalesce_key="facet-thresholds",
         )
 
     def set_crosshair_selector(

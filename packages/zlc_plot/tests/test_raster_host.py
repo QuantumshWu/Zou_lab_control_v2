@@ -9,10 +9,18 @@ import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
-from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot
+from zlc_plot import (
+    AxisRef,
+    CurvePlot,
+    FacetGridPlot,
+    HistogramPlot,
+    SelectorKind,
+    parameter_controls,
+)
 from zlc_plot.fit import FacetFitBatchResult
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
+from zlc_plot.ui import ControlKind
 
 
 def _snapshot() -> DatasetSnapshot:
@@ -143,8 +151,23 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         host.close(timeout=10)
 
 
-def test_host_presents_authoritative_thresholds_and_static_fit_for_every_facet() -> None:
-    """A report configures the shared plot; it does not paint annotations itself."""
+def test_a_regular_bimodal_fit_does_not_create_a_threshold_classifier() -> None:
+    host = RasterPlotHost.from_plot(
+        _site_distribution_snapshot(),
+        FacetGridPlot(AxisRef.point("site"), HistogramPlot()),
+    )
+    try:
+        host.wait_for_front(timeout=10)
+        host.fit("bimodal_gaussian", live=False).result(timeout=30)
+
+        with pytest.raises(KeyError):
+            host.selector_state(SelectorKind.THRESHOLD).result(timeout=10)
+    finally:
+        host.close(timeout=10)
+
+
+def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
+    """The Distribution switch owns its fit, threshold, and compact cell text."""
 
     host = RasterPlotHost.from_plot(
         _site_distribution_snapshot(),
@@ -152,24 +175,88 @@ def test_host_presents_authoritative_thresholds_and_static_fit_for_every_facet()
     )
     try:
         initial = host.wait_for_front(timeout=10)
-        threshold_operation = host.set_facet_thresholds(
-            (-0.25, 0.75),
-            display=False,
-        ).result(timeout=10)
-        assert threshold_operation.value == (-0.25, 0.75)
-        assert threshold_operation.front.identity.sequence > initial.identity.sequence
-        assert threshold_operation.front.buffer.pixels != initial.buffer.pixels, (
-            "threshold annotations did not reach the raster front"
-        )
-
-        fit_operation = host.fit(
-            "bimodal_gaussian",
-            live=False,
-            fit_all_facets=True,
+        configured = host.configure(
+            parameters={"threshold_classifier": True},
         ).result(timeout=30)
-        assert isinstance(fit_operation.value, FacetFitBatchResult)
-        assert len(fit_operation.value.results) == 2
-        assert fit_operation.front.identity.sequence > threshold_operation.front.identity.sequence
+        assert configured.value.display_state.values["threshold_classifier"] is True
+        classifier_control = next(
+            control
+            for control in parameter_controls(
+                configured.value.parameter_schema,
+                configured.value.display_state.values,
+            )
+            if control.name == "threshold_classifier"
+        )
+        assert classifier_control.kind is ControlKind.BOOLEAN
+        assert configured.front.identity.sequence > initial.identity.sequence
+        assert configured.front.buffer.pixels != initial.buffer.pixels
+
+        status = host.dispatch_control(
+            lambda: host._worker_adapter._session().fit_status
+        ).result(timeout=10)
+        assert status.value is None
+
+        details, facet_font = host.dispatch_control(
+            lambda: (
+                tuple(
+                    (
+                        len(artists[0]),
+                        artists[2].get_text(),
+                        artists[2].get_fontsize(),
+                    )
+                    for artists in host._worker_adapter._session()._renderer._classifier_artists.values()
+                ),
+                host._worker_adapter._session()._defaults.style.fonts.facet_fit_annotation_pt,
+            )
+        ).result(timeout=10).value
+        assert len(details) == 2
+        assert all(line_count == 3 for line_count, _label, _font in details)
+        assert all("Threshold" in label for _line_count, label, _font in details)
+        assert all("L/R" in label for _line_count, label, _font in details)
+        assert all("Fidelity" in label for _line_count, label, _font in details)
+        assert all(font == facet_font for _line_count, _label, font in details)
+
+        first_cell = next(
+            axes
+            for axes in configured.front.interaction.axes
+            if axes.role == "facet_cell" and axes.cell_index == 0
+        )
+        host.focus_facet(configured.front.identity, first_cell).result(timeout=10)
+        optimum = host.selector_state(
+            SelectorKind.THRESHOLD,
+            display=False,
+        ).result(timeout=10).value
+        moved = host.set_threshold_selector(
+            float(optimum.value) + 0.25,
+            display=False,
+        ).result(timeout=10).value
+        assert moved.value != optimum.value
+        moved_label = host.dispatch_control(
+            lambda: host._worker_adapter._session()._renderer._classifier_labels[0]
+        ).result(timeout=10).value
+        assert moved_label != details[0][1]
+        assert "Fidelity" in moved_label
+
+        host.fit("bimodal_gaussian", live=False).result(timeout=30)
+        assert host.selector_state(
+            SelectorKind.THRESHOLD,
+            display=False,
+        ).result(timeout=10).value.value == moved.value
+        host.clear_fit().result(timeout=10)
+        assert host.selector_state(
+            SelectorKind.THRESHOLD,
+            display=False,
+        ).result(timeout=10).value.value == moved.value
+
+        configured = host.configure(
+            parameters={"threshold_classifier": True},
+            classifier_thresholds=(-0.25, 0.75),
+        ).result(timeout=10)
+        assert configured.value.display_state.values["threshold_classifier"] is True
+        assert host.selector_state(
+            SelectorKind.THRESHOLD,
+            display=False,
+        ).result(timeout=10).value.value == -0.25
     finally:
         host.close(timeout=10)
 

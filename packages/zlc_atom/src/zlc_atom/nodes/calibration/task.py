@@ -329,8 +329,10 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
             labels=PlotLabels(title=title),
             size="4x4",
         ) as plot:
-            plot.set_facet_thresholds(thresholds, display=False)
-            plot.fit("bimodal_gaussian", live=False, fit_all_facets=True)
+            plot.configure(
+                parameters={"threshold_classifier": True},
+                classifier_thresholds=thresholds,
+            )
             plot.save(report_root / f"{model.kind.value}.png")
 
     return report_root

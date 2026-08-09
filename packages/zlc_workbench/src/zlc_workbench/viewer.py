@@ -34,7 +34,6 @@ from .panel_save import (
 from .panel_state import PanelState
 from .plot_annotations import (
     PanelPlotAnnotations,
-    apply_panel_plot_annotations,
 )
 
 
@@ -405,26 +404,20 @@ class FigureViewerPresenter:
     ) -> Exception | None:
         """Apply the saved panel decisions through the plot host's public API."""
 
-        if state is not None:
-            display = dict(state.display)
-            cls._await(
-                host.configure(
-                    parameters=display,
-                    size=state.size,
-                )
-            )
-
         selected_annotations = (
             PanelPlotAnnotations() if annotations is None else annotations
         )
-        for operation in apply_panel_plot_annotations(
-            host,
-            selected_annotations,
-            # Archives store producer/canonical values, never whatever unit
-            # happened to be selected when the panel was saved.
-            display=False,
-        ):
-            cls._await(operation)
+        display = {} if state is None else dict(state.display)
+        thresholds: tuple[float | None, ...] | None = None
+        if not selected_annotations.empty:
+            display["threshold_classifier"] = True
+            thresholds = selected_annotations.classifier_thresholds
+        configuration: dict[str, object] = {"parameters": display}
+        if state is not None:
+            configuration["size"] = state.size
+        if thresholds is not None:
+            configuration["classifier_thresholds"] = thresholds
+        cls._await(host.configure(**configuration))
 
         if state is None:
             return None

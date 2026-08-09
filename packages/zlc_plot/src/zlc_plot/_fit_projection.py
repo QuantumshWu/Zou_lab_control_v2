@@ -1284,48 +1284,13 @@ class FitProjection:
             dtype=float,
         )
 
-    @staticmethod
-    def _fit_crossover_coordinate(
-        coordinates: np.ndarray,
-        first: np.ndarray,
-        second: np.ndarray,
-    ) -> float:
-        x = np.asarray(coordinates, dtype=float).reshape(-1)
-        left = np.asarray(first, dtype=float).reshape(-1)
-        right = np.asarray(second, dtype=float).reshape(-1)
-        finite = np.isfinite(x) & np.isfinite(left) & np.isfinite(right)
-        x, left, right = x[finite], left[finite], right[finite]
-        if x.size == 0:
-            raise ValueError("fit crossover requires finite component curves")
-        difference = left - right
-        crossings = np.flatnonzero(
-            (difference[:-1] == 0.0)
-            | (difference[1:] == 0.0)
-            | (np.signbit(difference[:-1]) != np.signbit(difference[1:]))
-        )
-        if crossings.size:
-            strength = np.minimum(
-                np.abs(left[crossings]) + np.abs(right[crossings]),
-                np.abs(left[crossings + 1]) + np.abs(right[crossings + 1]),
-            )
-            index = int(crossings[int(np.argmax(strength))])
-            denominator = difference[index + 1] - difference[index]
-            fraction = (
-                0.5
-                if denominator == 0.0
-                else float(np.clip(-difference[index] / denominator, 0.0, 1.0))
-            )
-            return float(x[index] + fraction * (x[index + 1] - x[index]))
-        scale = np.abs(left) + np.abs(right) + np.finfo(float).eps
-        return float(x[int(np.argmin(np.abs(difference) / scale))])
-
     def _fit_overlay_polylines(
         self,
         result: FitResult,
         selection: FitSelection,
-    ) -> tuple[tuple[FitPolyline, ...], float | None]:
+    ) -> tuple[FitPolyline, ...]:
         if not result.success or result.model.independent_arity != 1:
-            return (), None
+            return ()
         presentation = result.model.presentation
         canonical, display_x = self._fit_overlay_curve_domain(result, selection)
         if not presentation.components:
@@ -1342,14 +1307,12 @@ class FitProjection:
                 )
             )
             role = "total" if self._is_histogram_plot() else "primary"
-            return (
-                FitPolyline(display_x, fitted_display, role=role),
-            ), None
+            return (FitPolyline(display_x, fitted_display, role=role),)
 
         source = np.asarray(canonical, dtype=float).reshape(-1)
         finite = source[np.isfinite(source)]
         if finite.size < 2:
-            return (), None
+            return ()
         sample_count = self._defaults.style.artists.fit_component_sample_count
         dense = np.linspace(float(np.min(finite)), float(np.max(finite)), sample_count)
         display_x = self._fit_solver_coordinate_to_display(
@@ -1398,22 +1361,7 @@ class FitProjection:
             )
             for index, component in enumerate(presentation.components)
         ) + (FitPolyline(display_x, total, role="total"),)
-        crossover = presentation.crossover_components
-        if crossover is None:
-            return polylines, None
-        canonical_threshold = self._fit_crossover_coordinate(
-            dense,
-            component_values[crossover[0]],
-            component_values[crossover[1]],
-        )
-        threshold = float(
-            self._fit_solver_coordinate_to_display(
-                np.asarray((canonical_threshold,), dtype=float),
-                result.model.coordinate_relations[0],
-                UnitRelation.AXIS_0,
-            )[0]
-        )
-        return polylines, threshold
+        return polylines
 
     def _fit_overlay_ellipse(
         self,
@@ -1459,14 +1407,13 @@ class FitProjection:
             ),
             None,
         )
-        polylines, suggested_threshold = self._fit_overlay_polylines(
+        polylines = self._fit_overlay_polylines(
             result,
             selection,
         )
         return FitOverlay(
             polylines=polylines,
             ellipse_glyph=self._fit_overlay_ellipse(result, parameter_display),
-            suggested_threshold=suggested_threshold,
             success=result.success,
             formula=result.model.formula or "",
             parameter_display=parameter_display,

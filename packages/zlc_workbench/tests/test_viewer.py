@@ -617,12 +617,12 @@ def test_panel_save_annotation_roundtrip_keeps_canonical_units(tmp_path) -> None
     presenter = build(view)
     try:
         assert presenter.open(str(written.archive)) is not None, view.status
-        assert presenter.plot_annotations.facet_thresholds == (1.0, 2.0)
+        assert presenter.plot_annotations.classifier_thresholds == (1.0, 2.0)
         host = presenter._host
         assert host is not None
         # Had the Viewer treated archived canonical values as display values,
         # these would be 0.001 V and 0.002 V after its mV projection.
-        assert tuple(host._session._facet_thresholds) == (1.0, 2.0)
+        assert tuple(host._session._classifier_thresholds) == (1.0, 2.0)
         description = host.describe_display().result(timeout=10).value
         assert str(description.display_state.values["value_display_unit"]) == "mV"
     finally:

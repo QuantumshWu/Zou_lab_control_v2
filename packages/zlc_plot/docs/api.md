@@ -244,6 +244,21 @@ session.save("curve.png")
 rgba = session.rgba()
 ```
 
+`HistogramPlot` and `FacetGridPlot(cell=HistogramPlot())` expose an independent
+`threshold_classifier` display parameter. Submit the complete target in one
+call; an authored threshold sequence is optional and follows facet order:
+
+```python
+session.configure(
+    parameters={"threshold_classifier": True},
+    classifier_thresholds=(0.15, 0.21, 0.18),
+)
+```
+
+The classifier owns its bimodal Gaussian classification fit, initial
+equal-prior threshold, component/sum curves, movable threshold, and L/R and
+balanced-fidelity readout. It is independent of the ordinary `fit()` state.
+
 Use the context-manager form when practical:
 
 ```python
@@ -498,7 +513,7 @@ coordinate expansion path unless they provide their own specialized solver.
 每种 selector 最多存在一个。默认 fit 严格按 `AREA > X_RANGE > viewport > all` 解析；需要固定 live fit
 authority 时可传入 `selector_kind=SelectorKind.AREA`、
 `selector_kind=SelectorKind.X_RANGE` 或 `selector_kind=SelectorKind.THRESHOLD`。
-Histogram bimodal fit 生成的 crossover 与手工 Threshold 共用一个 selector authority；命中时 Threshold 优先于 Area。这个 derived Threshold 默认是显示/分类状态，不反向裁剪生成它的 fit，只有显式绑定 `selector_kind=THRESHOLD` 时才成为 fit scope。crosshair 不作为 fit scope；color limits 根本不属于 data selector。`session.fit_status` 在没有 overlay
+Histogram 的 `threshold_classifier` 独立拥有 bimodal classification fit、equal-prior 初始 threshold、三条分类曲线和 L/R/Fidelity 显示；普通 `bimodal_gaussian` fit 不创建、移动或清除 classifier，classifier 也不写 `fit_status`。只有调用方明确以 `selector_kind=THRESHOLD` 启动普通 fit 时，当前 threshold 才作为该普通 fit 的 scope。crosshair 不作为 fit scope；color limits 根本不属于 data selector。`session.fit_status` 在没有 overlay
 时为 `None`；只有已接受结果同时匹配当前 data revision 和 fit-context generation
 （canonical selector/viewport authority、facet、projection 与 fit request）时才为 `"current"`；
 selector/viewport 改变后旧结果只标为 `"lagging"`，不会在 pointer motion 中启动新的 solver。
@@ -543,7 +558,7 @@ def show_fit(event):
 unsubscribe = session.subscribe_fit(show_fit)
 ```
 
-Histogram fit 使用 count projection；`density=True` 或 `cumulative=True` 时会明确拒绝 fit，切回两者均为 `False` 后再调用。
+Histogram fit 使用 count projection；`density=True` 或 `cumulative=True` 时会明确拒绝 fit，切回两者均为 `False` 后再调用。Threshold classifier 同样要求 `cumulative=False`，但不依赖普通 fit 的启停或 model choice。
 
 Fit annotation 使用固定 axes-fraction anchor，单图/focus 的 full annotation 为
 3.25 pt，FacetGrid overview 的单行 headline annotation 为固定 3.5 pt；两者

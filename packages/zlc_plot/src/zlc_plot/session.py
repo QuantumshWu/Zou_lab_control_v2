@@ -444,7 +444,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("fit_engine must be FitEngine or None")
         self._fit_engine = fit_engine or FitEngine()
         self._accepted_fit: _AcceptedFit | None = None
-        self._facet_thresholds: tuple[float | None, ...] = ()
+        self._classifier_results: tuple[FitResult | None, ...] = ()
+        self._classifier_overlays = ()
+        self._classifier_thresholds: tuple[float | None, ...] = ()
         self._fit_executor = ThreadPoolExecutor(
             max_workers=defaults.runtime.analysis_worker_count,
             thread_name_prefix=_FIT_THREAD_PREFIX,
@@ -482,6 +484,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             histogram_projection=None,
         )
         self._rebuild_projection()
+        self._refresh_threshold_classifier()
         if isinstance(self._spec, RollingPlot):
             self._rolling_history = self._projection.rolling_history
         self._presentation_epoch = 0
@@ -1169,6 +1172,20 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 (axes_x.low, axes_x.high),
                 self._viewport_y_to_axes(viewport.y),
             )
+        classifier_thresholds = self._classifier_thresholds_for_render()
+        display_classifier_thresholds = tuple(
+            None
+            if value is None
+            else self._projected._canonical_scalar_to_display(
+                value,
+                self._projected._value_quantity(),
+            )
+            for value in classifier_thresholds
+        )
+        classifier_labels = self._classifier_labels(
+            classifier_thresholds,
+            display_classifier_thresholds,
+        )
         with renderer.raster_transaction():
             renderer.present(RenderFrame(
                 payload=self._payload,
@@ -1180,15 +1197,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if self._accepted_fit is None
                     else self._accepted_fit.overlays
                 ),
-                facet_thresholds=tuple(
-                    None
-                    if value is None
-                    else self._projected._canonical_scalar_to_display(
-                        value,
-                        self._projected._value_quantity(),
-                    )
-                    for value in self._facet_thresholds
-                ),
+                classifier_overlays=self._classifier_overlays,
+                classifier_thresholds=display_classifier_thresholds,
+                classifier_labels=classifier_labels,
                 image_overlay=self._image_overlay,
                 selectors=self._painted_selector_snapshot(),
                 facet_index=self._focused_facet_index,
@@ -1242,7 +1253,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._projection,
                 self._image_overlay,
                 self._accepted_fit,
-                self._facet_thresholds,
+                self._classifier_results,
+                self._classifier_overlays,
+                self._classifier_thresholds,
                 self._focused_facet_index,
                 self._facet_focus_index,
                 self._viewport,
@@ -1254,7 +1267,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._rolling_history = projection.rolling_history
             self._image_overlay = image_overlay
             self._accepted_fit = accepted_fit
-            self._facet_thresholds = ()
+            self._refresh_threshold_classifier()
             if isinstance(self._spec, FacetGridPlot):
                 assert new_count is not None
                 self._clamp_facet_state(new_count)
@@ -1280,7 +1293,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._projection,
                     self._image_overlay,
                     self._accepted_fit,
-                    self._facet_thresholds,
+                    self._classifier_results,
+                    self._classifier_overlays,
+                    self._classifier_thresholds,
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._viewport,
@@ -1325,7 +1340,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._projection = presentation.previous_projection
                 self._image_overlay = presentation.previous_image_overlay
                 self._accepted_fit = presentation.previous_accepted_fit
-                self._facet_thresholds = presentation.previous_facet_thresholds
+                self._classifier_results = presentation.previous_classifier_results
+                self._classifier_overlays = presentation.previous_classifier_overlays
+                self._classifier_thresholds = presentation.previous_classifier_thresholds
                 self._focused_facet_index = (
                     presentation.previous_focused_facet_index
                 )
@@ -1374,6 +1391,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
         fit_model: str | None | object = _UNSET,
+        classifier_thresholds: Sequence[float | None] | object = _UNSET,
     ) -> DisplayDescription:
         """Apply one complete desired plot configuration.
 
@@ -1410,12 +1428,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 parameters=display_values,
                 size=size,
                 image_overlay=image_overlay,
+                classifier_thresholds=classifier_thresholds,
             )
         else:
             self._set_configuration_values(
                 display_values,
                 size=_UNSET if size is None else size,
                 image_overlay=image_overlay,
+                classifier_thresholds=classifier_thresholds,
             )
             description = self.describe_display()
 
@@ -1636,6 +1656,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         size: str | object = _UNSET,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
+        classifier_thresholds: Sequence[float | None] | object = _UNSET,
     ) -> DisplayState:
         """Commit display, layout and Image overlay with one renderer update."""
 
@@ -1710,6 +1731,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     effects |= RenderEffect.LAYOUT
                 if overlay_changed:
                     effects |= RenderEffect.OVERLAY
+                if classifier_thresholds is not _UNSET:
+                    effects |= RenderEffect.OVERLAY
                 if effects == RenderEffect.NONE:
                     return previous
                 unit_affecting = bool(
@@ -1733,6 +1756,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 previous_values = (
                     self._viewport,
                     self._accepted_fit,
+                    self._classifier_results,
+                    self._classifier_overlays,
+                    self._classifier_thresholds,
                     self._fit_context_generation,
                     self._layout_revision,
                     self._size,
@@ -1800,6 +1826,24 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._size = selected_size
                     if overlay_changed:
                         self._image_overlay = selected_overlay
+                    classifier_changed = bool(
+                        "threshold_classifier" in accepted_changes
+                        or (
+                            self._threshold_classifier_enabled()
+                            and parameter_effects
+                            & (
+                                RenderEffect.VIEW_PROJECTION
+                                | RenderEffect.PAYLOAD_PROJECTION
+                                | RenderEffect.FIT_SELECTION
+                            )
+                        )
+                    )
+                    if classifier_changed:
+                        self._refresh_threshold_classifier()
+                    if classifier_thresholds is not _UNSET:
+                        if isinstance(classifier_thresholds, (str, bytes)):
+                            raise TypeError("classifier_thresholds must be a sequence")
+                        self._set_classifier_thresholds_state(classifier_thresholds)
                     plan = (
                         self._resolve_plan()
                         if effects & RenderEffect.LAYOUT
@@ -1814,6 +1858,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     (
                         self._viewport,
                         self._accepted_fit,
+                        self._classifier_results,
+                        self._classifier_overlays,
+                        self._classifier_thresholds,
                         self._fit_context_generation,
                         self._layout_revision,
                         self._size,
@@ -1840,6 +1887,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     (
                         self._viewport,
                         self._accepted_fit,
+                        self._classifier_results,
+                        self._classifier_overlays,
+                        self._classifier_thresholds,
                         self._fit_context_generation,
                         self._layout_revision,
                         self._size,
@@ -1945,6 +1995,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
+        classifier_thresholds: Sequence[float | None] | object = _UNSET,
     ) -> DisplayDescription:
         """Atomically replace semantics and final presentation on one Figure."""
 
@@ -1994,7 +2045,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._accepted_fit,
-                    self._facet_thresholds,
+                    self._classifier_results,
+                    self._classifier_overlays,
+                    self._classifier_thresholds,
                     self._rolling_history,
                     self._layout_revision,
                     self._size,
@@ -2019,7 +2072,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
                 self._accepted_fit = None
-                self._facet_thresholds = ()
                 self._rolling_history = (
                     projection.rolling_history if isinstance(spec, RollingPlot) else ()
                 )
@@ -2028,6 +2080,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 # Layout resolution can reject a spec (for example the facet
                 # cell cap); it must stay inside the rollback envelope so a
                 # rejected replacement never leaves half-committed state.
+                self._refresh_threshold_classifier()
+                if classifier_thresholds is not _UNSET:
+                    if isinstance(classifier_thresholds, (str, bytes)):
+                        raise TypeError("classifier_thresholds must be a sequence")
+                    self._set_classifier_thresholds_state(classifier_thresholds)
                 renderer.spec = spec
                 plan = self._resolve_plan()
                 renderer.relayout(
@@ -2049,7 +2106,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._focused_facet_index,
                         self._facet_focus_index,
                         self._accepted_fit,
-                        self._facet_thresholds,
+                        self._classifier_results,
+                        self._classifier_overlays,
+                        self._classifier_thresholds,
                         self._rolling_history,
                         self._layout_revision,
                         self._size,
@@ -2818,6 +2877,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if finished_gesture is None
                     else self._selector_controller._commit_finished(state)
                 )
+                classifier_previous = self._classifier_thresholds
+                if (
+                    stored.kind is SelectorKind.THRESHOLD
+                    and self._threshold_classifier_enabled()
+                    and self._classifier_thresholds
+                ):
+                    index = 0 if stored.facet_index is None else stored.facet_index
+                    if 0 <= index < len(self._classifier_thresholds):
+                        updated = list(self._classifier_thresholds)
+                        updated[index] = float(stored.value)
+                        self._classifier_thresholds = tuple(updated)
                 affects_fit = self._selector_change_affects_fit(
                     stored.kind,
                     request,
@@ -2836,6 +2906,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             except Exception:
                 with self._lock:
                     self._selector_controller._rollback_install(stored, previous)
+                    self._classifier_thresholds = classifier_previous
                     self._fit_context_generation = fit_previous
                 try:
                     self._render_current(
@@ -2892,75 +2963,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 canonical,
                 facet_index=self._focused_facet_index,
             ))
-
-    def set_facet_thresholds(
-        self,
-        thresholds: Sequence[float | None],
-        *,
-        display: bool = True,
-    ) -> tuple[float | None, ...]:
-        """Set calibrated Histogram thresholds in current facet-cell order.
-
-        These are producer-authored result annotations, not the interactive
-        single threshold selector and not the crossover suggested by a fit.
-        They therefore survive display/unit/focus changes and are cleared
-        when either the Dataset revision or PlotSpec changes.
-        """
-
-        if not isinstance(display, bool):
-            raise TypeError("display must be bool")
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-                if not isinstance(self._spec, FacetGridPlot) or not isinstance(
-                    self._spec.cell,
-                    HistogramPlot,
-                ):
-                    raise TypeError(
-                        "facet thresholds require FacetGridPlot[HistogramPlot]"
-                    )
-                cells = tuple(getattr(self._payload, "cells", ()))
-                prepared = tuple(thresholds)
-                if len(prepared) != len(cells):
-                    raise ValueError(
-                        "facet thresholds must match the current facet-cell order"
-                    )
-                canonical: list[float | None] = []
-                for value in prepared:
-                    if value is None:
-                        canonical.append(None)
-                        continue
-                    numeric = float(value)
-                    if not math.isfinite(numeric):
-                        raise ValueError("facet thresholds must be finite or None")
-                    canonical.append(
-                        self._projected._display_scalar_to_canonical(
-                            numeric,
-                            self._projected._value_quantity(),
-                        )
-                        if display
-                        else numeric
-                    )
-                selected = tuple(canonical)
-                previous = self._facet_thresholds
-                self._facet_thresholds = selected
-            try:
-                self._render_current(
-                    RenderEffect.OVERLAY,
-                    schedule_fit=False,
-                )
-            except Exception:
-                with self._lock:
-                    self._facet_thresholds = previous
-                try:
-                    self._render_current(
-                        RenderEffect.OVERLAY,
-                        schedule_fit=False,
-                    )
-                except Exception:
-                    self.redraw_surface()
-                raise
-        return selected
 
     def set_crosshair_selector(
         self, x: float, y: float, *, display: bool = True
@@ -3607,43 +3609,40 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
         return replace(state, value=value)
 
-    def _derived_threshold_selector(self) -> SelectorState | None:
-        """Resolve the fit suggestion as a display selector fallback."""
-
-        accepted = self._accepted_fit
-        if (
-            accepted is None
-            or isinstance(accepted.result, FacetFitBatchResult)
-            or accepted.overlay is None
-            or accepted.selection is None
-            or not self._projected._is_histogram_plot()
-        ):
-            return None
-        threshold = accepted.overlay.suggested_threshold
-        if threshold is None:
-            return None
-        canonical = (
-            self._display_x_scalar_to_canonical(threshold)
-            if self._view is not None
-            else float(threshold)
-        )
-        return SelectorState(
-            SelectorKind.THRESHOLD,
-            canonical,
-            revision=accepted.context_generation,
-            facet_index=accepted.selection.facet_index,
-        )
-
     def _resolved_selector_snapshot(self) -> SelectorSnapshot:
         """Return the sole painted/hit-tested state for every selector kind."""
 
         snapshot = self._selector_controller.snapshot()
-        if any(state.kind is SelectorKind.THRESHOLD for state in snapshot.states):
-            return snapshot
-        derived = self._derived_threshold_selector()
+        derived = self._derived_threshold_classifier_selector()
         if derived is None:
             return snapshot
-        return SelectorSnapshot(snapshot.committed + (derived,), snapshot.candidate)
+        candidate = snapshot.candidate
+        active_index = derived.facet_index
+        if (
+            candidate is not None
+            and candidate.kind is SelectorKind.THRESHOLD
+            and candidate.facet_index == active_index
+        ):
+            threshold = candidate
+        else:
+            threshold = next(
+                (
+                    state
+                    for state in snapshot.committed
+                    if state.kind is SelectorKind.THRESHOLD
+                    and state.facet_index == active_index
+                ),
+                derived,
+            )
+        committed = tuple(
+            state
+            for state in snapshot.committed
+            if state.kind is not SelectorKind.THRESHOLD
+        ) + (threshold,)
+        return SelectorSnapshot(
+            committed,
+            candidate if candidate is not None and candidate.kind is not SelectorKind.THRESHOLD else None,
+        )
 
     def _painted_selector_state(self, state: SelectorState) -> SelectorState:
         """Project one selector into the renderer's axes data space.

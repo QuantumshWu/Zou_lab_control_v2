@@ -398,6 +398,13 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
     return (
         _bin_count_parameter(),
         ParameterSpec(
+            "threshold_classifier",
+            bool,
+            RenderEffect.OVERLAY | RenderEffect.FIT_SELECTION,
+            default=False,
+            label="Threshold classifier",
+        ),
+        ParameterSpec(
             "density",
             bool,
             _HISTOGRAM_PROJECTION_EFFECTS | RenderEffect.TEXT,
@@ -677,14 +684,21 @@ def _parameter_schema_for_context(
             )
         )
     has_limits = any(entry.name == "relim_mode" for entry in entries)
+    def validate_state(values: Mapping[str, object]) -> None:
+        if has_limits:
+            _validate_limit_state(values)
+        if (
+            values.get("threshold_classifier") is True
+            and values.get("cumulative") is True
+        ):
+            raise ValueError("threshold classifier requires a non-cumulative histogram")
+
     return ParameterSchema(
         entries,
         transition_normalizer=(
             _normalize_limit_transition if has_limits else None
         ),
-        full_state_validator=(
-            _validate_limit_state if has_limits else None
-        ),
+        full_state_validator=validate_state,
     )
 
 
