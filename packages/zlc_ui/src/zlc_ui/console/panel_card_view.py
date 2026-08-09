@@ -19,11 +19,12 @@ from zlc_ui.fluent import (
     CARD_TITLE_PX,
     FluentButton,
     FluentComboBox,
-    FluentFrame,
     FluentGroupBox,
     FluentLabel,
     FluentLineEdit,
+    FluentPopup,
     FluentScrollArea,
+    FluentSettingsPopupAnchor,
     FluentStatusDot,
     GREY,
     ORANGE,
@@ -77,7 +78,9 @@ class PanelCardView(FluentGroupBox):
         self.panel_id = str(panel_id)
         self._base_title = str(title)
         self._surface: QtWidgets.QWidget | None = None
-        self._settings_frame: FluentFrame | None = None
+        self._settings_popup: FluentPopup | None = None
+        self._settings_anchor: FluentSettingsPopupAnchor | None = None
+        self._settings_drag_handle: FluentLabel | None = None
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
@@ -100,6 +103,7 @@ class PanelCardView(FluentGroupBox):
         self._parameter_surface: Mapping[str, object] = {}
         self._interval_choices: tuple[int, ...] = ()
         self._drag_offset: QtCore.QPoint | None = None
+        self._settings_drag_offset: QtCore.QPoint | None = None
 
         # This is copied from v1 PanelCard: the title strip is supplied by
         # FluentGroupBox; the body is exactly CARD_PAD / 2 px / CARD_PAD with
@@ -273,22 +277,9 @@ class PanelCardView(FluentGroupBox):
         )
         button.raise_()
 
-    def _place_settings_frame(self) -> None:
-        frame = self._settings_frame
-        if frame is None:
-            return
-        inset = max(1, CARD_PAD // 2)
-        top = max(inset, scaled_px(CARD_TITLE_PX))
-        area = self.rect().adjusted(inset, top, -inset, -inset)
-        frame.setGeometry(area)
-        if frame.isVisible():
-            frame.raise_()
-            self.settings_button.raise_()
-
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
         self._place_settings_button()
-        self._place_settings_frame()
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
         """Mount or replace an arbitrary view surface."""
@@ -315,6 +306,30 @@ class PanelCardView(FluentGroupBox):
         self._place_settings_button()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        popup = self._settings_popup
+        if watched is self._settings_drag_handle and popup is not None:
+            if (
+                event.type() == QtCore.QEvent.MouseButtonPress
+                and event.button() == QtCore.Qt.LeftButton
+            ):
+                self._settings_drag_offset = (
+                    event.globalPos() - popup.frameGeometry().topLeft()
+                )
+                return True
+            if (
+                event.type() == QtCore.QEvent.MouseMove
+                and self._settings_drag_offset is not None
+            ):
+                popup.move(event.globalPos() - self._settings_drag_offset)
+                return True
+            if (
+                event.type() == QtCore.QEvent.MouseButtonRelease
+                and event.button() == QtCore.Qt.LeftButton
+            ):
+                self._settings_drag_offset = None
+                return True
+            if event.type() == QtCore.QEvent.Hide:
+                self._settings_drag_offset = None
         if (
             watched is self._surface
             and event.type() == QtCore.QEvent.Wheel
@@ -393,8 +408,8 @@ class PanelCardView(FluentGroupBox):
 
         self._editing_enabled = bool(enabled)
         self.settings_button.setEnabled(self._editing_enabled)
-        if not self._editing_enabled and self._settings_frame is not None:
-            self._settings_frame.hide()
+        if not self._editing_enabled and self._settings_popup is not None:
+            self._settings_popup.hide()
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()
@@ -558,13 +573,17 @@ class PanelCardView(FluentGroupBox):
                 )
 
     def _open_settings(self) -> None:
-        if self._settings_frame is None:
-            frame = FluentFrame(self)
-            layout = QtWidgets.QVBoxLayout(frame)
+        if self._settings_popup is None:
+            popup = FluentPopup(self)
+            layout = QtWidgets.QVBoxLayout(popup)
             pad = max(1, scaled_px(10))
             layout.setContentsMargins(pad, pad, pad, pad)
             layout.setSpacing(0)
-            scroll = FluentScrollArea(frame)
+            drag_handle = FluentLabel("Setting", popup)
+            drag_handle.setCursor(QtCore.Qt.SizeAllCursor)
+            drag_handle.installEventFilter(self)
+            layout.addWidget(drag_handle)
+            scroll = FluentScrollArea(popup)
             body = QtWidgets.QWidget()
             body.setStyleSheet("background: transparent;")
             body_layout = QtWidgets.QVBoxLayout(body)
@@ -603,27 +622,31 @@ class PanelCardView(FluentGroupBox):
             buttons.addWidget(self.remove_button)
             body_layout.addLayout(buttons)
             body.setMinimumHeight(body.sizeHint().height())
-            scroll.setWidget(body)
+            scroll.set_width_bounded_widget(body)
             layout.addWidget(scroll)
-            self._settings_frame = frame
+            self._settings_popup = popup
+            self._settings_anchor = FluentSettingsPopupAnchor(
+                popup, self.settings_button
+            )
+            self._settings_drag_handle = drag_handle
             self._settings_scroll = scroll
             self._settings_body = body
-            frame.hide()
-        if self._settings_frame.isVisible():
-            self._settings_frame.hide()
-            return
-        self._rebuild_settings_form()
-        self._place_settings_frame()
-        self._settings_frame.show()
-        self._settings_frame.raise_()
-        self.settings_button.raise_()
+            popup.hide()
+        anchor = self._settings_anchor
+        scroll = self._settings_scroll
+        anchor.toggle(
+            scroll,
+            prepare=self._rebuild_settings_form,
+            minimum_width=280,
+            minimum_height=320,
+        )
 
     def _request_edit(self) -> None:
-        self._settings_frame.hide()
+        self._settings_popup.hide()
         self.edit_requested.emit()
 
     def _request_remove(self) -> None:
-        self._settings_frame.hide()
+        self._settings_popup.hide()
         self.remove_requested.emit()
 
     def _setting_changed(self, key: str) -> None:

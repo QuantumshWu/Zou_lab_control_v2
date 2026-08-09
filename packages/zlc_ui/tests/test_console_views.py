@@ -132,7 +132,8 @@ import zou_lab_control_v2
 print(zou_lab_control_v2.__file__)
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
-from PyQt5 import QtCore, QtTest, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from zlc_ui.fluent import FluentPopup
 from zlc_ui.qt import ensure_qt_app
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
@@ -170,12 +171,19 @@ show_spy = _TopLevelShowSpy()
 app.installEventFilter(show_spy)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
-assert shown_top_levels == []
-assert card._settings_frame.parentWidget() is card
-assert not card._settings_frame.isWindow()
-assert card.rect().contains(card._settings_frame.geometry())
-assert {widget for widget in app.topLevelWidgets() if widget.isVisible()} == top_levels
+popup = card._settings_popup
+assert isinstance(popup, FluentPopup)
+assert popup.parentWidget() is card
+assert popup.isWindow()
+assert popup.windowFlags() & QtCore.Qt.Popup
+assert shown_top_levels == ['FluentPopup']
+assert {
+    widget for widget in app.topLevelWidgets() if widget.isVisible()
+} == top_levels | {popup}
+assert 240 <= popup.width() <= 320
 assert not hasattr(card, 'apply_button')
+popup.resize(popup.width(), 180)
+app.processEvents()
 assert card._settings_scroll.verticalScrollBar().maximum() > 0
 title = card._settings_form.widget_for('title')
 title.setText('Card changed')
@@ -184,8 +192,43 @@ interval = card._settings_form.widget_for('interval_ms')
 interval.setCurrentIndex(interval.findData(800))
 interval.activated.emit(interval.currentIndex())
 app.processEvents()
-assert card._settings_frame.isVisible()
+assert popup.isVisible()
+start = popup.pos()
+press = QtCore.QPoint(5, 5)
+handle = card._settings_drag_handle
+origin = handle.mapToGlobal(press)
+target = origin + QtCore.QPoint(24, 18)
+QtWidgets.QApplication.sendEvent(
+    handle,
+    QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonPress, press, origin,
+        QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    ),
+)
+QtWidgets.QApplication.sendEvent(
+    handle,
+    QtGui.QMouseEvent(
+        QtCore.QEvent.MouseMove, press + QtCore.QPoint(24, 18), target,
+        QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    ),
+)
+QtWidgets.QApplication.sendEvent(
+    handle,
+    QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonRelease, press + QtCore.QPoint(24, 18), target,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
+    ),
+)
+app.processEvents()
+assert popup.pos() != start
+popup.hide()  # Qt.Popup's outside-click dismissal reaches the same hide path.
+app.processEvents()
+assert not popup.isVisible()
+QtTest.QTest.qWait(300)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
 QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
+QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)

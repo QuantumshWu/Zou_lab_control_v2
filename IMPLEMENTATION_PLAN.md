@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`通用Axis/display-label已由f4095be收口；derived-signal链审计无需修改；live-fit统一update_data入口、分段profiling和受影响全包复验均已完成，正在独立提交。`
-- Last completed action：`有无live fit现在都走RasterPlotHost.update_data：新data front先发布，旧solver取消，仅当前revision结果可追加overlay。LivePlotController只保留capacity-one ingress/cadence。旧prepare阶段携带fit result的字段已删除，内部clock-fit命名改为live-prepare，没有在Workbench增加状态机。`
-- Last verified tests：`live-fit目标在旧生产精确红为RasterPlotHost.update_data抛RuntimeError；修后受控慢solver证明revision 1 front不等fit、revision 2取消revision 1且唯一接受fit revision 2。完整zlc_plot 207 passed in 14.12s；完整zlc_workbench 334 passed in 77.69s；diff-check和旧clock-fit/拒绝update_data语义残余扫描通过。每个测试进程导入路径均指向当前v2树。`
-- Pending acceptance gates：`独立提交live-fit切片；随后审计Save Fig/Auto/fit controls与popup布局等UI剩余目标，最终重跑full/detached和由用户执行可见bin\\experiment.bat验收。`
-- Next action：`性能已记录到zlc_plot performance文档：冷Image session 190.83/194.77 ms；projection 0.77/1.06 ms；render 15.21/17.24 ms；2D fit 43.47/45.74 ms；Distribution fit 10.55/10.88 ms、classifier 14.03/15.43 ms；35-cell classifier 217.05/220.15 ms、generic fit 177.19/183.14 ms。250 ms慢fit对照由旧295.62/314.89 ms front interval降至97.60/146.38 ms，且只接受最终fit。提交本切片后进入剩余UI审计。`
+- Current phase：`Panel UI逐项审计确认Save Fig、Auto、完整fit controls、tree signal/source与Producer Restart已存在；Setting popup唯一真实缺口已修，准备独立提交。`
+- Last completed action：`PanelCard删除卡片内嵌FluentFrame覆盖层，直接复用现有FluentPopup、FluentSettingsPopupAnchor和popup gap；popup创建时即带card parent，唯一预期top-level可外部关闭，窄宽度、内部滚动并由同一View标题拖动，没有新增文件、类、Apply或状态机。`
+- Last verified tests：`现有QTest在旧生产精确红为PanelCard无_settings_popup；修后真实Setting点击只产生一个有card parent的FluentPopup Show，拖动/scroll/toggle/Edit/Remove/即时commit均通过。完整zlc_ui 79 passed in 42.11s；完整zlc_workbench 334 passed in 86.61s；diff-check通过且无项目Python进程。每个测试进程导入路径均指向当前v2树。`
+- Pending acceptance gates：`独立提交Setting popup切片；继续审计panel frame默认signal标题及Goal末尾新增项，随后重跑full/detached和由用户执行可见bin\\experiment.bat验收。`
+- Next action：`提交本切片后核对panel frame title是否从authoritative signal label派生且独立于plot内title；已完成的全局100 ms display clock、Simulation非均匀性和MOT virtual不重复实现。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
@@ -238,7 +238,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 1. Plot entry 按固定顺序提供 `2D image`、`1D vector`、`Rolling trace`、`Distribution`、`Site grid`，不得包含 PulseTimeline；combined `Add Panel` 创建固定 kind 的 blank panel，不要求 signal 已发布、不自动选择 signal。Site grid 的 cell kind 固定为 Curve，Setting/Edit 中只读，无切换路径。
 2. 每个 panel 建立唯一 Workbench-owned `PanelState`，包含 signal/size/update interval/fixed kind/semantic/display/fit。Setting frame、Panel Edit 和 monitor panel 都订阅它，不保留独立 config 副本。
 3. Display interval 只允许 `100/200/400/800 ms`，默认 `400 ms`，使用 ComboBox；TaskConsole app beat 与该 interval 独立。任何载入的非法值必须在 state validation 阶段拒绝，不能等 scheduler tick 崩溃。
-4. Setting frame 从共享 `zlc_plot` kind schema 初次构造 Signal、Size、interval、全部 data-independent semantic/display/interaction parameters；依赖 signal/data 的 axis/reduction/fit controls 固定显示但在无 compatible signal 时禁用，不能在第一次 commit 后才追加字段。Setting 锚在所属 panel 内，最大尺寸不超过 panel，内容不足时内部滚动；每个懒创建控件从构造瞬间就带 card/body parent，禁止先收到 top-level Show 再 reparent；没有 Apply，任一字段 commit 立即更新同一 PanelState。
+4. Setting popup 从共享 `zlc_plot` kind schema 初次构造 Signal、Size、interval、全部 data-independent semantic/display/interaction parameters；依赖 signal/data 的 axis/reduction/fit controls 固定显示但在无 compatible signal 时禁用，不能在第一次 commit 后才追加字段。它复用现有 `FluentPopup`/anchor，宽约 `2x2` panel 一半，支持标题拖动、外部点击关闭和内部滚动；popup 从创建时就带 card parent，所有懒创建控件从构造时就带 popup/body parent，只允许预期 popup 自身成为 top-level，禁止临时无 parent 窗口闪现；没有 Apply，任一字段 commit 立即更新同一 PanelState。
 5. Panel Edit 作为 tab，重复显示同一完整 schema、fit、selector、direct producer form、与 producer row 共用的 Start/Restart action 和 Save Fig。两边的共同字段直接绑定同一 `PanelState`；任一边修改都由同一 controller 发布一次更新给所有 views。
 6. Logic Edit 和同 producer 的 Panel Edit 共享同一 row draft；一处修改同步到其他打开投影。
 7. 只处理 committed selection。Logic descriptor 用 data-only mapping 把 Image Area 等转成 typed measurement draft patch，Workbench 负责路由，不写 camera-specific branch。
@@ -293,7 +293,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 3. `Add Camera Measurement` -> 自动 Edit -> 选 camera -> 设 exposure/ROI -> `Repeat=0` -> Start。
 4. 从同一 Experiment 的 Pulse UI Load readable `imaging_template.json` 并 On Pulse；Camera worker 持续产生 frames，GUI beat 不读 camera。Camera Measurement 按 authored `Frames per cycle` 发布 `frame_0...frame_N` 普通二维 signals，所有 signal selector 分别列出它们并显示 dataset shape；`zlc_plot` 不实现 camera-specific frame selector。
 5. `Add Occupancy` -> 自动 Edit -> 选 frames signal + calibration path；依次验证 default/box/psf/uniform_psf choice -> Start。
-6. 依固定顺序创建全部五种 blank panels；在接 signal 前确认完整 initial schema 和 `100/200/400/800` ComboBox，Setting 始终留在 panel 边界内并可滚动，修改 signal/interval/display 后无需 Apply 立即生效，首图及时出现且没有 UI freeze/重复 rebuild。Image 用 SiteMap centers 画 35-site occupancy circles；可选标签最多为小号 ordinal，颜色/透明度与对应圈一致。
+6. 依固定顺序创建全部五种 blank panels；在接 signal 前确认完整 initial schema 和 `100/200/400/800` ComboBox，Setting popup 以正确 card parent 出现在 anchor 旁、可拖动/外部关闭/内部滚动且无额外顶层闪窗，修改 signal/interval/display 后无需 Apply 立即生效，首图及时出现且没有 UI freeze/重复 rebuild。Image 用 SiteMap centers 画 35-site occupancy circles；可选标签最多为小号 ordinal，颜色/透明度与对应圈一致。
 7. Panel Edit 中 Area selector 改 Camera Measurement ROI draft -> 单次 Producer Restart -> 新 measurement 已运行，旧 calibration 不相容时 Occupancy 显示 blocked。
 8. 分别执行 Header Save Layout、Header Save Screenshot、Panel Save Fig；Load Layout 恢复 stopped pipeline。
 9. 启动新 Calibration，验证它只停掉占用同 camera/sequencer 的冲突 nodes，observer/无关 node 仍正常；任务期间所有非 Stop Task 状态改写都确实禁用。
@@ -362,7 +362,7 @@ Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本�
 - TaskConsole/Pulse Editor 使用同一 Experiment/session/sequencer/world，Pulse Editor 不被虚构成长期 device owner。
 - Task active 时 header takeover 显示 progress 和唯一 Stop Task，其他状态改变禁用；Monitor preview 和 terminal cleanup 正确。
 - combined `Add Panel` 的 Logic entry 自动进 Edit；没有独立 Add Logic 控件；产品 UI 没有 Apply；Panel Producer Restart 复用同一个 Start/Restart endpoint。
-- combined `Add Panel` 只有规定的五种 Plot entries，可在无 signal 时创建 blank fixed-kind panel；Setting 初始显示完整 schema、限定在 panel 内并可滚动，interval 只能从 100/200/400/800 ComboBox 选择且修改立即生效。Panel/Edit 共享唯一 `PanelState`，selector 可联动 producer；完整配置一次交给 `zlc_plot`，同一 signal/schema 不重建 host/Figure、无 owner-thread wait且只增加一张同步 front。
+- combined `Add Panel` 只有规定的五种 Plot entries，可在无 signal 时创建 blank fixed-kind panel；Setting 初始显示完整 schema，以有 card parent 的 Fluent popup 锚定、可拖动/外部关闭/内部滚动且无额外闪窗，interval 只能从 100/200/400/800 ComboBox 选择且修改立即生效。Panel/Edit 共享唯一 `PanelState`，selector 可联动 producer；完整配置一次交给 `zlc_plot`，同一 signal/schema 不重建 host/Figure、无 owner-thread wait且只增加一张同步 front。
 - Pulse template/editor/generator 只通过 `zlc.pulse.v1` readable JSON 单一路径读写，没有 `.py` pulse 或第二 serializer。
 - SiteMap 不是 plot kind；Occupancy 显式发布 typed overlay sibling，固定 `Image` panel 选择 optional Overlay signal。
 - Header Layout、Header Screenshot、Panel Save Fig 三者分开；Panel data 包含正确调用链参数/device snapshots，不打包整个 monitor tab。

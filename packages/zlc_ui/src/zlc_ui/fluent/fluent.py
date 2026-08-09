@@ -604,7 +604,7 @@ def show_fluent_popup_for_anchor(
         screen = QtWidgets.QApplication.primaryScreen()
     available = None if screen is None else screen.availableGeometry()
     desired_width = max(
-        scaled_px(minimum_width, minimum=320),
+        scaled_px(minimum_width, minimum=240),
         hint.width() + scaled_px(28, minimum=20),
     )
     desired_height = max(
