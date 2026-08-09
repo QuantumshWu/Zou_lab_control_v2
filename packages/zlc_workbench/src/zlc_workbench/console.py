@@ -1458,6 +1458,7 @@ class ConsolePresenter:
                 if producer_node_id is None
                 else self.logic_editor_projection(producer_node_id)
             ),
+            "save_directory": str(self.session.workspace.data),
         }
 
     def refresh_panel_editor(self, panel_id: str) -> bool:
@@ -1606,7 +1607,7 @@ class ConsolePresenter:
         self.refresh_panel_editor(panel_id)
         return True
 
-    def save_panel_figure(self, panel_id: str) -> object | None:
+    def save_panel_figure(self, panel_id: str, selected: str) -> object | None:
         """Save only the exact frozen data currently shown in Panel Edit."""
 
         if self._task_command_blocked("saving a panel figure"):
@@ -1622,11 +1623,7 @@ class ConsolePresenter:
                 severity="warning",
             )
             return None
-        selected = self.view.ask_save_path(
-            "Save panel figure",
-            str(self.session.day_folder()),
-            "Panel figure (*.png *.npz)",
-        )
+        selected = str(selected).strip()
         if not selected:
             return None
         try:

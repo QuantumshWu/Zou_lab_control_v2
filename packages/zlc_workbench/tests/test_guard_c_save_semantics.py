@@ -244,15 +244,16 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         before_panel_save = {
             path.resolve() for path in tmp_path.rglob("*") if path.is_file()
         }
-        view.save_answer = str(tmp_path / "occupancy-panel")
-        view.panel_save_figure_requested.emit(target.panel_id)
+        view.panel_save_figure_requested.emit(
+            target.panel_id, str(tmp_path / "occupancy-panel.svg")
+        )
         created = {
             path.resolve()
             for path in tmp_path.rglob("*")
             if path.is_file() and path.resolve() not in before_panel_save
         }
         archives = [path for path in created if path.suffix == ".npz"]
-        images = [path for path in created if path.suffix == ".png"]
+        images = [path for path in created if path.suffix == ".svg"]
         assert len(archives) == 1 and len(images) == 1, (
             "Panel Edit Save Fig has no formal image + data archive intent seam; "
             f"status={view.status!r}"

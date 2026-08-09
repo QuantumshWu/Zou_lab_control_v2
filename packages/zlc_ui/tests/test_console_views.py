@@ -530,12 +530,16 @@ def test_panel_editor_and_setting_are_views_of_the_same_projection() -> None:
 import zou_lab_control_v2
 import zlc_ui.console.panel_editor_view as tested_module
 print(tested_module.__file__)
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from PyQt5 import QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
 from zlc_ui.fluent import FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['panel-editor'])
+temporary = TemporaryDirectory()
+save_directory = temporary.name
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
 handle.set_panel_intervals((100, 200, 400, 800))
@@ -635,6 +639,7 @@ projection = {
     'overlay_signal_options': overlay_groups,
     'interval_choices': (100, 200, 400, 800),
     'parameter_surface': surface,
+    'save_directory': save_directory,
     'kind_read_only': True, 'frozen_signal': '@logic/cm/frames',
     'frozen_publication': object(), 'frozen_snapshot': object(),
     'stale': False, 'producer_node_id': 'cm', 'producer_logic': producer,
@@ -653,7 +658,7 @@ handle.panel_producer_restart_requested.connect(
     lambda panel_id: events.append(('restart', panel_id))
 )
 handle.panel_save_figure_requested.connect(
-    lambda panel_id: events.append(('save', panel_id))
+    lambda panel_id, path: events.append(('save', panel_id, path))
 )
 handle.panel_editor_closed.connect(
     lambda panel_id: events.append(('closed', panel_id))
@@ -709,6 +714,16 @@ editor_interval.activated.emit(editor_interval.currentIndex())
 editor._producer_editor.form.widget_for('repeat').setValue(2)
 editor.refresh_button.click()
 editor.producer_restart_button.click()
+assert editor.save_directory.text() == save_directory
+assert tuple(
+    editor.save_format.itemData(index)
+    for index in range(editor.save_format.count())
+) == ('png', 'pdf', 'svg')
+assert editor.save_auto_name.isChecked()
+assert Path(editor.save_preview.text()).parent == Path(save_directory)
+editor.save_auto_name.setChecked(False)
+editor.save_name.setText('manual-name')
+editor.save_format.setCurrentIndex(editor.save_format.findData('svg'))
 editor.save_button.click()
 app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events
@@ -720,7 +735,7 @@ assert ('state', 'panel-1', {
 assert ('draft', 'cm', {'values': {'repeat': 2}}) in events
 assert ('refresh', 'panel-1') in events
 assert ('restart', 'panel-1') in events
-assert ('save', 'panel-1') in events
+assert ('save', 'panel-1', str(Path(save_directory) / 'manual-name.svg')) in events
 
 changed = dict(state, title='Retitled', interval_ms=800)
 handle.set_panel_projection('panel-1', changed, surface)
@@ -733,6 +748,7 @@ app.processEvents()
 assert view.tabs.count() == 2 and 'panel-1' not in handle._panel_editors
 assert ('closed', 'panel-1') in events
 assert second_host.widget.parentWidget() is None
+temporary.cleanup()
 """
     )
 

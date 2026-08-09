@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Repeat=0 的四-cycle内部 buffer margin 已完成回归，正在独立提交；下一步返回 Panel Save Fig/limits/fit 的真实操作面验收。`
-- Last completed action：`提交 24b19d9 后确认产品默认此前只申请 N 帧，即 frames_per_cycle=3 时只有一个三帧 cycle，且 Pylon 只校验 buffer_frame_count、没有写入 SDK。现已在既有 Camera Measurement monitor 中把内部最小容量改为 4*N 并向完整 cycle 取整；Virtual/DCAM 沿已有 arm 参数落实容量，Pylon 额外写入并读回 MaxNumBuffer。没有新增文件、类、用户参数或 per-device grouping。`
-- Last verified tests：`旧生产新纵向红已实跑：默认 monitor 在 13 triggers 后只保留最后三帧，前三次读取末 ordinal=12，而期望四-cycle buffer 应为 ordinal=3；Pylon MaxNumBuffer 没有任何写入。生产修改后同两项 2 passed；受影响 Virtual/DCAM/Pylon/Monitor 42 passed；完整 zlc_atom 143 passed；Guard A + Console Logic + end-to-end 38 passed。每个 Python 进程首行 import v2 root 并打印被测 production module 路径；diff-check clean，项目 Python 进程为零。`
-- Pending acceptance gates：`独立提交本 buffer margin；随后继续 Save Fig/limits/fit 的正式按钮验收与最终 Experiment flow close/零残留。`
-- Next action：`提交本 cycle-aligned buffer slice；随后从 Panel Edit Save Fig、Auto/limits 和 fit controls 继续真实按钮验收。`
+- Current phase：`四-cycle camera buffer 已提交 c3e1da7；Panel Edit Save Fig 的可见操作面已完成回归，正在独立提交。`
+- Last completed action：`Panel Edit 原来只有 Save Fig 按钮并再次打开 modal save dialog，缺少用户要求的目录、格式、auto-name 和最终路径预览。现直接在既有 PanelEditorView 加入 Directory/Browse、Auto-name + manual Name、PNG/PDF/SVG 和只读 final path；Handle 将 panel id + exact path 送入既有 ConsolePresenter.save_panel_figure，后者继续只保存当前 frozen snapshot 的 image + NPZ。panel_save 复用同一 zlc_plot host并按所选 image suffix保存，没有新文件、DTO、save registry 或第二保存路径。`
+- Last verified tests：`Save UI 的既有真实 Qt 测试在旧生产以 PanelEditorView 无 save_directory 精确红；修改后完整 zlc_ui 79 passed。相关 Workbench presenter/view contracts/TaskConsole/Guard C 83 passed；Viewer archive roundtrip 19 passed。Guard C 走Panel Edit exact path并选择SVG，得到同stem SVG+NPZ及精确 frozen data/run chain。每个验证进程首行 import v2 root并打印被测模块路径；diff-check clean，Panel Save presenter不再调用modal ask_save_path，项目 Python 进程为零。`
+- Pending acceptance gates：`独立提交 Save Fig surface；随后验证Auto/limits和完整fit controls，再做最终 Experiment flow close/零残留。`
+- Next action：`提交Save Fig surface；随后先用真实Qt投影确认zlc_plot声明的limits/fit字段和None=Auto缺口，再最小实现Auto toggle。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。`
 
 ## 1. 执行纪律

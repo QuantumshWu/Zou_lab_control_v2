@@ -8,6 +8,8 @@ devices: it shows the state it is given and emits named operator intents.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from PyQt5 import QtCore, QtWidgets
@@ -19,11 +21,18 @@ from zlc_ui.fluent import (
     GREY,
     ORANGE,
     FluentButton,
+    FluentComboBox,
     FluentFrame,
     FluentGroupBox,
     FluentLabel,
+    FluentLineEdit,
+    FluentPathEdit,
+    FluentReadoutEdit,
     FluentScrollArea,
+    FluentSettingRow,
+    FluentSwitch,
     scaled_px,
+    setting_label_width,
 )
 from zlc_ui.form import (
     FluentParameterForm,
@@ -44,6 +53,9 @@ from ._panel_projection import (
 from .logic_editor_view import LogicEditorView
 
 
+_IMAGE_FORMATS = ("png", "pdf", "svg")
+
+
 class PanelEditorView(QtWidgets.QWidget):
     """Editable projection of one Workbench-owned panel state and snapshot."""
 
@@ -51,7 +63,7 @@ class PanelEditorView(QtWidgets.QWidget):
     snapshot_refresh_requested = QtCore.pyqtSignal()
     producer_draft_changed = QtCore.pyqtSignal(str, object)
     producer_restart_requested = QtCore.pyqtSignal()
-    save_figure_requested = QtCore.pyqtSignal()
+    save_figure_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
         super().__init__(parent)
@@ -66,6 +78,10 @@ class PanelEditorView(QtWidgets.QWidget):
         }
         self._producer_editor: LogicEditorView | None = None
         self._surface: QtWidgets.QWidget | None = None
+        self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._save_directory_initialized = False
+        self._save_name_initialized = False
+        self._snapshot_can_save = False
         self._signal_groups = ()
         self._overlay_groups = ()
         self._signal_runtime = signal_form_runtime(self._choice_groups)
@@ -191,12 +207,54 @@ class PanelEditorView(QtWidgets.QWidget):
         self.producer_layout.addLayout(producer_actions)
         body_layout.addWidget(self.producer_group)
 
+        save_group = FluentGroupBox("Save figure")
+        save_layout = QtWidgets.QVBoxLayout(save_group)
+        save_layout.setContentsMargins(margin, margin, margin, margin)
+        save_layout.setSpacing(scaled_px(8, minimum=5))
+        label_width = setting_label_width(("Directory", "Name", "Format", "File"))
+        self.save_directory = FluentPathEdit(
+            "",
+            mode="dir",
+            caption="Choose where to save",
+            parent=save_group,
+        )
+        save_layout.addWidget(FluentSettingRow(
+            "Directory", self.save_directory, label_width=label_width, parent=save_group
+        ))
+        name_controls = QtWidgets.QWidget(save_group)
+        name_layout = QtWidgets.QHBoxLayout(name_controls)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(scaled_px(8, minimum=5))
+        self.save_auto_name = FluentSwitch("Auto-name", name_controls)
+        self.save_auto_name.setChecked(True)
+        self.save_name = FluentLineEdit()
+        self.save_name.setPlaceholderText("File name")
+        name_layout.addWidget(self.save_auto_name)
+        name_layout.addWidget(self.save_name, 1)
+        save_layout.addWidget(FluentSettingRow(
+            "Name", name_controls, label_width=label_width, parent=save_group
+        ))
+        self.save_format = FluentComboBox(save_group)
+        for extension in _IMAGE_FORMATS:
+            self.save_format.addItem(extension.upper(), extension)
+        save_layout.addWidget(FluentSettingRow(
+            "Format", self.save_format, label_width=label_width, parent=save_group
+        ))
+        self.save_preview = FluentReadoutEdit("")
+        save_layout.addWidget(FluentSettingRow(
+            "File", self.save_preview, label_width=label_width, parent=save_group
+        ))
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
         self.save_button = FluentButton("Save Fig", color=ACCENT)
-        self.save_button.clicked.connect(self.save_figure_requested.emit)
         actions.addWidget(self.save_button)
-        body_layout.addLayout(actions)
+        save_layout.addLayout(actions)
+        body_layout.addWidget(save_group)
+        self.save_directory.changed.connect(self._update_save_controls)
+        self.save_auto_name.toggled.connect(self._update_save_controls)
+        self.save_name.textChanged.connect(self._update_save_controls)
+        self.save_format.currentIndexChanged[int].connect(self._update_save_controls)
+        self.save_button.clicked.connect(self._save_figure)
         body_layout.addStretch(1)
 
         scroll.setWidget(body)
@@ -215,6 +273,12 @@ class PanelEditorView(QtWidgets.QWidget):
         if state["cell_kind"]:
             kind_text += f" · {state['cell_kind'].replace('_', ' ')} cells"
         self.kind_label.setText(kind_text)
+        if not self._save_directory_initialized:
+            self.save_directory.setText(str(incoming.get("save_directory") or ""))
+            self._save_directory_initialized = True
+        if not self._save_name_initialized:
+            self.save_name.setText(state["title"] or self.panel_id)
+            self._save_name_initialized = True
 
         fields: list[FormFieldProps] = [
             FormFieldProps("title", "text", "Title", default=state["title"]),
@@ -287,9 +351,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.snapshot_label.setStyleSheet(
             f"color: {ORANGE if stale else GREY}; background: transparent; border: none;"
         )
-        self.save_button.setEnabled(
-            self._mutation_enabled and snapshot is not None and not stale
-        )
+        self._snapshot_can_save = snapshot is not None and not stale
         self.save_button.setToolTip(
             "Refresh the stale snapshot before saving" if stale else ""
         )
@@ -336,16 +398,48 @@ class PanelEditorView(QtWidgets.QWidget):
         for form in self.parameter_forms.values():
             form.setEnabled(self._mutation_enabled)
         self.refresh_button.setEnabled(self._mutation_enabled)
-        self.save_button.setEnabled(
-            self._mutation_enabled
-            and self._projection.get("frozen_snapshot") is not None
-            and not bool(self._projection.get("stale"))
-        )
+        self._update_save_controls()
         self.producer_restart_button.setEnabled(
             self._mutation_enabled and self._producer_editor is not None
         )
         if self._producer_editor is not None:
             self._producer_editor.set_mutation_enabled(self._mutation_enabled)
+
+    def _save_path(self) -> Path | None:
+        directory_text = self.save_directory.text().strip()
+        if not directory_text:
+            return None
+        if self.save_auto_name.isChecked():
+            stem = str(self._state.get("title") or self.panel_id).strip()
+            stem = f"{stem}_{self._save_stamp}"
+        else:
+            stem = self.save_name.text().strip()
+        stem = stem.replace("/", "_").replace("\\", "_")
+        if not stem:
+            return None
+        stem = Path(stem).stem
+        extension = str(self.save_format.currentData() or "png")
+        return Path(directory_text).expanduser() / f"{stem}.{extension}"
+
+    def _update_save_controls(self, *_args: object) -> None:
+        editable = self._mutation_enabled
+        self.save_directory.setEnabled(editable)
+        self.save_auto_name.setEnabled(editable)
+        self.save_name.setEnabled(editable and not self.save_auto_name.isChecked())
+        self.save_format.setEnabled(editable)
+        path = self._save_path()
+        self.save_preview.setText("" if path is None else str(path))
+        self.save_button.setEnabled(
+            editable and self._snapshot_can_save and path is not None
+        )
+
+    def _save_figure(self) -> None:
+        path = self._save_path()
+        if path is None or not self.save_button.isEnabled():
+            return
+        self.save_figure_requested.emit(str(path))
+        self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._update_save_controls()
 
     @staticmethod
     def _size_choices(current: str) -> tuple[FormChoice, ...]:

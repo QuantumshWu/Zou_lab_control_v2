@@ -156,11 +156,13 @@ def save_panel_figure(
     """Save the Edit tab's exact frozen input without asking the plane again."""
 
     selected = Path(base_path).expanduser().resolve()
-    if selected.suffix.lower() in {".npz", ".png"}:
-        selected = selected.with_suffix("")
+    if not selected.suffix:
+        selected = selected.with_suffix(".png")
+    if selected.suffix.lower() not in {".png", ".pdf", ".svg"}:
+        raise ValueError("panel image format must be PNG, PDF, or SVG")
     selected.parent.mkdir(parents=True, exist_ok=True)
     archive_path = selected.with_suffix(".npz")
-    image_path = selected.with_suffix(".png")
+    image_path = selected
     plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
 
     host = make_host(
