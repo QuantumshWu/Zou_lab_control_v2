@@ -276,22 +276,25 @@ PlotSpec: TypeAlias = (
 
 
 def _title_parameter(default: str | None) -> ParameterSpec[object]:
+    del default
     return ParameterSpec(
         "title",
         str,
         _TEXT_EFFECTS,
-        default="" if default is None else default,
-        normalizer=_text,
+        default=None,
+        normalizer=_label_text_or_none,
+        allow_none=True,
         label="Title",
     )
 
 
 def _label_parameter(name: str, default: str | None, label: str) -> ParameterSpec[object]:
+    del default
     return ParameterSpec(
         name,
         str,
         _TEXT_EFFECTS,
-        default=default,
+        default=None,
         normalizer=_label_text_or_none,
         allow_none=True,
         label=label,

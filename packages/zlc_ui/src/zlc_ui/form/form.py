@@ -152,6 +152,7 @@ class FormFieldProps:
     file_filter: str = "All files (*)"
     base_dir: str = ""
     unavailable_reason: str = ""
+    automatic: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
@@ -170,6 +171,17 @@ class FormFieldProps:
             raise TypeError(
                 f"field {self.key!r} unavailable_reason must be a string"
             )
+        if not isinstance(self.automatic, bool):
+            raise TypeError(f"field {self.key!r} automatic must be bool")
+        if self.automatic:
+            if self.required:
+                raise ValueError(
+                    f"automatic field {self.key!r} cannot also be required"
+                )
+            if self.kind not in {"text", "int", "float", "number", "choice"}:
+                raise ValueError(
+                    f"field {self.key!r} kind {self.kind!r} cannot use Auto"
+                )
         if self.allow_blank is not None and not isinstance(self.allow_blank, bool):
             raise TypeError(f"field {self.key!r} allow_blank must be bool or None")
         if self.path_mode not in {"file", "dir"}:

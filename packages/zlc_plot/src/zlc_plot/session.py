@@ -1469,9 +1469,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     ) -> DisplayState:
         """Update visible text artists without rebuilding data artists.
 
-        ``None`` clears the title and resets an axis/value label to its
-        data-declared automatic text.  Use an empty string to hide an axis or
-        value label deliberately.
+        ``None`` resets title/axis/value text to the PlotSpec/data-declared
+        automatic value.  Use an empty string to hide text deliberately.
         """
 
         updates: dict[str, object] = {}
@@ -1483,7 +1482,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         ):
             if selected is _UNSET:
                 continue
-            updates[name] = "" if name == "title" and selected is None else selected
+            updates[name] = selected
         if not updates:
             return self.display_state
         return self.set_parameters(updates)

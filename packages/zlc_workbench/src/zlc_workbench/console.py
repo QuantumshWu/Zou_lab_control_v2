@@ -1009,7 +1009,6 @@ class ConsolePresenter:
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
             parameters = dict(candidate.display)
-            parameters["title"] = candidate.title
             configuration: dict[str, object] = {
                 "semantic": dict(candidate.semantic),
                 "parameters": parameters,
@@ -1132,11 +1131,7 @@ class ConsolePresenter:
         display_entries: list[dict[str, object]] = []
         for control in controls:
             entry = self._control_document(control)
-            name = str(entry["key"])
-            # Panel title has a dedicated shared field, so it is not a second
-            # independently authored display override.
-            if name != "title":
-                display_entries.append(entry)
+            display_entries.append(entry)
         return {
             "semantic": tuple(semantic),
             "display": tuple(display_entries),
@@ -1150,7 +1145,6 @@ class ConsolePresenter:
         """Describe a fixed kind before a compatible dataset is connected."""
 
         values = dict(state.display)
-        values["title"] = state.title
         try:
             controls = parameter_controls_for_kind(
                 state.kind,
@@ -1396,7 +1390,6 @@ class ConsolePresenter:
         """Submit the saved panel appearance as one zlc_plot configuration."""
 
         display = dict(state.display)
-        display["title"] = state.title
         self._await_panel_operation(
             host.configure(
                 parameters=display,
@@ -1458,7 +1451,7 @@ class ConsolePresenter:
                 if producer_node_id is None
                 else self.logic_editor_projection(producer_node_id)
             ),
-            "save_directory": str(self.session.workspace.data),
+            "save_directory": str(self.session.day_folder()),
         }
 
     def refresh_panel_editor(self, panel_id: str) -> bool:

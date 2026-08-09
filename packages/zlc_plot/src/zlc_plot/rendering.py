@@ -2660,7 +2660,7 @@ class MatplotlibRenderer:
             self._mark_axes_chrome_dirty(self.primary_axes)
 
     def _update_title_artist(self, state: DisplayState) -> None:
-        title = str(state["title"])
+        title = _state_label(state, "title", self.spec.labels.title) or ""
         if isinstance(self.spec, FacetGridPlot):
             title_artist = self._artists.get("figure:title")
             if title_artist is None:

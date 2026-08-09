@@ -337,6 +337,8 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 - title/labels、limits 和当前 kind 声明的全部 data-independent display/interaction 参数；
 - Edit / Remove。
 
+Panel frame name 与图内 title 是两个事实：frame name 默认包含所选 signal 以便在 Monitor 中辨认，也可单独重命名；图内 title、axis labels、units 和 limits 仍是 `zlc_plot` 的 display 参数。凡 plot schema 声明 `None` 为 automatic 的字段，Setting 与 Panel Edit 都在编辑器右侧显示 `Auto` switch；开启时禁用手工 editor并使用 PlotSpec/data 默认，关闭时提交手工值。不得再由 Workbench 用 frame name 覆盖 plot title。
+
 依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。Camera cycle 的各个 frame 已经是普通独立 signals，plot 参数层不再增加 camera-specific frame choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
 
 Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动。所有懒创建的 form/button/control 从构造瞬间就必须以 Setting body/card 为 parent，不能先作为临时 top-level 收到一次 Show 再由 layout reparent。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。

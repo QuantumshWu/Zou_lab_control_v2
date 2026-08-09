@@ -15,7 +15,6 @@ session, not from the window.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -95,10 +94,9 @@ def build_console(session, *, window_ratio=None):
             )
         spec = compose_panel_spec(snapshot.block.schema, spec, state)
         parameters = dict(state.display)
-        parameters["title"] = state.title
         return plot.RasterPlotHost.from_plot(
             plot_input,
-            replace(spec, labels=replace(spec.labels, title=state.title)),
+            spec,
             size=state.size,
             parameters=parameters,
         )

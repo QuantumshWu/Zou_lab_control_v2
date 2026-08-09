@@ -388,7 +388,6 @@ def presenter(session):
         spec = spec_for(initial, state.kind, state.cell_kind)
         spec = compose_panel_spec(initial.block.schema, spec, state)
         parameters = dict(state.display)
-        parameters["title"] = state.title
         return plot.RasterPlotHost.from_plot(
             plot_input,
             spec,
@@ -609,20 +608,34 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
         raise AssertionError(f"a parameter edit closed the live host ({timeout=})")
 
     monkeypatch.setattr(first_host, "close", unexpected_close)
+    described = presenter._plot_operation_value(binding.host.describe_display())
+    assert described.display_state.values["title"] is None
+
     assert presenter.update_panel_state(
-        binding.panel_id, {"title": "Camera without owner-thread wait"}
+        binding.panel_id, {"title": "Renamed panel"}
     )
     assert binding.host is first_host
     assert binding.editor_host is first_editor_host
     described = presenter._plot_operation_value(binding.host.describe_display())
-    assert described.display_state.values["title"] == "Camera without owner-thread wait"
+    assert described.display_state.values["title"] is None
+    assert binding.state.title == "Renamed panel"
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"display": {"title": "Camera image"}}
+    )
+    described = presenter._plot_operation_value(binding.host.describe_display())
+    assert described.display_state.values["title"] == "Camera image"
     editor_description = presenter._plot_operation_value(
         binding.editor_host.describe_display()
     )
-    assert (
-        editor_description.display_state.values["title"]
-        == "Camera without owner-thread wait"
+    assert editor_description.display_state.values["title"] == "Camera image"
+    assert binding.state.title == "Renamed panel"
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"display": {"title": None}}
     )
+    described = presenter._plot_operation_value(binding.host.describe_display())
+    assert described.display_state.values["title"] is None
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
 
@@ -976,7 +989,12 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     assert semantic["x"]["choices"] and semantic["x"]["value"] is not None
     assert display["colormap"]["kind"] == "choice"
     assert display["colormap"]["choices"]
+    assert display["title"]["allow_none"] is True
+    assert display["title"]["value"] is None
+    assert display["x_label"]["allow_none"] is True
+    assert display["x_label"]["value"] is None
     assert display["color_min"]["allow_none"] is True
+    assert display["color_min"]["value"] is None
     assert display["show_colorbar"]["kind"] == "boolean"
     assert "site_overlay" not in display
     assert "site_overlay" not in surface

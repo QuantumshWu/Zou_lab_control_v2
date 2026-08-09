@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`continuous camera raw buffer 已由四个提高到十六个完整 cycle，全部既定回归已绿，正在独立提交。`
-- Last completed action：`Panel Edit Save Fig 可见操作面已提交 456aabc。随后将Camera Measurement唯一minimum_frames从4 * frames_per_cycle提高为16 * frames_per_cycle并继续按cycle整数倍对齐；Virtual/DCAM/Pylon继续只落实同一个帧数，没有新文件、类、用户参数或设备分支。frames_per_cycle=3时默认由12帧提高为48帧。`
-- Last verified tests：`旧生产纵向红已实跑：49帧压力后只剩四-cycle容量，前三次读取末ordinal为39而不是3。修改后同一测试1 passed；Monitor/Pylon/DCAM/camera/runtime受影响组39 passed；完整zlc_atom 143 passed；Guard A + Console Logic + end-to-end 38 passed。每个Python进程首行import v2 root并打印被测production路径；buffer切片diff-check clean，项目Python进程为零。`
-- Pending acceptance gates：`独立提交十六-cycle buffer；随后继续Auto/limits和完整fit controls，再做最终Experiment flow close/零残留。`
-- Next action：`只stage两份权威文档、measurement.py和既有纵向测试并提交；保留工作树中Auto/limits未完成改动，随后从该Checkpoint继续。`
+- Current phase：`Panel display Auto/limits的同一Form与zlc_plot语义已完成全部包回归，正在独立提交。`
+- Last completed action：`Panel name与plot Title已分离：PanelState.title只命名card/frame，zlc_plot的title/x/y/value labels、unit和limits保留为plot-owned display参数。None统一表示Auto并回退PlotSpec/data标签；FluentParameterForm在既有row内为plot声明的optional display字段投影右侧Auto switch，开启时禁用editor，关闭时提交保留/初始manual value。Setting与Panel Edit仍投影同一parameter surface并即时commit，没有Apply、新文件或第二display state。`
+- Last verified tests：`Auto旧生产红已实跑：真实Qt Setting中display title的None被降为blank text且没有Auto seam。修改后同一真实Qt纵向测试1 passed，覆盖text/choice/number三种Auto开关、custom->Auto即时patch；Workbench title分离与zlc_plot complete configure聚焦3 passed；完整zlc_plot 206 passed、完整zlc_ui 79 passed、完整zlc_workbench 333 passed。Workbench首轮唯一失败还暴露Panel Save默认目录误依赖ExperimentSession.workspace；已改为两种session共同的day_folder()路径并在第二遍全包转绿。所有验证进程首行import v2 root并打印被测production路径。`
+- Pending acceptance gates：`独立提交Auto/limits；随后补齐现有fit操作面、Sitemap/Distribution classifier与最终Experiment flow。`
+- Next action：`diff-check与title残余扫描通过后只提交Auto/limits切片；随后审计现有zlc_plot fit public API和TaskConsole当前仅model choice的缺口，不增加第二fit状态机。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。`
 
 ## 1. 执行纪律

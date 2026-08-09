@@ -565,6 +565,19 @@ surface = {
         'minimum': None, 'maximum': None, 'step': None,
     },),
     'display': (
+        {'key': 'title', 'label': 'Title', 'kind': 'text',
+         'value': None, 'allow_none': True, 'choices': (),
+         'minimum': None, 'maximum': None, 'step': None},
+        {'key': 'x_label', 'label': 'X label', 'kind': 'text',
+         'value': None, 'allow_none': True, 'choices': (),
+         'minimum': None, 'maximum': None, 'step': None},
+        {'key': 'x_display_unit', 'label': 'X unit', 'kind': 'choice',
+         'value': None, 'allow_none': True,
+         'choices': (('Pixel', 'pixel'), ('Millimetre', 'mm')),
+         'minimum': None, 'maximum': None, 'step': None},
+        {'key': 'color_min', 'label': 'Color minimum', 'kind': 'number',
+         'value': None, 'allow_none': True, 'choices': (),
+         'minimum': None, 'maximum': None, 'step': None},
         {'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
          'value': 'viridis', 'allow_none': False,
          'choices': (('Viridis', 'viridis'), ('Magma', 'magma')),
@@ -610,6 +623,9 @@ assert card._settings_form.read_all()['kind'] == 'image'
 assert not card._settings_form.widget_for('kind').isEnabled()
 assert card._settings_form.read_all()['display__show_colorbar'] is True
 assert card._settings_form.read_all()['display__colormap'] == 'viridis'
+assert card._settings_form.read_all()['display__title'] is None
+assert card._settings_form.auto_switch_for('display__title').isChecked()
+assert not card._settings_form.widget_for('display__title').isEnabled()
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
 assert 'display__interpolation' in card._settings_form.spec.keys
 interval_combo = card._settings_form.widget_for('interval_ms')
@@ -695,9 +711,33 @@ assert handle.update_panel_editor('panel-1', projection)
 assert not editor._producer_editor.start_button.isVisible()
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)
 assert editor.parameter_forms['display'].spec.keys == (
+    'title', 'x_label', 'x_display_unit', 'color_min',
     'colormap', 'show_colorbar', 'interpolation'
 )
 assert editor.parameter_forms['fit'].spec.keys == ('model',)
+title_auto = editor.parameter_forms['display'].auto_switch_for('title')
+title_edit = editor.parameter_forms['display'].widget_for('title')
+assert title_auto.isChecked()
+assert not title_edit.isEnabled()
+title_auto.setChecked(False)
+assert title_edit.isEnabled()
+title_edit.setText('Camera image')
+title_edit.editingFinished.emit()
+title_auto.setChecked(True)
+assert not title_edit.isEnabled()
+x_unit_auto = editor.parameter_forms['display'].auto_switch_for('x_display_unit')
+assert x_unit_auto.isChecked()
+x_unit_edit = editor.parameter_forms['display'].widget_for('x_display_unit')
+assert not x_unit_edit.isEnabled()
+x_unit_auto.setChecked(False)
+assert x_unit_edit.isEnabled() and x_unit_edit.currentData() == 'pixel'
+x_unit_auto.setChecked(True)
+color_min_auto = editor.parameter_forms['display'].auto_switch_for('color_min')
+color_min_edit = editor.parameter_forms['display'].widget_for('color_min')
+assert color_min_auto.isChecked() and not color_min_edit.isEnabled()
+color_min_auto.setChecked(False)
+assert color_min_edit.isEnabled() and color_min_edit.text() == '0'
+color_min_auto.setChecked(True)
 semantic_combo = editor.parameter_forms['semantic'].widget_for('x')
 semantic_combo.setCurrentIndex(1)
 semantic_combo.activated.emit(1)
@@ -729,6 +769,12 @@ app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events
 assert ('state', 'panel-1', {'semantic': {'x': 'point_row'}}) in events
 assert ('state', 'panel-1', {'display': {'colormap': 'magma'}}) in events
+assert ('state', 'panel-1', {'display': {'title': 'Camera image'}}) in events
+assert ('state', 'panel-1', {'display': {'title': None}}) in events
+assert ('state', 'panel-1', {'display': {'x_display_unit': 'pixel'}}) in events
+assert ('state', 'panel-1', {'display': {'x_display_unit': None}}) in events
+assert ('state', 'panel-1', {'display': {'color_min': 0}}) in events
+assert ('state', 'panel-1', {'display': {'color_min': None}}) in events
 assert ('state', 'panel-1', {
     'fit': {'model': 'anisotropic_gaussian_center'}
 }) in events

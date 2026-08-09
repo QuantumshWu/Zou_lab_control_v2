@@ -431,7 +431,7 @@ class PanelCardView(FluentGroupBox):
                 )
             )
         fields.extend([
-            FormFieldProps("title", "text", "Title", default=state["title"]),
+            FormFieldProps("title", "text", "Panel name", default=state["title"]),
             FormFieldProps(
                 "signal",
                 "keyed_choice",
@@ -467,7 +467,10 @@ class PanelCardView(FluentGroupBox):
             parameter_fields(self._parameter_surface, "display")
         )
         for declared in declared_display:
-            field = parameter_form_spec((declared,)).fields[0]
+            field = parameter_form_spec(
+                (declared,),
+                automatic_none=True,
+            ).fields[0]
             fields.append(
                 FormFieldProps(
                     key=f"display__{str(declared['key'])}",
@@ -479,6 +482,7 @@ class PanelCardView(FluentGroupBox):
                     maximum=field.maximum,
                     choices=field.choices,
                     allow_blank=field.allow_blank,
+                    automatic=field.automatic,
                 )
             )
         display_unavailable = str(
@@ -514,7 +518,10 @@ class PanelCardView(FluentGroupBox):
         declared_display = tuple(
             parameter_fields(self._parameter_surface, "display")
         )
-        declared_values = parameter_form_values(declared_display)
+        declared_values = parameter_form_values(
+            declared_display,
+            automatic_none=True,
+        )
         for key, value in declared_values.items():
             values[f"display__{key}"] = value
         if "display_unavailable" in self._form_spec().keys:

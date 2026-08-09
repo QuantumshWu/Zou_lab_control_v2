@@ -345,6 +345,9 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
     try:
         first = host.wait_for_front(timeout=10)
         identity = host.host_id
+        initial = host.describe_display().result(timeout=10)
+        assert initial.value.display_state.values["title"] is None
+        assert initial.value.display_state.values["x_label"] is None
 
         configured = host.configure(
             semantic={"kind": PlotKind.CURVE},
@@ -379,6 +382,12 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
         ).result(timeout=10)
         assert unchanged.value.display_state.revision == reshaped.value.display_state.revision
         assert unchanged.value.size == reshaped.value.size
+
+        automatic = host.configure(
+            parameters={"title": None},
+        ).result(timeout=10)
+        assert automatic.value.display_state.values["title"] is None
+        assert automatic.front.identity.sequence == unchanged.front.identity.sequence + 1
     finally:
         host.close(timeout=10)
 

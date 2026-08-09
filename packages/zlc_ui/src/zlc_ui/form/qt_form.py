@@ -725,14 +725,15 @@ FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
 def _widget_family(field: FormFieldProps) -> str:
     """Concrete control family required by one declaration."""
 
+    prefix = "auto:" if field.automatic else ""
     if field.kind == "int" and _IntHandler._spin_range(field) is not None:
-        return "int-spin"
+        return prefix + "int-spin"
     if field.kind == "float" and _FloatHandler._spin_range(field) is not None:
-        return "float-spin"
+        return prefix + "float-spin"
     if field.kind in {"text", "int", "float", "number"}:
-        return "line-edit"
+        return prefix + "line-edit"
     if field.kind == "choice":
-        return "choice"
+        return prefix + "choice"
     if field.kind == "bool":
         return "bool"
     if field.kind == "axis_range":
@@ -813,6 +814,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._widgets: dict[str, QtWidgets.QWidget] = {}
         self._handlers: dict[str, FormWidgetHandler] = {}
         self._rows: dict[str, QtWidgets.QWidget] = {}
+        self._auto_switches: dict[str, FluentSwitch] = {}
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -830,20 +832,54 @@ class FluentParameterForm(QtWidgets.QWidget):
             )
             self._widgets[field.key] = widget
             self._handlers[field.key] = handler
-            row = self._make_row(field, widget, label_width)
+            row, automatic = self._make_row(field, widget, label_width)
             self._rows[field.key] = row
+            if automatic is not None:
+                self._auto_switches[field.key] = automatic
             self._layout.addWidget(row)
 
         if values is not None:
             self.populate(values)
 
     def _make_row(self, field, widget, label_width):
-        return FluentSettingRow(
+        automatic = None
+        content = widget
+        if field.automatic:
+            content = QtWidgets.QWidget(self)
+            layout = QtWidgets.QHBoxLayout(content)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(scaled_px(6, minimum=4))
+            widget.setParent(content)
+            automatic = FluentSwitch("Auto", content)
+            with signals_blocked(automatic):
+                automatic.setChecked(field.default is None)
+            widget.setEnabled(field.default is not None)
+            automatic.toggled.connect(
+                lambda checked, key=field.key: self._automatic_toggled(
+                    key, checked
+                )
+            )
+            layout.addWidget(widget, 1)
+            layout.addWidget(automatic)
+        row = FluentSettingRow(
             field.row_label,
-            widget,
+            content,
             label_width=label_width,
             parent=self,
         )
+        return row, automatic
+
+    def _automatic_toggled(self, key: str, automatic: bool) -> None:
+        field = self._fields[key]
+        widget = self._widgets[key]
+        widget.setEnabled(not automatic)
+        if not automatic and self._handlers[key].is_empty(field, widget):
+            if field.kind == "choice" and field.choices:
+                self._handlers[key].write(field, widget, field.choices[0].value)
+            elif field.kind in {"int", "float", "number"}:
+                value = field.minimum if field.minimum is not None else 0
+                self._handlers[key].write(field, widget, value)
+        self.changed.emit(key)
 
     @property
     def spec(self) -> FormSpec:
@@ -859,14 +895,26 @@ class FluentParameterForm(QtWidgets.QWidget):
         except KeyError as exc:
             raise KeyError(f"unknown form field key: {key!r}") from exc
 
+    def auto_switch_for(self, key: str) -> FluentSwitch:
+        try:
+            return self._auto_switches[key]
+        except KeyError as exc:
+            raise KeyError(f"form field {key!r} does not declare Auto") from exc
+
     def is_empty(self, key: str) -> bool:
         field = self._field_for(key)
+        automatic = self._auto_switches.get(key)
+        if automatic is not None and automatic.isChecked():
+            return False
         return self._handlers[key].is_empty(field, self._widgets[key])
 
     def read_value(self, key: str) -> object:
         """Read one edited leaf without promoting it to a whole-form snapshot."""
         field = self._field_for(key)
         handler, widget = self._handlers[key], self._widgets[key]
+        automatic = self._auto_switches.get(key)
+        if automatic is not None and automatic.isChecked():
+            return None
         if (
             field.required
             and handler.is_empty(field, widget)
@@ -892,11 +940,18 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         prepared = self._prepare_population(values)
         widgets = tuple(self._widgets[key] for key in self._spec.keys)
-        with signals_blocked(*widgets):
+        automatic = tuple(self._auto_switches.values())
+        with signals_blocked(*widgets, *automatic):
             for field in self._spec.fields:
-                self._handlers[field.key].write(
-                    field, self._widgets[field.key], prepared[field.key]
-                )
+                switch = self._auto_switches.get(field.key)
+                selected = switch is not None and values[field.key] is None
+                if not selected:
+                    self._handlers[field.key].write(
+                        field, self._widgets[field.key], prepared[field.key]
+                    )
+                if switch is not None:
+                    switch.setChecked(selected)
+                    self._widgets[field.key].setEnabled(not selected)
 
     def validate_population(self, values: Mapping[str, object]) -> None:
         """Validate one exact owner projection without mutating any widget."""
@@ -957,7 +1012,10 @@ class FluentParameterForm(QtWidgets.QWidget):
         }
 
         old_fields = self._fields
-        replacements: dict[str, tuple[QtWidgets.QWidget, QtWidgets.QWidget]] = {}
+        replacements: dict[
+            str,
+            tuple[QtWidgets.QWidget, QtWidgets.QWidget, FluentSwitch | None],
+        ] = {}
         label_width = self._label_width or setting_label_width(
             field.row_label for field in spec.fields
         )
@@ -975,17 +1033,22 @@ class FluentParameterForm(QtWidgets.QWidget):
                 lambda key=field.key: self.changed.emit(key),
                 self._runtime,
             )
-            row = self._make_row(field, widget, label_width)
-            replacements[field.key] = widget, row
+            row, automatic = self._make_row(field, widget, label_width)
+            replacements[field.key] = widget, row, automatic
 
         retained_widgets = tuple(
             self._widgets[field.key]
             for field in spec.fields
             if field.key not in replacements and field.key in self._widgets
         )
+        retained_switches = tuple(
+            self._auto_switches[field.key]
+            for field in spec.fields
+            if field.key not in replacements and field.key in self._auto_switches
+        )
         self.setUpdatesEnabled(False)
         try:
-            with signals_blocked(*retained_widgets):
+            with signals_blocked(*retained_widgets, *retained_switches):
                 for field in spec.fields:
                     if field.key in replacements:
                         continue
@@ -993,10 +1056,18 @@ class FluentParameterForm(QtWidgets.QWidget):
                     widget = self._widgets[field.key]
                     handler = new_handlers[field.key]
                     _reconfigure_widget(old_field, field, widget)
-                    if not _widget_has_value(
+                    selected = (
+                        field.key in self._auto_switches
+                        and incoming[field.key] is None
+                    )
+                    if not selected and not _widget_has_value(
                         handler, field, widget, prepared[field.key]
                     ):
                         handler.write(field, widget, prepared[field.key])
+                    automatic = self._auto_switches.get(field.key)
+                    if automatic is not None:
+                        automatic.setChecked(selected)
+                        widget.setEnabled(not selected)
 
             desired_keys = set(spec.keys)
             replaced_keys = set(replacements)
@@ -1012,10 +1083,17 @@ class FluentParameterForm(QtWidgets.QWidget):
                 row.deleteLater()
                 self._rows.pop(key, None)
                 self._widgets.pop(key, None)
+                self._auto_switches.pop(key, None)
 
-            for key, (widget, row) in replacements.items():
+            for key, (widget, row, automatic) in replacements.items():
                 self._widgets[key] = widget
                 self._rows[key] = row
+                if automatic is not None:
+                    self._auto_switches[key] = automatic
+                    selected = incoming[key] is None
+                    with signals_blocked(automatic):
+                        automatic.setChecked(selected)
+                    widget.setEnabled(not selected)
 
             for index, field in enumerate(spec.fields):
                 row = self._rows[field.key]
@@ -1041,6 +1119,9 @@ class FluentParameterForm(QtWidgets.QWidget):
                     self._widgets[field.key],
                     self._runtime,
                 )
+                automatic = self._auto_switches.get(field.key)
+                if automatic is not None and automatic.isChecked():
+                    self._widgets[field.key].setEnabled(False)
 
     def _field_for(self, key: str) -> FormFieldProps:
         try:
