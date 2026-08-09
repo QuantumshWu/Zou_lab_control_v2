@@ -538,7 +538,7 @@ class CameraMeasurementNode:
         attach_live_outputs: Callable[[object], None] | None = None,
     ) -> MonitorCapture:
         cycle_size = self.frames_per_cycle
-        minimum_frames = 4 * cycle_size
+        minimum_frames = 16 * cycle_size
         if buffer_frames is None:
             buffer_frames = minimum_frames
         else:

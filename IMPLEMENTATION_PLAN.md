@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`四-cycle camera buffer 已提交 c3e1da7；Panel Edit Save Fig 的可见操作面已完成回归，正在独立提交。`
-- Last completed action：`Panel Edit 原来只有 Save Fig 按钮并再次打开 modal save dialog，缺少用户要求的目录、格式、auto-name 和最终路径预览。现直接在既有 PanelEditorView 加入 Directory/Browse、Auto-name + manual Name、PNG/PDF/SVG 和只读 final path；Handle 将 panel id + exact path 送入既有 ConsolePresenter.save_panel_figure，后者继续只保存当前 frozen snapshot 的 image + NPZ。panel_save 复用同一 zlc_plot host并按所选 image suffix保存，没有新文件、DTO、save registry 或第二保存路径。`
-- Last verified tests：`Save UI 的既有真实 Qt 测试在旧生产以 PanelEditorView 无 save_directory 精确红；修改后完整 zlc_ui 79 passed。相关 Workbench presenter/view contracts/TaskConsole/Guard C 83 passed；Viewer archive roundtrip 19 passed。Guard C 走Panel Edit exact path并选择SVG，得到同stem SVG+NPZ及精确 frozen data/run chain。每个验证进程首行 import v2 root并打印被测模块路径；diff-check clean，Panel Save presenter不再调用modal ask_save_path，项目 Python 进程为零。`
-- Pending acceptance gates：`独立提交 Save Fig surface；随后验证Auto/limits和完整fit controls，再做最终 Experiment flow close/零残留。`
-- Next action：`提交Save Fig surface；随后先用真实Qt投影确认zlc_plot声明的limits/fit字段和None=Auto缺口，再最小实现Auto toggle。`
+- Current phase：`continuous camera raw buffer 已由四个提高到十六个完整 cycle，全部既定回归已绿，正在独立提交。`
+- Last completed action：`Panel Edit Save Fig 可见操作面已提交 456aabc。随后将Camera Measurement唯一minimum_frames从4 * frames_per_cycle提高为16 * frames_per_cycle并继续按cycle整数倍对齐；Virtual/DCAM/Pylon继续只落实同一个帧数，没有新文件、类、用户参数或设备分支。frames_per_cycle=3时默认由12帧提高为48帧。`
+- Last verified tests：`旧生产纵向红已实跑：49帧压力后只剩四-cycle容量，前三次读取末ordinal为39而不是3。修改后同一测试1 passed；Monitor/Pylon/DCAM/camera/runtime受影响组39 passed；完整zlc_atom 143 passed；Guard A + Console Logic + end-to-end 38 passed。每个Python进程首行import v2 root并打印被测production路径；buffer切片diff-check clean，项目Python进程为零。`
+- Pending acceptance gates：`独立提交十六-cycle buffer；随后继续Auto/limits和完整fit controls，再做最终Experiment flow close/零残留。`
+- Next action：`只stage两份权威文档、measurement.py和既有纵向测试并提交；保留工作树中Auto/limits未完成改动，随后从该Checkpoint继续。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。`
 
 ## 1. 执行纪律
@@ -130,7 +130,7 @@
 2. finite-source processor 接 `FollowTap`，按提交顺序无损处理。
 3. source 已结束时，让 processor 可对 retained final `OwnedSnapshot` 处理一次，不重跑设备。
 4. infinite Camera Measurement 在自己的 worker 上读 camera 并覆盖 latest slot；UI beat 只从 plane freeze。
-5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 至少是 `4 * frames_per_cycle` 且按完整 cycle 对齐；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。
+5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 至少是 `16 * frames_per_cycle` 且按完整 cycle 对齐；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。
 6. infinite-source processor 只处理当前 latest，不追历史。
 7. 删除 `missed_events/current_gap/behind/missed` 等 loss telemetry；保留 keyed sweep 断续时清 stale cells 的科学正确性规则。
 

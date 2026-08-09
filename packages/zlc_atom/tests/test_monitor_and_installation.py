@@ -73,13 +73,13 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert isinstance(monitor, MonitorCapture)
         camera = installation.device("camera")
 
-        # Continuous capture keeps four whole cycles.  Let that twelve-frame
+        # Continuous capture keeps sixteen whole cycles.  Let that 48-frame
         # raw buffer advance once before the consumer reads: it now contains
-        # ordinals 1..12.  The leading 1/2 cannot be combined with 3, and the
+        # ordinals 1..48.  The leading 1/2 cannot be combined with 3, and the
         # retained capacity must still leave 3/4/5 available as the next shot.
-        camera.trigger(13)
+        camera.trigger(49)
         deadline = time.monotonic() + 1.0
-        while camera.produced_count < 13 and time.monotonic() < deadline:
+        while camera.produced_count < 49 and time.monotonic() < deadline:
             time.sleep(0.001)
         for _ in range(3):
             monitor.poll()
