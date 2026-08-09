@@ -103,6 +103,9 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
             session._renderer.style.artists.point_occupied,
             session._renderer.style.artists.point_invalid,
         )
+        assert tokens[0].alpha <= 0.15
+        assert tokens[1].alpha <= 0.60
+        assert tokens[0].alpha < tokens[1].alpha
         assert tuple(label.get_text() for label in artists) == ("1", "2", "3")
         assert all(
             to_rgba(label.get_color(), label.get_alpha())

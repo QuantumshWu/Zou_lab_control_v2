@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Calibration 四张实际 PNG 已重新生成并逐张目视检查；L/R population 百分比和 site ordinal 位置的最小修正已完成，正在独立 commit。`
-- Last completed action：`在既有 zlc_plot fit/renderer 文件内把 classifier 的 L/R 改为总拟合分布在当前 threshold 两侧的 population 百分比，显示值严格合计 100%，balanced fidelity 保持独立；通用 point-overlay ordinal 移到 marker 左上角并继续复用对应圈的颜色/透明度。未新增文件或类。`
-- Last verified tests：`原生产两条目标红：L/R 显示合计 199.8 而非 100，site label 仍位于 marker 中心。修后目标 2 passed；zlc_plot 全包 206 passed；真实 35-site Calibration Task 链 1 passed，并逐张检查新生成的 site_map/box/psf/uniform_psf PNG：三个 grid 每格 L/R 合计 100%，1–35 均位于各 marker 左上角。所有 Python 进程首行 import v2 root 并打印被测 production module 路径。`
-- Pending acceptance gates：`本阶段独立 commit 后，继续实际检查 Occupancy overlay 的 occupied/vacant/invalid 颜色、透明度与 ordinal，以及 same-shot/derived/ROI、Save Fig/Auto/fit UI、性能和正式按钮验收。Overlay picker 还需在后续统一 signal picker UI 阶段从普通 Combo 升级成 grouped tree，而不改其数据契约。`
-- Next action：`完成本次四图视觉修正的 residual rg、diff 审查和独立 commit；随后只沿现有 Occupancy typed overlay -> Image 路径生成实际图，按可见结果最小调整 occupied/vacant/invalid 样式，不改 overlay 数据契约。`
+- Current phase：`Occupancy typed overlay 已沿真实 35-site Calibration -> Occupancy -> Image 路径生成并目视检查；occupied/vacant 透明度的最小修正已完成，正在独立 commit。`
+- Last completed action：`在既有 zlc_plot style token 中把 vacant/empty alpha 从 0.25 降到 0.12、occupied alpha 从 0.78 降到 0.58；不改 overlay dataset、status、renderer 或 Workbench 接线。实图中 occupied 保持主视觉，vacant 明显退到背景，左上角 ordinal 继续严格复用各自圈的颜色和 alpha。未新增文件或类。`
+- Last verified tests：`原生产目标红：empty alpha 0.25 超过 0.15 上限。修后目标 1 passed；zlc_plot 全包 206 passed；既有 Guard A headless virtual chain 1 passed。另用现有真实 Calibration/Occupancy/Image API 生成 35-site Occupancy PNG（17 empty、18 occupied）并目视确认 occupied/vacant 层级和 ordinal 位置；所有 Python 进程首行 import v2 root 并打印被测 production module 路径。`
+- Pending acceptance gates：`本阶段独立 commit 后，继续完成 same-shot/derived/ROI、Save Fig/Auto/fit UI、Panel 完整配置性能与正式按钮验收。Overlay picker 还需在后续统一 signal picker UI 阶段从普通 Combo 升级成 grouped tree，而不改其数据契约。`
+- Next action：`完成本次 Occupancy 样式修正的 residual rg、diff 审查和独立 commit；随后按现有科学链检查同一 camera shot 的 frame/occupied/overlay parent 对齐与 ROI contract，不增加新的数据身份或防御层。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。`
 
 ## 1. 执行纪律

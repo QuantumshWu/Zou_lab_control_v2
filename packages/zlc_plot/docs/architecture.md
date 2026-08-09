@@ -77,7 +77,7 @@ The public `PlotKind` vocabulary is complete:
 5. `FacetGrid`
 6. `PulseTimeline`
 
-Rolling is one plot kind with `side_distribution=True/False`. FacetGrid cells are homogeneous Curve, Image, or Histogram views. Canonical point coordinates are an independently revisioned `ImagePointOverlay` on an ordinary Image, not another plot kind or data geometry. Pulse program conversion remains an application/domain responsibility; the plot package consumes `PulseTimelineData` with `PulseChannel`, `PulseBlock`, `PulseAnalogTrace`, `PulseScanRegion`, `PulseDacScanSegment`, and `PulseRepeatMarker`.
+Rolling is one plot kind with `side_distribution=True/False`. FacetGrid cells are homogeneous Curve, Image, or Histogram views. Canonical point coordinates are an independently revisioned `ImagePointOverlay` on an ordinary Image, not another plot kind or data geometry. Point-status style keeps occupied rings visually primary, makes empty rings substantially more transparent, and places an optional ordinal at the ring's upper-left using that ring's exact colour and alpha. Pulse program conversion remains an application/domain responsibility; the plot package consumes `PulseTimelineData` with `PulseChannel`, `PulseBlock`, `PulseAnalogTrace`, `PulseScanRegion`, `PulseDacScanSegment`, and `PulseRepeatMarker`.
 
 ## Session state
 

@@ -177,7 +177,10 @@ image_session.update_image_overlay(ImagePointOverlay.empty(revision=1))
 optional parallel metadata. An overlay-only update must have a strictly newer
 revision; it updates the point artists without changing or reprojecting the
 image snapshot. Point ring size is derived from canonical coordinate spacing
-and the immutable package style. An `ImageFrame` always contains a
+and the immutable package style. Occupied rings are the primary annotation;
+empty rings deliberately use much lower opacity, and each optional ordinal is
+drawn at the ring's upper-left with exactly the same colour and opacity as its
+ring. An `ImageFrame` always contains a
 revisioned overlay, including an explicit empty layer. Reusing the identical
 overlay revision in later frames is allowed; the same revision cannot identify
 different content. A prepared frame also compares the point-layer authority at

@@ -364,7 +364,7 @@ Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display
 | `Site grid` / FacetGrid[Curve] | Facet axis；fixed Curve cell semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing；focus/cell display；Curve display parameters |
 
 Fit model 和参数兼容性由 `zlc_plot` 声明，UI 不写死列表。Overlay 不是 `zlc_plot` 的 Off/Centers/Occupancy mode 参数；它是 panel 的第二个显式 signal binding。producer 决定坐标、身份和状态，`zlc_plot` 只按 typed overlay contract 绘制，不从 grid shape 或 domain artifact 生成圈。
-Site 旁边不得显示长 site id；若开启标签，最多在 marker 左上角显示小号 ordinal 数字。数字颜色和透明度跟对应 site 圈完全一致，使 empty/occupied/invalid 仍可由同一状态色区分。
+Site 旁边不得显示长 site id；若开启标签，最多在 marker 左上角显示小号 ordinal 数字。数字颜色和透明度跟对应 site 圈完全一致，使 empty/occupied/invalid 仍可由同一状态色区分；vacant/empty 必须明显淡于 occupied，不能成为画面的第一视觉层。
 
 ## 11. 三种 Save（必须分开）
 
