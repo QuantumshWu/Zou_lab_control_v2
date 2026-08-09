@@ -58,7 +58,7 @@ def _commit_area(host) -> None:
         ).result()
 
 
-def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
+def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart_restarts(
     tmp_path,
 ) -> None:
     plot = pytest.importorskip("zlc_plot")
