@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Panel Setting与Panel Edit的同一semantic/display/fit操作面已完成全部受影响回归，正在独立提交。`
-- Last completed action：`continuous camera buffer已提交ff2a3b4；Panel display Auto/limits与Panel name/plot Title分离已提交e18aadc。随后确认zlc_plot现有RasterPlotHost.configure已经一次接收完整semantic/display/size/overlay/fit choice并自行决定原位更新、重投影或异步fit；真实缺口只是Panel Card Setting仍只投影display，而Panel Edit已投影semantic/display/fit。现仅把既有Card form改为消费同一个parameter surface的三个section并复用同一即时state_changed路径，没有新文件、类、fit状态机或第二配置链。`
-- Last verified tests：`旧生产真实Qt守卫精确红：Card Setting访问semantic__x时报KeyError；修改后同一测试1 passed，确认Setting初始即显示semantic与fit model，且两者分别发出semantic/fit PanelState patch。相关真实Qt 25 passed、完整zlc_ui 79 passed。现有Workbench纵向测试已扩为捕获live host的一次configure调用，确认fit commit携带完整semantic/display/size/fit_model且没有逐字段setter；聚焦1 passed、完整console presenter 30 passed、完整zlc_workbench 333 passed。diff-check clean，Card无display-only残余，项目Python进程为零。所有Python验证仍首行import v2 root并打印被测production路径。`
-- Pending acceptance gates：`独立提交该小切片；随后进入Sitemap/Distribution classifier与最终Experiment flow。`
-- Next action：`只stage IMPLEMENTATION_PLAN、PanelCardView和两个既有纵向测试并提交；随后从Sitemap的显式typed overlay signal与通用small point label/alpha设计继续。`
+- Current phase：`科学链、Sitemap/Distribution、same-shot camera、Panel操作面与性能切片均已提交到22fd0eb；当前工作树全树复验已绿，正在提交验证Checkpoint并做detached复验。`
+- Last completed action：`Panel Setting与Panel Edit现消费同一semantic/display/fit parameter surface并即时更新同一PanelState；fit choice继续一次提交完整semantic/display/size/overlay/fit_model给现有RasterPlotHost.configure。该切片已提交22fd0eb。更早已提交的Sitemap/explicit overlay/site ordinal与透明度、Distribution独立classifier、Calibration四图、camera same-shot grouping和16-cycle buffer不得重做。`
+- Last verified tests：`22fd0eb前的旧生产真实Qt守卫精确红：Card Setting访问semantic__x时报KeyError；修改后focused 1 passed、相关真实Qt 25 passed、完整zlc_ui 79 passed；Workbench完整配置纵向1 passed、console presenter 30 passed、完整zlc_workbench 333 passed。buffer切片此前完整zlc_atom 143 passed，Auto切片此前完整zlc_plot 206 passed。当前22fd0eb上Guard A/B/C + end-to-end + 正式TaskConsole app合组26 passed；随后当前工作树全树1152 passed in 170.77s。所有Python验证首行import v2 root并打印实际Atom/Plot/UI/Workbench路径；各阶段diff-check clean、项目Python进程为零。`
+- Pending acceptance gates：`detached精确提交全树复验、正式offscreen入口/关闭零残留最终核对；最后由用户亲自走可见bin\\experiment.bat按钮验收。`
+- Next action：`提交本Checkpoint；从该精确HEAD建立临时detached worktree，打印临时树实际导入路径并跑全树pytest，完成后git worktree remove并双重确认目录与注册均不存在。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。`
 
 ## 1. 执行纪律
