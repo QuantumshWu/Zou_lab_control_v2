@@ -8,9 +8,13 @@ calibration nodes. Virtual implementations live only under
 `SequencerDevice` over the same pulse-device surface as hardware.
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
-Qt or plotting imports. Calibration consumes a project-owned
+Qt dependency. Calibration consumes a project-owned
 `zlc.pulse.v1` JSON document through the public `zlc_pulse` codec/resolution
-API; there is no Python pulse-module format or second resolver.
+API; there is no Python pulse-module format or second resolver. After one
+calibration run produces one result, the Calibration plugin saves its JSON and
+passes that same result directly to the public `zlc_plot` API for six report
+images. The Atom foundation does not depend on plotting; this plugin-local
+report belongs to the Calibration task itself.
 
 Node results also expose `zlc-data` role-axis `OwnedSnapshot` artifacts, so
 repeat, site, and readout-event meaning is carried by `DatasetSchema` rather
@@ -61,7 +65,7 @@ The runtime has one direction of responsibility:
 | --- | --- | --- |
 | Device | camera/sequencer protocols, buffers, trigger routing, virtual imaging world | calibration policy or analysis |
 | Measurement | arm/read/finish observation and publication of camera frames | pulse selection or `sequencer.load/fire` |
-| Task | pulse resolution, sequencer load/fire, repeated capture, progress, typed preview/final publication, calibration, and artifact creation | reusable readout mathematics or report rendering |
+| Task | pulse resolution, sequencer load/fire, repeated capture, progress/current preview, calibration, JSON artifact, and its six report-image saves | reusable readout mathematics or renderer internals |
 | Processor | consume a frames signal plus calibration and derive counts/occupied/rate with lineage | excitation or camera control |
 
 For a manually controlled experiment, the notebook calls `resolve_pulse`,
@@ -69,9 +73,12 @@ For a manually controlled experiment, the notebook calls `resolve_pulse`,
 an automated experiment, `CalibrationTask.run()` owns that whole sequence and
 returns a saved calibration artifact. Calibration discovers its site count and
 centers from acquired images; it accepts no authored grid rows, columns, or
-site count. It publishes a live `capture_preview` and one typed six-dataset
-FINAL sibling bundle; the Workbench report adapter renders that bundle without
-putting a calibration object or report blob on the signal plane.
+site count. While hosted it publishes only the current `capture_preview` for
+Monitor. When the loop finishes it computes one result, writes one plain JSON,
+and passes the same in-memory result to `zlc_plot` to save site-map, fidelity,
+three classifier grids, and a PSF-kernel grid. Workbench neither renders nor
+opens those report files, and no calibration object/report blob is put on the
+signal plane.
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
 
@@ -105,5 +112,5 @@ Real camera adapters remain under `devices/camera/`; all virtual camera,
 sequencer, shared-world geometry, and virtual descriptors remain under
 `devices/simulation/`. Installation descriptors expose only operator-owned
 settings. Logic descriptors own their authoring schema, typed artifact/resource
-inputs, live/final outputs, and task preview/report declarations; Workbench and
-Qt consume those contracts rather than rebuilding them.
+inputs, dataset outputs, artifact outputs, and task preview declaration;
+Workbench and Qt consume those contracts rather than rebuilding them.

@@ -6,7 +6,7 @@ The current product path uses the same descriptor/catalog/NodeHost/TaskConsole
 route for virtual and physical adapters:
 
 ```text
-Calibration Task -> calibration JSON (SiteMap + readout model)
+Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
 Image/other Plot Panel -> Panel Edit Save Fig
@@ -14,9 +14,11 @@ Image/other Plot Panel -> Panel Edit Save Fig
 
 TaskConsole and Pulse Editor are two windows on the same `Experiment` session,
 named devices, virtual world, and sequencer; they do not create a second session
-or IPC service. Calibration discovers sites from its images and writes an
-artifact rather than a signal. Camera Measurement owns per-run exposure/ROI and
-uses `Repeat = 0` for infinite acquisition.
+or IPC service. Calibration publishes only its current capture preview while
+running; after the loop it computes one result, writes its JSON, and passes that
+same result to `zlc_plot` for six PNG report images. Workbench does not display
+or re-analyse the report. Camera Measurement owns per-run exposure/ROI and uses
+`Repeat = 0` for infinite acquisition.
 
 The three TaskConsole save actions are intentionally separate: header **Save
 Layout** writes stopped pipeline/layout wiring without data, header **Save
@@ -81,7 +83,7 @@ above it and must not know the ones below.
 | `zlc_plot` | drawing, fitting, panel layout | scheduling, devices |
 | `zlc_ui` | windows and controls | data, plots, domain — **and no Qt escapes it** |
 | `zlc_pulse` | the sequence model, the compiler, the wire | anything above |
-| `zlc_atom` | the physics: nodes, devices, calibration | how any of it is shown |
+| `zlc_atom` | physics: nodes, devices, calibration, and a leaf plugin's own report choice | Workbench/Qt; plotting dependencies in the foundation |
 | `zlc_workbench` | composition and wiring, and nothing else | inventing domain or UI |
 
 Two rules are mechanically enforced rather than remembered, because both were
