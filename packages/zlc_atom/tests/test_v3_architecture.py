@@ -491,6 +491,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "valid",
             "rate",
             "frame_judged",
+            "site_overlay",
         )
         with pytest.raises((TypeError, ValueError)):
             descriptors["camera_measurement"].instantiate(

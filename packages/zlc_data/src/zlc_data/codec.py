@@ -86,6 +86,9 @@ def axis_to_tree(axis: AxisSpec) -> dict[str, Any]:
         if axis.coordinate_frame is None
         else axis.coordinate_frame.value,
         "index_origin": axis.index_origin,
+        "coordinate_labels": None
+        if axis.coordinate_labels is None
+        else list(axis.coordinate_labels),
     }
 
 
@@ -102,6 +105,7 @@ def axis_from_tree(tree: Any) -> AxisSpec:
             "unit",
             "coordinate_frame",
             "index_origin",
+            "coordinate_labels",
         },
         AXIS_SCHEMA,
     )
@@ -109,6 +113,9 @@ def axis_from_tree(tree: Any) -> AxisSpec:
     if coordinates is not None and not isinstance(coordinates, list):
         raise ValueError("AxisSpec coordinates must be a list or null")
     frame = data["coordinate_frame"]
+    coordinate_labels = data["coordinate_labels"]
+    if coordinate_labels is not None and not isinstance(coordinate_labels, list):
+        raise ValueError("AxisSpec coordinate_labels must be a list or null")
     axis = AxisSpec(
         axis_id=AxisId(data["axis_id"]),
         name=data["name"],
@@ -118,6 +125,9 @@ def axis_from_tree(tree: Any) -> AxisSpec:
         unit=data["unit"],
         coordinate_frame=None if frame is None else CoordinateFrameId(frame),
         index_origin=data["index_origin"],
+        coordinate_labels=None
+        if coordinate_labels is None
+        else tuple(coordinate_labels),
     )
     if _encode(axis_to_tree(axis)) != _encode(tree):
         raise ValueError("AxisSpec tree is typed but non-canonical")
@@ -164,6 +174,9 @@ def point_column_to_tree(column: PointColumn) -> dict[str, Any]:
         "coordinate_frame": None
         if column.coordinate_frame is None
         else column.coordinate_frame.value,
+        "coordinate_labels": None
+        if column.coordinate_labels is None
+        else list(column.coordinate_labels),
     }
 
 
@@ -179,6 +192,7 @@ def point_column_from_tree(tree: Any) -> PointColumn:
             "values",
             "unit",
             "coordinate_frame",
+            "coordinate_labels",
         },
         POINT_COLUMN_SCHEMA,
     )
@@ -186,6 +200,9 @@ def point_column_from_tree(tree: Any) -> PointColumn:
     if not isinstance(values, list):
         raise ValueError("PointColumn values must be a list")
     frame = data["coordinate_frame"]
+    coordinate_labels = data["coordinate_labels"]
+    if coordinate_labels is not None and not isinstance(coordinate_labels, list):
+        raise ValueError("PointColumn coordinate_labels must be a list or null")
     column = PointColumn(
         coordinate_id=AxisId(data["coordinate_id"]),
         name=data["name"],
@@ -194,6 +211,9 @@ def point_column_from_tree(tree: Any) -> PointColumn:
         values=tuple(values),
         unit=data["unit"],
         coordinate_frame=None if frame is None else CoordinateFrameId(frame),
+        coordinate_labels=None
+        if coordinate_labels is None
+        else tuple(coordinate_labels),
     )
     if _encode(point_column_to_tree(column)) != _encode(tree):
         raise ValueError("PointColumn tree is typed but non-canonical")

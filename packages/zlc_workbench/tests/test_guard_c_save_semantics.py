@@ -110,8 +110,6 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         )
         parameters = dict(state.display)
         parameters["title"] = state.title
-        if state.kind == "image":
-            parameters["site_overlay"] = state.site_overlay
         return plot.RasterPlotHost.from_plot(
             plot_input,
             spec,
@@ -174,8 +172,13 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             title="occupancy image",
             kind="image",
             fit={"model": "anisotropic_gaussian_center"},
-            site_overlay="centers",
+            overlay_signal=occupancy_host.signal_key("site_overlay"),
         )
+        assert {
+            key
+            for _producer, leaves in view._cards[target.panel_id].overlay_choices
+            for _label, key in leaves
+        } == {occupancy_host.signal_key("site_overlay")}
         other = presenter.add_panel(
             frames_signal,
             camera_snapshot,
@@ -269,8 +272,13 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         panel_state = panel_section.get("state", panel_section)
         assert panel_state["kind"] == "image"
         assert panel_state["fit"] == {"model": "anisotropic_gaussian_center"}
-        assert panel_state["site_overlay"] == "centers"
-        assert sections["overlay"]["resolved_mode"] == "centers"
+        assert panel_state["overlay_signal"] == occupancy_host.signal_key(
+            "site_overlay"
+        )
+        assert sections["overlay"]["overlay_signal"] == (
+            occupancy_host.signal_key("site_overlay")
+        )
+        assert "calibration_path" not in sections["overlay"]
 
         records = {record["node"]: record for record in _records(sections["run_chain"])}
         assert set(records) >= {"camera_measurement", "occupancy"}

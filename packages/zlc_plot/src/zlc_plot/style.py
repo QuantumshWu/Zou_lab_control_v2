@@ -749,10 +749,10 @@ def build_plot_style() -> PlotStyleConfig:
         pulse_scan_region_color="#D69A6E",
         pulse_api_region_color="#B08BD6",
         pulse_scan_annotation_color="#FFFFFF",
-        point_unknown=PointRingToken("#FFFFFF", 0.85, 0.6),
-        point_empty=PointRingToken("#FFFFFF", 0.85, 0.6),
-        point_occupied=PointRingToken("#D07850", 0.95, 0.9),
-        point_invalid=PointRingToken("#CD7380", 0.95, 0.9),
+        point_unknown=PointRingToken("#FFFFFF", 0.45, 0.6),
+        point_empty=PointRingToken("#FFFFFF", 0.25, 0.5),
+        point_occupied=PointRingToken("#D07850", 0.78, 0.85),
+        point_invalid=PointRingToken("#CD7380", 0.50, 0.7),
     )
     pulse = PulseStyleConfig()
     render = RenderPolicyConfig()

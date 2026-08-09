@@ -70,7 +70,7 @@ class PanelState:
     semantic: Mapping[str, Any] = field(default_factory=dict)
     display: Mapping[str, Any] = field(default_factory=dict)
     fit: Mapping[str, Any] = field(default_factory=dict)
-    site_overlay: str = "off"
+    overlay_signal: str = ""
 
     def __post_init__(self) -> None:
         interval = int(self.interval_ms)
@@ -99,7 +99,10 @@ class PanelState:
         object.__setattr__(self, "semantic", _plain_state(self.semantic))
         object.__setattr__(self, "display", _plain_state(self.display))
         object.__setattr__(self, "fit", _plain_state(self.fit))
-        object.__setattr__(self, "site_overlay", str(self.site_overlay))
+        overlay_signal = str(self.overlay_signal).strip()
+        if overlay_signal and resolved_kind is not PlotKind.IMAGE:
+            raise ValueError("only an Image panel can select an overlay signal")
+        object.__setattr__(self, "overlay_signal", overlay_signal)
 
     def document(self) -> dict[str, Any]:
         """Return the JSON-shaped part of a reusable layout document."""
@@ -114,7 +117,7 @@ class PanelState:
             "semantic": _document_value(self.semantic),
             "display": _document_value(self.display),
             "fit": _document_value(self.fit),
-            "site_overlay": self.site_overlay,
+            "overlay_signal": self.overlay_signal,
         }
 
 

@@ -290,6 +290,9 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
         SITE,
         PointColumn.TEXT,
         site_map.site_ids,
+        coordinate_labels=tuple(
+            str(index) for index in range(1, site_map.n_sites + 1)
+        ),
     )
     labels_valid = np.asarray(result.report["labels_valid"], dtype=bool)
     model_reports = result.report["models"]

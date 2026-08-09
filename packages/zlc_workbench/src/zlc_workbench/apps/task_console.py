@@ -96,8 +96,6 @@ def build_console(session, *, window_ratio=None):
         spec = compose_panel_spec(snapshot.block.schema, spec, state)
         parameters = dict(state.display)
         parameters["title"] = state.title
-        if state.kind == "image":
-            parameters["site_overlay"] = state.site_overlay
         return plot.RasterPlotHost.from_plot(
             plot_input,
             replace(spec, labels=replace(spec.labels, title=state.title)),

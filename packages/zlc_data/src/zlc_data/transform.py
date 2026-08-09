@@ -326,6 +326,9 @@ def _subset_point_schema(
             tuple(column.values[index] for index in ordinals),
             column.unit,
             column.coordinate_frame,
+            None
+            if column.coordinate_labels is None
+            else tuple(column.coordinate_labels[index] for index in ordinals),
         )
         for column in schema.point_table.columns
     )
@@ -433,6 +436,11 @@ def _selected_axis(
     else:
         coordinates = tuple(axis.coordinates[index] for index in indices)
         index_origin = 0
+    labels = (
+        None
+        if axis.coordinate_labels is None
+        else tuple(axis.coordinate_labels[index] for index in indices)
+    )
     return AxisSpec(
         axis.axis_id,
         axis.name,
@@ -442,6 +450,7 @@ def _selected_axis(
         axis.unit,
         axis.coordinate_frame,
         index_origin,
+        labels,
     )
 
 
@@ -455,6 +464,7 @@ def _reduced_axis(axis: AxisSpec) -> AxisSpec:
         axis.unit,
         axis.coordinate_frame,
         0,
+        None,
     )
 
 
@@ -778,11 +788,16 @@ def _reduce_grid_domain(
         if column.coordinate_id in reduced_ids:
             continue
         values: list[object] = []
+        labels: list[str] | None = (
+            [] if column.coordinate_labels is not None else None
+        )
         for members in groups:
             first = column.values[members[0]]
             if any(column.values[index] != first for index in members[1:]):
                 break
             values.append(first)
+            if labels is not None:
+                labels.append(column.coordinate_labels[members[0]])
         else:
             columns.append(
                 PointColumn(
@@ -793,6 +808,7 @@ def _reduce_grid_domain(
                     tuple(values),
                     column.unit,
                     column.coordinate_frame,
+                    None if labels is None else tuple(labels),
                 )
             )
     remaining_ids = tuple(topology.dimension_ids[index] for index in remaining_positions)

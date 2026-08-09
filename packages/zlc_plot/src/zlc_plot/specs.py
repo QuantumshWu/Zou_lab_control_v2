@@ -657,24 +657,13 @@ def _parameter_schema_for_context(
             )
         )
     if kind is PlotKind.IMAGE:
-        entries.extend(
-            (
-                ParameterSpec(
-                    "site_overlay",
-                    str,
-                    RenderEffect.OVERLAY,
-                    default="off",
-                    normalizer=_normalize_nonempty_text,
-                    label="Site overlay",
-                    choices=("off", "centers", "occupancy"),
-                ),
-                ParameterSpec(
-                    "show_point_labels",
-                    bool,
-                    RenderEffect.OVERLAY,
-                    default=False,
-                    label="Point labels",
-                ),
+        entries.append(
+            ParameterSpec(
+                "show_point_labels",
+                bool,
+                RenderEffect.OVERLAY,
+                default=True,
+                label="Point labels",
             )
         )
     if kind is PlotKind.PULSE_TIMELINE:

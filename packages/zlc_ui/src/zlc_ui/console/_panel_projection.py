@@ -20,7 +20,7 @@ _STATE_KEYS = (
     "semantic",
     "display",
     "fit",
-    "site_overlay",
+    "overlay_signal",
 )
 
 
@@ -56,7 +56,7 @@ def panel_state_document(state: object) -> dict[str, Any]:
         "semantic": dict(incoming.get("semantic") or {}),
         "display": dict(incoming.get("display") or {}),
         "fit": dict(incoming.get("fit") or {}),
-        "site_overlay": str(incoming.get("site_overlay") or "off"),
+        "overlay_signal": str(incoming.get("overlay_signal") or ""),
     }
 
 

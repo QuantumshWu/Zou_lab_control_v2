@@ -132,7 +132,7 @@ def _panel_state(
         semantic=dict(document.get("semantic", {})),
         display=dict(document.get("display", {})),
         fit=dict(document.get("fit", {})),
-        site_overlay=str(document.get("site_overlay", "off")),
+        overlay_signal=str(document.get("overlay_signal", "")),
     )
 
 
@@ -407,8 +407,6 @@ class FigureViewerPresenter:
 
         if state is not None:
             display = dict(state.display)
-            if state.kind == "image":
-                display["site_overlay"] = state.site_overlay
             cls._await(
                 host.configure(
                     parameters=display,

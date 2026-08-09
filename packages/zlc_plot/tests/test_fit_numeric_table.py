@@ -4,6 +4,8 @@ import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from test_facet_live_fit import _facet_snapshot, _spec
+from zlc_data import AxisId, AxisSpec, PointColumn, PointTable as RolePointTable
+from zlc_data import REPEAT, SCAN_POINT, SITE
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
 from zlc_plot.fit import FacetFitBatchResult
 
@@ -76,5 +78,54 @@ def test_text_facet_coordinates_use_ordinals_and_labels() -> None:
         assert np.array_equal(result.sample_coordinates, [0.0, 1.0])
         assert result.sample_unit == ""
         assert result.sample_labels == ("repeat=a", "repeat=b")
+    finally:
+        session.close()
+
+
+def test_coordinate_display_labels_drive_facet_titles_and_fit_rows() -> None:
+    x = np.tile(np.linspace(-3.0, 3.0, 20), 2)
+    site_ids = ("site_0001",) * 20 + ("site_0002",) * 20
+    site_labels = ("1",) * 20 + ("2",) * 20
+    points = RolePointTable(
+        len(x),
+        (
+            PointColumn(
+                AxisId("scan.x"),
+                "x",
+                SCAN_POINT,
+                PointColumn.NUMERIC,
+                tuple(x),
+            ),
+            PointColumn(
+                AxisId("calibration.site"),
+                "Site",
+                SITE,
+                PointColumn.TEXT,
+                site_ids,
+                coordinate_labels=site_labels,
+            ),
+        ),
+    )
+    schema = DatasetSchema.create(
+        AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,)),
+        points,
+        dtype=np.float64,
+    )
+    curve = 2.0 * np.exp(-0.5 * ((x - 0.2) / 1.0) ** 2) + 0.2
+    snapshot = DatasetSnapshot(schema, curve[None, :], revision=0)
+    spec = FacetGridPlot(
+        AxisRef.point("calibration.site"),
+        CurvePlot(AxisRef.point("scan.x")),
+    )
+    session = PlotSession(snapshot, spec)
+    try:
+        result = session.fit("gaussian_offset", live=True)
+        assert isinstance(result, FacetFitBatchResult)
+        assert [axis.get_title() for axis in session._renderer.axes["facet_cell"]] == [
+            "Site=1",
+            "Site=2",
+        ]
+        assert result.facet_values == ("site_0001", "site_0002")
+        assert result.sample_labels == ("Site=1", "Site=2")
     finally:
         session.close()

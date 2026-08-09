@@ -43,10 +43,10 @@ card.set_signal_choices((('source', (('Temperature', 'temperature'),)),))
 state = {
     'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
     'title': 'Card', 'semantic': {}, 'display': {}, 'fit': {},
-    'site_overlay': 'off',
+    'overlay_signal': '',
 }
 surface_projection = {
-    'semantic': (), 'display': (), 'fit': (), 'site_overlay': None,
+    'semantic': (), 'display': (), 'fit': (),
 }
 card.set_panel_projection(state, surface_projection)
 class _GatedSurface(QtWidgets.QLabel):
@@ -122,9 +122,9 @@ card.set_interval_choices((100, 200, 400, 800))
 card.set_panel_projection({
     'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 400,
     'title': 'Card', 'semantic': {}, 'display': {}, 'fit': {},
-    'site_overlay': 'off',
+    'overlay_signal': '',
 }, {
-    'semantic': (), 'display': (), 'fit': (), 'site_overlay': None,
+    'semantic': (), 'display': (), 'fit': (),
     'semantic_unavailable': '', 'display_unavailable': '',
     'fit_unavailable': '',
 })
@@ -521,13 +521,17 @@ handle = TaskConsoleHandle(None, view)
 handle.set_panel_intervals((100, 200, 400, 800))
 handle.add_panel('panel-1', 'Camera')
 groups = (('camera', (('frames', '@logic/cm/frames'),)),)
+overlay_groups = (('occupancy', (('sites', '@logic/occ/site_overlay'),)),)
 handle.set_panel_signal_choices(
-    'panel-1', groups, current='@logic/cm/frames'
+    'panel-1', groups, current='@logic/cm/frames',
+    overlay_groups=overlay_groups,
+    overlay_current='@logic/occ/site_overlay',
 )
 state = {
     'signal': '@logic/cm/frames', 'kind': 'image', 'size': '2x2',
     'interval_ms': 100, 'title': 'Camera',
-    'semantic': {}, 'display': {}, 'fit': {}, 'site_overlay': 'off',
+    'semantic': {}, 'display': {}, 'fit': {},
+    'overlay_signal': '@logic/occ/site_overlay',
 }
 surface = {
     'semantic': ({
@@ -555,12 +559,6 @@ surface = {
         'choices': (('2-D Gaussian', 'anisotropic_gaussian_center'),),
         'minimum': None, 'maximum': None, 'step': None,
     },),
-    'site_overlay': {
-        'key': 'site_overlay', 'label': 'Site overlay', 'kind': 'choice',
-        'value': 'off', 'allow_none': False,
-        'choices': (('Off', 'off'), ('Centers', 'centers'), ('Occupancy', 'occupancy')),
-        'minimum': None, 'maximum': None, 'step': None,
-    },
 }
 handle.set_panel_projection('panel-1', state, surface)
 card = handle._cards['panel-1']
@@ -569,6 +567,7 @@ assert card._settings_form.read_all()['kind'] == 'image'
 assert not card._settings_form.widget_for('kind').isEnabled()
 assert card._settings_form.read_all()['display__show_colorbar'] is True
 assert card._settings_form.read_all()['display__colormap'] == 'viridis'
+assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
 assert 'display__interpolation' in card._settings_form.spec.keys
 interval_combo = card._settings_form.widget_for('interval_ms')
 assert isinstance(interval_combo, QtWidgets.QComboBox)
@@ -594,6 +593,7 @@ producer = {
 }
 projection = {
     'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
+    'overlay_signal_options': overlay_groups,
     'interval_choices': (100, 200, 400, 800),
     'parameter_surface': surface,
     'kind_read_only': True, 'frozen_signal': '@logic/cm/frames',

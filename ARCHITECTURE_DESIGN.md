@@ -240,7 +240,7 @@ Calibration result 中的所有 site 数据共享 SiteMap 的实际 `site_ids` �
 
 循环结束后的代码路径保持直接：Calibration Task 先把该结果写成 calibration JSON，然后把同一个 Python result 交给现有 `zlc_plot` 公开 API，保存四张 report 图片：(1) site-map image + centers；(2) box 模型的 per-site grid；(3) per-site PSF 模型的 per-site grid；(4) uniform PSF 模型的 per-site grid。JSON 和四张图是同一次 Calibration 的两种文件输出，不是两次分析。TaskConsole 不显示、挂载或自动打开 report；Monitor 只显示循环中的 measurement-linked preview。Calibration Task 决定 report 内容，`zlc_plot` 实现绘图；Task 不持有 Qt、TaskConsole panel state 或另一个 renderer，也不为这一条路径引入通用 report registry/coordinator/transaction 框架。
 
-`SiteMap` 不是 plot kind，UI 中也不存在 `SiteMap Plot`。它是 Calibration artifact 里的 domain data。固定的 `Image` plot kind 有 `Site overlay` 参数，需要时用 SiteMap centers 画 site/occupancy markers。绘图圈半径是 Image display 属性（可由 site spacing 自动给出），不与科学 integration half-width 混为一个参数。
+`SiteMap` 不是 plot kind，UI 中也不存在 `SiteMap Plot`。它是 Calibration artifact 里的 domain data。Occupancy 在与 `frame_judged` 相同的 publication 中显式发布 typed `site_overlay` sibling：canonical site ids、人类短标签、pixel centers 和当前 status。固定的 `Image` panel 分别选择 Image signal 与可选 Overlay signal；Workbench 只核对二者属于同一 publication，不从 run record 偷读 calibration JSON，也不从 signal 名称猜 SiteMap。`zlc_plot` 只把这份通用 point-overlay data 画成 markers。绘图圈半径是 Image display 属性（可由 point spacing 自动给出），不与科学 integration half-width 混为一个参数。
 
 输出文件由 Experiment workspace 选择目录和不重复文件名，例如 `calibration_20260808_153012_01.json`。这只是避免依赖 process cwd 和无提示覆盖，不是版本/安全机制。
 
@@ -355,13 +355,13 @@ Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc
 
 | TaskConsole label / kind | schema 中的 semantic 参数 | schema 中的 display/interaction | Setting 初始 data-independent surface |
 |---|---|---|---|
-| `2D image` / Image | X/Y axes；Reduction；`Site overlay = Off / Centers / Occupancy` | colormap；color limits；interpolation；colorbar；optional small ordinal site numbers；marker radius/style；empty/occupied/invalid colors；Area selector；2-D fit | title；colormap；color limits；interpolation；colorbar；all overlay/marker styling；selector display |
+| `2D image` / Image | X/Y axes；Reduction；optional typed Overlay signal | colormap；color limits；interpolation；colorbar；optional small point labels；marker radius/style；empty/occupied/invalid colors；Area selector；2-D fit | title；colormap；color limits；interpolation；colorbar；all overlay/marker styling；selector display |
 | `1D vector` / Curve | X axis；Group by；Reduction | labels/units；grid；limits；X-range selector；compatible fit | title；X/Y labels；units；grid；limits；selector display |
 | `Distribution` / Histogram | value/reduction selection | bins；density；cumulative；log Y；range selector；compatible fit | title；bins；density；cumulative；log Y；range/limits |
 | `Rolling trace` / Rolling | Group by；Reduction | window；Y limits；side distribution；X-range；compatible fit | title；window；Y limits；grid；side-distribution display；selector display |
 | `Site grid` / FacetGrid[Curve] | Facet axis；fixed Curve cell semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing；focus/cell display；Curve display parameters |
 
-Fit model 和参数兼容性由 `zlc_plot` 声明，UI 不写死列表。`Site overlay` 是 `Image` plot kind 的参数：`Centers` 使用 calibration SiteMap centers，`Occupancy` 再结合当前 occupied/valid 值绘制状态，不从 grid shape 生成圈。
+Fit model 和参数兼容性由 `zlc_plot` 声明，UI 不写死列表。Overlay 不是 `zlc_plot` 的 Off/Centers/Occupancy mode 参数；它是 panel 的第二个显式 signal binding。producer 决定坐标、身份和状态，`zlc_plot` 只按 typed overlay contract 绘制，不从 grid shape 或 domain artifact 生成圈。
 Site 旁边不得显示长 site id；若开启标签，最多显示小号 ordinal 数字。数字颜色和透明度跟对应 site 圈完全一致，使 empty/occupied/invalid 仍可由同一状态色区分。
 
 ## 11. 三种 Save（必须分开）
@@ -379,7 +379,7 @@ Panel `Save Fig` 只围绕当前 panel：
 - 数据是 Edit tab 正在显示的同一 frozen snapshot，不在 Save 时又抓一份 latest；
 - 调用链参数是该 run 真正启动时冻结的值：例如 camera instance/exposure/ROI/repeat，Occupancy 的 source/calibration path，以及上游 task/pulse 参数；
 - device snapshot 是 run 配置/采集时从公开 adapter API 读回的 actual state，不是点 Save 时临时拍可能已经变化的状态；
-- 如果该 `Image` panel 开启了 `Site overlay`，重画所需的 resolved centers/status 作为该 Image plot 的 data/annotation 保存；不创建 SiteMap plot kind；
+- 如果该 `Image` panel 选择了 Overlay signal，重画所需的 typed coordinates/ids/labels/status 作为该 Image plot 的 data/annotation 保存；不创建 SiteMap plot kind，也不复制 calibration artifact；
 - calibration 在调用链中按实际 `calibration_path` 记录，不内嵌另一份 calibration JSON，不考虑我之前臆造的“移动 panel 数据”场景；
 - 不新增 fingerprint/hash。
 
@@ -416,7 +416,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 - TaskConsole 只提供五种固定 plot kind；Display interval 是有限 ComboBox，blank panel 初始即显示完整 schema，Setting 无 Apply、字段 commit 立即异步准备并拒绝 stale result。
 - Panel Edit 重复显示 panel 参数和 direct producer 参数，selector 更新同一 measurement draft，Producer Restart 调用同一个 Start/Restart endpoint。
 - Setting frame 和 Panel Edit 直接绑定同一 `PanelState`，对应参数天然双向同步；不存在两份 panel config。
-- SiteMap 是 calibration domain data，不是 plot kind；site/occupancy circles 是固定 `Image` kind 的 `Site overlay` 参数和 annotation。
+- SiteMap 是 calibration domain data，不是 plot kind；Occupancy 显式发布同-publication typed overlay sibling，固定 `Image` panel 选择 optional Overlay signal，`zlc_plot` 只绘制通用 annotation。
 - 设备可多方只读，只有 exclusive Logic Node 单占；新冲突 node 停旧 node。
 - TaskConsole/Pulse Editor 使用同一 Experiment session，不引入 IPC。
 - Header Layout Save、Header Screenshot 和 Panel Save Fig 三者语义分开。

@@ -72,6 +72,7 @@ class PointColumn:
     values: tuple[CoordinateScalar, ...]
     unit: str | None = None
     coordinate_frame: CoordinateFrameId | None = None
+    coordinate_labels: tuple[str, ...] | None = None
 
     NUMERIC: ClassVar[str] = "NUMERIC"
     TEXT: ClassVar[str] = "TEXT"
@@ -108,6 +109,23 @@ class PointColumn:
             self.coordinate_frame, CoordinateFrameId
         ):
             raise TypeError("coordinate_frame must be CoordinateFrameId or None")
+        if self.coordinate_labels is not None:
+            labels = tuple(
+                canonical_text(label, "point coordinate label")
+                for label in self.coordinate_labels
+            )
+            if len(labels) != len(values):
+                raise ValueError(
+                    "point coordinate_labels length must match point values"
+                )
+            labels_by_value: dict[CoordinateScalar, str] = {}
+            for value, label in zip(values, labels, strict=True):
+                previous = labels_by_value.setdefault(value, label)
+                if previous != label:
+                    raise ValueError(
+                        "equal point coordinates must share one display label"
+                    )
+            object.__setattr__(self, "coordinate_labels", labels)
 
 
 @dataclass(frozen=True)

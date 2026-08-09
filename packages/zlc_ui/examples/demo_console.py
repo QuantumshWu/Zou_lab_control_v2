@@ -97,13 +97,12 @@ def populate(console, *, wire_intents: bool = True) -> None:
                 "semantic": {},
                 "display": {},
                 "fit": {},
-                "site_overlay": "off",
+                "overlay_signal": "",
             },
             {
                 "semantic": (),
                 "display": (),
                 "fit": (),
-                "site_overlay": None,
             },
         )
         console.set_panel_signal_choices(

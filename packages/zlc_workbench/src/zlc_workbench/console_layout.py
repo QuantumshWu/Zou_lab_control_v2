@@ -27,7 +27,7 @@ from .logic import (
 from .panel_state import PanelState
 
 
-LAYOUT_FORMAT = "zlc.console-board/v4"
+LAYOUT_FORMAT = "zlc.console-board/v5"
 
 
 class LayoutError(ValueError):
@@ -339,7 +339,7 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
             "semantic",
             "display",
             "fit",
-            "site_overlay",
+            "overlay_signal",
         },
         where,
     )
@@ -354,7 +354,9 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
             semantic=dict(_mapping(entry["semantic"], f"{where} semantic")),
             display=dict(_mapping(entry["display"], f"{where} display")),
             fit=dict(_mapping(entry["fit"], f"{where} fit")),
-            site_overlay=_string(entry["site_overlay"], f"{where} site_overlay"),
+            overlay_signal=_string(
+                entry["overlay_signal"], f"{where} overlay_signal"
+            ),
         )
     except Exception as error:
         raise LayoutError(f"{where}: {error}") from error

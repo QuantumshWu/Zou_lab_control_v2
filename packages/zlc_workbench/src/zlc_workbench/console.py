@@ -20,7 +20,7 @@ import time
 from typing import Any
 
 from zlc_plot import DEFAULTS
-from zlc_plot.primitives import ImageFrame
+from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 
 from .board import LiveBoard
@@ -47,7 +47,7 @@ from .logic import (
     make_host,
     stable_signal_key,
 )
-from .image_overlay import ImageOverlayResolver, ResolvedImagePresentation
+from .image_overlay import image_frame_from_publication
 from .panel_save import (
     capture_run_chain,
     save_panel_figure as _save_panel_figure,
@@ -94,12 +94,9 @@ class PanelBinding:
     reported_error: Any = None
     #: Exact publication used to construct a not-yet-board-anchored host.
     display_publication: Any = None
-    #: Image annotation is resolved from exact publications at this composition
-    #: boundary.  Its revision is independent of the dataset snapshot revision.
-    overlay_resolver: ImageOverlayResolver = field(default_factory=ImageOverlayResolver)
+    #: Image annotation has its own presentation revision while its data remains
+    #: an explicit sibling in the selected publication.
     overlay_revision: int = -1
-    overlay_publication: Any = None
-    image_presentation: ResolvedImagePresentation | None = None
     #: UI-neutral parameter descriptions projected from this host's public
     #: zlc_plot control plane.  This is editor metadata, not a second authored
     #: state; accepted values still live only in ``state``.
@@ -286,7 +283,7 @@ class ConsolePresenter:
         semantic: Mapping[str, Any] | None = None,
         display: Mapping[str, Any] | None = None,
         fit: Mapping[str, Any] | None = None,
-        site_overlay: str = "off",
+        overlay_signal: str = "",
     ) -> PanelBinding | None:
         """Author one fixed-kind panel before any signal has published.
 
@@ -336,7 +333,7 @@ class ConsolePresenter:
             semantic=dict(semantic or {}),
             display=dict(display or {}),
             fit=dict(fit or {}),
-            site_overlay=str(site_overlay),
+            overlay_signal=str(overlay_signal),
         )
         binding = PanelBinding(
             panel_id,
@@ -368,7 +365,7 @@ class ConsolePresenter:
         semantic: Mapping[str, Any] | None = None,
         display: Mapping[str, Any] | None = None,
         fit: Mapping[str, Any] | None = None,
-        site_overlay: str = "off",
+        overlay_signal: str = "",
         initial_publication: object | None = None,
     ) -> PanelBinding:
         """Show a signal, as ``kind`` when one is asked for.
@@ -405,7 +402,7 @@ class ConsolePresenter:
             semantic=dict(semantic or {}),
             display=dict(display or {}),
             fit=dict(fit or {}),
-            site_overlay=str(site_overlay),
+            overlay_signal=str(overlay_signal),
         )
         front = self.session.signal_plane.freeze()
         current = front.value(state.signal)
@@ -491,33 +488,21 @@ class ConsolePresenter:
         snapshot = getattr(value, "snapshot", None)
         if snapshot is None:
             raise TypeError("a panel signal value must carry an OwnedSnapshot")
-        if selected.kind != "image":
+        if selected.kind != "image" or not selected.overlay_signal:
             return snapshot
-        previous = binding.image_presentation
-        if (
-            binding.overlay_publication is publication
-            and previous is not None
-            and previous.requested_mode == selected.site_overlay
-            and previous.frame.snapshot is snapshot
-        ):
-            return previous.frame
         binding.overlay_revision += 1
-        presentation = binding.overlay_resolver.resolve(
+        return image_frame_from_publication(
             value,
             publication,
-            mode=selected.site_overlay,
+            overlay_signal=selected.overlay_signal,
             overlay_revision=binding.overlay_revision,
         )
-        binding.overlay_publication = publication
-        binding.image_presentation = presentation
-        return presentation.frame
 
     @staticmethod
     def _initial_plot_input(plot_input: object, state: PanelState) -> object:
-        """Avoid carrying an empty Image overlay into an otherwise exact first plot."""
+        """Return the already-composed first plot input."""
 
-        if isinstance(plot_input, ImageFrame) and state.site_overlay == "off":
-            return plot_input.snapshot
+        del state
         return plot_input
 
     @staticmethod
@@ -525,23 +510,14 @@ class ConsolePresenter:
         binding: PanelBinding,
         publication: object | None,
         plot_input: object,
+        *,
+        state: PanelState | None = None,
     ) -> dict[str, Any]:
-        presentation = binding.image_presentation
-        if (
-            presentation is None
-            or binding.overlay_publication is not publication
-            or presentation.frame is not plot_input
-        ):
+        del publication
+        selected = binding.state if state is None else state
+        if not isinstance(plot_input, ImageFrame) or not selected.overlay_signal:
             return {}
-        annotation: dict[str, Any] = {
-            "requested_mode": presentation.requested_mode,
-            "resolved_mode": presentation.resolved_mode,
-        }
-        if presentation.calibration_path is not None:
-            annotation["calibration_path"] = presentation.calibration_path
-        if presentation.note is not None:
-            annotation["note"] = presentation.note
-        return annotation
+        return {"overlay_signal": selected.overlay_signal}
 
     def _panel_frozen_data(
         self,
@@ -550,14 +526,18 @@ class ConsolePresenter:
         snapshot: object,
         publication: object | None,
         plot_input: object,
+        state: PanelState | None = None,
     ) -> PanelFrozenData:
+        selected = binding.state if state is None else state
         return PanelFrozenData(
-            binding.state.signal,
+            selected.signal,
             publication,
             snapshot,
             plot_input,
             capture_run_chain(self.session.signal_plane, publication),
-            self._overlay_annotation(binding, publication, plot_input),
+            self._overlay_annotation(
+                binding, publication, plot_input, state=selected
+            ),
         )
 
     def _panel_presented(
@@ -622,7 +602,14 @@ class ConsolePresenter:
         """Tell one card which currently published signals it may show."""
 
         self.view.set_panel_signal_choices(
-            panel_id, self.signal_groups(), current=self.panels[panel_id].state.signal
+            panel_id,
+            self.signal_groups(),
+            current=self.panels[panel_id].state.signal,
+            overlay_groups=self.overlay_signal_groups(
+                self.panels[panel_id].state.signal,
+                self.panels[panel_id].display_publication,
+            ),
+            overlay_current=self.panels[panel_id].state.overlay_signal,
         )
 
     def signal_groups(self) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
@@ -643,6 +630,37 @@ class ConsolePresenter:
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
 
+    def overlay_signal_groups(
+        self,
+        signal: str,
+        publication: object | None,
+    ) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+        """Typed overlay siblings of one selected image publication."""
+
+        selected = str(signal).strip()
+        if not selected or publication is None:
+            return ()
+        sibling_names = set(publication.signals)
+
+        contracts = dict(self._external_signal_contracts())
+        for binding in self.logic.values():
+            for output in self._logic_outputs(binding):
+                contracts[stable_signal_key(binding.node_id, output.name)] = str(
+                    output.contract_id
+                )
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for name, label, _state, producer, _derived in self.offered_signals(
+            include_shown=True
+        ):
+            if (
+                name in sibling_names
+                and contracts.get(name) == ImagePointOverlay.CONTRACT_ID
+            ):
+                groups.setdefault(producer or "signals", []).append((label, name))
+        return tuple(
+            (producer, tuple(leaves)) for producer, leaves in groups.items()
+        )
+
     def _refresh_signal_choices(self) -> None:
         """Offer newly published signals on cards that are already open.
 
@@ -654,14 +672,25 @@ class ConsolePresenter:
         if groups == self._offered_groups:
             return
         self._offered_groups = groups
+        front = self.session.signal_plane.freeze()
         for panel_id in self.view.panel_ids():
             binding = self.panels.get(panel_id)
             self.view.set_panel_signal_choices(
                 panel_id,
                 groups,
                 current=binding.state.signal if binding is not None else "",
+                overlay_groups=self.overlay_signal_groups(
+                    binding.state.signal if binding is not None else "",
+                    (
+                        front.publication(binding.state.signal)
+                        if binding is not None and binding.state.signal
+                        else None
+                    ),
+                ),
+                overlay_current=(
+                    binding.state.overlay_signal if binding is not None else ""
+                ),
             )
-        front = self.session.signal_plane.freeze()
         for panel_id, binding in tuple(self.panels.items()):
             if (
                 binding.host is None
@@ -751,7 +780,7 @@ class ConsolePresenter:
             "semantic",
             "display",
             "fit",
-            "site_overlay",
+            "overlay_signal",
         }
         unknown = tuple(name for name in changes if name not in allowed)
         if unknown:
@@ -790,6 +819,8 @@ class ConsolePresenter:
         title = str(changes.get("title", current.title)).strip()
         if signal != current.signal and "title" not in changes and current.title == current.signal:
             title = signal
+        if signal != current.signal and "overlay_signal" not in changes:
+            changes["overlay_signal"] = ""
         title = (
             title
             or signal
@@ -800,7 +831,9 @@ class ConsolePresenter:
             "size": str(changes.get("size", current.size)),
             "interval_ms": int(changes.get("interval_ms", current.interval_ms)),
             "title": title,
-            "site_overlay": str(changes.get("site_overlay", current.site_overlay)),
+            "overlay_signal": str(
+                changes.get("overlay_signal", current.overlay_signal)
+            ),
         }
         for name in ("semantic", "display", "fit"):
             values = dict(getattr(current, name))
@@ -921,6 +954,7 @@ class ConsolePresenter:
                     snapshot=value.snapshot,
                     publication=publication,
                     plot_input=plot_input,
+                    state=candidate,
                 )
                 binding.frozen_stale = False
             elif candidate.signal == current.signal:
@@ -941,7 +975,10 @@ class ConsolePresenter:
                     frozen,
                     plot_input=frozen_input,
                     overlay=self._overlay_annotation(
-                        binding, frozen.publication, frozen_input
+                        binding,
+                        frozen.publication,
+                        frozen_input,
+                        state=candidate,
                     ),
                 )
             else:
@@ -973,8 +1010,6 @@ class ConsolePresenter:
                 binding.port.set_display_interval(candidate.interval_ms)
             parameters = dict(candidate.display)
             parameters["title"] = candidate.title
-            if candidate.kind == "image":
-                parameters["site_overlay"] = candidate.site_overlay
             configuration: dict[str, object] = {
                 "semantic": dict(candidate.semantic),
                 "parameters": parameters,
@@ -984,8 +1019,10 @@ class ConsolePresenter:
             editor_configuration = dict(configuration)
             if (
                 candidate.kind == "image"
-                and candidate.site_overlay != current.site_overlay
+                and candidate.overlay_signal != current.overlay_signal
             ):
+                configuration["image_overlay"] = None
+                editor_configuration["image_overlay"] = None
                 publication = binding.display_publication
                 value = self._publication_value(publication, candidate.signal)
                 if value is not None:
@@ -1017,6 +1054,7 @@ class ConsolePresenter:
                                 binding,
                                 frozen.publication,
                                 frozen_input,
+                                state=candidate,
                             ),
                         )
                         if isinstance(frozen_input, ImageFrame):
@@ -1092,14 +1130,9 @@ class ConsolePresenter:
         """Project one plot-owned display declaration for every panel view."""
 
         display_entries: list[dict[str, object]] = []
-        site_overlay: dict[str, object] | None = None
         for control in controls:
             entry = self._control_document(control)
             name = str(entry["key"])
-            if name == "site_overlay":
-                site_overlay = entry
-                site_overlay["value"] = state.site_overlay
-                continue
             # Panel title has a dedicated shared field, so it is not a second
             # independently authored display override.
             if name != "title":
@@ -1108,7 +1141,6 @@ class ConsolePresenter:
             "semantic": tuple(semantic),
             "display": tuple(display_entries),
             "fit": tuple(fit),
-            "site_overlay": site_overlay,
             "semantic_unavailable": str(semantic_unavailable),
             "display_unavailable": str(display_unavailable),
             "fit_unavailable": str(fit_unavailable),
@@ -1119,8 +1151,6 @@ class ConsolePresenter:
 
         values = dict(state.display)
         values["title"] = state.title
-        if state.kind == "image":
-            values["site_overlay"] = state.site_overlay
         try:
             controls = parameter_controls_for_kind(
                 state.kind,
@@ -1367,8 +1397,6 @@ class ConsolePresenter:
 
         display = dict(state.display)
         display["title"] = state.title
-        if state.kind == "image":
-            display["site_overlay"] = state.site_overlay
         self._await_panel_operation(
             host.configure(
                 parameters=display,
@@ -1411,6 +1439,14 @@ class ConsolePresenter:
             "state": binding.state.document(),
             "parameter_surface": binding.parameter_surface,
             "signal_options": self.signal_groups(),
+            "overlay_signal_options": self.overlay_signal_groups(
+                binding.state.signal,
+                (
+                    frozen.publication
+                    if frozen is not None
+                    else binding.display_publication
+                ),
+            ),
             "kind_read_only": True,
             "frozen_signal": None if frozen is None else frozen.signal,
             "frozen_publication": None if frozen is None else frozen.publication,
@@ -1647,12 +1683,6 @@ class ConsolePresenter:
                 }
                 for field in tuple(surface.get(section, ()))
             )
-        overlay = surface.get("site_overlay")
-        if isinstance(overlay, Mapping):
-            surface["site_overlay"] = {
-                **dict(overlay),
-                "value": binding.state.site_overlay,
-            }
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)

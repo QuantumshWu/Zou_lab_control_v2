@@ -9,10 +9,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
+from typing import ClassVar, TypeAlias
 
 import numpy as np
-from zlc_data import OwnedSnapshot
+from zlc_data import OwnedSnapshot, SITE, SPATIAL_X, SPATIAL_Y
 
 from .data_contract import snapshot_revision
 
@@ -47,6 +47,29 @@ class PointStatus(str, Enum):
     EMPTY = "empty"
     OCCUPIED = "occupied"
     INVALID = "invalid"
+
+    @property
+    def code(self) -> int:
+        return {
+            PointStatus.UNKNOWN: 0,
+            PointStatus.EMPTY: 1,
+            PointStatus.OCCUPIED: 2,
+            PointStatus.INVALID: 3,
+        }[self]
+
+    @classmethod
+    def from_code(cls, value: object) -> "PointStatus":
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError("point status code must be an integer")
+        try:
+            return {
+                0: cls.UNKNOWN,
+                1: cls.EMPTY,
+                2: cls.OCCUPIED,
+                3: cls.INVALID,
+            }[int(value)]
+        except KeyError as exc:
+            raise ValueError("point status code must be 0, 1, 2, or 3") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +106,8 @@ class ImagePointOverlay:
     point_ids: tuple[str, ...] | None = None
     labels: tuple[str | None, ...] | None = None
     statuses: tuple[PointStatus, ...] | None = None
+
+    CONTRACT_ID: ClassVar[str] = "zlc_plot.image-point-overlay.v1"
 
     def __post_init__(self) -> None:
         revision = integer(self.revision, "revision", minimum=0)
@@ -165,6 +190,57 @@ class ImagePointOverlay:
             point_ids=tuple(marker.point_id for marker in values),
             labels=tuple(marker.label for marker in values),
             statuses=tuple(marker.status for marker in values),
+        )
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: OwnedSnapshot,
+        *,
+        revision: int,
+    ) -> "ImagePointOverlay":
+        """Project one typed point-overlay Dataset without domain guessing."""
+
+        if not isinstance(snapshot, OwnedSnapshot):
+            raise TypeError("point overlay requires zlc_data.OwnedSnapshot")
+        columns = tuple(snapshot.block.schema.point_table.columns)
+
+        def one(role: object):
+            matches = tuple(column for column in columns if column.role == role)
+            if len(matches) != 1:
+                raise ValueError(
+                    f"point overlay requires exactly one {getattr(role, 'value', role)} column"
+                )
+            return matches[0]
+
+        site = one(SITE)
+        x = one(SPATIAL_X)
+        y = one(SPATIAL_Y)
+        if x.unit != y.unit or x.coordinate_frame != y.coordinate_frame:
+            raise ValueError("point overlay x/y columns must share one coordinate frame")
+        point_ids = tuple(str(value) for value in site.values)
+        labels = (
+            tuple(site.coordinate_labels)
+            if site.coordinate_labels is not None
+            else point_ids
+        )
+        coordinates = np.column_stack((x.values, y.values))
+        count = len(point_ids)
+        array = np.asarray(snapshot.block.values)
+        if array.ndim < 2 or array.shape[1] != count:
+            raise ValueError("point overlay values do not match the point table")
+        rows = np.moveaxis(array, 1, -1).reshape((-1, count))
+        statuses = (
+            tuple(PointStatus.from_code(value) for value in rows[0])
+            if rows.shape[0] == 1
+            else (PointStatus.UNKNOWN,) * count
+        )
+        return cls(
+            revision=revision,
+            coordinates=coordinates,
+            point_ids=point_ids,
+            labels=labels,
+            statuses=statuses,
         )
 
 

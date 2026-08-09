@@ -168,12 +168,39 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             "@logic/occupancy/valid",
             "@logic/occupancy/rate",
             "@logic/occupancy/frame_judged",
+            "@logic/occupancy/site_overlay",
         }
         np.testing.assert_array_equal(
             publication.value("@logic/occupancy/frame_judged").values,
             source.values,
         )
         assert np.all(publication.value("@logic/occupancy/valid").values)
+        overlay_value = publication.value("@logic/occupancy/site_overlay")
+        assert overlay_value is not None
+        columns = {
+            column.role: column
+            for column in overlay_value.schema.point_table.columns
+        }
+        from zlc_data import SITE, SPATIAL_X, SPATIAL_Y
+        from zlc_plot import ImagePointOverlay, PointStatus
+
+        assert columns[SITE].values == site_ids
+        assert columns[SITE].coordinate_labels == ("1",)
+        assert columns[SPATIAL_X].unit == columns[SPATIAL_Y].unit == "pixel"
+        assert columns[SPATIAL_X].coordinate_frame == (
+            columns[SPATIAL_Y].coordinate_frame
+        )
+        overlay = ImagePointOverlay.from_snapshot(
+            overlay_value.snapshot,
+            revision=7,
+        )
+        assert overlay.point_ids == site_ids
+        assert overlay.labels == ("1",)
+        assert overlay.statuses == (PointStatus.OCCUPIED,)
+        np.testing.assert_allclose(
+            overlay.coordinates,
+            calibration.site_map.centers_xy,
+        )
         assert all(
             value.coverage is None and value.transient is False
             for value in publication.signals.values()

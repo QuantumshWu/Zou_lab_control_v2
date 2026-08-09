@@ -65,9 +65,18 @@ class _CardView:
         self.selectors_enabled = True
         self.status: tuple = ("", False)
 
-    def set_signal_choices(self, groups, *, current: str = "") -> None:
+    def set_signal_choices(
+        self,
+        groups,
+        *,
+        current: str = "",
+        overlay_groups=(),
+        overlay_current: str = "",
+    ) -> None:
         self.choices = tuple(groups)
         self.chosen = str(current or self.chosen)
+        self.overlay_choices = tuple(overlay_groups)
+        self.overlay_chosen = str(overlay_current)
 
     def set_selectors_enabled(self, enabled: bool) -> None:
         self.selectors_enabled = bool(enabled)
@@ -380,8 +389,6 @@ def presenter(session):
         spec = compose_panel_spec(initial.block.schema, spec, state)
         parameters = dict(state.display)
         parameters["title"] = state.title
-        if state.kind == "image":
-            parameters["site_overlay"] = state.site_overlay
         return plot.RasterPlotHost.from_plot(
             plot_input,
             spec,
@@ -557,7 +564,7 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
         "interpolation",
         "show_colorbar",
     }.issubset(display)
-    assert binding.parameter_surface["site_overlay"]["value"] == "off"
+    assert binding.state.overlay_signal == ""
     original_state = binding.state
     assert presenter.set_panel_interval(binding.panel_id, 500) is False
     assert binding.state is original_state
@@ -972,11 +979,7 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     assert display["color_min"]["allow_none"] is True
     assert display["show_colorbar"]["kind"] == "boolean"
     assert "site_overlay" not in display
-    assert surface["site_overlay"]["choices"] == (
-        ("Off", "off"),
-        ("Centers", "centers"),
-        ("Occupancy", "occupancy"),
-    )
+    assert "site_overlay" not in surface
     fit_choices = dict(surface["fit"][0]["choices"])
     assert "anisotropic_gaussian_center" in fit_choices.values()
 
@@ -1063,7 +1066,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "semantic": {semantic_key: semantic_value},
             "display": {"show_colorbar": False},
             "fit": {"model": "gaussian"},
-            "site_overlay": "centers",
+            "overlay_signal": "",
         },
     )
     second = presenter.add_panel(signal, snapshot, title="again", kind="image")
@@ -1090,7 +1093,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "size": "4x4", "interval_ms": 800,
         "semantic": {semantic_key: str(semantic_value)},
         "display": {"show_colorbar": False},
-        "fit": {"model": "gaussian"}, "site_overlay": "centers",
+        "fit": {"model": "gaussian"}, "overlay_signal": "",
     }
     # Nothing of this session's bookkeeping: ids are minted fresh on the way in.
     assert not any("panel_id" in panel for panel in document["panels"])
@@ -1135,7 +1138,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored[0].state.semantic == {semantic_key: semantic_value}
     assert restored[0].state.display == {"show_colorbar": False}
     assert restored[0].state.fit == {"model": "gaussian"}
-    assert restored[0].state.site_overlay == "centers"
+    assert restored[0].state.overlay_signal == ""
     assert restored[0].panel_id != first.panel_id, "an id is never handed out twice"
     restored_logic = presenter.logic[logic_id]
     assert restored_logic.host is None and restored_logic.node is None
@@ -1204,7 +1207,7 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
             "semantic": {},
             "display": {},
             "fit": {},
-            "site_overlay": "off",
+            "overlay_signal": "",
         }
     )
 
@@ -1226,7 +1229,7 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
         {"signal": "nobody.publishes.this", "title": "gone", "kind": "image",
          "cell_kind": "", "size": "",
          "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
-         "site_overlay": "off"}
+         "overlay_signal": ""}
     )
 
     assert presenter.apply_layout(document) is True

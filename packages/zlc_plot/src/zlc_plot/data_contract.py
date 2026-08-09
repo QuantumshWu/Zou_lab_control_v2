@@ -154,6 +154,7 @@ class AxisDescriptor:
     size: int
     coordinates: tuple[Any, ...]
     unit_annotation: str | None = None
+    coordinate_labels: tuple[str, ...] | None = None
 
     @property
     def label(self) -> str:
@@ -172,6 +173,7 @@ def descriptor_from_axis(axis: AxisSpec) -> AxisDescriptor:
         int(axis.size),
         implicit_coordinates(axis),
         axis.unit,
+        axis.coordinate_labels,
     )
 
 
@@ -184,6 +186,7 @@ def descriptor_from_point_column(column: PointColumn) -> AxisDescriptor:
         len(column.values),
         tuple(column.values),
         column.unit,
+        column.coordinate_labels,
     )
 
 
@@ -198,6 +201,7 @@ def descriptor_from_topology(
     axis_id = topology.dimension_ids[position]
     unit: str | None = None
     name = str(axis_id)
+    coordinate_labels: tuple[str, ...] | None = None
     # W-round GridTopology intentionally stores geometry, not presentation
     # annotations.  When the producer also carries the dimension in its
     # PointTable, reuse that column's unit and label; otherwise the plotting
@@ -210,12 +214,21 @@ def descriptor_from_topology(
         else:
             name = column.name
             unit = column.unit
+            if column.coordinate_labels is not None:
+                label_by_coordinate = dict(
+                    zip(column.values, column.coordinate_labels, strict=True)
+                )
+                coordinate_labels = tuple(
+                    label_by_coordinate[value]
+                    for value in topology.coordinate_domains[position]
+                )
     return AxisDescriptor(
         axis_id,
         name,
         len(topology.coordinate_domains[position]),
         tuple(topology.coordinate_domains[position]),
         unit,
+        coordinate_labels,
     )
 
 

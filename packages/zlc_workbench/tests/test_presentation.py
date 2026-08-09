@@ -46,7 +46,7 @@ from zlc_runtime.presentation import (
     SurfaceBatchArbiter,
 )
 from zlc_workbench.presentation import PlotPanelPort
-from zlc_workbench.image_overlay import ImageOverlayResolver
+from zlc_workbench.image_overlay import image_frame_from_publication
 from zlc_workbench.session import read_pulse
 from pulse_fixtures import write_ordinary_pulse
 
@@ -357,11 +357,10 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
 
 def test_image_overlay_resolves_one_exact_occupancy_status_row(
     live_bench,
-    tmp_path,
 ) -> None:
-    """The overlay uses SiteMap identity and sibling occupied/valid values."""
+    """The image consumes one explicit typed overlay sibling, not an artifact."""
 
-    from zlc_data import SITE
+    from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
     from zlc_plot.primitives import PointStatus
     from zlc_workbench.logic import stable_signal_key
 
@@ -380,7 +379,7 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
         (
             ReadoutModel(
                 site_ids,
-                np.asarray((1.0, 1.0, 1.0)),
+                np.asarray((1.0e20, -1.0e20, 0.0)),
                 np.asarray((True, True, True)),
                 np.asarray((1.0, 1.0, 1.0)),
             ),
@@ -388,76 +387,45 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
         ReadoutModelKind.BOX,
         FrameContract(shape),
     )
-    path = calibration.save(tmp_path / "calibration.json")
     node_id = "occupancy-test"
     frame_key = stable_signal_key(node_id, "frame_judged")
-    occupied_key = stable_signal_key(node_id, "occupied")
-    valid_key = stable_signal_key(node_id, "valid")
-    table = SimpleNamespace(
-        row_count=3,
-        columns=(SimpleNamespace(role=SITE),),
+    overlay_key = stable_signal_key(node_id, "site_overlay")
+    processor = OccupancyProcessor(calibration, producer=node_id)
+    result = processor.process(
+        np.asarray(source.values).reshape((-1, *shape))[:1],
+        generation="one-frame",
+        revision=1,
     )
     frame_value = SimpleNamespace(name=frame_key, snapshot=source.snapshot)
-    occupied_value = SimpleNamespace(
-        name=occupied_key,
-        values=np.asarray([[[False], [True], [True]]]),
-        schema=SimpleNamespace(point_table=table),
-    )
-    valid_value = SimpleNamespace(
-        name=valid_key,
-        values=np.asarray([[[True], [True], [False]]]),
-        schema=SimpleNamespace(point_table=table),
+    overlay_value = SimpleNamespace(
+        name=overlay_key,
+        snapshot=result.artifacts["site_overlay"],
     )
     values = {
         frame_key: frame_value,
-        occupied_key: occupied_value,
-        valid_key: valid_value,
+        overlay_key: overlay_value,
     }
-    publication = SimpleNamespace(
-        run_record={
-            "node": node_id,
-            "parameters": {
-                "calibration_path": str(path),
-                "model_kind": "box",
-            },
-        },
-        value=values.get,
-    )
+    publication = SimpleNamespace(value=values.get)
 
-    resolved = ImageOverlayResolver().resolve(
+    resolved = image_frame_from_publication(
         frame_value,
         publication,
-        mode="occupancy",
+        overlay_signal=overlay_key,
         overlay_revision=7,
     )
 
-    assert resolved.resolved_mode == "occupancy"
-    assert resolved.frame.overlay.point_ids == site_ids
-    assert resolved.frame.overlay.labels == ("1", "2", "3")
-    assert resolved.frame.overlay.statuses == (
+    assert resolved.overlay.point_ids == site_ids
+    assert resolved.overlay.labels == ("1", "2", "3")
+    assert resolved.overlay.statuses == (
         PointStatus.EMPTY,
         PointStatus.OCCUPIED,
         PointStatus.INVALID,
     )
     np.testing.assert_array_equal(
-        resolved.frame.overlay.coordinates,
+        resolved.overlay.coordinates,
         calibration.site_map.centers_xy,
     )
-
-    missing_model = SimpleNamespace(
-        run_record={
-            "node": node_id,
-            "parameters": {"calibration_path": str(path)},
-        },
-        value=values.get,
-    )
-    with pytest.raises(ValueError, match="exact readout model kind"):
-        ImageOverlayResolver().resolve(
-            frame_value,
-            missing_model,
-            mode="centers",
-            overlay_revision=8,
-        )
+    assert resolved.snapshot is source.snapshot
 
 
 def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None:

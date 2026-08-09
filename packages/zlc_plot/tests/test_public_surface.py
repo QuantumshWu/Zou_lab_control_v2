@@ -57,41 +57,24 @@ def test_session_replace_spec_reuses_the_existing_surface() -> None:
         session.close()
 
 
-def test_image_site_overlay_is_plain_roundtrippable_display_state() -> None:
+def test_image_overlay_is_explicit_data_not_a_display_mode() -> None:
     snapshot = _image_snapshot()
     spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
     session = PlotSession(snapshot, spec)
-    restored: PlotSession | None = None
     curve = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
         described = session.describe_display()
-        declaration = described.parameter_schema["site_overlay"]
-
-        assert declaration.value_type is str
-        assert declaration.default == "off"
-        assert declaration.choices == ("off", "centers", "occupancy")
-        assert described.display_state["site_overlay"] == "off"
-
-        updated = session.set_parameter("site_overlay", "occupancy")
-        assert updated["site_overlay"] == "occupancy"
-        assert session.describe_display().display_state["site_overlay"] == "occupancy"
-
-        # DisplayState values are the plain state read surface; the ordinary
-        # constructor parameter mapping is the matching restore surface.
-        restored = PlotSession(snapshot, spec, parameters=dict(updated.values))
-        assert restored.describe_display().display_state["site_overlay"] == "occupancy"
+        assert "site_overlay" not in described.parameter_schema
+        assert "site_overlay" not in described.display_state.values
+        assert described.display_state["show_point_labels"] is True
 
         curve_description = curve.describe_display()
         assert "site_overlay" not in curve_description.parameter_schema
         assert "site_overlay" not in curve_description.display_state.values
         with pytest.raises(KeyError, match="site_overlay"):
             curve.set_parameter("site_overlay", "centers")
-        with pytest.raises(ValueError, match="site_overlay"):
-            session.set_parameter("site_overlay", "sites")
     finally:
         curve.close()
-        if restored is not None:
-            restored.close()
         session.close()
 
 

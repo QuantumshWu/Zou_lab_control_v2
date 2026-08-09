@@ -210,6 +210,9 @@ class PanelEditorView(QtWidgets.QWidget):
         self.kind_label.setText(kind_text)
 
         choices = signal_form_choices(incoming.get("signal_options"), state["signal"])
+        overlay_choices = signal_form_choices(
+            incoming.get("overlay_signal_options"), state["overlay_signal"]
+        )
         fields: list[FormFieldProps] = [
             FormFieldProps("title", "text", "Title", default=state["title"]),
             FormFieldProps(
@@ -221,6 +224,16 @@ class PanelEditorView(QtWidgets.QWidget):
                 required=not bool(choices),
                 unavailable_reason="no signals available" if not choices else "",
             ),
+        ]
+        if state["kind"] == "image":
+            fields.append(FormFieldProps(
+                "overlay_signal",
+                "choice",
+                "Overlay",
+                default=state["overlay_signal"],
+                choices=(FormChoice("Off", ""),) + overlay_choices,
+            ))
+        fields.extend([
             FormFieldProps(
                 "size",
                 "choice",
@@ -232,23 +245,16 @@ class PanelEditorView(QtWidgets.QWidget):
                 incoming.get("interval_choices"),
                 state["interval_ms"],
             ),
-        ]
+        ])
         values: dict[str, object] = {
             "title": state["title"],
             "signal": state["signal"] if choices else None,
             "size": state["size"],
             "interval_ms": state["interval_ms"],
         }
+        if state["kind"] == "image":
+            values["overlay_signal"] = state["overlay_signal"]
         surface = incoming.get("parameter_surface")
-        overlay = (
-            dict(surface.get("site_overlay") or {})
-            if isinstance(surface, Mapping)
-            else {}
-        )
-        if overlay:
-            overlay["value"] = state["site_overlay"]
-            fields.append(parameter_form_spec((overlay,)).fields[0])
-            values["site_overlay"] = state["site_overlay"]
         self.panel_form.reconcile(FormSpec(tuple(fields)), values)
 
         for section in ("semantic", "display", "fit"):

@@ -33,12 +33,12 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Camera/shape、Monitor/Setting 与 Calibration 窄阶段均已按当前源码收敛并通过受影响包回归；现在进入整条正式 experiment workflow、全树测试与零残留验收。`
-- Last completed action：`Calibration Edit 已验证 project pulses JSON file picker、Samples=300、无 timeout；virtual finite shot 按 compiled logical duration 推进，capture_preview 是 latest R=1/P=1 image；terminal/Stop 后 transient panel 移除且不复活；直接 Restart 与 Remove/re-add 后 Start 均产生新 artifact；同一 result 保存 JSON + site-map/box/psf/uniform_psf 四图。Setting 瞬时顶层窗口已定位为无 parent FluentButton 并在既有 card 内修复；Selectors=OFF 时 Card 将 surface Wheel 明确交给唯一 board scroll，真实 Qt5PlotWidget 集成从 scroll 0 移到 120。没有新增文件、类、窗口层或 report 编排。`
-- Last verified tests：`当前 HEAD 整仓 1149 passed；zlc_ui 79 passed，Console/正式 TaskConsole Qt 44 passed。真实 offscreen Qt5PlotWidget + 4 个 4x4 panel 验证 outer scrollbar 0 -> 120；Setting signal commit 42.8 ms 返回、冷首 front 1.01 s/sequence=1；Experiment flow Init 后恰有 TaskConsole/PulseGUI 两窗，统一 close 后可见顶层为 0，项目 Python 进程为 0。正式 Calibration Qt 路径另断言三次 Start、至少三个实际 raster fronts、四图、唯一 transient preview/terminal cleanup。`
-- Pending acceptance gates：`由用户从根 bin/experiment.bat 进行正式可见按钮全流程；Calibration -> Repeat=0 Camera Measurement -> Pulse Load/On -> Occupancy model -> Image overlay；三种 Save；任何失败继续在当前 owner 内最小修复。`
-- Next action：等待用户进行正式可见人类按钮验收并记录产品断点；不由自动化擅自打开可见窗口。若验收失败，复现该一条真实路径并在现有文件内最小修复，不增加新文件/框架。
-- New decisions since architecture review：Simulation 只位于独立 devices/simulation 且复用真实设备契约；默认 virtual geometry 是 35 sites/96 x 128；Calibration JSON artifact 保留 SiteMap、三模型、default kind 和 frame contract，Calibration Task 另用同一结果调用 `zlc_plot` 保存 site-map + 三模型 grid 四张 report 图片；Workbench 不显示 report，Monitor 只自动显示 measurement preview；Occupancy readout-model choice 是科学模式而非 extent mode；Task active 时 takeover；TaskConsole 只有五种固定 plot kind，interval 是有限 ComboBox，blank panel 初始显示完整 schema，Setting 没有 Apply、字段 commit 即时异步生效并拒绝 stale result；pulse 只有 readable `zlc.pulse.v1` JSON 单一路径。旧 Goal tombstones 保持不动。
+- Current phase：`通用 coordinate display label 与显式 image-overlay signal 已实现；当前进入 Distribution classifier 与 fit 完全解耦及 Calibration 四图迁移。`
+- Last completed action：`在既有文件内完成显式 overlay 纵向链：Occupancy 与 frame_judged 同 publication 发布 site_overlay Dataset（canonical ids、coordinate_labels、pixel x/y、status）；PanelState/layout 改为 optional overlay_signal；Setting/Edit 选择同-publication typed sibling；Workbench image_overlay 删除 TrapCalibration JSON 读取和 mode resolver；zlc_plot 删除 site_overlay display mode并从 typed snapshot构造通用 ImagePointOverlay。site labels 与 marker RGBA一致，empty 最淡。`
+- Last verified tests：`coordinate-label 原红 2 项已绿；explicit-overlay 原生产纵向红为 Occupancy publication 缺 site_overlay，修后目标相关组 106 passed；随后完整 zlc_data + zlc_plot + zlc_atom + zlc_workbench + zlc_ui 共 854 passed in 158.70s。所有验证进程首行 import v2 root 并打印五个被测 package 均来自当前树；git diff --check clean。`
+- Pending acceptance gates：`提交本阶段；随后完成独立 Distribution classifier、四张 Calibration 图、same-shot/derived/ROI、Save Fig/Auto/fit UI、性能与正式按钮验收。Overlay picker 还需在后续统一 signal picker UI 阶段从普通 Combo 升级成 grouped tree，而不改其数据契约。`
+- Next action：`完成 explicit-overlay 阶段全 package 回归并单独 commit；随后只在既有 zlc_plot distribution/selector/fit 文件内把 classifier selector 从 fit 拆开，先写旧红，不新增文件或框架。`
+- New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。`
 
 ## 1. 执行纪律
 
@@ -189,7 +189,7 @@
 2. 实现 saved calibration path resolver；Start 时加载 plain JSON，校验 frame contract 后才绑 source。
 3. 使用用户所选模型（`default` 解析 artifact default）对每帧生成对齐的 `counts[N]`、`occupied[N]`、`valid[N]`，需要时生成 rate，并保留同一个 `frame_judged`。
 4. 同一次 processor publication 中的 sibling outputs 共享直接 parent，不用全局 shot id 猜同步。
-5. 不新增 SiteMap plot kind。固定 `Image` plot kind 的 `Site overlay` 参数决定 Off/Centers/Occupancy；Workbench/plot 用 `frame_judged` + SiteMap centers + occupied/valid status 组成 typed Image point overlay，绘制 empty/occupied/invalid markers。圈大小是 Image display 属性，不改科学 integration area。
+5. 不新增 SiteMap plot kind。Occupancy 与 `frame_judged` 同 publication 显式发布 typed `site_overlay` sibling（canonical ids、display labels、pixel centers、status）。固定 `Image` panel 选择 Image signal 与 optional Overlay signal；Workbench 只接线并核对同 publication，`zlc_plot` 只绘制 typed overlay。圈大小是 Image display 属性，不改科学 integration area。
 6. finite 上游走 FollowTap/最终 frozen dataset，infinite 上游走 latest。用户不选该模式。
 
 ### 完成标准
@@ -241,7 +241,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 6. Logic Edit 和同 producer 的 Panel Edit 共享同一 row draft；一处修改同步到其他打开投影。
 7. 只处理 committed selection。Logic descriptor 用 data-only mapping 把 Image Area 等转成 typed measurement draft patch，Workbench 负责路由，不写 camera-specific branch。
 8. Producer Restart 直接调同一 Start/Restart endpoint，一次按键完成停旧 run -> 配置 request -> 立即启动新 run；不另造 Apply action。
-9. Panel appearance 的每次字段 commit 把完整 semantic/display/size/overlay/fit 目标配置一次提交给当前 `zlc_plot` host。Workbench 不分类字段、不循环单参数 setter；`zlc_plot` 自己比较当前状态、合并 render effects，并在一个 worker job 中最多产生一张同步 front。owner thread 不 `.result()`，同一配置 key 的旧 job 被新 job 淘汰。产品 UI 没有 Apply。
+9. Panel appearance 的每次字段 commit 把完整 semantic/display/size/typed overlay/fit 目标配置一次提交给当前 `zlc_plot` host。Workbench 不分类字段、不循环单参数 setter；`zlc_plot` 自己比较当前状态、合并 render effects，并在一个 worker job 中最多产生一张同步 front。owner thread 不 `.result()`，同一配置 key 的旧 job 被新 job 淘汰。产品 UI 没有 Apply。
 10. node id/signal key 保持不变，成功启动创建新 generation。同一 signal/schema 始终保留 host/Figure；只有 signal、generation 或 schema compatibility 边界才替换 plot host。同 generation 内复用 snapshot revision 拒绝晚到数据结果，不新建第二套 revision。
 11. active downstream 保留 row/binding 并对新 source 重校验；ROI/exposure 使 calibration frame contract 不相容时显示 blocked。
 12. Selectors 默认关闭时，Panel Card 截获 surface Wheel 并交给唯一祖先 board scroll；不能只断言 plot widget 自己忽略了事件。Selectors 打开后不截获，wheel 留给 plot interaction。
@@ -273,7 +273,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 2. archive 仅含该 panel 的 dataset/schema/validity、plot state/fit 和重画所需 overlay annotation，不含其他 panels。
 3. 调用链 metadata 使用 run 时已冻结的 authored parameters、named devices、actual public device snapshots、pulse/sequencer snapshot（当该链确实使用时）和 Occupancy calibration path。
 4. 不在 Save 点击时才首次捕获 device state。
-5. 不内嵌 calibration JSON 副本，不增加 fingerprint/hash。如果该 `Image` panel 的 `Site overlay` 已开启，仅把重画当前 Image 所需的 resolved centers/status 当作该 panel 的 data/annotation 保存；不创建 SiteMap plot kind。
+5. 不内嵌 calibration JSON 副本，不增加 fingerprint/hash。如果该 `Image` panel 选择了 Overlay signal，仅把重画当前 Image 所需的 typed coordinates/ids/labels/status 当作该 panel 的 data/annotation 保存；不创建 SiteMap plot kind。
 
 ### 完成标准
 
@@ -361,7 +361,7 @@ Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本�
 - combined `Add Panel` 的 Logic entry 自动进 Edit；没有独立 Add Logic 控件；产品 UI 没有 Apply；Panel Producer Restart 复用同一个 Start/Restart endpoint。
 - combined `Add Panel` 只有规定的五种 Plot entries，可在无 signal 时创建 blank fixed-kind panel；Setting 初始显示完整 schema、限定在 panel 内并可滚动，interval 只能从 100/200/400/800 ComboBox 选择且修改立即生效。Panel/Edit 共享唯一 `PanelState`，selector 可联动 producer；完整配置一次交给 `zlc_plot`，同一 signal/schema 不重建 host/Figure、无 owner-thread wait且只增加一张同步 front。
 - Pulse template/editor/generator 只通过 `zlc.pulse.v1` readable JSON 单一路径读写，没有 `.py` pulse 或第二 serializer。
-- SiteMap 不是 plot kind；site/occupancy markers 是固定 `Image` plot kind 的 `Site overlay` 参数。
+- SiteMap 不是 plot kind；Occupancy 显式发布 typed overlay sibling，固定 `Image` panel 选择 optional Overlay signal。
 - Header Layout、Header Screenshot、Panel Save Fig 三者分开；Panel data 包含正确调用链参数/device snapshots，不打包整个 monitor tab。
 - 不记 buffer loss，不新增 fingerprint/hash，新增纵向守卫不超过 Guard A/B/C 三条且各自已证明原缺陷下会红。
 - 七份旧 package `GOAL.md` 均保持 historical/inactive，且任何仍保留的产品说明与最终实测实现一致；仓库中不存在第三个看似 active 的目标入口。

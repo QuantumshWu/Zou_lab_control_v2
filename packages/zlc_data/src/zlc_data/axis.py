@@ -173,6 +173,7 @@ class AxisSpec:
     unit: str | None = None
     coordinate_frame: CoordinateFrameId | None = None
     index_origin: int = 0
+    coordinate_labels: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.axis_id, AxisId):
@@ -206,6 +207,16 @@ class AxisSpec:
         )
         if self.coordinates is not None and self.index_origin != 0:
             raise ValueError("index_origin is only valid for an implicit-coordinate axis")
+        if self.coordinate_labels is not None:
+            labels = tuple(
+                _nonempty_text(label, "axis coordinate label")
+                for label in self.coordinate_labels
+            )
+            if len(labels) != self.size:
+                raise ValueError(
+                    "axis coordinate_labels length must match axis size"
+                )
+            object.__setattr__(self, "coordinate_labels", labels)
 
     def coordinate_at(self, index: int) -> Any:
         normalized = integer(index, "axis index")

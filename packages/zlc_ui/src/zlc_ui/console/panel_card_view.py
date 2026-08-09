@@ -82,6 +82,9 @@ class PanelCardView(FluentGroupBox):
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
         self._groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+        self._overlay_groups: tuple[
+            tuple[str, tuple[tuple[str, str], ...]], ...
+        ] = ()
         # A replace-only projection of the Workbench state.  It is view state,
         # never a second saved panel configuration or an authority of its own.
         self._state_projection = panel_state_document(
@@ -329,6 +332,10 @@ class PanelCardView(FluentGroupBox):
         groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...],
         *,
         current: str = "",
+        overlay_groups: tuple[
+            tuple[str, tuple[tuple[str, str], ...]], ...
+        ] = (),
+        overlay_current: str = "",
     ) -> None:
         """Replace the signal domain used by the Setting form."""
 
@@ -336,9 +343,16 @@ class PanelCardView(FluentGroupBox):
             (str(producer), tuple((str(display), str(key)) for display, key in leaves))
             for producer, leaves in groups
         )
+        self._overlay_groups = tuple(
+            (str(producer), tuple((str(display), str(key)) for display, key in leaves))
+            for producer, leaves in overlay_groups
+        )
         current = str(current or self._state_projection.get("signal") or "")
         if current:
             self._state_projection["signal"] = current
+        self._state_projection["overlay_signal"] = str(
+            overlay_current or self._state_projection.get("overlay_signal") or ""
+        )
         with signals_blocked(self.signal_combo):
             self.signal_combo.clear()
             for producer, leaves in self._groups:
@@ -432,14 +446,28 @@ class PanelCardView(FluentGroupBox):
                 required=not bool(choices),
                 unavailable_reason="no choices" if not choices else "",
             ),
+        ])
+        if state.get("kind") == "image":
+            fields.append(FormFieldProps(
+                "overlay_signal",
+                "choice",
+                "Overlay",
+                default=str(state.get("overlay_signal") or ""),
+                choices=(FormChoice("Off", ""),)
+                + signal_form_choices(
+                    self._overlay_groups,
+                    str(state.get("overlay_signal") or ""),
+                ),
+            ))
+        fields.append(
             FormFieldProps(
                 "size",
                 "choice",
                 "Size",
                 default=state["size"],
                 choices=tuple(FormChoice(value, value) for value in PANEL_SIZES),
-            ),
-        ])
+            )
+        )
         if self._live and self._interval_choices:
             fields.append(
                 interval_form_field(
@@ -447,10 +475,6 @@ class PanelCardView(FluentGroupBox):
                     state["interval_ms"],
                 )
             )
-        overlay = dict(self._parameter_surface.get("site_overlay") or {})
-        if overlay:
-            overlay["value"] = str(state.get("site_overlay") or "off")
-            fields.append(parameter_form_spec((overlay,)).fields[0])
         declared_display = tuple(
             parameter_fields(self._parameter_surface, "display")
         )
@@ -491,14 +515,14 @@ class PanelCardView(FluentGroupBox):
             "signal": signal,
             "size": str(self._state_projection.get("size") or DEFAULT_PANEL_SIZE),
         }
+        if self._state_projection.get("kind") == "image":
+            values["overlay_signal"] = str(
+                self._state_projection.get("overlay_signal") or ""
+            )
         if self._state_projection.get("cell_kind"):
             values["cell_kind"] = str(self._state_projection["cell_kind"])
         if self._live and self._interval_choices:
             values["interval_ms"] = int(self._state_projection["interval_ms"])
-        if "site_overlay" in self._form_spec().keys:
-            values["site_overlay"] = str(
-                self._state_projection.get("site_overlay") or "off"
-            )
         declared_display = tuple(
             parameter_fields(self._parameter_surface, "display")
         )
@@ -613,7 +637,7 @@ class PanelCardView(FluentGroupBox):
                 }
             elif name == "interval_ms":
                 patch = {name: int(value)}
-            elif name in {"title", "signal", "size", "site_overlay"}:
+            elif name in {"title", "signal", "overlay_signal", "size"}:
                 patch = {name: str(value or "")}
             else:
                 return

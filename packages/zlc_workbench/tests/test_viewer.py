@@ -457,7 +457,6 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     """The archive is the redraw input; calibration is not reopened."""
 
     _old_path, snapshot = saved
-    missing_calibration = tmp_path / "calibration-was-moved.json"
     state = PanelState(
         signal="@logic/occupancy/frame_judged",
         kind="image",
@@ -467,7 +466,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         semantic={"reduction": "mean"},
         display={"show_colorbar": False},
         fit={"model": "anisotropic_gaussian_center", "live": False},
-        site_overlay="occupancy",
+        overlay_signal="@logic/occupancy/site_overlay",
     )
     overlay = ImagePointOverlay(
         7,
@@ -481,10 +480,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         publication=None,
         snapshot=snapshot,
         plot_input=ImageFrame(snapshot, overlay),
-        overlay={
-            "resolved_mode": "occupancy",
-            "calibration_path": str(missing_calibration),
-        },
+        overlay={"overlay_signal": state.overlay_signal},
     )
 
     class _SavingHost:
@@ -501,7 +497,6 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         make_host=lambda _input, _signal, _kind, _cell_kind: _SavingHost(),
         configure_host=lambda _host, _state, _overlay: None,
     )
-    assert not missing_calibration.exists()
     with np.load(written.archive, allow_pickle=False) as payload:
         assert "overlay.coordinates" in payload.files
 
@@ -552,17 +547,13 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         host = seen["host"]
         assert seen["state"].semantic == {"reduction": "mean"}
-        assert host.display == {
-            "show_colorbar": False,
-            "site_overlay": "occupancy",
-        }
+        assert host.display == {"show_colorbar": False}
         assert host.size == "4x4"
         assert host.fitted == (
             "anisotropic_gaussian_center",
             {"live": False},
         )
         assert presenter.panel_state == state
-        assert not missing_calibration.exists()
     finally:
         presenter.close()
 

@@ -7,7 +7,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from zlc_data import OwnedSnapshot, READOUT_EVENT, SITE, SPATIAL_X, SPATIAL_Y
+from zlc_data import (
+    AxisId,
+    AxisRoleId,
+    CoordinateFrameId,
+    DataBlock,
+    DatasetSchema,
+    OwnedSnapshot,
+    PointColumn,
+    PointTable,
+    READOUT_EVENT,
+    SITE,
+    SPATIAL_X,
+    SPATIAL_Y,
+)
+from zlc_plot import ImagePointOverlay, PointStatus
 from zlc_runtime import DatasetCoverage
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime import (
@@ -28,6 +42,7 @@ _OUTPUT_DECLARATIONS = (
     DatasetOutputDeclaration("valid", "occupancy.valid.v1"),
     DatasetOutputDeclaration("rate", "occupancy.rate.v1"),
     DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged.v1"),
+    DatasetOutputDeclaration("site_overlay", ImagePointOverlay.CONTRACT_ID),
 )
 
 
@@ -120,6 +135,78 @@ def inherited_stamps(snapshot: object) -> dict[str, object]:
         "generation": str(getattr(ref.stream_generation, "value", ref.stream_generation)),
         "revision": int(getattr(ref.revision, "value", ref.revision)),
     }
+
+
+def _site_overlay_snapshot(
+    statuses: np.ndarray,
+    *,
+    calibration: TrapCalibration,
+    producer: str,
+    roles: tuple[AxisRoleId, ...],
+    generation: str,
+    revision: int,
+) -> OwnedSnapshot:
+    site_map = calibration.site_map
+    frame = CoordinateFrameId(site_map.coordinate_frame)
+    site = PointColumn(
+        AxisId(f"{producer}.site_overlay.site"),
+        "site",
+        SITE,
+        PointColumn.TEXT,
+        tuple(site_map.site_ids),
+        coordinate_labels=tuple(
+            str(index) for index in range(1, site_map.n_sites + 1)
+        ),
+    )
+    base = snapshot_from_array(
+        statuses,
+        producer=producer,
+        signal="site_overlay",
+        roles=roles,
+        point_columns={SITE: site},
+        generation=generation,
+        revision=revision,
+    )
+    centers = np.asarray(site_map.centers_xy, dtype=float)
+    table = PointTable(
+        site_map.n_sites,
+        (
+            site,
+            PointColumn(
+                AxisId(f"{producer}.site_overlay.x"),
+                "x",
+                SPATIAL_X,
+                PointColumn.NUMERIC,
+                tuple(float(value) for value in centers[:, 0]),
+                unit="pixel",
+                coordinate_frame=frame,
+            ),
+            PointColumn(
+                AxisId(f"{producer}.site_overlay.y"),
+                "y",
+                SPATIAL_Y,
+                PointColumn.NUMERIC,
+                tuple(float(value) for value in centers[:, 1]),
+                unit="pixel",
+                coordinate_frame=frame,
+            ),
+        ),
+    )
+    source = base.block
+    schema = DatasetSchema(
+        source.schema.repeat_axis,
+        table,
+        source.schema.grid_topology,
+        source.schema.cell_schema,
+    )
+    block = DataBlock(
+        source.block_id,
+        source.revision,
+        source.values,
+        source.validity,
+        schema,
+    )
+    return OwnedSnapshot(block.ref(base.ref.stream_generation), block)
 
 
 class OccupancyProcessor:
@@ -343,6 +430,10 @@ class OccupancyProcessor:
         counts = counts.reshape((*leading, self.calibration.n_sites))
         occupied = occupied.reshape((*leading, self.calibration.n_sites))
         valid = valid.reshape((*leading, self.calibration.n_sites))
+        statuses = np.full(valid.shape, PointStatus.UNKNOWN.code, dtype=np.uint8)
+        statuses[~valid] = PointStatus.INVALID.code
+        statuses[valid & ~occupied] = PointStatus.EMPTY.code
+        statuses[valid & occupied] = PointStatus.OCCUPIED.code
         valid_count = np.sum(valid, axis=-1)
         rate = np.divide(
             np.sum(occupied & valid, axis=-1, dtype=float),
@@ -397,6 +488,14 @@ class OccupancyProcessor:
                 producer=self.producer,
                 signal="frame_judged",
                 roles=frame_roles,
+                generation=generation,
+                revision=revision,
+            ),
+            "site_overlay": _site_overlay_snapshot(
+                statuses,
+                calibration=self.calibration,
+                producer=self.producer,
+                roles=site_roles,
                 generation=generation,
                 revision=revision,
             ),

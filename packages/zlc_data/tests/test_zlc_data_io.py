@@ -8,9 +8,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from zlc_data.axis import AxisId, AxisSpec, REPEAT, SPATIAL_X
+from zlc_data.axis import AxisId, AxisSpec, REPEAT, SITE, SPATIAL_X
 from zlc_data.io import NPZFormatError, load_npz, save_npz
-from zlc_data.schema import DatasetSchema, GridTopology, PointTable, ValueSchema
+from zlc_data.schema import (
+    DatasetSchema,
+    GridTopology,
+    PointColumn,
+    PointTable,
+    ValueSchema,
+)
 from zlc_data.validity import (
     CellValidity,
     DatasetComponentValidity,
@@ -60,6 +66,54 @@ def test_npz_round_trip_preserves_owned_snapshot_and_masks(tmp_path: Path):
     assert restored.block.schema == source.block.schema
     np.testing.assert_array_equal(restored.block.values, source.block.values)
     np.testing.assert_array_equal(restored.block.validity.mask, source.block.validity.mask)
+
+
+def test_npz_round_trip_preserves_canonical_coordinates_and_display_labels(
+    tmp_path: Path,
+):
+    repeat = AxisSpec(
+        AxisId("capture.repeat"),
+        "Shot",
+        REPEAT,
+        2,
+        ("shot_dark", "shot_bright"),
+        coordinate_labels=("Dark", "Bright"),
+    )
+    sites = PointColumn(
+        AxisId("calibration.site"),
+        "Site",
+        SITE,
+        PointColumn.TEXT,
+        ("site_0001", "site_0002"),
+        coordinate_labels=("1", "2"),
+    )
+    schema = DatasetSchema(
+        repeat,
+        PointTable(2, (sites,)),
+        None,
+        ValueSchema.scalar(np.dtype("<f4"), "count"),
+    )
+    block = DataBlock(
+        BlockId("coordinate-label-io-block"),
+        DatasetRevision(0),
+        np.arange(4, dtype="<f4").reshape(schema.physical_shape),
+        VALID,
+        schema,
+    )
+    source = OwnedSnapshot(
+        block.ref(StreamGenerationId("coordinate-label-generation")),
+        block,
+    )
+    path = tmp_path / "coordinate-labels.npz"
+
+    save_npz(path, source)
+    restored = load_npz(path)
+
+    assert restored.block.schema.repeat_axis.coordinates == ("shot_dark", "shot_bright")
+    assert restored.block.schema.repeat_axis.coordinate_labels == ("Dark", "Bright")
+    restored_sites = restored.block.schema.point_table.column(AxisId("calibration.site"))
+    assert restored_sites.values == ("site_0001", "site_0002")
+    assert restored_sites.coordinate_labels == ("1", "2")
 
 
 def test_npz_round_trip_preserves_dataset_component_masks(tmp_path: Path):

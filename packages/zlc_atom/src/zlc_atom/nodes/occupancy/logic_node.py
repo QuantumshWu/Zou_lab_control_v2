@@ -17,6 +17,7 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
     readout_model_kind_from_choice,
 )
+from zlc_plot import ImagePointOverlay
 
 from .processor import OccupancyProcessor
 
@@ -84,6 +85,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         OutputSpec("valid", "occupancy.valid.v1"),
         OutputSpec("rate", "occupancy.rate.v1"),
         OutputSpec("frame_judged", "occupancy.frame_judged.v1"),
+        OutputSpec("site_overlay", ImagePointOverlay.CONTRACT_ID),
     ),
     build=_build,
 )

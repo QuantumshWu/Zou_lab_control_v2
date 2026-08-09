@@ -361,6 +361,7 @@ class _ResolvedAxis:
     indices_flat: NDArray[np.int64] | None
     domain_canonical: NDArray[Any]
     domain_display: NDArray[Any]
+    coordinate_labels: tuple[str, ...] | None
     declared_domain: bool
     #: Which tensor dimension this axis IS, as the resolver worked it out.
     #: Recomputing it elsewhere by a different rule is what put a supported way
@@ -1236,12 +1237,33 @@ class DataView:
             canonical_values = resolved.domain_canonical[used_indices]
             display_values = resolved.domain_display[used_indices]
             indices: tuple[int | None, ...] = tuple(int(index) for index in used_indices)
+            coordinate_labels = (
+                (None,) * len(indices)
+                if resolved.coordinate_labels is None
+                else tuple(
+                    resolved.coordinate_labels[int(index)] for index in used_indices
+                )
+            )
         else:
             canonical_values, inverse = np.unique(selected[valid_local], return_inverse=True)
             display_values = resolved.coordinate.canonical_unit.convert_value_to(
                 canonical_values, resolved.coordinate.display_unit
             )
             indices = (None,) * int(canonical_values.size)
+            if resolved.coordinate_labels is None:
+                coordinate_labels = (None,) * int(canonical_values.size)
+            else:
+                label_by_coordinate = dict(
+                    zip(
+                        map(_python_scalar, resolved.domain_canonical),
+                        resolved.coordinate_labels,
+                        strict=True,
+                    )
+                )
+                coordinate_labels = tuple(
+                    label_by_coordinate[_python_scalar(value)]
+                    for value in canonical_values
+                )
         codes[valid_local] = inverse
         codes.setflags(write=False)
         values = tuple(
@@ -1254,10 +1276,15 @@ class DataView:
                     resolved.coordinate.label,
                     display_value,
                     resolved.coordinate.display_unit,
+                    coordinate_label,
                 ),
             )
-            for index, canonical_value, display_value in zip(
-                indices, canonical_values, display_values
+            for index, canonical_value, display_value, coordinate_label in zip(
+                indices,
+                canonical_values,
+                display_values,
+                coordinate_labels,
+                strict=True,
             )
         )
         return _Domain(values, codes)
@@ -1393,6 +1420,9 @@ class DataView:
             ),
             domain_canonical=_readonly(domain_canonical),
             domain_display=_readonly(display_domain),
+            coordinate_labels=(
+                None if descriptor is None else descriptor.coordinate_labels
+            ),
             declared_domain=declared_domain,
             dimension=dimension,
         )
@@ -1488,7 +1518,14 @@ def _python_scalar(value: Any) -> Any:
     return value.item() if isinstance(value, np.generic) else value
 
 
-def _axis_value_label(label: str, value: Any, unit: Unit) -> str:
+def _axis_value_label(
+    label: str,
+    value: Any,
+    unit: Unit,
+    coordinate_label: str | None = None,
+) -> str:
+    if coordinate_label is not None:
+        return f"{label}={coordinate_label}"
     scalar = _python_scalar(value)
     suffix = "" if unit.symbol == "1" else f" {unit.symbol}"
     return f"{label}={scalar}{suffix}"
