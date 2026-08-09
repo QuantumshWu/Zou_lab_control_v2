@@ -13,6 +13,7 @@ only when someone remembers to run the tool.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -43,11 +44,28 @@ def test_the_tool_is_runnable_from_outside_the_workspace() -> None:
     """
 
     with tempfile.TemporaryDirectory() as elsewhere:
+        root = Path(__file__).resolve().parents[3]
+        environment = dict(
+            os.environ,
+            PYTHONPATH=(
+                str(root)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", "")
+            ),
+        )
+        script = (
+            "import zou_lab_control_v2\n"
+            "from zlc_workbench.tools import check_environment as tested_module\n"
+            "print(tested_module.__file__)\n"
+            "from zou_lab_control_v2 import __main__ as product_entry\n"
+            "raise SystemExit(product_entry.main(['check']))\n"
+        )
         completed = subprocess.run(
-            [sys.executable, "-m", "zlc_workbench.tools.check_environment"],
+            [sys.executable, "-c", script],
             cwd=elsewhere,
             capture_output=True,
             text=True,
+            env=environment,
         )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "resolve to their own repo" in completed.stdout

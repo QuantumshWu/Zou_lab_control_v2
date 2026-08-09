@@ -30,7 +30,15 @@ def workspace(tmp_path) -> Path:
     return tmp_path
 
 
-def _run(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
+def _run_app(
+    app: str,
+    arguments: list[str],
+    *,
+    cwd: Path | None = None,
+    overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run one app only after this checkout's product bootstrap is imported."""
+
     environment = dict(
         os.environ,
         QT_QPA_PLATFORM="offscreen",
@@ -41,16 +49,27 @@ def _run(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
             + os.environ.get("PYTHONPATH", "")
         ),
     )
-    argv = ["--workspace", str(workspace), *arguments]
+    environment.update(dict(overrides or {}))
     script = (
         "import zou_lab_control_v2\n"
-        "from zlc_workbench.apps import task_console as tested_module\n"
+        f"from zlc_workbench.apps import {app} as tested_module\n"
         "print(tested_module.__file__)\n"
-        f"raise SystemExit(tested_module.main({argv!r}))\n"
+        f"raise SystemExit(tested_module.main({arguments!r}))\n"
     )
     return subprocess.run(
         [sys.executable, "-c", script],
-        capture_output=True, text=True, env=environment, timeout=300,
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=cwd,
+        timeout=300,
+    )
+
+
+def _run(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
+    return _run_app(
+        "task_console",
+        ["--workspace", str(workspace), *arguments],
     )
 
 
@@ -168,12 +187,8 @@ def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
     assert "1 dataset(s)" in completed.stdout
 
 
-def test_the_figure_viewer_starts_without_an_archive(workspace) -> None:
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
-    completed = subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.figure_viewer", "--check"],
-        capture_output=True, text=True, env=environment, timeout=300,
-    )
+def test_the_figure_viewer_starts_without_an_archive() -> None:
+    completed = _run_app("figure_viewer", ["--check"])
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "no archive given" in completed.stdout
 
@@ -205,16 +220,9 @@ def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
 
 
 def test_the_pulse_editor_names_the_pulse_it_could_not_find(workspace) -> None:
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
-    )
-    completed = subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.pulse_editor",
-         "--workspace", str(workspace), "--pulse", "absent", "--check"],
-        capture_output=True, text=True, env=environment, timeout=300,
+    completed = _run_app(
+        "pulse_editor",
+        ["--workspace", str(workspace), "--pulse", "absent", "--check"],
     )
     assert completed.returncode == 2
     assert "absent" in completed.stderr
@@ -251,33 +259,35 @@ def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(works
     assert f"workspace: {workspace}" in completed.stdout
 
 
-def test_no_experiment_directory_says_what_it_looked_for(tmp_path) -> None:
-    """Told plainly, with the names, so it can be acted on without reading code."""
+def test_no_nearby_experiment_uses_the_one_configured_default(tmp_path) -> None:
+    """A launch directory never becomes an accidental second workspace."""
 
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
     bare = tmp_path / "somewhere" / "else"
     bare.mkdir(parents=True)
+    configured = tmp_path / "configured-workspace"
 
-    completed = subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.task_console",
-         "--template", "virtual", "--check"],
-        capture_output=True, text=True, env=environment, timeout=300, cwd=bare,
+    completed = _run_app(
+        "task_console",
+        ["--template", "virtual", "--check"],
+        cwd=bare,
+        overrides={"ZLC_WORKSPACE": str(configured)},
     )
-    assert completed.returncode == 2
-    assert "pulses" in completed.stderr and "apparatus.json" in completed.stderr
-    assert "--workspace" in completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert f"workspace: {configured}" in completed.stdout
 
 
 def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) -> None:
     """An editor opens before it has a subject; it is not a session."""
 
-    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MPLBACKEND="Agg")
     bare = tmp_path / "anywhere"
     bare.mkdir()
+    configured = tmp_path / "configured-workspace"
 
-    completed = subprocess.run(
-        [sys.executable, "-m", "zlc_workbench.apps.pulse_editor", "--check"],
-        capture_output=True, text=True, env=environment, timeout=300, cwd=bare,
+    completed = _run_app(
+        "pulse_editor",
+        ["--check"],
+        cwd=bare,
+        overrides={"ZLC_WORKSPACE": str(configured)},
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "editor ready: no pulse open" in completed.stdout
