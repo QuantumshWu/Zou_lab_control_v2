@@ -96,9 +96,7 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
 
     node = CameraMeasurementNode(
         camera=session.camera,
-        request=CameraMeasurementRequest(
-            "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-        ),
+        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
         signal_plane=session.signal_plane,
         producer="cm",
     )
@@ -149,9 +147,7 @@ def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
     session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
-        request=CameraMeasurementRequest(
-            "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-        ),
+        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
         signal_plane=session.signal_plane,
         producer="cm",
     )
@@ -233,9 +229,7 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
 
         node = CameraMeasurementNode(
             camera=session.camera,
-            request=CameraMeasurementRequest(
-                "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-            ),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
             signal_plane=session.signal_plane,
             producer="cm",
         )

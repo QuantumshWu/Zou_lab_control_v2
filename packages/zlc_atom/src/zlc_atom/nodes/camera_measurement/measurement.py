@@ -77,18 +77,14 @@ class CameraMeasurementRequest:
     roi_xywh: tuple[int, int, int, int] | None
     repeat: int
     frames_per_cycle: int
-    timeout_seconds: float
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
         if not camera_key:
             raise ValueError("camera_key must be non-empty")
         exposure = float(self.exposure_seconds)
-        timeout = float(self.timeout_seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
-        if not np.isfinite(timeout) or timeout <= 0:
-            raise ValueError("timeout_seconds must be positive and finite")
         repeat = int(self.repeat)
         frames_per_cycle = int(self.frames_per_cycle)
         if repeat < 0:
@@ -111,7 +107,6 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "roi_xywh", roi)
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
-        object.__setattr__(self, "timeout_seconds", timeout)
 
 
 class _CameraMonitorSlot:
@@ -401,10 +396,6 @@ class CameraMeasurementNode:
         return self.request.frames_per_cycle
 
     @property
-    def timeout_seconds(self) -> float:
-        return self.request.timeout_seconds
-
-    @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
         return camera_frame_output_declarations(self.frames_per_cycle)
 
@@ -433,7 +424,6 @@ class CameraMeasurementNode:
                 "roi_xywh": self.request.roi_xywh,
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
-                "timeout_seconds": self.request.timeout_seconds,
             },
             "named_devices": {"camera": self.request.camera_key},
             "device_snapshots": {
@@ -468,20 +458,21 @@ class CameraMeasurementNode:
             self.provenance.reset()
         self._configure_for_run()
         self.provenance.capture(self)
+        timeout = float(self.camera.timeout)
         total = self.request.repeat * self.request.frames_per_cycle
         groups = (self.request.frames_per_cycle,) * self.request.repeat
         self.camera.arm(
             total,
             source_group_sizes=groups,
             buffer_frame_count=total,
-            timeout=self.timeout_seconds,
+            timeout=timeout,
         )
         try:
             return FiniteCapture(
                 self,
                 repeat=self.request.repeat,
                 frames_per_cycle=self.request.frames_per_cycle,
-                timeout=self.timeout_seconds,
+                timeout=timeout,
             )
         except BaseException:
             self.camera.finish_record_capture()
@@ -559,17 +550,18 @@ class CameraMeasurementNode:
             raise TypeError("a hosted monitor requires attach_live_outputs")
         self._configure_for_run()
         self.provenance.capture(self)
+        timeout = float(self.camera.timeout)
         self.camera.arm(
             None,
             source_group_sizes=(self.frames_per_cycle,),
             buffer_frame_count=buffer_frames,
-            timeout=self.timeout_seconds,
+            timeout=timeout,
         )
         try:
             return MonitorCapture(
                 self.camera,
                 node=self,
-                timeout=self.timeout_seconds,
+                timeout=timeout,
                 owns_generation=owns_generation,
                 attach_live_outputs=attach_live_outputs,
             )

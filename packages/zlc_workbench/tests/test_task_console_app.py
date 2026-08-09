@@ -160,7 +160,7 @@ def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
         "session = ExperimentSession.open(root, template='virtual');"
         "session.load_pulse('%s');"
         "node = CameraMeasurementNode(camera=session.camera,"
-        " request=CameraMeasurementRequest('camera', 0.02, None, 1, %d, 2.0),"
+        " request=CameraMeasurementRequest('camera', 0.02, None, 1, %d),"
         " signal_plane=session.signal_plane, producer='cm');"
         "capture = node.prepare();"
         "session.fire(shots=1);"

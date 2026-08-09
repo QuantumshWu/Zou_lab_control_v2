@@ -137,9 +137,7 @@ def saved(tmp_path):
         session.load_pulse(PULSE_NAME)
         node = CameraMeasurementNode(
             camera=session.camera,
-            request=CameraMeasurementRequest(
-                "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-            ),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
             signal_plane=session.signal_plane,
             producer="cm",
         )
@@ -312,9 +310,7 @@ def saved_pair(tmp_path):
         for name in ("panel-1", "panel-2"):
             node = CameraMeasurementNode(
                 camera=session.camera,
-                request=CameraMeasurementRequest(
-                    "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-                ),
+                request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
                 signal_plane=session.signal_plane,
                 producer=name.replace("-", ""),
             )

@@ -71,7 +71,7 @@ def live_bench(tmp_path):
 
         node = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, 0, 1, 2.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, 0, 1),
             signal_plane=plane,
             producer="cm",
         )

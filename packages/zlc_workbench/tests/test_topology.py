@@ -48,9 +48,7 @@ def _measure(session, producer: str = "cm"):
     session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
-        request=CameraMeasurementRequest(
-            "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-        ),
+        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
         signal_plane=session.signal_plane,
         producer=producer,
     )
@@ -81,9 +79,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
     session.load_pulse(PULSE_NAME)
     watching = CameraMeasurementNode(
         camera=session.camera,
-        request=CameraMeasurementRequest(
-            "camera", 0.02, None, 0, CAMERA_WINDOWS, 2.0
-        ),
+        request=CameraMeasurementRequest("camera", 0.02, None, 0, CAMERA_WINDOWS),
         signal_plane=session.signal_plane,
         producer="watching",
     )

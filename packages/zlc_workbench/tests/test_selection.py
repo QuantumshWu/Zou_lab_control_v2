@@ -56,9 +56,7 @@ def frames(session):
     session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
-        request=CameraMeasurementRequest(
-            "camera", 0.02, None, 1, CAMERA_WINDOWS, 2.0
-        ),
+        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
         signal_plane=session.signal_plane,
         producer="cm",
     )

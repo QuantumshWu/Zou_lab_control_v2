@@ -135,7 +135,6 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
         AuthoringField("repeat", "int", "Repeat", 1, minimum=0),
         AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1),
-        AuthoringField("timeout_seconds", "float", "Timeout seconds", 2.0, minimum=0.001),
     ),
     validator=_validate_measurement,
 )
@@ -165,7 +164,6 @@ def _build(
             roi_xywh=roi,  # type: ignore[arg-type]
             repeat=int(authored["repeat"]),
             frames_per_cycle=int(authored["frames_per_cycle"]),
-            timeout_seconds=float(authored["timeout_seconds"]),
         ),
         signal_plane=signal_plane,
     )

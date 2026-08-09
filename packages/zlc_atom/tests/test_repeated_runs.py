@@ -59,7 +59,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         windows = int(metadata["camera_windows"])
         node = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),
             signal_plane=plane,
             producer="cm",
         )
@@ -134,7 +134,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
         windows = int(metadata["camera_windows"])
         node = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),
             signal_plane=plane,
             producer="cm",
         )

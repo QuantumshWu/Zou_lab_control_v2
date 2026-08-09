@@ -334,6 +334,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         sequencer.wait_done(1.0)
         manual_result = capture.collect()
         assert len(manual_result.frames) == 3
+        assert [name for name, _ in camera.events].count("timeout") == 1
         assert any(name == "arm" for name, _ in camera.events)
         assert next(
             name

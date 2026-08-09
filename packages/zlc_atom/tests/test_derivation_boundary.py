@@ -66,7 +66,7 @@ def bench():
 def _finished_shot(plane, camera, sequencer, windows):
     node = CameraMeasurementNode(
         camera=camera,
-        request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+        request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),
         signal_plane=plane,
         producer="cm",
     )
@@ -237,7 +237,7 @@ def test_a_live_monitor_signal_does_carry_coverage(bench) -> None:
     plane, camera, sequencer, _windows = bench
     node = CameraMeasurementNode(
         camera=camera,
-        request=CameraMeasurementRequest("camera", 0.02, None, 0, 1, 2.0),
+        request=CameraMeasurementRequest("camera", 0.02, None, 0, 1),
         signal_plane=plane,
         producer="cm",
     )

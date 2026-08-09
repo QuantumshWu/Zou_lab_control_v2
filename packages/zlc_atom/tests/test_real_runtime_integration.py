@@ -72,7 +72,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
     try:
         measurement = CameraMeasurementNode(
             camera=installation.device("camera"),
-            request=CameraMeasurementRequest("camera", 0.02, None, 0, 1, 1.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, 0, 1),
             signal_plane=plane,
         )
         monitor = measurement.monitor(buffer_frames=1)

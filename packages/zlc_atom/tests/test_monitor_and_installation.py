@@ -65,7 +65,6 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
                 roi_xywh=(2, 3, 20, 16),
                 repeat=0,
                 frames_per_cycle=3,
-                timeout_seconds=1.0,
             ),
             signal_plane=plane,
         )
@@ -136,7 +135,6 @@ def test_direct_monitor_disarms_when_live_detach_fails() -> None:
                 roi_xywh=None,
                 repeat=0,
                 frames_per_cycle=1,
-                timeout_seconds=0.05,
             ),
             signal_plane=plane,
         )
@@ -166,7 +164,6 @@ def test_finite_measurement_collects_only_external_triggers() -> None:
                 roi_xywh=None,
                 repeat=3,
                 frames_per_cycle=1,
-                timeout_seconds=1.0,
             ),
             signal_plane=plane,
         )

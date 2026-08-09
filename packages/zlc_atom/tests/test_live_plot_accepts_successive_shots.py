@@ -56,7 +56,7 @@ def test_successive_shots_carry_strictly_increasing_revisions() -> None:
         windows = int(metadata["camera_windows"])
         node = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),
             signal_plane=plane,
             producer="cm",
         )
@@ -90,7 +90,7 @@ def test_a_live_plot_accepts_the_second_shot() -> None:
         windows = int(metadata["camera_windows"])
         node = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows, 2.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),
             signal_plane=plane,
             producer="cm",
         )

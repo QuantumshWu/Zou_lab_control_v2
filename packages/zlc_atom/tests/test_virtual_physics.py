@@ -126,7 +126,7 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         repeats = 30
         measurement = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, repeats, 3, 2.0),
+            request=CameraMeasurementRequest("camera", 0.02, None, repeats, 3),
             signal_plane=plane,
         )
         pulse = resolve_pulse(

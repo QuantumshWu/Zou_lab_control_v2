@@ -120,6 +120,7 @@ def test_a_row_draft_keeps_every_field_and_authored_patch(presenter) -> None:
     )
     assert draft.values["repeat"] == 3
     assert draft.values["frames_per_cycle"] == 2
+    assert "timeout_seconds" not in draft.values
 
 
 def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None:

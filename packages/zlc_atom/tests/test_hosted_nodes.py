@@ -197,7 +197,6 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
                 roi_xywh=None,
                 repeat=1,
                 frames_per_cycle=windows,
-                timeout_seconds=2.0,
             ),
             signal_plane=plane,
             producer="cm",
@@ -251,7 +250,6 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
             "roi_xywh": None,
             "repeat": 1,
             "frames_per_cycle": windows,
-            "timeout_seconds": 2.0,
         }
         assert record["named_devices"] == {"camera": "camera"}
         actual = record["device_snapshots"]["camera"]
@@ -285,7 +283,6 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
                 roi_xywh=None,
                 repeat=0,
                 frames_per_cycle=int(metadata["camera_windows"]),
-                timeout_seconds=0.05,
             ),
             signal_plane=plane,
             producer="cm-live",
