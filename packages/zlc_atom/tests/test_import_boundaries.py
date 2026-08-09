@@ -11,6 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "zlc_atom"
 PARALLEL_ROOTS = ("zlc_runtime", "zlc_pulse")
+VIEW_ROOTS = ("PyQt5", "matplotlib", "zlc_plot", "zlc_ui")
 EXPECTED_PUBLIC_API = frozenset({"__version__"})
 MAX_PUBLIC_NAMES = 2
 
@@ -35,7 +36,7 @@ def _python_files(*packages: str) -> tuple[Path, ...]:
     return paths
 
 
-def _parallel_imports(path: Path) -> tuple[str, ...]:
+def _absolute_imports(path: Path) -> tuple[str, ...]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     imports: list[str] = []
     for node in ast.walk(tree):
@@ -43,7 +44,22 @@ def _parallel_imports(path: Path) -> tuple[str, ...]:
             imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.append(node.module)
-    return tuple(name for name in imports if name.startswith(PARALLEL_ROOTS))
+    return tuple(imports)
+
+
+def _parallel_imports(path: Path) -> tuple[str, ...]:
+    return tuple(
+        name for name in _absolute_imports(path) if name.startswith(PARALLEL_ROOTS)
+    )
+
+
+def _is_concrete_plugin(path: Path) -> bool:
+    parts = path.relative_to(SRC).parts
+    return (
+        len(parts) >= 3
+        and parts[0] in {"nodes", "devices"}
+        and parts[1] != "_framework"
+    )
 
 
 def test_top_level_allow_list_is_data_only() -> None:
@@ -88,20 +104,23 @@ def test_foundation_stays_headless_while_concrete_plugins_may_own_views() -> Non
     for forbidden in ("zlc_neutral_atom", "_VirtualSequencerConnection"):
         assert forbidden not in package_text
 
-    foundation = tuple(
-        path
+    foundation_view_imports = tuple(
+        (path.relative_to(SRC), imported)
         for path in paths
-        if not (
-            len(path.relative_to(SRC).parts) >= 3
-            and path.relative_to(SRC).parts[0] in {"nodes", "devices"}
-            and path.relative_to(SRC).parts[1] != "_framework"
-        )
+        if not _is_concrete_plugin(path)
+        for imported in _absolute_imports(path)
+        if imported.split(".", 1)[0] in VIEW_ROOTS
     )
-    foundation_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in foundation
-    )
-    for forbidden in ("PyQt5", "matplotlib", "zlc_plot", "zlc_ui"):
-        assert forbidden not in foundation_text
+    assert foundation_view_imports == ()
+
+    plugin_view_imports = {
+        (path.relative_to(SRC), imported.split(".", 1)[0])
+        for path in paths
+        if _is_concrete_plugin(path)
+        for imported in _absolute_imports(path)
+        if imported.split(".", 1)[0] in VIEW_ROOTS
+    }
+    assert (Path("nodes/calibration/task.py"), "zlc_plot") in plugin_view_imports
 
 
 def test_b_half_parallel_import_policy_is_explicit() -> None:
