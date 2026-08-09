@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`逐项完成审计已收口，进入受影响packages、Guard A/B/C、全仓与独立路径验证门。`
-- Last completed action：`逐项核对axis display labels、Distribution classifier独立性、typed site_overlay、same-shot siblings、SelectionBridge派生signals、latest-only live fit、完整Panel configure、Virtual非均匀性/随机装载/MOT、Calibration六图、100 ms全局显示clock和Panel UI；只发现并删除README中fit-selector耦合残句及Guard B旧Apply测试名。`
-- Last verified tests：`此前阶段分别通过Atom全包146项、Camera/Guard纵向38项及Atom Notebook全本执行；性能实测已记录在zlc_plot/docs/performance.md，涵盖冷初始化、projection、render、2D/Distribution/35-cell fit与classifier、slow-fit front cadence和TaskConsole cadence。当前最终验证门尚未运行。`
-- Pending acceptance gates：`受影响包、Guard A/B/C、全树与独立路径验证；最后由操作者从bin\\experiment.bat执行真实可见按钮验收并确认零窗口/worker/claim/进程。`
-- Next action：`提交本次最小残余清理；逐包运行zlc_data/zlc_plot/zlc_runtime/zlc_atom/zlc_ui/zlc_workbench及Guard A/B/C，再运行全仓、diff-check、残余扫描和detached验证。`
+- Current phase：`受影响packages与Guard A/B/C已通过，进入全仓、diff/residual和detached验证门。`
+- Last completed action：`在当前根bootstrap和实际src路径下完成受影响包全量回归；没有发现新的产品缺口或测试迁移残余。`
+- Last verified tests：`zlc_data+zlc_plot+zlc_runtime 444 passed；zlc_atom 146 passed；zlc_ui 79 passed；Guard A/B/C 3 passed；zlc_workbench 334 passed。此前Atom Notebook全本执行与性能记录仍有效。`
+- Pending acceptance gates：`全树、diff-check、残余扫描与detached验证；最后由操作者从bin\\experiment.bat执行真实可见按钮验收并确认零窗口/worker/claim/进程。`
+- Next action：`提交本次验证checkpoint；运行全仓测试，完成diff/residual扫描并在临时detached worktree重复全仓验证。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
