@@ -178,8 +178,8 @@ class _ScheduleView:
             "scan_summary_text": scan_summary_text,
         }
 
-    def set_connection(self, connection) -> None:
-        self.connection = connection
+    def set_connection(self, vm) -> None:
+        self.connection = vm
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
