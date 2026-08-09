@@ -62,6 +62,38 @@ CALIBRATION_DATASET_DECLARATIONS = (
 )
 
 
+def _image_axis_specs(
+    frame_shape: tuple[int, int],
+    coordinate_frame: str | CoordinateFrameId,
+) -> dict[AxisRoleId, AxisSpec]:
+    """One image schema for Calibration live and FINAL publications."""
+
+    height, width = (int(value) for value in frame_shape)
+    frame = (
+        coordinate_frame
+        if isinstance(coordinate_frame, CoordinateFrameId)
+        else CoordinateFrameId(str(coordinate_frame))
+    )
+    return {
+        SPATIAL_Y: AxisSpec(
+            AxisId("calibration.image.y"),
+            "y",
+            SPATIAL_Y,
+            height,
+            unit="pixel",
+            coordinate_frame=frame,
+        ),
+        SPATIAL_X: AxisSpec(
+            AxisId("calibration.image.x"),
+            "x",
+            SPATIAL_X,
+            width,
+            unit="pixel",
+            coordinate_frame=frame,
+        ),
+    }
+
+
 def _generation_text(value: object) -> str:
     text = str(getattr(value, "value", value)).strip()
     if not text or text == "None":
@@ -193,6 +225,7 @@ class CalibrationCapturePreviewSlot:
             self._values,
             signal=CAPTURE_PREVIEW_DECLARATION.name,
             roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+            axis_specs=_image_axis_specs(self.frame_shape, "image_pixel_xy"),
             generation=self.generation,
             revision=self._revision,
             cell_validity=validity,
@@ -264,24 +297,7 @@ def calibration_final_outputs(
         calibration.site_map.site_ids,
     )
     site_columns = {SITE: site_column}
-    image_axes = {
-        SPATIAL_Y: AxisSpec(
-            AxisId("calibration.image.y"),
-            "y",
-            SPATIAL_Y,
-            frame_shape[0],
-            unit="pixel",
-            coordinate_frame=coordinate_frame,
-        ),
-        SPATIAL_X: AxisSpec(
-            AxisId("calibration.image.x"),
-            "x",
-            SPATIAL_X,
-            frame_shape[1],
-            unit="pixel",
-            coordinate_frame=coordinate_frame,
-        ),
-    }
+    image_axes = _image_axis_specs(frame_shape, coordinate_frame)
     center_component_axis = AxisSpec(
         AxisId("calibration.site-center.component"),
         "coordinate",

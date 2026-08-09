@@ -2,7 +2,7 @@
 
 from importlib.resources import files
 
-from ._framework.descriptor import ArtifactInputSpec, DatasetInputSpec
+from ._framework.descriptor import ArtifactInputSpec, DatasetInputSpec, TaskReportSpec
 from ._framework.discovery import discover_logic_nodes
 
 
@@ -19,6 +19,7 @@ def calibration_pulse_template_bytes() -> bytes:
 __all__ = [
     "ArtifactInputSpec",
     "DatasetInputSpec",
+    "TaskReportSpec",
     "calibration_pulse_template_bytes",
     "discover_logic_nodes",
 ]

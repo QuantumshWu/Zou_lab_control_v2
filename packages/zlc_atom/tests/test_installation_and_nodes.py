@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 from zlc_data import OwnedSnapshot, REPEAT, SITE
 
 from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_catalog
@@ -71,6 +72,57 @@ def test_logic_discovery_is_derived_from_three_leaf_modules() -> None:
     leaf_count = len(tuple((Path(__file__).parents[1] / "src" / "zlc_atom" / "nodes").rglob("logic_node.py")))
     assert len(descriptors) == leaf_count == 3
     assert tuple(item.api_name for item in descriptors) == ("calibration", "camera_measurement", "occupancy")
+
+
+def test_task_report_specs_are_terminal_declared_output_bundles() -> None:
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes import TaskReportSpec
+    from zlc_atom.nodes._framework import LogicNodeDescriptor, NodeKind, OutputSpec
+
+    calibration = next(
+        descriptor
+        for descriptor in discover_logic_nodes()
+        if descriptor.api_name == "calibration"
+    )
+    assert tuple(
+        (
+            report.adapter_key,
+            report.output_names,
+            report.trigger_output_name,
+        )
+        for report in calibration.task_reports
+    ) == (
+        (
+            "calibration.report.v1",
+            tuple(output.name for output in calibration.outputs),
+            "fidelity_threshold",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="undeclared outputs"):
+        LogicNodeDescriptor(
+            "bad-task",
+            NodeKind.TASK,
+            AuthoringSchema(),
+            outputs=(OutputSpec("final", "test.final.v1"),),
+            task_reports=(
+                TaskReportSpec(
+                    "bad.report.v1",
+                    ("final", "invented"),
+                    "final",
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="only Task nodes"):
+        LogicNodeDescriptor(
+            "bad-measurement",
+            NodeKind.MEASUREMENT,
+            AuthoringSchema(),
+            outputs=(OutputSpec("final", "test.final.v1"),),
+            task_reports=(
+                TaskReportSpec("bad.report.v1", ("final",), "final"),
+            ),
+        )
 
 
 def test_device_requirements_name_build_arguments_and_exclusive_access() -> None:

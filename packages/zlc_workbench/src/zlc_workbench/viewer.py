@@ -27,8 +27,15 @@ from pathlib import Path
 from typing import Any
 
 from .archive import read_archive, read_dataset
-from .panel_save import restore_panel_plot_input
-from .panel_state import PanelState, restore_semantic_choice
+from .panel_save import (
+    restore_panel_plot_annotations,
+    restore_panel_plot_input,
+)
+from .panel_state import PanelState
+from .plot_annotations import (
+    PanelPlotAnnotations,
+    apply_panel_plot_annotations,
+)
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -253,7 +260,7 @@ class FigureViewerPresenter:
         self,
         view: object,
         *,
-        make_host: Callable[[Any, str, str, str], Any],
+        make_host: Callable[[Any, str, PanelState | None], Any],
         edit_figure: Callable[[Any, str], object] | None = None,
     ) -> None:
         self.view = view
@@ -271,6 +278,7 @@ class FigureViewerPresenter:
         self._arrays: Mapping[str, Any] = {}
         self.dataset = ""
         self.panel_state: PanelState | None = None
+        self.plot_annotations = PanelPlotAnnotations()
         self._host: Any = None
         self._connect()
 
@@ -359,13 +367,13 @@ class FigureViewerPresenter:
                 snapshot,
             )
             panel_state = _panel_state(self._info.get("sections", {}), str(name))
+            annotations = restore_panel_plot_annotations(self._info, str(name))
             host = self._make_host(
                 plot_input,
                 label,
-                "" if panel_state is None else panel_state.kind,
-                "" if panel_state is None else panel_state.cell_kind,
+                panel_state,
             )
-            fit_error = self._configure_host(host, panel_state)
+            fit_error = self._configure_host(host, panel_state, annotations)
         except Exception as error:
             if host is not None:
                 close = getattr(host, "close", None)
@@ -377,6 +385,7 @@ class FigureViewerPresenter:
         self._mount(host)
         self.dataset = str(name)
         self.panel_state = panel_state
+        self.plot_annotations = annotations
         total = len(self.description.datasets) if self.description else 1
         position = "" if total <= 1 else f"  ({total} datasets in this file)"
         suffix = "" if fit_error is None else f"; saved fit was not restored: {fit_error}"
@@ -392,31 +401,36 @@ class FigureViewerPresenter:
         cls,
         host: object,
         state: PanelState | None,
+        annotations: PanelPlotAnnotations | None = None,
     ) -> Exception | None:
         """Apply the saved panel decisions through the plot host's public API."""
 
+        if state is not None:
+            display = dict(state.display)
+            if state.kind == "image":
+                display["site_overlay"] = state.site_overlay
+            set_parameters = getattr(host, "set_parameters", None)
+            if display and callable(set_parameters):
+                cls._await(set_parameters(display))
+
+            set_size = getattr(host, "set_size", None)
+            if state.size and callable(set_size):
+                cls._await(set_size(state.size))
+
+        selected_annotations = (
+            PanelPlotAnnotations() if annotations is None else annotations
+        )
+        for operation in apply_panel_plot_annotations(
+            host,
+            selected_annotations,
+            # Archives store producer/canonical values, never whatever unit
+            # happened to be selected when the panel was saved.
+            display=False,
+        ):
+            cls._await(operation)
+
         if state is None:
             return None
-        apply_semantic = getattr(host, "apply_semantic", None)
-        if callable(apply_semantic):
-            for name, value in state.semantic.items():
-                cls._await(
-                    apply_semantic(
-                        name,
-                        cls._restore_semantic_value(host, name, value),
-                    )
-                )
-
-        display = dict(state.display)
-        if state.kind == "image":
-            display["site_overlay"] = state.site_overlay
-        set_parameters = getattr(host, "set_parameters", None)
-        if display and callable(set_parameters):
-            cls._await(set_parameters(display))
-
-        set_size = getattr(host, "set_size", None)
-        if state.size and callable(set_size):
-            cls._await(set_size(state.size))
 
         fit = dict(state.fit)
         model = fit.pop("model", None)
@@ -431,22 +445,6 @@ class FigureViewerPresenter:
                 # otherwise exact figure.
                 return error
         return None
-
-    @classmethod
-    def _restore_semantic_value(
-        cls,
-        host: object,
-        name: str,
-        saved: object,
-    ) -> object:
-        """Resolve JSON values through the host's registry-owned choices."""
-
-        describe = getattr(host, "describe_semantics", None)
-        if not callable(describe):
-            return saved
-        operation = cls._await(describe())
-        description = getattr(operation, "value", operation)
-        return restore_semantic_choice(description, name, saved)
 
     def rename_figure(self, text: str) -> None:
         """Remember what the operator called this figure."""

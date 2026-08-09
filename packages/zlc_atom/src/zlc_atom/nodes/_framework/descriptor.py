@@ -85,6 +85,29 @@ class TaskPreviewSpec:
             raise ValueError("task preview requires output_name and plot_kind")
 
 
+@dataclass(frozen=True, slots=True)
+class TaskReportSpec:
+    """UI-neutral terminal report request over one exact output sibling bundle."""
+
+    adapter_key: str
+    output_names: tuple[str, ...]
+    trigger_output_name: str
+
+    def __post_init__(self) -> None:
+        adapter_key = str(self.adapter_key).strip()
+        output_names = tuple(str(value).strip() for value in self.output_names)
+        trigger = str(self.trigger_output_name).strip()
+        if not adapter_key or not output_names or any(not value for value in output_names):
+            raise ValueError("task report requires adapter_key and output_names")
+        if len(set(output_names)) != len(output_names):
+            raise ValueError("task report output_names must be unique")
+        if trigger not in output_names:
+            raise ValueError("task report trigger must belong to its output_names")
+        object.__setattr__(self, "adapter_key", adapter_key)
+        object.__setattr__(self, "output_names", output_names)
+        object.__setattr__(self, "trigger_output_name", trigger)
+
+
 @dataclass(frozen=True)
 class DeviceRequirement:
     capability_token: str
@@ -137,6 +160,7 @@ class LogicNodeDescriptor:
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     task_previews: tuple[TaskPreviewSpec, ...] = ()
+    task_reports: tuple[TaskReportSpec, ...] = ()
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -149,6 +173,7 @@ class LogicNodeDescriptor:
         inputs = tuple(self.input_specs)
         outputs = tuple(self.outputs)
         task_previews = tuple(self.task_previews)
+        task_reports = tuple(self.task_reports)
         artifact_outputs = tuple(self.artifact_outputs)
         requirements = tuple(self.device_requirements)
         selection_mappings = tuple(self.selection_mappings)
@@ -158,6 +183,8 @@ class LogicNodeDescriptor:
             raise TypeError("outputs must contain OutputSpec values")
         if any(not isinstance(value, TaskPreviewSpec) for value in task_previews):
             raise TypeError("task_previews must contain TaskPreviewSpec values")
+        if any(not isinstance(value, TaskReportSpec) for value in task_reports):
+            raise TypeError("task_reports must contain TaskReportSpec values")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
@@ -182,6 +209,18 @@ class LogicNodeDescriptor:
             )
         if task_previews and self.kind is not NodeKind.TASK:
             raise ValueError("only Task nodes may declare task previews")
+        if len({value.adapter_key for value in task_reports}) != len(task_reports):
+            raise ValueError("task report adapter keys must be unique")
+        unknown_report_outputs = {
+            name for report in task_reports for name in report.output_names
+        } - {value.name for value in outputs}
+        if unknown_report_outputs:
+            raise ValueError(
+                "task reports use undeclared outputs: "
+                f"{sorted(unknown_report_outputs)}"
+            )
+        if task_reports and self.kind is not NodeKind.TASK:
+            raise ValueError("only Task nodes may declare task reports")
         if len({value.name for value in artifact_outputs}) != len(artifact_outputs):
             raise ValueError("artifact output names must be unique")
         if len({value.argument_name for value in requirements}) != len(requirements):
@@ -205,6 +244,7 @@ class LogicNodeDescriptor:
         object.__setattr__(self, "input_specs", inputs)
         object.__setattr__(self, "outputs", outputs)
         object.__setattr__(self, "task_previews", task_previews)
+        object.__setattr__(self, "task_reports", task_reports)
         object.__setattr__(self, "artifact_outputs", artifact_outputs)
         object.__setattr__(self, "device_requirements", requirements)
         object.__setattr__(self, "selection_mappings", selection_mappings)
@@ -253,4 +293,5 @@ __all__ = [
     "OutputSpec",
     "SelectionMapping",
     "TaskPreviewSpec",
+    "TaskReportSpec",
 ]

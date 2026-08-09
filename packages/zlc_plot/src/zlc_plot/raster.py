@@ -465,6 +465,14 @@ class _WorkerSessionAdapter:
     def set_threshold_selector(self, value: float, *, display: bool = True) -> object:
         return self._session().set_threshold_selector(value, display=display)
 
+    def set_facet_thresholds(
+        self,
+        thresholds: tuple[float | None, ...],
+        *,
+        display: bool = True,
+    ) -> object:
+        return self._session().set_facet_thresholds(thresholds, display=display)
+
     def set_crosshair_selector(self, x: float, y: float, *, display: bool = True) -> object:
         return self._session().set_crosshair_selector(x, y, display=display)
 
@@ -1473,6 +1481,20 @@ class RasterPlotHost:
             _mode=_DispatchMode.PUBLISH,
         )
 
+    def set_facet_thresholds(
+        self,
+        thresholds: tuple[float | None, ...] | list[float | None],
+        *,
+        display: bool = True,
+    ) -> Future[RasterOperation[tuple[float | None, ...]]]:
+        return self._dispatch_session(
+            self._worker_adapter.set_facet_thresholds,
+            tuple(thresholds),
+            display=display,
+            _mode=_DispatchMode.PUBLISH,
+            coalesce_key="facet-thresholds",
+        )
+
     def set_crosshair_selector(
         self,
         x: float,
@@ -1497,6 +1519,7 @@ class RasterPlotHost:
         bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
         options: "FitOptions | None" = None,
         live: bool = True,
+        fit_all_facets: bool = False,
     ) -> Future[RasterOperation[FitResult | FacetFitBatchResult]]:
         """Fit asynchronously and complete after the accepted front is promoted."""
 
@@ -1532,6 +1555,7 @@ class RasterPlotHost:
             bounds=bounds,
             options=options,
             live=live,
+            fit_all_facets=fit_all_facets,
             _mode=_DispatchMode.CONTROL,
         )
 

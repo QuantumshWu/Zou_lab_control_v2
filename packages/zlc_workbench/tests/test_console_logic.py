@@ -304,7 +304,12 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
             artifact_inputs={"calibration_path": "picked.json"},
         )
         assert resolved["calibration_path"] == "picked.json"
-        assert accepted == {"calibration_path", "source_signal", "signal_plane"}
+        assert accepted == {
+            "calibration_path",
+            "source_signal",
+            "signal_plane",
+            "values",
+        }
 
 
 def test_named_device_options_and_build_resolution_use_compatible_instances() -> None:
@@ -386,7 +391,11 @@ def _claim_descriptor(api_name: str, access, *capabilities: str):
     requested = capabilities or ("camera.adapter",)
     return LogicNodeDescriptor(
         api_name,
-        NodeKind.TASK,
+        # These tests exercise device-use arbitration between ordinary
+        # concurrent nodes.  A Task intentionally owns the whole console, so
+        # using Task here would test (and violate) the Task admission rule
+        # before the device-use behavior under test is reached.
+        NodeKind.MEASUREMENT,
         AuthoringSchema(),
         device_requirements=tuple(
             DeviceRequirement(token, f"device_{index}", access)
@@ -792,7 +801,7 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert node_id == "occupancy"
     assert presenter.logic[node_id].draft.source_signal == ""
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
-    assert presenter.logic[node_id].draft.values == {}
+    assert presenter.logic[node_id].draft.values == {"model_kind": "default"}
     assert presenter.view.logic_editors[node_id]["artifact_form_spec"].keys == (
         "calibration_path",
     )

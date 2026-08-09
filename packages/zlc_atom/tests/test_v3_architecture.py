@@ -526,6 +526,22 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             (preview.output_name, preview.plot_kind)
             for preview in descriptors["calibration"].task_previews
         ) == (("capture_preview", "image"),)
+        assert tuple(
+            (
+                report.adapter_key,
+                report.output_names,
+                report.trigger_output_name,
+            )
+            for report in descriptors["calibration"].task_reports
+        ) == (
+            (
+                "calibration.report.v1",
+                tuple(
+                    output.name for output in descriptors["calibration"].outputs
+                ),
+                "fidelity_threshold",
+            ),
+        )
         assert [
             (value.name, value.contract_id)
             for value in descriptors["calibration"].artifact_outputs

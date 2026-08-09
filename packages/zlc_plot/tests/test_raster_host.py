@@ -8,7 +8,7 @@ import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
-from zlc_plot import AxisRef, CurvePlot, FacetGridPlot
+from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot
 from zlc_plot.fit import FacetFitBatchResult
 from zlc_plot.raster import RasterPlotHost
 
@@ -21,6 +21,23 @@ def _snapshot() -> DatasetSnapshot:
         generation="raster-host-test",
     )
     return DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+
+
+def _site_distribution_snapshot() -> DatasetSnapshot:
+    samples = np.linspace(-3.0, 3.0, 80)
+    values = np.column_stack(
+        (
+            np.where(samples < 0.0, samples - 2.0, samples + 2.0),
+            np.where(samples < 0.0, samples - 1.0, samples + 3.0),
+        )
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=values.shape[0]),
+        PointTable.from_columns({"site": (0.0, 1.0)}),
+        dtype=np.float64,
+        generation="raster-site-distribution",
+    )
+    return DatasetSnapshot(schema, values, revision=0)
 
 
 def test_host_coalesces_same_key_and_front_sequences_advance() -> None:
@@ -120,6 +137,37 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         assert operation.value.source_revision == operation.front.identity.data_revision
         assert operation.front.identity.sequence > first.identity.sequence
         assert host.front is operation.front
+    finally:
+        host.close(timeout=10)
+
+
+def test_host_presents_authoritative_thresholds_and_static_fit_for_every_facet() -> None:
+    """A report configures the shared plot; it does not paint annotations itself."""
+
+    host = RasterPlotHost.from_plot(
+        _site_distribution_snapshot(),
+        FacetGridPlot(AxisRef.point("site"), HistogramPlot()),
+    )
+    try:
+        initial = host.wait_for_front(timeout=10)
+        threshold_operation = host.set_facet_thresholds(
+            (-0.25, 0.75),
+            display=False,
+        ).result(timeout=10)
+        assert threshold_operation.value == (-0.25, 0.75)
+        assert threshold_operation.front.identity.sequence > initial.identity.sequence
+        assert threshold_operation.front.buffer.pixels != initial.buffer.pixels, (
+            "threshold annotations did not reach the raster front"
+        )
+
+        fit_operation = host.fit(
+            "bimodal_gaussian",
+            live=False,
+            fit_all_facets=True,
+        ).result(timeout=30)
+        assert isinstance(fit_operation.value, FacetFitBatchResult)
+        assert len(fit_operation.value.results) == 2
+        assert fit_operation.front.identity.sequence > threshold_operation.front.identity.sequence
     finally:
         host.close(timeout=10)
 

@@ -150,6 +150,19 @@ class PlotPanelPort:
             else self._project_input(value, publication)
         )
         revision = _revision_of(plot_input)
+        for serial, prepared in tuple(self._pending.items()):
+            if (
+                revision is not None
+                and _publication_generation(prepared.publication)
+                == publication_generation
+                and _revision_of(prepared.plot_input) == revision
+            ):
+                # The renderer is already producing these exact pixels.  Move
+                # the pending causal target forward (typically LIVE -> FINAL)
+                # so accepting that one render cannot later regress identity.
+                if prepared.publication is not publication:
+                    self._pending[serial] = _Prepared(publication, plot_input)
+                return None
         if (
             self._shown_generation is None
             and revision is not None
@@ -189,6 +202,15 @@ class PlotPanelPort:
             and revision is not None
             and revision == self._shown_revision
         ):
+            # A terminal sibling publication may deliberately reuse the last
+            # LIVE snapshot.  No pixels need rendering, but the displayed
+            # causal identity must still advance to FINAL; otherwise consumers
+            # wait forever for a publication the panel already depicts.
+            if not self._pending and self._presented is not publication:
+                self._presented = publication
+                self._presented_input = plot_input
+                if self._on_presented is not None:
+                    self._on_presented(publication, plot_input)
             return None
         if any(
             prepared.publication is publication
@@ -228,16 +250,19 @@ class PlotPanelPort:
     def accept(self, update: SurfaceUpdate, operation: object) -> bool:
         if not self.can_accept(update, operation):
             return False
-        self._presented = update.publication
         prepared = self._pending.pop(update.serial, None)
+        publication = (
+            update.publication if prepared is None else prepared.publication
+        )
+        self._presented = publication
         self._presented_input = (
             update.value.snapshot if prepared is None else prepared.plot_input
         )
-        self._shown_generation = _publication_generation(update.publication)
+        self._shown_generation = _publication_generation(publication)
         self._shown_revision = _revision_of(self._presented_input)
         self.last_error = None
         if self._on_presented is not None:
-            self._on_presented(update.publication, self._presented_input)
+            self._on_presented(publication, self._presented_input)
         return True
 
     def reject(self, update: SurfaceUpdate, error: BaseException | None) -> None:

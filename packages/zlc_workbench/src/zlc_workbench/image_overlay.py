@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from zlc_atom.nodes.calibration import TrapCalibration
+from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_data import SITE
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointMarker, PointStatus
 
@@ -44,6 +44,18 @@ def _calibration_path(publication: object) -> str | None:
         return None
     text = str(candidate).strip()
     return text or None
+
+
+def _readout_model_kind(publication: object) -> ReadoutModelKind:
+    record = getattr(publication, "run_record", {})
+    parameters = record.get("parameters", {}) if hasattr(record, "get") else {}
+    value = parameters.get("model_kind") if hasattr(parameters, "get") else None
+    try:
+        return ReadoutModelKind(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Occupancy publication has no exact readout model kind"
+        ) from exc
 
 
 def _one_site_row(value: object, count: int, name: str) -> np.ndarray | None:
@@ -157,7 +169,7 @@ class ImageOverlayResolver:
             raise ValueError("Occupancy publication has no calibration_path")
         calibration = self._load(path)
         site_map = calibration.site_map
-        model = calibration.readout_model
+        model = calibration.select_model(_readout_model_kind(publication))
         base_valid = (
             np.asarray(site_map.valid_sites, dtype=bool)
             & np.asarray(model.usable_sites, dtype=bool)

@@ -15,6 +15,7 @@ print(tested_module.__file__)
 from zlc_atom.nodes.calibration import (
     FrameContract,
     ReadoutModel,
+    ReadoutModelKind,
     SiteMap,
     TrapCalibration,
 )
@@ -51,12 +52,15 @@ def _calibration(path: Path) -> TrapCalibration:
             np.asarray((True, True)),
             np.asarray((1.0, 1.0)),
         ),
-        ReadoutModel(
-            site_ids,
-            np.asarray((100.0, 100.0)),
-            np.asarray((True, True)),
-            np.asarray((1.0, 1.0)),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((100.0, 100.0)),
+                np.asarray((True, True)),
+                np.asarray((1.0, 1.0)),
+            ),
         ),
+        ReadoutModelKind.BOX,
         FrameContract(
             (96, 128),
             sensor_shape=(96, 128),

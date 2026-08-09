@@ -40,15 +40,18 @@ def build(view: object) -> object:
     from zlc_plot.primitives import ImageFrame
 
     from ..panel_spec import fitting_panel_spec
+    from ..panel_state import compose_panel_spec
     from ..viewer import FigureViewerPresenter
 
-    def make_host(plot_input, name: str, kind: str, cell_kind: str):
+    def make_host(plot_input, name: str, state):
         # Which plot suits a dataset is a question about the dataset, and the
         # saved schema answers it.  This window used to answer it itself, in a
         # two-branch copy of a rule zlc_plot already owns per kind -- so a
         # dataset that was neither a plain image nor a point table opened as an
         # exception instead of a plot.  Asking zlc_plot means one answer.
         snapshot = plot_input.snapshot if isinstance(plot_input, ImageFrame) else plot_input
+        kind = "" if state is None else state.kind
+        cell_kind = "" if state is None else state.cell_kind
         spec = fitting_panel_spec(
             snapshot.block.schema, kind, cell_kind
         )
@@ -56,6 +59,8 @@ def build(view: object) -> object:
             raise ValueError(
                 f"nothing in {name!r} can be drawn as {kind or 'an inferred plot'}"
             )
+        if state is not None:
+            spec = compose_panel_spec(snapshot.block.schema, spec, state)
         # Only the title: axis names come from the payload's own schema when a
         # label is left unset, and the signal's name is the one thing the data
         # does not know about itself.

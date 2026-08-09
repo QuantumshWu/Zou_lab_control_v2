@@ -13,6 +13,7 @@ from zlc_atom.nodes._framework.descriptor import (
     NodeKind,
     OutputSpec,
     TaskPreviewSpec,
+    TaskReportSpec,
 )
 
 from .calibration import ReadoutModelKind
@@ -199,6 +200,16 @@ LOGIC_NODE = LogicNodeDescriptor(
         for declaration in CALIBRATION_DATASET_DECLARATIONS
     ),
     task_previews=(TaskPreviewSpec("capture_preview", "image"),),
+    task_reports=(
+        TaskReportSpec(
+            "calibration.report.v1",
+            tuple(
+                declaration.name
+                for declaration in CALIBRATION_DATASET_DECLARATIONS
+            ),
+            "fidelity_threshold",
+        ),
+    ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
     ),

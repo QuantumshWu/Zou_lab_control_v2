@@ -495,11 +495,21 @@ class RenderFrame:
     effects: RenderEffect
     data_revision: int | None = None
     fit_overlays: tuple[FitOverlay, ...] = ()
+    facet_thresholds: tuple[float | None, ...] = ()
     image_overlay: ImagePointOverlay | None = None
     selectors: SelectorSnapshot = SelectorSnapshot(())
     facet_index: int | None = None
     facet_focus_index: int | None = None
     view_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
+
+    def __post_init__(self) -> None:
+        thresholds = tuple(self.facet_thresholds)
+        if any(
+            value is not None and not math.isfinite(float(value))
+            for value in thresholds
+        ):
+            raise ValueError("facet thresholds must be finite or None")
+        object.__setattr__(self, "facet_thresholds", thresholds)
 
 
 class MatplotlibRenderer:
@@ -532,6 +542,7 @@ class MatplotlibRenderer:
         self._fit_slots: dict[str, Any] = {}
         self._last_fit_overlay: FitOverlay | None = None
         self._last_fit_overlays: tuple[FitOverlay, ...] = ()
+        self._facet_threshold_artists: dict[int, tuple[Any, Any]] = {}
         self._fit_source_scatter: Any | None = None
         self._fit_hidden_source_lines: tuple[tuple[Any, bool], ...] = ()
         self._fit_axis: Any | None = None
@@ -729,6 +740,7 @@ class MatplotlibRenderer:
         self._fit_slots.clear()
         self._last_fit_overlay = None
         self._last_fit_overlays = ()
+        self._facet_threshold_artists.clear()
         self._fit_source_scatter = None
         self._fit_hidden_source_lines = ()
         self._fit_axis = None
@@ -824,6 +836,7 @@ class MatplotlibRenderer:
             self._update_selectors(self._last_selectors)
             self._set_fit_mode(bool(painted_fit_overlays) and not overview)
             self._update_fit(painted_fit_overlays, overview=overview)
+            self._update_facet_thresholds(frame.facet_thresholds)
             self._update_image_point_overlay(payload, frame.image_overlay, state)
             image_blitted = (
                 base_changed
@@ -3453,6 +3466,65 @@ class MatplotlibRenderer:
             self._update_facet_fit_overview(overlays)
             return
         self._update_single_fit(overlays[0] if overlays else None)
+
+    def _update_facet_thresholds(
+        self,
+        thresholds: tuple[float | None, ...],
+    ) -> None:
+        """Paint one authoritative threshold on each Histogram facet cell.
+
+        Fit overlays and calibrated thresholds are different facts: the fit
+        explains the observed distribution, while this line records the
+        threshold that the producing analysis actually selected.  The values
+        arrive through :class:`RenderFrame`; no embedding application draws
+        Matplotlib artists or duplicates unit conversion.
+        """
+
+        if not isinstance(self.spec, FacetGridPlot) or not isinstance(
+            self.spec.cell,
+            HistogramPlot,
+        ):
+            thresholds = ()
+        active = {
+            index: float(value)
+            for index, value in enumerate(thresholds)
+            if value is not None and index < self._visible_facet_count
+        }
+        for index in tuple(self._facet_threshold_artists):
+            if index in active:
+                continue
+            self._remove_artists(self._facet_threshold_artists.pop(index))
+
+        token = self.style.artists.threshold_line
+        axes = self._axes.get("facet_cell", ())
+        for index, value in active.items():
+            artists = self._facet_threshold_artists.get(index)
+            if artists is None:
+                axis = axes[index]
+                (line,) = axis.plot((), (), clip_on=True, **token.kwargs())
+                label = axis.text(
+                    1.0 - self.style.render.axes_text_inset_fraction,
+                    1.0 - self.style.render.axes_text_inset_fraction,
+                    "",
+                    transform=axis.transAxes,
+                    ha="right",
+                    va="top",
+                    clip_on=True,
+                    zorder=self.style.artists.fit_annotation_zorder,
+                    fontsize=self.style.fonts.annotation_pt,
+                    color=self.style.palette.threshold,
+                )
+                artists = (line, label)
+                self._facet_threshold_artists[index] = artists
+            line, label = artists
+            y_low, y_high = axes[index].get_ylim()
+            line.set_data((value, value), (y_low, y_high))
+            line.set_visible(True)
+            label.set_text(f"th={_compact_engineering(value)}")
+            label.set_visible(
+                self._visible_facet_count == 1
+                or self._facet_focus_index == index
+            )
 
     def _rgba_buffer(self) -> np.ndarray:
         """Return the already-painted canvas buffer in the surface contract."""

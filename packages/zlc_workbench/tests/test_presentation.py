@@ -26,7 +26,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.calibration import FrameContract, ReadoutModel, SiteMap, TrapCalibration
+from zlc_atom.nodes.calibration import (
+    FrameContract,
+    ReadoutModel,
+    ReadoutModelKind,
+    SiteMap,
+    TrapCalibration,
+)
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -221,6 +227,82 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     port.finish_unpresented(recovered)
 
 
+def test_same_snapshot_final_reanchors_pending_and_presented_identity(
+    live_bench,
+) -> None:
+    """A reused FINAL snapshot neither redraws nor regresses to LIVE identity."""
+
+    from concurrent.futures import Future
+    from zlc_data import owned_snapshot_from_arrays
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    calls: list[object] = []
+    completion: Future[object] = Future()
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda snapshot: calls.append(snapshot) or completion,
+    )
+    presented: list[object] = []
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        host,
+        display_interval_ms=100,
+        shown=value.snapshot,
+        on_presented=lambda selected, _input: presented.append(selected),
+    )
+    assert port.prepare(value, publication) is None
+
+    snapshot = owned_snapshot_from_arrays(
+        schema=value.snapshot.block.schema,
+        values=value.snapshot.block.values,
+        revision=value.snapshot.block.revision.value + 1,
+        validity=value.snapshot.block.validity,
+        block_id=value.snapshot.block.block_id,
+        stream_generation=value.snapshot.ref.stream_generation,
+    )
+    live_value = replace(value, snapshot=snapshot, transient=True)
+    live = replace(
+        publication,
+        event_ref=replace(
+            publication.event_ref,
+            sequence=publication.event_ref.sequence + 1,
+        ),
+        signals={**publication.signals, signal: live_value},
+    )
+    update = port.prepare(live_value, live)
+    assert update is not None
+
+    final_value = replace(live_value, transient=False)
+    final = replace(
+        live,
+        event_ref=replace(live.event_ref, sequence=live.event_ref.sequence + 1),
+        signals={**live.signals, signal: final_value},
+    )
+    assert port.prepare(final_value, final) is None
+    assert calls == [snapshot], "FINAL must coalesce with the identical pending render"
+
+    completion.set_result(object())
+    assert port.accept(update, object()) is True
+    assert port.presented_publication() is final
+    assert port.presented_publication().value(signal).transient is False
+    assert presented[-1] is final
+
+    terminal_record = replace(
+        final,
+        event_ref=replace(final.event_ref, sequence=final.event_ref.sequence + 1),
+    )
+    assert port.prepare(final_value, terminal_record) is None
+    assert port.presented_publication() is terminal_record
+    assert calls == [snapshot], "identity-only reanchor must not redraw pixels"
+
+
 def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
     live_bench,
 ) -> None:
@@ -295,12 +377,15 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
             np.asarray((True, True, False)),
             np.asarray((1.0, 1.0, 0.0)),
         ),
-        ReadoutModel(
-            site_ids,
-            np.asarray((1.0, 1.0, 1.0)),
-            np.asarray((True, True, True)),
-            np.asarray((1.0, 1.0, 1.0)),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((1.0, 1.0, 1.0)),
+                np.asarray((True, True, True)),
+                np.asarray((1.0, 1.0, 1.0)),
+            ),
         ),
+        ReadoutModelKind.BOX,
         FrameContract(shape),
     )
     path = calibration.save(tmp_path / "calibration.json")
@@ -331,7 +416,10 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
     publication = SimpleNamespace(
         run_record={
             "node": node_id,
-            "parameters": {"calibration_path": str(path)},
+            "parameters": {
+                "calibration_path": str(path),
+                "model_kind": "box",
+            },
         },
         value=values.get,
     )
@@ -354,6 +442,21 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
         resolved.frame.overlay.coordinates,
         calibration.site_map.centers_xy,
     )
+
+    missing_model = SimpleNamespace(
+        run_record={
+            "node": node_id,
+            "parameters": {"calibration_path": str(path)},
+        },
+        value=values.get,
+    )
+    with pytest.raises(ValueError, match="exact readout model kind"):
+        ImageOverlayResolver().resolve(
+            frame_value,
+            missing_model,
+            mode="centers",
+            overlay_revision=8,
+        )
 
 
 def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None:

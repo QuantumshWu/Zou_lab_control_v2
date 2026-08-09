@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from zlc_plot import PlotKind
+from zlc_plot import PlotKind, describe_semantics, updated_spec
 
 
-__all__ = ["PanelFrozenData", "PanelState"]
+__all__ = ["PanelFrozenData", "PanelState", "compose_panel_spec"]
 
 
 def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -42,6 +42,19 @@ def restore_semantic_choice(description: object, name: str, saved: object) -> ob
         if candidate == saved or _document_value(candidate) == saved:
             return candidate
     return saved
+
+
+def compose_panel_spec(schema: object, spec: object, state: "PanelState") -> object:
+    """Compose saved semantics before a host performs its first render."""
+
+    if not isinstance(state, PanelState):
+        raise TypeError("state must be PanelState")
+    candidate = spec
+    for name, saved in state.semantic.items():
+        description = describe_semantics(schema, candidate)
+        value = restore_semantic_choice(description, str(name), saved)
+        candidate = updated_spec(schema, candidate, str(name), value)
+    return candidate
 
 
 @dataclass(frozen=True, slots=True)

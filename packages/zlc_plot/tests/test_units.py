@@ -65,6 +65,7 @@ def test_unit_choice_symbols_are_unique_but_alias_input_resolution_is_unchanged(
     assert len(resolved) == len(set(resolved))
     assert resolve_unit("us") is resolve_unit("µs") is resolve_unit("μs")
     assert resolve_unit("deg") is resolve_unit("°")
+    assert resolve_unit("pixel").dimension == "pixel"
 
 
 def test_display_unit_choices_do_not_repeat_aliases() -> None:

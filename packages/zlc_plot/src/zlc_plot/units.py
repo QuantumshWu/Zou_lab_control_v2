@@ -246,6 +246,7 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("rad", "angle"),
         Unit("deg", "angle", np.pi / 180.0, aliases=("°",)),
         Unit("count", "count"),
+        Unit("pixel", "pixel"),
     )
 
 

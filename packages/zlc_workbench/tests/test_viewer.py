@@ -27,8 +27,10 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 from zlc_workbench.archive import read_archive, read_dataset
 from zlc_workbench.panel_save import save_panel_figure
 from zlc_workbench.panel_state import PanelFrozenData, PanelState
+from zlc_workbench.plot_annotations import PanelPlotAnnotations
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import FigureViewerPresenter, _panel_state, describe_archive
+from zlc_plot import AxisRef
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
@@ -162,7 +164,7 @@ def presenter():
     plot = pytest.importorskip("zlc_plot")
     view = _ViewerView()
 
-    def make_host(snapshot, name, _kind, _cell_kind):
+    def make_host(snapshot, name, _state):
         return plot.RasterPlotHost.from_plot(
             snapshot,
             plot.ImagePlot(
@@ -508,14 +510,10 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
     class _RestoredHost:
         def __init__(self) -> None:
-            self.semantic = []
             self.display = {}
             self.size = ""
             self.fitted = None
             self.closed = False
-
-        def apply_semantic(self, name, value) -> None:
-            self.semantic.append((name, value))
 
         def set_parameters(self, values) -> None:
             self.display = dict(values)
@@ -531,12 +529,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
     seen = {}
 
-    def make_host(plot_input, label, kind, cell_kind):
+    def make_host(plot_input, label, panel_state):
         seen.update(
             plot_input=plot_input,
             label=label,
-            kind=kind,
-            cell_kind=cell_kind,
+            state=panel_state,
         )
         host = _RestoredHost()
         seen["host"] = host
@@ -546,8 +543,10 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     presenter = FigureViewerPresenter(view, make_host=make_host)
     try:
         assert presenter.open(str(written.archive)) is not None, view.status
-        assert seen["kind"] == "image", "the saved kind must not be inferred anew"
-        assert seen["cell_kind"] == ""
+        assert seen["state"].kind == "image", (
+            "the saved kind must not be inferred anew"
+        )
+        assert seen["state"].cell_kind == ""
         assert seen["label"] == f"site occupancy — {state.signal}"
         frame = seen["plot_input"]
         assert isinstance(frame, ImageFrame)
@@ -557,7 +556,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert frame.overlay.statuses == overlay.statuses
 
         host = seen["host"]
-        assert host.semantic == [("reduction", "mean")]
+        assert seen["state"].semantic == {"reduction": "mean"}
         assert host.display == {
             "show_colorbar": False,
             "site_overlay": "occupancy",
@@ -582,3 +581,102 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert real_presenter.panel_state == state
     finally:
         real_presenter.close()
+
+
+def test_ordinary_viewer_replays_exported_calibration_facet_thresholds(
+    tmp_path,
+) -> None:
+    """Open Saved uses the generic annotation seam, not a Calibration loader."""
+
+    from test_archive import _calibration_outputs
+    from zlc_workbench.apps.figure_viewer import build
+    from zlc_workbench.calibration_report import export_calibration_report
+
+    files = export_calibration_report(tmp_path / "calibration-report", _calibration_outputs())
+    distribution = next(
+        path for path in files.archives if path.name == "distribution.npz"
+    )
+    info, arrays = read_archive(distribution)
+    assert info["sections"]["plot_annotations"] == {
+        "dataset": "data",
+        "facet_thresholds": [0.0, 1.0, None],
+    }
+    assert not any(name.startswith("calibration.threshold") for name in arrays)
+
+    view = _ViewerView()
+    presenter = build(view)
+    try:
+        assert presenter.open(str(distribution)) is not None, view.status
+        assert presenter.plot_annotations.facet_thresholds == (0.0, 1.0, None)
+        host = presenter._host
+        assert host is not None
+        assert tuple(host._session._facet_thresholds) == (0.0, 1.0, None)
+        annotated = host.front
+        assert annotated is not None
+        cleared = host.set_facet_thresholds(
+            (None, None, None),
+            display=False,
+        ).result(timeout=10)
+        assert cleared.front.buffer.pixels != annotated.buffer.pixels
+    finally:
+        presenter.close()
+
+
+def test_panel_save_annotation_roundtrip_keeps_canonical_units(tmp_path) -> None:
+    """A saved V threshold stays V after reopening a panel displayed in mV."""
+
+    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from zlc_workbench.apps.figure_viewer import build
+
+    samples = np.linspace(-3.0, 3.0, 80)
+    values = np.column_stack((samples - 1.0, samples + 1.0))
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=len(samples)),
+        PointTable.from_columns({"site": (0.0, 1.0)}),
+        dtype=np.float64,
+        canonical_unit="V",
+        generation="annotation-unit-roundtrip",
+    )
+    snapshot = DatasetSnapshot(schema, values, revision=0)
+    state = PanelState(
+        signal="report/distribution",
+        kind="facet_grid",
+        cell_kind="histogram",
+        size="4x4",
+        interval_ms=400,
+        title="unit report",
+        semantic={"facet": AxisRef.point("site")},
+        display={"value_display_unit": "mV"},
+    )
+    frozen = PanelFrozenData(state.signal, None, snapshot)
+
+    class _SavingHost:
+        def save(self, path) -> None:
+            Path(path).write_bytes(b"png")
+
+        def close(self) -> None:
+            return None
+
+    written = save_panel_figure(
+        tmp_path / "unit-report",
+        state=state,
+        frozen=frozen,
+        make_host=lambda *_args: _SavingHost(),
+        configure_host=lambda _host, _state: None,
+        annotations=PanelPlotAnnotations((1.0, 2.0)),
+    )
+
+    view = _ViewerView()
+    presenter = build(view)
+    try:
+        assert presenter.open(str(written.archive)) is not None, view.status
+        assert presenter.plot_annotations.facet_thresholds == (1.0, 2.0)
+        host = presenter._host
+        assert host is not None
+        # Had the Viewer treated archived canonical values as display values,
+        # these would be 0.001 V and 0.002 V after its mV projection.
+        assert tuple(host._session._facet_thresholds) == (1.0, 2.0)
+        description = host.describe_display().result(timeout=10).value
+        assert str(description.display_state.values["value_display_unit"]) == "mV"
+    finally:
+        presenter.close()

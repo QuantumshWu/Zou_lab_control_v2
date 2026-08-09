@@ -12,12 +12,16 @@ from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 
 from .archive import write_figure_file
 from .panel_state import PanelFrozenData, PanelState
+from .plot_annotations import PanelPlotAnnotations
 
 
 __all__ = [
     "PanelFigureFiles",
     "capture_run_chain",
+    "overlay_payload",
+    "panel_plot_annotations_section",
     "restore_panel_plot_input",
+    "restore_panel_plot_annotations",
     "save_panel_figure",
 ]
 
@@ -74,7 +78,7 @@ def capture_run_chain(
     return tuple(records)
 
 
-def _overlay_payload(
+def overlay_payload(
     plot_input: object,
     annotation: Mapping[str, Any],
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
@@ -109,6 +113,33 @@ def _overlay_payload(
     return arrays, section
 
 
+def panel_plot_annotations_section(
+    annotations: PanelPlotAnnotations,
+    *,
+    dataset: str,
+) -> dict[str, object]:
+    """Archive one generic producer-authored plot annotation bundle."""
+
+    if not isinstance(annotations, PanelPlotAnnotations):
+        raise TypeError("annotations must be PanelPlotAnnotations")
+    document = dict(annotations.document())
+    if not document:
+        return {}
+    return {"dataset": str(dataset), **document}
+
+
+def restore_panel_plot_annotations(
+    info: Mapping[str, Any],
+    dataset: str,
+) -> PanelPlotAnnotations:
+    """Restore generic annotations without interpreting their producer."""
+
+    section = info.get("sections", {}).get("plot_annotations")
+    if not isinstance(section, Mapping) or section.get("dataset") != str(dataset):
+        return PanelPlotAnnotations()
+    return PanelPlotAnnotations.from_document(section)
+
+
 def _await(operation: object) -> object:
     return operation.result() if hasattr(operation, "result") else operation
 
@@ -120,6 +151,7 @@ def save_panel_figure(
     frozen: PanelFrozenData,
     make_host: Callable[[object, str, str, str], object],
     configure_host: Callable[[object, PanelState], None],
+    annotations: PanelPlotAnnotations | None = None,
 ) -> PanelFigureFiles:
     """Save the Edit tab's exact frozen input without asking the plane again."""
 
@@ -150,7 +182,7 @@ def save_panel_figure(
         if callable(close):
             close()
 
-    overlay_arrays, overlay_section = _overlay_payload(
+    overlay_arrays, overlay_section = overlay_payload(
         plot_input,
         frozen.overlay,
     )
@@ -163,6 +195,12 @@ def save_panel_figure(
     }
     if overlay_section:
         sections["overlay"] = overlay_section
+    annotation_section = panel_plot_annotations_section(
+        PanelPlotAnnotations() if annotations is None else annotations,
+        dataset="data",
+    )
+    if annotation_section:
+        sections["plot_annotations"] = annotation_section
     written = write_figure_file(
         archive_path,
         name=selected.name,

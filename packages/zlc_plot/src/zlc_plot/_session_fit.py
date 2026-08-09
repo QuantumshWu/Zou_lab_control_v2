@@ -137,16 +137,8 @@ class FitSessionMixin:
             raise TypeError("cancelled must be callable or None")
         if not isinstance(fit_all_facets, bool):
             raise TypeError("fit_all_facets must be bool")
-        if fit_all_facets:
-            if live:
-                raise ValueError("fit_all_facets cannot be a live fit")
-            return self._fit_all_facets(
-                model,
-                initial=initial,
-                bounds=bounds,
-                options=options,
-                cancelled=cancelled,
-            )
+        if fit_all_facets and live:
+            raise ValueError("fit_all_facets cannot be a live fit")
         started = self._begin_fit_request(
             model,
             selector_kind=selector_kind,
@@ -154,6 +146,7 @@ class FitSessionMixin:
             bounds=bounds,
             options=options,
             live=live,
+            all_facets=fit_all_facets,
             logical_completion=None,
         )
         if started is None:
@@ -192,27 +185,8 @@ class FitSessionMixin:
 
         if not isinstance(fit_all_facets, bool):
             raise TypeError("fit_all_facets must be bool")
-        if fit_all_facets:
-            if live:
-                raise ValueError("fit_all_facets cannot be a live fit")
-            completion: Future[FitResult | FacetFitBatchResult] = Future()
-
-            def solve_batch() -> None:
-                try:
-                    completion.set_result(
-                        self._fit_all_facets(
-                            model,
-                            initial=initial,
-                            bounds=bounds,
-                            options=options,
-                            cancelled=None,
-                        )
-                    )
-                except Exception as error:
-                    completion.set_exception(error)
-
-            self._fit_executor.submit(solve_batch)
-            return completion
+        if fit_all_facets and live:
+            raise ValueError("fit_all_facets cannot be a live fit")
         logical_completion: Future[FitResult | FacetFitBatchResult] = Future()
         started = self._begin_fit_request(
             model,
@@ -221,6 +195,7 @@ class FitSessionMixin:
             bounds=bounds,
             options=options,
             live=live,
+            all_facets=fit_all_facets,
             logical_completion=logical_completion,
         )
         if started is None:
@@ -231,32 +206,6 @@ class FitSessionMixin:
             logical_completion=logical_completion,
         )
         return logical_completion
-
-    def _fit_all_facets(
-        self,
-        model: str | FitModelSpec,
-        *,
-        initial: Mapping[str, float] | Sequence[float] | None,
-        bounds: Mapping[str, tuple[float | None, float | None]] | None,
-        options: FitOptions | None,
-        cancelled: Callable[[], bool] | None,
-    ) -> FacetFitBatchResult:
-        if not isinstance(self._spec, FacetGridPlot):
-            raise TypeError("fit_all_facets requires FacetGridPlot")
-        resolved = self._resolve_fit_model(model)
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-                projection = self._projected
-        batch, _selections = self._fit_facet_batch(
-            projection,
-            resolved,
-            initial=initial,
-            bounds=bounds,
-            options=options,
-            cancelled=cancelled,
-        )
-        return self._stamp_fit_batch_revision(batch)
 
     def _fit_facet_batch(
         self,
@@ -374,12 +323,17 @@ class FitSessionMixin:
         bounds: Mapping[str, tuple[float | None, float | None]] | None,
         options: FitOptions | None,
         live: bool,
+        all_facets: bool = False,
         logical_completion: Future[FitResult | FacetFitBatchResult] | None,
     ) -> _StartedFitRequest | None:
         """Atomically replace fit request authority and freeze one solver input."""
 
         if not isinstance(live, bool):
             raise TypeError("live must be bool")
+        if not isinstance(all_facets, bool):
+            raise TypeError("all_facets must be bool")
+        if all_facets and not isinstance(self._spec, FacetGridPlot):
+            raise TypeError("fit_all_facets requires FacetGridPlot")
         request = self._prepare_fit_request(
             model,
             selector_kind=selector_kind,
@@ -389,7 +343,9 @@ class FitSessionMixin:
         )
         request = replace(
             request,
-            all_facets=live and isinstance(self._spec, FacetGridPlot),
+            all_facets=all_facets or (
+                live and isinstance(self._spec, FacetGridPlot)
+            ),
         )
         selection: FitSelection | None = None
         with self._render_lock:

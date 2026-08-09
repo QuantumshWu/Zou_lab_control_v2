@@ -304,6 +304,18 @@ class TaskConsoleHandle(QtCore.QObject):
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
 
+    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
+        """Combine one panel's owner gate with the application Task gate."""
+
+        key = str(panel_id)
+        effective = bool(enabled) and not self._task_takeover
+        card = self._cards.get(key)
+        if card is not None:
+            card.set_editing_enabled(effective)
+        editor = self._panel_editors.get(key)
+        if editor is not None:
+            editor.set_mutation_enabled(effective)
+
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         self._cards[str(panel_id)].set_selectors_enabled(enabled)
 

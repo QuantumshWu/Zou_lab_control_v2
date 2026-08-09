@@ -441,6 +441,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("fit_engine must be FitEngine or None")
         self._fit_engine = fit_engine or FitEngine()
         self._accepted_fit: _AcceptedFit | None = None
+        self._facet_thresholds: tuple[float | None, ...] = ()
         self._fit_executor = ThreadPoolExecutor(
             max_workers=defaults.runtime.analysis_worker_count,
             thread_name_prefix=_FIT_THREAD_PREFIX,
@@ -1175,6 +1176,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if self._accepted_fit is None
                     else self._accepted_fit.overlays
                 ),
+                facet_thresholds=tuple(
+                    None
+                    if value is None
+                    else self._projected._canonical_scalar_to_display(
+                        value,
+                        self._projected._value_quantity(),
+                    )
+                    for value in self._facet_thresholds
+                ),
                 image_overlay=self._image_overlay,
                 selectors=self._painted_selector_snapshot(),
                 facet_index=self._focused_facet_index,
@@ -1228,6 +1238,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._projection,
                 self._image_overlay,
                 self._accepted_fit,
+                self._facet_thresholds,
                 self._focused_facet_index,
                 self._facet_focus_index,
                 self._viewport,
@@ -1239,6 +1250,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._rolling_history = projection.rolling_history
             self._image_overlay = image_overlay
             self._accepted_fit = accepted_fit
+            self._facet_thresholds = ()
             if isinstance(self._spec, FacetGridPlot):
                 assert new_count is not None
                 self._clamp_facet_state(new_count)
@@ -1264,6 +1276,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._projection,
                     self._image_overlay,
                     self._accepted_fit,
+                    self._facet_thresholds,
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._viewport,
@@ -1308,6 +1321,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._projection = presentation.previous_projection
                 self._image_overlay = presentation.previous_image_overlay
                 self._accepted_fit = presentation.previous_accepted_fit
+                self._facet_thresholds = presentation.previous_facet_thresholds
                 self._focused_facet_index = (
                     presentation.previous_focused_facet_index
                 )
@@ -1810,6 +1824,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._accepted_fit,
+                    self._facet_thresholds,
                     self._rolling_history,
                     self._layout_revision,
                 )
@@ -1826,6 +1841,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
                 self._accepted_fit = None
+                self._facet_thresholds = ()
                 self._rolling_history = (
                     projection.rolling_history if isinstance(spec, RollingPlot) else ()
                 )
@@ -1855,6 +1871,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._focused_facet_index,
                         self._facet_focus_index,
                         self._accepted_fit,
+                        self._facet_thresholds,
                         self._rolling_history,
                         self._layout_revision,
                     ) = previous
@@ -2696,6 +2713,75 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 canonical,
                 facet_index=self._focused_facet_index,
             ))
+
+    def set_facet_thresholds(
+        self,
+        thresholds: Sequence[float | None],
+        *,
+        display: bool = True,
+    ) -> tuple[float | None, ...]:
+        """Set calibrated Histogram thresholds in current facet-cell order.
+
+        These are producer-authored result annotations, not the interactive
+        single threshold selector and not the crossover suggested by a fit.
+        They therefore survive display/unit/focus changes and are cleared
+        when either the Dataset revision or PlotSpec changes.
+        """
+
+        if not isinstance(display, bool):
+            raise TypeError("display must be bool")
+        with self._render_lock:
+            with self._lock:
+                self._assert_open()
+                if not isinstance(self._spec, FacetGridPlot) or not isinstance(
+                    self._spec.cell,
+                    HistogramPlot,
+                ):
+                    raise TypeError(
+                        "facet thresholds require FacetGridPlot[HistogramPlot]"
+                    )
+                cells = tuple(getattr(self._payload, "cells", ()))
+                prepared = tuple(thresholds)
+                if len(prepared) != len(cells):
+                    raise ValueError(
+                        "facet thresholds must match the current facet-cell order"
+                    )
+                canonical: list[float | None] = []
+                for value in prepared:
+                    if value is None:
+                        canonical.append(None)
+                        continue
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        raise ValueError("facet thresholds must be finite or None")
+                    canonical.append(
+                        self._projected._display_scalar_to_canonical(
+                            numeric,
+                            self._projected._value_quantity(),
+                        )
+                        if display
+                        else numeric
+                    )
+                selected = tuple(canonical)
+                previous = self._facet_thresholds
+                self._facet_thresholds = selected
+            try:
+                self._render_current(
+                    RenderEffect.OVERLAY,
+                    schedule_fit=False,
+                )
+            except Exception:
+                with self._lock:
+                    self._facet_thresholds = previous
+                try:
+                    self._render_current(
+                        RenderEffect.OVERLAY,
+                        schedule_fit=False,
+                    )
+                except Exception:
+                    self.redraw_surface()
+                raise
+        return selected
 
     def set_crosshair_selector(
         self, x: float, y: float, *, display: bool = True
