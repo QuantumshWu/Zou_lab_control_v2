@@ -519,7 +519,7 @@ class NodeHost:
     def _start_worker(self) -> None:
         assert self._owner is not None
         if self._dataset_outputs:
-            self._generation = self._data_plane.reserve(self)
+            self._generation = self._data_plane.begin_generation(self)
             self._plane_state = True
         self._active = True
         generation = self._owner.begin_generation()

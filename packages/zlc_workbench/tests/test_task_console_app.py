@@ -551,6 +551,44 @@ assert {path.name for path in report_root.iterdir()} == {
     'site_map.png', 'box.png', 'psf.png', 'uniform_psf.png',
 }
 
+first_artifact_path = artifact_path
+QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
+application.processEvents()
+assert presenter._active_task_id == 'calibration', presenter.logic[
+    'calibration'
+].draft_error
+until(lambda: presenter._active_task_id is None and bool(
+    presenter.logic['calibration'].artifact_results
+))
+second_artifact_path = Path(
+    presenter.logic['calibration'].artifact_results[0]['path']
+)
+assert second_artifact_path != first_artifact_path
+
+QtTest.QTest.mouseClick(
+    view._rows['calibration'].remove_button,
+    QtCore.Qt.LeftButton,
+)
+until(lambda: 'calibration' not in presenter.logic)
+view._view.kind_combo.setCurrentIndex(task_index)
+QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+application.processEvents()
+editor = view._logic_editors['calibration']
+editor.form.widget_for('repeats').setValue(30)
+application.processEvents()
+QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
+application.processEvents()
+assert presenter._active_task_id == 'calibration', presenter.logic[
+    'calibration'
+].draft_error
+until(lambda: presenter._active_task_id is None and bool(
+    presenter.logic['calibration'].artifact_results
+))
+third_artifact_path = Path(
+    presenter.logic['calibration'].artifact_results[0]['path']
+)
+assert third_artifact_path not in {first_artifact_path, second_artifact_path}
+
 front = presenter.session.signal_plane.freeze()
 capture_signal = '@logic/calibration/capture_preview'
 assert tuple(front.names()) == (capture_signal,)
