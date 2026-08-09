@@ -66,7 +66,20 @@ def test_only_the_default_workspace_seeds_the_packaged_imaging_template(
     monkeypatch.setenv(Workspace.HOME_VARIABLE, str(default_home))
     default = Workspace.default()
     template = default.pulses / Workspace.IMAGING_TEMPLATE
-    assert template.read_bytes() == calibration_pulse_template_bytes()
+    canonical = calibration_pulse_template_bytes()
+    assert template.read_bytes() == canonical
+
+    same_tree = json.loads(canonical)
+    template.write_text(json.dumps(same_tree, indent=4), encoding="utf-8")
+    Workspace.default()
+    assert template.read_bytes() == canonical, "equivalent seed was not canonicalized"
+
+    authored_tree = dict(same_tree)
+    authored_tree["name"] = "operator imaging template"
+    authored = json.dumps(authored_tree, indent=4).encode("utf-8")
+    template.write_bytes(authored)
+    Workspace.default()
+    assert template.read_bytes() == authored, "default seeding overwrote an authored pulse"
 
     template.write_bytes(b"operator-owned\n")
     assert Workspace.default().pulses == default.pulses

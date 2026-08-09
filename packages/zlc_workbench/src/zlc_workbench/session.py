@@ -16,12 +16,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date as _date
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from zlc_durable import atomic_write_bytes, day_folder
+from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
 
 from .archive import write_figure
 from .device_use import DeviceClaim, DeviceUseCoordinator
@@ -41,6 +42,46 @@ def _connect_pulse(host: str, port: int, **kwargs: Any) -> object:
     from zlc_pulse import connect
 
     return connect(host, port, **kwargs)
+
+
+def _same_json_value(left: object, right: object) -> bool:
+    """Compare JSON trees without conflating booleans and numbers."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_json_value(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_value(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return left == right
+
+
+def _seed_default_pulse(template: Path) -> None:
+    """Create or canonicalize only the packaged default pulse.
+
+    A differently authored or unreadable file is operator content and remains
+    untouched.  An equivalent old rendering is not a second pulse: write it
+    back through the one readable JSON serializer and durable file owner.
+    """
+
+    from zlc_atom.nodes import calibration_pulse_template_bytes
+
+    packaged_tree = json.loads(calibration_pulse_template_bytes().decode("utf-8"))
+    canonical = readable_json_bytes(packaged_tree)
+    if not template.exists():
+        atomic_write_bytes(template, canonical)
+        return
+    try:
+        existing = template.read_bytes()
+        existing_tree = json.loads(existing.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return
+    if _same_json_value(existing_tree, packaged_tree) and existing != canonical:
+        atomic_write_bytes(template, canonical)
 
 
 @dataclass(frozen=True)
@@ -141,10 +182,7 @@ class Workspace:
         pulses = home / "pulses"
         pulses.mkdir(parents=True, exist_ok=True)
         template = pulses / cls.IMAGING_TEMPLATE
-        if not template.exists():
-            from zlc_atom.nodes import calibration_pulse_template_bytes
-
-            atomic_write_bytes(template, calibration_pulse_template_bytes())
+        _seed_default_pulse(template)
         return cls(home)
 
     @classmethod
