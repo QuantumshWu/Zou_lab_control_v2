@@ -22,7 +22,7 @@ from zlc_runtime.dataset_output import (
     FinalDatasetOutput,
     LiveDatasetOutput,
 )
-from zlc_runtime.host import LogicNodeObservation, NodeHost
+from zlc_runtime.host import LogicNodeObservation, NodeHost, NodeProgress
 from zlc_runtime.owner_mailbox import OwnerCompletion
 from zlc_runtime.plane import SignalDataPlane
 
@@ -146,10 +146,12 @@ def test_worker_without_kind_publishes_final_and_records_context_capabilities() 
                     "open_live_dataset",
                     "open_exact_dataset",
                     "publish_final",
+                    "report_progress",
                     "warn",
                 )
             )
             assert context.cancel_requested() is False
+            context.report_progress("capturing", current=2, total=5)
             context.warn("one warning")
             assert context.start_and_wait(
                 lambda: _ImmediateHandle("hardware result")
@@ -168,6 +170,7 @@ def test_worker_without_kind_publishes_final_and_records_context_capabilities() 
         observation = _wait_worker(host, wake)
         assert observation == host.observation
         assert observation.phase == "done"
+        assert observation.progress == NodeProgress("capturing", current=2, total=5)
         assert observation.warnings == ("one warning",)
         assert host.final_result == {"status": "ok"}
         assert host.signal_key("frame") == "@logic/camera/frame"

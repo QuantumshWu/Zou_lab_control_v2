@@ -29,6 +29,7 @@ __all__ = [
     "Node",
     "NodeExecutionContext",
     "NodeHost",
+    "NodeProgress",
 ]
 
 
@@ -46,6 +47,34 @@ class Node(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class NodeProgress:
+    """One worker-owned progress fact, independent of any UI toolkit."""
+
+    message: str
+    current: int | None = None
+    total: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "message", canonical_text(self.message, "node progress message"))
+        if (self.current is None) != (self.total is None):
+            raise ValueError("node progress current and total must be supplied together")
+        if self.current is None:
+            return
+        current = int(self.current)
+        total = int(self.total)
+        if total <= 0 or current < 0 or current > total:
+            raise ValueError("node progress must satisfy 0 <= current <= total")
+        object.__setattr__(self, "current", current)
+        object.__setattr__(self, "total", total)
+
+    @property
+    def text(self) -> str:
+        if self.current is None:
+            return self.message
+        return f"{self.message} {self.current}/{self.total}"
+
+
+@dataclass(frozen=True, slots=True)
 class LogicNodeObservation:
     """Read-only lifecycle projection shared by workers and processors."""
 
@@ -55,6 +84,7 @@ class LogicNodeObservation:
     error: str | None = None
     warnings: tuple[str, ...] = ()
     run_snapshot: object | None = None
+    progress: NodeProgress | None = None
 
     def __post_init__(self) -> None:
         if type(self.running) is not bool or type(self.terminal) is not bool:
@@ -66,6 +96,8 @@ class LogicNodeObservation:
         if any(not isinstance(value, str) or not value.strip() for value in warnings):
             raise ValueError("node observation warnings must be non-empty text")
         object.__setattr__(self, "warnings", tuple(value.strip() for value in warnings))
+        if self.progress is not None and not isinstance(self.progress, NodeProgress):
+            raise TypeError("node observation progress must be NodeProgress or None")
 
 
 class NodeExecutionContext:
@@ -126,6 +158,17 @@ class NodeExecutionContext:
         outputs: Mapping[str, FinalDatasetOutput],
     ) -> Mapping[str, SignalValue]:
         return self._host._publish_final(outputs)
+
+    def report_progress(
+        self,
+        message: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Replace this run's current progress fact and wake its owner."""
+
+        self._host._report_progress(NodeProgress(message, current, total))
 
     def warn(self, message: str) -> None:
         self._host._warn(message)
@@ -201,6 +244,7 @@ class NodeHost:
         self._phase = "not started"
         self._error: str | None = None
         self._warnings: list[str] = []
+        self._progress: NodeProgress | None = None
         self._result: object = _UNRESOLVED
         self._handle: RunHandleLike | None = None
         self._snapshot: object | None = None
@@ -359,6 +403,7 @@ class NodeHost:
             self._error,
             tuple(self._warnings),
             self._snapshot,
+            self._progress,
         )
 
     def start(self) -> None:
@@ -459,6 +504,7 @@ class NodeHost:
         self._phase = "starting"
         self._error = None
         self._warnings.clear()
+        self._progress = None
         self._result = _UNRESOLVED
         self._handle = None
         self._snapshot = None
@@ -1046,4 +1092,13 @@ class NodeHost:
         self._error = None
 
     def request_processor_owner_wake(self) -> None:
+        self._request_owner_wake()
+
+    def _report_progress(self, progress: NodeProgress) -> None:
+        if not isinstance(progress, NodeProgress):
+            raise TypeError("progress must be NodeProgress")
+        if not self._active:
+            raise RuntimeError("inactive node cannot report progress")
+        with self._start_lock:
+            self._progress = progress
         self._request_owner_wake()
