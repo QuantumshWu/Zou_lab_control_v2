@@ -2498,13 +2498,20 @@ class ConsolePresenter:
         resource_fields = {
             spec.field_name for spec in binding.descriptor.workspace_resources
         }
+        resource_directories = {
+            spec.field_name: (
+                Path(self.session.workspace.root).resolve() / spec.directory
+            ).resolve()
+            for spec in binding.descriptor.workspace_resources
+        }
         form_values = {}
         for field in binding.descriptor.authoring_schema.fields:
             value = binding.draft.values.get(field.name, field.default)
-            if field.name in resource_fields and value not in finalization.resource_choices.get(
-                field.name, ()
-            ):
-                value = None
+            if field.name in resource_fields and value:
+                selected = Path(str(value)).expanduser()
+                if not selected.is_absolute():
+                    selected = resource_directories[field.name] / selected
+                value = str(selected.resolve())
             form_values[field.name] = display_value(value)
         can_start = finalization.can_start and binding.pending is None
         can_stop = bool(
@@ -2519,8 +2526,7 @@ class ConsolePresenter:
             ),
             "form_spec": project_logic_schema(
                 binding.descriptor,
-                resource_choices=finalization.resource_choices,
-                resource_errors=finalization.resource_errors,
+                workspace_root=str(self.session.workspace.root),
             ),
             "form_values": form_values,
             "artifact_form_spec": project_artifact_inputs(

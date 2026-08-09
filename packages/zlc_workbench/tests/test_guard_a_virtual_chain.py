@@ -155,7 +155,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
                     "repeats": 30,
                     "reference_exposure_seconds": 0.02,
                     "readout_exposure_seconds": 0.005,
-                    "timeout_seconds": 2.0,
                 },
                 device_keys={"camera": "camera", "sequencer": "sequencer"},
             ),

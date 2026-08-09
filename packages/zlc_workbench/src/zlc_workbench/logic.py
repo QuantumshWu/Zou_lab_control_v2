@@ -66,8 +66,6 @@ class LogicDraftFinalization:
     artifact_paths: Mapping[str, str]
     artifacts: Mapping[str, object]
     resources: Mapping[str, object]
-    resource_choices: Mapping[str, tuple[str, ...]]
-    resource_errors: Mapping[str, str]
     issues: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -78,8 +76,6 @@ class LogicDraftFinalization:
             "artifact_paths",
             "artifacts",
             "resources",
-            "resource_choices",
-            "resource_errors",
         ):
             object.__setattr__(
                 self,
@@ -322,44 +318,27 @@ def finalize_logic_draft(
         artifacts[spec.name] = resolved
 
     resources: dict[str, ResolvedWorkspaceResource] = {}
-    resource_choices: dict[str, tuple[str, ...]] = {}
-    resource_errors: dict[str, str] = {}
     workspace_root = Path(getattr(workspace, "root", Path.cwd())).resolve()
     for spec in descriptor.workspace_resources:
         directory = (workspace_root / spec.directory).resolve()
         if directory.parent != workspace_root:
             raise ValueError("workspace resource directory escaped workspace root")
-        candidates: dict[str, Path] = {}
-        if directory.is_dir():
-            for candidate in sorted(directory.iterdir(), key=lambda item: item.name):
-                if (
-                    candidate.is_file()
-                    and candidate.suffix.lower() in spec.suffixes
-                ):
-                    candidates[candidate.name] = candidate
-        names = tuple(candidates)
-        resource_choices[spec.field_name] = names
-        if not names:
-            reason = (
-                f"no valid {spec.contract_id} resource in "
-                f"{spec.directory}/"
-            )
-            resource_errors[spec.field_name] = reason
-            issues.append(reason)
-            continue
         raw_value = draft.values.get(spec.field_name, "")
-        selected = str(raw_value).strip()
-        if selected not in candidates:
+        selected_text = str(raw_value).strip()
+        selected = Path(selected_text).expanduser()
+        if not selected.is_absolute():
+            selected = directory / selected
+        selected = selected.resolve()
+        if not selected_text or selected.parent != directory:
             issues.append(
-                f"{spec.field_name} must select one {spec.contract_id} "
-                f"resource: {', '.join(names)}"
+                f"{spec.field_name} must choose a file from {directory}"
             )
             continue
         try:
-            resources[spec.field_name] = spec.resolve(candidates[selected])
+            resources[spec.field_name] = spec.resolve(selected)
         except Exception as error:
             issues.append(
-                f"{spec.contract_id} resource {selected!r} is invalid: {error}"
+                f"{spec.contract_id} resource {str(selected)!r} is invalid: {error}"
             )
 
     return LogicDraftFinalization(
@@ -370,8 +349,6 @@ def finalize_logic_draft(
         artifact_paths,
         artifacts,
         resources,
-        resource_choices,
-        resource_errors,
         tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
     )
 

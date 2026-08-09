@@ -13,7 +13,8 @@ and saves a string where the device expected a number.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
+from pathlib import Path
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_ui import FormChoice, FormFieldProps, FormSpec
@@ -58,10 +59,9 @@ def project_schema(schema: AuthoringSchema) -> FormSpec:
 def project_logic_schema(
     descriptor: object,
     *,
-    resource_choices: Mapping[str, Sequence[str]],
-    resource_errors: Mapping[str, str],
+    workspace_root: str,
 ) -> FormSpec:
-    """Project a logic schema, resolving explicit workspace-resource fields."""
+    """Project a logic schema, rooting resource pickers in the workspace."""
 
     schema = getattr(descriptor, "authoring_schema", None)
     if not isinstance(schema, AuthoringSchema):
@@ -79,15 +79,11 @@ def project_logic_schema(
             raise ValueError(
                 f"resource field {field.name!r} has no WorkspaceResourceSpec"
             )
-        choices = tuple(
-            FormChoice(str(value), str(value))
-            for value in resource_choices.get(field.name, ())
-        )
         fields.append(
             _project_resource_field(
                 field,
-                choices=choices,
-                unavailable_reason=str(resource_errors.get(field.name, "")),
+                resources[field.name],
+                workspace_root=workspace_root,
             )
         )
     return FormSpec(tuple(fields))
@@ -150,30 +146,30 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
 
 def _project_resource_field(
     field: AuthoringField,
+    spec: object,
     *,
-    choices: tuple[FormChoice, ...],
-    unavailable_reason: str,
+    workspace_root: str,
 ) -> FormFieldProps:
     if field.choices:
         raise ValueError(
             f"resource field {field.name!r} cannot declare static choices"
         )
-    default = (
-        field.default
-        if any(choice.value == field.default for choice in choices)
-        else None
-    )
-    if not choices and not unavailable_reason.strip():
-        unavailable_reason = "no valid workspace resources available"
+    directory = (
+        Path(workspace_root).expanduser().resolve()
+        / str(getattr(spec, "directory"))
+    ).resolve()
+    suffixes = tuple(str(value) for value in getattr(spec, "suffixes"))
+    patterns = " ".join(f"*{suffix}" for suffix in suffixes)
+    default = str((directory / str(field.default)).resolve()) if field.default else ""
     return FormFieldProps(
         key=field.name,
-        kind="choice",
+        kind="path",
         label=field.label,
         default=default,
         required=True,
-        choices=choices,
-        description="Workspace resource",
-        unavailable_reason=unavailable_reason if not choices else "",
+        description=f"Choose a file from {directory}",
+        file_filter=f"{field.label} ({patterns})",
+        base_dir=str(directory),
     )
 
 

@@ -870,14 +870,15 @@ def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
     assert "missing-calibration.json" in presenter.logic[node_id].draft_error
 
 
-def test_calibration_pulse_is_a_valid_workspace_resource_choice(
+def test_calibration_pulse_is_a_workspace_file_picker(
     presenter,
 ) -> None:
     from zlc_atom.nodes import calibration_pulse_template_bytes
 
     template = presenter.session.workspace.pulses / "imaging_template.json"
     template.write_bytes(calibration_pulse_template_bytes())
-    (presenter.session.workspace.pulses / "not-calibration.json").write_text(
+    invalid = presenter.session.workspace.pulses / "not-calibration.json"
+    invalid.write_text(
         "{}", encoding="utf-8"
     )
 
@@ -888,14 +889,26 @@ def test_calibration_pulse_is_a_valid_workspace_resource_choice(
         for field in projection["form_spec"].fields
         if field.key == "pulse_template"
     )
-    assert pulse.kind == "choice"
-    assert {choice.value for choice in pulse.choices} >= {
-        "imaging_template.json",
-        "not-calibration.json",
-    }
+    assert pulse.kind == "path"
+    assert Path(pulse.base_dir) == presenter.session.workspace.pulses
+    assert pulse.file_filter == "Calibration pulse template (*.json)"
+    assert projection["form_values"]["pulse_template"] == str(template.resolve())
+    assert projection["form_values"]["repeats"] == 300
+    assert "timeout_seconds" not in projection["form_values"]
     assert projection["can_start"] is True
 
-    presenter.update_logic_draft(node_id, values={"roi_x": 4})
+    presenter.update_logic_draft(
+        node_id,
+        values={"pulse_template": str(invalid)},
+    )
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is False
+    assert any("not-calibration.json" in issue for issue in projection["issues"])
+
+    presenter.update_logic_draft(
+        node_id,
+        values={"pulse_template": str(template), "roi_x": 4},
+    )
     projection = presenter.logic_editor_projection(node_id)
     assert presenter.logic[node_id].draft.values["roi_x"] == 4
     assert projection["can_start"] is False
