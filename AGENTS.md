@@ -4,6 +4,26 @@ These rules apply to every agent and sub-agent working in this repository.
 They constrain implementation method; product and architecture truth remain in
 `ARCHITECTURE_DESIGN.md` and `IMPLEMENTATION_PLAN.md`.
 
+## 最高实施约束（用户裁决，不得重新解释）
+
+- **只有整体骨架保持稳定。** 稳定范围仅包括 plugin discovery、
+  descriptor/contract、NodeHost lifecycle、session/device ownership 和公共
+  signal/plot capability。
+- **骨架上的一切功能都取最简实现。** 每个 Logic Node、device plugin 和
+  Workbench feature 只在自己的现有 owner 内写完成该业务所必需的直接逻辑；
+  Workbench 只做基本组合、状态投影和接线，不承载 plugin 科学逻辑。
+- **默认删，不默认抽象。** 单消费者 helper/framework、plugin-specific
+  registry/coordinator/transaction/adapter/DTO、平行 lifecycle/state 和防御型
+  代码应直接删除。不得为了“以后可能复用”、兼容旧测试或防范假想误用而保留。
+- **未经用户明确批准，不增加任何 production 文件、通用类或架构层。** 能在
+  现有模块用普通函数和直线流程完成，就必须采用该方案。若现有设计文字诱导出
+  更复杂实现，先把两份权威文档改回最简单的产品流程，不能照着过度设计实施。
+- **每次设计和修复前先读权威。** 每个 agent/sub-agent 在修改前必须先读取
+  `ARCHITECTURE_DESIGN.md` 和 `IMPLEMENTATION_PLAN.md` 的相关完整章节；所有
+  分派任务必须原样携带本节约束。对话摘要、旧测试和既有复杂代码都不能覆盖它。
+
+以上约束适用于本仓库此后的每一次任务和上下文恢复，除非用户本人明确修改。
+
 ## Read the v2 authority before designing
 
 - For every defect, design conflict, performance problem, or implementation
