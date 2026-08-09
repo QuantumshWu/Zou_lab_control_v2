@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 
 from zlc_ui.board import DEFAULT_PANEL_SIZE
-from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
+from zlc_ui.form import FormChoice, FormFieldProps, FormRuntimeContext, FormSpec
 
 
 _STATE_KEYS = (
@@ -150,26 +150,38 @@ def decode_parameter_value(field: Mapping[str, object], edited: object) -> objec
     return edited
 
 
-def signal_form_choices(groups: object, current: str) -> tuple[FormChoice, ...]:
-    """Flatten grouped producer choices while preserving their opaque keys."""
+def signal_form_runtime(groups_for) -> FormRuntimeContext:
+    """Project producer groups into the existing keyed tree-choice form seam."""
 
-    choices: list[FormChoice] = []
-    seen: set[str] = set()
-    try:
-        incoming = tuple(groups or ())
-    except TypeError:
-        incoming = ()
-    for producer, leaves in incoming:
-        for display, key in tuple(leaves):
-            value = str(key)
-            if value in seen:
-                continue
-            seen.add(value)
-            label = f"{str(producer)} · {str(display)}" if producer else str(display)
-            choices.append(FormChoice(label, value))
-    if current and current not in seen:
-        choices.insert(0, FormChoice(f"Unresolved · {current}", current))
-    return tuple(choices)
+    def entries(field: str):
+        for producer, leaves in tuple(groups_for(str(field)) or ()):
+            for display, key in tuple(leaves):
+                yield str(producer), str(display), str(key)
+
+    def names(field: str) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(key for _producer, _display, key in entries(field)))
+
+    def sources() -> dict[str, tuple[str, ...]]:
+        grouped: dict[str, list[str]] = {}
+        for field in ("signal", "overlay_signal"):
+            for producer, _display, key in entries(field):
+                values = grouped.setdefault(key, [])
+                if producer not in values:
+                    values.append(producer)
+        return {key: tuple(values) for key, values in grouped.items()}
+
+    def labels() -> dict[str, str]:
+        return {
+            key: display
+            for field in ("signal", "overlay_signal")
+            for _producer, display, key in entries(field)
+        }
+
+    return FormRuntimeContext(
+        choice_names=names,
+        choice_sources=sources,
+        choice_labels=labels,
+    )
 
 
 def interval_form_field(intervals: object, current: object) -> FormFieldProps:
@@ -201,5 +213,5 @@ __all__ = [
     "parameter_fields",
     "parameter_form_spec",
     "parameter_form_values",
-    "signal_form_choices",
+    "signal_form_runtime",
 ]

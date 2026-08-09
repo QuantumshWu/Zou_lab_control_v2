@@ -39,7 +39,7 @@ from ._panel_projection import (
     parameter_fields,
     parameter_form_spec,
     parameter_form_values,
-    signal_form_choices,
+    signal_form_runtime,
 )
 from .logic_editor_view import LogicEditorView
 
@@ -66,6 +66,9 @@ class PanelEditorView(QtWidgets.QWidget):
         }
         self._producer_editor: LogicEditorView | None = None
         self._surface: QtWidgets.QWidget | None = None
+        self._signal_groups = ()
+        self._overlay_groups = ()
+        self._signal_runtime = signal_form_runtime(self._choice_groups)
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -95,7 +98,9 @@ class PanelEditorView(QtWidgets.QWidget):
         panel_group = FluentGroupBox("Panel")
         panel_layout = QtWidgets.QVBoxLayout(panel_group)
         panel_layout.setContentsMargins(margin, margin, margin, margin)
-        self.panel_form = FluentParameterForm(FormSpec(()), {})
+        self.panel_form = FluentParameterForm(
+            FormSpec(()), {}, runtime=self._signal_runtime
+        )
         self.panel_form.changed.connect(self._panel_value_changed)
         panel_layout.addWidget(self.panel_form)
         body_layout.addWidget(panel_group)
@@ -203,35 +208,30 @@ class PanelEditorView(QtWidgets.QWidget):
         state = panel_state_document(incoming.get("state") or {})
         self._projection = incoming
         self._state = state
+        self._signal_groups = tuple(incoming.get("signal_options") or ())
+        self._overlay_groups = tuple(incoming.get("overlay_signal_options") or ())
         self.title_label.setText(state["title"] or self.panel_id)
         kind_text = state["kind"].replace("_", " ") or "automatic"
         if state["cell_kind"]:
             kind_text += f" · {state['cell_kind'].replace('_', ' ')} cells"
         self.kind_label.setText(kind_text)
 
-        choices = signal_form_choices(incoming.get("signal_options"), state["signal"])
-        overlay_choices = signal_form_choices(
-            incoming.get("overlay_signal_options"), state["overlay_signal"]
-        )
         fields: list[FormFieldProps] = [
             FormFieldProps("title", "text", "Title", default=state["title"]),
             FormFieldProps(
                 "signal",
-                "choice",
+                "keyed_choice",
                 "Signal",
-                default=state["signal"] if choices else None,
-                choices=choices,
-                required=not bool(choices),
-                unavailable_reason="no signals available" if not choices else "",
+                default=state["signal"],
+                required=True,
             ),
         ]
         if state["kind"] == "image":
             fields.append(FormFieldProps(
                 "overlay_signal",
-                "choice",
+                "keyed_choice",
                 "Overlay",
                 default=state["overlay_signal"],
-                choices=(FormChoice("Off", ""),) + overlay_choices,
             ))
         fields.extend([
             FormFieldProps(
@@ -248,14 +248,17 @@ class PanelEditorView(QtWidgets.QWidget):
         ])
         values: dict[str, object] = {
             "title": state["title"],
-            "signal": state["signal"] if choices else None,
+            "signal": state["signal"],
             "size": state["size"],
             "interval_ms": state["interval_ms"],
         }
         if state["kind"] == "image":
             values["overlay_signal"] = state["overlay_signal"]
         surface = incoming.get("parameter_surface")
+        self.panel_form.refresh()
         self.panel_form.reconcile(FormSpec(tuple(fields)), values)
+        self.panel_form.refresh()
+        self.panel_form.widget_for("signal").setEnabled(bool(self._signal_groups))
 
         for section in ("semantic", "display", "fit"):
             declared = parameter_fields(surface, section)
@@ -358,6 +361,13 @@ class PanelEditorView(QtWidgets.QWidget):
             self.snapshot_label.setText(str(error))
             return
         self.state_changed.emit({str(key): value})
+
+    def _choice_groups(self, field: str):
+        if str(field) == "signal":
+            return self._signal_groups
+        if str(field) == "overlay_signal":
+            return self._overlay_groups
+        return ()
 
     def _mapping_value_changed(self, section: str, key: str) -> None:
         try:

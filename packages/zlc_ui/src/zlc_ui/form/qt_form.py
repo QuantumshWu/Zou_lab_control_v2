@@ -680,6 +680,8 @@ class _KeyedChoiceHandler(FormWidgetHandler):
             labels=runtime.labels(),
             state_labels=runtime.choice_state_labels,
             current=current,
+            none_label="Off" if not field.required else None,
+            empty_source_label="Unresolved",
         )
 
     def build(self, field, value, on_change, context=None):

@@ -32,7 +32,7 @@ from zlc_ui.fluent import (
     signals_blocked,
 )
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
-from zlc_ui.form.qt_form import FormRuntimeContext, FluentParameterForm
+from zlc_ui.form.qt_form import FluentParameterForm
 
 from ._panel_projection import (
     decode_parameter_value,
@@ -41,7 +41,7 @@ from ._panel_projection import (
     parameter_fields,
     parameter_form_spec,
     parameter_form_values,
-    signal_form_choices,
+    signal_form_runtime,
 )
 
 
@@ -85,6 +85,7 @@ class PanelCardView(FluentGroupBox):
         self._overlay_groups: tuple[
             tuple[str, tuple[tuple[str, str], ...]], ...
         ] = ()
+        self._signal_runtime = signal_form_runtime(self._choice_groups)
         # A replace-only projection of the Workbench state.  It is view state,
         # never a second saved panel configuration or an authority of its own.
         self._state_projection = panel_state_document(
@@ -411,13 +412,7 @@ class PanelCardView(FluentGroupBox):
 
     def _form_spec(self) -> FormSpec:
         state = self._state_projection
-        choices = signal_form_choices(self._groups, str(state.get("signal") or ""))
         current_signal = str(state.get("signal") or "")
-        signal_default = (
-            current_signal
-            if any(choice.value == current_signal for choice in choices)
-            else (choices[0].value if choices else None)
-        )
         fields: list[FormFieldProps] = [
             FormFieldProps(
                 "kind",
@@ -439,25 +434,18 @@ class PanelCardView(FluentGroupBox):
             FormFieldProps("title", "text", "Title", default=state["title"]),
             FormFieldProps(
                 "signal",
-                "choice",
+                "keyed_choice",
                 "Signal",
-                default=signal_default,
-                choices=choices,
-                required=not bool(choices),
-                unavailable_reason="no choices" if not choices else "",
+                default=current_signal,
+                required=True,
             ),
         ])
         if state.get("kind") == "image":
             fields.append(FormFieldProps(
                 "overlay_signal",
-                "choice",
+                "keyed_choice",
                 "Overlay",
                 default=str(state.get("overlay_signal") or ""),
-                choices=(FormChoice("Off", ""),)
-                + signal_form_choices(
-                    self._overlay_groups,
-                    str(state.get("overlay_signal") or ""),
-                ),
             ))
         fields.append(
             FormFieldProps(
@@ -537,7 +525,10 @@ class PanelCardView(FluentGroupBox):
 
     def _rebuild_settings_form(self) -> None:
         if self._settings_form is not None:
+            self._settings_form.refresh()
             self._settings_form.reconcile(self._form_spec(), self._form_values())
+            self._settings_form.refresh()
+            self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
             self._settings_form.widget_for("kind").setEnabled(False)
             if "cell_kind" in self._settings_form.spec.keys:
                 self._settings_form.widget_for("cell_kind").setEnabled(False)
@@ -564,9 +555,10 @@ class PanelCardView(FluentGroupBox):
             self._settings_form = FluentParameterForm(
                 self._form_spec(),
                 self._form_values(),
-                runtime=FormRuntimeContext(),
+                runtime=self._signal_runtime,
                 parent=body,
             )
+            self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
             self._settings_form.changed.connect(self._setting_changed)
             self._settings_form.widget_for("kind").setEnabled(False)
             if "cell_kind" in self._settings_form.spec.keys:
@@ -645,6 +637,13 @@ class PanelCardView(FluentGroupBox):
             self.set_status(str(error), error=True)
             return
         self.state_changed.emit(patch)
+
+    def _choice_groups(self, field: str):
+        if str(field) == "signal":
+            return self._groups
+        if str(field) == "overlay_signal":
+            return self._overlay_groups
+        return ()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == QtCore.Qt.LeftButton:

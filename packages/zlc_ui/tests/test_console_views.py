@@ -32,8 +32,9 @@ def test_panel_card_construct_and_setters() -> None:
         """
 import zou_lab_control_v2
 print(zou_lab_control_v2.__file__)
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentTreeComboBox
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 PanelCardView = tested_module.PanelCardView
@@ -60,7 +61,25 @@ card.set_surface(surface)
 card.set_status('ready', error=False)
 assert card.panel_id == 'panel-1'
 signal_field = next(field for field in card._form_spec().fields if field.key == 'signal')
-assert len(signal_field.choices) == 1
+assert signal_field.kind == 'keyed_choice'
+card._open_settings()
+signal_picker = card._settings_form.widget_for('signal')
+assert isinstance(signal_picker, FluentTreeComboBox)
+assert signal_picker.current_choice_key() == ''
+assert signal_picker.model().item(0).text() == 'source'
+picked = []
+card.state_changed.connect(picked.append)
+card.show()
+signal_picker.showPopup()
+source_index = signal_picker.model().index(0, 0)
+signal_picker.view().expand(source_index)
+app.processEvents()
+leaf_index = signal_picker.model().index(0, 0, source_index)
+QtTest.QTest.mouseClick(
+    signal_picker.view().viewport(), QtCore.Qt.LeftButton,
+    pos=signal_picker.view().visualRect(leaf_index).center(),
+)
+assert {'signal': 'temperature'} in picked
 assert surface.parentWidget() is not None
 # The switch is about dragging on the PLOT, not about the card's own controls:
 # turning it off used to grey out this combo and never reach the plot at all.
@@ -513,6 +532,7 @@ import zlc_ui.console.panel_editor_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
+from zlc_ui.fluent import FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['panel-editor'])
@@ -563,6 +583,25 @@ surface = {
 handle.set_panel_projection('panel-1', state, surface)
 card = handle._cards['panel-1']
 card._open_settings()
+assert isinstance(card._settings_form.widget_for('signal'), FluentTreeComboBox)
+assert isinstance(card._settings_form.widget_for('overlay_signal'), FluentTreeComboBox)
+assert card._settings_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
+assert card._settings_form.widget_for('overlay_signal').current_choice_key() == '@logic/occ/site_overlay'
+assert card._settings_form.widget_for('overlay_signal').model().item(0).text() == 'Off'
+replacement_groups = (('camera', (('reference', '@logic/cm/reference'),)),)
+replacement_state = dict(state, signal='@logic/cm/reference')
+handle.set_panel_signal_choices(
+    'panel-1', replacement_groups, current='@logic/cm/reference',
+    overlay_groups=overlay_groups, overlay_current='@logic/occ/site_overlay',
+)
+handle.set_panel_projection('panel-1', replacement_state, surface)
+assert card._settings_form.widget_for('signal').current_choice_key() == '@logic/cm/reference'
+handle.set_panel_signal_choices(
+    'panel-1', groups, current='@logic/cm/frames',
+    overlay_groups=overlay_groups,
+    overlay_current='@logic/occ/site_overlay',
+)
+handle.set_panel_projection('panel-1', state, surface)
 assert card._settings_form.read_all()['kind'] == 'image'
 assert not card._settings_form.widget_for('kind').isEnabled()
 assert card._settings_form.read_all()['display__show_colorbar'] is True
@@ -621,6 +660,10 @@ handle.panel_editor_closed.connect(
 )
 handle.open_panel_editor('panel-1', projection)
 editor = handle._panel_editors['panel-1']
+assert isinstance(editor.panel_form.widget_for('signal'), FluentTreeComboBox)
+assert isinstance(editor.panel_form.widget_for('overlay_signal'), FluentTreeComboBox)
+assert editor.panel_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
+assert editor.panel_form.widget_for('overlay_signal').current_choice_key() == '@logic/occ/site_overlay'
 class _PlotHost:
     def __init__(self, text):
         self.widget = QtWidgets.QLabel(text)
