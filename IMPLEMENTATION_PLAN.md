@@ -34,10 +34,10 @@
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
 - Current phase：`Camera/shape、Monitor/Setting 与 Calibration 窄阶段均已按当前源码收敛并通过受影响包回归；现在进入整条正式 experiment workflow、全树测试与零残留验收。`
-- Last completed action：`Calibration Edit 已验证 project pulses JSON file picker、Samples=300、无 timeout；virtual finite shot 按 compiled logical duration 推进，capture_preview 是 latest R=1/P=1 image；terminal/Stop 后 transient panel 移除且不复活；直接 Restart 与 Remove/re-add 后 Start 均产生新 artifact；同一 result 保存 JSON + site-map/box/psf/uniform_psf 四图。Setting 瞬时顶层窗口已定位为无 parent FluentButton，并在既有 card 内直接修复。没有新增文件、类、窗口层或 report 编排。`
-- Last verified tests：`本 Calibration/Setting 阶段：zlc_atom 143、zlc_workbench 333、zlc_ui 79 全部通过；正式 Calibration Qt 路径额外断言三次 Start、至少三个实际 raster fronts、四图、唯一 transient preview/terminal cleanup。前一阶段当前树已验证 zlc_plot 204、zlc_runtime 142；这些仍不代替全树和正式可见按钮验收。`
-- Pending acceptance gates：`正式 experiment.bat 可见按钮全流程；Calibration -> Repeat=0 Camera Measurement -> Pulse Load/On -> Occupancy model -> Image overlay；三种 Save；受影响外的全树 tests；Stop/close 后窗口、worker、device claim、项目 Python 进程归零。`
-- Next action：运行全树测试后，从根 bin/experiment.bat 走正式可见人类按钮链并记录每个产品断点；失败继续在现有 owner 内最小修复，不增加新文件/框架，最后复核文档与零残留。
+- Last completed action：`Calibration Edit 已验证 project pulses JSON file picker、Samples=300、无 timeout；virtual finite shot 按 compiled logical duration 推进，capture_preview 是 latest R=1/P=1 image；terminal/Stop 后 transient panel 移除且不复活；直接 Restart 与 Remove/re-add 后 Start 均产生新 artifact；同一 result 保存 JSON + site-map/box/psf/uniform_psf 四图。Setting 瞬时顶层窗口已定位为无 parent FluentButton 并在既有 card 内修复；Selectors=OFF 时 Card 将 surface Wheel 明确交给唯一 board scroll，真实 Qt5PlotWidget 集成从 scroll 0 移到 120。没有新增文件、类、窗口层或 report 编排。`
+- Last verified tests：`当前 HEAD 整仓 1149 passed；zlc_ui 79 passed，Console/正式 TaskConsole Qt 44 passed。真实 offscreen Qt5PlotWidget + 4 个 4x4 panel 验证 outer scrollbar 0 -> 120；Setting signal commit 42.8 ms 返回、冷首 front 1.01 s/sequence=1；Experiment flow Init 后恰有 TaskConsole/PulseGUI 两窗，统一 close 后可见顶层为 0，项目 Python 进程为 0。正式 Calibration Qt 路径另断言三次 Start、至少三个实际 raster fronts、四图、唯一 transient preview/terminal cleanup。`
+- Pending acceptance gates：`由用户从根 bin/experiment.bat 进行正式可见按钮全流程；Calibration -> Repeat=0 Camera Measurement -> Pulse Load/On -> Occupancy model -> Image overlay；三种 Save；任何失败继续在当前 owner 内最小修复。`
+- Next action：等待用户进行正式可见人类按钮验收并记录产品断点；不由自动化擅自打开可见窗口。若验收失败，复现该一条真实路径并在现有文件内最小修复，不增加新文件/框架。
 - New decisions since architecture review：Simulation 只位于独立 devices/simulation 且复用真实设备契约；默认 virtual geometry 是 35 sites/96 x 128；Calibration JSON artifact 保留 SiteMap、三模型、default kind 和 frame contract，Calibration Task 另用同一结果调用 `zlc_plot` 保存 site-map + 三模型 grid 四张 report 图片；Workbench 不显示 report，Monitor 只自动显示 measurement preview；Occupancy readout-model choice 是科学模式而非 extent mode；Task active 时 takeover；TaskConsole 只有五种固定 plot kind，interval 是有限 ComboBox，blank panel 初始显示完整 schema，Setting 没有 Apply、字段 commit 即时异步生效并拒绝 stale result；pulse 只有 readable `zlc.pulse.v1` JSON 单一路径。旧 Goal tombstones 保持不动。
 
 ## 1. 执行纪律
@@ -244,12 +244,14 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 9. Panel appearance 的每次字段 commit 把完整 semantic/display/size/overlay/fit 目标配置一次提交给当前 `zlc_plot` host。Workbench 不分类字段、不循环单参数 setter；`zlc_plot` 自己比较当前状态、合并 render effects，并在一个 worker job 中最多产生一张同步 front。owner thread 不 `.result()`，同一配置 key 的旧 job 被新 job 淘汰。产品 UI 没有 Apply。
 10. node id/signal key 保持不变，成功启动创建新 generation。同一 signal/schema 始终保留 host/Figure；只有 signal、generation 或 schema compatibility 边界才替换 plot host。同 generation 内复用 snapshot revision 拒绝晚到数据结果，不新建第二套 revision。
 11. active downstream 保留 row/binding 并对新 source 重校验；ROI/exposure 使 calibration frame contract 不相容时显示 blocked。
+12. Selectors 默认关闭时，Panel Card 截获 surface Wheel 并交给唯一祖先 board scroll；不能只断言 plot widget 自己忽略了事件。Selectors 打开后不截获，wheel 留给 plot interaction。
 
 ### 完成标准
 
 - selector -> ROI draft 在非零 origin/binning 下仍使用正确 sensor coordinates。
 - 只按一次 Producer Restart 就已运行新 measurement；它就是同一个 Start/Restart action。
 - blank panel 首帧前就有完整稳定 Setting surface；合法 interval 立即生效且不会使 scheduler 崩溃；profiling 证明同一 signal/schema 的完整配置提交不重建 host/Figure、不在 owner thread 等待，并且同步 front 只增加一次。
+- 多 panel 造成 Monitor 纵向溢出时，在真实 plot surface 上滚轮会移动 TaskConsole 的同一个外层 vertical scrollbar；Selectors 打开后才由 plot 消费。
 - Guard B 通过，不增加字段级 GUI 测试矩阵。
 
 ## 12. Phase 9：实现三种 Save

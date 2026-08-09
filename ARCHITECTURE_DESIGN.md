@@ -302,7 +302,7 @@ Calibration 中所谓“必要的高级检测参数”只能是算法确实需�
 - Task active 时，TaskConsole header 的可操作区切换为唯一的 task status strip：显示当前阶段、进度和唯一 `Stop Task`。所有会改变系统状态的 header controls、logic rows/cards、Setting/Edit controls、Add/Start/Restart/Stop/Remove 都禁用，不能与 exclusive Task 并行改写 draft 或设备状态。
 - Monitor 中 selector、zoom、pan、fit inspection 只允许 view-only；Task active 时 selector commit 不能回写任何 producer draft。
 - 每个 task generation 的 LIVE preview 都带明确生命周期。它只在该 Task host 正在运行时允许自动创建；terminal、Stop、失败或取消统一移除 transient preview，后续 beat 即使仍能读到该 generation 的最后 publication 也不得重建。下一次 Restart 的新 generation 才能创建新的 preview。
-- Monitor 左侧作为一个整体滚动区域响应鼠标滚轮；不能只有某个子控件吃掉滚动而使 logic/panel 列表无法上下移动。
+- Monitor 左侧作为一个整体滚动区域响应鼠标滚轮；不能只有某个子控件吃掉滚动而使 logic/panel 列表无法上下移动。仅让 plot widget `ignore()` wheel 不足以证明这一点：Selectors 关闭时，Panel Card 必须把 surface 上的 Wheel 事件明确交给唯一的祖先 board scroll owner。
 
 ## 10. Plot Panel UI
 
@@ -327,7 +327,7 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 
 Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动。所有懒创建的 form/button/control 从构造瞬间就必须以 Setting body/card 为 parent，不能先作为临时 top-level 收到一次 Show 再由 layout reparent。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
 
-Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不消费 wheel，滚轮交给外层 board scroll；打开后 wheel 才属于 plot 的 zoom/selection interaction。这个开关直接调用同一 plot widget 的 interaction gate，不重建 panel。
+Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不消费 wheel，Panel Card 把 wheel 明确路由到外层 board scroll；打开后 wheel 才属于 plot 的 zoom/selection interaction。这个开关直接调用同一 plot widget 的 interaction gate，不重建 panel。
 
 改 Signal 只换这个 panel 的绑定，不改 Occupancy 等 Logic Node 的 input binding，也不改 plot kind。
 

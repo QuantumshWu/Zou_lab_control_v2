@@ -30,9 +30,13 @@ def _run_qt(code: str) -> None:
 def test_panel_card_construct_and_setters() -> None:
     _run_qt(
         """
-from PyQt5 import QtWidgets
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import PanelCardView
+from zlc_ui.console import panel_card_view as tested_module
+print(tested_module.__file__)
+PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
 card.set_signal_choices((('source', (('Temperature', 'temperature'),)),))
@@ -65,6 +69,29 @@ card.set_selectors_enabled(True)
 assert surface.interaction is True
 card.set_selectors_enabled(False)
 assert surface.interaction is False
+body = QtWidgets.QWidget()
+body.setMinimumSize(420, 1200)
+card.setParent(body)
+card.setGeometry(10, 10, 340, 240)
+scroll = QtWidgets.QScrollArea()
+scroll.setWidget(body)
+scroll.resize(380, 300)
+scroll.show()
+app.processEvents()
+bar = scroll.verticalScrollBar()
+assert bar.maximum() > 0
+wheel = QtGui.QWheelEvent(
+    QtCore.QPointF(surface.rect().center()),
+    QtCore.QPointF(surface.mapToGlobal(surface.rect().center())),
+    QtCore.QPoint(),
+    QtCore.QPoint(0, -240),
+    QtCore.Qt.NoButton,
+    QtCore.Qt.NoModifier,
+    QtCore.Qt.NoScrollPhase,
+    False,
+)
+QtWidgets.QApplication.sendEvent(surface, wheel)
+assert bar.value() > 0, 'Selectors OFF did not hand wheel ownership to the board scroll'
 card.set_surface(None)
 assert not card._placeholder.isHidden()
 card.set_panel_projection(dict(state, size='1x4'), surface_projection)

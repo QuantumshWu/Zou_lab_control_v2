@@ -295,6 +295,7 @@ class PanelCardView(FluentGroupBox):
             # The switch may have been thrown while this card was empty.
             _set_interaction(widget, self._selectors_on)
         if self._surface is not None:
+            self._surface.removeEventFilter(self)
             self._surface_layout.removeWidget(self._surface)
             self._surface.hide()
             self._surface.setParent(None)
@@ -304,9 +305,24 @@ class PanelCardView(FluentGroupBox):
             return
         self._placeholder.hide()
         widget.setParent(self)
+        widget.installEventFilter(self)
         self._surface_layout.addWidget(widget)
         widget.show()
         self._place_settings_button()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if (
+            watched is self._surface
+            and event.type() == QtCore.QEvent.Wheel
+            and not self._selectors_on
+        ):
+            ancestor = self.parentWidget()
+            while ancestor is not None:
+                if isinstance(ancestor, QtWidgets.QAbstractScrollArea):
+                    QtWidgets.QApplication.sendEvent(ancestor.viewport(), event)
+                    return True
+                ancestor = ancestor.parentWidget()
+        return super().eventFilter(watched, event)
 
     def set_signal_choices(
         self,
