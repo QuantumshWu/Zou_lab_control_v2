@@ -52,7 +52,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "imaging_template.json",
             required=True,
         ),
-        AuthoringField("repeats", "int", "Samples", 30, minimum=1),
+        AuthoringField("repeats", "int", "Samples", 300, minimum=1),
         AuthoringField(
             "reference_exposure_seconds",
             "float",
@@ -156,13 +156,6 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             6.0,
             minimum=1e-9,
         ),
-        AuthoringField(
-            "timeout_seconds",
-            "float",
-            "Timeout seconds",
-            2.0,
-            minimum=0.001,
-        ),
     ),
     validator=_validate_calibration,
 )
@@ -214,7 +207,6 @@ def _build(
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
             detection_min_distance=int(authored["detection_min_distance"]),
             detection_sigma=float(authored["detection_sigma"]),
-            timeout_seconds=float(authored["timeout_seconds"]),
         ),
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,

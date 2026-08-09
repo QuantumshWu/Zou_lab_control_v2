@@ -168,7 +168,6 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         detection_spot_sigma=1.0,
         detection_min_distance=3,
         detection_sigma=6.0,
-        timeout_seconds=2.0,
     )
 
 
@@ -459,8 +458,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "detection_spot_sigma",
             "detection_min_distance",
             "detection_sigma",
-            "timeout_seconds",
         )
+        assert descriptors["calibration"].authoring_schema.project_values({})[
+            "repeats"
+        ] == 300
         with pytest.raises(ValueError, match="all four fields"):
             descriptors["calibration"].authoring_schema.project_values({"roi_x": 1})
         with pytest.raises(ValueError, match="cannot exceed"):

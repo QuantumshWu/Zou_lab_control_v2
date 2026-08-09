@@ -56,7 +56,6 @@ def _calibration_request() -> CalibrationRequest:
         detection_spot_sigma=1.0,
         detection_min_distance=3,
         detection_sigma=6.0,
-        timeout_seconds=2.0,
     )
 
 

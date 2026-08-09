@@ -41,6 +41,7 @@ from .outputs import (
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
 _REDUCERS = {"mean", "sum", "median", "max"}
+_DEVICE_WAIT_SECONDS = 2.0
 
 
 def _positive_float(value: object, name: str) -> float:
@@ -92,7 +93,6 @@ class CalibrationRequest:
     detection_spot_sigma: float
     detection_min_distance: int
     detection_sigma: float
-    timeout_seconds: float
 
     def __post_init__(self) -> None:
         camera_key = _non_empty_key(self.camera_key, "camera_key")
@@ -134,7 +134,6 @@ class CalibrationRequest:
         if detection_min_distance <= 0:
             raise ValueError("detection_min_distance must be positive")
         detection_sigma = _positive_float(self.detection_sigma, "detection_sigma")
-        timeout_seconds = _positive_float(self.timeout_seconds, "timeout_seconds")
         object.__setattr__(self, "camera_key", camera_key)
         object.__setattr__(self, "sequencer_key", sequencer_key)
         object.__setattr__(self, "pulse_template", pulse_template)
@@ -150,7 +149,6 @@ class CalibrationRequest:
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
         object.__setattr__(self, "detection_min_distance", detection_min_distance)
         object.__setattr__(self, "detection_sigma", detection_sigma)
-        object.__setattr__(self, "timeout_seconds", timeout_seconds)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -170,7 +168,6 @@ class CalibrationRequest:
             "detection_spot_sigma": self.detection_spot_sigma,
             "detection_min_distance": self.detection_min_distance,
             "detection_sigma": self.detection_sigma,
-            "timeout_seconds": self.timeout_seconds,
         }
 
 
@@ -532,7 +529,7 @@ class CalibrationTask:
                 count,
                 source_group_sizes=(3,) * self.request.repeats,
                 buffer_frame_count=count,
-                timeout=self.request.timeout_seconds,
+                timeout=_DEVICE_WAIT_SECONDS,
             )
             armed = True
             arm_sequencer(self.sequencer, pulse)
@@ -564,11 +561,11 @@ class CalibrationTask:
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
                 self.sequencer.fire()
-                report = self.sequencer.wait_done(self.request.timeout_seconds)
+                report = self.sequencer.wait_done(_DEVICE_WAIT_SECONDS)
                 if report is None:
                     raise TimeoutError(
                         "a calibration shot was fired and never reported done within "
-                        f"{self.request.timeout_seconds:g}s"
+                        f"{_DEVICE_WAIT_SECONDS:g}s"
                     )
                 fault = str(getattr(report, "fault", ""))
                 if fault:
@@ -576,7 +573,7 @@ class CalibrationTask:
                 records = tuple(
                     self.camera.read_frame_records(
                         3,
-                        timeout=self.request.timeout_seconds,
+                        timeout=_DEVICE_WAIT_SECONDS,
                         exact=True,
                     )
                 )
