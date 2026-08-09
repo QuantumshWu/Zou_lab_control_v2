@@ -1,9 +1,7 @@
-"""Thin pulse-shaped sequencer device and virtual twin."""
+"""Generic sequencer capability and physical-device descriptors."""
 
-from .virtual import SequencerDevice, VirtualPulseStreamer, VirtualSequencer
+from .device import SequencerDevice
 
 __all__ = [
     "SequencerDevice",
-    "VirtualPulseStreamer",
-    "VirtualSequencer",
 ]

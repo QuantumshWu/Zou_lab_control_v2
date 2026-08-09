@@ -15,7 +15,11 @@ from zlc_atom.nodes.camera_measurement import (
     CameraMeasurementRequest,
     MonitorCapture,
 )
-from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
+from zlc_atom.nodes.calibration import (
+    CalibrationRequest,
+    CalibrationTask,
+    ReadoutModelKind,
+)
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
@@ -43,10 +47,12 @@ def _calibration_request() -> CalibrationRequest:
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
         roi_xywh=None,
-        integration_method="box",
+        default_model_kind=ReadoutModelKind.BOX,
         threshold_method="empirical",
-        integration_half_width=1,
-        reducer="mean",
+        box_half_width=1,
+        box_reducer="mean",
+        psf_half_width=3,
+        psf_padding=3,
         detection_spot_sigma=1.0,
         detection_min_distance=3,
         detection_sigma=6.0,
@@ -116,8 +122,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             oracle["input_short_frames"],
             frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
         )
-        np.testing.assert_array_equal(result.report["predictions"], oracle["pred_box"])
-        assert int(np.count_nonzero(result.report["predictions"] != oracle["input_latent_occupancy"])) == 29
+        box_report = result.report["models"]["box"]
+        np.testing.assert_array_equal(box_report["predictions"], oracle["pred_box"])
+        assert int(np.count_nonzero(box_report["predictions"] != oracle["input_latent_occupancy"])) == 29
     finally:
         plane.close()
         installation.close()

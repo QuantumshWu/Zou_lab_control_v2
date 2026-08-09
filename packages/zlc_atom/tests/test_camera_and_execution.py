@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 import time
 
-from zlc_atom.devices.camera import CameraFrameRecord, VirtualCamera, VirtualCameraConfig
+from zlc_atom.devices.camera import (
+    CameraAdapter,
+    CameraFrameRecord,
+    DcamCameraAdapter,
+    PylonCameraAdapter,
+)
+from zlc_atom.devices.camera.binding import bind_camera
+from zlc_atom.devices.simulation import SimulationWorld, VirtualCamera, VirtualCameraConfig
 from zlc_atom.execution import (
     DeviceIdentityEvidenceKind,
     DeviceBroker,
@@ -16,7 +23,22 @@ from zlc_atom.execution import (
     bind_verified_device,
     run_plan,
 )
-from zlc_atom.devices.camera.world import SimulationWorld
+
+
+def test_real_and_virtual_cameras_share_one_runtime_contract() -> None:
+    world = SimulationWorld()
+    virtual = VirtualCamera(frame_source=world.render_frame)
+    adapters = (
+        virtual,
+        object.__new__(DcamCameraAdapter),
+        object.__new__(PylonCameraAdapter),
+    )
+    assert all(isinstance(adapter, CameraAdapter) for adapter in adapters)
+
+
+def test_camera_binding_rejects_an_object_outside_the_camera_contract() -> None:
+    with pytest.raises(TypeError, match="canonical CameraAdapter"):
+        bind_camera(object(), "bad", object(), "bad", "camera.bad")  # type: ignore[arg-type]
 
 
 def test_virtual_camera_preserves_trigger_to_frame_causality_and_drops_monitor_history() -> None:

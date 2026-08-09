@@ -21,8 +21,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zlc_atom.devices.camera.world import SimulationWorld
-from zlc_atom.devices.sequencer.virtual import SequencerDevice, VirtualPulseStreamer
+from zlc_atom.devices.sequencer import SequencerDevice
+from zlc_atom.devices.simulation import SimulationWorld, VirtualPulseStreamer, VirtualSequencer
+
+
+def test_virtual_sequencer_is_the_canonical_sequencer_device() -> None:
+    assert isinstance(VirtualSequencer(world=SimulationWorld()), SequencerDevice)
 
 
 def _real_streamer():

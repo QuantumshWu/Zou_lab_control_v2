@@ -9,6 +9,7 @@ from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.calibration import (
     FrameContract,
     ReadoutModel,
+    ReadoutModelKind,
     SiteMap,
     TrapCalibration,
     calibrate,
@@ -30,13 +31,14 @@ def test_threshold_plus_17_3_is_rejected_by_frozen_predictions() -> None:
         oracle["input_reference_frames"],
         oracle["input_short_frames"],
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
-        method="box",
-        integration_half_width=1,
-        reducer="mean",
+        box_half_width=1,
+        box_reducer="mean",
     )
+    box_report = result.report["models"]["box"]
+    box_model = result.calibration.select_model(ReadoutModelKind.BOX)
     mutated = classify_threshold(
-        result.report["short_signals"],
-        result.calibration.readout_model.thresholds + 17.3,
+        box_report["short_signals"],
+        box_model.thresholds + 17.3,
     )
     with pytest.raises(AssertionError):
         np.testing.assert_array_equal(mutated, oracle["pred_box"])
@@ -63,15 +65,18 @@ def test_occupancy_rate_inverse_is_rejected_by_frozen_rate() -> None:
             np.ones(len(site_ids), dtype=bool),
             np.ones(len(site_ids)),
         ),
-        ReadoutModel(
-            site_ids,
-            oracle["thresholds_box"],
-            np.ones(len(site_ids), dtype=bool),
-            np.ones(len(site_ids)),
-            method="box",
-            integration_half_width=1,
-            reducer="mean",
+        (
+            ReadoutModel(
+                site_ids,
+                oracle["thresholds_box"],
+                np.ones(len(site_ids), dtype=bool),
+                np.ones(len(site_ids)),
+                kind=ReadoutModelKind.BOX,
+                integration_half_width=1,
+                reducer="mean",
+            ),
         ),
+        ReadoutModelKind.BOX,
         FrameContract((34, 40), exposure_seconds=0.005),
     )
     probe_frames = oracle["input_short_frames"][oracle["runtime_probe_indices"]].reshape(2, 3, 34, 40)

@@ -6,6 +6,7 @@ import time
 import numpy as np
 import pytest
 
+from zlc_atom.devices.camera import CameraAdapter
 from zlc_atom.devices.camera._dcam_driver import DcamProperty, DcamValue
 from zlc_atom.devices.camera.dcam import (
     DcamCameraAdapter,
@@ -182,6 +183,7 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
     driver = _FakeDcamDriver()
     adapter = DcamCameraAdapter(_config(), driver=driver)
     try:
+        assert isinstance(adapter, CameraAdapter)
         point = adapter.capture_working_point()
         assert point.frame_shape_yx == (8, 8)
         assert point.sensor_shape_yx == (12, 16)

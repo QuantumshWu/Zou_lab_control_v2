@@ -11,6 +11,7 @@ from .descriptor import (
     NodeKind,
     OutputSpec,
     SelectionMapping,
+    TaskPreviewSpec,
 )
 from .discovery import discover_logic_nodes
 
@@ -25,5 +26,6 @@ __all__ = [
     "NodeKind",
     "OutputSpec",
     "SelectionMapping",
+    "TaskPreviewSpec",
     "discover_logic_nodes",
 ]

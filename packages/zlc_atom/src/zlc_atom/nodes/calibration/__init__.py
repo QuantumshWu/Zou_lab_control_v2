@@ -13,8 +13,11 @@ from .bimodal import (
 from .calibration import (
     AtomDetection,
     CalibrationResult,
+    DEFAULT_READOUT_MODEL_CHOICE,
     FrameContract,
+    READOUT_MODEL_CHOICES,
     ReadoutModel,
+    ReadoutModelKind,
     SiteMap,
     TrapCalibration,
     calibrate,
@@ -23,9 +26,11 @@ from .calibration import (
     detect_sites,
     extract_box_signals,
     extract_psf_signals,
+    readout_model_kind_from_choice,
     signals,
 )
 from .logic_node import LOGIC_NODE
+from .outputs import CALIBRATION_DATASET_DECLARATIONS
 from .psf import gaussian_psf_kernel, normalized_psf_kernel
 from .task import (
     CalibrationCapture,
@@ -42,9 +47,13 @@ __all__ = [
     "CalibrationRequest",
     "CalibrationRunResult",
     "CalibrationTask",
+    "CALIBRATION_DATASET_DECLARATIONS",
+    "DEFAULT_READOUT_MODEL_CHOICE",
     "FrameContract",
     "LOGIC_NODE",
     "ReadoutModel",
+    "ReadoutModelKind",
+    "READOUT_MODEL_CHOICES",
     "SiteMap",
     "TrapCalibration",
     "calibrate",
@@ -62,5 +71,6 @@ __all__ = [
     "normalized_psf_kernel",
     "optimal_gaussian_threshold",
     "per_site_fidelity",
+    "readout_model_kind_from_choice",
     "signals",
 ]

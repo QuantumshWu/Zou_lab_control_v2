@@ -6,12 +6,11 @@ import time
 import numpy as np
 import pytest
 
-from zlc_atom.devices.camera.world import SimulationWorld
+from zlc_atom.devices.simulation import SimulationWorld, VirtualPulseStreamer
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
-from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
 from zlc_runtime import SignalDataPlane
 from tests.pulse_fixture import CAMERA_CHANNEL, PULSE_ROOT, build_calibration_pulse
 

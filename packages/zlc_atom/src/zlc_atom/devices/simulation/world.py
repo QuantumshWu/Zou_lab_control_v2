@@ -1,4 +1,4 @@
-"""Minimal virtual atom/imaging world shared by virtual devices."""
+"""Installation-owned atom/imaging world shared by simulation devices."""
 
 from __future__ import annotations
 
@@ -69,7 +69,6 @@ class SimulationWorld:
         self.rng = np.random.default_rng(int(seed))
         self._lock = threading.RLock()
         self._cameras: list[Any] = []
-        self._sequencers: list[Any] = []
         self._occupancy_override: np.ndarray | None = None
         self._fire_count = 0
         self.offset_counts = 200.0
@@ -84,11 +83,6 @@ class SimulationWorld:
         with self._lock:
             if camera not in self._cameras:
                 self._cameras.append(camera)
-
-    def register_sequencer(self, sequencer: Any) -> None:
-        with self._lock:
-            if sequencer not in self._sequencers:
-                self._sequencers.append(sequencer)
 
     def set_occupancy(self, occupancy: object) -> None:
         values = np.asarray(occupancy, dtype=bool).reshape(-1)
@@ -193,10 +187,6 @@ class SimulationWorld:
                         occupancy=shot_occupancy,
                     )
                     camera.trigger(1, frame=frame)
-            for sequencer in tuple(self._sequencers):
-                callback = getattr(sequencer, "on_world_fire", None)
-                if callback is not None:
-                    callback(ordinal)
 
 
 __all__ = [

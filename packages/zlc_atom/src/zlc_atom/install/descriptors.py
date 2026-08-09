@@ -6,10 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from zlc_atom.authoring import AuthoringSchema
-from zlc_atom.devices.camera.contract import CameraAdapter, CameraWorkingPoint
 from zlc_atom.execution.capabilities import CAPABILITY_TYPES
 from zlc_atom.execution.ports import BoundDevice
-from zlc_atom.devices.camera.world import SimulationWorld, SimulationWorldConfig
 
 
 @dataclass(frozen=True)
@@ -28,7 +26,10 @@ class InstalledLeaf:
 
 @dataclass(frozen=True)
 class InstallationFactoryContext:
-    world: SimulationWorld | None
+    # Backend-owned composition state.  A device family validates the concrete
+    # value it consumes; the generic installation descriptor does not depend on
+    # any simulation implementation.
+    world: object | None
     broker: object
     devices: Mapping[str, InstalledLeaf]
     #: How to reach a pulse server, supplied by the composition root.
@@ -48,7 +49,7 @@ class DeviceTypeDescriptor:
     capabilities: tuple[str, ...]
     dependencies: tuple[str, ...] = ()
     factory: Callable[[InstallationFactoryContext, str, Mapping[str, Any]], InstalledLeaf] | None = None
-    world_config: Callable[[Mapping[str, Any]], SimulationWorldConfig] | None = None
+    world_config: Callable[[Mapping[str, Any]], object] | None = None
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.domain:

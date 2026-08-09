@@ -203,9 +203,7 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
                         "seed": 3,
                     },
                 ),
-                DeviceInstanceConfig(
-                    "sequencer", "sequencer", "sequencer.virtual", {"camera_key": "camera"}
-                ),
+                DeviceInstanceConfig("sequencer", "sequencer", "sequencer.virtual", {}),
             )
         ),
         tmp_path / "apparatus.json",

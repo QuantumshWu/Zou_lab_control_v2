@@ -25,6 +25,7 @@ import types
 import numpy as np
 import pytest
 
+from zlc_atom.devices.camera import CameraAdapter
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
 
 
@@ -149,6 +150,7 @@ def test_a_roi_configured_before_open_reaches_the_sensor(fake_pypylon) -> None:
     )
     adapter.open()
 
+    assert isinstance(adapter, CameraAdapter)
     working_point = adapter.capture_working_point()
     assert working_point.roi_shape_yx == (480, 640)
     assert working_point.roi_origin_yx == (50, 100)

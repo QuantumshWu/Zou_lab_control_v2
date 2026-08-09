@@ -100,3 +100,23 @@ def test_virtual_runtime_branch_scan_is_non_vacuous_and_clean() -> None:
     pattern = re.compile(r"\bif[^\r\n]*\bvirtual\b|\bvirtual\b[^\r\n]*\bif\b", re.IGNORECASE)
     hits = tuple((path, line_number, line) for path in paths for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line))
     assert not hits, hits
+
+
+def test_simulation_devices_are_a_separate_device_family() -> None:
+    """Real-device packages must not own or re-export virtual apparatus code."""
+
+    devices = SRC / "devices"
+    simulation = devices / "simulation"
+    assert {
+        "camera.py",
+        "device_types.py",
+        "sequencer.py",
+        "world.py",
+    } <= {path.name for path in simulation.glob("*.py")}
+    assert not (devices / "camera" / "virtual.py").exists()
+    assert not (devices / "camera" / "world.py").exists()
+    assert not (devices / "sequencer" / "virtual.py").exists()
+
+    for package in (devices / "camera", devices / "sequencer"):
+        for path in package.rglob("*.py"):
+            assert "zlc_atom.devices.simulation" not in path.read_text(encoding="utf-8"), path

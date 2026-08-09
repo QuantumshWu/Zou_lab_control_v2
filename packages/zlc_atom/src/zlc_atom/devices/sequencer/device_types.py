@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.sequencer.virtual import SequencerDevice, VirtualSequencer
-from zlc_atom.execution import DeviceIdentityEvidenceKind, PhysicalDeviceIdentity, ResourceKey, SafetyOperation, bind_verified_device
+from zlc_atom.devices.sequencer.binding import bind_sequencer
+from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
-from zlc_atom.devices.camera.world import SimulationWorld
 from zlc_pulse import PulseStreamer, RemotePulseStreamer
 
-
-#: The virtual sequencer needs nothing said about it: it has no endpoint.
-VIRTUAL_SEQUENCER_SCHEMA = AuthoringSchema(())
 
 #: A real board is reached over the network, by the pulse server that owns it.
 #: Writing the endpoint down is what lets an apparatus configuration be saved
@@ -24,29 +20,6 @@ HARDWARE_SEQUENCER_SCHEMA = AuthoringSchema(
         AuthoringField("request_timeout", "float", "Request timeout seconds", 30.0, minimum=0.1),
     )
 )
-
-
-def _bind(context, key: str, device: SequencerDevice, identity: str, type_id: str) -> InstalledLeaf:
-    binding, proof = bind_verified_device(
-        context.broker,
-        key=ResourceKey.parse(f"device/{key}"),
-        identity_probe=lambda: PhysicalDeviceIdentity(identity, DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT),
-        execute_command=lambda command: device.fire(forever=bool(command)) if command is not None else device.fire(),
-        capability_probe=lambda: {"sequencer.streamer": device},
-        close_session=lambda _command: device.close(),
-        interrupt_operations={SafetyOperation.STOP: lambda: device.close()},
-    )
-    return InstalledLeaf(key, type_id, device, dict(proof.snapshot), binding=binding, closer=device.close)
-
-
-def _virtual_factory(context, key: str, values: dict) -> InstalledLeaf:
-    del values
-    if not isinstance(context.world, SimulationWorld):
-        raise TypeError("sequencer.virtual requires the installation SimulationWorld")
-    world = context.world
-    device = VirtualSequencer(world=world)
-    device.open()
-    return _bind(context, key, device, f"virtual-sequencer:{key}", "sequencer.virtual")
 
 
 def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -79,12 +52,11 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
         raise TypeError("sequencer.hardware needs a zlc_pulse device")
     device = SequencerDevice(streamer)
     device.open()
-    return _bind(context, key, device, f"sequencer:{key}", "sequencer.hardware")
+    return bind_sequencer(context, key, device, f"sequencer:{key}", "sequencer.hardware")
 
 
 DEVICE_TYPES = (
     DeviceTypeDescriptor("sequencer.hardware", "sequencer", HARDWARE_SEQUENCER_SCHEMA, ("sequencer.streamer",), factory=_hardware_factory),
-    DeviceTypeDescriptor("sequencer.virtual", "sequencer", VIRTUAL_SEQUENCER_SCHEMA, ("sequencer.streamer",), factory=_virtual_factory),
 )
 
-__all__ = ["DEVICE_TYPES", "HARDWARE_SEQUENCER_SCHEMA", "VIRTUAL_SEQUENCER_SCHEMA"]
+__all__ = ["DEVICE_TYPES", "HARDWARE_SEQUENCER_SCHEMA"]

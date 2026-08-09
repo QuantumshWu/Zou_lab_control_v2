@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zlc_atom.authoring import AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactInputSpec,
     DatasetInputSpec,
@@ -12,12 +12,27 @@ from zlc_atom.nodes._framework.descriptor import (
     NodeKind,
     OutputSpec,
 )
-from zlc_atom.nodes.calibration import TrapCalibration
+from zlc_atom.nodes.calibration import (
+    DEFAULT_READOUT_MODEL_CHOICE,
+    READOUT_MODEL_CHOICES,
+    TrapCalibration,
+    readout_model_kind_from_choice,
+)
 
 from .processor import OccupancyProcessor
 
 
-OCCUPANCY_SCHEMA = AuthoringSchema()
+OCCUPANCY_SCHEMA = AuthoringSchema(
+    (
+        AuthoringField(
+            "model_kind",
+            "choice",
+            "Readout model",
+            DEFAULT_READOUT_MODEL_CHOICE,
+            choices=READOUT_MODEL_CHOICES,
+        ),
+    )
+)
 
 
 def _build(
@@ -25,7 +40,9 @@ def _build(
     calibration_path: object,
     source_signal: str,
     signal_plane: object | None = None,
+    **values: object,
 ) -> OccupancyProcessor:
+    authored = OCCUPANCY_SCHEMA.freeze(values)
     text = str(calibration_path).strip()
     if not text:
         raise ValueError("calibration_path must be non-empty")
@@ -38,6 +55,7 @@ def _build(
         calibration_path=path,
         signal_plane=signal_plane,
         source_signal=selected_source,
+        model_kind=readout_model_kind_from_choice(authored["model_kind"]),
     )
 
 

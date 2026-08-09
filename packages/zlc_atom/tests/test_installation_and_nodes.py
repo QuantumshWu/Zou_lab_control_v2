@@ -8,7 +8,11 @@ from zlc_data import OwnedSnapshot, REPEAT, SITE
 
 from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_catalog
 from zlc_atom.nodes import discover_logic_nodes
-from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
+from zlc_atom.nodes.calibration import (
+    CalibrationRequest,
+    CalibrationTask,
+    ReadoutModelKind,
+)
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
 from tests.fakes import FakePlane
@@ -28,10 +32,12 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
         roi_xywh=None,
-        integration_method="box",
+        default_model_kind=ReadoutModelKind.BOX,
         threshold_method="empirical",
-        integration_half_width=1,
-        reducer="mean",
+        box_half_width=1,
+        box_reducer="mean",
+        psf_half_width=3,
+        psf_padding=3,
         detection_spot_sigma=1.0,
         detection_min_distance=3,
         detection_sigma=6.0,
@@ -56,7 +62,6 @@ def test_capability_tokens_have_machine_visible_types() -> None:
         "camera.adapter",
         "camera.working_point",
         "sequencer.streamer",
-        "simulation.world",
     }
     assert all(isinstance(value, type) for value in CAPABILITY_TYPES.values())
 
@@ -116,10 +121,16 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         artifact = json.loads(result.artifact_path.read_text(encoding="utf-8"))
         assert set(artifact) == {
             "site_map",
-            "readout_model",
+            "models",
+            "default_model_kind",
             "frame_contract",
             "report",
         }
+        assert tuple(model["kind"] for model in artifact["models"]) == (
+            "box",
+            "psf",
+            "uniform_psf",
+        )
         assert result.calibration.n_sites == len(
             installation.world.geometry.site_centers_xy
         )

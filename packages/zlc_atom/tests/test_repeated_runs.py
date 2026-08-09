@@ -107,7 +107,7 @@ def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> N
     bench.
     """
 
-    from zlc_atom.devices.sequencer.virtual import CAMERA_TRIGGER_CHANNEL
+    from zlc_atom.devices.simulation import CAMERA_TRIGGER_CHANNEL
 
     installation = create_installation("virtual")
     try:

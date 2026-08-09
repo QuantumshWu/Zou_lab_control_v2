@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import pytest
 
-from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA, VIRTUAL_CAMERA_SCHEMA
-from zlc_atom.devices.sequencer.device_types import (
-    HARDWARE_SEQUENCER_SCHEMA,
+from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA
+from zlc_atom.devices.sequencer.device_types import HARDWARE_SEQUENCER_SCHEMA
+from zlc_atom.devices.simulation.device_types import (
+    VIRTUAL_CAMERA_SCHEMA,
     VIRTUAL_SEQUENCER_SCHEMA,
 )
 from zlc_atom.install import create_installation, discover_device_catalog
@@ -94,6 +95,7 @@ def test_a_configuration_is_enough_to_ask_for_a_real_board() -> None:
         ),
     )
     try:
+        assert installation.world is None
         assert "sequencer" in installation.failures
         reason = str(installation.failures["sequencer"])
         assert "10.0.0.7:20000" in reason

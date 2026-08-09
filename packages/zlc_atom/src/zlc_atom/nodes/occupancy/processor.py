@@ -18,7 +18,7 @@ from zlc_runtime import (
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.data import snapshot_from_array
-from zlc_atom.nodes.calibration import TrapCalibration
+from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
 
 
@@ -133,6 +133,7 @@ class OccupancyProcessor:
         signal_plane: object | None = None,
         producer: str = "occupancy",
         source_signal: str | None = None,
+        model_kind: ReadoutModelKind | None = None,
     ) -> None:
         if not isinstance(calibration, TrapCalibration):
             raise TypeError("calibration must be TrapCalibration")
@@ -141,6 +142,7 @@ class OccupancyProcessor:
                 "occupancy requires calibration centers in image_pixel_xy coordinates"
             )
         self.calibration = calibration
+        self.model = calibration.select_model(model_kind)
         self.calibration_path = (
             None
             if calibration_path is None
@@ -323,9 +325,13 @@ class OccupancyProcessor:
         # comparison against the thresholds the calibration already carries.
         images = [_image(frame) for frame in values]
         counts = np.asarray(
-            [self.calibration.signals(image) for image in images], dtype="<f8"
+            [
+                self.calibration.signals(image, model_kind=self.model.kind)
+                for image in images
+            ],
+            dtype="<f8",
         )
-        model = self.calibration.readout_model
+        model = self.model
         site_valid = (
             self.calibration.site_map.valid_sites
             & model.usable_sites
@@ -419,6 +425,7 @@ class OccupancyProcessor:
                     if self.calibration_path is None
                     else str(self.calibration_path)
                 ),
+                "model_kind": self.model.kind.value,
             },
         }
         outputs: dict[str, LiveDatasetOutput] = {}

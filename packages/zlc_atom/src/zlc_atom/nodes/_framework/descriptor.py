@@ -73,6 +73,18 @@ class ArtifactOutputSpec:
             raise ValueError("artifact output requires name and contract_id")
 
 
+@dataclass(frozen=True, slots=True)
+class TaskPreviewSpec:
+    """UI-neutral request to preview one declared Task Dataset output."""
+
+    output_name: str
+    plot_kind: str
+
+    def __post_init__(self) -> None:
+        if not self.output_name or not self.plot_kind:
+            raise ValueError("task preview requires output_name and plot_kind")
+
+
 @dataclass(frozen=True)
 class DeviceRequirement:
     capability_token: str
@@ -124,7 +136,7 @@ class LogicNodeDescriptor:
     outputs: tuple[OutputSpec, ...] = ()
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
-    task_previews: tuple[object, ...] = ()
+    task_previews: tuple[TaskPreviewSpec, ...] = ()
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -136,6 +148,7 @@ class LogicNodeDescriptor:
             raise TypeError("authoring_schema must be AuthoringSchema")
         inputs = tuple(self.input_specs)
         outputs = tuple(self.outputs)
+        task_previews = tuple(self.task_previews)
         artifact_outputs = tuple(self.artifact_outputs)
         requirements = tuple(self.device_requirements)
         selection_mappings = tuple(self.selection_mappings)
@@ -143,6 +156,8 @@ class LogicNodeDescriptor:
             raise TypeError("input_specs contain an unsupported input type")
         if any(not isinstance(value, OutputSpec) for value in outputs):
             raise TypeError("outputs must contain OutputSpec values")
+        if any(not isinstance(value, TaskPreviewSpec) for value in task_previews):
+            raise TypeError("task_previews must contain TaskPreviewSpec values")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
@@ -156,6 +171,17 @@ class LogicNodeDescriptor:
             raise ValueError("input names must be unique")
         if len({value.name for value in outputs}) != len(outputs):
             raise ValueError("output names must be unique")
+        if len({value.output_name for value in task_previews}) != len(task_previews):
+            raise ValueError("task preview output names must be unique")
+        unknown_previews = {
+            value.output_name for value in task_previews
+        } - {value.name for value in outputs}
+        if unknown_previews:
+            raise ValueError(
+                f"task previews use undeclared outputs: {sorted(unknown_previews)}"
+            )
+        if task_previews and self.kind is not NodeKind.TASK:
+            raise ValueError("only Task nodes may declare task previews")
         if len({value.name for value in artifact_outputs}) != len(artifact_outputs):
             raise ValueError("artifact output names must be unique")
         if len({value.argument_name for value in requirements}) != len(requirements):
@@ -178,6 +204,7 @@ class LogicNodeDescriptor:
             raise ValueError("a processor requires exactly one DatasetInputSpec")
         object.__setattr__(self, "input_specs", inputs)
         object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "task_previews", task_previews)
         object.__setattr__(self, "artifact_outputs", artifact_outputs)
         object.__setattr__(self, "device_requirements", requirements)
         object.__setattr__(self, "selection_mappings", selection_mappings)
@@ -225,4 +252,5 @@ __all__ = [
     "NodeKind",
     "OutputSpec",
     "SelectionMapping",
+    "TaskPreviewSpec",
 ]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 from zlc_data import (
@@ -31,6 +31,9 @@ def snapshot_from_array(
     producer: str,
     signal: str,
     roles: Sequence[AxisRoleId] = (),
+    axis_specs: Mapping[AxisRoleId, AxisSpec] | None = None,
+    point_columns: Mapping[AxisRoleId, PointColumn] | None = None,
+    value_unit: str | None = None,
     generation: str,
     revision: int,
 ) -> OwnedSnapshot:
@@ -44,8 +47,11 @@ def snapshot_from_array(
 
     The first array dimension is the repeat axis.  A ``SITE`` role is encoded
     in the shared point table; all other roles remain explicit tensor axes.
-    The helper deliberately keeps the array-facing node API separate from the
-    typed artifact so existing consumers do not infer axis meaning from shape.
+    Producers with domain identities or physical coordinates pass their exact
+    ``PointColumn``/``AxisSpec`` by role.  Generated axes are only the fallback
+    for outputs whose producer has no stronger metadata.  The helper keeps the
+    array-facing node API separate from the typed artifact so consumers never
+    infer axis meaning from shape.
     """
 
     producer = str(producer).strip()
@@ -61,6 +67,38 @@ def snapshot_from_array(
     normalized_roles = tuple(roles)
     if any(not isinstance(role, AxisRoleId) for role in normalized_roles):
         raise TypeError("roles must contain AxisRoleId values")
+    if axis_specs is not None and not isinstance(axis_specs, Mapping):
+        raise TypeError("axis_specs must be a mapping or None")
+    normalized_axis_specs = dict(axis_specs or {})
+    for role, axis in normalized_axis_specs.items():
+        if not isinstance(role, AxisRoleId):
+            raise TypeError("axis_specs keys must be AxisRoleId values")
+        if not isinstance(axis, AxisSpec):
+            raise TypeError("axis_specs values must be AxisSpec values")
+        if axis.role != role:
+            raise ValueError("axis_specs keys must match their AxisSpec role")
+        if role == SITE:
+            raise ValueError("SITE metadata belongs in point_columns")
+        if normalized_roles.count(role) != 1:
+            raise ValueError(
+                "an explicit axis spec requires exactly one matching role"
+            )
+    if point_columns is not None and not isinstance(point_columns, Mapping):
+        raise TypeError("point_columns must be a mapping or None")
+    normalized_point_columns = dict(point_columns or {})
+    for role, column in normalized_point_columns.items():
+        if not isinstance(role, AxisRoleId):
+            raise TypeError("point_columns keys must be AxisRoleId values")
+        if not isinstance(column, PointColumn):
+            raise TypeError("point_columns values must be PointColumn values")
+        if column.role != role:
+            raise ValueError("point_columns keys must match their PointColumn role")
+        if role != SITE:
+            raise ValueError("only SITE is represented by a point column")
+        if normalized_roles.count(role) != 1:
+            raise ValueError(
+                "an explicit point column requires exactly one matching role"
+            )
     trailing_shape = tuple(int(size) for size in array.shape[1:])
     if len(normalized_roles) != len(trailing_shape):
         raise ValueError("roles must describe every non-repeat array dimension")
@@ -86,32 +124,49 @@ def snapshot_from_array(
         if not cell_roles:
             tensor = tensor.reshape((repeat_size, point_size, 1))
 
-    point_column = PointColumn(
-        AxisId(f"{producer}.{signal}.site"),
-        "site",
-        SITE,
-        PointColumn.NUMERIC,
-        tuple(range(point_size)),
+    point_column = normalized_point_columns.get(SITE)
+    if point_column is None:
+        point_column = PointColumn(
+            AxisId(f"{producer}.{signal}.site"),
+            "site",
+            SITE,
+            PointColumn.NUMERIC,
+            tuple(range(point_size)),
+        )
+    elif len(point_column.values) != point_size:
+        raise ValueError("SITE PointColumn length must match the SITE axis size")
+    point_table = (
+        PointTable(point_size, (point_column,))
+        if SITE in normalized_roles
+        else PointTable(1)
     )
-    point_table = PointTable(point_size, (point_column,)) if SITE in normalized_roles else PointTable(1)
     # Implicit coordinates: a spatial axis of a camera frame is indexed 0..n-1,
     # which is exactly what an AxisSpec means when it carries none.  Writing
     # them out made every published frame build a 2048-element tuple, validate
     # each element, and then SHA-256 all of it into the schema fingerprint --
     # 6.3 ms per frame to say what "no coordinates" already says.
-    cell_axes = tuple(
-        AxisSpec(
-            AxisId(f"{producer}.{signal}.{index}.{role.value}"),
-            role.value,
-            role,
-            int(size),
-        )
-        for index, (role, size) in enumerate(zip(cell_roles, cell_shape, strict=True))
-    )
+    cell_axes_list: list[AxisSpec] = []
+    for index, (role, size) in enumerate(
+        zip(cell_roles, cell_shape, strict=True)
+    ):
+        axis = normalized_axis_specs.get(role)
+        if axis is None:
+            axis = AxisSpec(
+                AxisId(f"{producer}.{signal}.{index}.{role.value}"),
+                role.value,
+                role,
+                int(size),
+            )
+        elif axis.size != size:
+            raise ValueError(
+                f"explicit {role.value} axis size {axis.size} does not match {size}"
+            )
+        cell_axes_list.append(axis)
+    cell_axes = tuple(cell_axes_list)
     cell_schema = (
-        ValueSchema(cell_axes, ValidityContract.value(), array.dtype)
+        ValueSchema(cell_axes, ValidityContract.value(), array.dtype, value_unit)
         if cell_axes
-        else ValueSchema.scalar(array.dtype)
+        else ValueSchema.scalar(array.dtype, value_unit)
     )
     schema = DatasetSchema(
         AxisSpec(

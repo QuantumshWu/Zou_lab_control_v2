@@ -31,7 +31,7 @@ def _virtual_apparatus() -> InstallationConfig:
     return InstallationConfig(
         (
             DeviceInstanceConfig("camera", "camera", "camera.virtual", {"seed": 7}),
-            DeviceInstanceConfig("sequencer", "sequencer", "sequencer.virtual", {"camera_key": "camera"}),
+            DeviceInstanceConfig("sequencer", "sequencer", "sequencer.virtual", {}),
         )
     )
 

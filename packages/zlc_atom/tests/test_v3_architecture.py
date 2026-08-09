@@ -3,8 +3,17 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+import time
 
 import pytest
+from zlc_data import (
+    AxisId,
+    COMPONENT,
+    SITE,
+    SPATIAL_X,
+    SPATIAL_Y,
+    CoordinateFrameId,
+)
 from zlc_durable import readable_json_bytes
 from zlc_pulse import (
     PULSE_TREE_FORMAT,
@@ -14,10 +23,10 @@ from zlc_pulse import (
     sequence_to_tree,
 )
 from zlc_pulse.device import BoardDescription
-from zlc_runtime import SignalDataPlane
+from zlc_runtime import NodeHost, SignalDataPlane
 
 import zlc_atom.nodes.calibration.pulse as calibration_pulse_module
-from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
+from zlc_atom.devices.simulation import VirtualPulseStreamer
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ArtifactInputSpec,
@@ -26,11 +35,29 @@ from zlc_atom.nodes import (
     discover_logic_nodes,
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask
+from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask, ReadoutModelKind
+from tests.fakes import FakePlane
 
 
 ROOT = Path(__file__).parents[1]
 PULSE_ROOT = ROOT / "src" / "zlc_atom" / "nodes" / "calibration"
+
+
+class _CalibrationCoveragePlane(FakePlane):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calibration_coverages: list[tuple[int, int]] = []
+        self.calibration_schema_fingerprints: list[str] = []
+
+    def mark_changed(self, producer: object, live_slot: object) -> None:
+        output = live_slot.freeze_live_outputs()["capture_preview"]
+        self.calibration_coverages.append(
+            (output.coverage.written_cells, output.coverage.total_cells)
+        )
+        self.calibration_schema_fingerprints.append(
+            output.snapshot.block.schema.fingerprint
+        )
+        super().mark_changed(producer, live_slot)
 
 
 class _RecordingCamera:
@@ -134,10 +161,12 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
         roi_xywh=None,
-        integration_method="box",
+        default_model_kind=ReadoutModelKind.BOX,
         threshold_method="empirical",
-        integration_half_width=1,
-        reducer="mean",
+        box_half_width=1,
+        box_reducer="mean",
+        psf_half_width=3,
+        psf_padding=3,
         detection_spot_sigma=1.0,
         detection_min_distance=3,
         detection_sigma=6.0,
@@ -278,7 +307,8 @@ def test_pulse_resolver_uses_the_project_json_document(
 
 def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Path) -> None:
     installation = create_installation("virtual")
-    plane = SignalDataPlane()
+    plane = _CalibrationCoveragePlane()
+    calibration_host = None
     try:
         descriptors = {descriptor.api_name: descriptor for descriptor in discover_logic_nodes()}
         camera = _RecordingCamera(installation.device("camera"))
@@ -328,9 +358,117 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         fires_before_task = len([event for event, _ in sequencer.events if event == "fire"])
         camera_events_before_task = len(camera.events)
         signals_before_task = set(plane.freeze().signals)
-        task_result = calibration_node.run()
+        calibration_host = NodeHost(calibration_node, plane)
+        calibration_host.start()
+        deadline = time.monotonic() + 10.0
+        while not calibration_host.observation.terminal and time.monotonic() < deadline:
+            calibration_host.poll()
+            time.sleep(0.005)
+        observation = calibration_host.poll()
+        assert observation.terminal and observation.phase == "done", observation
+        assert observation.progress is not None
+        assert observation.progress.text == "Calibration complete 30/30"
+        task_result = calibration_node.result
+        assert task_result is not None
         task_camera_events = camera.events[camera_events_before_task:]
-        assert set(plane.freeze().signals) == signals_before_task
+        front = plane.freeze()
+        calibration_signals = {
+            f"@logic/calibration/{name}"
+            for name in (
+                "capture_preview",
+                "site_map",
+                "fidelity_site",
+                "fidelity_centers",
+                "readout_samples",
+                "fidelity_threshold",
+            )
+        }
+        assert set(front.signals) == signals_before_task | calibration_signals
+        assert plane.calibration_coverages == [
+            (current, 30) for current in range(1, 31)
+        ]
+        assert len(set(plane.calibration_schema_fingerprints)) == 1
+        assert front.value("@logic/calibration/capture_preview").shape == (
+            30,
+            1,
+            3,
+            96,
+            128,
+        )
+        assert front.value("@logic/calibration/site_map").shape == (
+            1,
+            1,
+            96,
+            128,
+        )
+        assert front.value("@logic/calibration/fidelity_site").shape == (
+            1,
+            35,
+            1,
+        )
+        assert front.value("@logic/calibration/fidelity_centers").shape == (
+            1,
+            35,
+            2,
+        )
+        assert front.value("@logic/calibration/readout_samples").shape == (
+            30,
+            35,
+            1,
+        )
+        assert front.value("@logic/calibration/fidelity_threshold").shape == (
+            1,
+            35,
+            1,
+        )
+        site_values = tuple(
+            front.value(f"@logic/calibration/{name}")
+            for name in (
+                "fidelity_site",
+                "fidelity_centers",
+                "readout_samples",
+                "fidelity_threshold",
+            )
+        )
+        assert all(value is not None for value in site_values)
+        site_columns = tuple(
+            value.schema.point_table.columns[0]  # type: ignore[union-attr]
+            for value in site_values
+        )
+        assert all(column is site_columns[0] for column in site_columns)
+        assert site_columns[0].coordinate_id == AxisId("calibration.site")
+        assert site_columns[0].role is SITE
+        assert site_columns[0].values == task_result.calibration.site_map.site_ids
+
+        coordinate_frame = CoordinateFrameId(
+            task_result.calibration.site_map.coordinate_frame
+        )
+        assert coordinate_frame == CoordinateFrameId("image_pixel_xy")
+        site_map_value = front.value("@logic/calibration/site_map")
+        assert site_map_value is not None
+        site_map_axes = {
+            axis.role: axis for axis in site_map_value.cell_schema.data_axes
+        }
+        assert set(site_map_axes) == {SPATIAL_Y, SPATIAL_X}
+        assert all(
+            site_map_axes[role].unit == "pixel"
+            and site_map_axes[role].coordinate_frame == coordinate_frame
+            for role in (SPATIAL_Y, SPATIAL_X)
+        )
+
+        centers_value = front.value("@logic/calibration/fidelity_centers")
+        assert centers_value is not None
+        component_axis = centers_value.cell_schema.data_axes[0]
+        assert component_axis.role is COMPONENT
+        assert component_axis.coordinates == ("x", "y")
+        assert component_axis.unit == "pixel"
+        assert component_axis.coordinate_frame == coordinate_frame
+        assert centers_value.cell_schema.value_unit == "pixel"
+        assert all(
+            front.value(name).coverage is None
+            and front.value(name).transient is False
+            for name in calibration_signals
+        )
         assert len(task_result.capture.frames) == 90
         assert sum(len(group) for group in task_result.reference) == 60
         assert len(task_result.short) == 30
@@ -357,9 +495,11 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             calibration_path=str(calibration_path),
             source_signal=camera_node.signal_key("frames"),
             signal_plane=plane,
+            model_kind="uniform_psf",
         )
         assert occupancy_node.signal_plane is plane
         assert occupancy_node.calibration_path == calibration_path.resolve()
+        assert occupancy_node.model.kind is ReadoutModelKind.UNIFORM_PSF
         occupancy_result = occupancy_node.process(
             task_result.short,
             generation="calibration-task",
@@ -371,7 +511,21 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
 
         assert tuple(value.argument_name for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
         assert tuple(value.argument_name for value in descriptors["calibration"].device_requirements) == ("camera", "sequencer")
-        assert descriptors["calibration"].outputs == ()
+        assert tuple(
+            (value.name, value.contract_id)
+            for value in descriptors["calibration"].outputs
+        ) == (
+            ("capture_preview", "calibration.capture-preview.v1"),
+            ("site_map", "calibration.site-map.v1"),
+            ("fidelity_site", "calibration.site-fidelity.v1"),
+            ("fidelity_centers", "calibration.site-centers.v1"),
+            ("readout_samples", "calibration.readout-samples.v1"),
+            ("fidelity_threshold", "calibration.site-threshold.v1"),
+        )
+        assert tuple(
+            (preview.output_name, preview.plot_kind)
+            for preview in descriptors["calibration"].task_previews
+        ) == (("capture_preview", "image"),)
         assert [
             (value.name, value.contract_id)
             for value in descriptors["calibration"].artifact_outputs
@@ -385,10 +539,12 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "roi_y",
             "roi_width",
             "roi_height",
-            "integration_method",
+            "default_model_kind",
             "threshold_method",
-            "integration_half_width",
-            "reducer",
+            "box_half_width",
+            "box_reducer",
+            "psf_half_width",
+            "psf_padding",
             "detection_spot_sigma",
             "detection_min_distance",
             "detection_sigma",
@@ -404,7 +560,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
                 }
             )
         assert descriptors["occupancy"].device_requirements == ()
-        assert descriptors["occupancy"].authoring_schema.field_names == ()
+        assert descriptors["occupancy"].authoring_schema.field_names == (
+            "model_kind",
+        )
         assert len(descriptors["occupancy"].input_specs) == 2
         assert isinstance(descriptors["occupancy"].input_specs[0], DatasetInputSpec)
         assert descriptors["occupancy"].input_specs[0].name == "frames"
@@ -435,6 +593,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
                 signal_plane=plane,
             )
     finally:
+        if calibration_host is not None:
+            calibration_host.shutdown()
         plane.close()
         installation.close()
 

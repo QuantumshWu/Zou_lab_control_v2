@@ -1,4 +1,4 @@
-"""Camera adapter contracts and implementations."""
+"""Camera adapter contract and physical camera implementations."""
 
 from .contract import (
     CameraAcquisitionMode,
@@ -9,8 +9,7 @@ from .contract import (
     CameraWorkingPoint,
 )
 from .dcam import DcamCameraAdapter, DcamCameraConfig
-from .virtual import VirtualCamera, VirtualCameraConfig
-from .world import SimulationGeometry, SimulationWorld
+from .pylon import PylonCameraAdapter, PylonCameraConfig
 
 __all__ = [
     "CameraAcquisitionMode",
@@ -21,8 +20,6 @@ __all__ = [
     "CameraWorkingPoint",
     "DcamCameraAdapter",
     "DcamCameraConfig",
-    "VirtualCamera",
-    "VirtualCameraConfig",
-    "SimulationGeometry",
-    "SimulationWorld",
+    "PylonCameraAdapter",
+    "PylonCameraConfig",
 ]

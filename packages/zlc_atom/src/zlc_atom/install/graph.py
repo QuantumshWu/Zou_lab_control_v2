@@ -112,9 +112,9 @@ def _world_from_apparatus(
 ) -> object:
     """Build one shared world from device-declared apparatus contributions."""
 
-    from zlc_atom.devices.camera.world import SimulationWorld, SimulationWorldConfig
+    from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 
-    configs = tuple(
+    contributions = tuple(
         descriptor.world_config(
             descriptor.authoring_schema.freeze(spec.config)
         )
@@ -122,6 +122,9 @@ def _world_from_apparatus(
         for descriptor in (descriptors[spec.type_id],)
         if descriptor.world_config is not None
     )
+    if not contributions:
+        return None
+    configs = tuple(config for config in contributions if config is not None)
     if not configs:
         return SimulationWorld()
     if not all(isinstance(config, SimulationWorldConfig) for config in configs):

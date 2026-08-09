@@ -5,13 +5,19 @@ from pathlib import Path
 
 import numpy as np
 
-from zlc_atom.nodes.calibration import ReadoutModel, SiteMap, TrapCalibration, normal_cdf
+from zlc_atom.nodes.calibration import (
+    ReadoutModel,
+    ReadoutModelKind,
+    SiteMap,
+    TrapCalibration,
+    normal_cdf,
+)
 from zlc_atom.nodes.calibration.calibration import FrameContract, extract_box_signals
 
 
 def _calibration(
     *,
-    method: str = "box",
+    kind: ReadoutModelKind = ReadoutModelKind.BOX,
     psf_weights: np.ndarray | None = None,
     psf_boxes: np.ndarray | None = None,
     frame_contract: FrameContract | None = None,
@@ -19,17 +25,22 @@ def _calibration(
     site_ids = ("site_0000",)
     return TrapCalibration(
         SiteMap(site_ids, np.asarray([[1.0, 1.0]]), [True], [1.0]),
-        ReadoutModel(
-            site_ids,
-            [5.0],
-            [True],
-            [1.0],
-            method=method,
-            integration_half_width=1,
-            reducer="mean",
-            psf_weights=psf_weights,
-            psf_boxes=psf_boxes,
+        (
+            ReadoutModel(
+                site_ids,
+                [5.0],
+                [True],
+                [1.0],
+                kind=kind,
+                integration_half_width=1,
+                reducer="mean" if kind is ReadoutModelKind.BOX else None,
+                psf_weights=psf_weights,
+                psf_boxes=psf_boxes,
+                background=None if kind is ReadoutModelKind.BOX else "none",
+                psf_padding=None if kind is ReadoutModelKind.BOX else 3,
+            ),
         ),
+        kind,
         frame_contract or FrameContract((3, 3)),
     )
 
@@ -54,17 +65,23 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     np.testing.assert_array_equal(calibration.detect(image), [False])
     target = calibration.save(tmp_path / "calibration.json")
     payload = json.loads(target.read_text(encoding="utf-8"))
-    assert set(payload) == {"site_map", "readout_model", "frame_contract", "report"}
+    assert set(payload) == {
+        "site_map",
+        "models",
+        "default_model_kind",
+        "frame_contract",
+        "report",
+    }
     loaded = TrapCalibration.load(target)
     assert loaded.frame_contract.binning_yx == (2, 2)
-    assert loaded.readout_model.threshold_method == "empirical"
+    assert loaded.select_model().threshold_method == "empirical"
     np.testing.assert_allclose(loaded.signals(image), [5.0])
 
 
 def test_psf_dispatch_is_explicit_and_not_a_name_substring() -> None:
     kernel = np.ones((3, 3), dtype=float) / 9.0
     calibration = _calibration(
-        method="psf",
+        kind=ReadoutModelKind.PER_SITE_PSF,
         psf_weights=kernel[None],
         psf_boxes=np.asarray([[0, 0, 3, 3]]),
     )

@@ -1,4 +1,4 @@
-"""Discoverable artifact-only calibration task descriptor."""
+"""Discoverable calibration task with typed previews, final data, and artifact."""
 
 from __future__ import annotations
 
@@ -11,8 +11,12 @@ from zlc_atom.nodes._framework.descriptor import (
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
+    OutputSpec,
+    TaskPreviewSpec,
 )
 
+from .calibration import ReadoutModelKind
+from .outputs import CALIBRATION_DATASET_DECLARATIONS
 from .task import CalibrationRequest, CalibrationTask
 
 
@@ -62,11 +66,11 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "roi_height", "int", "ROI height", None, required=False, minimum=1
         ),
         AuthoringField(
-            "integration_method",
+            "default_model_kind",
             "choice",
-            "Integration method",
-            "box",
-            choices=("box", "psf", "uniform_psf"),
+            "Default readout model",
+            ReadoutModelKind.BOX.value,
+            choices=tuple(kind.value for kind in ReadoutModelKind),
         ),
         AuthoringField(
             "threshold_method",
@@ -76,18 +80,32 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             choices=("empirical", "gaussian"),
         ),
         AuthoringField(
-            "integration_half_width",
+            "box_half_width",
             "int",
-            "Integration half-width",
+            "Box half-width",
             1,
             minimum=0,
         ),
         AuthoringField(
-            "reducer",
+            "box_reducer",
             "choice",
             "Box reducer",
             "mean",
             choices=("mean", "sum", "median", "max"),
+        ),
+        AuthoringField(
+            "psf_half_width",
+            "int",
+            "PSF half-width",
+            3,
+            minimum=0,
+        ),
+        AuthoringField(
+            "psf_padding",
+            "int",
+            "PSF background padding",
+            3,
+            minimum=1,
         ),
         AuthoringField(
             "detection_spot_sigma",
@@ -156,10 +174,12 @@ def _build(
             ),
             readout_exposure_seconds=float(authored["readout_exposure_seconds"]),
             roi_xywh=roi,  # type: ignore[arg-type]
-            integration_method=str(authored["integration_method"]),
+            default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
             threshold_method=str(authored["threshold_method"]),
-            integration_half_width=int(authored["integration_half_width"]),
-            reducer=str(authored["reducer"]),
+            box_half_width=int(authored["box_half_width"]),
+            box_reducer=str(authored["box_reducer"]),
+            psf_half_width=int(authored["psf_half_width"]),
+            psf_padding=int(authored["psf_padding"]),
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
             detection_min_distance=int(authored["detection_min_distance"]),
             detection_sigma=float(authored["detection_sigma"]),
@@ -174,7 +194,11 @@ LOGIC_NODE = LogicNodeDescriptor(
     "calibration",
     NodeKind.TASK,
     CALIBRATION_SCHEMA,
-    outputs=(),
+    outputs=tuple(
+        OutputSpec(declaration.name, declaration.contract_id)
+        for declaration in CALIBRATION_DATASET_DECLARATIONS
+    ),
+    task_previews=(TaskPreviewSpec("capture_preview", "image"),),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
     ),

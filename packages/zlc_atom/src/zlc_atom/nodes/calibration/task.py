@@ -1,4 +1,4 @@
-"""Artifact-only calibration orchestration over camera and sequencer adapters."""
+"""Calibration orchestration over camera, sequencer, typed data, and artifact."""
 
 from __future__ import annotations
 
@@ -22,10 +22,20 @@ from .pulse import (
     resolve_pulse,
 )
 
-from .calibration import CalibrationResult, FrameContract, TrapCalibration, calibrate
+from .calibration import (
+    CalibrationResult,
+    FrameContract,
+    ReadoutModelKind,
+    TrapCalibration,
+    calibrate,
+)
+from .outputs import (
+    CALIBRATION_DATASET_DECLARATIONS,
+    CalibrationCapturePreviewSlot,
+    calibration_final_outputs,
+)
 
 
-_INTEGRATION_METHODS = {"box", "psf", "uniform_psf"}
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
 _REDUCERS = {"mean", "sum", "median", "max"}
 
@@ -70,10 +80,12 @@ class CalibrationRequest:
     reference_exposure_seconds: float
     readout_exposure_seconds: float
     roi_xywh: tuple[int, int, int, int] | None
-    integration_method: str
+    default_model_kind: ReadoutModelKind
     threshold_method: str
-    integration_half_width: int
-    reducer: str
+    box_half_width: int
+    box_reducer: str
+    psf_half_width: int
+    psf_padding: int
     detection_spot_sigma: float
     detection_min_distance: int
     detection_sigma: float
@@ -96,20 +108,21 @@ class CalibrationRequest:
         )
         if readout_exposure > reference_exposure:
             raise ValueError("readout exposure cannot exceed reference exposure")
-        integration_method = str(self.integration_method).lower()
-        if integration_method not in _INTEGRATION_METHODS:
-            raise ValueError(
-                "integration_method must be 'box', 'psf', or 'uniform_psf'"
-            )
+        if not isinstance(self.default_model_kind, ReadoutModelKind):
+            raise TypeError("default_model_kind must be ReadoutModelKind")
         threshold_method = str(self.threshold_method).lower()
         if threshold_method not in _THRESHOLD_METHODS:
             raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
-        integration_half_width = int(self.integration_half_width)
-        if integration_half_width < 0:
-            raise ValueError("integration_half_width must be non-negative")
-        reducer = str(self.reducer).lower()
-        if reducer not in _REDUCERS:
-            raise ValueError("reducer must be mean, sum, median, or max")
+        box_half_width = int(self.box_half_width)
+        psf_half_width = int(self.psf_half_width)
+        if box_half_width < 0 or psf_half_width < 0:
+            raise ValueError("integration half-widths must be non-negative")
+        psf_padding = int(self.psf_padding)
+        if psf_padding <= 0:
+            raise ValueError("psf_padding must be positive")
+        box_reducer = str(self.box_reducer).lower()
+        if box_reducer not in _REDUCERS:
+            raise ValueError("box_reducer must be mean, sum, median, or max")
         detection_spot_sigma = _positive_float(
             self.detection_spot_sigma,
             "detection_spot_sigma",
@@ -126,10 +139,11 @@ class CalibrationRequest:
         object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
         object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
         object.__setattr__(self, "roi_xywh", _roi(self.roi_xywh))
-        object.__setattr__(self, "integration_method", integration_method)
         object.__setattr__(self, "threshold_method", threshold_method)
-        object.__setattr__(self, "integration_half_width", integration_half_width)
-        object.__setattr__(self, "reducer", reducer)
+        object.__setattr__(self, "box_half_width", box_half_width)
+        object.__setattr__(self, "box_reducer", box_reducer)
+        object.__setattr__(self, "psf_half_width", psf_half_width)
+        object.__setattr__(self, "psf_padding", psf_padding)
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
         object.__setattr__(self, "detection_min_distance", detection_min_distance)
         object.__setattr__(self, "detection_sigma", detection_sigma)
@@ -144,10 +158,12 @@ class CalibrationRequest:
             "reference_exposure_seconds": self.reference_exposure_seconds,
             "readout_exposure_seconds": self.readout_exposure_seconds,
             "roi_xywh": None if self.roi_xywh is None else list(self.roi_xywh),
-            "integration_method": self.integration_method,
+            "default_model_kind": self.default_model_kind.value,
             "threshold_method": self.threshold_method,
-            "integration_half_width": self.integration_half_width,
-            "reducer": self.reducer,
+            "box_half_width": self.box_half_width,
+            "box_reducer": self.box_reducer,
+            "psf_half_width": self.psf_half_width,
+            "psf_padding": self.psf_padding,
             "detection_spot_sigma": self.detection_spot_sigma,
             "detection_min_distance": self.detection_min_distance,
             "detection_sigma": self.detection_sigma,
@@ -278,7 +294,7 @@ def _sequencer_snapshot(sequencer: object) -> dict[str, object]:
 
 
 class CalibrationTask:
-    """Drive one calibration protocol and return one saved artifact."""
+    """Drive one protocol and publish its preview, diagnostics, and artifact."""
 
     instance_id = "calibration"
 
@@ -323,6 +339,10 @@ class CalibrationTask:
     @property
     def result(self) -> CalibrationRunResult | None:
         return self._result
+
+    @property
+    def dataset_output_declarations(self):
+        return CALIBRATION_DATASET_DECLARATIONS
 
     def _resolve_pulse(self) -> ResolvedPulse:
         return resolve_pulse(
@@ -395,7 +415,12 @@ class CalibrationTask:
         pulse: ResolvedPulse,
         *,
         context: object | None,
-    ) -> tuple[CalibrationCapture, Mapping[str, object]]:
+        actual: CameraWorkingPoint,
+        pulse_facts: Mapping[str, object],
+    ) -> tuple[
+        CalibrationCapture,
+        Mapping[str, object],
+    ]:
         count = self.request.repeats * 3
         armed = False
         try:
@@ -408,6 +433,26 @@ class CalibrationTask:
             armed = True
             arm_sequencer(self.sequencer, pulse)
             sequencer_snapshot = _sequencer_snapshot(self.sequencer)
+            run_record = self._run_record(
+                actual,
+                sequencer_snapshot,
+                pulse_facts,
+            )
+            preview: CalibrationCapturePreviewSlot | None = None
+            if context is not None:
+                preview = CalibrationCapturePreviewSlot(
+                    repeats=self.request.repeats,
+                    frame_shape=actual.frame_shape_yx,
+                    dtype=actual.dtype,
+                    generation=context.generation,
+                    run_record=run_record,
+                )
+                context.attach_live_outputs(preview)
+                context.report_progress(
+                    "Capturing calibration",
+                    current=0,
+                    total=self.request.repeats,
+                )
             cycles: list[
                 tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord]
             ] = []
@@ -437,7 +482,15 @@ class CalibrationTask:
                     raise RuntimeError(
                         "camera returned an incomplete calibration cycle"
                     )
-                cycles.append((records[0], records[1], records[2]))
+                cycle = (records[0], records[1], records[2])
+                cycles.append(cycle)
+                if preview is not None:
+                    preview.update(cycle)
+                    context.report_progress(
+                        "Capturing calibration",
+                        current=len(cycles),
+                        total=self.request.repeats,
+                    )
             terminal = self.camera.finish_record_capture()
             armed = False
             if (
@@ -447,7 +500,10 @@ class CalibrationTask:
                 or not terminal.joined
             ):
                 raise RuntimeError("camera did not prove exact calibration completion")
-            return CalibrationCapture(tuple(cycles), terminal), sequencer_snapshot
+            return (
+                CalibrationCapture(tuple(cycles), terminal),
+                run_record,
+            )
         except BaseException:
             if armed:
                 self.camera.finish_record_capture()
@@ -472,6 +528,21 @@ class CalibrationTask:
             readout_mode=actual.readout_mode,
         )
 
+    def _run_record(
+        self,
+        actual: CameraWorkingPoint,
+        sequencer_snapshot: Mapping[str, object],
+        pulse_facts: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            "request": self.request.to_dict(),
+            "actual_devices": {
+                self.request.camera_key: _camera_snapshot(actual),
+                self.request.sequencer_key: dict(sequencer_snapshot),
+            },
+            "pulse": dict(pulse_facts),
+        }
+
     def _analyse(
         self,
         capture: CalibrationCapture,
@@ -481,10 +552,12 @@ class CalibrationTask:
             capture.reference,
             capture.short,
             frame_contract=contract,
-            method=self.request.integration_method,
+            default_model_kind=self.request.default_model_kind,
             threshold_method=self.request.threshold_method,
-            integration_half_width=self.request.integration_half_width,
-            reducer=self.request.reducer,
+            box_half_width=self.request.box_half_width,
+            box_reducer=self.request.box_reducer,
+            psf_half_width=self.request.psf_half_width,
+            psf_padding=self.request.psf_padding,
             detection_spot_sigma=self.request.detection_spot_sigma,
             detection_min_distance=self.request.detection_min_distance,
             detection_sigma=self.request.detection_sigma,
@@ -505,22 +578,22 @@ class CalibrationTask:
                     "camera configure_measurement must return CameraWorkingPoint"
                 )
             self._actual_working_point = actual
-            capture, sequencer_snapshot = self._capture(pulse, context=context)
+            capture, run_record = self._capture(
+                pulse,
+                context=context,
+                actual=actual,
+                pulse_facts=pulse_facts,
+            )
             contract = self._frame_contract(actual, pulse_facts)
+            if context is not None:
+                context.report_progress("Analysing calibration")
             analysis = self._analyse(capture, contract)
-            run_record = {
-                "request": self.request.to_dict(),
-                "actual_devices": {
-                    self.request.camera_key: _camera_snapshot(actual),
-                    self.request.sequencer_key: dict(sequencer_snapshot),
-                },
-                "pulse": dict(pulse_facts),
-            }
             artifact_report = dict(analysis.calibration.report)
             artifact_report["run_record"] = run_record
             calibration = TrapCalibration(
                 analysis.calibration.site_map,
-                analysis.calibration.readout_model,
+                analysis.calibration.models,
+                analysis.calibration.default_model_kind,
                 analysis.calibration.frame_contract,
                 artifact_report,
             )
@@ -529,6 +602,8 @@ class CalibrationTask:
                 "calibration",
                 ".json",
             )
+            if context is not None:
+                context.report_progress("Saving calibration")
             calibration.save(artifact_path)
             result = CalibrationRunResult(
                 artifact_path,
@@ -541,6 +616,21 @@ class CalibrationTask:
                 run_record,
             )
             self._result = result
+            if context is not None:
+                context.report_progress(
+                    "Calibration complete",
+                    current=self.request.repeats,
+                    total=self.request.repeats,
+                )
+                context.publish_final(
+                    calibration_final_outputs(
+                        calibration=calibration,
+                        capture_cycles=capture.cycles,
+                        report=analysis.report,
+                        generation=context.generation,
+                        run_record=run_record,
+                    )
+                )
             return result
         except BaseException:
             self._safe()

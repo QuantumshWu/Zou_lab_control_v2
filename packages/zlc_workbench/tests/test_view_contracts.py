@@ -38,7 +38,7 @@ from zlc_ui.pulse.scan_view import PulseScanView
 from zlc_ui.pulse.schedule_view import PulseScheduleView
 from zlc_ui.pulse.target_view import PulseTargetView
 from zlc_atom.devices.sequencer import device_types as atom_sequencer_types
-from zlc_atom.devices.sequencer.virtual import VirtualPulseStreamer
+from zlc_atom.devices.simulation import VirtualPulseStreamer
 from zlc_pulse import load_streamer_config, pulse_target_from_xdc
 from zlc_pulse import device, remote
 from zlc_pulse.device import PulseStreamer

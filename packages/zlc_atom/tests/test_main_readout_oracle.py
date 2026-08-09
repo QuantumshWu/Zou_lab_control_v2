@@ -9,6 +9,7 @@ import numpy as np
 from zlc_atom.nodes.calibration.bimodal import fit_bimodal, normal_cdf, per_site_fidelity
 from zlc_atom.nodes.calibration.calibration import (
     FrameContract,
+    ReadoutModelKind,
     calibrate,
     classify_threshold,
     detect_sites,
@@ -174,19 +175,27 @@ def test_main_oracle_data_driven_psf_fit_and_uniform_sibling() -> None:
     oracle = _load_oracle()
     kwargs = {
         "frame_contract": FrameContract((34, 40), exposure_seconds=0.005),
-        "integration_half_width": 3,
+        "box_half_width": 1,
+        "psf_half_width": 3,
         "psf_padding": 3,
     }
-    per_site = calibrate(oracle["input_reference_frames"], oracle["input_short_frames"], method="psf", **kwargs)
-    _assert_close(per_site.calibration.readout_model.psf_weights, oracle["psf_kernels"])
-    np.testing.assert_array_equal(per_site.calibration.readout_model.psf_boxes, oracle["psf_boxes_xywh"])
-    _assert_close(per_site.report["psf_fit_centers_xy"], oracle["psf_fit_centers_xy"])
-    _assert_close(per_site.report["psf_fit_sigma_xy"], oracle["psf_fit_sigma_xy"])
-    np.testing.assert_array_equal(per_site.report["psf_fit_ok"], oracle["psf_fit_ok"])
-    _assert_close(per_site.report["uniform_kernel"], oracle["uniform_kernel"])
-
-    uniform = calibrate(oracle["input_reference_frames"], oracle["input_short_frames"], method="uniform_psf", **kwargs)
-    _assert_close(uniform.calibration.readout_model.psf_weights[0], oracle["uniform_kernel"])
+    result = calibrate(
+        oracle["input_reference_frames"], oracle["input_short_frames"], **kwargs
+    )
+    assert tuple(model.kind.value for model in result.calibration.models) == MODEL_NAMES
+    per_site = result.calibration.select_model(ReadoutModelKind.PER_SITE_PSF)
+    uniform = result.calibration.select_model(ReadoutModelKind.UNIFORM_PSF)
+    _assert_close(per_site.psf_weights, oracle["psf_kernels"])
+    np.testing.assert_array_equal(per_site.psf_boxes, oracle["psf_boxes_xywh"])
+    per_site_report = result.report["models"]["psf"]
+    _assert_close(per_site_report["psf_fit_centers_xy"], oracle["psf_fit_centers_xy"])
+    _assert_close(per_site_report["psf_fit_sigma_xy"], oracle["psf_fit_sigma_xy"])
+    np.testing.assert_array_equal(per_site_report["psf_fit_ok"], oracle["psf_fit_ok"])
+    _assert_close(uniform.psf_weights[0], oracle["uniform_kernel"])
+    _assert_close(
+        result.report["models"]["uniform_psf"]["uniform_kernel"],
+        oracle["uniform_kernel"],
+    )
 
 
 def test_main_oracle_bimodal_components_and_threshold() -> None:
@@ -225,56 +234,58 @@ def test_main_oracle_grouped_calibration_end_to_end() -> None:
         oracle["input_reference_frames"],
         oracle["input_short_frames"],
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
-        method="box",
-        integration_half_width=1,
-        reducer="mean",
+        box_half_width=1,
+        box_reducer="mean",
     )
     report = result.report
-    assert result.calibration.readout_model.threshold_method == "empirical"
-    assert report["threshold_method"] == "empirical"
+    box_model = result.calibration.select_model(ReadoutModelKind.BOX)
+    box_report = report["models"]["box"]
+    assert box_model.threshold_method == "empirical"
+    assert box_report["threshold_method"] == "empirical"
     _assert_close(report["reference_average"], oracle["reference_average"])
-    _assert_close(report["reference_signals"], oracle["reference_box_signals"])
+    _assert_close(report["reference_label_signals"], oracle["reference_box_signals"])
     np.testing.assert_array_equal(report["labels_occupied"], oracle["labels_occupied"])
     np.testing.assert_array_equal(report["labels_dark"], oracle["labels_dark"])
     np.testing.assert_array_equal(report["labels_valid"], oracle["labels_valid"])
-    _assert_close(report["short_signals"], oracle["short_signals_box"])
-    _assert_close(result.calibration.readout_model.thresholds, oracle["thresholds_box"])
-    np.testing.assert_array_equal(report["predictions"], oracle["pred_box"])
-    assert int(np.count_nonzero(report["predictions"] != oracle["input_latent_occupancy"])) == 29
-    _assert_close(report["site_fidelity"], oracle["site_fidelity_box"])
+    _assert_close(box_report["short_signals"], oracle["short_signals_box"])
+    _assert_close(box_model.thresholds, oracle["thresholds_box"])
+    np.testing.assert_array_equal(box_report["predictions"], oracle["pred_box"])
+    assert int(np.count_nonzero(box_report["predictions"] != oracle["input_latent_occupancy"])) == 29
+    _assert_close(box_report["site_fidelity"], oracle["site_fidelity_box"])
     _assert_close(
         per_site_fidelity(
-            report["short_signals"],
+            box_report["short_signals"],
             report["labels_occupied"],
-            result.calibration.readout_model.thresholds,
+            box_model.thresholds,
             test_mask=report["split_test"],
             valid_mask=report["labels_valid"],
         ).balanced,
         oracle["site_fidelity_box"],
     )
-    _assert_close(report["site_fidelity_dark"], oracle["site_fidelity_dark_box"])
-    _assert_close(report["site_fidelity_bright"], oracle["site_fidelity_bright_box"])
-    _assert_close(report["site_model_fidelity"], oracle["site_model_fidelity_box"])
+    _assert_close(box_report["site_fidelity_dark"], oracle["site_fidelity_dark_box"])
+    _assert_close(box_report["site_fidelity_bright"], oracle["site_fidelity_bright_box"])
+    _assert_close(box_report["site_model_fidelity"], oracle["site_model_fidelity_box"])
     np.testing.assert_array_equal(report["split_train"], oracle["split_train_box"])
     np.testing.assert_array_equal(report["split_test"], oracle["split_test_box"])
-    np.testing.assert_array_equal(report["site_n_test"], oracle["site_n_test_box"])
-    np.testing.assert_array_equal(report["site_n_train_dark"], oracle["site_n_train_dark_box"])
-    np.testing.assert_array_equal(report["site_n_train_bright"], oracle["site_n_train_bright_box"])
+    np.testing.assert_array_equal(box_report["site_n_test"], oracle["site_n_test_box"])
+    np.testing.assert_array_equal(box_report["site_n_train_dark"], oracle["site_n_train_dark_box"])
+    np.testing.assert_array_equal(box_report["site_n_train_bright"], oracle["site_n_train_bright_box"])
 
     gaussian = calibrate(
         oracle["input_reference_frames"],
         oracle["input_short_frames"],
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
-        method="box",
         threshold_method="gaussian",
-        integration_half_width=1,
-        reducer="mean",
+        box_half_width=1,
+        box_reducer="mean",
     )
-    assert gaussian.calibration.readout_model.threshold_method == "gaussian"
-    assert gaussian.report["threshold_method"] == "gaussian"
+    gaussian_model = gaussian.calibration.select_model(ReadoutModelKind.BOX)
+    gaussian_report = gaussian.report["models"]["box"]
+    assert gaussian_model.threshold_method == "gaussian"
+    assert gaussian_report["threshold_method"] == "gaussian"
     np.testing.assert_allclose(
-        gaussian.calibration.readout_model.thresholds,
-        gaussian.report["gaussian_thresholds"],
+        gaussian_model.thresholds,
+        gaussian_report["gaussian_thresholds"],
         equal_nan=True,
     )
 

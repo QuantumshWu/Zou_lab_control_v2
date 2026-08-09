@@ -27,7 +27,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.calibration import FrameContract, ReadoutModel, SiteMap, TrapCalibration
+from zlc_atom.nodes.calibration import (
+    FrameContract,
+    ReadoutModel,
+    ReadoutModelKind,
+    SiteMap,
+    TrapCalibration,
+)
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -104,7 +110,8 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             [True],
             [1.0],
         ),
-        ReadoutModel(site_ids, [0.0], [True], [1.0]),
+        (ReadoutModel(site_ids, [0.0], [True], [1.0]),),
+        ReadoutModelKind.BOX,
         frame_contract,
     )
     calibration_path = calibration.save(tmp_path / "calibration.json")
@@ -117,7 +124,8 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     assert processor.calibration_path == calibration_path.resolve()
     incompatible = TrapCalibration(
         calibration.site_map,
-        calibration.readout_model,
+        calibration.models,
+        calibration.default_model_kind,
         FrameContract(
             frame_contract.image_shape,
             sensor_shape=frame_contract.sensor_shape,
@@ -174,6 +182,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             "parameters": {
                 "frames_signal": source_name,
                 "calibration_path": str(calibration_path.resolve()),
+                "model_kind": "box",
             },
         }
         assert publication.run_record == expected_record

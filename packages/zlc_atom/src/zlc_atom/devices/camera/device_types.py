@@ -3,39 +3,11 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.camera.contract import CameraAcquisitionMode
+from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.dcam import DcamCameraAdapter, DcamCameraConfig
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
-from zlc_atom.devices.camera.virtual import VirtualCamera, VirtualCameraConfig
-from zlc_atom.execution import DeviceIdentityEvidenceKind, PhysicalDeviceIdentity, ResourceKey, SafetyOperation, bind_verified_device
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
-from .world import (
-    DEFAULT_SIMULATION_GRID_SHAPE_YX,
-    DEFAULT_SIMULATION_IMAGE_SHAPE_YX,
-    SimulationGeometry,
-    SimulationWorld,
-    SimulationWorldConfig,
-)
 
-
-# Each camera type declares the parameters IT has.  One shared schema meant the
-# virtual camera's vocabulary -- a grid of simulated atoms and a random seed --
-# was the only thing any camera could be configured with, so a real sensor could
-# not be given a device index, an ROI, a binning or a readout speed.  An operator
-# could see the qCMOS in the catalogue and had no way to set it up.
-
-VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
-    (
-        AuthoringField(
-            "frame_shape_yx", "pair", "Frame shape (Y,X)", DEFAULT_SIMULATION_IMAGE_SHAPE_YX
-        ),
-        AuthoringField(
-            "grid_shape_yx", "pair", "Grid shape (Y,X)", DEFAULT_SIMULATION_GRID_SHAPE_YX
-        ),
-        AuthoringField("seed", "int", "Seed", 0, minimum=0),
-        AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9),
-    )
-)
 
 #: A physical sensor: which one, how long, how fast, and which corner of it.
 #: ROI is four independently optional numbers, and leaving them unset means the
@@ -114,61 +86,7 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
         camera=values.get("camera"),
     )
     camera.open()
-    return _bind_camera(context, key, camera, f"pylon-camera:{key}", "camera.pylon")
-
-
-def _bind_camera(context, key: str, camera: object, identity: str, type_id: str) -> InstalledLeaf:
-    broker = context.broker
-    binding, proof = bind_verified_device(
-        broker,
-        key=ResourceKey.parse(f"device/{key}"),
-        identity_probe=lambda: PhysicalDeviceIdentity(identity, DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT),
-        execute_command=lambda command: getattr(camera, "trigger")(int(command or 1)),
-        capability_probe=lambda: {
-            "camera.adapter": camera,
-            "camera.working_point": camera.capture_working_point(),
-        },
-        close_session=lambda _command: getattr(camera, "finish_record_capture")() if getattr(camera, "capture_state")() else None,
-        interrupt_operations={SafetyOperation.DISARM: lambda: getattr(camera, "finish_record_capture")()},
-    )
-    capabilities = dict(proof.snapshot)
-    return InstalledLeaf(key, type_id, camera, capabilities, binding=binding, closer=getattr(camera, "close", None))
-
-
-def _virtual_factory(context, key: str, values: dict) -> InstalledLeaf:
-    if not isinstance(context.world, SimulationWorld):
-        raise TypeError("camera.virtual requires the installation SimulationWorld")
-    world = context.world
-    authored = VIRTUAL_CAMERA_SCHEMA.freeze(values)
-    geometry = world.geometry
-    config = VirtualCameraConfig(
-        frame_shape_yx=tuple(values.get("frame_shape_yx", geometry.image_shape_yx)),
-        grid_shape_yx=tuple(values.get("grid_shape_yx", geometry.grid_shape_yx)),
-        seed=int(authored["seed"]),
-        exposure_seconds=float(authored["exposure_seconds"]),
-    )
-    if config.frame_shape_yx != geometry.image_shape_yx or config.grid_shape_yx != geometry.grid_shape_yx:
-        raise ValueError("camera virtual geometry must share SimulationWorld geometry")
-    camera = VirtualCamera(
-        config,
-        frame_source=lambda ordinal, exposure: world.render_frame(
-            ordinal,
-            exposure_seconds=exposure,
-        ),
-    )
-    world.register_camera(camera)
-    return _bind_camera(context, key, camera, f"virtual-camera:{key}", "camera.virtual")
-
-
-def _world_config(values: dict) -> SimulationWorldConfig:
-    authored = VIRTUAL_CAMERA_SCHEMA.freeze(values)
-    return SimulationWorldConfig(
-        SimulationGeometry(
-            grid_shape_yx=tuple(authored["grid_shape_yx"]),
-            image_shape_yx=tuple(authored["frame_shape_yx"]),
-        ),
-        seed=int(authored["seed"]),
-    )
+    return bind_camera(context, key, camera, f"pylon-camera:{key}", "camera.pylon")
 
 
 def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -196,7 +114,7 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
         ),
         driver=driver,
     )
-    return _bind_camera(context, key, camera, f"dcam-camera:{key}", "camera.dcam")
+    return bind_camera(context, key, camera, f"dcam-camera:{key}", "camera.dcam")
 
 
 DEVICE_TYPES = (
@@ -214,19 +132,10 @@ DEVICE_TYPES = (
         ("camera.adapter", "camera.working_point"),
         factory=_pylon_factory,
     ),
-    DeviceTypeDescriptor(
-        "camera.virtual",
-        "camera",
-        VIRTUAL_CAMERA_SCHEMA,
-        ("camera.adapter", "camera.working_point"),
-        factory=_virtual_factory,
-        world_config=_world_config,
-    ),
 )
 
 __all__ = [
     "DCAM_CAMERA_SCHEMA",
     "DEVICE_TYPES",
     "PYLON_CAMERA_SCHEMA",
-    "VIRTUAL_CAMERA_SCHEMA",
 ]

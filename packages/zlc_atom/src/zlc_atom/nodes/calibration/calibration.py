@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
@@ -13,6 +14,34 @@ from zlc_durable import write_readable_json
 
 from .bimodal import fit_bimodal, finite_mean, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity
 from .psf import extract_psf_window, gaussian_psf_kernel
+
+
+class ReadoutModelKind(str, Enum):
+    """The closed set of readout feature models stored by a calibration."""
+
+    BOX = "box"
+    PER_SITE_PSF = "psf"
+    UNIFORM_PSF = "uniform_psf"
+
+
+DEFAULT_READOUT_MODEL_CHOICE = "default"
+READOUT_MODEL_CHOICES = (
+    DEFAULT_READOUT_MODEL_CHOICE,
+    *(kind.value for kind in ReadoutModelKind),
+)
+
+
+def readout_model_kind_from_choice(
+    value: object,
+) -> ReadoutModelKind | None:
+    """Resolve the authored request for the artifact-selected default."""
+
+    if value == DEFAULT_READOUT_MODEL_CHOICE:
+        return None
+    try:
+        return ReadoutModelKind(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unknown readout model choice {value!r}") from exc
 
 
 def _shape(value: object, field_name: str) -> tuple[int, int]:
@@ -282,14 +311,14 @@ class ReadoutModel:
     thresholds: np.ndarray
     usable_sites: np.ndarray
     quality: np.ndarray
-    method: str = "box"
+    kind: ReadoutModelKind = ReadoutModelKind.BOX
     integration_half_width: int = 1
-    reducer: str = "mean"
+    reducer: str | None = "mean"
     threshold_method: str = "empirical"
     psf_weights: np.ndarray | None = None
     psf_boxes: np.ndarray | None = None
-    background: str = "none"
-    psf_padding: int = 3
+    background: str | None = None
+    psf_padding: int | None = None
 
     def __post_init__(self) -> None:
         site_ids = _site_ids(self.site_ids)
@@ -299,37 +328,50 @@ class ReadoutModel:
         thresholds = _immutable_array(thresholds.reshape(-1), "<f8", (len(site_ids),))
         usable = _immutable_array(self.usable_sites, "?", (len(site_ids),))
         quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
-        method = str(self.method).lower()
-        if method not in {"box", "psf", "uniform_psf"}:
-            raise ValueError("method must be 'box', 'psf', or 'uniform_psf'")
+        if not isinstance(self.kind, ReadoutModelKind):
+            raise TypeError("kind must be ReadoutModelKind")
         half_width = int(self.integration_half_width)
         if half_width < 0:
             raise ValueError("integration_half_width must be non-negative")
-        reducer = str(self.reducer).lower()
-        if reducer not in {"mean", "sum", "median", "max"}:
-            raise ValueError("reducer must be mean, sum, median, or max")
         threshold_method = str(self.threshold_method).lower()
         if threshold_method not in {"empirical", "gaussian"}:
             raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
-        background = str(self.background).lower()
-        if background not in {"none", "annulus"}:
-            raise ValueError("background must be 'none' or 'annulus'")
-        padding = int(self.psf_padding)
-        if padding <= 0:
-            raise ValueError("psf_padding must be positive")
+        reducer: str | None
+        background: str | None
+        padding: int | None
         weights = boxes = None
-        if method in {"psf", "uniform_psf"}:
+        if self.kind is ReadoutModelKind.BOX:
+            reducer = str(self.reducer).lower()
+            if reducer not in {"mean", "sum", "median", "max"}:
+                raise ValueError("box reducer must be mean, sum, median, or max")
+            if self.psf_weights is not None or self.psf_boxes is not None:
+                raise ValueError("box model cannot carry PSF features")
+            if self.background is not None or self.psf_padding is not None:
+                raise ValueError("box model cannot carry PSF background parameters")
+            background = None
+            padding = None
+        else:
+            if self.reducer is not None:
+                raise ValueError("PSF model cannot carry a box reducer")
             if self.psf_weights is None or self.psf_boxes is None:
                 raise ValueError("PSF calibration requires psf_weights and psf_boxes")
             weights = _immutable_array(self.psf_weights, "<f8")
             boxes = _immutable_array(self.psf_boxes, "<i8")
             if weights.ndim != 3 or weights.shape[0] != len(site_ids) or boxes.shape != (len(site_ids), 4):
                 raise ValueError("PSF arrays have incompatible shapes")
+            background = str(self.background).lower()
+            if background not in {"none", "annulus"}:
+                raise ValueError("PSF background must be 'none' or 'annulus'")
+            if self.psf_padding is None:
+                raise ValueError("PSF model requires psf_padding")
+            padding = int(self.psf_padding)
+            if padding <= 0:
+                raise ValueError("psf_padding must be positive")
+            reducer = None
         object.__setattr__(self, "site_ids", site_ids)
         object.__setattr__(self, "thresholds", thresholds)
         object.__setattr__(self, "usable_sites", usable)
         object.__setattr__(self, "quality", quality)
-        object.__setattr__(self, "method", method)
         object.__setattr__(self, "integration_half_width", half_width)
         object.__setattr__(self, "reducer", reducer)
         object.__setattr__(self, "threshold_method", threshold_method)
@@ -340,13 +382,13 @@ class ReadoutModel:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "kind": self.kind.value,
             "site_ids": list(self.site_ids),
             "thresholds": _nullable_floats(self.thresholds),
             "usable_sites": self.usable_sites.tolist(),
             "quality": _nullable_floats(self.quality),
             "threshold_method": self.threshold_method,
             "integration": {
-                "method": self.method,
                 "half_width": self.integration_half_width,
                 "reducer": self.reducer,
                 "psf_weights": None if self.psf_weights is None else self.psf_weights.tolist(),
@@ -364,7 +406,7 @@ class ReadoutModel:
             _floats_from_json(payload["thresholds"]),
             np.asarray(payload["usable_sites"]),
             _floats_from_json(payload["quality"]),
-            method=integration["method"],
+            kind=ReadoutModelKind(payload["kind"]),
             integration_half_width=integration["half_width"],
             reducer=integration["reducer"],
             threshold_method=payload["threshold_method"],
@@ -377,41 +419,66 @@ class ReadoutModel:
 
 @dataclass(frozen=True)
 class TrapCalibration:
-    """One aligned SiteMap, readout model, frame contract, and report."""
+    """One SiteMap and the aligned readout models trained from one capture."""
 
     site_map: SiteMap
-    readout_model: ReadoutModel
+    models: tuple[ReadoutModel, ...]
+    default_model_kind: ReadoutModelKind
     frame_contract: FrameContract
     report: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.site_map, SiteMap):
             raise TypeError("site_map must be SiteMap")
-        if not isinstance(self.readout_model, ReadoutModel):
-            raise TypeError("readout_model must be ReadoutModel")
+        models = tuple(self.models)
+        if not models or any(not isinstance(model, ReadoutModel) for model in models):
+            raise TypeError("models must contain at least one ReadoutModel")
         if not isinstance(self.frame_contract, FrameContract):
             raise TypeError("frame_contract must be FrameContract")
-        if self.site_map.site_ids != self.readout_model.site_ids:
-            raise ValueError("SiteMap and ReadoutModel site_ids must align")
+        kinds = tuple(model.kind for model in models)
+        if len(set(kinds)) != len(kinds):
+            raise ValueError("models must contain at most one model of each kind")
+        if kinds != tuple(kind for kind in ReadoutModelKind if kind in kinds):
+            raise ValueError("models must follow ReadoutModelKind order")
+        if not isinstance(self.default_model_kind, ReadoutModelKind):
+            raise TypeError("default_model_kind must be ReadoutModelKind")
+        if self.default_model_kind not in kinds:
+            raise ValueError("default_model_kind must name a stored model")
+        if any(self.site_map.site_ids != model.site_ids for model in models):
+            raise ValueError("SiteMap and every ReadoutModel site_ids must align")
+        object.__setattr__(self, "models", models)
         object.__setattr__(self, "report", dict(self.report))
 
     @property
     def n_sites(self) -> int:
         return self.site_map.n_sites
 
-    def signals(self, image: object, *, method: str | None = None) -> np.ndarray:
+    def select_model(
+        self, kind: ReadoutModelKind | None = None
+    ) -> ReadoutModel:
+        selected = self.default_model_kind if kind is None else kind
+        if not isinstance(selected, ReadoutModelKind):
+            raise TypeError("kind must be ReadoutModelKind or None")
+        for model in self.models:
+            if model.kind is selected:
+                return model
+        raise KeyError(selected)
+
+    def signals(
+        self,
+        image: object,
+        *,
+        model_kind: ReadoutModelKind | None = None,
+    ) -> np.ndarray:
         array = np.asarray(image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image)
         array = self.frame_contract.assert_image(array)
-        model = self.readout_model
-        selected = model.method if method in (None, "") else str(method).lower()
-        if selected != model.method:
-            raise ValueError(f"calibration owns method {model.method!r}, not {selected!r}")
-        if selected == "box":
+        model = self.select_model(model_kind)
+        if model.kind is ReadoutModelKind.BOX:
             values = extract_box_signals(
                 array,
                 self.site_map.centers_xy,
                 radius=model.integration_half_width,
-                reducer=model.reducer,
+                reducer=model.reducer,  # type: ignore[arg-type]
             )
         else:
             values = extract_psf_signals(
@@ -425,16 +492,23 @@ class TrapCalibration:
             )
         return np.where(self.site_map.valid_sites & model.usable_sites, values, np.nan)
 
-    def detect(self, image: object, *, method: str | None = None) -> AtomDetection:
-        values = self.signals(image, method=method)
-        thresholds = self.readout_model.thresholds
+    def detect(
+        self,
+        image: object,
+        *,
+        model_kind: ReadoutModelKind | None = None,
+    ) -> AtomDetection:
+        model = self.select_model(model_kind)
+        values = self.signals(image, model_kind=model.kind)
+        thresholds = model.thresholds
         occupied = classify_threshold(values, thresholds)
         return AtomDetection(values, occupied, tuple(np.flatnonzero(occupied)), thresholds)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "site_map": self.site_map.to_dict(),
-            "readout_model": self.readout_model.to_dict(),
+            "models": [model.to_dict() for model in self.models],
+            "default_model_kind": self.default_model_kind.value,
             "frame_contract": self.frame_contract.to_dict(),
             "report": dict(self.report),
         }
@@ -443,7 +517,8 @@ class TrapCalibration:
     def from_dict(cls, payload: Mapping[str, Any]) -> "TrapCalibration":
         return cls(
             SiteMap.from_dict(payload["site_map"]),
-            ReadoutModel.from_dict(payload["readout_model"]),
+            tuple(ReadoutModel.from_dict(model) for model in payload["models"]),
+            ReadoutModelKind(payload["default_model_kind"]),
             FrameContract.from_dict(payload["frame_contract"]),
             payload["report"],
         )
@@ -807,107 +882,30 @@ def _seeded_train_test(occupied: np.ndarray, valid: np.ndarray, *, train_fractio
     return train, test
 
 
-def calibrate(
-    reference_frames: object,
-    short_frames: object,
+def _train_readout_model(
     *,
-    frame_contract: FrameContract,
-    method: str = "box",
-    threshold_method: str = "empirical",
-    integration_half_width: int = 1,
-    reducer: str = "mean",
-    detection_spot_sigma: float = 1.0,
-    detection_min_distance: int = 3,
-    detection_sigma: float = 6.0,
-    train_fraction: float = 0.9,
-    split_seed: int = 0,
-    histogram_bins: int = 120,
-    max_drop: int = 5,
-    psf_padding: int = 3,
-) -> CalibrationResult:
-    """Calibrate using grouped reference labels and held-out short frames."""
+    kind: ReadoutModelKind,
+    site_map: SiteMap,
+    reference_signals: np.ndarray,
+    short_signals: np.ndarray,
+    labels_occupied: np.ndarray,
+    labels_valid: np.ndarray,
+    train: np.ndarray,
+    test: np.ndarray,
+    threshold_method: str,
+    histogram_bins: int,
+    model_parameters: Mapping[str, Any],
+    diagnostics: Mapping[str, Any] | None = None,
+) -> tuple[ReadoutModel, dict[str, Any]]:
+    """Train one feature model against the shared labels and split."""
 
-    references = _coerce_reference_stack(reference_frames, frame_contract)
-    shorts = _coerce_short_stack(short_frames, frame_contract)
-    if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
-        raise ValueError("reference and short frames must share non-empty group counts")
-    reference_average = finite_mean(references, axis=(0, 1))
-    site_map = detect_sites(
-        reference_average,
-        spot_sigma=detection_spot_sigma,
-        min_distance=detection_min_distance,
-        detection_sigma=detection_sigma,
-    )
     centers = site_map.centers_xy
-    method = str(method).lower()
-    threshold_method = str(threshold_method).lower()
-    if threshold_method not in {"empirical", "gaussian"}:
-        raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
-    if method == "box":
-        extractor = lambda frame: extract_box_signals(
-            frame,
-            centers,
-            radius=integration_half_width,
-            reducer=reducer,
-        )
-        calibration_kwargs: dict[str, Any] = {}
-    elif method in {"psf", "uniform_psf"}:
-        per_site_weights, uniform_weight, boxes, psf_fit_centers, psf_fit_sigmas, psf_fit_ok = _fit_psf_features(
-            reference_average,
-            centers,
-            radius=integration_half_width,
-            padding=psf_padding,
-        )
-        weights = per_site_weights if method == "psf" else np.broadcast_to(uniform_weight, per_site_weights.shape).copy()
-        extractor = lambda frame: extract_psf_signals(
-            frame,
-            centers,
-            kernels=weights,
-            boxes_xywh=boxes,
-            background="annulus",
-            radius=integration_half_width,
-            padding=psf_padding,
-        )
-        calibration_kwargs = {
-            "psf_weights": weights,
-            "psf_boxes": boxes,
-            "background": "annulus",
-            "psf_padding": psf_padding,
-        }
-    else:
-        raise ValueError("method must be 'box', 'psf', or 'uniform_psf'")
-    reference_signals = np.asarray([[extractor(frame) for frame in group] for group in references], dtype=float)
-    short_signals = np.asarray([extractor(frame) for frame in shorts], dtype=float)
-    reference_valid = np.isfinite(reference_signals)
-    fits = tuple(fit_bimodal(reference_signals[:, :, site][reference_valid[:, :, site]]) for site in range(len(centers)))
-    bright = np.zeros_like(reference_signals, dtype=bool)
-    fit_ok = np.zeros(len(centers), dtype=bool)
-    for site, fit in enumerate(fits):
-        if fit.ok and fit.bright_above and np.isfinite(fit.threshold):
-            reference_values = reference_signals[:, :, site]
-            bright[:, :, site] = classify_threshold(
-                reference_values,
-                np.full(reference_values.shape, fit.threshold, dtype=float),
-                bright_above=True,
-            )
-            fit_ok[site] = True
-    every_reference_valid = np.all(reference_valid, axis=1)
-    all_bright = np.all(bright, axis=1)
-    all_dark = np.all(~bright, axis=1)
-    labels_valid = every_reference_valid & (all_bright | all_dark) & fit_ok[np.newaxis, :]
-    labels_occupied = all_bright & labels_valid
-    labels_dark = all_dark & labels_valid
-    train, test = _seeded_train_test(labels_occupied, labels_valid, train_fraction=train_fraction, seed=split_seed)
     common_validity = labels_valid & np.isfinite(short_signals)
     edges = _common_bin_edges(short_signals, common_validity, bins=histogram_bins)
     thresholds = np.full(len(centers), np.nan, dtype=float)
     predictions = np.zeros_like(short_signals, dtype=bool)
-    site_fidelity = np.full(len(centers), np.nan, dtype=float)
-    site_fidelity_dark = np.full(len(centers), np.nan, dtype=float)
-    site_fidelity_bright = np.full(len(centers), np.nan, dtype=float)
     site_model_fidelity = np.full(len(centers), np.nan, dtype=float)
     gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
-    n_test = np.zeros(len(centers), dtype=int)
     n_train_dark = np.zeros(len(centers), dtype=int)
     n_train_bright = np.zeros(len(centers), dtype=int)
     for site in range(len(centers)):
@@ -966,55 +964,289 @@ def calibrate(
         valid_mask=labels_valid,
     )
     site_fidelity = confusion.balanced
-    site_fidelity_dark = confusion.dark
-    site_fidelity_bright = confusion.bright
-    n_test = confusion.tested
     usable_sites = site_map.valid_sites & np.isfinite(thresholds)
     readout_model = ReadoutModel(
         site_map.site_ids,
         thresholds,
         usable_sites,
         site_fidelity,
-        method=method,
-        integration_half_width=integration_half_width,
-        reducer=reducer,
+        kind=kind,
         threshold_method=threshold_method,
-        **calibration_kwargs,
+        **dict(model_parameters),
     )
-    calibration_report = {
-        "detected_sites": site_map.n_sites,
-        "integration_method": method,
-        "threshold_method": threshold_method,
-        "site_detection_quality": _nullable_floats(site_map.quality),
-        "site_readout_quality": _nullable_floats(site_fidelity),
-        "site_n_test": [int(value) for value in n_test],
-        "site_n_train_dark": [int(value) for value in n_train_dark],
-        "site_n_train_bright": [int(value) for value in n_train_bright],
-    }
-    calibration = TrapCalibration(site_map, readout_model, frame_contract, calibration_report)
     report = {
-        "site_ids": site_map.site_ids,
-        "site_centers_xy": site_map.centers_xy,
-        "site_detection_quality": site_map.quality,
-        "site_valid": site_map.valid_sites,
-        "site_usable": usable_sites,
-        "reference_average": reference_average,
+        "kind": kind.value,
         "reference_signals": reference_signals,
-        "labels_occupied": labels_occupied,
-        "labels_dark": labels_dark,
-        "labels_valid": labels_valid,
         "short_signals": short_signals,
         "thresholds": thresholds,
         "gaussian_thresholds": gaussian_thresholds,
         "threshold_method": threshold_method,
         "predictions": predictions,
+        "site_usable": usable_sites,
         "site_fidelity": site_fidelity,
-        "site_fidelity_dark": site_fidelity_dark,
-        "site_fidelity_bright": site_fidelity_bright,
+        "site_fidelity_dark": confusion.dark,
+        "site_fidelity_bright": confusion.bright,
         "site_model_fidelity": site_model_fidelity,
-        "site_n_test": n_test,
+        "site_n_test": confusion.tested,
         "site_n_train_dark": n_train_dark,
         "site_n_train_bright": n_train_bright,
+    }
+    report.update(dict(diagnostics or {}))
+    return readout_model, report
+
+
+def calibrate(
+    reference_frames: object,
+    short_frames: object,
+    *,
+    frame_contract: FrameContract,
+    default_model_kind: ReadoutModelKind = ReadoutModelKind.BOX,
+    threshold_method: str = "empirical",
+    box_half_width: int = 1,
+    box_reducer: str = "mean",
+    psf_half_width: int = 3,
+    psf_padding: int = 3,
+    detection_spot_sigma: float = 1.0,
+    detection_min_distance: int = 3,
+    detection_sigma: float = 6.0,
+    train_fraction: float = 0.9,
+    split_seed: int = 0,
+    histogram_bins: int = 120,
+) -> CalibrationResult:
+    """Discover sites once and train all readout models from one capture."""
+
+    if not isinstance(default_model_kind, ReadoutModelKind):
+        raise TypeError("default_model_kind must be ReadoutModelKind")
+    threshold_method = str(threshold_method).lower()
+    if threshold_method not in {"empirical", "gaussian"}:
+        raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
+    box_half_width = int(box_half_width)
+    psf_half_width = int(psf_half_width)
+    psf_padding = int(psf_padding)
+    if box_half_width < 0 or psf_half_width < 0:
+        raise ValueError("integration half-widths must be non-negative")
+    if psf_padding <= 0:
+        raise ValueError("psf_padding must be positive")
+    box_reducer = str(box_reducer).lower()
+    if box_reducer not in {"mean", "sum", "median", "max"}:
+        raise ValueError("box_reducer must be mean, sum, median, or max")
+
+    references = _coerce_reference_stack(reference_frames, frame_contract)
+    shorts = _coerce_short_stack(short_frames, frame_contract)
+    if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
+        raise ValueError("reference and short frames must share non-empty group counts")
+    reference_average = finite_mean(references, axis=(0, 1))
+    site_map = detect_sites(
+        reference_average,
+        spot_sigma=detection_spot_sigma,
+        min_distance=detection_min_distance,
+        detection_sigma=detection_sigma,
+    )
+    centers = site_map.centers_xy
+
+    box_extractor: Callable[[np.ndarray], np.ndarray] = lambda frame: extract_box_signals(
+        frame,
+        centers,
+        radius=box_half_width,
+        reducer=box_reducer,
+    )
+    reference_label_signals = np.asarray(
+        [[box_extractor(frame) for frame in group] for group in references],
+        dtype=float,
+    )
+    reference_valid = np.isfinite(reference_label_signals)
+    fits = tuple(
+        fit_bimodal(
+            reference_label_signals[:, :, site][reference_valid[:, :, site]]
+        )
+        for site in range(len(centers))
+    )
+    bright = np.zeros_like(reference_label_signals, dtype=bool)
+    fit_ok = np.zeros(len(centers), dtype=bool)
+    for site, fit in enumerate(fits):
+        if fit.ok and fit.bright_above and np.isfinite(fit.threshold):
+            reference_values = reference_label_signals[:, :, site]
+            bright[:, :, site] = classify_threshold(
+                reference_values,
+                np.full(reference_values.shape, fit.threshold, dtype=float),
+                bright_above=True,
+            )
+            fit_ok[site] = True
+    every_reference_valid = np.all(reference_valid, axis=1)
+    all_bright = np.all(bright, axis=1)
+    all_dark = np.all(~bright, axis=1)
+    labels_valid = (
+        every_reference_valid
+        & (all_bright | all_dark)
+        & fit_ok[np.newaxis, :]
+    )
+    labels_occupied = all_bright & labels_valid
+    labels_dark = all_dark & labels_valid
+    train, test = _seeded_train_test(
+        labels_occupied,
+        labels_valid,
+        train_fraction=train_fraction,
+        seed=split_seed,
+    )
+
+    (
+        per_site_weights,
+        uniform_weight,
+        psf_boxes,
+        psf_fit_centers,
+        psf_fit_sigmas,
+        psf_fit_ok,
+    ) = _fit_psf_features(
+        reference_average,
+        centers,
+        radius=psf_half_width,
+        padding=psf_padding,
+    )
+    uniform_weights = np.broadcast_to(
+        uniform_weight, per_site_weights.shape
+    ).copy()
+
+    def psf_extractor(weights: np.ndarray) -> Callable[[np.ndarray], np.ndarray]:
+        return lambda frame: extract_psf_signals(
+            frame,
+            centers,
+            kernels=weights,
+            boxes_xywh=psf_boxes,
+            background="annulus",
+            radius=psf_half_width,
+            padding=psf_padding,
+        )
+
+    feature_specs: tuple[
+        tuple[
+            ReadoutModelKind,
+            Callable[[np.ndarray], np.ndarray],
+            Mapping[str, Any],
+            Mapping[str, Any],
+        ],
+        ...,
+    ] = (
+        (
+            ReadoutModelKind.BOX,
+            box_extractor,
+            {
+                "integration_half_width": box_half_width,
+                "reducer": box_reducer,
+            },
+            {},
+        ),
+        (
+            ReadoutModelKind.PER_SITE_PSF,
+            psf_extractor(per_site_weights),
+            {
+                "integration_half_width": psf_half_width,
+                "reducer": None,
+                "psf_weights": per_site_weights,
+                "psf_boxes": psf_boxes,
+                "background": "annulus",
+                "psf_padding": psf_padding,
+            },
+            {
+                "psf_fit_centers_xy": psf_fit_centers,
+                "psf_fit_sigma_xy": psf_fit_sigmas,
+                "psf_fit_ok": psf_fit_ok,
+                "psf_boxes_xywh": psf_boxes,
+                "psf_kernels": per_site_weights,
+            },
+        ),
+        (
+            ReadoutModelKind.UNIFORM_PSF,
+            psf_extractor(uniform_weights),
+            {
+                "integration_half_width": psf_half_width,
+                "reducer": None,
+                "psf_weights": uniform_weights,
+                "psf_boxes": psf_boxes,
+                "background": "annulus",
+                "psf_padding": psf_padding,
+            },
+            {
+                "psf_fit_centers_xy": psf_fit_centers,
+                "psf_fit_sigma_xy": psf_fit_sigmas,
+                "psf_fit_ok": psf_fit_ok,
+                "psf_boxes_xywh": psf_boxes,
+                "uniform_kernel": uniform_weight,
+            },
+        ),
+    )
+    models: list[ReadoutModel] = []
+    model_reports: dict[str, dict[str, Any]] = {}
+    for kind, extractor, parameters, diagnostics in feature_specs:
+        reference_signals = (
+            reference_label_signals
+            if kind is ReadoutModelKind.BOX
+            else np.asarray(
+                [[extractor(frame) for frame in group] for group in references],
+                dtype=float,
+            )
+        )
+        short_signals = np.asarray(
+            [extractor(frame) for frame in shorts], dtype=float
+        )
+        model, model_report = _train_readout_model(
+            kind=kind,
+            site_map=site_map,
+            reference_signals=reference_signals,
+            short_signals=short_signals,
+            labels_occupied=labels_occupied,
+            labels_valid=labels_valid,
+            train=train,
+            test=test,
+            threshold_method=threshold_method,
+            histogram_bins=histogram_bins,
+            model_parameters=parameters,
+            diagnostics=diagnostics,
+        )
+        models.append(model)
+        model_reports[kind.value] = model_report
+
+    calibration_report = {
+        "detected_sites": site_map.n_sites,
+        "default_model_kind": default_model_kind.value,
+        "site_detection_quality": _nullable_floats(site_map.quality),
+        "models": {
+            model.kind.value: {
+                "threshold_method": model.threshold_method,
+                "site_readout_quality": _nullable_floats(model.quality),
+                "site_n_test": [
+                    int(value)
+                    for value in model_reports[model.kind.value]["site_n_test"]
+                ],
+                "site_n_train_dark": [
+                    int(value)
+                    for value in model_reports[model.kind.value]["site_n_train_dark"]
+                ],
+                "site_n_train_bright": [
+                    int(value)
+                    for value in model_reports[model.kind.value]["site_n_train_bright"]
+                ],
+            }
+            for model in models
+        },
+    }
+    calibration = TrapCalibration(
+        site_map,
+        tuple(models),
+        default_model_kind,
+        frame_contract,
+        calibration_report,
+    )
+    report = {
+        "site_ids": site_map.site_ids,
+        "site_centers_xy": site_map.centers_xy,
+        "site_detection_quality": site_map.quality,
+        "site_valid": site_map.valid_sites,
+        "reference_average": reference_average,
+        "reference_label_model_kind": ReadoutModelKind.BOX.value,
+        "reference_label_signals": reference_label_signals,
+        "labels_occupied": labels_occupied,
+        "labels_dark": labels_dark,
+        "labels_valid": labels_valid,
         "split_train": train,
         "split_test": test,
         "fits": fits,
@@ -1026,45 +1258,49 @@ def calibrate(
         "reference_fit_bright_sigma": np.asarray([fit.bright_sigma for fit in fits]),
         "reference_fit_bright_above": np.asarray([fit.bright_above for fit in fits]),
         "reference_fit_ok": np.asarray([fit.ok for fit in fits]),
+        "models": model_reports,
     }
-    if method in {"psf", "uniform_psf"}:
-        report.update(
-            {
-                "psf_fit_centers_xy": psf_fit_centers,
-                "psf_fit_sigma_xy": psf_fit_sigmas,
-                "psf_fit_ok": psf_fit_ok,
-                "psf_boxes_xywh": boxes,
-                "psf_kernels": per_site_weights,
-                "uniform_kernel": uniform_weight,
-            }
-        )
     return CalibrationResult(calibration, report)
 
 
-def signals(calibration: TrapCalibration, image: object, *, method: str | None = None) -> np.ndarray:
+def signals(
+    calibration: TrapCalibration,
+    image: object,
+    *,
+    model_kind: ReadoutModelKind | None = None,
+) -> np.ndarray:
     if not isinstance(calibration, TrapCalibration):
         raise TypeError("calibration must be TrapCalibration")
-    return calibration.signals(image, method=method)
+    return calibration.signals(image, model_kind=model_kind)
 
 
-def detect(calibration: TrapCalibration, image: object, *, method: str | None = None) -> AtomDetection:
+def detect(
+    calibration: TrapCalibration,
+    image: object,
+    *,
+    model_kind: ReadoutModelKind | None = None,
+) -> AtomDetection:
     if not isinstance(calibration, TrapCalibration):
         raise TypeError("calibration must be TrapCalibration")
-    return calibration.detect(image, method=method)
+    return calibration.detect(image, model_kind=model_kind)
 
 
 __all__ = [
     "AtomDetection",
     "CalibrationResult",
+    "DEFAULT_READOUT_MODEL_CHOICE",
+    "READOUT_MODEL_CHOICES",
     "classify_threshold",
     "detect_sites",
     "FrameContract",
     "ReadoutModel",
+    "ReadoutModelKind",
     "SiteMap",
     "TrapCalibration",
     "calibrate",
     "detect",
     "extract_box_signals",
     "extract_psf_signals",
+    "readout_model_kind_from_choice",
     "signals",
 ]

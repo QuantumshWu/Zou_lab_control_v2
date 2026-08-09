@@ -67,14 +67,14 @@ def test_installation_rejects_wrong_capability_instances_and_uses_one_registry()
             key,
             "test.bad-capability",
             object(),
-            {"simulation.world": object()},
+            {"camera.adapter": object()},
         )
 
     descriptor = DeviceTypeDescriptor(
         "test.bad-capability",
         "test",
         AuthoringSchema(()),
-        ("simulation.world",),
+        ("camera.adapter",),
         factory=bad_factory,
     )
     installation = create_installation(
