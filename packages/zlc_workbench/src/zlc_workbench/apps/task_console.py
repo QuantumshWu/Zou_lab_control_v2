@@ -43,8 +43,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval-ms",
         type=int,
-        default=200,
-        help="TaskConsole event-loop beat in milliseconds (default: 200)",
+        default=100,
+        help="TaskConsole event-loop beat in milliseconds (default: 100)",
     )
     return parser
 

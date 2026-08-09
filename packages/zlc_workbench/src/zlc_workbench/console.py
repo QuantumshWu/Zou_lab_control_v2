@@ -817,8 +817,11 @@ class ConsolePresenter:
 
         signal = str(changes.get("signal", current.signal)).strip()
         title = str(changes.get("title", current.title)).strip()
-        if signal != current.signal and "title" not in changes and current.title == current.signal:
-            title = signal
+        if signal != current.signal and "title" not in changes:
+            base_title = self._panel_kind_labels.get(current.kind, current.kind)
+            suffix = current.title.removeprefix(f"{base_title} ")
+            if current.title == current.signal or current.title == base_title or suffix.isdigit():
+                title = signal
         if signal != current.signal and "overlay_signal" not in changes:
             changes["overlay_signal"] = ""
         title = (

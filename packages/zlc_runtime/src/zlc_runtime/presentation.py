@@ -191,7 +191,7 @@ class HarmonicClock:
             raise ValueError("display intervals must be harmonic multiples of the base")
         self._allowed = frozenset(normalized)
         self._default_ms = default
-        self._base_ms = default
+        self._base_ms = base
         self._elapsed_ms = 0
 
     @property

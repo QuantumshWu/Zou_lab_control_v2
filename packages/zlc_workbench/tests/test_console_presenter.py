@@ -598,6 +598,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     signal = node.signal_key("frame_0")
     assert presenter.retarget_panel(binding.panel_id, signal) is True
     assert binding.signal == signal
+    assert binding.state.title == signal
     assert binding.host is not None
     assert binding.port is not None
     _settle_panel_hosts(

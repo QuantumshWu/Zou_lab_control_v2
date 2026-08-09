@@ -112,11 +112,11 @@ def test_owner_channels_coalesce_and_borrow_data_wake() -> None:
     assert channels.take() == OwnerTurn(False, False, False)
 
 
-def test_harmonic_clock_rebases_and_uses_group_maximum() -> None:
+def test_harmonic_clock_uses_the_global_smallest_tick_and_group_maximum() -> None:
     clock = HarmonicClock((100, 200, 800), 200)
-    assert clock.base_ms == 200
-    assert clock.advance() == 200
-    assert not clock.group_due(200, (100, 800))
+    assert clock.base_ms == 100
+    assert clock.advance() == 100
+    assert not clock.group_due(100, (100, 800))
     assert clock.group_due(800, (100, 800))
     assert clock.rebase((100, 800)) == 100
     assert clock.elapsed_ms == 0
@@ -214,6 +214,57 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
     assert not arbiter.enqueue_group((failing, failing_second), front)
     assert len(failing.finished) == 1
     assert arbiter.pending_batches == 0
+
+
+def test_same_shot_siblings_wait_for_one_global_due_tick_and_commit_together() -> None:
+    first = _front("camera/frame_0")
+    first_value = first.value("camera/frame_0")
+    assert first_value is not None
+    second_value = SignalValue(
+        "camera/frame_1",
+        first_value.snapshot,
+        None,
+        transient=True,
+        run_record=first_value.run_record,
+    )
+    publication = SignalPublication(
+        first.publication("camera/frame_0").event_ref,
+        {
+            "camera/frame_0": first_value,
+            "camera/frame_1": second_value,
+        },
+        object(),
+    )
+    siblings = frozenset(("camera/frame_0", "camera/frame_1"))
+    front = SignalFront(
+        dict(publication.signals),
+        {},
+        {name: publication for name in siblings},
+        {name: siblings for name in siblings},
+    )
+    ports = (
+        _Port("first", "camera/frame_0", interval=100),
+        _Port("second", "camera/frame_1", interval=400),
+    )
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    scheduler = BoardScheduler(
+        _Plane(front),
+        HarmonicClock((100, 200, 400, 800), 400),
+        arbiter,
+        lambda: ports,
+    )
+
+    for _ in range(3):
+        scheduler.on_tick()
+    assert not ports[0].updates and not ports[1].updates
+    scheduler.on_tick()
+    assert len(ports[0].updates) == len(ports[1].updates) == 1
+    ports[0].futures[0].set_result("first")
+    ports[1].futures[0].set_result("second")
+    scheduler.on_owner_turn(lambda: None)
+    assert ports[0].presented is publication
+    assert ports[1].presented is publication
 
 
 def test_surface_arbiter_rejects_the_whole_completed_batch_once() -> None:

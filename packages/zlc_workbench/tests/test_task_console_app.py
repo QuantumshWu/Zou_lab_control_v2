@@ -80,6 +80,12 @@ def test_the_console_assembles_and_beats(workspace) -> None:
     assert "0 panel" in completed.stdout
 
 
+def test_task_console_display_beat_is_the_global_ten_hertz_clock() -> None:
+    from zlc_workbench.apps.task_console import _parser
+
+    assert _parser().parse_args([]).interval_ms == 100
+
+
 @pytest.mark.skipif(os.name != "nt", reason="the product launcher is a Windows batch file")
 def test_experiment_batch_is_one_task_console_entry_and_forwards_its_arguments(
     workspace,
