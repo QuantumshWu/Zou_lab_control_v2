@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Repeat=0共同采集buffer扩容切片已完成，准备独立提交后继续Occupancy结构兼容边界。`
-- Last completed action：`Camera Measurement唯一共同层把连续raw buffer下限由64个完整cycle提高为128个完整cycle，并继续按frames_per_cycle整数倍对齐；Virtual/DCAM/Pylon仍只落实同一个buffer_frame_count，没有新增设备特判、配置字段、文件或抽象。`
-- Last verified tests：`旧生产在现有三帧cycle测试中压入385帧后精确红：只保留192帧并从ordinal 193开始；修后保留384帧并只发布连续完整3/4/5 shot。Monitor、共同camera contract、DCAM、Pylon相关回归38 passed in 1.89s；diff-check通过。`
+- Current phase：`Occupancy结构兼容边界已收口，准备独立提交并转入受影响产品文档/Notebook残余同步。`
+- Last completed action：`Occupancy仍校验frame shape、sensor、ROI和binning；删除exposure、camera id、readout mode的适用性拒绝。这三项仍保留在FrameContract作为provenance，同一几何的Calibration可用于不同非结构采集上下文；没有新增文件、类、兼容路径或validator。`
+- Last verified tests：`旧生产对exposure差异先精确红，随后对camera id差异再次精确红；修后同一现有测试证明三项同时变化仍能derive，同时ROI origin变化仍以结构不兼容拒绝。exact 1 passed；zlc_atom全包146 passed in 40.90s；Guard A/end-to-end/Console Logic相关38 passed in 25.67s；残余扫描只保留五个结构拒绝。`
 - Pending acceptance gates：`按交付定义审计剩余代码与产品文档；受影响包、Guard A/B/C、全树与独立路径验证；最后由操作者从bin\\experiment.bat执行真实可见按钮验收并确认零窗口/worker/claim/进程。`
-- Next action：`独立提交128-cycle buffer切片；随后完成Occupancy只拒绝ROI、sensor、binning、shape等真实结构不兼容而接受exposure/camera-id/readout-mode差异的既有测试与最小实现。`
+- Next action：`独立提交Occupancy结构兼容切片；随后同步Atom/Workbench README、contract与Notebook中仍描述typed FINAL/report adapter、Producer Apply、旧Calibration/Camera Measurement参数的历史残余。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律

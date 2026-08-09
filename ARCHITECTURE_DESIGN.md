@@ -288,7 +288,7 @@ Edit 中的理想参数：
 | Calibration file | 显式选择 calibration JSON path |
 | Readout model | `default` / `box` / `psf` / `uniform_psf`；`default` 解析 artifact 的 `default_model_kind` |
 
-没有 device、finite/infinite extent mode、buffer 或 loss 参数。Readout-model choice 是 Occupancy 必须显式拥有的科学算法模式，不是被删除的 extent mode。Start 时加载 calibration，核对 frames 的 sensor/ROI/binning/exposure/readout contract，然后按 SiteMap + 所选 readout model 的 feature/threshold 产生 per-site counts/occupied/rate 等 dataset。Finite source 顺序处理/可处理已完成的 frozen dataset；infinite source 只处理 latest。
+没有 device、finite/infinite extent mode、buffer 或 loss 参数。Readout-model choice 是 Occupancy 必须显式拥有的科学算法模式，不是被删除的 extent mode。Start 时加载 calibration，只拒绝 frame shape、sensor、ROI、binning 等会破坏像素与 site 对齐的结构差异；exposure、camera id 和 readout mode 继续保存在 frame contract 作为 provenance，但不限制同一几何 calibration 的使用。随后按 SiteMap + 所选 readout model 的 feature/threshold 产生 per-site counts/occupied/rate 等 dataset。Finite source 顺序处理/可处理已完成的 frozen dataset；infinite source 只处理 latest。
 
 ## 9. TaskConsole Logic UI
 

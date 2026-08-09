@@ -260,24 +260,10 @@ class OccupancyProcessor:
         self._validate_source_run_record(source)
 
     def _validate_source_run_record(self, source: SignalValue) -> None:
-        """Check only physical camera facts actually present on the parent."""
+        """Check only structural camera facts present on the parent."""
 
         record = source.run_record
         contract = self.calibration.frame_contract
-        named_devices = record.get("named_devices")
-        if named_devices is not None:
-            if not isinstance(named_devices, Mapping):
-                raise ValueError("camera run record named_devices must be a mapping")
-            camera_key = named_devices.get("camera")
-            if (
-                contract.camera_id is not None
-                and camera_key is not None
-                and str(camera_key) != contract.camera_id
-            ):
-                raise ValueError(
-                    f"camera {camera_key!r} differs from calibration {contract.camera_id!r}"
-                )
-
         snapshots = record.get("device_snapshots")
         if snapshots is None:
             return
@@ -332,36 +318,6 @@ class OccupancyProcessor:
             raise ValueError(
                 f"camera binning {binning} differs from calibration "
                 f"{contract.binning_yx}"
-            )
-
-        exposure = actual.get("exposure_seconds")
-        if contract.exposure_seconds is not None and exposure is not None:
-            try:
-                observed_exposure = float(exposure)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "camera device snapshot exposure_seconds must be numeric"
-                ) from exc
-            if not np.isclose(
-                observed_exposure,
-                contract.exposure_seconds,
-                rtol=1e-12,
-                atol=0.0,
-            ):
-                raise ValueError(
-                    f"camera exposure {observed_exposure} differs from calibration "
-                    f"{contract.exposure_seconds}"
-                )
-
-        readout_mode = actual.get("readout_mode")
-        if (
-            contract.readout_mode is not None
-            and readout_mode is not None
-            and str(readout_mode) != contract.readout_mode
-        ):
-            raise ValueError(
-                f"camera readout mode {readout_mode!r} differs from calibration "
-                f"{contract.readout_mode!r}"
             )
 
     @property

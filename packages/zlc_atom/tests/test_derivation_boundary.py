@@ -123,7 +123,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     )
     assert isinstance(processor, OccupancyProcessor)
     assert processor.calibration_path == calibration_path.resolve()
-    incompatible = TrapCalibration(
+    different_nonstructural_context = TrapCalibration(
         calibration.site_map,
         calibration.models,
         calibration.default_model_kind,
@@ -133,18 +133,40 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             roi_xywh=frame_contract.roi_xywh,
             binning_yx=frame_contract.binning_yx,
             exposure_seconds=frame_contract.exposure_seconds * 2.0,
-            camera_id=frame_contract.camera_id,
-            readout_mode=frame_contract.readout_mode,
+            camera_id="another-camera",
+            readout_mode="another-readout-mode",
         ),
     )
-    incompatible_path = incompatible.save(tmp_path / "incompatible.json")
-    incompatible_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(incompatible_path),
+    different_context_path = different_nonstructural_context.save(
+        tmp_path / "different-context.json"
+    )
+    different_context_processor = OCCUPANCY_LOGIC_NODE.instantiate(
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(different_context_path),
         source_signal=source_name,
         signal_plane=plane,
     )
-    with pytest.raises(ValueError, match="exposure"):
-        incompatible_processor.evaluate(source)
+    different_outputs = different_context_processor.evaluate(source)
+    assert different_outputs["counts"].snapshot.block.values.shape[-1] == 1
+    x, y, width, height = frame_contract.roi_xywh
+    structurally_incompatible = TrapCalibration(
+        calibration.site_map,
+        calibration.models,
+        calibration.default_model_kind,
+        FrameContract(
+            frame_contract.image_shape,
+            sensor_shape=None,
+            roi_xywh=(x + 1, y, width, height),
+            binning_yx=frame_contract.binning_yx,
+        ),
+    )
+    structural_path = structurally_incompatible.save(tmp_path / "structural.json")
+    structural_processor = OCCUPANCY_LOGIC_NODE.instantiate(
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(structural_path),
+        source_signal=source_name,
+        signal_plane=plane,
+    )
+    with pytest.raises(ValueError, match="ROI origin"):
+        structural_processor.evaluate(source)
     wake = Event()
     host = NodeHost(processor, plane, wake.set)
 
