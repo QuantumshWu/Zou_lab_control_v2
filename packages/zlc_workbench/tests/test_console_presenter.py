@@ -115,6 +115,7 @@ class _ConsoleView:
         "close_requested", "add_panel_requested", "add_logic_requested",
         "pause_toggled", "selectors_toggled", "save_layout_requested",
         "load_layout_requested", "save_screenshot_requested",
+        "stop_task_requested",
         "panel_order_committed",
         "panel_remove_requested",
         "panel_edit_requested", "logic_start_requested", "logic_stop_requested",
@@ -150,6 +151,7 @@ class _ConsoleView:
         self.panel_editors: dict[str, dict] = {}
         self.panel_editor_surfaces: dict[str, object] = {}
         self.focused_panel_editor = ""
+        self.task_takeover = False
 
     # -- what a test reads ------------------------------------------------
 
@@ -183,6 +185,9 @@ class _ConsoleView:
 
     def show_status(self, text: str, severity: str) -> None:
         self.status.append((str(severity), str(text)))
+
+    def set_task_takeover(self, active: bool) -> None:
+        self.task_takeover = bool(active)
 
     def choose_signal(self, rows) -> str | None:
         self.offered = tuple(rows)
@@ -995,7 +1000,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         {
             "node_id": occupancy_id,
             "api_name": "occupancy",
-            "values": {},
+            "values": {"model_kind": "default"},
             "source_signal": f"@logic/{logic_id}/frames",
             "device_keys": {},
             "artifact_inputs": {
@@ -1148,3 +1153,107 @@ def test_panel_edit_projects_the_direct_producer_and_apply_uses_start(
     )
     presenter.view.panel_producer_apply_requested.emit(panel.panel_id)
     assert started == [node_id]
+
+
+def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
+    presenter, monkeypatch
+) -> None:
+    """The real view signals and direct endpoints share one admission rule."""
+
+    from zlc_runtime.host import LogicNodeObservation, NodeProgress
+    from zlc_workbench.logic import LogicCandidate
+
+    class TaskHost:
+        def __init__(self) -> None:
+            self.running = False
+            self.terminal = False
+            self.final_result_resolved = False
+            self.cancelled = False
+            self.fail = False
+            self.observation = LogicNodeObservation(False, False, "starting")
+
+        def start(self) -> None:
+            self.cancelled = False
+            self.fail = False
+            self.running = True
+            self.observation = LogicNodeObservation(
+                True,
+                False,
+                "running",
+                progress=NodeProgress("Capturing", 2, 5),
+            )
+
+        def cancel(self, _reason: str) -> None:
+            self.cancelled = True
+            self.observation = LogicNodeObservation(
+                True,
+                False,
+                "stopping",
+                progress=NodeProgress("Capturing", 2, 5),
+            )
+
+        def poll(self):
+            if self.fail:
+                self.running = False
+                self.terminal = True
+                self.observation = LogicNodeObservation(
+                    False, True, "failed", error="camera fault"
+                )
+            elif self.cancelled:
+                self.running = False
+                self.terminal = True
+                self.observation = LogicNodeObservation(
+                    False, True, "cancelled"
+                )
+            return self.observation
+
+        def published_signals(self) -> tuple[str, ...]:
+            return ()
+
+        def shutdown(self) -> None:
+            self.running = False
+
+    task_id = presenter.add_logic("calibration", open_editor=False)
+    other_id = presenter.add_logic("camera_measurement", open_editor=False)
+    panel = presenter.add_blank_panel("image")
+    assert task_id and other_id and panel is not None
+    host = TaskHost()
+    monkeypatch.setattr(
+        presenter,
+        "_build_logic_candidate",
+        lambda _binding: LogicCandidate(object(), host, ()),
+    )
+
+    presenter.view.logic_start_requested.emit(task_id)
+    assert presenter.view.task_takeover is True
+    assert presenter._active_task_id == task_id
+    assert presenter.view.status[-1] == ("task", "calibration: Capturing 2/5")
+
+    panel_ids = tuple(presenter.panels)
+    logic_ids = tuple(presenter.logic)
+    presenter.view.add_panel_requested.emit("curve")
+    presenter.view.add_logic_requested.emit("occupancy")
+    presenter.view.panel_remove_requested.emit(panel.panel_id)
+    presenter.view.logic_start_requested.emit(other_id)
+    presenter.view.logic_draft_changed.emit(other_id, {"values": {"shots": 3}})
+    assert tuple(presenter.panels) == panel_ids
+    assert tuple(presenter.logic) == logic_ids
+    assert presenter.logic[other_id].host is None
+
+    presenter.view.stop_task_requested.emit()
+    assert host.cancelled is True
+    assert presenter.view.task_takeover is True
+    presenter.set_paused(True)
+    presenter.beat()
+    assert presenter._active_task_id is None
+    assert presenter.view.task_takeover is False
+    assert presenter.view.status[-1] == ("task", "calibration: cancelled")
+
+    presenter.view.logic_start_requested.emit(task_id)
+    assert presenter.view.task_takeover is True
+    host.fail = True
+    presenter.beat()
+    assert presenter._active_task_id is None
+    assert presenter.view.task_takeover is False
+    assert presenter.view.status[-1] == ("error", "calibration: camera fault")
+    assert presenter.logic_editor_projection(task_id)["error"] == "camera fault"

@@ -56,6 +56,7 @@ class PanelEditorView(QtWidgets.QWidget):
     def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
         super().__init__(parent)
         self.panel_id = str(panel_id)
+        self._mutation_enabled = True
         self._projection: dict[str, object] = {}
         self._state: dict[str, Any] = {}
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
@@ -275,7 +276,9 @@ class PanelEditorView(QtWidgets.QWidget):
         self.snapshot_label.setStyleSheet(
             f"color: {ORANGE if stale else GREY}; background: transparent; border: none;"
         )
-        self.save_button.setEnabled(snapshot is not None and not stale)
+        self.save_button.setEnabled(
+            self._mutation_enabled and snapshot is not None and not stale
+        )
         self.save_button.setToolTip(
             "Refresh the stale snapshot before saving" if stale else ""
         )
@@ -291,6 +294,7 @@ class PanelEditorView(QtWidgets.QWidget):
             )
         )
         self._update_producer(incoming.get("producer_logic"))
+        self.set_mutation_enabled(self._mutation_enabled)
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
         """Mount or replace the plot widget supplied by the console handle."""
@@ -312,6 +316,25 @@ class PanelEditorView(QtWidgets.QWidget):
         widget.setParent(self.surface_holder)
         self.surface_layout.addWidget(widget)
         widget.show()
+
+    def set_mutation_enabled(self, enabled: bool) -> None:
+        """Gate saved-state changes while leaving the frozen plot inspectable."""
+
+        self._mutation_enabled = bool(enabled)
+        self.panel_form.setEnabled(self._mutation_enabled)
+        for form in self.parameter_forms.values():
+            form.setEnabled(self._mutation_enabled)
+        self.refresh_button.setEnabled(self._mutation_enabled)
+        self.save_button.setEnabled(
+            self._mutation_enabled
+            and self._projection.get("frozen_snapshot") is not None
+            and not bool(self._projection.get("stale"))
+        )
+        self.producer_apply_button.setEnabled(
+            self._mutation_enabled and self._producer_editor is not None
+        )
+        if self._producer_editor is not None:
+            self._producer_editor.set_mutation_enabled(self._mutation_enabled)
 
     @staticmethod
     def _size_choices(current: str) -> tuple[FormChoice, ...]:
@@ -358,6 +381,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 self._producer_editor.setParent(None)
                 self._producer_editor.deleteLater()
             editor = LogicEditorView(node_id, projection, show_actions=False)
+            editor.set_mutation_enabled(self._mutation_enabled)
             editor.setMinimumHeight(scaled_px(330, minimum=260))
             editor.draft_changed.connect(
                 lambda patch, nid=node_id: self.producer_draft_changed.emit(nid, patch)
@@ -367,7 +391,7 @@ class PanelEditorView(QtWidgets.QWidget):
         else:
             self._producer_editor.update_projection(projection)
         self.producer_empty.hide()
-        self.producer_apply_button.setEnabled(True)
+        self.producer_apply_button.setEnabled(self._mutation_enabled)
 
     @staticmethod
     def _snapshot_text(projection: Mapping[str, object], *, stale: bool) -> str:

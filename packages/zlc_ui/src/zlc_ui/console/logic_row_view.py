@@ -36,6 +36,7 @@ class LogicRowView(FluentFrame):
         self.kind = str(kind)
         self._state = "idle"
         self._status_text = "idle"
+        self._task_takeover = False
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(scaled_px(12), scaled_px(8), scaled_px(12), scaled_px(8))
         outer.setSpacing(scaled_px(4, minimum=3))
@@ -84,8 +85,31 @@ class LogicRowView(FluentFrame):
         )
         running = state == "running"
         self.start_button.setText("Restart" if running else "Start")
+        if not self._task_takeover:
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(running)
+
+    def set_task_takeover(self, active: bool) -> None:
+        """Leave the row readable while the status strip owns all commands."""
+
+        self._task_takeover = bool(active)
+        if self._task_takeover:
+            for button in (
+                self.start_button,
+                self.stop_button,
+                self.edit_button,
+                self.remove_button,
+            ):
+                button.setEnabled(False)
+            if self.kind == "task":
+                self.stop_button.setVisible(False)
+            return
+        self.stop_button.setVisible(True)
+        running = self._state == "running"
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(running)
+        self.edit_button.setEnabled(True)
+        self.remove_button.setEnabled(True)
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:
         self.publishes_label.set_rows(tuple(tuple(str(value) for value in row) for row in rows))

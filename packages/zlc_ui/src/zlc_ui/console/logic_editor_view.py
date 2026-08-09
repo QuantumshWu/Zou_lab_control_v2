@@ -45,6 +45,7 @@ class LogicEditorView(QtWidgets.QWidget):
     ) -> None:
         super().__init__(parent)
         self.node_id = str(node_id)
+        self._mutation_enabled = True
         self._projection: dict[str, object] = {}
         self._device_combos: dict[str, FluentComboBox] = {}
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
@@ -154,13 +155,30 @@ class LogicEditorView(QtWidgets.QWidget):
         pending = bool(incoming.get("pending"))
         error = str(incoming.get("error") or "")
         self.start_button.setText("Starting…" if pending else ("Restart" if running else "Start"))
-        self.start_button.setEnabled(not pending)
-        self.stop_button.setEnabled(running or pending)
+        self.start_button.setEnabled(self._mutation_enabled and not pending)
+        self.stop_button.setEnabled(self._mutation_enabled and (running or pending))
+        self.remove_button.setEnabled(self._mutation_enabled)
         state = "waiting for device release" if pending else ("running" if running else "stopped")
-        self.status_label.setText(error or state)
+        status = str(incoming.get("status") or state)
+        self.status_label.setText(error or status)
         self.status_label.setStyleSheet(
             f"color: {'#D13438' if error else GREY}; background: transparent; border: none;"
         )
+
+    def set_mutation_enabled(self, enabled: bool) -> None:
+        """Disable authored and lifecycle commands while a Task owns the console."""
+
+        self._mutation_enabled = bool(enabled)
+        self._selector_frame.setEnabled(self._mutation_enabled)
+        self.artifact_form.setEnabled(self._mutation_enabled)
+        self.form.setEnabled(self._mutation_enabled)
+        running = bool(self._projection.get("running"))
+        pending = bool(self._projection.get("pending"))
+        self.start_button.setEnabled(self._mutation_enabled and not pending)
+        self.stop_button.setEnabled(
+            self._mutation_enabled and (running or pending)
+        )
+        self.remove_button.setEnabled(self._mutation_enabled)
 
     def _reconcile_selectors(self, projection: Mapping[str, object]) -> None:
         device_options = projection.get("device_options") or {}

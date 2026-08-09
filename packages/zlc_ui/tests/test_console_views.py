@@ -752,6 +752,7 @@ handle.add_logic_requested.connect(lambda api_name: events.append(('logic', api_
 handle.pause_toggled.connect(lambda value: events.append(('pause', value)))
 handle.save_screenshot_requested.connect(lambda: events.append(('screenshot',)))
 handle.save_layout_requested.connect(lambda: events.append(('layout',)))
+handle.stop_task_requested.connect(lambda: events.append(('stop-task',)))
 assert view.kind_combo.count() == 5
 assert view.kind_combo.itemData(0) == ('plot', 'curve')
 assert view.kind_combo.itemData(1) == ('plot', 'image')
@@ -776,6 +777,50 @@ assert ('logic', 'camera_measurement') in events
 assert ('pause', True) in events
 assert ('screenshot',) in events
 assert ('layout',) in events
+
+# A running Task owns the console through one status-strip command surface.
+# Drive the actual widgets: disabled controls must not emit around the
+# presenter gate, while Stop task must still emit its one dedicated intent.
+handle.add_panel('task-preview', 'Capture preview')
+handle.add_logic_row('calibration', 'task')
+handle.add_logic_row('camera', 'measurement')
+preview = handle._cards['task-preview']
+task_row = handle._rows['calibration']
+camera_row = handle._rows['camera']
+handle.set_task_takeover(True)
+assert view.status_strip.action_button is not None
+assert view.status_strip.action_button.isVisible()
+assert not view.name_edit.isEnabled()
+assert not view.kind_combo.isEnabled()
+assert not view.add_panel_button.isEnabled()
+assert not view.save_layout_button.isEnabled()
+assert not view.load_layout_button.isEnabled()
+assert view.selectors_switch.isEnabled()
+assert view.pause_switch.isEnabled()
+assert view.save_screenshot_button.isEnabled()
+assert not preview.settings_button.isEnabled()
+for row in (task_row, camera_row):
+    assert not row.start_button.isEnabled()
+    assert not row.stop_button.isEnabled()
+    assert not row.edit_button.isEnabled()
+    assert not row.remove_button.isEnabled()
+assert not task_row.stop_button.isVisible()
+before = list(events)
+QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(camera_row.start_button, QtCore.Qt.LeftButton)
+assert events == before
+QtTest.QTest.mouseClick(view.status_strip.action_button, QtCore.Qt.LeftButton)
+assert events[-1] == ('stop-task',)
+
+handle.set_task_takeover(False)
+assert not view.status_strip.action_button.isVisible()
+assert view.name_edit.isEnabled()
+assert view.kind_combo.isEnabled()
+assert view.add_panel_button.isEnabled()
+assert preview.settings_button.isEnabled()
+assert camera_row.start_button.isEnabled()
+assert camera_row.edit_button.isEnabled()
+assert camera_row.remove_button.isEnabled()
 
 """
     )

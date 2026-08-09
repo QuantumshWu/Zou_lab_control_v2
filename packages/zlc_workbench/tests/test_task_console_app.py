@@ -367,6 +367,98 @@ session.close()
     assert "STOPPED_DRAFT" in completed.stdout
 
 
+def test_task_takeover_and_live_preview_follow_the_real_buttons(workspace) -> None:
+    """Start, preview and Stop use the same widgets an operator clicks."""
+
+    from zlc_atom.nodes import calibration_pulse_template_bytes
+
+    (workspace / "pulses" / "imaging_template.json").write_bytes(
+        calibration_pulse_template_bytes()
+    )
+
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        PYTHONPATH=(
+            str(REPO_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", "")
+        ),
+    )
+    script = """import time
+import zou_lab_control_v2
+from PyQt5 import QtCore, QtTest
+from zlc_ui import ensure_qt_app
+from zlc_workbench.apps import task_console as tested_module
+print(tested_module.__file__)
+application = ensure_qt_app([])
+space, session = tested_module.open_experiment(r'%s', 'virtual')
+view, presenter = tested_module.build_console(session)
+
+def until(predicate, timeout=20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        presenter.beat()
+        application.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError('TaskConsole interaction did not settle')
+
+task_index = next(
+    index for index in range(view._view.kind_combo.count())
+    if view._view.kind_combo.itemData(index) == ('logic', 'calibration')
+)
+view._view.kind_combo.setCurrentIndex(task_index)
+QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+application.processEvents()
+editor = view._logic_editors['calibration']
+editor.form.widget_for('repeats').setValue(200)
+application.processEvents()
+
+QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
+application.processEvents()
+assert presenter._active_task_id == 'calibration'
+assert view._view.status_strip.action_button.isVisible()
+assert not view._view.kind_combo.isEnabled()
+assert not view._view.add_panel_button.isEnabled()
+assert not view._rows['calibration'].start_button.isEnabled()
+assert not view._rows['calibration'].stop_button.isVisible()
+assert 'calibration:' in view._view.status_strip.text()
+
+preview_signal = '@logic/calibration/capture_preview'
+until(lambda: any(panel.state.signal == preview_signal for panel in presenter.panels.values()))
+preview = next(panel for panel in presenter.panels.values() if panel.state.signal == preview_signal)
+assert preview.host is not None and preview.port is not None
+assert preview_signal in presenter.session.signal_plane.freeze().names()
+assert not view._cards[preview.panel_id].settings_button.isEnabled()
+
+QtTest.QTest.mouseClick(
+    view._view.status_strip.action_button,
+    QtCore.Qt.LeftButton,
+)
+until(lambda: presenter._active_task_id is None)
+assert not view._view.status_strip.action_button.isVisible()
+assert view._view.kind_combo.isEnabled()
+assert view._view.add_panel_button.isEnabled()
+assert view._rows['calibration'].start_button.isEnabled()
+assert all(panel.state.signal != preview_signal for panel in presenter.panels.values())
+print('TASK_TAKEOVER_PREVIEW_OK')
+presenter.close()
+session.close()
+""" % workspace
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
+
+
 def test_the_experiment_entry_opens_both_work_windows_on_one_session(workspace) -> None:
     """Device Init lends one session to two initially idle work windows."""
 

@@ -44,6 +44,7 @@ class TaskConsoleHandle(QtCore.QObject):
     save_layout_requested = QtCore.pyqtSignal()
     load_layout_requested = QtCore.pyqtSignal()
     save_screenshot_requested = QtCore.pyqtSignal()
+    stop_task_requested = QtCore.pyqtSignal()
     panel_order_committed = QtCore.pyqtSignal(tuple)
 
     # -- one named panel -------------------------------------------------
@@ -71,11 +72,12 @@ class TaskConsoleHandle(QtCore.QObject):
         self._logic_editors: dict[str, LogicEditorView] = {}
         self._panel_editors: dict[str, PanelEditorView] = {}
         self._panel_intervals: tuple[int, ...] = ()
+        self._task_takeover = False
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
             "selectors_toggled", "save_layout_requested",
             "load_layout_requested", "save_screenshot_requested",
-            "panel_order_committed",
+            "stop_task_requested", "panel_order_committed",
         ):
             getattr(view, name).connect(getattr(self, name))
         if hasattr(view, "close_requested"):
@@ -149,6 +151,21 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def show_status(self, text: str, severity: str) -> None:
         self._view.show_status(text, severity)
+
+    def set_task_takeover(self, active: bool) -> None:
+        """Project one application admission gate onto every existing view."""
+
+        self._task_takeover = bool(active)
+        editing = not self._task_takeover
+        self._view.set_task_takeover(self._task_takeover)
+        for card in self._cards.values():
+            card.set_editing_enabled(editing)
+        for row in self._rows.values():
+            row.set_task_takeover(self._task_takeover)
+        for editor in self._logic_editors.values():
+            editor.set_mutation_enabled(editing)
+        for editor in self._panel_editors.values():
+            editor.set_mutation_enabled(editing)
 
     def choose_signal(self, rows) -> str | None:
         """Ask which signal to show; None when the operator declines."""
@@ -236,6 +253,7 @@ class TaskConsoleHandle(QtCore.QObject):
             self._cards[key] = card
             if self._panel_intervals:
                 card.set_interval_choices(self._panel_intervals)
+            card.set_editing_enabled(not self._task_takeover)
         self._view.set_cards(tuple(self._cards.values()))
 
     def remove_panel(self, panel_id: str) -> None:
@@ -298,6 +316,7 @@ class TaskConsoleHandle(QtCore.QObject):
         editor = self._panel_editors.get(key)
         if editor is None:
             editor = PanelEditorView(key, incoming)
+            editor.set_mutation_enabled(not self._task_takeover)
             editor.state_changed.connect(
                 lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
             )
@@ -371,6 +390,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 lambda _=None, nid=key: self.logic_remove_requested.emit(nid)
             )
             self._rows[key] = row
+            row.set_task_takeover(self._task_takeover)
         self._view.set_logic_rows(tuple(self._rows.values()))
 
     def remove_logic_row(self, node_id: str) -> None:
@@ -397,6 +417,7 @@ class TaskConsoleHandle(QtCore.QObject):
         editor = self._logic_editors.get(key)
         if editor is None:
             editor = LogicEditorView(key, projection)
+            editor.set_mutation_enabled(not self._task_takeover)
             editor.draft_changed.connect(
                 lambda patch, nid=key: self.logic_draft_changed.emit(nid, patch)
             )
@@ -432,6 +453,9 @@ class TaskConsoleHandle(QtCore.QObject):
         return False if editor is None else self._view.remove_editor_tab(editor)
 
     def _editor_close_requested(self, editor: object) -> None:
+        if self._task_takeover:
+            self._view.focus_editor_tab(editor)
+            return
         for node_id, candidate in tuple(self._logic_editors.items()):
             if candidate is editor:
                 self.close_logic_editor(node_id)

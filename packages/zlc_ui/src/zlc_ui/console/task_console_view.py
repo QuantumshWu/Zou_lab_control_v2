@@ -50,6 +50,7 @@ class TaskConsoleView(QtWidgets.QWidget):
     save_layout_requested = QtCore.pyqtSignal()
     load_layout_requested = QtCore.pyqtSignal()
     save_screenshot_requested = QtCore.pyqtSignal()
+    stop_task_requested = QtCore.pyqtSignal()
     #: Re-raised from the board, because a presenter talks to the view it was
     #: given.  Where the operator put the cards is where the panels ARE, and a
     #: figure saved in a different order is a figure of a board nobody saw.
@@ -87,6 +88,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
 
         self.kind_combo = FluentComboBox()
+        self._task_takeover = False
         self._panel_kind_choices: tuple[tuple[str, str], ...] = ()
         self._logic_kind_choices: tuple[tuple[str, str, str, str], ...] = ()
         # v1's toolbar token: keep the full kind label and its arrow in the
@@ -129,7 +131,8 @@ class TaskConsoleView(QtWidgets.QWidget):
 
         # v1 keeps this status surface between the header and tabs.  It is not
         # a bottom log panel and therefore never shifts the board vertically.
-        self.status_strip = StatusStrip()
+        self.status_strip = StatusStrip(action_text="Stop task")
+        self.status_strip.action_clicked.connect(self.stop_task_requested.emit)
         outer.addWidget(self.status_strip)
 
         self.tabs = FluentTabWidget()
@@ -234,7 +237,9 @@ class TaskConsoleView(QtWidgets.QWidget):
             if index >= 0:
                 self.kind_combo.setCurrentIndex(index)
         self.kind_combo.blockSignals(False)
-        self.add_panel_button.setEnabled(self.kind_combo.count() > 0)
+        self.add_panel_button.setEnabled(
+            self.kind_combo.count() > 0 and not self._task_takeover
+        )
 
     def _add_current_selection(self) -> None:
         selected = self.kind_combo.currentData()
@@ -288,6 +293,21 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def show_status(self, text: str, severity: str) -> None:
         self.status_strip.show_status(text, severity)
+
+    def set_task_takeover(self, active: bool) -> None:
+        """Project the console-wide Task command gate onto header chrome."""
+
+        self._task_takeover = bool(active)
+        enabled = not self._task_takeover
+        for widget in (
+            self.name_edit,
+            self.kind_combo,
+            self.save_layout_button,
+            self.load_layout_button,
+        ):
+            widget.setEnabled(enabled)
+        self.add_panel_button.setEnabled(enabled and self.kind_combo.count() > 0)
+        self.status_strip.set_action_visible(self._task_takeover)
 
     def set_summary(self, text: str) -> None:
         self.summary_label.setText(str(text))

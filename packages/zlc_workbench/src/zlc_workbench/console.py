@@ -152,6 +152,13 @@ class ConsolePresenter:
         self._open_saved = open_saved
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
+        # Task identity is a command-admission projection only.  Its lifecycle,
+        # phase and progress continue to come exclusively from the row's host.
+        self._active_task_id: str | None = None
+        self._shown_task_takeover: bool | None = None
+        # Only auto-created transient previews are removed with their Task.
+        # User-authored panels and FINAL previews remain ordinary board state.
+        self._transient_task_previews: dict[str, dict[str, str]] = {}
         self._artifact_completion_order = 0
         self.panels: dict[str, PanelBinding] = {}
         #: Monotonic, so a panel id is never handed out twice in one session.
@@ -197,6 +204,7 @@ class ConsolePresenter:
         if callable(interval_setter):
             interval_setter(self._intervals)
         self._connect()
+        self._project_task_takeover()
 
     # ------------------------------------------------------------------ wiring
 
@@ -223,6 +231,7 @@ class ConsolePresenter:
         self.view.logic_stop_requested.connect(self.stop_logic)
         self.view.logic_edit_requested.connect(self.edit_logic)
         self.view.logic_remove_requested.connect(self.remove_logic)
+        self.view.stop_task_requested.connect(self.stop_active_task)
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
             draft_changed.connect(self._logic_draft_changed)
@@ -278,6 +287,9 @@ class ConsolePresenter:
         choice, while the plot surface is mounted only when that signal has an
         actual compatible publication.
         """
+
+        if self._task_command_blocked("adding a panel"):
+            return None
 
         wanted = str(kind or self._default_panel_kind)
         if wanted not in self._panel_kind_labels:
@@ -625,6 +637,10 @@ class ConsolePresenter:
         on the next redraw is a board that ignores the operator.
         """
 
+        if self._task_command_blocked("reordering panels"):
+            self.view.set_panel_order(tuple(self.panels))
+            return False
+
         wanted = [str(panel_id) for panel_id in order if str(panel_id) in self.panels]
         if len(wanted) != len(self.panels):
             wanted += [panel_id for panel_id in self.panels if panel_id not in wanted]
@@ -717,6 +733,9 @@ class ConsolePresenter:
 
     def edit_panel(self, panel_id: str) -> bool:
         """Open or focus the panel's non-modal Edit projection."""
+
+        if self._task_command_blocked("editing a panel"):
+            return False
 
         binding = self.panels.get(panel_id)
         if binding is None:
@@ -831,6 +850,8 @@ class ConsolePresenter:
             or binding.port is None
         )
         if candidate == current and not needs_mount:
+            return False
+        if candidate != current and self._task_command_blocked("changing a panel"):
             return False
 
         host_patch = dict(changes)
@@ -1496,12 +1517,16 @@ class ConsolePresenter:
                 host.close()
 
     def _panel_editor_closed(self, panel_id: str) -> None:
+        if self._task_command_blocked("closing an Edit tab"):
+            return
         binding = self.panels.get(str(panel_id))
         if binding is not None:
             binding.editor_open = False
             self._release_panel_editor(binding)
 
     def close_panel_editor(self, panel_id: str) -> bool:
+        if self._task_command_blocked("closing an Edit tab"):
+            return False
         binding = self.panels.get(str(panel_id))
         if binding is not None:
             binding.editor_open = False
@@ -1513,6 +1538,8 @@ class ConsolePresenter:
         return False
 
     def refresh_panel_snapshot(self, panel_id: str) -> bool:
+        if self._task_command_blocked("refreshing a panel snapshot"):
+            return False
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return False
@@ -1552,6 +1579,9 @@ class ConsolePresenter:
 
     def save_panel_figure(self, panel_id: str) -> object | None:
         """Save only the exact frozen data currently shown in Panel Edit."""
+
+        if self._task_command_blocked("saving a panel figure"):
+            return None
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
@@ -1669,14 +1699,28 @@ class ConsolePresenter:
             if include_shown or not row.shown
         )
 
+    def _remove_panel_now(self, panel_id: str) -> bool:
+        """Retire one panel after its caller has passed command admission."""
+
+        key = str(panel_id)
+        binding = self.panels.pop(key, None)
+        if binding is None:
+            return False
+        self._release_panel_editor(binding)
+        close_editor = getattr(self.view, "close_panel_editor", None)
+        if callable(close_editor):
+            close_editor(key)
+        self._release_panel(binding)
+        self.view.remove_panel(key)
+        for previews in self._transient_task_previews.values():
+            previews.pop(key, None)
+        return True
+
     def remove_panel(self, panel_id: str) -> None:
-        binding = self.panels.pop(panel_id, None)
-        if binding is not None:
-            self._release_panel_editor(binding)
-            self._release_panel(binding)
-        self.close_panel_editor(panel_id)
-        self.view.remove_panel(panel_id)
-        self._refresh_console_projection()
+        if self._task_command_blocked("removing a panel"):
+            return
+        if self._remove_panel_now(panel_id):
+            self._refresh_console_projection()
 
     # ------------------------------------------------------------------ running
 
@@ -1708,13 +1752,12 @@ class ConsolePresenter:
         )
 
     def beat(self) -> None:
-        """One display beat.  A paused console still draws nothing new."""
+        """Advance lifecycle always; Pause freezes only Monitor presentation."""
 
-        if self._paused:
-            return
-        self.board.tick()
-        self.board.commit()
-        self._report_panel_errors()
+        if not self._paused:
+            self.board.tick()
+            self.board.commit()
+            self._report_panel_errors()
         self.poll_logic()
         self._refresh_signal_choices()
 
@@ -1939,6 +1982,9 @@ class ConsolePresenter:
         is still three quarters of an afternoon's work.
         """
 
+        if self._task_command_blocked("loading a layout"):
+            return False
+
         if any(
             binding.pending is not None
             or (binding.host is not None and binding.host.running)
@@ -1981,6 +2027,9 @@ class ConsolePresenter:
     def save_layout(self) -> str:
         """Write only the stopped, reusable pipeline/layout document."""
 
+        if self._task_command_blocked("saving a layout"):
+            return ""
+
         path = self.view.ask_save_path(
             "Save TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
         )
@@ -1996,6 +2045,9 @@ class ConsolePresenter:
 
     def load_layout(self) -> bool:
         """Restore a layout as stopped drafts without building devices."""
+
+        if self._task_command_blocked("loading a layout"):
+            return False
 
         path = self.view.ask_open_path(
             "Load TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
@@ -2199,6 +2251,142 @@ class ConsolePresenter:
 
     # ------------------------------------------------------------------- logic
 
+    @staticmethod
+    def _is_task(binding: LogicBinding) -> bool:
+        kind = getattr(binding.descriptor, "kind", "")
+        return str(getattr(kind, "value", kind)) == "task"
+
+    def _active_task(self) -> LogicBinding | None:
+        task_id = self._active_task_id
+        return None if task_id is None else self.logic.get(task_id)
+
+    def _task_command_blocked(
+        self,
+        action: str,
+        *,
+        node_id: str = "",
+        active_stop: bool = False,
+    ) -> bool:
+        """Apply one admission rule to every authored/lifecycle mutation."""
+
+        active = self._active_task()
+        if active is None:
+            return False
+        if active_stop and str(node_id) == active.node_id:
+            return False
+        _state, status = self._logic_state(active)
+        self._report(
+            f"{active.node_id}: {status}; use Stop task before {action}",
+            severity="task",
+        )
+        return True
+
+    def _project_task_takeover(self) -> None:
+        active = self._active_task()
+        takeover = active is not None
+        if takeover != self._shown_task_takeover:
+            self.view.set_task_takeover(takeover)
+            self._shown_task_takeover = takeover
+        if active is not None:
+            _state, status = self._logic_state(active)
+            self._report(f"{active.node_id}: {status}", severity="task")
+
+    def _begin_task_takeover(self, binding: LogicBinding) -> None:
+        if not self._is_task(binding):
+            return
+        active = self._active_task()
+        if active is not None and active is not binding:
+            raise RuntimeError("TaskConsole already has an active Task")
+        self._active_task_id = binding.node_id
+        self._project_task_takeover()
+
+    def stop_active_task(self) -> bool:
+        """Route the status-strip action through the ordinary Stop endpoint."""
+
+        active = self._active_task()
+        return False if active is None else self.stop_logic(active.node_id)
+
+    def _ensure_task_previews(self, binding: LogicBinding) -> None:
+        """Mount declared Task outputs through the ordinary panel data path."""
+
+        if not self._is_task(binding):
+            return
+        previews = tuple(getattr(binding.descriptor, "task_previews", ()))
+        if not previews:
+            return
+        front = self.session.signal_plane.freeze()
+        for preview in previews:
+            output_name = str(preview.output_name)
+            signal = stable_signal_key(binding.node_id, output_name)
+            if any(panel.state.signal == signal for panel in self.panels.values()):
+                continue
+            value = front.value(signal)
+            if value is None:
+                continue
+            publication = front.publication(signal)
+            panel = self.add_panel(
+                signal,
+                value.snapshot,
+                title=output_name.replace("_", " ").title(),
+                kind=str(preview.plot_kind),
+                initial_publication=publication,
+            )
+            if value.transient:
+                self._transient_task_previews.setdefault(binding.node_id, {})[
+                    panel.panel_id
+                ] = signal
+
+    def _remove_task_transient_previews(self, binding: LogicBinding) -> None:
+        tracked = self._transient_task_previews.pop(binding.node_id, {})
+        if not tracked:
+            return
+        front = self.session.signal_plane.freeze()
+        for panel_id, signal in tracked.items():
+            current = front.value(signal)
+            # A Task may promote the same declared output to FINAL at terminal.
+            # Such a panel has become ordinary retained board state.
+            if current is not None and not current.transient:
+                continue
+            self._remove_panel_now(panel_id)
+
+    def _finish_task_takeover(
+        self,
+        binding: LogicBinding,
+        *,
+        status: str,
+        severity: str,
+    ) -> None:
+        if self._active_task_id != binding.node_id:
+            return
+        self._remove_task_transient_previews(binding)
+        self._active_task_id = None
+        self._project_task_takeover()
+        self._report(f"{binding.node_id}: {status}", severity=severity)
+
+    def _sync_task_takeover(self) -> None:
+        binding = self._active_task()
+        if binding is None:
+            if self._active_task_id is not None:
+                self._active_task_id = None
+                self._project_task_takeover()
+            return
+        if binding.pending is not None:
+            self._project_task_takeover()
+            return
+        host = binding.host
+        if host is not None and host.running:
+            self._project_task_takeover()
+            return
+        _state, status = self._logic_state(binding)
+        error = "" if host is None else str(host.observation.error or "")
+        if binding.draft_error:
+            error = binding.draft_error
+        self._finish_task_takeover(
+            binding,
+            status=error or status,
+            severity="error" if error else "task",
+        )
+
     def logic_offer(self) -> tuple[tuple[str, str, str, str], ...]:
         """Every addable row type without resolving or building a run."""
 
@@ -2219,6 +2407,9 @@ class ConsolePresenter:
         open_editor: bool = True,
     ) -> str:
         """Create one stopped row draft; Start is the first build boundary."""
+
+        if self._task_command_blocked("adding a logic node"):
+            return ""
 
         descriptor = self.catalog.get(api_name)
         if descriptor is None:
@@ -2301,6 +2492,7 @@ class ConsolePresenter:
         artifact_specs = artifact_input_specs(binding.descriptor)
         workspace = getattr(self.session, "workspace", None)
         artifact_base_dir = str(getattr(workspace, "data", ""))
+        state, status = self._logic_state(binding)
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
@@ -2325,7 +2517,8 @@ class ConsolePresenter:
             "device_options": options,
             "running": bool(binding.host is not None and binding.host.running),
             "pending": binding.pending is not None,
-            "error": binding.draft_error,
+            "error": status if state == "error" else "",
+            "status": status,
         }
 
     def _open_logic_editor(self, binding: LogicBinding) -> bool:
@@ -2361,6 +2554,9 @@ class ConsolePresenter:
     ) -> bool:
         """Patch the row draft without mutating its current run."""
 
+        if self._task_command_blocked("changing a logic draft"):
+            return False
+
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
@@ -2392,6 +2588,8 @@ class ConsolePresenter:
         )
 
     def start_logic(self, node_id: str) -> bool:
+        if self._task_command_blocked("starting another logic node"):
+            return False
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
@@ -2432,6 +2630,7 @@ class ConsolePresenter:
         blockers = set(candidate.reservation.waiting_for)
         if blockers:
             binding.pending = candidate
+            self._begin_task_takeover(binding)
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             self._report(
@@ -2439,20 +2638,43 @@ class ConsolePresenter:
                 severity="task",
             )
             return True
-        return self._activate_candidate(binding, candidate)
+        activated = self._activate_candidate(binding, candidate)
+        if activated:
+            self._begin_task_takeover(binding)
+            self._refresh_console_projection()
+        return activated
 
     def stop_logic(self, node_id: str) -> bool:
+        if self._task_command_blocked(
+            "stopping another logic node",
+            node_id=str(node_id),
+            active_stop=True,
+        ):
+            return False
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
+        had_pending = binding.pending is not None
         self._discard_pending(binding)
-        if binding.host is not None:
-            binding.host.cancel("the operator pressed Stop")
+        host = binding.host
+        if host is not None and host.running:
+            host.cancel("the operator pressed Stop")
+        if self._active_task_id == binding.node_id and (
+            host is None or not host.running
+        ):
+            _state, status = self._logic_state(binding)
+            self._finish_task_takeover(
+                binding,
+                status="cancelled" if had_pending else status,
+                severity="task",
+            )
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
         return True
 
     def edit_logic(self, node_id: str) -> bool:
+        if self._task_command_blocked("editing a logic node"):
+            return False
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
@@ -2467,6 +2689,9 @@ class ConsolePresenter:
         stays, saying so, until it has -- which the beat notices.  Nothing here
         waits, because what would be waiting is the window.
         """
+
+        if self._task_command_blocked("removing a logic node"):
+            return False
 
         binding = self.logic.get(str(node_id))
         if binding is None:
@@ -2524,6 +2749,7 @@ class ConsolePresenter:
                 except Exception as error:
                     self._report(f"{binding.node_id}: {error}", severity="error")
                 self._capture_artifact_results(binding)
+                self._ensure_task_previews(binding)
                 if not binding.host.running and binding.lease is not None:
                     binding.lease.release()
                     binding.lease = None
@@ -2540,15 +2766,21 @@ class ConsolePresenter:
             if not candidate.waiting_for:
                 binding.pending = None
                 self._activate_candidate(binding, candidate)
+        self._sync_task_takeover()
         self._refresh_console_projection()
 
-    def _show_logic(self, binding: LogicBinding) -> None:
-        """What one node is doing, pushed only when it changed.
+    @staticmethod
+    def _observation_status(observed: object) -> str:
+        phase = str(getattr(observed, "phase", "") or "running")
+        if phase == "stopping":
+            return phase
+        progress = getattr(observed, "progress", None)
+        text = str(getattr(progress, "text", "") or "")
+        if text:
+            return text
+        return phase
 
-        A row rewritten every beat is a row an operator cannot read a status
-        off, because the text they were halfway through replaced itself.
-        """
-
+    def _logic_state(self, binding: LogicBinding) -> tuple[str, str]:
         host = binding.host
         if host is None:
             state = "error" if binding.draft_error else "idle"
@@ -2558,14 +2790,29 @@ class ConsolePresenter:
             if observed.error:
                 state, status = "error", observed.error
             elif observed.running:
-                state, status = "running", observed.phase
+                state, status = "running", self._observation_status(observed)
             elif binding.draft_error:
                 state, status = "error", binding.draft_error
             else:
-                state, status = "idle", observed.phase
+                state, status = "idle", self._observation_status(observed)
+            warnings = tuple(getattr(observed, "warnings", ()))
+            if warnings:
+                status = f"{status}; warning: {'; '.join(warnings)}"
         if binding.pending is not None:
             waiting = ", ".join(sorted(binding.pending.waiting_for))
+            state = "running"
             status = f"waiting for {waiting}" if waiting else "restart queued"
+        return state, str(status)
+
+    def _show_logic(self, binding: LogicBinding) -> None:
+        """What one node is doing, pushed only when it changed.
+
+        A row rewritten every beat is a row an operator cannot read a status
+        off, because the text they were halfway through replaced itself.
+        """
+
+        host = binding.host
+        state, status = self._logic_state(binding)
         names = (
             host.published_signals()
             if host is not None
@@ -2850,6 +3097,7 @@ class ConsolePresenter:
 
         for binding in tuple(self.logic.values()):
             self._show_logic(binding)
+        self._project_task_takeover()
         state = "paused" if self._paused else "running"
         running = sum(
             1

@@ -119,6 +119,7 @@ class PanelCardView(FluentGroupBox):
         #: redraws on a beat and can be taken off the board; a saved figure
         #: does neither, and must not offer controls for both.
         self._live = True
+        self._editing_enabled = True
         self.settings_button = FluentButton("Setting", color=GREY)
         self.settings_button.setParent(self)
         self.settings_button.setFixedSize(
@@ -341,6 +342,14 @@ class PanelCardView(FluentGroupBox):
 
         self._selectors_on = bool(enabled)
         _set_interaction(self._surface, self._selectors_on)
+
+    def set_editing_enabled(self, enabled: bool) -> None:
+        """Gate persisted panel edits without disabling plot interaction."""
+
+        self._editing_enabled = bool(enabled)
+        self.settings_button.setEnabled(self._editing_enabled)
+        if not self._editing_enabled and self._settings_popup is not None:
+            self._settings_popup.hide()
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()
