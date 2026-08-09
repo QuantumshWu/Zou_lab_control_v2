@@ -17,9 +17,11 @@ HARDWARE_SEQUENCER_SCHEMA = AuthoringSchema(
     (
         AuthoringField("host", "str", "Pulse server host", "127.0.0.1"),
         AuthoringField("port", "int", "Pulse server port", 18861, minimum=1, maximum=65535),
-        AuthoringField("request_timeout", "float", "Request timeout seconds", 30.0, minimum=0.1),
     )
 )
+
+
+_INTERNAL_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -46,7 +48,7 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
         streamer = dial(
             str(authored["host"]),
             int(authored["port"]),
-            request_timeout=float(authored["request_timeout"]),
+            request_timeout=_INTERNAL_REQUEST_TIMEOUT_SECONDS,
         )
     if not isinstance(streamer, (PulseStreamer, RemotePulseStreamer)):
         raise TypeError("sequencer.hardware needs a zlc_pulse device")

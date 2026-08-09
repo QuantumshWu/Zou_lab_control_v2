@@ -12,9 +12,11 @@ rediscover them:
 * the ROI goes in offsets-first, and every value is snapped to the CAMERA'S own
   min/max/increment.  Writing a width while a stale offset is live violates
   ``offset + width <= sensor`` and the camera rejects it outright.
-* how loudly a missing frame fails follows the TRIGGER MODE.  Free-running, it
-  is a viewer seeing no light: return short and freeze.  Hardware-triggered, it
-  is a lost trigger that corrupts the shot: raise.
+* finite acquisition is always external-triggered while a monitor arm is a
+  temporary free-running session.  One authored trigger setting must not turn
+  the whole camera into one mode or the other.
+* Mono8 is the fixed payload contract, checked from SDK readback rather than
+  inferred from whatever operator-authored string happened to be supplied.
 """
 
 from __future__ import annotations
@@ -81,7 +83,15 @@ class _Result:
 
 
 class _FakeCamera:
-    def __init__(self, frames=(), succeed=True):
+    def __init__(
+        self,
+        frames=(),
+        succeed=True,
+        fail_stop_once=False,
+        fail_start_once=False,
+        ignore_stop_once=False,
+        fail_open=False,
+    ):
         self.Width = _Node(64, 16, 1920, 4)
         self.Height = _Node(48, 16, 1200, 2)
         self.WidthMax = _Node(1920)
@@ -98,17 +108,28 @@ class _FakeCamera:
         self._grabbing = False
         self.opened = False
         self.grab_calls: list[str] = []
+        self.close_calls = 0
+        self._fail_stop_once = fail_stop_once
+        self._fail_start_once = fail_start_once
+        self._ignore_stop_once = ignore_stop_once
+        self._fail_open = fail_open
 
     def Open(self):
         self.opened = True
+        if self._fail_open:
+            raise RuntimeError("injected SDK open failure")
 
     def Close(self):
         self.opened = False
+        self.close_calls += 1
 
     def IsGrabbing(self):
         return self._grabbing
 
     def StartGrabbing(self, _strategy):
+        if self._fail_start_once:
+            self._fail_start_once = False
+            raise RuntimeError("injected start failure")
         self._grabbing = True
         self.grab_calls.append("StartGrabbing")
 
@@ -117,8 +138,14 @@ class _FakeCamera:
         self.grab_calls.append(f"StartGrabbingMax({count})")
 
     def StopGrabbing(self):
-        self._grabbing = False
         self.grab_calls.append("StopGrabbing")
+        if self._ignore_stop_once:
+            self._ignore_stop_once = False
+            return
+        self._grabbing = False
+        if self._fail_stop_once:
+            self._fail_stop_once = False
+            raise RuntimeError("injected stop failure")
 
     def RetrieveResult(self, _timeout_ms, _handling):
         if not self._frames:
@@ -140,12 +167,24 @@ def fake_pypylon(monkeypatch):
     return pylon
 
 
+def _config(**values) -> PylonCameraConfig:
+    return PylonCameraConfig(serial="PYLON-001", **values)
+
+
+def test_serial_is_required_and_the_payload_contract_is_not_authorable() -> None:
+    with pytest.raises(ValueError, match="serial"):
+        PylonCameraConfig(serial="")
+    with pytest.raises(TypeError, match="pixel_format"):
+        PylonCameraConfig(serial="PYLON-001", pixel_format="Mono12")
+    assert _config().trigger_source == "Line1"
+
+
 def test_a_roi_configured_before_open_reaches_the_sensor(fake_pypylon) -> None:
     """Devices open last, so configure-then-open is the normal order."""
 
     camera = _FakeCamera()
     adapter = PylonCameraAdapter(
-        PylonCameraConfig(roi_xywh=(100, 50, 640, 480), exposure_seconds=0.01),
+        _config(roi_xywh=(100, 50, 640, 480), exposure_seconds=0.01),
         camera=camera,
     )
     adapter.open()
@@ -161,7 +200,7 @@ def test_the_roi_is_written_offsets_first_and_snapped_to_the_camera_grid(fake_py
     camera = _FakeCamera()
     adapter = PylonCameraAdapter(
         # 641 is not a multiple of the width increment 4; 51 not of the y increment 2.
-        PylonCameraConfig(roi_xywh=(101, 51, 641, 481)),
+        _config(roi_xywh=(101, 51, 641, 481)),
         camera=camera,
     )
     adapter.open()
@@ -177,7 +216,7 @@ def test_the_roi_is_written_offsets_first_and_snapped_to_the_camera_grid(fake_py
 
 def test_a_blank_roi_means_the_full_sensor_not_a_stale_window(fake_pypylon) -> None:
     camera = _FakeCamera()
-    PylonCameraAdapter(PylonCameraConfig(roi_xywh=None), camera=camera).open()
+    PylonCameraAdapter(_config(roi_xywh=None), camera=camera).open()
     assert camera.Width.GetValue() == camera.WidthMax.GetValue()
     assert camera.Height.GetValue() == camera.HeightMax.GetValue()
 
@@ -185,7 +224,7 @@ def test_a_blank_roi_means_the_full_sensor_not_a_stale_window(fake_pypylon) -> N
 def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_pypylon) -> None:
     camera = _FakeCamera()
     adapter = PylonCameraAdapter(
-        PylonCameraConfig(trigger_source="Line1"),
+        _config(),
         camera=camera,
     )
     adapter.open()
@@ -204,20 +243,22 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     adapter.finish_record_capture()
 
 
-def test_free_run_keeps_the_stream_resident_across_arm_and_finish(fake_pypylon) -> None:
-    """Restarting a USB3 stream per frame was the live-monitor stutter."""
+def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(fake_pypylon) -> None:
+    """Monitor mode is an arm policy, not the camera's permanent configuration."""
 
     camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 4)
-    adapter = PylonCameraAdapter(PylonCameraConfig(trigger_source="Software"), camera=camera)
+    adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+    assert camera.TriggerMode.GetValue() == "Off"
     adapter.read_frame_records(1, timeout=0.5, exact=False)
     adapter.finish_record_capture()
-    assert camera.IsGrabbing(), "free-run leaves the stream up on purpose"
-
-    adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
-    assert camera.grab_calls.count("StartGrabbing") == 1, "the stream restarted"
+    assert not camera.IsGrabbing()
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
 
 
 def test_a_triggered_session_is_bounded_and_stops_when_done(fake_pypylon) -> None:
@@ -227,29 +268,139 @@ def test_a_triggered_session_is_bounded_and_stops_when_done(fake_pypylon) -> Non
     """
 
     camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 3)
-    adapter = PylonCameraAdapter(PylonCameraConfig(trigger_source="Line1"), camera=camera)
+    adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
 
     adapter.arm(3, source_group_sizes=(3,), buffer_frame_count=3, timeout=0.5)
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
     assert "StartGrabbingMax(3)" in camera.grab_calls
     adapter.read_frame_records(3, timeout=0.5, exact=True)
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
 
 
-def test_fault_loudness_follows_the_trigger_mode(fake_pypylon) -> None:
-    """Free-run returns short; a lost hardware trigger raises."""
+def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
+    """A monitor returns short; a lost finite trigger raises."""
 
-    quiet = PylonCameraAdapter(PylonCameraConfig(trigger_source="Software"), camera=_FakeCamera(frames=[]))
+    quiet = PylonCameraAdapter(_config(), camera=_FakeCamera(frames=[]))
     quiet.open()
     quiet.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.05)
     assert quiet.read_frame_records(2, timeout=0.05, exact=False) == ()
 
-    loud = PylonCameraAdapter(PylonCameraConfig(trigger_source="Line1"), camera=_FakeCamera(frames=[]))
+    loud = PylonCameraAdapter(_config(), camera=_FakeCamera(frames=[]))
     loud.open()
     loud.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.05)
     with pytest.raises(RuntimeError, match="lost trigger"):
         loud.read_frame_records(2, timeout=0.05, exact=True)
+
+
+def test_mono8_is_verified_from_sdk_readback(fake_pypylon) -> None:
+    camera = _FakeCamera()
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+    camera.PixelFormat.value = "Mono12"
+    with pytest.raises(RuntimeError, match="Mono8"):
+        adapter.capture_working_point()
+
+
+def test_open_failure_closes_once_and_close_remains_idempotent(fake_pypylon) -> None:
+    camera = _FakeCamera()
+    camera.PixelFormat.SetValue = lambda _value: None
+    camera.PixelFormat.value = "Mono12"
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    with pytest.raises(RuntimeError, match="Mono8"):
+        adapter.open()
+    assert camera.close_calls == 1
+    adapter.close()
+    assert camera.close_calls == 1
+
+
+def test_sdk_open_failure_closes_the_unadopted_candidate(fake_pypylon) -> None:
+    candidate = _FakeCamera(fail_open=True)
+    info = types.SimpleNamespace(GetSerialNumber=lambda: "PYLON-001")
+    factory = types.SimpleNamespace(
+        EnumerateDevices=lambda: (info,),
+        CreateDevice=lambda selected: selected,
+    )
+    fake_pypylon.TlFactory = types.SimpleNamespace(GetInstance=lambda: factory)
+    fake_pypylon.InstantCamera = lambda _device: candidate
+
+    adapter = PylonCameraAdapter(_config())
+    with pytest.raises(RuntimeError, match="SDK open failure"):
+        adapter.open()
+
+    assert candidate.close_calls == 1
+    adapter.close()
+    assert candidate.close_calls == 1
+
+
+def test_finish_attempts_external_restore_even_if_stream_stop_fails(fake_pypylon) -> None:
+    camera = _FakeCamera(fail_stop_once=True)
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+    adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+    with pytest.raises(RuntimeError, match="stop failure"):
+        adapter.finish_record_capture()
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
+    adapter.finish_record_capture()
+    adapter.close()
+    adapter.close()
+    assert camera.close_calls == 1
+
+
+def test_failed_monitor_start_restores_the_external_working_point(fake_pypylon) -> None:
+    camera = _FakeCamera(fail_start_once=True)
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+
+    with pytest.raises(RuntimeError, match="start failure"):
+        adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
+    adapter.close()
+
+
+def test_partial_monitor_trigger_write_is_rolled_back(fake_pypylon) -> None:
+    camera = _FakeCamera()
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+    original_get = camera.TriggerMode.GetValue
+    failed = False
+
+    def fail_first_monitor_readback():
+        nonlocal failed
+        if camera.TriggerMode.value == "Off" and not failed:
+            failed = True
+            raise RuntimeError("injected trigger readback failure")
+        return original_get()
+
+    camera.TriggerMode.GetValue = fail_first_monitor_readback
+    with pytest.raises(RuntimeError, match="trigger readback failure"):
+        adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+
+    assert camera.TriggerMode.GetValue() == "On"
+    assert camera.TriggerSource.GetValue() == "Line1"
+    adapter.close()
+
+
+def test_finish_refuses_to_claim_terminal_while_the_sdk_is_still_grabbing(
+    fake_pypylon,
+) -> None:
+    camera = _FakeCamera(ignore_stop_once=True)
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+    adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+
+    with pytest.raises(RuntimeError, match="remained grabbing"):
+        adapter.finish_record_capture()
+
+    assert adapter.capture_state() is True
+    assert camera.IsGrabbing() is True
+    adapter.finish_record_capture()
+    assert adapter.capture_state() is False
 
 
 def test_the_module_imports_without_a_basler_runtime() -> None:

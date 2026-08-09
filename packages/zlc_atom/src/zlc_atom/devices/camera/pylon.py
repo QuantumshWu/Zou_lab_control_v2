@@ -1,12 +1,14 @@
-"""Basler pylon camera: the MOT viewer, as a pure frame grabber.
+"""Basler pylon camera with finite-trigger and temporary-monitor modes.
 
 Ported from the pre-split tree against this package's ``CameraAdapter``
 contract.  Not a byte-copy -- the old driver was written against a different
 base class -- but every behaviour that was learned the hard way is carried over,
 and each is commented where it lives.
 
-The camera never touches a sequencer.  Whatever gates its frames is somebody
-else's business, which is what makes the virtual twin and this a drop-in swap.
+The camera never touches a sequencer.  Finite arms nevertheless have a fixed
+hardware contract: ``FrameStart`` is externally triggered from the configured
+line.  A monitor arm temporarily disables that trigger and uses latest-image
+free-run, then restores the finite working point when it finishes.
 
 ``pypylon`` is imported lazily, so a machine with no Basler runtime still
 imports this package, runs the virtual backend, and passes the whole suite.
@@ -62,18 +64,34 @@ def _roi_request(
 class PylonCameraConfig:
     """What an operator writes down to reach and set up one Basler camera."""
 
-    serial: str = ""
+    serial: str
     exposure_seconds: float = 5e-3
-    trigger_source: str = "Software"
-    pixel_format: str = "Mono8"
+    trigger_source: str = "Line1"
     roi_xywh: tuple[int, int, int, int] | None = None
     timeout_seconds: float = 2.0
 
-    @property
-    def free_run(self) -> bool:
-        """Software trigger means free-run: nothing external gates the frames."""
-
-        return str(self.trigger_source).strip().lower() == "software"
+    def __post_init__(self) -> None:
+        if not isinstance(self.serial, str):
+            raise TypeError("pylon serial must be text")
+        serial = self.serial.strip()
+        if not serial:
+            raise ValueError("pylon serial must be non-empty")
+        if not isinstance(self.trigger_source, str):
+            raise TypeError("pylon trigger_source must be text")
+        trigger_source = self.trigger_source.strip()
+        if not trigger_source:
+            raise ValueError("pylon trigger_source must be non-empty")
+        exposure = float(self.exposure_seconds)
+        if not np.isfinite(exposure) or exposure <= 0.0:
+            raise ValueError("exposure_seconds must be positive and finite")
+        timeout = float(self.timeout_seconds)
+        if not np.isfinite(timeout) or timeout <= 0.0:
+            raise ValueError("timeout_seconds must be positive and finite")
+        object.__setattr__(self, "serial", serial)
+        object.__setattr__(self, "trigger_source", trigger_source)
+        object.__setattr__(self, "exposure_seconds", exposure)
+        object.__setattr__(self, "timeout_seconds", timeout)
+        object.__setattr__(self, "roi_xywh", _roi_request(self.roi_xywh))
 
 
 class PylonCameraAdapter:
@@ -88,6 +106,7 @@ class PylonCameraAdapter:
         self._roi = _roi_request(config.roi_xywh)
         self._configured = False
         self._capture_incomplete = False
+        self._monitor_mode = False
 
     # ------------------------------------------------------------------ open
 
@@ -103,43 +122,74 @@ class PylonCameraAdapter:
         still import this module and run everything that touches no Basler.
         """
 
-        if self._camera is None:
-            self._attach()
         if self._configured:
             return
-        self._apply_pixel_format()
-        self._apply_trigger()
-        self._apply_exposure()
-        self._apply_roi()
+        try:
+            if self._camera is None:
+                self._attach()
+            self._apply_pixel_format()
+            self._apply_trigger(monitor=False)
+            self._apply_exposure()
+            self._apply_roi()
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException as secondary:
+                primary.add_note(f"pylon close after open failure also failed: {secondary}")
+            raise
         self._configured = True
 
     def _attach(self) -> None:
         from pypylon import pylon  # noqa: PLC0415 -- lazy on purpose, see open()
 
         factory = pylon.TlFactory.GetInstance()
-        if self.config.serial:
-            devices = [
-                info
-                for info in factory.EnumerateDevices()
-                if info.GetSerialNumber() == self.config.serial
-            ]
-            if not devices:
-                raise RuntimeError(f"no Basler camera with serial {self.config.serial!r}")
-            device = factory.CreateDevice(devices[0])
-        else:
-            device = factory.CreateFirstDevice()
-        self._camera = pylon.InstantCamera(device)
-        self._camera.Open()
+        devices = [
+            info
+            for info in factory.EnumerateDevices()
+            if str(info.GetSerialNumber()) == self.config.serial
+        ]
+        if not devices:
+            raise RuntimeError(f"no Basler camera with serial {self.config.serial!r}")
+        device = factory.CreateDevice(devices[0])
+        camera = pylon.InstantCamera(device)
+        try:
+            camera.Open()
+        except BaseException as primary:
+            try:
+                camera.Close()
+            except BaseException as secondary:
+                primary.add_note(f"pylon close after SDK Open failure also failed: {secondary}")
+            raise
+        self._camera = camera
 
     def close(self) -> None:
         camera = self._camera
         if camera is None:
+            self._armed = False
+            self._monitor_mode = False
+            self._configured = False
             return
-        if camera.IsGrabbing():
-            camera.StopGrabbing()
-        camera.Close()
-        self._camera = None
-        self._configured = False
+        primary: BaseException | None = None
+        try:
+            self._stop_and_restore_external()
+        except BaseException as error:
+            primary = error
+        closed = False
+        try:
+            camera.Close()
+            closed = True
+        except BaseException as error:
+            if primary is None:
+                primary = error
+            else:
+                primary.add_note(f"pylon camera close also failed: {error}")
+        if closed:
+            self._camera = None
+            self._configured = False
+            self._armed = False
+            self._monitor_mode = False
+        if primary is not None:
+            raise primary
 
     # ------------------------------------------------------------ configuring
 
@@ -171,16 +221,58 @@ class PylonCameraAdapter:
 
     def _apply_pixel_format(self) -> None:
         with self._paused_stream():
-            self._camera.PixelFormat.SetValue(str(self.config.pixel_format))
+            self._camera.PixelFormat.SetValue("Mono8")
+            if str(self._camera.PixelFormat.GetValue()) != "Mono8":
+                raise RuntimeError("pylon PixelFormat readback differs from fixed Mono8")
 
-    def _apply_trigger(self) -> None:
+    def _apply_trigger(self, *, monitor: bool) -> None:
         camera = self._camera
         camera.TriggerSelector.SetValue("FrameStart")
-        if self.config.free_run:
+        if str(camera.TriggerSelector.GetValue()) != "FrameStart":
+            raise RuntimeError("pylon TriggerSelector readback differs from FrameStart")
+        if monitor:
             camera.TriggerMode.SetValue("Off")
+            if str(camera.TriggerMode.GetValue()) != "Off":
+                raise RuntimeError("pylon TriggerMode readback differs from monitor free-run")
         else:
             camera.TriggerMode.SetValue("On")
             camera.TriggerSource.SetValue(str(self.config.trigger_source))
+            if str(camera.TriggerMode.GetValue()) != "On":
+                raise RuntimeError("pylon TriggerMode readback differs from external trigger")
+            if str(camera.TriggerSource.GetValue()) != self.config.trigger_source:
+                raise RuntimeError("pylon TriggerSource readback differs from its configured line")
+            activation = getattr(camera, "TriggerActivation", None)
+            if activation is not None:
+                activation.SetValue("RisingEdge")
+                if str(activation.GetValue()) != "RisingEdge":
+                    raise RuntimeError(
+                        "pylon TriggerActivation readback differs from RisingEdge"
+                    )
+
+    def _stop_and_restore_external(self) -> None:
+        """Attempt both terminal actions and preserve the first failure."""
+
+        camera = self._camera
+        if camera is None:
+            return
+        primary: BaseException | None = None
+        try:
+            if camera.IsGrabbing():
+                camera.StopGrabbing()
+            if camera.IsGrabbing():
+                raise RuntimeError("pylon remained grabbing after StopGrabbing")
+        except BaseException as error:
+            primary = error
+        try:
+            self._apply_trigger(monitor=False)
+            self._monitor_mode = False
+        except BaseException as error:
+            if primary is None:
+                primary = error
+            else:
+                primary.add_note(f"pylon external-trigger restore also failed: {error}")
+        if primary is not None:
+            raise primary
 
     def _apply_roi(self) -> None:
         """Push the ROI in the GenICam-safe order.
@@ -295,26 +387,34 @@ class PylonCameraAdapter:
         sensor = (int(camera.HeightMax.GetValue()), int(camera.WidthMax.GetValue()))
         origin = (int(camera.OffsetY.GetValue()), int(camera.OffsetX.GetValue()))
         pixel_format = str(camera.PixelFormat.GetValue())
-        dtype = np.dtype("uint8") if pixel_format.endswith("8") else np.dtype("uint16")
+        if pixel_format != "Mono8":
+            raise RuntimeError(f"pylon pixel format is {pixel_format!r}, expected 'Mono8'")
+        expected_trigger_mode = (
+            "Off" if self._armed and self._monitor_mode else "On"
+        )
+        if str(camera.TriggerMode.GetValue()) != expected_trigger_mode:
+            raise RuntimeError("pylon trigger mode changed outside the adapter")
+        if expected_trigger_mode == "On" and (
+            str(camera.TriggerSource.GetValue()) != self.config.trigger_source
+        ):
+            raise RuntimeError("pylon trigger source changed outside the adapter")
         exposure = float(camera.ExposureTime.GetValue()) / 1e6
         return CameraWorkingPoint(
-            acquisition_mode=(
-                CameraAcquisitionMode.FREE_RUNNING
-                if self.config.free_run
-                else CameraAcquisitionMode.EXTERNAL_TRIGGERED
-            ),
+            acquisition_mode=CameraAcquisitionMode.EXTERNAL_TRIGGERED,
             frame_shape_yx=(height, width),
             sensor_shape_yx=sensor,
             roi_origin_yx=origin,
             roi_shape_yx=(height, width),
             binning_yx=(1, 1),
-            dtype=dtype,
+            dtype=np.dtype("uint8"),
             count_unit="count",
             exposure_seconds=exposure,
             required_external_trigger_interval_seconds=exposure,
             external_trigger_integration_start_offset_seconds=0.0,
             gain=1.0,
-            readout_mode=f"pylon-{pixel_format}-{self.config.trigger_source}",
+            readout_mode=(
+                f"pylon:Mono8;external={self.config.trigger_source};monitor=free-run"
+            ),
         )
 
     def arm(
@@ -327,11 +427,9 @@ class PylonCameraAdapter:
     ) -> None:
         """Start the grab session, with the strategy each mode's semantics need.
 
-        FREE-RUN keeps the stream RESIDENT: it starts on the first arm and stays
-        running across arm/disarm.  Restarting a USB3 stream per frame costs tens
-        of milliseconds and was the live-monitor stutter.  Latest-image-only
-        means a slow viewer always sees the current image rather than working
-        through a stale backlog.
+        MONITOR acquisition is free-running only for this arm.  Latest-image-only
+        means a slow viewer sees the current image rather than a stale backlog;
+        finish stops the stream and restores the external-trigger working point.
 
         HARDWARE TRIGGER gets one bounded session per arm, stopped when done:
         one trigger, one frame, one shot, strictly.  A resident latest-only
@@ -340,27 +438,70 @@ class PylonCameraAdapter:
         acquisitions are slow enough that the restart cost does not matter.
         """
 
-        del source_group_sizes, buffer_frame_count
+        if frames is None:
+            if source_group_sizes is not None:
+                raise ValueError("monitor arm cannot declare source_group_sizes")
+            expected = None
+        else:
+            if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+                raise ValueError("frames must be a positive integer or None")
+            if not isinstance(source_group_sizes, tuple):
+                raise TypeError("finite arm requires tuple source_group_sizes")
+            if (
+                not source_group_sizes
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value <= 0
+                    for value in source_group_sizes
+                )
+                or sum(source_group_sizes) != frames
+            ):
+                raise ValueError("source_group_sizes must exactly cover frames")
+            expected = frames
+        if (
+            isinstance(buffer_frame_count, bool)
+            or not isinstance(buffer_frame_count, int)
+            or buffer_frame_count <= 0
+        ):
+            raise ValueError("buffer_frame_count must be a positive integer")
+        if expected is not None and buffer_frame_count != expected:
+            raise ValueError(
+                "finite buffer_frame_count must equal the complete frame count"
+            )
+        bounded_timeout = float(timeout)
+        if not np.isfinite(bounded_timeout) or bounded_timeout <= 0.0:
+            raise ValueError("timeout must be positive and finite")
         self.open()
         from pypylon import pylon  # noqa: PLC0415
 
         camera = self._camera
-        if self.config.free_run:
-            if not camera.IsGrabbing():
-                camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-        else:
+        if self._armed:
+            raise RuntimeError("pylon camera is already armed")
+        monitor = expected is None
+        try:
             if camera.IsGrabbing():
                 camera.StopGrabbing()
-            if frames is None:
-                camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+            if camera.IsGrabbing():
+                raise RuntimeError("pylon remained grabbing after StopGrabbing")
+            self._apply_trigger(monitor=monitor)
+            if monitor:
+                camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
             else:
-                camera.StartGrabbingMax(int(frames), pylon.GrabStrategy_OneByOne)
-        self._armed_total = None if frames is None else int(frames)
+                camera.StartGrabbingMax(expected, pylon.GrabStrategy_OneByOne)
+        except BaseException as primary:
+            try:
+                self._stop_and_restore_external()
+            except BaseException as secondary:
+                primary.add_note(
+                    f"pylon rollback after arm failure also failed: {secondary}"
+                )
+            raise
+        self._armed_total = expected
         self._grabbed = 0
         self._armed = True
         self._capture_incomplete = False
-        if timeout:
-            self.config = type(self.config)(**{**self.config.__dict__, "timeout_seconds": float(timeout)})
+        self._monitor_mode = monitor
 
     def read_frame_records(
         self,
@@ -400,6 +541,10 @@ class PylonCameraAdapter:
                     self._capture_incomplete = True
                     continue
                 image = np.array(result.Array, copy=True)
+                if image.dtype != np.dtype("uint8"):
+                    raise RuntimeError(
+                        f"pylon Mono8 capture returned dtype {image.dtype}, expected uint8"
+                    )
             finally:
                 result.Release()
             self._grabbed += 1
@@ -413,11 +558,11 @@ class PylonCameraAdapter:
         return tuple(records)
 
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
-        """End the session.  Free-run leaves the stream resident on purpose."""
+        """End this arm and restore the finite external-trigger working point."""
 
         camera = self._camera
-        if camera is not None and camera.IsGrabbing() and not self.config.free_run:
-            camera.StopGrabbing()
+        if camera is not None:
+            self._stop_and_restore_external()
         self._armed = False
         return CameraCaptureTerminalRecord(
             self._grabbed,

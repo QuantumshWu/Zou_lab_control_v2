@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA
+from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA, PYLON_CAMERA_SCHEMA
 from zlc_atom.devices.sequencer.device_types import HARDWARE_SEQUENCER_SCHEMA
 from zlc_atom.devices.simulation.device_types import (
     VIRTUAL_CAMERA_SCHEMA,
@@ -35,19 +35,35 @@ def _fields(schema) -> set[str]:
     return {field.name for field in schema.fields}
 
 
-def test_a_real_camera_can_be_given_the_parameters_a_real_camera_has() -> None:
-    assert _fields(DCAM_CAMERA_SCHEMA) >= {
+def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
+    assert _fields(DCAM_CAMERA_SCHEMA) == {
         "device_index",
         "exposure_seconds",
         "readout_speed",
-        "binning",
         "roi_x",
         "roi_y",
         "roi_width",
         "roi_height",
     }
-    # And it is NOT asked for a simulation's vocabulary.
-    assert not _fields(DCAM_CAMERA_SCHEMA) & {"grid_shape_yx", "seed"}
+    assert _fields(PYLON_CAMERA_SCHEMA) == {
+        "serial",
+        "exposure_seconds",
+        "trigger_source",
+        "roi_x",
+        "roi_y",
+        "roi_width",
+        "roi_height",
+    }
+    with pytest.raises(ValueError, match="required.*serial"):
+        PYLON_CAMERA_SCHEMA.project_values({})
+    for schema, forbidden in (
+        (DCAM_CAMERA_SCHEMA, {"binning", "timeout_seconds"}),
+        (PYLON_CAMERA_SCHEMA, {"pixel_format", "timeout_seconds"}),
+    ):
+        assert _fields(schema).isdisjoint(forbidden | {"grid_shape_yx", "seed"})
+        for field in forbidden:
+            with pytest.raises(ValueError, match="unknown authoring fields"):
+                schema.project_values({field: 2})
 
 
 def test_the_virtual_camera_keeps_its_own_vocabulary() -> None:
@@ -56,7 +72,7 @@ def test_the_virtual_camera_keeps_its_own_vocabulary() -> None:
 
 
 def test_a_real_board_has_an_endpoint_and_a_virtual_one_does_not() -> None:
-    assert _fields(HARDWARE_SEQUENCER_SCHEMA) == {"host", "port", "request_timeout"}
+    assert _fields(HARDWARE_SEQUENCER_SCHEMA) == {"host", "port"}
     assert _fields(VIRTUAL_SEQUENCER_SCHEMA) == set()
 
 
@@ -135,6 +151,7 @@ def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
     try:
         assert installation.failures == {}
         assert dialled and dialled[0][0] == "10.0.0.7" and dialled[0][1] == 20000
+        assert dialled[0][2] == {"request_timeout": 30.0}
     finally:
         installation.close()
 

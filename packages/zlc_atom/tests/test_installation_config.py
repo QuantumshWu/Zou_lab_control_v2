@@ -59,7 +59,7 @@ def test_a_real_apparatus_writes_its_endpoint_and_its_sensor_settings(tmp_path) 
         (
             DeviceInstanceConfig(
                 "camera", "camera", "camera.dcam",
-                {"device_index": 1, "exposure_seconds": 0.003, "binning": 2,
+                {"device_index": 1, "exposure_seconds": 0.003, "readout_speed": 1,
                  "roi_x": 128, "roi_y": 64, "roi_width": 512, "roi_height": 256},
             ),
             DeviceInstanceConfig(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.dcam import DcamCameraAdapter, DcamCameraConfig
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
@@ -18,17 +18,6 @@ DCAM_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField("device_index", "int", "Device index", 0, minimum=0),
         AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9),
         AuthoringField("readout_speed", "int", "Readout speed", 1, minimum=1),
-        AuthoringField(
-            "binning",
-            "int",
-            "Binning",
-            1,
-            choices=tuple(
-                AuthoringChoice(value, f"{value} × {value}")
-                for value in (1, 2, 4, 8, 16)
-            ),
-        ),
-        AuthoringField("timeout_seconds", "float", "Timeout seconds", 2.0, minimum=1e-3),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
         AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
@@ -56,14 +45,13 @@ def _roi_xywh(authored: dict) -> tuple[int, int, int, int] | None:
     return tuple(int(value) for value in corners)
 
 
-#: A Basler: which one by serial, how long, how it is gated, and what it sends.
+#: A Basler: which one by serial, how long, and which external line gates finite
+#: acquisition.  Mono8 and the SDK timeout are adapter policy, not authoring.
 PYLON_CAMERA_SCHEMA = AuthoringSchema(
     (
-        AuthoringField("serial", "str", "Serial number", "", required=False),
+        AuthoringField("serial", "str", "Serial number", "", required=True),
         AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.005, minimum=1e-9),
-        AuthoringField("trigger_source", "str", "Trigger source", "Software"),
-        AuthoringField("pixel_format", "str", "Pixel format", "Mono8"),
-        AuthoringField("timeout_seconds", "float", "Timeout seconds", 2.0, minimum=1e-3),
+        AuthoringField("trigger_source", "str", "Trigger source", "Line1"),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
         AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
@@ -76,8 +64,7 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Open a Basler from a written-down configuration.
 
     An already-attached camera object may be injected for tests; otherwise the
-    serial in the configuration selects one, or the first attached camera is
-    taken when no serial is given.
+    serial in the configuration selects exactly one camera.
     """
 
     authored = PYLON_CAMERA_SCHEMA.project_values(
@@ -85,12 +72,10 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
     camera = PylonCameraAdapter(
         PylonCameraConfig(
-            serial=str(authored["serial"] or ""),
+            serial=str(authored["serial"]),
             exposure_seconds=float(authored["exposure_seconds"]),
             trigger_source=str(authored["trigger_source"]),
-            pixel_format=str(authored["pixel_format"]),
             roi_xywh=_roi_xywh(authored),
-            timeout_seconds=float(authored["timeout_seconds"]),
         ),
         camera=values.get("camera"),
     )
@@ -116,10 +101,9 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
         DcamCameraConfig(
             exposure_seconds=float(authored["exposure_seconds"]),
             readout_speed=int(authored["readout_speed"]),
-            binning=int(authored["binning"]),
+            binning=1,
             roi_xywh=_roi_xywh(authored),
             device_index=int(authored["device_index"]),
-            timeout_seconds=float(authored["timeout_seconds"]),
         ),
         driver=driver,
     )
