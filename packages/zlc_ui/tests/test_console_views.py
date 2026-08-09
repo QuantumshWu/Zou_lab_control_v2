@@ -1001,35 +1001,36 @@ assert not window.isVisible()
     )
 
 
-def test_the_connection_field_arrives_filled_in_and_is_never_wiped() -> None:
-    """An empty address box makes every operator retype the same string.
-
-    It was seeded and then cleared by the first status update, which reports
-    "offline" with no address to offer -- so the seed lasted until the window
-    finished opening.
-    """
+def test_the_connection_control_is_one_complete_presenter_projection() -> None:
 
     _run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse.models import ConnectionChoiceVM, ConnectionVM
 from zlc_ui.pulse.schedule_view import PulseScheduleView
 app = ensure_qt_app(['endpoint'])
 view = PulseScheduleView(); view.show(); app.processEvents()
 
-# Whoever opens the window seeds the address it offers; this package does not
-# know where a pulse server listens and must not write one down.
-view.set_connection('offline', '127.0.0.1:18861', 'not connected')
+choices = (
+    ConnectionChoiceVM('Virtual (sim)', 'virtual'),
+    ConnectionChoiceVM('Remote server', 'remote', endpoint_editable=True),
+    ConnectionChoiceVM('Offline (edit only)', 'offline'),
+)
+view.set_connection(ConnectionVM(choices, 'offline', '127.0.0.1:18861', 'not connected'))
 assert view.connection_endpoint.text() == '127.0.0.1:18861'
 assert 'host:port' in view.connection_endpoint.toolTip()
+assert not view.connection_endpoint.isEnabled()
 
-# Reporting offline again offers no address, and must leave the seed alone.
-view.set_connection('offline', '', 'not connected')
-assert view.connection_endpoint.text() == '127.0.0.1:18861'
+view.set_connection(ConnectionVM(choices, 'remote', '', 'remote selected'))
+assert view.connection_endpoint.text() == ''
+assert view.connection_endpoint.isEnabled()
 
-# A real endpoint replaces it, and the status keeps the whole message.
-view.set_connection('remote', '10.0.0.9:18861', '10.0.0.9:18861 - 26 ports, 62 lanes, 50 MHz')
-assert view.connection_endpoint.text() == '10.0.0.9:18861'
-assert '26 ports' in view.connection_status.toolTip()
+given = (ConnectionChoiceVM('Experiment session', 'given'),)
+view.set_connection(ConnectionVM(given, 'given', '', 'connected', locked=True))
+assert view.connection_combo.currentText() == 'Experiment session'
+assert not view.connection_combo.isEnabled()
+assert not view.connection_button.isEnabled()
+assert not view.connection_endpoint.isEnabled()
 """
     )
 

@@ -86,20 +86,14 @@ visible_names = {label.text() for label in body.findChildren(QtWidgets.QLabel) i
 assert 'FluentStatusStrip' in visible_names
 assert 'FluentFormGrid' in visible_names
 assert 'ConsoleBoardView' in visible_names
-assert 'FluentScanLineEdit · Duration cycle' in visible_names
+assert 'FluentScanLineEdit · Duration intent' in visible_names
 assert 'FluentScanLineEdit · Scan slot 1 · duration' in visible_names
 assert 'FluentScanLineEdit · API slot 1 · duration' in visible_names
 assert 'FluentScanLineEdit · DAC slot 2 · da_bias_y' in visible_names
-assert 'FluentScanLineEdit · Delay slot · off/API' in visible_names
+assert 'FluentScanLineEdit · Delay intent · off' in visible_names
 
 duration = body.binding_examples['duration_cycle']
 assert duration.binding is None
-QtTest.QTest.mouseClick(duration.field.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert duration.binding == 'scan' and duration.field.text() == 's0'
-QtTest.QTest.mouseClick(duration.field.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert duration.binding == 'api' and duration.field.text() == '1000'
 QtTest.QTest.mouseClick(duration.field.dot, QtCore.Qt.LeftButton)
 app.processEvents()
 assert duration.binding is None and duration.field.text() == '0'
@@ -108,15 +102,9 @@ dac = body.binding_examples['dac_cycle']
 assert dac.binding == 'scan' and dac.field.text() == 's1'
 QtTest.QTest.mouseClick(dac.field.dot, QtCore.Qt.LeftButton)
 app.processEvents()
-assert dac.binding == 'api' and dac.field.text() == '500'
-QtTest.QTest.mouseClick(dac.field.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert dac.binding is None and dac.field.text() == '500'
+assert dac.binding == 'scan' and dac.field.text() == 's1'
 
 delay = body.binding_examples['delay_cycle']
-QtTest.QTest.mouseClick(delay.field.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert delay.binding == 'api'
 QtTest.QTest.mouseClick(delay.field.dot, QtCore.Qt.LeftButton)
 app.processEvents()
 assert delay.binding is None

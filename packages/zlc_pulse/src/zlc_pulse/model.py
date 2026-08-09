@@ -28,6 +28,18 @@ FIELD_DAC = "dac"
 FIELD_DELAY = "delay"
 FIELD_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
 SLOT_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
+BINDING_SCAN = "scan"
+BINDING_API = "api"
+#: The legal binding transition for each physical pulse field.  Binding
+#: availability is a pulse-model fact: a delay has no scan-table column, while
+#: durations and DAC values may be supplied by either a scan or the API.
+FIELD_BINDING_CYCLES = MappingProxyType(
+    {
+        FIELD_DURATION: (None, BINDING_SCAN, BINDING_API),
+        FIELD_DAC: (None, BINDING_SCAN, BINDING_API),
+        FIELD_DELAY: (None, BINDING_API),
+    }
+)
 #: How long one of each unit is, in nanoseconds.  A tick is NOT here: it is
 #: however long this board's clock says, and listing it as 1.0 ns made it a
 #: synonym for ns -- so on a 20 ns clock the one unit that is on the grid by
@@ -39,8 +51,34 @@ TIME_UNIT_TO_NS = {
     "s": 1_000_000_000.0,
 }
 TIME_UNIT_CHOICES = tuple(TIME_UNIT_TO_NS)
-ANALOG_MODES = frozenset(("edge", "ramp"))
+#: Stable domain order for editors and serializers that must offer every
+#: model-supported analog step.  Labels remain a presentation concern.
+ANALOG_MODE_CHOICES = ("edge", "ramp")
+ANALOG_MODES = frozenset(ANALOG_MODE_CHOICES)
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def cycle_binding_kind(
+    binding: str | None,
+    *,
+    field_kind: str,
+) -> str | None:
+    """Return the next legal binding for one canonical pulse field kind.
+
+    The caller supplies the ``PulseFieldRef.kind`` value, not a widget alias.
+    Refusing unknown field and binding values here keeps the authoring control
+    from silently widening the pulse model's finite domain.
+    """
+
+    try:
+        cycle = FIELD_BINDING_CYCLES[field_kind]
+    except KeyError as exc:
+        raise ValueError(f"unknown pulse field kind {field_kind!r}") from exc
+    if binding not in cycle:
+        raise ValueError(
+            f"binding {binding!r} is not valid for pulse field kind {field_kind!r}"
+        )
+    return cycle[(cycle.index(binding) + 1) % len(cycle)]
 
 
 def _text(value: Any, field_name: str, *, empty: bool = False) -> str:

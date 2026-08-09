@@ -12,6 +12,8 @@ The stable top-level names are exactly these:
 __all__ = (
     "__version__",
     "BoardMetrics",
+    "ConnectionChoiceVM",
+    "ConnectionVM",
     "DelayRowVM",
     "FieldVM",
     "FormChoice",
@@ -29,7 +31,6 @@ __all__ = (
     "VALIDATOR_INT",
     "WINDOW_SCREEN_FRACTION",
     "capture_window",
-    "cycle_binding_kind",
     "ensure_qt_app",
     "open_device_manager",
     "open_figure_viewer",
@@ -54,10 +55,12 @@ So the surface is of three kinds, and nothing else:
   hear, methods to call, and no way through to a QWidget.  The window's
   lifecycle -- the launcher, the shared screen-fit size, centring, retention
   and the close handshake -- belongs here too.
-* **The wiring vocabulary.**  `ScheduleVM`, `PeriodVM`, `FieldVM`,
+* **The wiring vocabulary.**  `ConnectionChoiceVM`, `ConnectionVM`,
+  `ScheduleVM`, `PeriodVM`, `FieldVM`,
   `PortRowVM`, `DelayRowVM`, `RepeatVM`, `ScanPageRecord`,
-  `TargetPortRecord`, `TargetWidthRule`, the two validator tokens and
-  `cycle_binding_kind` are what a host builds to say WHAT to show.  They are
+  `TargetPortRecord`, `TargetWidthRule`, and the two validator tokens are what
+  a host builds to say WHAT to show.  Binding transitions remain in
+  `zlc_pulse`; this package emits only click intent.  These view records are
   named here because they are the contract; reaching into a submodule for
   them is how a host ends up importing views as well.
 * **The bootstrap and the headless forms.**  `ensure_qt_app` is the single

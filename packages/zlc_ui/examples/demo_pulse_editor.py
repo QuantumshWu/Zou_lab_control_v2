@@ -7,7 +7,6 @@ receives plain signal payloads and prints the same event to stdout.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import os
 from pathlib import Path
 import sys
@@ -23,8 +22,11 @@ from PyQt5 import QtCore, QtWidgets  # noqa: E402
 # else.  This demo is the tutorial for that surface, so it is written under the
 # same rule the surface enforces: no submodule reaches, no widget classes.
 from zlc_ui import (  # noqa: E402
+    ConnectionChoiceVM,
+    ConnectionVM,
     DelayRowVM,
     FieldVM,
+    FormChoice,
     PeriodVM,
     PortRowVM,
     RepeatVM,
@@ -34,7 +36,6 @@ from zlc_ui import (  # noqa: E402
     TargetWidthRule,
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
-    cycle_binding_kind,
     ensure_qt_app,
     open_pulse_editor,
 )
@@ -57,32 +58,6 @@ def _field(
                    validator_lo=validator_lo, validator_hi=validator_hi,
                    resolution=1 if kind == "int" else 0,
                    allow_any=False)
-
-
-def _with_binding(
-    field: FieldVM,
-    binding: str | None,
-    *,
-    number: int,
-    literal_text: str,
-    api_text: str,
-) -> FieldVM:
-    """Project one fake presenter binding change back into a plain FieldVM."""
-
-    normalized = None if binding is None else str(binding).strip().lower()
-    if normalized == "scan":
-        text = f"s{max(0, int(number) - 1)}"
-    elif normalized == "api":
-        text = str(api_text)
-    else:
-        text = str(literal_text)
-    return replace(
-        field,
-        text=text,
-        binding_kind=normalized or "",
-        binding_number=int(number) if normalized else 0,
-        binding_tooltip=f"fake {normalized} parameter" if normalized else "",
-    )
 
 
 def fake_schedule() -> ScheduleVM:
@@ -162,6 +137,11 @@ def fake_schedule() -> ScheduleVM:
         summary_text="5/22 ports visible | 2 periods | step 20 ns | 2e+03 ns | 1 pulses | scan 2 slots × 16 pts",
         ports=ports,
         periods=periods,
+        analog_mode_choices=(
+            FormChoice("Edge", "edge"),
+            FormChoice("Ramp", "ramp"),
+            FormChoice("Hold", "hold"),
+        ),
         repeat=None,
         delay_rows=(
             DelayRowVM("ch00", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
@@ -226,103 +206,16 @@ def populate(editor) -> None:
     schedule_vm = fake_schedule()
     schedule.set_schedule(schedule_vm)
 
-    def cycle_binding(field_kind: str, period_id, port_key) -> None:
-        """Fake-presenter side of the real dot-click intent contract."""
-
-        nonlocal schedule_vm
-        if field_kind == "duration":
-            period = next(item for item in schedule_vm.periods if item.period_id == str(period_id))
-            current = period.duration.binding_kind or None
-            next_kind = cycle_binding_kind(current, field_kind="duration")
-            updated = replace(
-                period,
-                duration=_with_binding(
-                    period.duration,
-                    next_kind,
-                    number=1,
-                    literal_text="0",
-                    api_text="1000",
-                ),
-            )
-            schedule_vm = replace(
-                schedule_vm,
-                periods=tuple(updated if item.period_id == updated.period_id else item for item in schedule_vm.periods),
-            )
-            schedule.set_period(updated)
-        elif field_kind == "analog":
-            period = next(item for item in schedule_vm.periods if item.period_id == str(period_id))
-            analog_items = list(period.analog)
-            current_item = next(
-                (item for item in analog_items if item[0] == str(port_key)),
-                None,
-            )
-            if current_item is None:
-                current_mode = "hold"
-                current_field = _field(
-                    "0", editable=False,
-                    validator_kind="int", validator_lo=-512, validator_hi=511,
-                )
-            else:
-                current_mode, current_field = current_item[1], current_item[2]
-            current = current_field.binding_kind or None
-            next_kind = cycle_binding_kind(current, field_kind="analog")
-            next_mode = "edge" if current_mode == "hold" and next_kind else current_mode
-            if next_kind:
-                current_field = replace(current_field, editable=True)
-            literal_text = "500" if str(port_key) == "da_bias_y" else "0"
-            updated_field = _with_binding(
-                current_field,
-                next_kind,
-                number=2,
-                literal_text=literal_text,
-                api_text=literal_text,
-            )
-            replacement = (str(port_key), next_mode, updated_field)
-            if current_item is None:
-                analog_items.append(replacement)
-            else:
-                analog_items = [
-                    replacement if item[0] == str(port_key) else item
-                    for item in analog_items
-                ]
-            updated = replace(period, analog=tuple(analog_items))
-            schedule_vm = replace(
-                schedule_vm,
-                periods=tuple(
-                    updated if item.period_id == updated.period_id else item
-                    for item in schedule_vm.periods
-                ),
-            )
-            schedule.set_period(updated)
-        elif field_kind == "delay":
-            row = next(item for item in schedule_vm.delay_rows if item.port_key == str(port_key))
-            current = row.value.binding_kind or None
-            next_kind = cycle_binding_kind(current, field_kind="delay")
-            updated = replace(
-                row,
-                value=_with_binding(
-                    row.value,
-                    next_kind,
-                    number=2,
-                    literal_text="0",
-                    api_text="0",
-                ),
-            )
-            schedule_vm = replace(
-                schedule_vm,
-                delay_rows=tuple(updated if item.port_key == updated.port_key else item for item in schedule_vm.delay_rows),
-            )
-            schedule.set_delay_row(updated)
-        else:
-            raise ValueError(f"unsupported fake binding field kind: {field_kind!r}")
-        print(
-            f"binding_cycle_requested({field_kind!r}, {period_id!r}, {port_key!r}) -> "
-            f"{next_kind or 'off'}",
-            flush=True,
-        )
-
-    schedule.binding_cycle_requested.connect(cycle_binding)
-    schedule.set_connection("offline", "127.0.0.1:18861", "Offline (edit only)")
+    schedule.set_connection(ConnectionVM(
+        choices=(
+            ConnectionChoiceVM("Virtual (sim)", "virtual"),
+            ConnectionChoiceVM("Remote server", "remote", endpoint_editable=True),
+            ConnectionChoiceVM("Offline (edit only)", "offline"),
+        ),
+        selected="offline",
+        endpoint="127.0.0.1:18861",
+        status="Offline (edit only)",
+    ))
     scan = editor
     scan.set_scan_repeats_range(0, 0)
     scan.set_scan_page(ScanPageRecord(
@@ -355,6 +248,7 @@ def populate(editor) -> None:
         (schedule.duration_committed, "duration_committed"),
         (schedule.digital_committed, "digital_committed"),
         (schedule.analog_committed, "analog_committed"),
+        (schedule.binding_cycle_requested, "binding_cycle_requested"),
         (schedule.move_period_requested, "move_period_requested"),
         (schedule.repeat_committed, "repeat_committed"),
         (schedule.visible_ports_committed, "visible_ports_committed"),

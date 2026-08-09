@@ -15,6 +15,27 @@ from zlc_pulse.scan import (
 )
 
 
+def test_binding_cycle_is_owned_by_canonical_pulse_field_kinds() -> None:
+    from zlc_pulse.model import (
+        FIELD_DAC,
+        FIELD_DELAY,
+        FIELD_DURATION,
+        cycle_binding_kind,
+    )
+
+    for field_kind in (FIELD_DURATION, FIELD_DAC):
+        assert cycle_binding_kind(None, field_kind=field_kind) == "scan"
+        assert cycle_binding_kind("scan", field_kind=field_kind) == "api"
+        assert cycle_binding_kind("api", field_kind=field_kind) is None
+
+    assert cycle_binding_kind(None, field_kind=FIELD_DELAY) == "api"
+    assert cycle_binding_kind("api", field_kind=FIELD_DELAY) is None
+    with pytest.raises(ValueError, match="not valid"):
+        cycle_binding_kind("scan", field_kind=FIELD_DELAY)
+    with pytest.raises(ValueError, match="unknown pulse field kind"):
+        cycle_binding_kind(None, field_kind="analog")
+
+
 def _sequence(slots=()):
     target = pulse_target_from_xdc()
     lanes = len(target.raw_lanes)

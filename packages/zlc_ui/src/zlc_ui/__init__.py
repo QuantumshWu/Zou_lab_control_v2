@@ -33,6 +33,8 @@ _EXPORTS = {
     # The wiring vocabulary: what a host builds to say WHAT to show.  These
     # are the contract, so they are named here rather than reached for in a
     # submodule, which is how a host ends up importing views as well.
+    "ConnectionChoiceVM": ("zlc_ui.pulse.models", "ConnectionChoiceVM"),
+    "ConnectionVM": ("zlc_ui.pulse.models", "ConnectionVM"),
     "DelayRowVM": ("zlc_ui.pulse.models", "DelayRowVM"),
     "FieldVM": ("zlc_ui.pulse.models", "FieldVM"),
     "PeriodVM": ("zlc_ui.pulse.models", "PeriodVM"),
@@ -44,7 +46,6 @@ _EXPORTS = {
     "TargetWidthRule": ("zlc_ui.pulse.models", "TargetWidthRule"),
     "VALIDATOR_FLOAT": ("zlc_ui.pulse.models", "VALIDATOR_FLOAT"),
     "VALIDATOR_INT": ("zlc_ui.pulse.models", "VALIDATOR_INT"),
-    "cycle_binding_kind": ("zlc_ui.pulse", "cycle_binding_kind"),
 }
 
 __all__: tuple[str, ...] = ("__version__", *tuple(sorted(_EXPORTS)))

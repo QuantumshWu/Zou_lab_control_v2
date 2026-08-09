@@ -35,6 +35,9 @@ from zlc_pulse.remote import REMOTE_METHODS, RemotePulseStreamer
 #: the author's problem: the template offered offset-binary codes and device
 #: ticks for fields whose own boxes are signed codes and microseconds.  Naming
 #: both directions makes the conversion a place instead of an instruction.
+#: 36 -> 38 for the two finite authoring facts a sibling editor consumes:
+#: analog step choices and the legal binding transition for a physical field.
+#: Keeping them here prevents Qt or Workbench from owning a second enum/cycle.
 EXPECTED_PUBLIC_NAMES = (
     "PulseStreamer",
     "RemotePulseStreamer",
@@ -64,7 +67,9 @@ EXPECTED_PUBLIC_NAMES = (
     "DEFAULT_PORT",
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
+    "ANALOG_MODE_CHOICES",
     "align_to_grid",
+    "cycle_binding_kind",
     "resolve_scan_point",
     "resolve_api_parameters",
     "scan_columns_for",

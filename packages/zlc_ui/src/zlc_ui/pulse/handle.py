@@ -26,6 +26,7 @@ from typing import Any
 from PyQt5 import QtCore
 
 from .editor_view import PulseEditorView
+from .models import ConnectionVM
 
 
 class PulseEditorHandle(QtCore.QObject):
@@ -234,8 +235,8 @@ class PulseEditorHandle(QtCore.QObject):
             running, synchronized, file_dirty, can_run=can_run, can_stop=can_stop
         )
 
-    def set_connection(self, mode: str, endpoint: str, status: str) -> None:
-        self._view.schedule_view.set_connection(mode, endpoint, status)
+    def set_connection(self, connection: ConnectionVM) -> None:
+        self._view.schedule_view.set_connection(connection)
 
     def set_scan_busy(self, busy: bool) -> None:
         self._view.schedule_view.set_scan_busy(busy)

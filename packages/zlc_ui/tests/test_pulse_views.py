@@ -9,27 +9,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
-
-def test_binding_cycle_contract_is_pure_and_field_specific() -> None:
-    from zlc_ui.pulse import cycle_binding_kind
-
-    duration = None
-    duration = cycle_binding_kind(duration, field_kind="duration")
-    assert duration == "scan"
-    duration = cycle_binding_kind(duration, field_kind="duration")
-    assert duration == "api"
-    assert cycle_binding_kind(duration, field_kind="duration") is None
-
-    assert cycle_binding_kind(None, field_kind="delay") == "api"
-    assert cycle_binding_kind("api", field_kind="delay") is None
-    try:
-        cycle_binding_kind("scan", field_kind="delay")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("output delay must not accept a scan binding")
-
-
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(SRC)
@@ -47,15 +26,82 @@ def _run_qt(code: str) -> None:
 
 def _schedule_source() -> str:
     return r'''
+from zlc_ui import FormChoice
 from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, ScheduleVM
 field = FieldVM("4", validator_kind="int", validator_lo=-8, validator_hi=8)
+analog_modes = (
+    FormChoice("Step now", "edge"),
+    FormChoice("Glide", "ramp"),
+    FormChoice("Leave unchanged", "hold"),
+)
 ports = (PortRowVM("d0", "digital", "Gate", "d0"), PortRowVM("a0", "dac", "Voltage", "a0", lo=-8, hi=8))
 periods = (
     PeriodVM("p1", "One", field, "us", ("ns", "us"), digital=(("d0", True),), analog=(("a0", "edge", field),)),
     PeriodVM("p2", "Two", field, "us", ("ns", "us"), digital=(("d0", False),), analog=(("a0", "hold", FieldVM("0", editable=False)),)),
 )
-vm = ScheduleVM(1, 2, "fake", "50 MHz", "10 us", "total", 2, "2/2", "2 periods", ports, periods)
+vm = ScheduleVM(
+    1, 2, "fake", "50 MHz", "10 us", "total", 2, "2/2", "2 periods",
+    ports, periods, analog_mode_choices=analog_modes,
+)
 '''
+
+
+def test_embedded_connection_is_named_and_locked_in_the_real_schedule_view() -> None:
+    _run_qt(
+        r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import ConnectionChoiceVM, ConnectionVM, PulseScheduleView
+
+app = ensure_qt_app(["pulse-embedded-connection"])
+view = PulseScheduleView()
+view.set_connection(ConnectionVM(
+    choices=(ConnectionChoiceVM("Experiment session", "given"),),
+    selected="given",
+    endpoint="",
+    status="connected",
+    locked=True,
+))
+assert view.connection_combo.currentText() == "Experiment session"
+assert not view.connection_combo.isEnabled()
+assert not view.connection_endpoint.isEnabled()
+assert not view.connection_button.isEnabled()
+try:
+    ConnectionVM(
+        choices=(ConnectionChoiceVM("Experiment session", "given"),),
+        selected="mystery",
+        endpoint="",
+        status="",
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown selected connection was accepted")
+
+standalone = PulseScheduleView()
+choices = (
+    ConnectionChoiceVM("Simulated", "virtual"),
+    ConnectionChoiceVM("Bench server", "remote", endpoint_editable=True),
+    ConnectionChoiceVM("Edit only", "offline"),
+)
+standalone.set_connection(ConnectionVM(
+    choices=choices,
+    selected="offline",
+    endpoint="127.0.0.1:18861",
+    status="not connected",
+))
+assert standalone.connection_combo.isEnabled()
+assert standalone.connection_button.isEnabled()
+assert not standalone.connection_endpoint.isEnabled()
+standalone.connection_combo.setCurrentIndex(
+    standalone.connection_combo.findData("remote")
+)
+assert standalone.connection_endpoint.isEnabled()
+requests = []
+standalone.connection_requested.connect(lambda *payload: requests.append(payload))
+standalone.connection_button.click()
+assert requests == [("remote", "127.0.0.1:18861")]
+'''
+    )
 
 
 def test_schedule_stale_rejection_and_widget_reuse() -> None:
@@ -67,17 +113,24 @@ from zlc_ui.pulse import ScheduleVM, PulseScheduleView
 app = ensure_qt_app(["pulse-test"])
 view = PulseScheduleView()
 assert view.set_schedule(vm)
+mode_combo = view._cards["p1"].bus_mode_combos["a0"]
+assert [mode_combo.itemText(i) for i in range(mode_combo.count())] == [
+    "Step now", "Glide", "Leave unchanged",
+]
+assert [mode_combo.itemData(i) for i in range(mode_combo.count())] == [
+    "edge", "ramp", "hold",
+]
 view.set_capabilities(False, False, True)
 assert not view.sync_button.isEnabled()
 first = view._cards["p1"]
 assert not view.set_schedule(vm)
 try:
-    view.set_schedule(ScheduleVM(1, 2, "different", vm.clock_text, vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text, vm.summary_text, vm.ports, vm.periods))
+    view.set_schedule(ScheduleVM(1, 2, "different", vm.clock_text, vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text, vm.summary_text, vm.ports, vm.periods, analog_mode_choices=vm.analog_mode_choices))
 except ValueError:
     pass
 else:
     raise AssertionError("same revision must reject a different projection")
-assert not view.set_schedule(ScheduleVM(1, 1, vm.document_name, vm.clock_text, vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text, vm.summary_text, vm.ports, vm.periods))
+assert not view.set_schedule(ScheduleVM(1, 1, vm.document_name, vm.clock_text, vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text, vm.summary_text, vm.ports, vm.periods, analog_mode_choices=vm.analog_mode_choices))
 assert view._cards["p1"] is first
 '''
     )
@@ -122,7 +175,7 @@ assert view.channel_panel.scan_summary_label.text() == "1 slot · 4 pts"
     )
 
 
-def test_pulse_demo_clicks_cycle_bindings_through_a_fake_presenter() -> None:
+def test_pulse_binding_dots_emit_intents_without_mutating_view_state() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore, QtTest
@@ -136,54 +189,26 @@ app = ensure_qt_app(["pulse-binding-cycle"])
 editor = create_window(window_ratio=0.4)
 app.processEvents()
 schedule = editor._view.schedule_view
-assert any(port.key == "da_bias_y" and port.kind == "dac" and port.visible for port in schedule._schedule.ports)
-assert "da_bias_y" in schedule.channel_panel._rows
+requested = []
+schedule.binding_cycle_requested.connect(lambda *payload: requested.append(payload))
 
+before = schedule._schedule
 duration = schedule._cards["p1"].duration_edit
-assert duration.binding_kind == "scan" and duration.text() == "s0"
-QtTest.QTest.mouseClick(duration.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert duration.binding_kind == "api" and duration.text() == "1000"
-assert schedule._schedule.periods[0].duration.binding_kind == "api"
-QtTest.QTest.mouseClick(duration.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert duration.binding_kind is None and duration.text() == "0"
-assert schedule._schedule.periods[0].duration.binding_kind == ""
-QtTest.QTest.mouseClick(duration.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert duration.binding_kind == "scan" and duration.text() == "s0"
-
 dac = schedule._cards["p1"].bus_value_edits["da_bias_y"]
-assert dac.binding_kind == "scan" and dac.text() == "s1"
-QtTest.QTest.mouseClick(dac.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert dac.binding_kind == "api" and dac.text() == "500"
-assert schedule._cards["p1"].bus_mode_combos["da_bias_y"].currentText() == "Ramp"
-QtTest.QTest.mouseClick(dac.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert dac.binding_kind is None and dac.text() == "500"
-QtTest.QTest.mouseClick(dac.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert dac.binding_kind == "scan" and dac.text() == "s1"
-
-hold_dac = schedule._cards["p2"].bus_value_edits["da_bias_y"]
-assert hold_dac.binding_kind is None
-QtTest.QTest.mouseClick(hold_dac.dot, QtCore.Qt.LeftButton)
-app.processEvents()
-assert hold_dac.binding_kind == "scan"
-assert schedule._cards["p2"].bus_mode_combos["da_bias_y"].currentText() == "Edge"
-assert schedule._schedule.periods[1].analog[0][1] == "edge"
-
 delay = schedule.channel_panel._rows["ch01"][0]
-assert delay.binding_kind is None
-QtTest.QTest.mouseClick(delay.dot, QtCore.Qt.LeftButton)
+for dot in (duration.dot, dac.dot, delay.dot):
+    QtTest.QTest.mouseClick(dot, QtCore.Qt.LeftButton)
 app.processEvents()
-assert delay.binding_kind == "api"
-assert schedule._schedule.delay_rows[1].value.binding_kind == "api"
-QtTest.QTest.mouseClick(delay.dot, QtCore.Qt.LeftButton)
-app.processEvents()
+
+assert requested == [
+    ("duration", "p1", None),
+    ("analog", "p1", "da_bias_y"),
+    ("delay", None, "ch01"),
+]
+assert schedule._schedule == before
+assert duration.binding_kind == "scan"
+assert dac.binding_kind == "scan"
 assert delay.binding_kind is None
-assert schedule._schedule.delay_rows[1].value.binding_kind == ""
 
 # This test owns an isolated QApplication subprocess; letting Qt tear down
 # with the process avoids an intermittent PyQt5/offscreen native crash in

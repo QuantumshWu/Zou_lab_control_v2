@@ -66,8 +66,9 @@ def dial(mode: str, endpoint: str):
         load_streamer_config,
         pulse_target_from_xdc,
     )
+    from ..pulse_editor import CONNECTION_REMOTE, CONNECTION_VIRTUAL
 
-    if mode == "remote":
+    if mode == CONNECTION_REMOTE:
         text = str(endpoint or default_endpoint())
         host, _, port = text.partition(":")
         streamer = connect(host or DEFAULT_HOST, int(port or DEFAULT_PORT))
@@ -77,7 +78,7 @@ def dial(mode: str, endpoint: str):
         # when the operator presses a button and blames the pulse.
         streamer.open()
         return streamer
-    if mode == "virtual":
+    if mode == CONNECTION_VIRTUAL:
         config = load_streamer_config()
         if config["source"] is None:
             raise RuntimeError(
@@ -169,8 +170,9 @@ def build(
         dial=dial if allow_dial else None,
         pulses_directory=pulses_directory,
         path=path,
-        default_endpoint=(
-            default_endpoint() if connection_label is None else str(connection_label)
+        default_endpoint=default_endpoint() if sequencer is None else "",
+        connection_label=(
+            "Experiment session" if connection_label is None else str(connection_label)
         ),
     )
 
@@ -278,7 +280,7 @@ def create_bound_window(
         sequencer=sequencer,
         device_use=device_use,
         allow_dial=False,
-        connection_label="experiment session",
+        connection_label="Experiment session",
     )
     window.closed.connect(window.presenter.close)
     return window

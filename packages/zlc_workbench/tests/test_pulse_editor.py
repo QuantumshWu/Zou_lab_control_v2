@@ -178,8 +178,8 @@ class _ScheduleView:
             "scan_summary_text": scan_summary_text,
         }
 
-    def set_connection(self, mode: str, endpoint: str, status: str) -> None:
-        self.connection = (str(mode), str(endpoint), str(status))
+    def set_connection(self, connection) -> None:
+        self.connection = connection
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
@@ -461,8 +461,8 @@ class _EditorView:
             running, synchronized, file_dirty, can_run=can_run, can_stop=can_stop
         )
 
-    def set_connection(self, mode: str, endpoint: str, status: str) -> None:
-        self.schedule_view.set_connection(mode, endpoint, status)
+    def set_connection(self, connection) -> None:
+        self.schedule_view.set_connection(connection)
 
     def set_scan_busy(self, busy: bool) -> None:
         self.schedule_view.set_scan_busy(busy)
@@ -563,6 +563,15 @@ def test_the_projection_shows_what_the_sequence_contains(presenter, sequence) ->
     }
     assert latched, "this board has no DAC latch clock to fold in"
     assert not any(row.kind == "clock" for row in vm.ports)
+    from zlc_pulse.model import ANALOG_MODE_CHOICES
+
+    assert tuple(choice.value for choice in vm.analog_mode_choices) == (
+        *ANALOG_MODE_CHOICES,
+        "hold",
+    )
+    assert tuple(choice.label for choice in vm.analog_mode_choices) == (
+        "Edge", "Ramp", "Hold",
+    )
 
     first = vm.periods[0]
     original = sequence.periods[0]
@@ -1178,15 +1187,26 @@ def test_connecting_attaches_a_sequencer_and_shows_it(sequence, monkeypatch) -> 
         view, sequence, dial=lambda _mode, _endpoint: board
     )
     try:
-        assert view.schedule_view.connection[2] == "not connected"
+        initial_connection = view.schedule_view.connection
+        assert initial_connection.status == "not connected"
+        assert initial_connection.locked is False
+        assert tuple(choice.value for choice in initial_connection.choices) == (
+            "virtual", "remote", "offline",
+        )
         assert view.schedule_view.capabilities == (False, False, False)
+
+        with pytest.raises(ValueError, match="unknown connection mode"):
+            presenter.connect_to("mystery", "")
 
         view.connection_requested.emit("remote", "127.0.0.1:18861")
 
         assert presenter.sequencer is board
         # The status says what was attached, not merely that something was.
-        mode, endpoint, status = view.schedule_view.connection
-        assert (mode, endpoint) == ("remote", "127.0.0.1:18861")
+        connection = view.schedule_view.connection
+        assert (connection.selected, connection.endpoint) == (
+            "remote", "127.0.0.1:18861",
+        )
+        status = connection.status
         assert "127.0.0.1:18861" in status and "ports" in status and "MHz" in status
         # Sync and hold need a board; stepping also needs a table to step
         # through, and offering it without one is a button that cannot work.
@@ -1212,7 +1232,7 @@ def test_a_refused_connection_says_so_and_stays_offline(sequence) -> None:
         view.connection_requested.emit("remote", "10.0.0.9:18861")
 
         assert presenter.sequencer is None
-        assert "failed" in view.schedule_view.connection[2]
+        assert "failed" in view.schedule_view.connection.status
         assert view.schedule_view.capabilities == (False, False, False)
         assert any("cannot connect" in text for text in view.warnings)
     finally:
@@ -1284,6 +1304,14 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         device_use=device_use,
     )
     assert presenter.board == exact
+    connection = presenter.view.schedule_view.connection
+    assert connection.selected == "given"
+    assert connection.locked is True
+    assert tuple((choice.label, choice.value) for choice in connection.choices) == (
+        ("Experiment session", "given"),
+    )
+    with pytest.raises(RuntimeError, match="experiment session owns"):
+        presenter.connect_to("given", "")
     presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
     assert presenter.compile().scan_coeff_frac_bits == 3
     assert presenter.fire(forever=True) is True
@@ -1615,7 +1643,7 @@ def test_a_board_that_will_not_describe_itself_is_reported(sequence) -> None:
     presenter = PulseEditorPresenter(view, sequence, dial=lambda *_args: _Mute())
     try:
         presenter.connect_to("remote", "127.0.0.1:18861")
-        assert "cannot read the board" in view.schedule_view.connection[2]
+        assert "cannot read the board" in view.schedule_view.connection.status
         assert any("would not describe itself" in text for text in view.warnings)
     finally:
         presenter.close()
@@ -2227,7 +2255,7 @@ def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
             [port for port in schedule.ports if port.kind in ("digital", "dac")]
         ), "every delayable output gets a row"
 
-        status = view.schedule_view.connection[2]
+        status = view.schedule_view.connection.status
         assert status.startswith("virtual"), status
         assert "127.0.0.1" not in status, (
             "the address box is not what this editor dialled"
@@ -2691,8 +2719,8 @@ def test_a_bound_field_is_drawn_where_it_happens(presenter, sequence) -> None:
     presenter.set_analog(sequence.periods[1].period_id, dac.key, "edge", 200)
 
     view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    view.binding_cycle_requested.emit("dac", sequence.periods[1].period_id, dac.key)
-    view.binding_cycle_requested.emit("dac", sequence.periods[1].period_id, dac.key)
+    view.binding_cycle_requested.emit("analog", sequence.periods[1].period_id, dac.key)
+    view.binding_cycle_requested.emit("analog", sequence.periods[1].period_id, dac.key)
 
     data = timeline_of(presenter.sequence, include_off=True)
     region = next(iter(data.scan_regions))

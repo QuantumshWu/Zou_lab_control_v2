@@ -64,8 +64,10 @@ def period_control_width(card_width: int) -> int:
     return max(px(76, minimum=68), card_width - 2 * px(7) - px(4))
 
 
-def bus_mode_combo_width() -> int:
-    return measure_text_width(["Edge", "Ramp", "Hold"], padding=34)
+def bus_mode_combo_width(labels: tuple[str, ...]) -> int:
+    if not labels:
+        raise ValueError("a bus-mode combo needs presenter-supplied labels")
+    return measure_text_width(labels, padding=34)
 
 
 def set_fixed_height(widget: QtWidgets.QWidget, height: int | None = None) -> QtWidgets.QWidget:

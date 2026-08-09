@@ -11,10 +11,12 @@ if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
 
 from .codec import PULSE_TREE_FORMAT, sequence_from_tree, sequence_to_tree
 from .model import (
+    ANALOG_MODE_CHOICES,
     MINIMUM_REPEAT_COUNT,  # noqa: E402
     TIME_UNIT_CHOICES,
     TIME_UNIT_TO_NS,
     align_to_grid,
+    cycle_binding_kind,
     AnalogStep,
     OutputDelay,
     PulseApiParameter,
@@ -78,7 +80,9 @@ __all__ = [
     "DEFAULT_PORT",
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
+    "ANALOG_MODE_CHOICES",
     "align_to_grid",
+    "cycle_binding_kind",
     "resolve_scan_point",
     "resolve_api_parameters",
     "scan_columns_for",

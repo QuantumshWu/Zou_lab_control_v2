@@ -124,9 +124,9 @@ The package is organized as follows:
 - `zlc_ui.console` — pure task-console views; presentation runtime stays out.
 - `zlc_ui.pulse` — pure pulse schedule, scan, target, preview, and editor-shell
   views driven by frozen plain view models; controller and plot ownership stay
-  outside this package. Its Scan/API dot controls emit click intent; presenters
-  can reuse `zlc_ui.pulse.cycle_binding_kind()` to cycle duration/DAC fields
-  through `off -> scan -> api -> off` and output delays through `off -> api -> off`.
+  outside this package. Its Scan/API dot controls emit click intent only;
+  presenters ask the public `zlc_pulse.cycle_binding_kind()` domain API for the
+  next legal state and project the resulting `FieldVM` back into the view.
 - `zlc_ui.figure_viewer` — pure file/path/info shell and presenter-owned
   QWidget mount point; archive IO and plot rendering stay outside.
 - `zlc_ui.acceptance` — the test-only real-screen UI acceptance helper

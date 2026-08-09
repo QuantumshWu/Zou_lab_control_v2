@@ -8,7 +8,8 @@ domain object.
 
 ## View models
 
-The public records are `FieldVM`, `PortRowVM`, `PeriodVM`, `RepeatVM`,
+The public records are `ConnectionChoiceVM`, `ConnectionVM`, `FieldVM`,
+`PortRowVM`, `PeriodVM`, `RepeatVM`,
 `DelayRowVM`, `ScheduleVM`, `ScanPageRecord`, `TargetPortRecord`, and
 `TargetWidthRule`. They are frozen dataclasses and contain only strings,
 numbers, booleans, and tuples. `FieldVM.text` is already display-ready: a
@@ -19,15 +20,15 @@ rejects an older pair and accepts an identical pair idempotently; a different
 record at the same pair raises because one revision must have one projection.
 
 The inline dot is an intent control, not a local model.  A presenter handles
-`binding_cycle_requested`, calls the pure `cycle_binding_kind()` helper, updates
-its `FieldVM`, and sends the new record back to the view.  Duration/DAC fields
-cycle `off -> scan -> api -> off`; output delays cycle `off -> api -> off`.
+`binding_cycle_requested`, asks the public `zlc_pulse.cycle_binding_kind()`
+domain API for the next state, updates its `FieldVM`, and sends the new record
+back to the view.  The UI package owns no copy of that transition.
 
 For a DAC channel, `PortRowVM.kind == "dac"` plus a
-`PeriodVM.analog` record renders the reusable `Edge / Ramp / Hold` mode combo
+`PeriodVM.analog` record renders the mode choices supplied by `ScheduleVM`
 and the numeric `FluentScanLineEdit`.  A presenter can bind that value through
-the same signal; a `Hold` row becomes an explicit `Edge` row when it is first
-parameterized.
+the same signal.  `Hold` is the authoring projection of no `AnalogStep`;
+choosing `Edge` or `Ramp` with a value creates the domain step.
 
 ## Schedule page
 
@@ -43,7 +44,7 @@ view.set_summary(total_text, total_tooltip, period_count,
                  visible_text, summary_text, scan_summary_text) -> None
 view.set_scan_source(use_loaded, path) -> None
 view.set_scan_busy(busy) -> None
-view.set_connection(mode, endpoint, status) -> None
+view.set_connection(connection_vm) -> None
 view.set_control_state(running, synchronized, file_dirty) -> None
 view.set_capabilities(can_sync, can_hold, can_step) -> None
 ```

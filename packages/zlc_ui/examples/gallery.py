@@ -83,15 +83,14 @@ FlowGraphEdge = _graph.FlowGraphEdge
 FlowGraphNode = _graph.FlowGraphNode
 FlowGraphView = _graph.FlowGraphView
 FluentScanLineEdit = _pulse.FluentScanLineEdit
-cycle_binding_kind = _pulse.cycle_binding_kind
 
 
 class _InteractiveBindingField(QtWidgets.QWidget):
-    """A fake presenter around one real Scan/API dot control.
+    """One real Scan/API dot control with an injected display state.
 
     ``FluentScanLineEdit`` deliberately emits click intent and accepts injected
-    state.  This small gallery composite owns only fake state so a human can
-    click the dot and observe the same projection cycle as PulseEditor.
+    state.  The gallery records that intent but never invents the pulse-domain
+    transition a presenter would apply.
     """
 
     binding_changed = QtCore.pyqtSignal(object, object)
@@ -100,23 +99,17 @@ class _InteractiveBindingField(QtWidgets.QWidget):
         self,
         *,
         text: str,
-        field_kind: str,
         binding: str | None,
         number: int,
-        literal_text: str,
-        api_text: str,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._field_kind = str(field_kind)
         self._number = int(number)
-        self._literal_text = str(literal_text)
-        self._api_text = str(api_text)
         self._binding: str | None = None
 
         self.field = FluentScanLineEdit(
             str(text),
-            tooltip=self._tooltip(),
+            tooltip="Click the dot to emit a binding-cycle intent",
         )
         self.field.setFixedHeight(scaled_px(32, minimum=26))
         self.state_label = muted_note_label("")
@@ -126,24 +119,12 @@ class _InteractiveBindingField(QtWidgets.QWidget):
         layout.setSpacing(window_pad(0.25))
         layout.addWidget(self.field)
         layout.addWidget(self.state_label)
-        self.field.scan_clicked.connect(self._cycle)
-        self.set_binding(binding)
-
-    def _tooltip(self) -> str:
-        if self._field_kind == "delay":
-            return "Click the dot to cycle off → API → off"
-        return "Click the dot to cycle off → Scan → API → off"
+        self.field.scan_clicked.connect(self._request_cycle)
+        self.set_binding(binding, text=str(text))
 
     @property
     def binding(self) -> str | None:
         return self._binding
-
-    def _display_text(self, binding: str | None) -> str:
-        if binding == "scan":
-            return f"s{max(0, self._number - 1)}"
-        if binding == "api":
-            return self._api_text
-        return self._literal_text
 
     def _state_text(self) -> str:
         if self._binding == "scan":
@@ -152,29 +133,25 @@ class _InteractiveBindingField(QtWidgets.QWidget):
             current = f"API slot {self._number}"
         else:
             current = "OFF"
-        next_kind = cycle_binding_kind(self._binding, field_kind=self._field_kind)
-        next_label = (next_kind or "OFF").upper()
-        return f"state: {current} · click dot → {next_label}"
+        return f"state: {current} · click dot → presenter intent"
 
-    def set_binding(self, binding: str | None) -> None:
-        normalized = None if binding is None else str(binding).strip().lower()
-        if normalized == "":
-            normalized = None
-        # Validate the injected state and the next transition in one place.
-        cycle_binding_kind(normalized, field_kind=self._field_kind)
-        self._binding = normalized
-        self.field.setText(self._display_text(normalized))
+    def set_binding(self, binding: str | None, *, text: str) -> None:
+        if binding not in (None, "scan", "api"):
+            raise ValueError(f"unsupported projected binding state {binding!r}")
+        self._binding = binding
+        self.field.setText(text)
         self.field.set_field_state(
             editable=True,
-            binding=normalized,
-            number=self._number if normalized else None,
+            binding=binding,
+            number=self._number if binding else None,
         )
         self.state_label.setText(self._state_text())
 
-    def _cycle(self) -> None:
-        next_kind = cycle_binding_kind(self._binding, field_kind=self._field_kind)
-        self.set_binding(next_kind)
-        self.binding_changed.emit(next_kind, self._number if next_kind else None)
+    def _request_cycle(self) -> None:
+        self.binding_changed.emit(
+            self._binding,
+            self._number if self._binding else None,
+        )
 
 
 class _GalleryBody(QtWidgets.QWidget):
@@ -347,30 +324,27 @@ class _GalleryBody(QtWidgets.QWidget):
     def _build_pulse_binding_section(self) -> QWidget:
         card, inner = self._section("组合：FluentScanLineEdit — Scan slot / API slot")
         note = muted_note_label(
-            "这些是 PulseEditor 实际使用的动态字段。点击右侧圆点，不是点击输入框：duration/DAC 按 off → Scan → API → off 切换，delay 按 off → API → off 切换。"
+            "这些是 PulseEditor 实际使用的动态字段。点击右侧圆点只发 intent；binding 的合法迁移由 Pulse domain 决定，再由 presenter 投回字段。"
         )
         note.setWordWrap(True)
         inner.addWidget(note)
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(window_pad())
         examples = (
-            ("duration_cycle", "Duration cycle", "0", "duration", None, 1, "0", "1000"),
-            ("scan_duration", "Scan slot 1 · duration", "s0", "duration", "scan", 1, "0", "1000"),
-            ("api_duration", "API slot 1 · duration", "1000", "duration", "api", 1, "0", "1000"),
-            ("dac_cycle", "DAC slot 2 · da_bias_y", "s1", "analog", "scan", 2, "500", "500"),
-            ("delay_cycle", "Delay slot · off/API", "0", "delay", None, 2, "0", "0"),
+            ("duration_cycle", "Duration intent", "0", None, 1),
+            ("scan_duration", "Scan slot 1 · duration", "s0", "scan", 1),
+            ("api_duration", "API slot 1 · duration", "1000", "api", 1),
+            ("dac_cycle", "DAC slot 2 · da_bias_y", "s1", "scan", 2),
+            ("delay_cycle", "Delay intent · off", "0", None, 2),
         )
         echo = muted_note_label("last binding click: —")
         echo.setWordWrap(True)
         inner.addWidget(echo)
-        for key, name, text, field_kind, binding, number, literal_text, api_text in examples:
+        for key, name, text, binding, number in examples:
             demo = _InteractiveBindingField(
                 text=text,
-                field_kind=field_kind,
                 binding=binding,
                 number=number,
-                literal_text=literal_text,
-                api_text=api_text,
             )
             demo.field.setObjectName(f"GalleryBinding_{key}")
             demo.field.setFixedWidth(scaled_px(150, minimum=120))

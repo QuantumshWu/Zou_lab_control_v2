@@ -19,6 +19,8 @@ if str(SRC) not in sys.path:
 EXPECTED_FACADE = (
     "__version__",
     "BoardMetrics",
+    "ConnectionChoiceVM",
+    "ConnectionVM",
     "DelayRowVM",
     "FieldVM",
     "FormChoice",
@@ -36,7 +38,6 @@ EXPECTED_FACADE = (
     "VALIDATOR_INT",
     "WINDOW_SCREEN_FRACTION",
     "capture_window",
-    "cycle_binding_kind",
     "ensure_qt_app",
     "open_device_manager",
     "open_figure_viewer",
@@ -45,7 +46,7 @@ EXPECTED_FACADE = (
     "use_panel_display_sizes",
 )
 EXPECTED_PUBLIC = frozenset(name for name in EXPECTED_FACADE if not name.startswith("_"))
-MAX_PUBLIC_NAMES = 27
+MAX_PUBLIC_NAMES = 28
 
 #: GUIs still handed out as widget trees rather than opened behind a handle.
 #: Each entry is one window's worth of work, and removing the last one is what

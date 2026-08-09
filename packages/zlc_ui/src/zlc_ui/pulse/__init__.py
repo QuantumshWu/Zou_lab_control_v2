@@ -2,12 +2,18 @@
 
 from .handle import PulseEditorHandle
 from .editor_view import PulseEditorView, launch_pulse_editor_window
-from .binding_cycle import cycle_binding_kind
 from .models import (
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
     VALIDATOR_NONE,
-    DelayRowVM, FieldVM, PeriodVM, PortRowVM, RepeatVM, ScanPageRecord,
+    ConnectionChoiceVM,
+    ConnectionVM,
+    DelayRowVM,
+    FieldVM,
+    PeriodVM,
+    PortRowVM,
+    RepeatVM,
+    ScanPageRecord,
     ScheduleVM, TargetPortRecord, TargetWidthRule,
 )
 from .preview_view import PulsePreviewView
@@ -20,8 +26,8 @@ __all__ = [
     "VALIDATOR_FLOAT",
     "VALIDATOR_INT",
     "VALIDATOR_NONE",
-    "ChannelNamesPanel", "ChannelPanel", "DelayRowVM", "FieldVM",
-    "cycle_binding_kind",
+    "ChannelNamesPanel", "ChannelPanel", "ConnectionChoiceVM", "ConnectionVM",
+    "DelayRowVM", "FieldVM",
     "FluentScanLineEdit", "PeriodCard", "PeriodVM", "PortRowVM",
     "PulseEditorHandle",
     "PulseEditorView", "PulsePreviewView", "PulseScanView",

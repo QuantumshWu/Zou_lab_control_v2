@@ -13,6 +13,7 @@ from dataclasses import replace
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from zlc_ui.form import FormChoice
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
@@ -29,6 +30,7 @@ from ._layout import (
 from .models import (
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
+    ConnectionVM,
     DelayRowVM,
     FieldVM,
     PeriodVM,
@@ -74,7 +76,8 @@ class PeriodCard(FluentGroupBox):
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
 
     def __init__(self, period: PeriodVM, *, index: int = 0, total_periods: int = 1,
-                 ports: tuple[PortRowVM, ...] = (), parent=None) -> None:
+                 ports: tuple[PortRowVM, ...] = (),
+                 analog_mode_choices: tuple[FormChoice, ...] = (), parent=None) -> None:
         if not isinstance(period, PeriodVM):
             raise TypeError("period must be PeriodVM")
         super().__init__("", parent)
@@ -124,7 +127,13 @@ class PeriodCard(FluentGroupBox):
         self.duration_dot.clicked.connect(self._cycle_duration_binding)
         self.unit_combo.currentTextChanged.connect(self._commit_duration)
         self.name_edit.editingFinished.connect(self._commit_name)
-        self.set_period(period, index=index, total_periods=total_periods, ports=ports)
+        self.set_period(
+            period,
+            index=index,
+            total_periods=total_periods,
+            ports=ports,
+            analog_mode_choices=analog_mode_choices,
+        )
         column.addStretch(1)
 
     @staticmethod
@@ -135,7 +144,8 @@ class PeriodCard(FluentGroupBox):
         return label
 
     def set_period(self, period: PeriodVM, *, index: int, total_periods: int,
-                   ports: tuple[PortRowVM, ...]) -> None:
+                   ports: tuple[PortRowVM, ...],
+                   analog_mode_choices: tuple[FormChoice, ...]) -> None:
         if period.period_id != self.period_id:
             raise ValueError("period identity cannot change")
         self._period = period
@@ -153,7 +163,18 @@ class PeriodCard(FluentGroupBox):
             self._last_duration = (float(period.duration.text), period.unit)
         except ValueError:
             self._last_duration = (0.0, period.unit)
+        self._analog_mode_choices = tuple(analog_mode_choices)
         self._reconcile_ports(tuple(ports), period)
+
+    def _set_analog_mode(self, combo: FluentComboBox, mode: str) -> None:
+        with signals_blocked(combo):
+            combo.clear()
+            for choice in self._analog_mode_choices:
+                combo.addItem(choice.label, choice.value)
+            selected = combo.findData(mode)
+            if selected < 0:
+                raise ValueError(f"analog mode {mode!r} was not supplied to the view")
+            combo.setCurrentIndex(selected)
 
     def _reconcile_ports(self, ports: tuple[PortRowVM, ...], period: PeriodVM) -> None:
         desired = {port.key: port for port in ports if port.visible}
@@ -181,12 +202,12 @@ class PeriodCard(FluentGroupBox):
                     combo = self.bus_mode_combos.get(port.key)
                     edit = self.bus_value_edits.get(port.key)
                     if combo is not None and edit is not None:
-                        mode, field = analog.get(
-                            port.key,
-                            ("hold", FieldVM("0", editable=False)),
-                        )
-                        with signals_blocked(combo):
-                            combo.setCurrentText(str(mode).title())
+                        if port.key not in analog:
+                            raise ValueError(
+                                f"period {period.period_id!r} has no analog row for {port.key!r}"
+                            )
+                        mode, field = analog[port.key]
+                        self._set_analog_mode(combo, mode)
                         _apply_field(edit, field)
                 continue
             if port.kind == "digital":
@@ -196,16 +217,23 @@ class PeriodCard(FluentGroupBox):
                 widget.toggled.connect(lambda checked, key=port.key: self.digital_committed.emit(self.period_id, key, bool(checked)))
                 self.checks[port.key] = widget
             else:
-                mode, field = analog.get(port.key, ("hold", FieldVM("0", editable=False)))
+                if port.key not in analog:
+                    raise ValueError(
+                        f"period {period.period_id!r} has no analog row for {port.key!r}"
+                    )
+                mode, field = analog[port.key]
                 widget = QtWidgets.QWidget()
                 widget.setFixedHeight(channel_row_height())
                 row_layout = QtWidgets.QHBoxLayout(widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(px(4, minimum=3))
                 combo = FluentComboBox()
-                combo.addItems(["Edge", "Ramp", "Hold"])
-                combo.setCurrentText(str(mode).title())
-                combo.setFixedWidth(bus_mode_combo_width())
+                self._set_analog_mode(combo, mode)
+                combo.setFixedWidth(
+                    bus_mode_combo_width(
+                        tuple(choice.label for choice in self._analog_mode_choices)
+                    )
+                )
                 # The port's own code range, enforced where it is typed.  It
                 # was carried all the way here on the row and then read by
                 # nobody, so a 10-bit signed DAC accepted 700: refused later by
@@ -222,7 +250,9 @@ class PeriodCard(FluentGroupBox):
                 edit.set_numeric_validator("int", bottom=port.lo, top=port.hi)
                 edit.setFixedHeight(channel_row_height())
                 _apply_field(edit, field)
-                combo.currentTextChanged.connect(lambda _text, key=port.key: self._commit_analog(key))
+                combo.currentIndexChanged[int].connect(
+                    lambda _index, key=port.key: self._commit_analog(key)
+                )
                 edit.editingFinished.connect(lambda key=port.key: self._commit_analog(key))
                 edit.dot.clicked.connect(lambda _checked=False, key=port.key: self.binding_cycle_requested.emit("analog", self.period_id, key))
                 row_layout.addWidget(combo)
@@ -266,10 +296,9 @@ class PeriodCard(FluentGroupBox):
         edit = self.bus_value_edits.get(port)
         if combo is None or edit is None:
             return
-        mode = combo.currentText().strip().lower()
-        if mode == "hold":
-            self.analog_committed.emit(self.period_id, port, mode, None)
-            return
+        mode = combo.currentData()
+        if not isinstance(mode, str) or not mode:
+            raise ValueError("the selected analog mode has no domain value")
         try:
             value = int(float(edit.text()))
         except ValueError:
@@ -857,6 +886,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
         self._schedule: ScheduleVM | None = None
+        self._connection: ConnectionVM | None = None
         self._version = (-1, -1)
         self._capabilities = {"can_sync": True, "can_hold": True, "can_step": True}
         self._cards: dict[str, PeriodCard] = {}
@@ -1007,24 +1037,14 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_layout.setSpacing(px(4, minimum=3))
         self.connection_combo = FluentComboBox()
         self.connection_combo.setFixedHeight(control_height)
-        self.connection_combo.addItem("Virtual (sim)", "virtual")
-        self.connection_combo.addItem("Remote server", "remote")
-        self.connection_combo.addItem("Offline (edit only)", "offline")
-        # Seeded with the address the pulse server prints on the machine wired
-        # Seeded by whoever opens the window, not by this widget: where a pulse
-        # server listens is zlc_pulse's fact, and a control package that writes
-        # an address into itself is a second place to change when it moves.
-        # It arrives through set_connection before the window is shown, so the
-        # operator still never types it.
+        # The presenter projects the complete endpoint value before the window
+        # is shown.  This widget neither seeds nor preserves a second copy.
         self.connection_endpoint = FluentLineEdit("")
         self.connection_endpoint.setToolTip(
-            "Remote sequencer server address as host:port.\n"
-            "The server prints its own endpoint when it starts."
+            "Endpoint for a connection choice that accepts one, as host:port."
         )
         self.connection_combo.setToolTip(
-            "Virtual: a local in-memory sequencer (edit and fire in simulation).\n"
-            "Remote: a running FPGA sequencer server (host:port).\n"
-            "Offline: edit only, no backend calls."
+            "Connection choices are supplied by the host that opened this editor."
         )
         self.connection_endpoint.setFixedHeight(control_height)
         self.connection_button = FluentButton("Connect", color=ACCENT)
@@ -1096,6 +1116,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.hide_off_button.clicked.connect(self._request_hide_off_ports)
         self.show_all_button.clicked.connect(self._request_show_all_ports)
         self.connection_button.clicked.connect(self._request_connection)
+        self.connection_combo.currentIndexChanged[int].connect(
+            self._sync_endpoint_enabled
+        )
         self._sync_endpoint_enabled()
 
     def set_schedule(self, vm: ScheduleVM) -> bool:
@@ -1201,10 +1224,22 @@ class PulseScheduleView(QtWidgets.QWidget):
         for index, period in enumerate(vm.periods):
             card = self._cards.get(period.period_id)
             if card is None:
-                card = PeriodCard(period, index=index, total_periods=len(vm.periods), ports=vm.ports)
+                card = PeriodCard(
+                    period,
+                    index=index,
+                    total_periods=len(vm.periods),
+                    ports=vm.ports,
+                    analog_mode_choices=vm.analog_mode_choices,
+                )
                 self._connect_card(card)
             else:
-                card.set_period(period, index=index, total_periods=len(vm.periods), ports=vm.ports)
+                card.set_period(
+                    period,
+                    index=index,
+                    total_periods=len(vm.periods),
+                    ports=vm.ports,
+                    analog_mode_choices=vm.analog_mode_choices,
+                )
             desired[period.period_id] = card
         for key, card in self._cards.items():
             if key not in desired:
@@ -1244,6 +1279,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             index=next(i for i, item in enumerate(periods) if item.period_id == period.period_id),
             total_periods=len(periods),
             ports=self._schedule.ports,
+            analog_mode_choices=self._schedule.analog_mode_choices,
         )
         # That call rebuilds any port row whose shape changed, and a row built
         # after the card was adopted is one the strip has never watched -- so a
@@ -1294,39 +1330,61 @@ class PulseScheduleView(QtWidgets.QWidget):
     def set_scan_busy(self, busy: bool) -> None:
         self.channel_panel.load_array_button.setEnabled(not bool(busy))
 
-    def set_connection(self, mode: str, endpoint: str, status: str) -> None:
-        """Show what the editor is attached to.
+    def set_connection(self, vm: ConnectionVM) -> None:
+        """Project the presenter's complete connection domain and authority."""
 
-        An empty endpoint leaves the field alone rather than clearing it: a
-        presenter reporting "offline" at startup has no address to offer, and
-        wiping the seeded one there would hand the operator a blank box to
-        retype -- which is exactly what it did.
-        """
-
-        self.connection_combo.setCurrentIndex(max(0, self.connection_combo.findData(str(mode))))
-        if str(endpoint):
-            self.connection_endpoint.setText(str(endpoint))
+        if not isinstance(vm, ConnectionVM):
+            raise TypeError("connection must be ConnectionVM")
+        self._connection = vm
+        with signals_blocked(self.connection_combo):
+            self.connection_combo.clear()
+            for choice in vm.choices:
+                self.connection_combo.addItem(choice.label, choice.value)
+            selected = self.connection_combo.findData(vm.selected)
+            if selected < 0:
+                raise ValueError(
+                    f"selected connection {vm.selected!r} was not supplied to the view"
+                )
+            self.connection_combo.setCurrentIndex(selected)
+        self.connection_endpoint.setText(vm.endpoint)
+        self.connection_combo.setEnabled(not vm.locked)
+        self.connection_button.setEnabled(not vm.locked)
         self._sync_endpoint_enabled()
-        self.connection_status.setText(str(status))
-        self.connection_status.setToolTip(str(status))
+        self.connection_status.setText(vm.status)
+        self.connection_status.setToolTip(vm.status)
 
     def _request_connection(self) -> None:
-        """Dial what the combo says, with the address only remote will use."""
+        """Emit the selected presenter-supplied connection intent."""
 
-        mode = str(self.connection_combo.currentData() or "virtual")
+        if self._connection is None or self._connection.locked:
+            raise RuntimeError("this connection control is not operator-owned")
+        mode = self.connection_combo.currentData()
+        if not isinstance(mode, str) or not mode:
+            raise ValueError("the selected connection has no domain value")
         self.connection_requested.emit(mode, self.connection_endpoint.text())
 
-    def _sync_endpoint_enabled(self) -> None:
+    def _sync_endpoint_enabled(self, _index: int | None = None) -> None:
         """An address that will not be dialled must not look like an input.
 
-        Only the remote mode reads this field.  Left live, it kept the server
-        address on screen next to a virtual connection, which is half of why
-        the two modes were indistinguishable once connected.
+        The selected presenter-owned choice says whether it accepts an
+        endpoint.  The widget does not infer that authority from a mode name.
         """
 
-        self.connection_endpoint.setEnabled(
-            (self.connection_combo.currentData() or "virtual") == "remote"
+        operator_owned = self._connection is not None and not self._connection.locked
+        current = self.connection_combo.currentData()
+        choice = next(
+            (
+                item
+                for item in (() if self._connection is None else self._connection.choices)
+                if item.value == current
+            ),
+            None,
         )
+        self.connection_combo.setEnabled(operator_owned)
+        self.connection_endpoint.setEnabled(
+            operator_owned and choice is not None and choice.endpoint_editable
+        )
+        self.connection_button.setEnabled(operator_owned)
 
     def set_control_state(
         self,

@@ -30,12 +30,14 @@ from pathlib import Path
 from typing import Any
 
 from zlc_pulse import (
+    ANALOG_MODE_CHOICES,
     MINIMUM_REPEAT_COUNT,
     AnalogStep,
     OutputDelay,
     PulsePeriod,
     PulseSequence,
     RepeatRegion,
+    cycle_binding_kind,
 )
 from zlc_pulse import (
     TIME_UNIT_CHOICES,
@@ -47,6 +49,9 @@ from zlc_pulse import (
 from zlc_durable import unique_path
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui import (
+    ConnectionChoiceVM,
+    ConnectionVM,
+    FormChoice,
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
     DelayRowVM,
@@ -111,6 +116,23 @@ FOREVER_NOTATION = "x∞"
 #: model has -- ANALOG_MODES is edge and ramp -- and the one place both the
 #: projection and the commit have to agree on the word.
 HOLD_MODE = "hold"
+CONNECTION_VIRTUAL = "virtual"
+CONNECTION_REMOTE = "remote"
+CONNECTION_OFFLINE = "offline"
+CONNECTION_GIVEN = "given"
+#: zlc_pulse owns the legal analog-step values; this presenter adds the label
+#: and the authoring-only Hold action (absence of a step) before crossing the
+#: view-model boundary.  Qt receives rows and never spells this finite domain.
+ANALOG_MODE_ROWS = tuple(
+    FormChoice(mode.title(), mode) for mode in ANALOG_MODE_CHOICES
+) + (FormChoice("Hold", HOLD_MODE),)
+#: Only a standalone editor may replace its sequencer.  An embedded editor gets
+#: a separate one-choice, locked authority record in the presenter constructor.
+STANDALONE_CONNECTION_CHOICES = (
+    ConnectionChoiceVM("Virtual (sim)", CONNECTION_VIRTUAL),
+    ConnectionChoiceVM("Remote server", CONNECTION_REMOTE, endpoint_editable=True),
+    ConnectionChoiceVM("Offline (edit only)", CONNECTION_OFFLINE),
+)
 #: How long each period of a brand-new pulse is.  A duration has to be chosen
 #: and the board's tick is the wrong choice: at 20 ns the two periods are drawn
 #: as one pixel, so a legal pulse looks like no pulse.  1 us is the established
@@ -141,7 +163,7 @@ def _connection_name(mode: str, endpoint: str) -> str:
     this window: it decides whether pressing On Pulse moves atoms.
     """
 
-    if str(mode) == "remote":
+    if str(mode) == CONNECTION_REMOTE:
         return f"remote {endpoint}" if endpoint else "remote"
     return str(mode)
 
@@ -158,6 +180,7 @@ EMPTY_SCHEDULE = ScheduleVM(
     summary_text="Load a pulse, or Add Period to start one on this board",
     ports=(),
     periods=(),
+    analog_mode_choices=ANALOG_MODE_ROWS,
 )
 
 
@@ -462,6 +485,7 @@ def project_schedule(
         ),
         ports=ports,
         periods=periods,
+        analog_mode_choices=ANALOG_MODE_ROWS,
         repeat=(
             None
             if repeat is None
@@ -870,6 +894,7 @@ class PulseEditorPresenter:
         pulses_directory: str = "",
         path: str = "",
         default_endpoint: str = "",
+        connection_label: str = "Experiment session",
     ) -> None:
         self.view = view
         if state is not None and not isinstance(state, PulseEditorState):
@@ -909,6 +934,8 @@ class PulseEditorPresenter:
             raise ValueError(
                 "an injected sequencer requires its session device-use coordinator"
             )
+        if sequencer is not None and dial is not None:
+            raise ValueError("an injected sequencer cannot also have a dial authority")
         self.sequencer = sequencer
         self.device_use = device_use if device_use is not None else DeviceUseCoordinator()
         self._device_owner = object()
@@ -932,10 +959,16 @@ class PulseEditorPresenter:
         self._board_step_ns = None
         # Offered, not remembered: the address a board is usually at belongs to
         # whoever knows what a pulse server is, and arrives from there.
+        self._connection_locked = sequencer is not None
+        self._connection_choices = (
+            (ConnectionChoiceVM(str(connection_label), CONNECTION_GIVEN),)
+            if self._connection_locked
+            else STANDALONE_CONNECTION_CHOICES
+        )
         self.connection = (
-            ("offline", str(default_endpoint))
-            if sequencer is None
-            else ("given", str(default_endpoint))
+            (CONNECTION_GIVEN, "")
+            if self._connection_locked
+            else (CONNECTION_OFFLINE, str(default_endpoint))
         )
         self._owns_sequencer = False
         self._connection_status = "connected" if sequencer is not None else "not connected"
@@ -1198,9 +1231,10 @@ class PulseEditorPresenter:
         def _edit(period: PulsePeriod) -> PulsePeriod:
             steps = tuple(step for step in period.analog_steps if step.port != port_key)
             text = "" if value is None else str(value).strip()
-            if text and str(mode or "edge") != HOLD_MODE:
+            selected_mode = str(mode)
+            if text and selected_mode != HOLD_MODE:
                 steps = steps + (
-                    AnalogStep(str(port_key), str(mode or "edge"), int(float(text))),
+                    AnalogStep(str(port_key), selected_mode, int(float(text))),
                 )
             return replace(period, analog_steps=steps)
 
@@ -1421,12 +1455,14 @@ class PulseEditorPresenter:
         second one usually fails in a way that reads as the first one breaking.
         """
 
-        if self._dial is None:
-            self._warn("this editor was built without a way to connect")
-            return False
-        self._release()
         mode, endpoint = str(mode), str(endpoint)
-        if mode == "offline":
+        allowed = {str(choice.value) for choice in self._connection_choices}
+        if mode not in allowed:
+            raise ValueError(f"unknown connection mode {mode!r}")
+        if self._connection_locked:
+            raise RuntimeError("the experiment session owns this connection")
+        if mode == CONNECTION_OFFLINE:
+            self._release()
             self.connection = (mode, endpoint)
             self._show_connection("edit only")
             self._done("disconnected - this editor is now edit only")
@@ -1435,10 +1471,14 @@ class PulseEditorPresenter:
             # and the run buttons have nothing to fire on.
             self.refresh()
             return True
+        if self._dial is None:
+            self._warn("this editor was built without a way to connect")
+            return False
+        self._release()
         try:
             self.sequencer = self._dial(mode, endpoint)
         except Exception as error:
-            self.connection = ("offline", endpoint)
+            self.connection = (CONNECTION_OFFLINE, endpoint)
             self._show_connection(f"failed: {error}")
             self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {error}")
             return False
@@ -1448,7 +1488,7 @@ class PulseEditorPresenter:
         if not self.adopt_board():
             failure_status = self._connection_status
             self._release()
-            self.connection = ("offline", endpoint)
+            self.connection = (CONNECTION_OFFLINE, endpoint)
             self._show_connection(failure_status)
             self.refresh()
             return False
@@ -1667,7 +1707,15 @@ class PulseEditorPresenter:
 
         mode, endpoint = self.connection
         self._connection_status = str(status)
-        self.view.set_connection(mode, endpoint, status)
+        self.view.set_connection(
+            ConnectionVM(
+                choices=self._connection_choices,
+                selected=mode,
+                endpoint=endpoint,
+                status=self._connection_status,
+                locked=self._connection_locked,
+            )
+        )
         self._render_run_state()
 
     def sync_from_sequencer(self) -> bool:
@@ -2246,18 +2294,16 @@ class PulseEditorPresenter:
 
         A dot is how a field becomes a scan column: bound, it stops being a
         constant in the pulse and becomes a value the device writes per point.
-        The cycle order and which fields may be scanned belong to zlc_ui, which
-        owns the control; what a binding MEANS is a slot on the sequence, which
-        is this.
+        The view emits only which field was clicked.  zlc_pulse owns the legal
+        binding transition for that field; this presenter applies the returned
+        domain value to the immutable sequence.
         """
 
-        from zlc_pulse import PulseApiParameter, PulseFieldRef, PulseSlot
-        from zlc_ui import cycle_binding_kind
+        from zlc_pulse import PulseApiParameter, PulseSlot
 
         if self.sequence is None:
             return
-        kind = "delay" if str(field_kind) == "delay" else str(field_kind)
-        reference = self._field_reference(kind, period_id, port_key)
+        reference = self._field_reference(str(field_kind), period_id, port_key)
         if reference is None:
             return
         current_scan = next(
@@ -2279,7 +2325,7 @@ class PulseEditorPresenter:
         binding = "scan" if current_scan is not None else (
             "api" if current_api is not None else None
         )
-        wanted = cycle_binding_kind(binding, field_kind=kind)
+        wanted = cycle_binding_kind(binding, field_kind=reference.kind)
         slots = tuple(
             slot for slot in self.sequence.slots if slot.field_ref != reference
         )
@@ -2355,9 +2401,15 @@ class PulseEditorPresenter:
         try:
             if kind == "duration":
                 return PulseFieldRef("duration", period_id=str(period_id))
-            if kind in ("analog", "dac"):
-                return PulseFieldRef("dac", period_id=str(period_id), port=str(port_key))
-            return PulseFieldRef("delay", port=str(port_key))
+            if kind == "analog":
+                return PulseFieldRef(
+                    "dac",
+                    period_id=str(period_id),
+                    port=str(port_key),
+                )
+            if kind == "delay":
+                return PulseFieldRef("delay", port=str(port_key))
+            raise ValueError(f"unknown binding intent {kind!r}")
         except (TypeError, ValueError) as error:
             self._warn(f"cannot bind that field: {error}")
             return None
