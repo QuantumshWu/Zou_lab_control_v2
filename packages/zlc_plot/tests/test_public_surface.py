@@ -113,6 +113,26 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
             label.get_fontsize() == session._renderer.style.fonts.fit_annotation_pt
             for label in artists
         )
+        image_axes = session._renderer._axes["image"][0]
+        positions = tuple(label.get_position() for label in artists)
+        assert all(
+            position[0] < point[0]
+            for position, point in zip(positions, overlay.coordinates, strict=True)
+        )
+        if image_axes.yaxis_inverted():
+            assert all(
+                position[1] < point[1]
+                for position, point in zip(
+                    positions, overlay.coordinates, strict=True
+                )
+            )
+        else:
+            assert all(
+                position[1] > point[1]
+                for position, point in zip(
+                    positions, overlay.coordinates, strict=True
+                )
+            )
     finally:
         session.close()
 

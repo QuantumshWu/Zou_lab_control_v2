@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Distribution threshold classifier 已完成实现、残余清理、API 文档同步与最终回归，正在独立 commit；下一阶段才检查 Calibration 四张实际图片。`
-- Last completed action：`在既有 zlc_plot 文件内把 Distribution classifier 与普通 fit 拆开：boolean schema switch 独立求解 bimodal classifier，initial equal-prior threshold，单图/FacetGrid 三条 Gaussian 曲线、可移动 threshold、L/R/Fidelity；grid 使用小字号。fit presentation 删除 crossover/suggested-threshold。Calibration Task 与 Figure Viewer archive 都把 toggle + canonical thresholds 一次交给现有 configure()，不再静态 threshold 后另跑普通 fit。未新增文件或类。`
-- Last verified tests：`旧生产两条目标红为普通 bimodal fit 自动生成 threshold、threshold_classifier 被 schema 拒绝；修后目标 2 passed。最终 zlc_plot 206 passed、Calibration report 真实链 6 passed、Viewer archive 19 passed；同一生产实现的 zlc_atom 143 passed、zlc_workbench 333 passed、zlc_ui 79 passed。所有进程首行 import v2 root 并打印被测 production module/package 路径。`
-- Pending acceptance gates：`本阶段独立 commit 后，逐张检查 Calibration 的 site-map/box/psf/uniform_psf 实际输出，完成 same-shot/derived/ROI、Save Fig/Auto/fit UI、性能与正式按钮验收。Overlay picker 还需在后续统一 signal picker UI 阶段从普通 Combo 升级成 grouped tree，而不改其数据契约。`
-- Next action：`完成 Distribution stage 的 residual rg、diff 审查和 commit；随后只在现有 Calibration Task/zlc_plot API 路径生成并目视检查四张图片，确认三个 model grid 使用 classifier 而非普通 fit，TaskConsole 不显示 report。`
+- Current phase：`Calibration 四张实际 PNG 已重新生成并逐张目视检查；L/R population 百分比和 site ordinal 位置的最小修正已完成，正在独立 commit。`
+- Last completed action：`在既有 zlc_plot fit/renderer 文件内把 classifier 的 L/R 改为总拟合分布在当前 threshold 两侧的 population 百分比，显示值严格合计 100%，balanced fidelity 保持独立；通用 point-overlay ordinal 移到 marker 左上角并继续复用对应圈的颜色/透明度。未新增文件或类。`
+- Last verified tests：`原生产两条目标红：L/R 显示合计 199.8 而非 100，site label 仍位于 marker 中心。修后目标 2 passed；zlc_plot 全包 206 passed；真实 35-site Calibration Task 链 1 passed，并逐张检查新生成的 site_map/box/psf/uniform_psf PNG：三个 grid 每格 L/R 合计 100%，1–35 均位于各 marker 左上角。所有 Python 进程首行 import v2 root 并打印被测 production module 路径。`
+- Pending acceptance gates：`本阶段独立 commit 后，继续实际检查 Occupancy overlay 的 occupied/vacant/invalid 颜色、透明度与 ordinal，以及 same-shot/derived/ROI、Save Fig/Auto/fit UI、性能和正式按钮验收。Overlay picker 还需在后续统一 signal picker UI 阶段从普通 Combo 升级成 grouped tree，而不改其数据契约。`
+- Next action：`完成本次四图视觉修正的 residual rg、diff 审查和独立 commit；随后只沿现有 Occupancy typed overlay -> Image 路径生成实际图，按可见结果最小调整 occupied/vacant/invalid 样式，不改 overlay 数据契约。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。`
 
 ## 1. 执行纪律
@@ -242,7 +242,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 7. 只处理 committed selection。Logic descriptor 用 data-only mapping 把 Image Area 等转成 typed measurement draft patch，Workbench 负责路由，不写 camera-specific branch。
 8. Producer Restart 直接调同一 Start/Restart endpoint，一次按键完成停旧 run -> 配置 request -> 立即启动新 run；不另造 Apply action。
 9. Panel appearance 的每次字段 commit 把完整 semantic/display/size/typed overlay/fit 目标配置一次提交给当前 `zlc_plot` host。Workbench 不分类字段、不循环单参数 setter；`zlc_plot` 自己比较当前状态、合并 render effects，并在一个 worker job 中最多产生一张同步 front。owner thread 不 `.result()`，同一配置 key 的旧 job 被新 job 淘汰。产品 UI 没有 Apply。
-10. Distribution 的 `threshold_classifier` 是独立 boolean switch。启用后由 plot owner 自己拟合左右 Gaussian、总和与 equal-prior initial threshold，并按当前可移动 threshold 显示 L/R 与 balanced fidelity；普通 fit 与 classifier 两边互不读写。FacetGrid[Histogram] 每个 cell 都显示 classifier，overview 文本使用小字号。外部 model thresholds 与完整 display mapping 必须一次传给 `configure()`。
+10. Distribution 的 `threshold_classifier` 是独立 boolean switch。启用后由 plot owner 自己拟合左右 Gaussian、总和与 equal-prior initial threshold，并按当前可移动 threshold 显示总拟合分布的左/右 population 百分比（严格合计 100%）与 balanced fidelity；普通 fit 与 classifier 两边互不读写。FacetGrid[Histogram] 每个 cell 都显示 classifier，overview 文本使用小字号。外部 model thresholds 与完整 display mapping 必须一次传给 `configure()`。
 11. node id/signal key 保持不变，成功启动创建新 generation。同一 signal/schema 始终保留 host/Figure；只有 signal、generation 或 schema compatibility 边界才替换 plot host。同 generation 内复用 snapshot revision 拒绝晚到数据结果，不新建第二套 revision。
 12. active downstream 保留 row/binding 并对新 source 重校验；ROI/exposure 使 calibration frame contract 不相容时显示 blocked。
 13. Selectors 默认关闭时，Panel Card 截获 surface Wheel 并交给唯一祖先 board scroll；不能只断言 plot widget 自己忽略了事件。Selectors 打开后不截获，wheel 留给 plot interaction。

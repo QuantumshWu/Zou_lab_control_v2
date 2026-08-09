@@ -215,6 +215,11 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         assert all("L/R" in label for _line_count, label, _font in details)
         assert all("Fidelity" in label for _line_count, label, _font in details)
         assert all(font == facet_font for _line_count, _label, font in details)
+        for _line_count, label, _font in details:
+            left_text, right_text = label.splitlines()[1].removeprefix("L/R ").split("/")
+            assert float(left_text.removesuffix("%")) + float(
+                right_text.removesuffix("%")
+            ) == pytest.approx(100.0)
 
         first_cell = next(
             axes
@@ -236,6 +241,12 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         ).result(timeout=10).value
         assert moved_label != details[0][1]
         assert "Fidelity" in moved_label
+        moved_left, moved_right = (
+            moved_label.splitlines()[1].removeprefix("L/R ").split("/")
+        )
+        assert float(moved_left.removesuffix("%")) + float(
+            moved_right.removesuffix("%")
+        ) == pytest.approx(100.0)
 
         host.fit("bimodal_gaussian", live=False).result(timeout=30)
         assert host.selector_state(

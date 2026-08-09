@@ -2597,7 +2597,7 @@ class MatplotlibRenderer:
                     0.0,
                     0.0,
                     "",
-                    ha="center",
+                    ha="right",
                     va="bottom",
                     fontsize=self.style.fonts.fit_annotation_pt,
                     zorder=self.style.artists.point_label_zorder,
@@ -2607,12 +2607,18 @@ class MatplotlibRenderer:
         show_labels = bool(state["show_point_labels"])
         point_ids = overlay.point_ids
         point_labels = overlay.labels
+        label_x = points[:, 0] + (
+            radius_x if axis.xaxis_inverted() else -radius_x
+        )
+        label_y = points[:, 1] + (
+            -radius_y if axis.yaxis_inverted() else radius_y
+        )
         for index, label in enumerate(labels):
             visible = show_labels and index < overlay.count
             label.set_visible(visible)
             if not visible:
                 continue
-            label.set_position(tuple(points[index]))
+            label.set_position((label_x[index], label_y[index]))
             label.set_color(edgecolors[index])
             explicit = None if point_labels is None else point_labels[index]
             point_id = None if point_ids is None else point_ids[index]

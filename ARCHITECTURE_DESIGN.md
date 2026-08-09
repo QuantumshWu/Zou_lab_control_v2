@@ -351,7 +351,7 @@ Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `Pa
 
 Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc_plot`：semantic mapping、整张 display parameter mapping、size、Image overlay 和 fit choice。Workbench 不判断哪一个字段能原位更新，也不循环调用单字段 setter；`zlc_plot` 用当前 `PlotSpec`、`ParameterSchema`、layout、overlay 和 fit 状态比较差异，合并需要的 render effects，并在同一个 worker job 中最多发布一张同步 front。只要 signal/schema 兼容，就保留同一个 host 和 Figure；只有 signal 改变、generation 改变或 schema 不兼容才替换 host。Fit 求解本身继续是异步科学计算，完成后再发布 fit overlay。owner thread 不调用 `.result()` 等待，旧的完整配置 job 由同一 coalescing key 淘汰。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
 
-Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display 参数，和通用 fit 完全独立。打开后由 `zlc_plot` 自己执行 bimodal Gaussian classification fit，显示左右 Gaussian、总和、可拖动 threshold，以及当前 threshold 对应的 L/R correctness 和 balanced fidelity；初值是 equal-prior 最优 threshold。普通 fit 的启停、model、结果和状态不得创建、移动或清除 classifier，classifier 也不得写普通 `fit_status`。FacetGrid[Histogram] 对每个 cell 使用同一 classifier，overview 中保留三条曲线、threshold 和较小字号的三项数值；focus 后只把该 cell 的 threshold 变成可交互 selector。外部若已有模型 threshold，就把 toggle 与整组 canonical thresholds 放进同一次 `configure()`，不先画静态线再另跑普通 fit。
+Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display 参数，和通用 fit 完全独立。打开后由 `zlc_plot` 自己执行 bimodal Gaussian classification fit，显示左右 Gaussian、总和、可拖动 threshold，以及当前 threshold 对应的 fitted population 左/右占比（两者严格合计 100%）和 balanced fidelity；初值是 equal-prior 最优 threshold。普通 fit 的启停、model、结果和状态不得创建、移动或清除 classifier，classifier 也不得写普通 `fit_status`。FacetGrid[Histogram] 对每个 cell 使用同一 classifier，overview 中保留三条曲线、threshold 和较小字号的三项数值；focus 后只把该 cell 的 threshold 变成可交互 selector。外部若已有模型 threshold，就把 toggle 与整组 canonical thresholds 放进同一次 `configure()`，不先画静态线再另跑普通 fit。
 
 ### 10.4 各 plot kind 的理想参数
 
@@ -364,7 +364,7 @@ Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display
 | `Site grid` / FacetGrid[Curve] | Facet axis；fixed Curve cell semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing；focus/cell display；Curve display parameters |
 
 Fit model 和参数兼容性由 `zlc_plot` 声明，UI 不写死列表。Overlay 不是 `zlc_plot` 的 Off/Centers/Occupancy mode 参数；它是 panel 的第二个显式 signal binding。producer 决定坐标、身份和状态，`zlc_plot` 只按 typed overlay contract 绘制，不从 grid shape 或 domain artifact 生成圈。
-Site 旁边不得显示长 site id；若开启标签，最多显示小号 ordinal 数字。数字颜色和透明度跟对应 site 圈完全一致，使 empty/occupied/invalid 仍可由同一状态色区分。
+Site 旁边不得显示长 site id；若开启标签，最多在 marker 左上角显示小号 ordinal 数字。数字颜色和透明度跟对应 site 圈完全一致，使 empty/occupied/invalid 仍可由同一状态色区分。
 
 ## 11. 三种 Save（必须分开）
 

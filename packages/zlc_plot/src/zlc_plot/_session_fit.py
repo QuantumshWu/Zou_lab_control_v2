@@ -686,13 +686,15 @@ class FitSessionMixin:
             ):
                 labels.append("")
                 continue
-            _threshold, left, right, fidelity = _bimodal_classifier_metrics(
+            _threshold, left, _right, fidelity = _bimodal_classifier_metrics(
                 result,
                 threshold,
             )
+            left_percent = round(100.0 * left, 1)
+            right_percent = 100.0 - left_percent
             labels.append(
                 f"Threshold {displayed:.4g}\n"
-                f"L/R {100.0 * left:.1f}%/{100.0 * right:.1f}%\n"
+                f"L/R {left_percent:.1f}%/{right_percent:.1f}%\n"
                 f"Fidelity {100.0 * fidelity:.1f}%"
             )
         return tuple(labels)

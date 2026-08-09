@@ -256,8 +256,9 @@ session.configure(
 ```
 
 The classifier owns its bimodal Gaussian classification fit, initial
-equal-prior threshold, component/sum curves, movable threshold, and L/R and
-balanced-fidelity readout. It is independent of the ordinary `fit()` state.
+equal-prior threshold, component/sum curves, movable threshold, fitted
+population L/R percentages that sum to 100%, and balanced-fidelity readout. It
+is independent of the ordinary `fit()` state.
 
 Use the context-manager form when practical:
 
@@ -513,7 +514,7 @@ coordinate expansion path unless they provide their own specialized solver.
 每种 selector 最多存在一个。默认 fit 严格按 `AREA > X_RANGE > viewport > all` 解析；需要固定 live fit
 authority 时可传入 `selector_kind=SelectorKind.AREA`、
 `selector_kind=SelectorKind.X_RANGE` 或 `selector_kind=SelectorKind.THRESHOLD`。
-Histogram 的 `threshold_classifier` 独立拥有 bimodal classification fit、equal-prior 初始 threshold、三条分类曲线和 L/R/Fidelity 显示；普通 `bimodal_gaussian` fit 不创建、移动或清除 classifier，classifier 也不写 `fit_status`。只有调用方明确以 `selector_kind=THRESHOLD` 启动普通 fit 时，当前 threshold 才作为该普通 fit 的 scope。crosshair 不作为 fit scope；color limits 根本不属于 data selector。`session.fit_status` 在没有 overlay
+Histogram 的 `threshold_classifier` 独立拥有 bimodal classification fit、equal-prior 初始 threshold、三条分类曲线，以及严格合计 100% 的 fitted-population L/R 百分比和 Fidelity 显示；普通 `bimodal_gaussian` fit 不创建、移动或清除 classifier，classifier 也不写 `fit_status`。只有调用方明确以 `selector_kind=THRESHOLD` 启动普通 fit 时，当前 threshold 才作为该普通 fit 的 scope。crosshair 不作为 fit scope；color limits 根本不属于 data selector。`session.fit_status` 在没有 overlay
 时为 `None`；只有已接受结果同时匹配当前 data revision 和 fit-context generation
 （canonical selector/viewport authority、facet、projection 与 fit request）时才为 `"current"`；
 selector/viewport 改变后旧结果只标为 `"lagging"`，不会在 pointer motion 中启动新的 solver。

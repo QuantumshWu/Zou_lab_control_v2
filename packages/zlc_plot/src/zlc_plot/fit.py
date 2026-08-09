@@ -927,7 +927,7 @@ def _bimodal_classifier_metrics(
     result: FitResult,
     threshold: float | None = None,
 ) -> tuple[float, float, float, float]:
-    """Return threshold, left/right correctness, and balanced fidelity."""
+    """Return threshold, left/right population fractions, and fidelity."""
 
     if result.model.model_id != "bimodal_gaussian" or not result.success:
         raise ValueError("threshold classification requires a successful bimodal fit")
@@ -961,9 +961,23 @@ def _bimodal_classifier_metrics(
             )
     else:
         threshold = float(threshold)
-    left = cdf(threshold, left_mean, left_sigma)
-    right = 1.0 - cdf(threshold, right_mean, right_sigma)
-    return threshold, left, right, 0.5 * (left + right)
+    left_correct = cdf(threshold, left_mean, left_sigma)
+    right_correct = 1.0 - cdf(threshold, right_mean, right_sigma)
+    left_area = float(values["left_amplitude"]) * left_sigma
+    right_area = float(values["right_amplitude"]) * right_sigma
+    total_area = left_area + right_area
+    left_weight = left_area / total_area
+    right_weight = 1.0 - left_weight
+    left_fraction = (
+        left_weight * cdf(threshold, left_mean, left_sigma)
+        + right_weight * cdf(threshold, right_mean, right_sigma)
+    )
+    return (
+        threshold,
+        left_fraction,
+        1.0 - left_fraction,
+        0.5 * (left_correct + right_correct),
+    )
 
 
 @dataclass(frozen=True, slots=True)
