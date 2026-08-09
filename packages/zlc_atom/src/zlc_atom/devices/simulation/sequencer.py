@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_pulse import load_streamer_config, pulse_target_from_xdc
 from zlc_pulse.compile import CompiledProgram
-from zlc_pulse.device import PulseStreamer, SafeReadback
+from zlc_pulse.device import DoneReport, PulseStreamer, SafeReadback
 from zlc_pulse.transport import MemoryRegisterTransport
 
 
@@ -44,6 +45,7 @@ class VirtualPulseStreamer(PulseStreamer):
         self.world = world
         self.camera_trigger_channel = channel
         self._world_thread: threading.Thread | None = None
+        self._logical_deadline: float | None = None
         super().__init__(
             MemoryRegisterTransport(geom=geometry, auto_done=True),
             geometry,
@@ -56,6 +58,12 @@ class VirtualPulseStreamer(PulseStreamer):
         applied = self.applied()
         if applied is None:  # PulseStreamer.fire() requires a loaded program.
             raise RuntimeError("virtual sequencer fired without an applied program")
+        with self._lock:
+            self._logical_deadline = (
+                None
+                if forever
+                else time.monotonic() + float(applied.program.duration_seconds)
+            )
         self._fire_world(applied.program)
         if forever:
             self._world_thread = threading.Thread(
@@ -66,10 +74,32 @@ class VirtualPulseStreamer(PulseStreamer):
             )
             self._world_thread.start()
 
+    def wait_done(self, timeout: float | None = None) -> DoneReport | None:
+        with self._lock:
+            deadline = self._logical_deadline
+        if deadline is not None:
+            remaining = max(0.0, deadline - time.monotonic())
+            if timeout is not None and remaining > max(0.0, float(timeout)):
+                return None
+            if remaining > 0.0:
+                time.sleep(remaining)
+            timeout = (
+                None
+                if timeout is None
+                else max(0.0, float(timeout) - remaining)
+            )
+        report = super().wait_done(timeout)
+        if report is not None:
+            with self._lock:
+                self._logical_deadline = None
+        return report
+
     def safe(self) -> SafeReadback:
         try:
             return super().safe()
         finally:
+            with self._lock:
+                self._logical_deadline = None
             self._join_world()
 
     def _repeat_world(self, program: CompiledProgram) -> None:

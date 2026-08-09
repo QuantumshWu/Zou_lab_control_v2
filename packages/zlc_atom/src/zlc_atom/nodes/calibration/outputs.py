@@ -12,7 +12,6 @@ from zlc_data import (
     AxisSpec,
     CoordinateFrameId,
     PointColumn,
-    READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
     CellValidity,
@@ -132,7 +131,7 @@ def _cycle_array(
 
 
 class CalibrationCapturePreviewSlot:
-    """Fixed-extent repeat x three-frame live preview for one Task run."""
+    """The latest complete camera image from one running Calibration."""
 
     def __init__(
         self,
@@ -152,9 +151,7 @@ class CalibrationCapturePreviewSlot:
         self.dtype = np.dtype(dtype).newbyteorder("<")
         self.generation = generation
         self.run_record = dict(run_record)
-        self._values = np.zeros(
-            (self.repeats, 3, *self.frame_shape), dtype=self.dtype
-        )
+        self._latest: np.ndarray | None = None
         self._written = 0
         self._revision = 0
         self._listener: Callable[[], None] | None = None
@@ -180,32 +177,32 @@ class CalibrationCapturePreviewSlot:
             raise RuntimeError("calibration preview slot is not attached")
         if self._written >= self.repeats:
             raise RuntimeError("calibration preview received too many cycles")
-        self._values[self._written] = _cycle_array(
-            cycle, self.frame_shape, self.dtype
+        images = _cycle_array(cycle, self.frame_shape, self.dtype)
+        self._latest = np.array(
+            images[-1],
+            dtype=self.dtype,
+            copy=True,
         )
         self._written += 1
         self._revision += 1
         self._listener()
 
     def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
-        if self._closed or self._written <= 0:
+        if self._closed or self._latest is None:
             raise RuntimeError("calibration preview has no readable cycle")
-        validity = np.zeros((self.repeats, 1), dtype=bool)
-        validity[: self._written] = True
         snapshot = _snapshot(
-            self._values,
+            self._latest[None, ...],
             signal=CAPTURE_PREVIEW_DECLARATION.name,
-            roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+            roles=(SPATIAL_Y, SPATIAL_X),
             axis_specs=_image_axis_specs(self.frame_shape, "image_pixel_xy"),
             generation=self.generation,
             revision=self._revision,
-            cell_validity=validity,
         )
         return {
             CAPTURE_PREVIEW_DECLARATION.name: LiveDatasetOutput(
                 CAPTURE_PREVIEW_DECLARATION,
                 snapshot,
-                DatasetCoverage(self._written, self.repeats),
+                DatasetCoverage(1, 1),
                 self.run_record,
             )
         }

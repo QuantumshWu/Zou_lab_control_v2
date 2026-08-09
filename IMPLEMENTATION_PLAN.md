@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task LIVE/FINAL/report + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Camera Measurement 已收敛为 frame_0...frame_N 普通二维 signals；Monitor/Setting 已恢复默认 Selectors=OFF、wheel 回到 board scroll、card 内滚动/无 Apply/即时异步配置，并通过受影响 package 回归。现在进入 Calibration plugin 的 file picker、Samples=300、restart、唯一 preview 与四图收敛。`
-- Last completed action：`Camera/shape 和 Monitor/Setting-scroll 两个窄阶段已分别以当前源码与完整受影响 package tests 验证；没有新增文件、窗口层或 camera-specific plot 语义。`
-- Last verified tests：`当前 Camera/shape + Monitor/Setting-scroll 阶段：zlc_atom 143、zlc_plot 204、zlc_runtime 142、zlc_workbench 333、zlc_ui 79 全部通过；这些只证明受影响 package，不代替剩余 Calibration、全树和正式按钮验收。`
-- Pending acceptance gates：`Calibration 单次 result -> JSON + site-map/三模型四张 report 图片；Task progress/preview/terminal cleanup；terminal generation restart；Task takeover；Occupancy model choice；35-site simulation；panel finite ComboBox/full initial schema/Setting 即时 commit 性能；受影响与全树 tests；正式 experiment.bat 真实按钮全流程；Stop/close 零残留。`
-- Next action：在现有 Calibration plugin/Workbench 接线内修正 project pulses file picker、Samples=300、terminal restart generation、唯一 Monitor preview 和同一 result 保存 JSON + site-map/三模型四图；每个窄阶段通过受影响 tests 后才进入全树和正式按钮验收，并在每次 GUI probe 后立即确认窗口与进程归零。
+- Current phase：`Camera/shape、Monitor/Setting 与 Calibration 窄阶段均已按当前源码收敛并通过受影响包回归；现在进入整条正式 experiment workflow、全树测试与零残留验收。`
+- Last completed action：`Calibration Edit 已验证 project pulses JSON file picker、Samples=300、无 timeout；virtual finite shot 按 compiled logical duration 推进，capture_preview 是 latest R=1/P=1 image；terminal/Stop 后 transient panel 移除且不复活；直接 Restart 与 Remove/re-add 后 Start 均产生新 artifact；同一 result 保存 JSON + site-map/box/psf/uniform_psf 四图。Setting 瞬时顶层窗口已定位为无 parent FluentButton，并在既有 card 内直接修复。没有新增文件、类、窗口层或 report 编排。`
+- Last verified tests：`本 Calibration/Setting 阶段：zlc_atom 143、zlc_workbench 333、zlc_ui 79 全部通过；正式 Calibration Qt 路径额外断言三次 Start、至少三个实际 raster fronts、四图、唯一 transient preview/terminal cleanup。前一阶段当前树已验证 zlc_plot 204、zlc_runtime 142；这些仍不代替全树和正式可见按钮验收。`
+- Pending acceptance gates：`正式 experiment.bat 可见按钮全流程；Calibration -> Repeat=0 Camera Measurement -> Pulse Load/On -> Occupancy model -> Image overlay；三种 Save；受影响外的全树 tests；Stop/close 后窗口、worker、device claim、项目 Python 进程归零。`
+- Next action：运行全树测试后，从根 bin/experiment.bat 走正式可见人类按钮链并记录每个产品断点；失败继续在现有 owner 内最小修复，不增加新文件/框架，最后复核文档与零残留。
 - New decisions since architecture review：Simulation 只位于独立 devices/simulation 且复用真实设备契约；默认 virtual geometry 是 35 sites/96 x 128；Calibration JSON artifact 保留 SiteMap、三模型、default kind 和 frame contract，Calibration Task 另用同一结果调用 `zlc_plot` 保存 site-map + 三模型 grid 四张 report 图片；Workbench 不显示 report，Monitor 只自动显示 measurement preview；Occupancy readout-model choice 是科学模式而非 extent mode；Task active 时 takeover；TaskConsole 只有五种固定 plot kind，interval 是有限 ComboBox，blank panel 初始显示完整 schema，Setting 没有 Apply、字段 commit 即时异步生效并拒绝 stale result；pulse 只有 readable `zlc.pulse.v1` JSON 单一路径。旧 Goal tombstones 保持不动。
 
 ## 1. 执行纪律
@@ -73,7 +73,7 @@
 
 - combined `Add Panel` 选择 Logic entry -> stopped row -> 自动 Edit tab -> Start/Restart；不新增独立 Add Logic 按钮或 modal chooser。
 - capability-filtered device selector，Camera Measurement 可选 `camera`、`mot_camera` 等实例。
-- Calibration active 时 header 显示 progress 和唯一 Stop Task，所有其他状态改写禁用；循环中的唯一 preview 进入普通 Monitor。结束后 Task 保存四张 report 图片，Workbench 不显示或自动打开它们。
+- Calibration active 时 header 显示 progress 和唯一 Stop Task，所有其他状态改写禁用；循环中的唯一 latest-image preview 进入普通 Monitor。terminal/Stop 后该 transient panel 自动移除且不由后续 beat 重建。结束后 Task 保存四张 report 图片，Workbench 不显示或自动打开它们。
 - Panel Edit 共享 producer draft，selector 改 ROI/range，Producer Restart 调用同一个 Start/Restart endpoint。
 - Plot catalog 固定为 `2D image / 1D vector / Rolling trace / Distribution / Site grid`，没有 PulseTimeline；Display interval 用 `100/200/400/800 ms` ComboBox，blank Setting 初始即显示完整 schema，Setting 无 Apply、字段 commit 立即异步生效且不阻塞 owner thread。
 
@@ -169,7 +169,7 @@
 3. 定义简单 `SiteMap`：`site_ids`、`centers_xy`、`valid_sites`、`coordinate_frame`、可选自动 topology/order；无 `grid_shape`。
 4. 只构建一份 labels 和 train/held-out split，同时训练与同一 `site_ids` 对齐的 `box`、per-site `psf`、`uniform_psf` 三种 readout models；各自保存 features/PSF、thresholds、usable/quality，并保存 `default_model_kind`。不把 integration 框和绘图圈半径塞进 SiteMap。
 5. Calibration Edit 表单使用 camera、sequencer、以 project `pulses` 为起点并显示明确路径的 JSON file picker、samples（默认 300）、reference/readout exposure、camera ROI、default readout model 和 box/PSF 条件参数。不显示 `bracket` 或 timeout。
-6. Task 运行中发布 progress 和当前 `capture_preview`；循环结束后只计算一次 Calibration result，包含 SiteMap、三种 readout models、default kind、frame contract，以及每种模型画 grid 所需的 samples/thresholds/fits。
+6. Task 运行中发布 progress 和当前 `capture_preview`；preview 是最近一个完整 cycle 的最后一张二维 image（固定 `R=1, P=1`），不发布累计 samples/history tensor。循环结束后只计算一次 Calibration result，包含 SiteMap、三种 readout models、default kind、frame contract，以及每种模型画 grid 所需的 samples/thresholds/fits。
 7. 直接把该 result 原子写成 plain JSON，再把同一个内存对象交给 `zlc_plot`：画 site map + centers，以及 box、per-site PSF、uniform PSF 三个 per-site grids。不得重算第二套结果，也不得增加通用 report registry/coordinator/transaction 框架。
 8. Monitor 只自动显示循环中的 measurement preview。四张 report 图片由 Task 保存到本次 Calibration 输出位置；Workbench 不创建 report panel/tab/window，也不自动打开。Task 成功后由 workspace 选择目录和唯一文件名，不依赖 cwd，不静默覆盖。
 9. Calibration template、Pulse UI Save 和 generator 全部使用 `PulseEditorState -> state_to_tree -> sequence_to_tree(zlc.pulse.v1) -> write_readable_json`；删除 `.py` pulse、手写 compact JSON 和第二条 serializer。
@@ -179,7 +179,7 @@
 
 - 改变 virtual world 中的 site 数量时，不改 Calibration request，detected N 跟着图像变化。
 - 输出 JSON 中 `centers[i]` 与三种模型的 feature/threshold/validity 都由同一 `site_id` 对齐。
-- Monitor 可见且只自动加入循环中的 measurement preview；用户 Remove terminal preview 后不自动重建。循环结束后同一个 result 已写 JSON，并通过 `zlc_plot` 保存四张 report 图片，Workbench 没有新增 report UI。
+- Monitor 可见且只自动加入循环中的 latest-image measurement preview；terminal/Stop 后自动移除，后续 beat 不重建，下一次 Restart 才为新 generation 再创建。循环结束后同一个 result 已写 JSON，并通过 `zlc_plot` 保存四张 report 图片，Workbench 没有新增 report UI。
 
 ## 8. Phase 5：Occupancy 正式输入、输出和 overlay
 
@@ -202,7 +202,7 @@
 ## 9. Phase 6：跑 Guard A，完成 headless P0
 
 1. 在同一 Experiment/session 从独立 simulation device catalog 安装 virtual camera + virtual sequencer，验证共同 device contracts、同一 `SimulationWorld`、35-site geometry 和 96 x 128 frame。
-2. 通过 descriptor/catalog/host 运行 Calibration，从图像自动得到 sites，验证循环 preview、三模型 JSON 和同一结果产生的四个 `zlc_plot` views。
+2. 通过 descriptor/catalog/host 运行 Calibration，从图像自动得到 sites，验证 virtual finite pulse cadence、latest-image 循环 preview、三模型 JSON 和同一结果产生的四个 `zlc_plot` views。
 3. 运行 Camera Measurement finite 和 `Repeat=0` infinite，每次都让 request 中 exposure/ROI 实际到达 virtual adapter。
 4. 运行 Occupancy，显式传 frames key + JSON path + 各 readout-model choice，验证 counts/occupied/valid 与 SiteMap 对齐。
 5. 停止所有 workers/nodes，释放 exclusive claims，关闭 session，不留阻塞读或后台线程。
@@ -220,7 +220,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 5. Start/Restart 冻结当前 draft -> validate request -> 停冲突 Logic Nodes -> measurement/task 启动。
 6. Occupancy signal selector 按 contract 过滤；在尚无 publication 时可保留 unresolved stable key，不强制 Add modal。
 7. Task active 时 header 切换为 task status strip，显示 stage/progress 和唯一 `Stop Task`；所有其他 state-changing header/row/card/editor controls 禁用。selector/zoom/pan/fit inspection 只能 view-only，selector commit 不得修改 draft。
-8. 循环中的唯一 measurement preview 放入普通 Monitor；terminal 后用户可以保留或 Remove，Remove 后不重建。Calibration Task 直接用完成 result 调 `zlc_plot` 保存 report 图片；Workbench 不组装、不显示、不自动打开 report。
+8. 循环中的唯一 latest-image measurement preview 放入普通 Monitor；terminal/Stop 后作为 transient panel 自动移除且后续 beat 不重建。Calibration Task 直接用完成 result 调 `zlc_plot` 保存 report 图片；Workbench 不组装、不显示、不自动打开 report。
 
 ### 完成标准
 
@@ -236,7 +236,7 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 1. Plot entry 按固定顺序提供 `2D image`、`1D vector`、`Rolling trace`、`Distribution`、`Site grid`，不得包含 PulseTimeline；combined `Add Panel` 创建固定 kind 的 blank panel，不要求 signal 已发布、不自动选择 signal。Site grid 的 cell kind 固定为 Curve，Setting/Edit 中只读，无切换路径。
 2. 每个 panel 建立唯一 Workbench-owned `PanelState`，包含 signal/size/update interval/fixed kind/semantic/display/fit。Setting frame、Panel Edit 和 monitor panel 都订阅它，不保留独立 config 副本。
 3. Display interval 只允许 `100/200/400/800 ms`，默认 `400 ms`，使用 ComboBox；TaskConsole app beat 与该 interval 独立。任何载入的非法值必须在 state validation 阶段拒绝，不能等 scheduler tick 崩溃。
-4. Setting frame 从共享 `zlc_plot` kind schema 初次构造 Signal、Size、interval、全部 data-independent semantic/display/interaction parameters；依赖 signal/data 的 axis/reduction/fit controls 固定显示但在无 compatible signal 时禁用，不能在第一次 commit 后才追加字段。Setting 锚在所属 panel 内，最大尺寸不超过 panel，内容不足时内部滚动，不制造闪现的临时顶层窗口；没有 Apply，任一字段 commit 立即更新同一 PanelState。
+4. Setting frame 从共享 `zlc_plot` kind schema 初次构造 Signal、Size、interval、全部 data-independent semantic/display/interaction parameters；依赖 signal/data 的 axis/reduction/fit controls 固定显示但在无 compatible signal 时禁用，不能在第一次 commit 后才追加字段。Setting 锚在所属 panel 内，最大尺寸不超过 panel，内容不足时内部滚动；每个懒创建控件从构造瞬间就带 card/body parent，禁止先收到 top-level Show 再 reparent；没有 Apply，任一字段 commit 立即更新同一 PanelState。
 5. Panel Edit 作为 tab，重复显示同一完整 schema、fit、selector、direct producer form、与 producer row 共用的 Start/Restart action 和 Save Fig。两边的共同字段直接绑定同一 `PanelState`；任一边修改都由同一 controller 发布一次更新给所有 views。
 6. Logic Edit 和同 producer 的 Panel Edit 共享同一 row draft；一处修改同步到其他打开投影。
 7. 只处理 committed selection。Logic descriptor 用 data-only mapping 把 Image Area 等转成 typed measurement draft patch，Workbench 负责路由，不写 camera-specific branch。

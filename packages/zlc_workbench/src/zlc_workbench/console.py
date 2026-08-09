@@ -2345,7 +2345,11 @@ class ConsolePresenter:
     def _ensure_task_previews(self, binding: LogicBinding) -> None:
         """Mount declared Task outputs through the ordinary panel data path."""
 
-        if not self._is_task(binding):
+        if (
+            not self._is_task(binding)
+            or binding.host is None
+            or not binding.host.running
+        ):
             return
         previews = tuple(getattr(binding.descriptor, "task_previews", ()))
         if not previews:

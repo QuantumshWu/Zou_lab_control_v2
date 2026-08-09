@@ -95,6 +95,7 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 2. Camera 的共同契约是 runtime-checkable `CameraAdapter` Protocol，不虚构另一个 `BaseCamera`。`VirtualCamera`、DCAM 和 Pylon 都通过同一 adapter/binding 契约，安装时校验该 Protocol。Sequencer 的共同契约是 nominal `SequencerDevice`，`VirtualSequencer` 必须继承它。
 3. Virtual camera/sequencer 与硬件一样由 `DeviceTypeDescriptor -> InstalledLeaf -> binding` 组成，Logic Node 只按 capability 取设备，不写 `if virtual` 分支。
 4. `SimulationWorld` 是 virtual 成像物理、site geometry、seed 和 trigger routing 的唯一所有者。默认 virtual apparatus 是 `5 x 7 = 35` sites 和 `96 x 128` image；这是模拟装置的可测真值，不能倒流成 Calibration request 的 grid/count 输入。
+5. Virtual sequencer 的 finite `fire -> wait_done` 必须尊重 compiled pulse 的 logical duration；不能因为 memory transport 已立即给出 DONE 就把几十到几百次采集压进一个 Monitor refresh interval。`forever` 与 finite 都复用同一个 compiled duration，只是前者持续按 cadence 触发、后者到 logical terminal 才交付一次完成报告。
 
 ## 4. Package 责任边界
 
@@ -206,7 +207,7 @@ Calibration 不接受 grid rows、columns、site count 或预先 `SiteLayout`。
 2. 从标定图像自动发现 site candidates，根据局部对比度/噪声、最小间距和 spot 尺度去重。
 3. 精修每个 site 的 pixel center，生成稳定 site id/排序。若能从坐标推断拓扑，拓扑也是输出，不是必需输入。
 4. 只生成一份 site labels 和 train/held-out split，以同一 site axis 同时训练三种 `ReadoutModelKind`：`box`、`psf` (per-site PSF) 和 `uniform_psf`。每个模型都保存自己的 integration feature/PSF、threshold、usable/quality，artifact 另存一个 `default_model_kind`。
-5. 运行中通过 NodeHost 发布 progress 和当前 `capture_preview`；循环完成后计算一次包含 SiteMap、三种模型及各模型诊断数据的 Calibration result。
+5. 运行中通过 NodeHost 发布 progress 和当前 `capture_preview`。Preview 只投影最近一个完整 cycle 的最后一张二维 camera image，固定为 `R=1, P=1`；采集历史属于本次 Calibration result，不得把 `samples x 3 x Y x X` 累计数组冒充“当前图”反复交给 Monitor。循环完成后计算一次包含 SiteMap、三种模型及各模型诊断数据的 Calibration result。
 
 Calibration 的 `Reference exposure` 与 `Readout exposure` 是显式 protocol 参数：相机 adapter 以 reference exposure 配置本次 run 的最大积分时间，编译后的 long/readout/long 外部门宽分别使用两项 authored 值。外部门宽可以按真实物理缩短某个 frame 的有效曝光，但不能把已配置的 camera exposure 延长；普通 Camera Measurement 仍只由自己的 request 配置 exposure，不能被一个无声明的 pulse metadata 替代。这样三帧继续共享同一 shot occupancy，同时 exposure 归属没有第二份隐式真相。
 
@@ -297,10 +298,10 @@ Calibration 中所谓“必要的高级检测参数”只能是算法确实需�
 
 ### 9.3 Task takeover、LIVE preview 与 terminal 清理
 
-- Calibration 循环中的 `capture_preview` 是唯一自动加入 Monitor 的 measurement-linked panel。循环完成后，Calibration Task 直接把 result 交给 `zlc_plot` 保存四张 report 图片。Workbench 只显示 Task 的进度和 preview，不组装、不显示、不自动打开 report。
+- Calibration 循环中的 `capture_preview` 是唯一自动加入 Monitor 的 measurement-linked panel；它显示最新一张二维 camera image，不携带累计采集维度。循环完成后，Calibration Task 直接把 result 交给 `zlc_plot` 保存四张 report 图片。Workbench 只显示 Task 的进度和运行中 preview，不组装、不显示、不自动打开 report。
 - Task active 时，TaskConsole header 的可操作区切换为唯一的 task status strip：显示当前阶段、进度和唯一 `Stop Task`。所有会改变系统状态的 header controls、logic rows/cards、Setting/Edit controls、Add/Start/Restart/Stop/Remove 都禁用，不能与 exclusive Task 并行改写 draft 或设备状态。
 - Monitor 中 selector、zoom、pan、fit inspection 只允许 view-only；Task active 时 selector commit 不能回写任何 producer draft。
-- 每个 task generation 的 LIVE preview 都带明确生命周期。terminal 后 preview 可以作为最后一张普通 Monitor 图保留；用户关闭/Remove 后不得在后续 beat 自动重建。失败/取消不能留下貌似仍在运行的 LIVE 数据。
+- 每个 task generation 的 LIVE preview 都带明确生命周期。它只在该 Task host 正在运行时允许自动创建；terminal、Stop、失败或取消统一移除 transient preview，后续 beat 即使仍能读到该 generation 的最后 publication 也不得重建。下一次 Restart 的新 generation 才能创建新的 preview。
 - Monitor 左侧作为一个整体滚动区域响应鼠标滚轮；不能只有某个子控件吃掉滚动而使 logic/panel 列表无法上下移动。
 
 ## 10. Plot Panel UI
@@ -324,7 +325,7 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 
 依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。Camera cycle 的各个 frame 已经是普通独立 signals，plot 参数层不再增加 camera-specific frame choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
 
-Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动，不能先闪现一个脱离 panel 的临时顶层窗口再重建。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
+Setting frame 锚定在所属 panel 内，最大宽高不超过该 panel 的可见边界；内容放不下时在 frame 内滚动。所有懒创建的 form/button/control 从构造瞬间就必须以 Setting body/card 为 parent，不能先作为临时 top-level 收到一次 Show 再由 layout reparent。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
 
 Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不消费 wheel，滚轮交给外层 board scroll；打开后 wheel 才属于 plot 的 zoom/selection interaction。这个开关直接调用同一 plot widget 的 interaction gate，不重建 panel。
 

@@ -82,9 +82,13 @@ else:
 def test_panel_card_qtest_signal_payloads() -> None:
     _run_qt(
         """
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from zlc_ui.console import panel_card_view as tested_module
+print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import PanelCardView
+PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
 card.set_interval_choices((100, 200, 400, 800))
@@ -106,8 +110,21 @@ card.state_changed.connect(lambda patch: events.append(('state', patch)))
 # every other per-panel decision.  Reached any other way they were hidden
 # widgets nothing ever showed, so a panel could not be removed at all.
 top_levels = {widget for widget in app.topLevelWidgets() if widget.isVisible()}
+shown_top_levels = []
+class _TopLevelShowSpy(QtCore.QObject):
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QtCore.QEvent.Show
+            and isinstance(watched, QtWidgets.QWidget)
+            and watched.isWindow()
+        ):
+            shown_top_levels.append(type(watched).__name__)
+        return False
+show_spy = _TopLevelShowSpy()
+app.installEventFilter(show_spy)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
+assert shown_top_levels == []
 assert card._settings_frame.parentWidget() is card
 assert not card._settings_frame.isWindow()
 assert card.rect().contains(card._settings_frame.geometry())

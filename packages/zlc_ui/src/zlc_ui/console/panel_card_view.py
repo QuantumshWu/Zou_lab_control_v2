@@ -541,9 +541,9 @@ class PanelCardView(FluentGroupBox):
             # per-panel decision already lives.  They existed as hidden widgets
             # nothing ever showed, so a panel opened in the real window could
             # not be removed at all and its Edit signal could not be raised.
-            self.edit_button = FluentButton("Edit", color=ACCENT)
+            self.edit_button = FluentButton("Edit", body, color=ACCENT)
             self.edit_button.clicked.connect(self._request_edit)
-            self.remove_button = FluentButton("Remove", color=ORANGE)
+            self.remove_button = FluentButton("Remove", body, color=ORANGE)
             self.remove_button.clicked.connect(self._request_remove)
             self.remove_button.setVisible(self._live)
             buttons.addWidget(self.edit_button)

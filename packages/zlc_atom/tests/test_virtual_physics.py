@@ -55,6 +55,12 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
     try:
         program, _metadata = build_calibration_pulse(streamer.describe())
         streamer.load(program)
+        started = time.monotonic()
+        streamer.fire()
+        time.sleep(program.duration_seconds * 0.25)
+        assert streamer.wait_done(0.0) is None
+        assert streamer.wait_done(1.0) is not None
+        assert time.monotonic() - started >= program.duration_seconds * 0.8
         streamer.fire(forever=True)
         deadline = time.monotonic() + 0.5
         while world.fire_count < 3 and time.monotonic() < deadline:

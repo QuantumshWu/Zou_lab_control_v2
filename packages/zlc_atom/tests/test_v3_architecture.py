@@ -46,6 +46,7 @@ class _CalibrationCoveragePlane(FakePlane):
         super().__init__()
         self.calibration_coverages: list[tuple[int, int]] = []
         self.calibration_schema_fingerprints: list[str] = []
+        self.calibration_preview_shapes: list[tuple[int, ...]] = []
 
     def mark_changed(self, producer: object, live_slot: object) -> None:
         output = live_slot.freeze_live_outputs()["capture_preview"]
@@ -55,6 +56,7 @@ class _CalibrationCoveragePlane(FakePlane):
         self.calibration_schema_fingerprints.append(
             output.snapshot.block.schema.fingerprint
         )
+        self.calibration_preview_shapes.append(output.snapshot.block.values.shape)
         super().mark_changed(producer, live_slot)
 
 
@@ -365,9 +367,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         task_result = calibration_node.result
         assert task_result is not None
         task_camera_events = camera.events[camera_events_before_task:]
-        assert plane.calibration_coverages == [
-            (current, 30) for current in range(1, 31)
-        ]
+        assert plane.calibration_coverages == [(1, 1)] * 30
+        assert plane.calibration_preview_shapes == [(1, 1, 96, 128)] * 30
         assert len(set(plane.calibration_schema_fingerprints)) == 1
         report_images = tuple(
             sorted(

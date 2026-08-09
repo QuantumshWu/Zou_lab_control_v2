@@ -490,12 +490,14 @@ def test_calibration_terminal_writes_four_images_without_report_panels(
             + os.environ.get("PYTHONPATH", "")
         ),
     )
-    script = """import time
+    script = """import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+import time
 from pathlib import Path
-import zou_lab_control_v2
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
 from zlc_workbench.apps import task_console as tested_module
+print(tested_module.__file__)
 application = ensure_qt_app([])
 space, session = tested_module.open_experiment(r'%s', 'virtual')
 view, presenter = tested_module.build_console(session)
@@ -529,9 +531,21 @@ editor.form.widget_for('repeats').setValue(30)
 application.processEvents()
 QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
 
-until(lambda: presenter._active_task_id is None and bool(
-    presenter.logic['calibration'].artifact_results
-))
+capture_signal = '@logic/calibration/capture_preview'
+first_preview_sequences = set()
+def first_run_done():
+    for panel in presenter.panels.values():
+        if (
+            panel.state.signal == capture_signal
+            and panel.host is not None
+            and panel.host.front is not None
+        ):
+            first_preview_sequences.add(panel.host.front.identity.sequence)
+    return presenter._active_task_id is None and bool(
+        presenter.logic['calibration'].artifact_results
+    )
+until(first_run_done)
+assert len(first_preview_sequences) >= 3, first_preview_sequences
 for _ in range(20):
     presenter.beat()
     application.processEvents()
@@ -574,6 +588,15 @@ view._view.kind_combo.setCurrentIndex(task_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 editor = view._logic_editors['calibration']
+pulse_field = next(
+    field for field in editor.form.spec.fields
+    if field.key == 'pulse_template'
+)
+assert pulse_field.kind == 'path'
+assert Path(pulse_field.base_dir).resolve() == space.pulses.resolve()
+assert '*.json' in pulse_field.file_filter
+assert editor.form.read_value('repeats') == 300
+assert all('timeout' not in key for key in editor.form.keys)
 editor.form.widget_for('repeats').setValue(30)
 application.processEvents()
 QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
@@ -590,7 +613,6 @@ third_artifact_path = Path(
 assert third_artifact_path not in {first_artifact_path, second_artifact_path}
 
 front = presenter.session.signal_plane.freeze()
-capture_signal = '@logic/calibration/capture_preview'
 assert tuple(front.names()) == (capture_signal,)
 assert all(
     panel.state.signal == capture_signal
@@ -599,6 +621,13 @@ assert all(
 assert not hasattr(presenter, '_task_report_coordinator')
 assert not view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
+for _ in range(5):
+    presenter.beat()
+    application.processEvents()
+assert all(
+    panel.state.signal != capture_signal
+    for panel in presenter.panels.values()
+)
 print('CALIBRATION_FILES_WITHOUT_REPORT_UI_OK')
 presenter.close()
 session.close()
