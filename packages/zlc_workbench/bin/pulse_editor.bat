@@ -2,7 +2,7 @@
 rem The pulse window: edit a sequence, preview it, fire it.
 rem
 rem   bin\pulse_editor.bat
-rem   bin\pulse_editor.bat --pulse calibration
+rem   bin\pulse_editor.bat --pulse imaging_template.json
 rem   bin\pulse_editor.bat --connect virtual
 rem   bin\pulse_editor.bat --connect remote:127.0.0.1:18861
 rem

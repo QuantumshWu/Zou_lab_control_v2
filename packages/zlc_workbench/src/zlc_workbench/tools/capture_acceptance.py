@@ -1,8 +1,8 @@
 """Capture one workbench window for visual acceptance, on a real screen.
 
-    python -m zlc_workbench.tools.capture_acceptance --view console --template virtual
-    python -m zlc_workbench.tools.capture_acceptance --view pulse --pulse calibration
-    python -m zlc_workbench.tools.capture_acceptance --view figure --path run.npz
+    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view console --template virtual
+    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view pulse --pulse imaging_template.json
+    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view figure --path run.npz
 
 This is an adapter, not a capture implementation.  zlc_ui owns the only one:
 ``zlc_ui.acceptance.capture_window`` opens the same ``create_window`` entry a
@@ -31,7 +31,6 @@ def _opener(arguments: argparse.Namespace, ratio: float):
         return lambda: create_window(
             workspace=arguments.workspace,
             template=arguments.template,
-            pulse=arguments.pulse,
             window_ratio=ratio,
         )
     if arguments.view == "pulse":
@@ -39,7 +38,7 @@ def _opener(arguments: argparse.Namespace, ratio: float):
 
         return lambda: create_window(
             workspace=arguments.workspace,
-            pulse=arguments.pulse if arguments.pulse != "calibration" or arguments.workspace else None,
+            pulse=arguments.pulse,
             connect=arguments.connect,
             window_ratio=ratio,
         )
@@ -55,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--view", choices=("console", "pulse", "figure"), required=True)
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--template", default=None)
-    parser.add_argument("--pulse", default="calibration")
+    parser.add_argument("--pulse", default=None)
     parser.add_argument("--connect", default=None)
     parser.add_argument("--path", type=Path, default=None)
     parser.add_argument("--ratio", type=float, default=WINDOW_SCREEN_FRACTION)

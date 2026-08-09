@@ -6,10 +6,11 @@ Pulse UI in the same process over one shared session. The wrappers in this
 package directory are developer/package entry points, not a second experiment
 workflow.
 
-Double-click, or run from the directory holding your experiment's `pulses/`,
-`data/` and `apparatus.json`. The workspace defaults to **where you started the
-launcher**, not to the repository, so the repository never becomes somebody's
-data directory.
+Double-click the repository-root launcher. `Workspace.discover()` uses the
+nearest directory that already contains `pulses/` or `apparatus.json`; when
+none exists it uses the one configured default at `<checkout>\workspace` (or
+`ZLC_WORKSPACE`). It never treats an arbitrary launch directory as a new
+experiment.
 
 | Launcher | Window | First run |
 |---|---|---|
@@ -23,11 +24,11 @@ up, and it is what the tests run.
 
 ## Connecting the pulse editor to a board
 
-The board is driven by a server on the machine it is wired to. Start it from
-the **zlc_pulse** repository, which is where the geometry and the transport
-policy live:
+The board is driven by a server on the machine it is wired to. Start the
+monorepo launcher, which bootstraps the same checkout before importing
+`zlc_pulse`:
 
-    zlc_pulse\fpga\run_server.bat
+    bin\run_server.bat
 
 It prints the exact endpoint to type into the editor's Connection panel — use
 `127.0.0.1:18861` on the same computer, or the LAN address it shows under
@@ -46,7 +47,7 @@ Run, Stop and Sync are disabled and say so rather than looking available.
 There is one way to capture a window for visual acceptance, and it is not a
 screenshot script:
 
-    python -m zlc_workbench.tools.capture_acceptance --view pulse --connect virtual
+    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view pulse --connect virtual
 
 It opens the same `create_window()` a human uses through
 `zlc_ui.acceptance.capture_window`, which checks the window is exactly the
@@ -62,5 +63,6 @@ producing a plausible image at a size somebody typed.
 | `ZLC_PY_CMD` | Interpreter to use (default: `python`) |
 | `ZLC_NO_PAUSE` | Set to anything to skip the pause on failure (used by scripts) |
 
-Packages are installed globally — there is no virtual environment to activate,
-and these launchers deliberately do not look for one.
+The launchers first import the repository bootstrap and print the modules they
+resolved. They do not rely on a global/editable `zlc_*` installation, which
+could silently test a sibling checkout instead of this product tree.
