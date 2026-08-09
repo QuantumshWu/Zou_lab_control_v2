@@ -1361,6 +1361,8 @@ class MatplotlibRenderer:
             )
         if axes.get_legend() is not None:
             axes.get_legend().remove()
+        if len(series) > 1:
+            axes.legend()
         axes.set_xlabel(x_label)
         axes.set_ylabel(y_label)
         apply_smart_ticks(axes)

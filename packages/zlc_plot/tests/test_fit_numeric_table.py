@@ -82,7 +82,7 @@ def test_text_facet_coordinates_use_ordinals_and_labels() -> None:
         session.close()
 
 
-def test_coordinate_display_labels_drive_facet_titles_and_fit_rows() -> None:
+def test_coordinate_display_labels_drive_facets_fit_rows_and_legends() -> None:
     x = np.tile(np.linspace(-3.0, 3.0, 20), 2)
     site_ids = ("site_0001",) * 20 + ("site_0002",) * 20
     site_labels = ("1",) * 20 + ("2",) * 20
@@ -129,3 +129,20 @@ def test_coordinate_display_labels_drive_facet_titles_and_fit_rows() -> None:
         assert result.sample_labels == ("Site=1", "Site=2")
     finally:
         session.close()
+
+    grouped = PlotSession(
+        snapshot,
+        CurvePlot(
+            AxisRef.point("scan.x"),
+            group=AxisRef.point("calibration.site"),
+        ),
+    )
+    try:
+        legend = grouped._renderer.primary_axes.get_legend()
+        assert legend is not None
+        assert tuple(text.get_text() for text in legend.get_texts()) == (
+            "Site=1",
+            "Site=2",
+        )
+    finally:
+        grouped.close()
