@@ -17,7 +17,7 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
 from tests.fakes import FakePlane
-from tests.pulse_fixture import PULSE_ROOT
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -146,6 +146,38 @@ def test_device_requirements_name_build_arguments_and_exclusive_access() -> None
     assert all(not hasattr(value, "device_key") for value in (*camera, *calibration))
 
 
+def test_logic_build_namespace_rejects_authored_resolved_or_reserved_collisions() -> None:
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+    from zlc_atom.nodes import (
+        DeviceAccess,
+        DeviceRequirement,
+        LogicNodeDescriptor,
+        NodeKind,
+    )
+
+    with pytest.raises(ValueError, match="camera"):
+        LogicNodeDescriptor(
+            "bad-device-override",
+            NodeKind.MEASUREMENT,
+            AuthoringSchema((AuthoringField("camera", "text", "Camera"),)),
+            device_requirements=(
+                DeviceRequirement(
+                    "camera.adapter",
+                    "camera",
+                    DeviceAccess.EXCLUSIVE,
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="signal_plane"):
+        LogicNodeDescriptor(
+            "bad-runtime-override",
+            NodeKind.MEASUREMENT,
+            AuthoringSchema(
+                (AuthoringField("signal_plane", "text", "Signal plane"),)
+            ),
+        )
+
+
 def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
     tmp_path: Path,
 ) -> None:
@@ -156,7 +188,8 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
             request=_calibration_request(),
-            pulse_search_paths=(PULSE_ROOT,),
+            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+            pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         ).run()
         assert plane.freeze().signals == {}
@@ -164,7 +197,8 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
             request=_calibration_request(),
-            pulse_search_paths=(PULSE_ROOT,),
+            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+            pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         ).run()
         assert result.artifact_path.name == "calibration.json"
@@ -223,7 +257,8 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             camera=installation.device("camera"),
             sequencer=installation.device("sequencer"),
             request=_calibration_request(),
-            pulse_search_paths=(PULSE_ROOT,),
+            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+            pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         ).run()
         occupancy = OccupancyProcessor(result.calibration).process(

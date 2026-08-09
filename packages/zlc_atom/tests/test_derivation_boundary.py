@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration import (
+    CALIBRATION_ARTIFACT_CODEC,
     FrameContract,
     ReadoutModel,
     ReadoutModelKind,
@@ -116,7 +117,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     )
     calibration_path = calibration.save(tmp_path / "calibration.json")
     processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration_path=str(calibration_path),
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(calibration_path),
         source_signal=source_name,
         signal_plane=plane,
     )
@@ -138,7 +139,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     )
     incompatible_path = incompatible.save(tmp_path / "incompatible.json")
     incompatible_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration_path=str(incompatible_path),
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(incompatible_path),
         source_signal=source_name,
         signal_plane=plane,
     )

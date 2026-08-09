@@ -59,7 +59,9 @@ def installation_config_from_template(
                 instance_id=spec.key,
                 role=spec.key,
                 type_id=spec.type_id,
-                parameters=by_type[spec.type_id].authoring_schema.freeze(spec.config),
+                parameters=by_type[spec.type_id].authoring_schema.project_values(
+                    spec.config
+                ),
             )
             for spec in specs
         )

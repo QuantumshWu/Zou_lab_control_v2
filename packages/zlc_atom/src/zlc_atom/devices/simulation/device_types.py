@@ -50,7 +50,7 @@ VIRTUAL_SEQUENCER_SCHEMA = AuthoringSchema(())
 def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     if not isinstance(context.world, SimulationWorld):
         raise TypeError("camera.virtual requires the installation SimulationWorld")
-    authored = VIRTUAL_CAMERA_SCHEMA.freeze(values)
+    authored = VIRTUAL_CAMERA_SCHEMA.project_values(values)
     world = context.world
     geometry = world.geometry
     config = VirtualCameraConfig(
@@ -77,7 +77,7 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
 
 
 def _camera_world_config(values: dict) -> SimulationWorldConfig:
-    authored = VIRTUAL_CAMERA_SCHEMA.freeze(values)
+    authored = VIRTUAL_CAMERA_SCHEMA.project_values(values)
     return SimulationWorldConfig(
         SimulationGeometry(
             grid_shape_yx=tuple(authored["grid_shape_yx"]),
@@ -88,7 +88,7 @@ def _camera_world_config(values: dict) -> SimulationWorldConfig:
 
 
 def _sequencer_factory(context, key: str, values: dict) -> InstalledLeaf:
-    VIRTUAL_SEQUENCER_SCHEMA.freeze(values)
+    VIRTUAL_SEQUENCER_SCHEMA.project_values(values)
     if not isinstance(context.world, SimulationWorld):
         raise TypeError("sequencer.virtual requires the installation SimulationWorld")
     device = VirtualSequencer(world=context.world)
@@ -105,7 +105,7 @@ def _sequencer_factory(context, key: str, values: dict) -> InstalledLeaf:
 def _sequencer_world_config(values: dict) -> None:
     """Request the default shared world without claiming camera geometry."""
 
-    VIRTUAL_SEQUENCER_SCHEMA.freeze(values)
+    VIRTUAL_SEQUENCER_SCHEMA.project_values(values)
     return None
 
 

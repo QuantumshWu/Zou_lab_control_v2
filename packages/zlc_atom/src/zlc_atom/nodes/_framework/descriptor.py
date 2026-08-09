@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable
 
 from zlc_atom.authoring import AuthoringSchema
@@ -39,16 +40,142 @@ class DatasetInputSpec:
 
 
 @dataclass(frozen=True)
+class ResolvedArtifact:
+    """One exact file and the typed value decoded from those exact bytes."""
+
+    path: Path
+    contract_id: str
+    value: object
+
+
+@dataclass(frozen=True)
+class ArtifactCodec:
+    """The one file contract used to choose and validate a saved artifact."""
+
+    contract_id: str
+    file_filter: str
+    suffixes: tuple[str, ...]
+    decode: Callable[[Path], object]
+
+    def __post_init__(self) -> None:
+        contract_id = str(self.contract_id).strip()
+        file_filter = str(self.file_filter).strip()
+        suffixes = tuple(str(value).strip().lower() for value in self.suffixes)
+        if not contract_id or not file_filter or not suffixes:
+            raise ValueError(
+                "artifact codec requires contract_id, file_filter, and suffixes"
+            )
+        if any(not value.startswith(".") for value in suffixes):
+            raise ValueError("artifact codec suffixes must begin with '.'")
+        if len(set(suffixes)) != len(suffixes):
+            raise ValueError("artifact codec suffixes must be unique")
+        if not callable(self.decode):
+            raise TypeError("artifact codec decode must be callable")
+        object.__setattr__(self, "contract_id", contract_id)
+        object.__setattr__(self, "file_filter", file_filter)
+        object.__setattr__(self, "suffixes", suffixes)
+
+    def resolve(self, path: str | Path) -> ResolvedArtifact:
+        source = Path(path).expanduser().resolve()
+        if source.suffix.lower() not in self.suffixes:
+            raise ValueError(
+                f"{source.name!r} must use one of {self.suffixes!r}"
+            )
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        return ResolvedArtifact(source, self.contract_id, self.decode(source))
+
+
+@dataclass(frozen=True)
 class ArtifactInputSpec:
     """One explicit saved-artifact path consumed by a run."""
 
     name: str
-    contract_id: str
+    label: str
+    codec: ArtifactCodec
     required: bool = True
+    argument_name: str = ""
 
     def __post_init__(self) -> None:
-        if not self.name or not self.contract_id:
-            raise ValueError("artifact input requires name and contract_id")
+        name = str(self.name).strip()
+        label = str(self.label).strip()
+        if not name or not label:
+            raise ValueError("artifact input requires name and label")
+        if not isinstance(self.codec, ArtifactCodec):
+            raise TypeError("artifact input codec must be ArtifactCodec")
+        argument_name = str(self.argument_name).strip() or str(self.name).strip()
+        if not argument_name:
+            raise ValueError("artifact input requires a build argument name")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "label", label)
+        object.__setattr__(self, "argument_name", argument_name)
+
+    @property
+    def contract_id(self) -> str:
+        return self.codec.contract_id
+
+
+@dataclass(frozen=True)
+class ResolvedWorkspaceResource:
+    """One selected workspace file and its descriptor-decoded typed value."""
+
+    path: Path
+    contract_id: str
+    value: object
+
+
+@dataclass(frozen=True)
+class WorkspaceResourceSpec:
+    """One plain file chosen from a descriptor-owned workspace collection."""
+
+    field_name: str
+    contract_id: str
+    directory: str
+    suffixes: tuple[str, ...]
+    decode: Callable[[Path], object]
+    argument_name: str = ""
+
+    def __post_init__(self) -> None:
+        field_name = str(self.field_name).strip()
+        contract_id = str(self.contract_id).strip()
+        directory = str(self.directory).strip()
+        suffixes = tuple(str(value).strip().lower() for value in self.suffixes)
+        if (
+            not field_name
+            or not contract_id
+            or not directory
+            or Path(directory).name != directory
+            or not suffixes
+        ):
+            raise ValueError(
+                "workspace resource requires field, contract, plain directory, and suffixes"
+            )
+        if any(not value.startswith(".") for value in suffixes):
+            raise ValueError("workspace resource suffixes must begin with '.'")
+        if len(set(suffixes)) != len(suffixes):
+            raise ValueError("workspace resource suffixes must be unique")
+        if not callable(self.decode):
+            raise TypeError("workspace resource decode must be callable")
+        argument_name = str(self.argument_name).strip() or field_name
+        if not argument_name:
+            raise ValueError("workspace resource requires a build argument name")
+        object.__setattr__(self, "field_name", field_name)
+        object.__setattr__(self, "contract_id", contract_id)
+        object.__setattr__(self, "directory", directory)
+        object.__setattr__(self, "suffixes", suffixes)
+        object.__setattr__(self, "argument_name", argument_name)
+
+    def resolve(self, path: str | Path) -> ResolvedWorkspaceResource:
+        source = Path(path).expanduser().resolve()
+        if source.suffix.lower() not in self.suffixes or not source.is_file():
+            raise ValueError(
+                f"workspace resource must be an existing {self.suffixes!r} file"
+            )
+        return ResolvedWorkspaceResource(
+            source,
+            self.contract_id,
+            self.decode(source),
+        )
 
 
 @dataclass(frozen=True)
@@ -164,6 +291,12 @@ class LogicNodeDescriptor:
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
+    workspace_resources: tuple[WorkspaceResourceSpec, ...] = ()
+    build_argument_names: tuple[str, ...] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.api_name or not isinstance(self.kind, NodeKind):
@@ -177,6 +310,7 @@ class LogicNodeDescriptor:
         artifact_outputs = tuple(self.artifact_outputs)
         requirements = tuple(self.device_requirements)
         selection_mappings = tuple(self.selection_mappings)
+        workspace_resources = tuple(self.workspace_resources)
         if any(not isinstance(value, (DatasetInputSpec, ArtifactInputSpec)) for value in inputs):
             raise TypeError("input_specs contain an unsupported input type")
         if any(not isinstance(value, OutputSpec) for value in outputs):
@@ -191,6 +325,13 @@ class LogicNodeDescriptor:
             raise TypeError("device_requirements must contain DeviceRequirement values")
         if any(not isinstance(value, SelectionMapping) for value in selection_mappings):
             raise TypeError("selection_mappings must contain SelectionMapping values")
+        if any(
+            not isinstance(value, WorkspaceResourceSpec)
+            for value in workspace_resources
+        ):
+            raise TypeError(
+                "workspace_resources must contain WorkspaceResourceSpec values"
+            )
         unknown_requirements = {value.capability_token for value in requirements} - set(CAPABILITY_TYPES)
         if unknown_requirements:
             raise ValueError(f"logic node uses unknown capability tokens: {sorted(unknown_requirements)}")
@@ -223,8 +364,6 @@ class LogicNodeDescriptor:
             raise ValueError("only Task nodes may declare task reports")
         if len({value.name for value in artifact_outputs}) != len(artifact_outputs):
             raise ValueError("artifact output names must be unique")
-        if len({value.argument_name for value in requirements}) != len(requirements):
-            raise ValueError("device requirement argument names must be unique")
         if len(
             {(value.plot_kind, value.selector_kind) for value in selection_mappings}
         ) != len(selection_mappings):
@@ -239,7 +378,56 @@ class LogicNodeDescriptor:
                 "selection mappings use unknown draft fields: "
                 f"{sorted(unknown_draft_fields)}"
             )
-        if self.kind is NodeKind.PROCESSOR and len(tuple(value for value in inputs if isinstance(value, DatasetInputSpec))) != 1:
+        resource_fields = tuple(value.field_name for value in workspace_resources)
+        if len(set(resource_fields)) != len(resource_fields):
+            raise ValueError("workspace resource fields must be unique")
+        unknown_resource_fields = set(resource_fields) - set(
+            self.authoring_schema.field_names
+        )
+        if unknown_resource_fields:
+            raise ValueError(
+                "workspace resources use unknown authoring fields: "
+                f"{sorted(unknown_resource_fields)}"
+            )
+        declared_resource_fields = {
+            field.name
+            for field in self.authoring_schema.fields
+            if field.value_type == "resource"
+        }
+        if set(resource_fields) != declared_resource_fields:
+            raise ValueError(
+                "workspace resource specs and resource authoring fields must "
+                "match exactly"
+            )
+        dataset_inputs = tuple(
+            value for value in inputs if isinstance(value, DatasetInputSpec)
+        )
+        build_argument_names = (
+            *(value.name for value in self.authoring_schema.fields),
+            *(value.argument_name for value in requirements),
+            *(f"{value.argument_name}_key" for value in requirements),
+            *(
+                value.argument_name
+                for value in inputs
+                if isinstance(value, ArtifactInputSpec)
+            ),
+            *(value.argument_name for value in workspace_resources),
+            *(("source_signal",) if dataset_inputs else ()),
+            "signal_plane",
+        )
+        duplicate_build_arguments = sorted(
+            {
+                name
+                for name in build_argument_names
+                if build_argument_names.count(name) > 1
+            }
+        )
+        if duplicate_build_arguments:
+            raise ValueError(
+                "logic build argument namespace has collisions: "
+                f"{duplicate_build_arguments!r}"
+            )
+        if self.kind is NodeKind.PROCESSOR and len(dataset_inputs) != 1:
             raise ValueError("a processor requires exactly one DatasetInputSpec")
         object.__setattr__(self, "input_specs", inputs)
         object.__setattr__(self, "outputs", outputs)
@@ -248,6 +436,8 @@ class LogicNodeDescriptor:
         object.__setattr__(self, "artifact_outputs", artifact_outputs)
         object.__setattr__(self, "device_requirements", requirements)
         object.__setattr__(self, "selection_mappings", selection_mappings)
+        object.__setattr__(self, "workspace_resources", workspace_resources)
+        object.__setattr__(self, "build_argument_names", build_argument_names)
         if self.build is not None and not callable(self.build):
             raise TypeError("build must be callable or None")
 
@@ -284,6 +474,7 @@ class LogicNodeDescriptor:
 
 
 __all__ = [
+    "ArtifactCodec",
     "ArtifactInputSpec",
     "DatasetInputSpec",
     "DeviceAccess",
@@ -291,7 +482,10 @@ __all__ = [
     "LogicNodeDescriptor",
     "NodeKind",
     "OutputSpec",
+    "ResolvedArtifact",
+    "ResolvedWorkspaceResource",
     "SelectionMapping",
     "TaskPreviewSpec",
     "TaskReportSpec",
+    "WorkspaceResourceSpec",
 ]

@@ -9,7 +9,11 @@ import time
 import numpy as np
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes import calibration_pulse_template_bytes
+from zlc_atom.nodes import (
+    ResolvedArtifact,
+    ResolvedWorkspaceResource,
+    calibration_pulse_template_bytes,
+)
 from zlc_atom.nodes.calibration import logic_node as calibration_logic_node
 from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
 from zlc_atom.nodes.occupancy import logic_node as occupancy_logic_node
@@ -17,12 +21,15 @@ from zlc_runtime import MonitorCoverage, SignalDataPlane
 import zlc_runtime.host as runtime_host
 from zlc_workbench.logic import (
     LogicCatalog,
+    LogicDraft,
     build_arguments,
+    finalize_logic_draft,
     make_host,
     stable_signal_key,
 )
 import zlc_workbench.image_overlay as image_overlay_module
 from zlc_workbench.image_overlay import ImageOverlayResolver
+from zlc_workbench.session import Workspace
 
 
 def _one_camera_window_program():
@@ -130,6 +137,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         (pulse_directory / "imaging_template.json").write_bytes(
             calibration_pulse_template_bytes()
         )
+        workspace = Workspace(tmp_path).prepare()
         assert {"calibration", "camera_measurement", "occupancy"} <= set(
             catalog.by_name
         )
@@ -139,21 +147,33 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
 
         calibration_descriptor = catalog.get("calibration")
         assert calibration_descriptor is not None
-        calibration_arguments = build_arguments(
+        calibration_finalization = finalize_logic_draft(
             calibration_descriptor,
+            LogicDraft(
+                values={
+                    "pulse_template": "imaging_template.json",
+                    "repeats": 30,
+                    "reference_exposure_seconds": 0.02,
+                    "readout_exposure_seconds": 0.005,
+                    "timeout_seconds": 2.0,
+                },
+                device_keys={"camera": "camera", "sequencer": "sequencer"},
+            ),
             installation=installation,
             signal_plane=plane,
-            values={
-                "repeats": 30,
-                "reference_exposure_seconds": 0.02,
-                "readout_exposure_seconds": 0.005,
-                "timeout_seconds": 2.0,
-            },
-            extras={
-                "pulse_search_paths": (pulse_directory,),
-                "artifact_directory": tmp_path,
-            },
-            device_keys={"camera": "camera", "sequencer": "sequencer"},
+            workspace=workspace,
+        )
+        assert calibration_finalization.can_start, calibration_finalization.issues
+        calibration_resource = calibration_finalization.resources["pulse_template"]
+        assert isinstance(calibration_resource, ResolvedWorkspaceResource)
+        assert calibration_resource.path == (
+            pulse_directory / "imaging_template.json"
+        ).resolve()
+        calibration_arguments = build_arguments(
+            calibration_descriptor,
+            signal_plane=plane,
+            finalization=calibration_finalization,
+            extras={"artifact_directory": tmp_path},
         )
         calibration_node = calibration_descriptor.instantiate(
             **calibration_arguments
@@ -219,17 +239,26 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         sequencer.load(one_window_program)
         camera_descriptor = catalog.get("camera_measurement")
         assert camera_descriptor is not None
-        finite_arguments = build_arguments(
+        finite_finalization = finalize_logic_draft(
             camera_descriptor,
+            LogicDraft(
+                values={
+                    "exposure_seconds": 0.005,
+                    "repeat": 3,
+                    "frames_per_cycle": 1,
+                    "timeout_seconds": 1.0,
+                },
+                device_keys={"camera": "camera"},
+            ),
             installation=installation,
             signal_plane=plane,
-            values={
-                "exposure_seconds": 0.005,
-                "repeat": 3,
-                "frames_per_cycle": 1,
-                "timeout_seconds": 1.0,
-            },
-            device_keys={"camera": "camera"},
+            workspace=workspace,
+        )
+        assert finite_finalization.can_start, finite_finalization.issues
+        finite_arguments = build_arguments(
+            camera_descriptor,
+            signal_plane=plane,
+            finalization=finite_finalization,
         )
         finite_node = camera_descriptor.instantiate(**finite_arguments)
         finite_host = make_host(
@@ -264,22 +293,35 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
 
         occupancy_descriptor = catalog.get("occupancy")
         assert occupancy_descriptor is not None
-        occupancy_arguments = build_arguments(
+        occupancy_finalization = finalize_logic_draft(
             occupancy_descriptor,
+            LogicDraft(
+                source_signal=frames_signal,
+                artifact_inputs={
+                    "calibration_path": str(first_calibration.artifact_path),
+                },
+            ),
             installation=installation,
             signal_plane=plane,
-            values={},
-            artifact_inputs={
-                "calibration_path": str(first_calibration.artifact_path),
-            },
-            source_signal=frames_signal,
+            workspace=workspace,
+            source_options=(frames_signal,),
+        )
+        assert occupancy_finalization.can_start, occupancy_finalization.issues
+        occupancy_arguments = build_arguments(
+            occupancy_descriptor,
+            signal_plane=plane,
+            finalization=occupancy_finalization,
         )
         assert set(occupancy_arguments) == {
-            "calibration_path",
+            "calibration",
             "source_signal",
             "signal_plane",
             "model_kind",
         }
+        assert isinstance(occupancy_arguments["calibration"], ResolvedArtifact)
+        assert occupancy_arguments["calibration"].path == (
+            first_calibration.artifact_path.resolve()
+        )
         assert occupancy_arguments["model_kind"] == "default"
         assert occupancy_arguments["source_signal"] == frames_signal
         occupancy_node = occupancy_descriptor.instantiate(**occupancy_arguments)
@@ -363,17 +405,26 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert set(plane.freeze().signals) == calibration_signals
 
         sequencer.load(one_window_program)
-        infinite_arguments = build_arguments(
+        infinite_finalization = finalize_logic_draft(
             camera_descriptor,
+            LogicDraft(
+                values={
+                    "exposure_seconds": 0.005,
+                    "repeat": 0,
+                    "frames_per_cycle": 1,
+                    "timeout_seconds": 0.05,
+                },
+                device_keys={"camera": "camera"},
+            ),
             installation=installation,
             signal_plane=plane,
-            values={
-                "exposure_seconds": 0.005,
-                "repeat": 0,
-                "frames_per_cycle": 1,
-                "timeout_seconds": 0.05,
-            },
-            device_keys={"camera": "camera"},
+            workspace=workspace,
+        )
+        assert infinite_finalization.can_start, infinite_finalization.issues
+        infinite_arguments = build_arguments(
+            camera_descriptor,
+            signal_plane=plane,
+            finalization=infinite_finalization,
         )
         infinite_node = camera_descriptor.instantiate(**infinite_arguments)
         infinite_host = make_host(

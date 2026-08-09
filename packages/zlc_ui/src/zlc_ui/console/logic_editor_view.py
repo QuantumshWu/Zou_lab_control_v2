@@ -154,15 +154,15 @@ class LogicEditorView(QtWidgets.QWidget):
         running = bool(incoming.get("running"))
         pending = bool(incoming.get("pending"))
         error = str(incoming.get("error") or "")
+        issues = tuple(str(issue) for issue in incoming.get("issues", ()) or ())
         self.start_button.setText("Starting…" if pending else ("Restart" if running else "Start"))
-        self.start_button.setEnabled(self._mutation_enabled and not pending)
-        self.stop_button.setEnabled(self._mutation_enabled and (running or pending))
-        self.remove_button.setEnabled(self._mutation_enabled)
+        self._project_commands()
         state = "waiting for device release" if pending else ("running" if running else "stopped")
         status = str(incoming.get("status") or state)
-        self.status_label.setText(error or status)
+        issue = issues[0] if issues else ""
+        self.status_label.setText(error or issue or status)
         self.status_label.setStyleSheet(
-            f"color: {'#D13438' if error else GREY}; background: transparent; border: none;"
+            f"color: {'#D13438' if error or issue else GREY}; background: transparent; border: none;"
         )
 
     def set_mutation_enabled(self, enabled: bool) -> None:
@@ -172,12 +172,16 @@ class LogicEditorView(QtWidgets.QWidget):
         self._selector_frame.setEnabled(self._mutation_enabled)
         self.artifact_form.setEnabled(self._mutation_enabled)
         self.form.setEnabled(self._mutation_enabled)
-        running = bool(self._projection.get("running"))
+        self._project_commands()
+
+    def _project_commands(self) -> None:
         pending = bool(self._projection.get("pending"))
-        self.start_button.setEnabled(self._mutation_enabled and not pending)
-        self.stop_button.setEnabled(
-            self._mutation_enabled and (running or pending)
+        can_start = bool(self._projection.get("can_start"))
+        can_stop = bool(self._projection.get("can_stop"))
+        self.start_button.setEnabled(
+            self._mutation_enabled and can_start and not pending
         )
+        self.stop_button.setEnabled(self._mutation_enabled and can_stop)
         self.remove_button.setEnabled(self._mutation_enabled)
 
     def _reconcile_selectors(self, projection: Mapping[str, object]) -> None:

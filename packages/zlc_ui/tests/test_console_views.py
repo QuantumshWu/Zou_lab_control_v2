@@ -277,6 +277,9 @@ from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView
 app = ensure_qt_app(['test'])
 row = LogicRowView('Processor', 'processor')
+assert not row.start_button.isEnabled()
+assert not row.stop_button.isEnabled()
+row.set_commands(can_start=True, can_stop=True)
 row.set_state('running', 'processing fake input')
 row.set_publishes((('out', '1', 'fake output'),))
 assert row.status_label.text() == 'processing fake input'
@@ -299,6 +302,7 @@ row = LogicRowView('Processor', 'processor'); row.show(); app.processEvents()
 events = []
 row.start_requested.connect(lambda: events.append('start'))
 row.edit_requested.connect(lambda: events.append('edit'))
+row.set_commands(can_start=True, can_stop=False)
 QtTest.QTest.mouseClick(row.start_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(row.edit_button, QtCore.Qt.LeftButton)
 assert events == ['start', 'edit']
@@ -344,6 +348,9 @@ projection = {
     'device_options': {'camera': ('camera', 'mot_camera')},
     'running': False,
     'pending': False,
+    'can_start': False,
+    'can_stop': False,
+    'issues': ('select a compatible source',),
     'error': '',
 }
 patches = []
@@ -361,10 +368,14 @@ def accept_and_refresh(node_id, patch):
 handle.logic_draft_changed.connect(accept_and_refresh)
 handle.open_logic_editor('camera-1', projection)
 editor = handle._logic_editors['camera-1']
+handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()
 assert view.tabs.count() == 3
 assert view.tabs.currentWidget() is editor
+assert not editor.start_button.isEnabled()
+assert not editor.stop_button.isEnabled()
+assert not handle._rows['camera-1'].start_button.isEnabled()
 editor.form.widget_for('repeat').setValue(3)
 artifact_picker = editor.artifact_form.widget_for('calibration_path')
 assert artifact_picker.browse.text() == 'Browse…'
@@ -413,11 +424,20 @@ assert readout.isReadOnly()
 assert readout.text() == 'C:/data/calibration-2.json'
 
 patches.clear()
-running = dict(projection, form_values={'repeat': 3}, running=True)
+running = dict(
+    projection,
+    form_values={'repeat': 3},
+    running=True,
+    can_start=True,
+    can_stop=True,
+    issues=(),
+)
+handle.set_logic_commands('camera-1', can_start=True, can_stop=True)
 handle.update_logic_editor('camera-1', running)
 assert not patches, patches
 assert editor.start_button.text() == 'Restart'
 assert editor.start_button.isEnabled()
+assert editor.stop_button.isEnabled()
 view.editor_close_requested.emit(editor)
 app.processEvents()
 assert view.tabs.count() == 2
@@ -784,6 +804,8 @@ assert ('layout',) in events
 handle.add_panel('task-preview', 'Capture preview')
 handle.add_logic_row('calibration', 'task')
 handle.add_logic_row('camera', 'measurement')
+handle.set_logic_commands('calibration', can_start=True, can_stop=False)
+handle.set_logic_commands('camera', can_start=True, can_stop=False)
 preview = handle._cards['task-preview']
 task_row = handle._rows['calibration']
 camera_row = handle._rows['camera']

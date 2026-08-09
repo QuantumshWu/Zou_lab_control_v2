@@ -2,7 +2,23 @@
 
 from importlib.resources import files
 
-from ._framework.descriptor import ArtifactInputSpec, DatasetInputSpec, TaskReportSpec
+from ._framework.descriptor import (
+    ArtifactCodec,
+    ArtifactInputSpec,
+    ArtifactOutputSpec,
+    DatasetInputSpec,
+    DeviceAccess,
+    DeviceRequirement,
+    LogicNodeDescriptor,
+    NodeKind,
+    OutputSpec,
+    ResolvedArtifact,
+    ResolvedWorkspaceResource,
+    SelectionMapping,
+    TaskPreviewSpec,
+    TaskReportSpec,
+    WorkspaceResourceSpec,
+)
 from ._framework.discovery import discover_logic_nodes
 
 
@@ -17,9 +33,21 @@ def calibration_pulse_template_bytes() -> bytes:
 
 
 __all__ = [
+    "ArtifactCodec",
     "ArtifactInputSpec",
+    "ArtifactOutputSpec",
     "DatasetInputSpec",
+    "DeviceAccess",
+    "DeviceRequirement",
+    "LogicNodeDescriptor",
+    "NodeKind",
+    "OutputSpec",
+    "ResolvedArtifact",
+    "ResolvedWorkspaceResource",
+    "SelectionMapping",
+    "TaskPreviewSpec",
     "TaskReportSpec",
+    "WorkspaceResourceSpec",
     "calibration_pulse_template_bytes",
     "discover_logic_nodes",
 ]

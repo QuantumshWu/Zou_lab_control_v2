@@ -166,7 +166,9 @@ def resolve_layout(
                     f"{entry.node_id}: missing authoring fields "
                     f"{sorted(missing_values)!r}"
                 )
-            values = descriptor.authoring_schema.freeze(entry.values)
+            # A saved row is an editable raw draft.  Semantic projection is
+            # deliberately deferred to the same finalizer that gates Start.
+            values = dict(entry.values)
             options = device_key_options(descriptor, installation=installation)
         except Exception as error:
             raise LayoutError(f"{entry.node_id}: {error}") from error

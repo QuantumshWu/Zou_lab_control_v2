@@ -34,9 +34,15 @@ from zlc_atom.nodes import (
     calibration_pulse_template_bytes,
     discover_logic_nodes,
 )
+from zlc_atom.nodes.calibration import (
+    CalibrationRequest,
+    CalibrationTask,
+    LOGIC_NODE as CALIBRATION_LOGIC_NODE,
+    ReadoutModelKind,
+)
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from zlc_atom.nodes.calibration import CalibrationRequest, CalibrationTask, ReadoutModelKind
 from tests.fakes import FakePlane
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 
 ROOT = Path(__file__).parents[1]
@@ -248,6 +254,9 @@ def test_pulse_resolver_uses_the_project_json_document(
     explicit = resolve_api_parameters(sequence, api_values)
     assert explicit.api_parameters == ()
     assert explicit.slots == ()
+    resource_spec = CALIBRATION_LOGIC_NODE.workspace_resources[0]
+    resource = resource_spec.resolve(asset)
+    assert sequence_to_tree(resource.value) == tree
 
     sequencer = VirtualPulseStreamer()
     sequencer.open()
@@ -255,16 +264,15 @@ def test_pulse_resolver_uses_the_project_json_document(
         board = sequencer.describe()
         monkeypatch.setattr(
             calibration_pulse_module,
-            "load_streamer_config",
-            lambda: (_ for _ in ()).throw(
-                AssertionError("calibration resolution read process-global board config")
+            "sequence_from_tree",
+            lambda _tree: (_ for _ in ()).throw(
+                AssertionError("resolve_pulse decoded its resource a second time")
             ),
-            raising=False,
         )
         resolved = resolve_pulse(
-            "imaging_template.json",
+            resource.value,
+            path=resource.path,
             board=board,
-            search_paths=(PULSE_ROOT,),
             api_values=api_values,
         )
         assert resolved.path == asset.resolve()
@@ -287,20 +295,16 @@ def test_pulse_resolver_uses_the_project_json_document(
         )
         with pytest.raises(ValueError, match="target.*connected board"):
             resolve_pulse(
-                "imaging_template.json",
+                resource.value,
+                path=resource.path,
                 board=incompatible_board,
-                search_paths=(PULSE_ROOT,),
                 api_values=api_values,
             )
 
-        with pytest.raises(FileNotFoundError) as error:
-            resolve_pulse(
-                "missing.json",
-                board=board,
-                search_paths=(PULSE_ROOT,),
-                api_values=api_values,
+        with pytest.raises(ValueError, match="existing"):
+            resource_spec.resolve(
+                PULSE_ROOT / "missing.json"
             )
-        assert str(PULSE_ROOT / "missing.json") in str(error.value)
     finally:
         sequencer.close()
 
@@ -321,9 +325,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         )
         assert camera_node.camera is camera
         pulse = resolve_pulse(
-            "imaging_template.json",
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
             board=sequencer.describe(),
-            search_paths=(PULSE_ROOT,),
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,
@@ -349,7 +353,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
-            pulse_search_paths=(PULSE_ROOT,),
+            pulse_resource=IMAGING_PULSE_RESOURCE,
             artifact_directory=tmp_path,
             repeats=30,
         )
@@ -491,8 +495,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         calibration_path = task_result.artifact_path
         calibration_output = descriptors["calibration"].artifact_outputs[0]
         assert getattr(task_result, calibration_output.name) == calibration_path
+        calibration_input = descriptors["occupancy"].input_specs[1]
+        assert isinstance(calibration_input, ArtifactInputSpec)
         occupancy_node = descriptors["occupancy"].instantiate(
-            calibration_path=str(calibration_path),
+            calibration=calibration_input.codec.resolve(calibration_path),
             source_signal=camera_node.signal_key("frames"),
             signal_plane=plane,
             model_kind="uniform_psf",
@@ -567,9 +573,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "timeout_seconds",
         )
         with pytest.raises(ValueError, match="all four fields"):
-            descriptors["calibration"].authoring_schema.freeze({"roi_x": 1})
+            descriptors["calibration"].authoring_schema.project_values({"roi_x": 1})
         with pytest.raises(ValueError, match="cannot exceed"):
-            descriptors["calibration"].authoring_schema.freeze(
+            descriptors["calibration"].authoring_schema.project_values(
                 {
                     "reference_exposure_seconds": 0.005,
                     "readout_exposure_seconds": 0.02,
@@ -625,7 +631,8 @@ def test_calibration_task_safes_sequencer_when_capture_fails(tmp_path: Path) -> 
             camera=camera,
             sequencer=sequencer,
             request=_calibration_request(repeats=1),
-            pulse_search_paths=(PULSE_ROOT,),
+            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+            pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         )
         with pytest.raises(RuntimeError, match="fire failure"):

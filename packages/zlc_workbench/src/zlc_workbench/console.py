@@ -38,10 +38,12 @@ from .logic import (
     LogicCandidate,
     LogicCatalog,
     LogicDraft,
+    LogicDraftFinalization,
     artifact_input_specs,
     build_arguments,
     dataset_inputs,
     device_key_options,
+    finalize_logic_draft,
     make_host,
     stable_signal_key,
 )
@@ -2774,11 +2776,49 @@ class ConsolePresenter:
         for other_id in self.logic:
             if other_id != selected_id:
                 self.refresh_logic_editor(other_id)
-        self._refresh_console_projection()
         if open_editor:
             self._open_logic_editor(binding)
+        self._refresh_console_projection()
         self._report(f"added {selected_id}", severity="task")
         return selected_id
+
+    def _logic_finalization_key(self, binding: LogicBinding) -> tuple:
+        """In-memory revisions that may change one draft's admission."""
+
+        source_options = self._source_options(binding.descriptor)
+        source = binding.draft.source_signal.strip()
+        publication = (
+            self.session.signal_plane.latest_publication(source)
+            if source
+            else None
+        )
+        return (
+            binding.draft_revision,
+            id(self.session.installation),
+            source_options,
+            publication is not None,
+        )
+
+    def _finalize_logic_binding(
+        self,
+        binding: LogicBinding,
+        *,
+        force: bool = False,
+    ) -> LogicDraftFinalization:
+        """Cache one owner finalization until its raw or external facts change."""
+
+        key = self._logic_finalization_key(binding)
+        if force or binding.finalization is None or binding.finalization_key != key:
+            binding.finalization = finalize_logic_draft(
+                binding.descriptor,
+                binding.draft,
+                installation=self.session.installation,
+                signal_plane=self.session.signal_plane,
+                workspace=self.session.workspace,
+                source_options=self._source_options(binding.descriptor),
+            )
+            binding.finalization_key = key
+        return binding.finalization
 
     def logic_editor_projection(self, node_id: str) -> dict[str, Any] | None:
         """Plain state consumed by Logic Edit and future producer projections."""
@@ -2789,9 +2829,10 @@ class ConsolePresenter:
         from .authoring_form import (
             display_value,
             project_artifact_inputs,
-            project_schema,
+            project_logic_schema,
         )
 
+        finalization = self._finalize_logic_binding(binding)
         options = device_key_options(
             binding.descriptor,
             installation=self.session.installation,
@@ -2800,17 +2841,34 @@ class ConsolePresenter:
         workspace = getattr(self.session, "workspace", None)
         artifact_base_dir = str(getattr(workspace, "data", ""))
         state, status = self._logic_state(binding)
+        resource_fields = {
+            spec.field_name for spec in binding.descriptor.workspace_resources
+        }
+        form_values = {}
+        for field in binding.descriptor.authoring_schema.fields:
+            value = binding.draft.values.get(field.name, field.default)
+            if field.name in resource_fields and value not in finalization.resource_choices.get(
+                field.name, ()
+            ):
+                value = None
+            form_values[field.name] = display_value(value)
+        can_start = finalization.can_start and binding.pending is None
+        can_stop = bool(
+            binding.pending is not None
+            or (binding.host is not None and binding.host.running)
+        )
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
             "kind": str(
                 getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
             ),
-            "form_spec": project_schema(binding.descriptor.authoring_schema),
-            "form_values": {
-                name: display_value(value)
-                for name, value in binding.draft.values.items()
-            },
+            "form_spec": project_logic_schema(
+                binding.descriptor,
+                resource_choices=finalization.resource_choices,
+                resource_errors=finalization.resource_errors,
+            ),
+            "form_values": form_values,
             "artifact_form_spec": project_artifact_inputs(
                 artifact_specs,
                 base_dir=artifact_base_dir,
@@ -2824,11 +2882,17 @@ class ConsolePresenter:
             "device_options": options,
             "running": bool(binding.host is not None and binding.host.running),
             "pending": binding.pending is not None,
+            "can_start": can_start,
+            "can_stop": can_stop,
+            "issues": finalization.issues,
             "error": status if state == "error" else "",
             "status": status,
         }
 
     def _open_logic_editor(self, binding: LogicBinding) -> bool:
+        # Opening/focusing edit is the explicit resource refresh boundary.
+        # The heartbeat never polls the filesystem.
+        self._finalize_logic_binding(binding, force=True)
         projection = self.logic_editor_projection(binding.node_id)
         opened = getattr(self.view, "open_logic_editor", None)
         focused = getattr(self.view, "focus_logic_editor", None)
@@ -2880,6 +2944,9 @@ class ConsolePresenter:
                 {str(name): str(path) for name, path in artifact_inputs.items()}
             )
         binding.draft_error = ""
+        binding.draft_revision += 1
+        binding.finalization_key = ()
+        binding.finalization = None
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
         return True
@@ -2900,8 +2967,16 @@ class ConsolePresenter:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
+        finalization = self._finalize_logic_binding(binding, force=True)
+        if not finalization.can_start:
+            error = finalization.issues[0]
+            binding.draft_error = error
+            self._report(f"{node_id}: {error}", severity="error")
+            self._refresh_console_projection()
+            self.refresh_logic_editor(binding.node_id)
+            return False
         try:
-            candidate = self._build_logic_candidate(binding)
+            candidate = self._build_logic_candidate(binding, finalization)
         except Exception as error:
             binding.draft_error = str(error)
             self._report(f"{node_id}: {error}", severity="error")
@@ -3093,8 +3168,10 @@ class ConsolePresenter:
     def _logic_state(self, binding: LogicBinding) -> tuple[str, str]:
         host = binding.host
         if host is None:
-            state = "error" if binding.draft_error else "idle"
-            status = binding.draft_error or "not started"
+            issues = self._finalize_logic_binding(binding).issues
+            error = binding.draft_error or (issues[0] if issues else "")
+            state = "error" if error else "idle"
+            status = error or "not started"
         else:
             observed = host.observation
             if observed.error:
@@ -3104,7 +3181,11 @@ class ConsolePresenter:
             elif binding.draft_error:
                 state, status = "error", binding.draft_error
             else:
-                state, status = "idle", self._observation_status(observed)
+                issues = self._finalize_logic_binding(binding).issues
+                if issues:
+                    state, status = "error", issues[0]
+                else:
+                    state, status = "idle", self._observation_status(observed)
             warnings = tuple(getattr(observed, "warnings", ()))
             if warnings:
                 status = f"{status}; warning: {'; '.join(warnings)}"
@@ -3122,6 +3203,7 @@ class ConsolePresenter:
         """
 
         host = binding.host
+        finalization = self._finalize_logic_binding(binding)
         state, status = self._logic_state(binding)
         names = (
             host.published_signals()
@@ -3140,11 +3222,20 @@ class ConsolePresenter:
             for name in names
         )
         artifacts = self._artifact_results(binding)
-        shown = (state, status, published, artifacts)
+        can_start = finalization.can_start and binding.pending is None
+        can_stop = bool(
+            binding.pending is not None or (host is not None and host.running)
+        )
+        shown = (state, status, published, artifacts, can_start, can_stop)
         if shown == binding.shown:
             return
         binding.shown = shown
         self.view.set_logic_state(binding.node_id, state, status)
+        self.view.set_logic_commands(
+            binding.node_id,
+            can_start=can_start,
+            can_stop=can_stop,
+        )
         self.view.set_logic_publishes(binding.node_id, published)
         self.refresh_logic_editor(binding.node_id)
 
@@ -3172,34 +3263,18 @@ class ConsolePresenter:
                     compatible.add(str(signal_key(declaration.name)))
         return tuple(sorted(compatible))
 
-    def _validate_dataset_source(self, binding: LogicBinding) -> None:
-        wants = dataset_inputs(binding.descriptor)
-        if not wants:
-            return
-        source = binding.draft.source_signal.strip()
-        if not source:
-            raise ValueError("source_signal must be selected")
-        if source not in self._source_options(binding.descriptor):
-            contracts = ", ".join(spec.contract_id for spec in wants)
-            raise ValueError(
-                f"{source!r} is not declared as a compatible {contracts} Dataset"
-            )
-        if self.session.signal_plane.latest_publication(source) is None:
-            raise LookupError(f"{source!r} has not published a Dataset yet")
-
-    def _build_logic_candidate(self, binding: LogicBinding) -> LogicCandidate:
+    def _build_logic_candidate(
+        self,
+        binding: LogicBinding,
+        finalization: LogicDraftFinalization,
+    ) -> LogicCandidate:
         """Freeze and build one complete candidate without touching old runs."""
 
-        self._validate_dataset_source(binding)
         arguments = build_arguments(
             binding.descriptor,
-            installation=self.session.installation,
             signal_plane=self.session.signal_plane,
-            values=dict(binding.draft.values),
-            source_signal=binding.draft.source_signal,
-            artifact_inputs=binding.draft.artifact_inputs,
+            finalization=finalization,
             extras=self._logic_extras(),
-            device_keys=binding.draft.device_keys,
         )
         node = binding.descriptor.instantiate(**arguments)
         host = make_host(
@@ -3212,7 +3287,7 @@ class ConsolePresenter:
         claims = tuple(
             DeviceClaim(
                 requirement.argument_name,
-                binding.draft.device_keys.get(requirement.argument_name, ""),
+                finalization.device_keys[requirement.argument_name],
                 arguments[requirement.argument_name],
                 requirement.access,
             )
@@ -3320,9 +3395,6 @@ class ConsolePresenter:
         """Facts this bench can supply beyond its devices and the signal plane."""
 
         extras: dict[str, Any] = {}
-        workspace = getattr(self.session, "workspace", None)
-        if workspace is not None:
-            extras["pulse_search_paths"] = (workspace.pulses,)
         extras["artifact_directory"] = self.session.day_folder()
         return extras
 

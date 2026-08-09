@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from zlc_durable import unique_path
+from zlc_pulse import PulseSequence
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
@@ -304,7 +305,8 @@ class CalibrationTask:
         camera: CameraAdapter,
         sequencer: object,
         request: CalibrationRequest,
-        pulse_search_paths: Sequence[str | Path],
+        pulse_sequence: PulseSequence,
+        pulse_path: str | Path,
         artifact_directory: str | Path,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
@@ -314,16 +316,16 @@ class CalibrationTask:
                 raise TypeError(f"sequencer must expose {name}")
         if not isinstance(request, CalibrationRequest):
             raise TypeError("request must be CalibrationRequest")
-        paths = tuple(Path(value).expanduser().resolve() for value in pulse_search_paths)
-        if not paths:
-            raise ValueError("pulse_search_paths must not be empty")
+        if not isinstance(pulse_sequence, PulseSequence):
+            raise TypeError("pulse_sequence must be PulseSequence")
         directory = Path(artifact_directory).expanduser().resolve()
         if not directory.is_dir():
             raise ValueError("artifact_directory must be an existing directory")
         self.camera = camera
         self.sequencer = sequencer
         self._request = request
-        self.pulse_search_paths = paths
+        self.pulse_sequence = pulse_sequence
+        self.pulse_path = Path(pulse_path).expanduser().resolve()
         self.artifact_directory = directory
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
@@ -346,9 +348,9 @@ class CalibrationTask:
 
     def _resolve_pulse(self) -> ResolvedPulse:
         return resolve_pulse(
-            self.request.pulse_template,
+            self.pulse_sequence,
+            path=self.pulse_path,
             board=self.sequencer.describe(),
-            search_paths=self.pulse_search_paths,
             api_values={
                 "reference_probe_duration_before": self.request.reference_exposure_seconds,
                 "readout_probe_duration": self.request.readout_exposure_seconds,

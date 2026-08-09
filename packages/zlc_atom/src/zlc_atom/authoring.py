@@ -3,7 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import re
 from typing import Any, Callable, Mapping
+
+
+def _typed_equal(left: object, right: object) -> bool:
+    return type(left) is type(right) and bool(left == right)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoringChoice:
+    """One owner-declared value and the human label that explains it."""
+
+    value: Any
+    label: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("authoring choice label must be non-empty")
+        try:
+            hash(self.value)
+        except TypeError as error:
+            raise TypeError("authoring choice value must be immutable") from error
 
 
 @dataclass(frozen=True)
@@ -15,15 +37,27 @@ class AuthoringField:
     required: bool = False
     minimum: float | None = None
     maximum: float | None = None
-    choices: tuple[Any, ...] = ()
+    choices: tuple[AuthoringChoice, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             raise ValueError("authoring field minimum exceeds maximum")
-        if self.choices and self.default is not None and self.default not in self.choices:
+        choices = tuple(self.choices)
+        if any(not isinstance(choice, AuthoringChoice) for choice in choices):
+            raise TypeError("authoring field choices must contain AuthoringChoice values")
+        values = tuple(choice.value for choice in choices)
+        if any(
+            any(_typed_equal(value, prior) for prior in values[:index])
+            for index, value in enumerate(values)
+        ):
+            raise ValueError("authoring choice values must be unique")
+        if choices and self.default is not None and not any(
+            _typed_equal(self.default, value) for value in values
+        ):
             raise ValueError("authoring field default is not one of its choices")
+        object.__setattr__(self, "choices", choices)
 
 
 @dataclass(frozen=True)
@@ -44,18 +78,28 @@ class AuthoringSchema:
     def field_names(self) -> tuple[str, ...]:
         return tuple(field.name for field in self.fields)
 
-    def freeze(self, values: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def project_values(
+        self,
+        values: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convert one raw draft and validate it through its sole domain owner."""
+
         supplied = dict(values or {})
         unknown = set(supplied) - set(self.field_names)
         if unknown:
             raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
         result: dict[str, Any] = {}
         for field in self.fields:
-            value = supplied.get(field.name, field.default)
+            value = _project_value(field, supplied.get(field.name, field.default))
             if value is None and field.required:
                 raise ValueError(f"missing required authoring field {field.name!r}")
-            if field.choices and value is not None and value not in field.choices:
-                raise ValueError(f"{field.name!r} must be one of {field.choices!r}")
+            if isinstance(value, str) and field.required and not value.strip():
+                raise ValueError(f"missing required authoring field {field.name!r}")
+            if field.choices and value is not None and not any(
+                _typed_equal(value, choice.value) for choice in field.choices
+            ):
+                offered = tuple(choice.value for choice in field.choices)
+                raise ValueError(f"{field.name!r} must be one of {offered!r}")
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if field.minimum is not None and value < field.minimum:
                     raise ValueError(f"{field.name!r} is below its minimum")
@@ -67,4 +111,69 @@ class AuthoringSchema:
         return result
 
 
-__all__ = ["AuthoringField", "AuthoringSchema"]
+def _project_value(field: AuthoringField, value: object) -> object:
+    if value is None:
+        return None
+    declared = str(field.value_type)
+    if declared == "pair":
+        if isinstance(value, (tuple, list)):
+            parts = tuple(value)
+        else:
+            parts = tuple(
+                piece
+                for piece in str(value).replace(",", " ").split()
+                if piece
+            )
+        if len(parts) != 2:
+            raise ValueError(f"{field.label} needs two numbers, as y, x")
+        return [
+            _project_integer(part, label=f"{field.label} item")
+            for part in parts
+        ]
+    if declared == "int":
+        return _project_integer(value, label=field.label)
+    if declared == "float":
+        if isinstance(value, bool):
+            raise TypeError(f"{field.label} must be a finite number")
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError(f"{field.label} must be finite")
+        return result
+    if declared == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        raise TypeError(f"{field.label} must be true or false")
+    if declared in {"str", "text", "choice", "resource"}:
+        if not isinstance(value, str):
+            if declared not in {"choice"}:
+                raise TypeError(f"{field.label} must be text")
+            return value
+        return value
+    raise ValueError(
+        f"field {field.name!r} is declared as {field.value_type!r}, "
+        "which has no domain value projector"
+    )
+
+
+_DECIMAL_INTEGER = re.compile(r"[+-]?[0-9]+")
+
+
+def _project_integer(value: object, *, label: str) -> int:
+    """Project an authored integer without Python's lossy ``int`` coercions."""
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        if _DECIMAL_INTEGER.fullmatch(normalized):
+            return int(normalized, 10)
+    raise TypeError(f"{label} must be an integer or decimal integer text")
+
+
+__all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema"]

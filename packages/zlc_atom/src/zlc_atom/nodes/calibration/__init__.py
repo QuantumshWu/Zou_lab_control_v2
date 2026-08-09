@@ -10,6 +10,7 @@ from .bimodal import (
     optimal_gaussian_threshold,
     per_site_fidelity,
 )
+from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import (
     AtomDetection,
     CalibrationResult,
@@ -47,6 +48,7 @@ __all__ = [
     "CalibrationRequest",
     "CalibrationRunResult",
     "CalibrationTask",
+    "CALIBRATION_ARTIFACT_CODEC",
     "CALIBRATION_DATASET_DECLARATIONS",
     "DEFAULT_READOUT_MODEL_CHOICE",
     "FrameContract",

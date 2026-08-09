@@ -20,7 +20,7 @@ from zlc_atom.install.configuration import (
     InstallationConfig,
     load_installation_config,
 )
-from zlc_workbench.authoring_form import project_schema, project_values
+from zlc_workbench.authoring_form import project_schema
 from zlc_workbench.device_manager import DeviceManagerPresenter
 
 
@@ -294,11 +294,53 @@ def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
         )
     )
 
-    frozen = project_values(schema, {"n": "12", "x": "1.5", "s": "3 4"})
+    frozen = schema.project_values({"n": "12", "x": "1.5", "s": "3 4"})
 
     assert frozen == {"n": 12, "x": 1.5, "s": [3, 4]}
     with pytest.raises(ValueError):
-        project_values(schema, {"n": 1, "x": 1.0, "s": "3"})
+        schema.project_values({"n": 1, "x": 1.0, "s": "3"})
+    with pytest.raises(TypeError):
+        schema.project_values({"n": 1.5, "x": 1.0, "s": "3 4"})
+    with pytest.raises(TypeError):
+        schema.project_values({"n": 1, "x": 1.0, "s": (3.5, 4)})
+
+
+def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
+    from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+
+    schema = AuthoringSchema(
+        (
+            AuthoringField(
+                "binning",
+                "choice",
+                "Binning",
+                1,
+                choices=(
+                    AuthoringChoice(1, "1 × 1"),
+                    AuthoringChoice(2, "2 × 2"),
+                ),
+            ),
+        )
+    )
+
+    field = project_schema(schema).fields[0]
+    assert tuple((choice.label, choice.value) for choice in field.choices) == (
+        ("1 × 1", 1),
+        ("2 × 2", 2),
+    )
+    assert schema.project_values({"binning": 2}) == {"binning": 2}
+
+
+def test_dcam_binning_is_the_finite_device_choice_the_adapter_accepts() -> None:
+    from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA
+
+    field = next(
+        value
+        for value in project_schema(DCAM_CAMERA_SCHEMA).fields
+        if value.key == "binning"
+    )
+    assert field.kind == "choice"
+    assert tuple(choice.value for choice in field.choices) == (1, 2, 4, 8, 16)
 
 
 def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -> None:
@@ -427,7 +469,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
                 instance_id="camera",
                 role="camera",
                 type_id=camera.type_id,
-                parameters=camera.authoring_schema.freeze({}),
+                parameters=camera.authoring_schema.project_values({}),
             ),
         )
     )

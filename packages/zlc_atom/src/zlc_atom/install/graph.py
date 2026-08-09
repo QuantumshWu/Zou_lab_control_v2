@@ -116,7 +116,7 @@ def _world_from_apparatus(
 
     contributions = tuple(
         descriptor.world_config(
-            descriptor.authoring_schema.freeze(spec.config)
+            descriptor.authoring_schema.project_values(spec.config)
         )
         for spec in specs
         for descriptor in (descriptors[spec.type_id],)

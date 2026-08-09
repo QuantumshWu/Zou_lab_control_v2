@@ -21,8 +21,10 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.logic import (
     LogicCatalog,
+    LogicDraft,
     build_arguments,
     device_key_options,
+    finalize_logic_draft,
     stable_signal_key,
 )
 from zlc_workbench.panel_catalog import task_console_fitting_spec
@@ -228,6 +230,9 @@ def test_a_missing_device_is_a_repairable_draft_until_start(presenter) -> None:
         node_id = presenter.add_logic("camera_measurement")
         assert node_id == "camera_measurement"
         assert presenter.logic[node_id].draft.device_keys == {"camera": ""}
+        projection = presenter.logic_editor_projection(node_id)
+        assert projection["can_start"] is False
+        assert any("camera.adapter" in issue for issue in projection["issues"])
         assert presenter.start_logic(node_id) is False
     finally:
         presenter.session.installation = real
@@ -273,43 +278,30 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
     """
 
     catalog = LogicCatalog()
-    arguments = build_arguments(
-        catalog.get("camera_measurement"),
+    descriptor = catalog.get("camera_measurement")
+    finalization = finalize_logic_draft(
+        descriptor,
+        LogicDraft(values={"repeat": 2}, device_keys={"camera": "camera"}),
         installation=session.installation,
         signal_plane=session.signal_plane,
-        values={"repeat": 2},
+        workspace=session.workspace,
+    )
+    assert finalization.can_start
+    arguments = build_arguments(
+        descriptor,
+        signal_plane=session.signal_plane,
+        finalization=finalization,
     )
 
     assert set(arguments) >= {"camera", "signal_plane", "repeat"}
     assert arguments["repeat"] == 2
-    # occupancy's build takes no **values, so it must be given nothing extra.
-    occupancy = catalog.get("occupancy")
-    if occupancy is not None:
-        import inspect
-
-        accepted = set(inspect.signature(occupancy.build).parameters)
-        with pytest.raises(LookupError):
-            build_arguments(
-                occupancy,
-                installation=session.installation,
-                signal_plane=session.signal_plane,
-                values={},
-            )
-        resolved = build_arguments(
-            occupancy,
-            installation=session.installation,
+    with pytest.raises(ValueError, match="extras collide"):
+        build_arguments(
+            descriptor,
             signal_plane=session.signal_plane,
-            values={},
-            source_signal="@logic/camera/frames",
-            artifact_inputs={"calibration_path": "picked.json"},
+            finalization=finalization,
+            extras={"camera": object()},
         )
-        assert resolved["calibration_path"] == "picked.json"
-        assert accepted == {
-            "calibration_path",
-            "source_signal",
-            "signal_plane",
-            "values",
-        }
 
 
 def test_named_device_options_and_build_resolution_use_compatible_instances() -> None:
@@ -344,37 +336,45 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
         return camera, camera_key, signal_plane
 
     keyed_descriptor = replace(descriptor, build=build)
+    workspace = SimpleNamespace(root=Path.cwd(), data=Path.cwd())
+    plane = SimpleNamespace(latest_publication=lambda _name: None)
+    def finalized(key: str):
+        return finalize_logic_draft(
+            keyed_descriptor,
+            LogicDraft(device_keys={"camera": key}),
+            installation=_Installation(),
+            signal_plane=plane,
+            workspace=workspace,
+        )
+
     default = build_arguments(
         keyed_descriptor,
-        installation=_Installation(),
         signal_plane="plane",
-        values={},
+        finalization=finalized("camera"),
     )
     selected = build_arguments(
         keyed_descriptor,
-        installation=_Installation(),
         signal_plane="plane",
-        values={},
-        device_keys={"camera": "mot_camera"},
+        finalization=finalized("mot_camera"),
     )
 
     assert default["camera"] is default_camera
     assert default["camera_key"] == "camera"
     assert selected["camera"] is mot_camera
     assert selected["camera_key"] == "mot_camera"
-    with pytest.raises(LookupError, match="does not provide camera.adapter"):
+    invalid = finalized("sequencer")
+    assert not invalid.can_start
+    with pytest.raises(ValueError, match="not startable"):
         build_arguments(
             keyed_descriptor,
-            installation=_Installation(),
             signal_plane="plane",
-            values={},
-            device_keys={"camera": "sequencer"},
+            finalization=invalid,
         )
 
 
 def _claim_descriptor(api_name: str, access, *capabilities: str):
     from zlc_atom.authoring import AuthoringSchema
-    from zlc_atom.nodes._framework.descriptor import (
+    from zlc_atom.nodes import (
         DeviceRequirement,
         LogicNodeDescriptor,
         NodeKind,
@@ -406,7 +406,7 @@ def _claim_descriptor(api_name: str, access, *capabilities: str):
 
 
 def test_only_exact_exclusive_device_claims_queue_and_stop_the_old_row(presenter) -> None:
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_atom.nodes import DeviceAccess
 
     first_descriptor = _claim_descriptor("first", DeviceAccess.EXCLUSIVE)
     second_descriptor = _claim_descriptor("second", DeviceAccess.EXCLUSIVE)
@@ -431,7 +431,7 @@ def test_only_exact_exclusive_device_claims_queue_and_stop_the_old_row(presenter
 
 
 def test_observe_and_exclusive_claims_on_one_device_coexist(presenter) -> None:
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_atom.nodes import DeviceAccess
 
     observer = _claim_descriptor("observer", DeviceAccess.OBSERVE)
     owner = _claim_descriptor("owner", DeviceAccess.EXCLUSIVE)
@@ -451,7 +451,7 @@ def test_observe_and_exclusive_claims_on_one_device_coexist(presenter) -> None:
 def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -> None:
     """A Pulse command cannot enter through the candidate's currently-free device."""
 
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_atom.nodes import DeviceAccess
     from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
 
     old = _claim_descriptor("old", DeviceAccess.EXCLUSIVE, "camera.adapter")
@@ -513,7 +513,7 @@ def test_running_sequencer_logic_rejects_pulse_without_touching_device(
 ) -> None:
     import zlc_pulse
 
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_atom.nodes import DeviceAccess
     from zlc_workbench.device_use import DeviceUseBusy
 
     descriptor = _claim_descriptor(
@@ -563,7 +563,7 @@ def test_notebook_fire_holds_the_session_lease_through_wait_done(
     session,
     monkeypatch,
 ) -> None:
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_atom.nodes import DeviceAccess
     from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
 
     session.load_pulse(PULSE_NAME)
@@ -608,7 +608,7 @@ def test_notebook_fire_holds_the_session_lease_through_wait_done(
 def test_pulse_drive_rejects_whole_logic_candidate_before_any_logic_is_stopped(
     presenter,
 ) -> None:
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
+    from zlc_atom.nodes import DeviceAccess
 
     camera_owner = _claim_descriptor(
         "camera_owner",
@@ -703,7 +703,8 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
     presenter,
 ) -> None:
     from zlc_atom.authoring import AuthoringSchema
-    from zlc_atom.nodes._framework.descriptor import (
+    from zlc_atom.nodes import (
+        ArtifactCodec,
         ArtifactInputSpec,
         ArtifactOutputSpec,
         DatasetInputSpec,
@@ -740,10 +741,20 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         AuthoringSchema(),
         input_specs=(
             DatasetInputSpec("frames", "camera.frames.v1"),
-            ArtifactInputSpec("calibration_path", "calibration.readout.v1"),
+            ArtifactInputSpec(
+                "calibration_path",
+                "Calibration artifact",
+                ArtifactCodec(
+                    "calibration.readout.v1",
+                    "Calibration artifacts (*.json)",
+                    (".json",),
+                    lambda path: path.read_text(encoding="utf-8"),
+                ),
+                argument_name="calibration",
+            ),
         ),
         outputs=(OutputSpec("judged", "judged.v1"),),
-        build=lambda *, calibration_path, source_signal, signal_plane: object(),
+        build=lambda *, calibration, source_signal, signal_plane: object(),
     )
     presenter.catalog = LogicCatalog((descriptor, consumer))
     node_id = presenter.add_logic("artifact_task")
@@ -829,9 +840,12 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     }
 
 
-def test_an_unresolved_processor_source_fails_only_when_started(presenter) -> None:
+def test_an_unresolved_processor_source_disables_start_before_click(presenter) -> None:
     node_id = presenter.add_logic("occupancy")
 
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is False
+    assert any("source_signal" in issue for issue in projection["issues"])
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is None
     assert "source_signal" in presenter.logic[node_id].draft_error
@@ -854,3 +868,103 @@ def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
         "calibration_path": str(missing)
     }
     assert "missing-calibration.json" in presenter.logic[node_id].draft_error
+
+
+def test_calibration_pulse_is_a_valid_workspace_resource_choice(
+    presenter,
+) -> None:
+    from zlc_atom.nodes import calibration_pulse_template_bytes
+
+    template = presenter.session.workspace.pulses / "imaging_template.json"
+    template.write_bytes(calibration_pulse_template_bytes())
+    (presenter.session.workspace.pulses / "not-calibration.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    node_id = presenter.add_logic("calibration")
+    projection = presenter.logic_editor_projection(node_id)
+    pulse = next(
+        field
+        for field in projection["form_spec"].fields
+        if field.key == "pulse_template"
+    )
+    assert pulse.kind == "choice"
+    assert {choice.value for choice in pulse.choices} >= {
+        "imaging_template.json",
+        "not-calibration.json",
+    }
+    assert projection["can_start"] is True
+
+    presenter.update_logic_draft(node_id, values={"roi_x": 4})
+    projection = presenter.logic_editor_projection(node_id)
+    assert presenter.logic[node_id].draft.values["roi_x"] == 4
+    assert projection["can_start"] is False
+    assert any("ROI" in issue for issue in projection["issues"])
+
+
+def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
+    presenter,
+    tmp_path,
+) -> None:
+    import json
+
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes import (
+        ArtifactCodec,
+        ArtifactInputSpec,
+        LogicNodeDescriptor,
+        NodeKind,
+        ResolvedArtifact,
+    )
+
+    builds: list[object] = []
+    decodes: list[Path] = []
+
+    def decode(path: Path) -> object:
+        decodes.append(path)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def build(*, artifact_path):
+        builds.append(artifact_path)
+        return SimpleNamespace(execute=lambda _context: {})
+
+    descriptor = LogicNodeDescriptor(
+        "artifact_consumer",
+        NodeKind.TASK,
+        AuthoringSchema(),
+        input_specs=(
+            ArtifactInputSpec(
+                "artifact_path",
+                "Probe artifact",
+                ArtifactCodec(
+                    "probe.v1",
+                    "Probe artifacts (*.json)",
+                    (".json",),
+                    decode,
+                ),
+            ),
+        ),
+        build=build,
+    )
+    presenter.catalog = LogicCatalog((descriptor,))
+    selected = tmp_path / "selected.json"
+    selected.write_text('{"format":"probe.v1"}', encoding="utf-8")
+    node_id = presenter.add_logic(
+        "artifact_consumer",
+        artifact_inputs={"artifact_path": str(selected)},
+    )
+
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is True
+    artifact_field = projection["artifact_form_spec"].fields[0]
+    assert artifact_field.file_filter == "Probe artifacts (*.json)"
+    decodes.clear()
+    assert presenter.start_logic(node_id) is True
+    assert decodes == [selected.resolve()]
+    resolved = builds[0]
+    assert isinstance(resolved, ResolvedArtifact)
+    assert resolved is presenter.logic[node_id].finalization.artifacts[
+        "artifact_path"
+    ]
+    assert resolved.path == selected.resolve()
+    assert resolved.value == {"format": "probe.v1"}

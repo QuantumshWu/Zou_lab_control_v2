@@ -36,6 +36,8 @@ class LogicRowView(FluentFrame):
         self.kind = str(kind)
         self._state = "idle"
         self._status_text = "idle"
+        self._can_start = False
+        self._can_stop = False
         self._task_takeover = False
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(scaled_px(12), scaled_px(8), scaled_px(12), scaled_px(8))
@@ -56,6 +58,7 @@ class LogicRowView(FluentFrame):
         self.stop_button = FluentButton("Stop", color=ORANGE)
         self.edit_button = FluentButton("Edit", color=ACCENT)
         self.remove_button = FluentButton("Remove", color=GREY)
+        self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -85,31 +88,27 @@ class LogicRowView(FluentFrame):
         )
         running = state == "running"
         self.start_button.setText("Restart" if running else "Start")
-        if not self._task_takeover:
-            self.start_button.setEnabled(True)
-            self.stop_button.setEnabled(running)
+
+    def set_commands(self, *, can_start: bool, can_stop: bool) -> None:
+        """Project presenter-owned command admission onto this row."""
+
+        self._can_start = bool(can_start)
+        self._can_stop = bool(can_stop)
+        self._project_commands()
 
     def set_task_takeover(self, active: bool) -> None:
         """Leave the row readable while the status strip owns all commands."""
 
         self._task_takeover = bool(active)
-        if self._task_takeover:
-            for button in (
-                self.start_button,
-                self.stop_button,
-                self.edit_button,
-                self.remove_button,
-            ):
-                button.setEnabled(False)
-            if self.kind == "task":
-                self.stop_button.setVisible(False)
-            return
-        self.stop_button.setVisible(True)
-        running = self._state == "running"
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(running)
-        self.edit_button.setEnabled(True)
-        self.remove_button.setEnabled(True)
+        self._project_commands()
+
+    def _project_commands(self) -> None:
+        enabled = not self._task_takeover
+        self.start_button.setEnabled(enabled and self._can_start)
+        self.stop_button.setEnabled(enabled and self._can_stop)
+        self.edit_button.setEnabled(enabled)
+        self.remove_button.setEnabled(enabled)
+        self.stop_button.setVisible(not (self._task_takeover and self.kind == "task"))
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:
         self.publishes_label.set_rows(tuple(tuple(str(value) for value in row) for row in rows))

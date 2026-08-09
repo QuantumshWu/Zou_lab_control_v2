@@ -14,7 +14,6 @@ and saves a string where the device expected a number.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_ui import FormChoice, FormFieldProps, FormSpec
@@ -23,8 +22,8 @@ from zlc_ui import FormChoice, FormFieldProps, FormSpec
 __all__ = [
     "display_value",
     "project_artifact_inputs",
+    "project_logic_schema",
     "project_schema",
-    "project_values",
 ]
 
 
@@ -56,23 +55,61 @@ def project_schema(schema: AuthoringSchema) -> FormSpec:
     return FormSpec(tuple(_project_field(field) for field in schema.fields))
 
 
+def project_logic_schema(
+    descriptor: object,
+    *,
+    resource_choices: Mapping[str, Sequence[str]],
+    resource_errors: Mapping[str, str],
+) -> FormSpec:
+    """Project a logic schema, resolving explicit workspace-resource fields."""
+
+    schema = getattr(descriptor, "authoring_schema", None)
+    if not isinstance(schema, AuthoringSchema):
+        raise TypeError("project_logic_schema needs a logic descriptor")
+    resources = {
+        str(spec.field_name): spec
+        for spec in getattr(descriptor, "workspace_resources", ())
+    }
+    fields: list[FormFieldProps] = []
+    for field in schema.fields:
+        if field.value_type != "resource":
+            fields.append(_project_field(field))
+            continue
+        if field.name not in resources:
+            raise ValueError(
+                f"resource field {field.name!r} has no WorkspaceResourceSpec"
+            )
+        choices = tuple(
+            FormChoice(str(value), str(value))
+            for value in resource_choices.get(field.name, ())
+        )
+        fields.append(
+            _project_resource_field(
+                field,
+                choices=choices,
+                unavailable_reason=str(resource_errors.get(field.name, "")),
+            )
+        )
+    return FormSpec(tuple(fields))
+
+
 def project_artifact_inputs(
     specs: Sequence[object],
     *,
     base_dir: str,
 ) -> FormSpec:
-    """Declared artifact paths as one generic JSON-file picker surface."""
+    """Declared artifact paths using each domain codec's picker contract."""
 
     return FormSpec(
         tuple(
             FormFieldProps(
                 key=str(spec.name),
                 kind="path",
-                label=str(spec.name).replace("_", " ").title(),
+                label=str(spec.label),
                 default="",
                 required=bool(spec.required),
                 description=f"Artifact contract: {spec.contract_id}",
-                file_filter="JSON files (*.json);;All files (*)",
+                file_filter=str(spec.codec.file_filter),
                 base_dir=str(base_dir),
             )
             for spec in specs
@@ -81,6 +118,11 @@ def project_artifact_inputs(
 
 
 def _project_field(field: AuthoringField) -> FormFieldProps:
+    if str(field.value_type) == "resource":
+        raise ValueError(
+            f"resource field {field.name!r} requires its "
+            "WorkspaceResourceSpec projection"
+        )
     kind = _FIELD_KINDS.get(str(field.value_type))
     if kind is None:
         raise ValueError(
@@ -97,10 +139,41 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         required=bool(field.required),
         minimum=field.minimum,
         maximum=field.maximum,
-        choices=tuple(FormChoice(str(item), str(item)) for item in field.choices),
+        choices=tuple(
+            FormChoice(choice.label, choice.value) for choice in field.choices
+        ),
         description=(
             "two integers as y, x" if str(field.value_type) == "pair" else ""
         ),
+    )
+
+
+def _project_resource_field(
+    field: AuthoringField,
+    *,
+    choices: tuple[FormChoice, ...],
+    unavailable_reason: str,
+) -> FormFieldProps:
+    if field.choices:
+        raise ValueError(
+            f"resource field {field.name!r} cannot declare static choices"
+        )
+    default = (
+        field.default
+        if any(choice.value == field.default for choice in choices)
+        else None
+    )
+    if not choices and not unavailable_reason.strip():
+        unavailable_reason = "no valid workspace resources available"
+    return FormFieldProps(
+        key=field.name,
+        kind="choice",
+        label=field.label,
+        default=default,
+        required=True,
+        choices=choices,
+        description="Workspace resource",
+        unavailable_reason=unavailable_reason if not choices else "",
     )
 
 
@@ -109,43 +182,4 @@ def display_value(value: object) -> object:
 
     if isinstance(value, (tuple, list)):
         return ", ".join(str(item) for item in value)
-    return value
-
-
-def project_values(
-    schema: AuthoringSchema,
-    edited: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Edited fields back in the types their owner declared, then frozen.
-
-    Frozen by the schema rather than accepted field by field: an exposure that
-    is legal alone can be illegal beside a readout speed, and a half-applied
-    settings change is not a state worth being able to reach.
-    """
-
-    by_name = {field.name: field for field in schema.fields}
-    values: dict[str, Any] = {}
-    for name, value in dict(edited).items():
-        field = by_name.get(str(name))
-        if field is not None:
-            values[str(name)] = _project_value(field, value)
-    return schema.freeze(values)
-
-
-def _project_value(field: AuthoringField, value: object) -> object:
-    declared = str(field.value_type)
-    if declared == "pair":
-        if isinstance(value, (tuple, list)):
-            parts = list(value)
-        else:
-            parts = [piece for piece in str(value).replace(",", " ").split() if piece]
-        if len(parts) != 2:
-            raise ValueError(f"{field.label} needs two numbers, as y, x")
-        return [int(str(part).strip()) for part in parts]
-    if declared == "int":
-        return int(value)
-    if declared == "float":
-        return float(value)
-    if declared == "bool":
-        return bool(value)
     return value

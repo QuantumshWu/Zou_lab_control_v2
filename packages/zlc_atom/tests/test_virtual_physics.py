@@ -12,7 +12,11 @@ from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_runtime import SignalDataPlane
-from tests.pulse_fixture import CAMERA_CHANNEL, PULSE_ROOT, build_calibration_pulse
+from tests.pulse_fixture import (
+    CAMERA_CHANNEL,
+    IMAGING_PULSE_RESOURCE,
+    build_calibration_pulse,
+)
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -77,9 +81,9 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
             signal_plane=plane,
         )
         pulse = resolve_pulse(
-            "imaging_template.json",
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
             board=sequencer.describe(),
-            search_paths=(PULSE_ROOT,),
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,

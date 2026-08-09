@@ -92,6 +92,7 @@ class _LogicRowView:
         self.edit_requested = _Signal()
         self.remove_requested = _Signal()
         self.state = ("idle", "")
+        self.commands = (False, False)
         self.publishes: tuple = ()
 
     def set_state(self, state: str, status_text: str = "") -> None:
@@ -99,6 +100,9 @@ class _LogicRowView:
 
     def set_publishes(self, rows) -> None:
         self.publishes = tuple(rows)
+
+    def set_commands(self, *, can_start: bool, can_stop: bool) -> None:
+        self.commands = (bool(can_start), bool(can_stop))
 
 
 class _ConsoleView:
@@ -318,6 +322,18 @@ class _ConsoleView:
 
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
+
+    def set_logic_commands(
+        self,
+        node_id: str,
+        *,
+        can_start: bool,
+        can_stop: bool,
+    ) -> None:
+        self._rows[str(node_id)].set_commands(
+            can_start=can_start,
+            can_stop=can_stop,
+        )
 
     def set_logic_publishes(self, node_id: str, rows) -> None:
         self._rows[str(node_id)].set_publishes(rows)
@@ -1165,7 +1181,12 @@ def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
     """The real view signals and direct endpoints share one admission rule."""
 
     from zlc_runtime.host import LogicNodeObservation, NodeProgress
+    from zlc_atom.nodes import calibration_pulse_template_bytes
     from zlc_workbench.logic import LogicCandidate
+
+    (presenter.session.workspace.pulses / "imaging_template.json").write_bytes(
+        calibration_pulse_template_bytes()
+    )
 
     class TaskHost:
         def __init__(self) -> None:
@@ -1225,7 +1246,7 @@ def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
     monkeypatch.setattr(
         presenter,
         "_build_logic_candidate",
-        lambda _binding: LogicCandidate(object(), host, ()),
+        lambda _binding, _finalization: LogicCandidate(object(), host, ()),
     )
 
     presenter.view.logic_start_requested.emit(task_id)

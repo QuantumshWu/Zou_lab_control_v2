@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.install import create_installation
 from zlc_atom.nodes._framework import SelectionMapping
 from zlc_atom.nodes._framework.descriptor import NodeKind
@@ -48,8 +49,30 @@ def test_descriptor_role_is_independent_of_camera_measurement_extent() -> None:
     assert camera.kind is NodeKind.MEASUREMENT
     assert descriptors["calibration"].kind is NodeKind.TASK
     assert descriptors["occupancy"].kind is NodeKind.PROCESSOR
-    assert camera.authoring_schema.freeze({"repeat": 0})["repeat"] == 0
-    assert camera.authoring_schema.freeze({"repeat": 3})["repeat"] == 3
+    assert camera.authoring_schema.project_values({"repeat": 0})["repeat"] == 0
+    assert camera.authoring_schema.project_values({"repeat": 3})["repeat"] == 3
+
+
+def test_authoring_schema_rejects_lossy_integer_projection() -> None:
+    schema = AuthoringSchema(
+        (
+            AuthoringField("count", "int", "Count", required=True),
+            AuthoringField("origin", "pair", "Origin", required=True),
+        )
+    )
+
+    assert schema.project_values({"count": 3, "origin": (4, 5)}) == {
+        "count": 3,
+        "origin": [4, 5],
+    }
+    assert schema.project_values({"count": "3", "origin": "4, 5"}) == {
+        "count": 3,
+        "origin": [4, 5],
+    }
+    with pytest.raises((TypeError, ValueError)):
+        schema.project_values({"count": 1.5, "origin": (4, 5)})
+    with pytest.raises((TypeError, ValueError)):
+        schema.project_values({"count": 3, "origin": (4.5, 5)})
 
 
 def test_camera_descriptor_builds_repeat_zero_and_finite_measurements() -> None:
@@ -99,7 +122,7 @@ def test_camera_descriptor_builds_repeat_zero_and_finite_measurements() -> None:
 def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
     print(camera_logic_node.__file__)
     descriptor = camera_logic_node.LOGIC_NODE
-    draft = descriptor.authoring_schema.freeze(
+    draft = descriptor.authoring_schema.project_values(
         {
             "roi_x": 100,
             "roi_y": 200,
@@ -131,7 +154,7 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         "roi_height": 10,
     }
     assert all(type(value) is int for value in patch.values())
-    assert descriptor.authoring_schema.freeze({**draft, **patch}) == {
+    assert descriptor.authoring_schema.project_values({**draft, **patch}) == {
         **draft,
         **patch,
     }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -36,6 +36,34 @@ class ResolvedPulse:
     metadata: Mapping[str, Any]
 
 
+def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
+    """Decode one exact JSON file and require calibration-template semantics."""
+
+    source = Path(path).expanduser().resolve()
+    if source.suffix.lower() != ".json" or not source.is_file():
+        raise ValueError("calibration pulse template must be an existing JSON file")
+    sequence = sequence_from_tree(
+        json.loads(source.read_text(encoding="utf-8"))
+    )
+    _validate_calibration_sequence(sequence)
+    return sequence
+
+
+def _validate_calibration_sequence(sequence: PulseSequence) -> None:
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("calibration pulse must be PulseSequence")
+    if sequence.slots:
+        raise ValueError("calibration pulse cannot declare scan slots")
+    parameter_ids = tuple(
+        parameter.parameter_id for parameter in sequence.api_parameters
+    )
+    if parameter_ids != CALIBRATION_API_PARAMETER_IDS:
+        raise ValueError(
+            "calibration pulse API parameters must be "
+            f"{CALIBRATION_API_PARAMETER_IDS!r}, got {parameter_ids!r}"
+        )
+
+
 def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
     """Apply and load one resolved pulse, including its inspectable source."""
 
@@ -47,54 +75,19 @@ def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
     sequencer.load(pulse.program, source=pulse.sequence)
 
 
-def _template_filename(value: object) -> str:
-    name = str(value).strip()
-    if not name or Path(name).name != name:
-        raise ValueError("pulse template must be a plain JSON filename")
-    suffix = Path(name).suffix.lower()
-    if suffix == "":
-        return f"{name}.json"
-    if suffix != ".json":
-        raise ValueError("pulse template must be a plain JSON filename")
-    return name
-
-
 def resolve_pulse(
-    template: str,
+    sequence: PulseSequence,
     *,
+    path: str | Path,
     board: BoardDescription,
-    search_paths: Sequence[str | Path],
     api_values: Mapping[str, float],
 ) -> ResolvedPulse:
-    """Load one exact project JSON, resolve its three API inputs, and compile it."""
+    """Resolve and compile the already-decoded exact workspace resource."""
 
     if not isinstance(board, BoardDescription):
         raise TypeError("board must be BoardDescription")
-    filename = _template_filename(template)
-    if isinstance(search_paths, (str, Path)):
-        search_paths = (search_paths,)
-    roots = tuple(Path(value).expanduser().resolve() for value in search_paths)
-    candidates = tuple(root / filename for root in roots)
-    path = next((candidate for candidate in candidates if candidate.is_file()), None)
-    if path is None:
-        attempted = "\n".join(f"  - {candidate}" for candidate in candidates)
-        raise FileNotFoundError(
-            f"pulse template {filename!r} was not found; searched these paths:\n"
-            f"{attempted}"
-        )
-
-    tree = json.loads(path.read_text(encoding="utf-8"))
-    sequence = sequence_from_tree(tree)
-    if sequence.slots:
-        raise ValueError("calibration pulse cannot declare scan slots")
-    parameter_ids = tuple(
-        parameter.parameter_id for parameter in sequence.api_parameters
-    )
-    if parameter_ids != CALIBRATION_API_PARAMETER_IDS:
-        raise ValueError(
-            "calibration pulse API parameters must be "
-            f"{CALIBRATION_API_PARAMETER_IDS!r}, got {parameter_ids!r}"
-        )
+    _validate_calibration_sequence(sequence)
+    source = Path(path).expanduser().resolve()
     values = dict(api_values)
     if set(values) != set(CALIBRATION_API_PARAMETER_IDS) or len(values) != len(
         CALIBRATION_API_PARAMETER_IDS
@@ -131,7 +124,7 @@ def resolve_pulse(
     }
     return ResolvedPulse(
         sequence.name,
-        path.resolve(),
+        source,
         resolved,
         program,
         metadata,
@@ -143,5 +136,6 @@ __all__ = [
     "CAMERA_TRIGGER_PORT",
     "ResolvedPulse",
     "arm_sequencer",
+    "load_calibration_pulse_template",
     "resolve_pulse",
 ]

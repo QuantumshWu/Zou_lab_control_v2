@@ -32,7 +32,7 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
 
     streamer = values.get("streamer")
     if streamer is None:
-        authored = HARDWARE_SEQUENCER_SCHEMA.freeze(
+        authored = HARDWARE_SEQUENCER_SCHEMA.project_values(
             {name: value for name, value in values.items() if name != "streamer"}
         )
         dial = getattr(context, "connect_pulse", None)

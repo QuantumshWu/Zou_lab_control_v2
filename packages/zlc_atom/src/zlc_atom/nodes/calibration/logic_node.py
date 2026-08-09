@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactOutputSpec,
     DeviceAccess,
@@ -12,16 +10,28 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
     OutputSpec,
+    ResolvedWorkspaceResource,
     TaskPreviewSpec,
     TaskReportSpec,
+    WorkspaceResourceSpec,
 )
+from zlc_pulse import PulseSequence
 
 from .calibration import ReadoutModelKind
 from .outputs import CALIBRATION_DATASET_DECLARATIONS
+from .pulse import load_calibration_pulse_template
 from .task import CalibrationRequest, CalibrationTask
 
 
 _ROI_FIELDS = ("roi_x", "roi_y", "roi_width", "roi_height")
+_CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
+    "pulse_template",
+    "zlc.pulse.v1/calibration",
+    "pulses",
+    (".json",),
+    load_calibration_pulse_template,
+    argument_name="pulse_resource",
+)
 
 
 def _validate_calibration(values: dict[str, object]) -> None:
@@ -38,7 +48,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
             "pulse_template",
-            "text",
+            "resource",
             "Calibration pulse template",
             "imaging_template.json",
             required=True,
@@ -71,14 +81,27 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "choice",
             "Default readout model",
             ReadoutModelKind.BOX.value,
-            choices=tuple(kind.value for kind in ReadoutModelKind),
+            choices=(
+                AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
+                AuthoringChoice(
+                    ReadoutModelKind.PER_SITE_PSF.value,
+                    "Per-site PSF",
+                ),
+                AuthoringChoice(
+                    ReadoutModelKind.UNIFORM_PSF.value,
+                    "Uniform PSF",
+                ),
+            ),
         ),
         AuthoringField(
             "threshold_method",
             "choice",
             "Threshold method",
             "empirical",
-            choices=("empirical", "gaussian"),
+            choices=(
+                AuthoringChoice("empirical", "Empirical"),
+                AuthoringChoice("gaussian", "Gaussian"),
+            ),
         ),
         AuthoringField(
             "box_half_width",
@@ -92,7 +115,12 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "choice",
             "Box reducer",
             "mean",
-            choices=("mean", "sum", "median", "max"),
+            choices=(
+                AuthoringChoice("mean", "Mean"),
+                AuthoringChoice("sum", "Sum"),
+                AuthoringChoice("median", "Median"),
+                AuthoringChoice("max", "Maximum"),
+            ),
         ),
         AuthoringField(
             "psf_half_width",
@@ -147,28 +175,31 @@ def _build(
     camera_key: str,
     sequencer: object,
     sequencer_key: str,
-    pulse_search_paths: object,
+    pulse_resource: ResolvedWorkspaceResource,
     artifact_directory: object,
     **values: object,
 ) -> CalibrationTask:
-    authored = CALIBRATION_SCHEMA.freeze(values)
+    authored = CALIBRATION_SCHEMA.project_values(values)
+    if (
+        not isinstance(pulse_resource, ResolvedWorkspaceResource)
+        or pulse_resource.contract_id
+        != _CALIBRATION_PULSE_RESOURCE.contract_id
+        or not isinstance(pulse_resource.value, PulseSequence)
+    ):
+        raise TypeError("pulse_resource must be a resolved calibration pulse")
     roi_values = tuple(authored[name] for name in _ROI_FIELDS)
     roi = (
         None
         if all(value is None for value in roi_values)
         else tuple(int(value) for value in roi_values)
     )
-    if isinstance(pulse_search_paths, (str, Path)):
-        paths = (pulse_search_paths,)
-    else:
-        paths = tuple(pulse_search_paths)  # type: ignore[arg-type]
     return CalibrationTask(
         camera=camera,  # type: ignore[arg-type]
         sequencer=sequencer,
         request=CalibrationRequest(
             camera_key=camera_key,
             sequencer_key=sequencer_key,
-            pulse_template=str(authored["pulse_template"]),
+            pulse_template=pulse_resource.path.name,
             repeats=int(authored["repeats"]),
             reference_exposure_seconds=float(
                 authored["reference_exposure_seconds"]
@@ -186,7 +217,8 @@ def _build(
             detection_sigma=float(authored["detection_sigma"]),
             timeout_seconds=float(authored["timeout_seconds"]),
         ),
-        pulse_search_paths=paths,
+        pulse_sequence=pulse_resource.value,
+        pulse_path=pulse_resource.path,
         artifact_directory=artifact_directory,  # type: ignore[arg-type]
     )
 
@@ -220,6 +252,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         ),
     ),
     build=_build,
+    workspace_resources=(_CALIBRATION_PULSE_RESOURCE,),
 )
 
 

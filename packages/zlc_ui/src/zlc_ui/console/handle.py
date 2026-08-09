@@ -419,6 +419,14 @@ class TaskConsoleHandle(QtCore.QObject):
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
 
+    def set_logic_commands(
+        self, node_id: str, *, can_start: bool, can_stop: bool
+    ) -> None:
+        self._rows[str(node_id)].set_commands(
+            can_start=can_start,
+            can_stop=can_stop,
+        )
+
     def set_logic_publishes(self, node_id: str, rows: tuple[tuple[str, str, str], ...]) -> None:
         self._rows[str(node_id)].set_publishes(rows)
 

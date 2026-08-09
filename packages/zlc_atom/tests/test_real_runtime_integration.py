@@ -23,7 +23,7 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
-from tests.pulse_fixture import PULSE_ROOT
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -80,9 +80,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         assert isinstance(monitor, MonitorCapture)
         sequencer = installation.device("sequencer")
         pulse = resolve_pulse(
-            "imaging_template.json",
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
             board=sequencer.describe(),
-            search_paths=(PULSE_ROOT,),
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,
@@ -101,7 +101,8 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             camera=installation.device("camera"),
             sequencer=sequencer,
             request=_calibration_request(),
-            pulse_search_paths=(PULSE_ROOT,),
+            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+            pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         ).run()
         occupancy_node = OccupancyProcessor(

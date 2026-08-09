@@ -144,7 +144,7 @@ def _build(
     signal_plane: object,
     **values: object,
 ) -> CameraMeasurementNode:
-    authored = CAMERA_MEASUREMENT_SCHEMA.freeze(values)
+    authored = CAMERA_MEASUREMENT_SCHEMA.project_values(values)
     roi_values = tuple(
         authored[name] for name in _ROI_FIELDS
     )

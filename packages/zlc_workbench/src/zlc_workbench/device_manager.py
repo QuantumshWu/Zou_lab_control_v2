@@ -36,7 +36,7 @@ from zlc_atom.install import (
     installation_config_from_template,
     installation_template_names,
 )
-from .authoring_form import display_value, project_schema, project_values
+from .authoring_form import display_value, project_schema
 
 
 __all__ = ["DeviceManagerPresenter"]
@@ -235,7 +235,7 @@ class DeviceManagerPresenter:
                 instance_id=role,
                 role=role,
                 type_id=descriptor.type_id,
-                parameters=descriptor.authoring_schema.freeze({}),
+                parameters=descriptor.authoring_schema.project_values({}),
             )
         )
         self._touch(f"added {role} ({descriptor.type_id})")
@@ -299,7 +299,7 @@ class DeviceManagerPresenter:
             lambda item: replace(
                 item,
                 type_id=descriptor.type_id,
-                parameters=descriptor.authoring_schema.freeze(kept),
+                parameters=descriptor.authoring_schema.project_values(kept),
             ),
         )
 
@@ -317,7 +317,9 @@ class DeviceManagerPresenter:
             return False
         schema = self.types[current.type_id].authoring_schema
         try:
-            frozen = project_values(schema, dict(self.view.read_values(str(instance_id))))
+            frozen = schema.project_values(
+                dict(self.view.read_values(str(instance_id)))
+            )
         except Exception as error:
             self._report(f"{current.role}: {error}", severity="warning")
             return False

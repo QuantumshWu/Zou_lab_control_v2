@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.dcam import DcamCameraAdapter, DcamCameraConfig
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
@@ -18,7 +18,16 @@ DCAM_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField("device_index", "int", "Device index", 0, minimum=0),
         AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9),
         AuthoringField("readout_speed", "int", "Readout speed", 1, minimum=1),
-        AuthoringField("binning", "int", "Binning", 1, minimum=1),
+        AuthoringField(
+            "binning",
+            "int",
+            "Binning",
+            1,
+            choices=tuple(
+                AuthoringChoice(value, f"{value} × {value}")
+                for value in (1, 2, 4, 8, 16)
+            ),
+        ),
         AuthoringField("timeout_seconds", "float", "Timeout seconds", 2.0, minimum=1e-3),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
@@ -71,7 +80,7 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
     taken when no serial is given.
     """
 
-    authored = PYLON_CAMERA_SCHEMA.freeze(
+    authored = PYLON_CAMERA_SCHEMA.project_values(
         {name: value for name, value in values.items() if name != "camera"}
     )
     camera = PylonCameraAdapter(
@@ -100,7 +109,7 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
     """
 
     driver = values.get("driver")
-    authored = DCAM_CAMERA_SCHEMA.freeze(
+    authored = DCAM_CAMERA_SCHEMA.project_values(
         {name: value for name, value in values.items() if name != "driver"}
     )
     camera = DcamCameraAdapter(

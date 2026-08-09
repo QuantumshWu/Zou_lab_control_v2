@@ -2,6 +2,7 @@
 
 from .context import ApplicationContext
 from .descriptor import (
+    ArtifactCodec,
     ArtifactOutputSpec,
     ArtifactInputSpec,
     DatasetInputSpec,
@@ -10,13 +11,17 @@ from .descriptor import (
     LogicNodeDescriptor,
     NodeKind,
     OutputSpec,
+    ResolvedArtifact,
+    ResolvedWorkspaceResource,
     SelectionMapping,
     TaskPreviewSpec,
     TaskReportSpec,
+    WorkspaceResourceSpec,
 )
 from .discovery import discover_logic_nodes
 
 __all__ = [
+    "ArtifactCodec",
     "ArtifactOutputSpec",
     "ApplicationContext",
     "ArtifactInputSpec",
@@ -26,8 +31,11 @@ __all__ = [
     "LogicNodeDescriptor",
     "NodeKind",
     "OutputSpec",
+    "ResolvedArtifact",
+    "ResolvedWorkspaceResource",
     "SelectionMapping",
     "TaskPreviewSpec",
     "TaskReportSpec",
+    "WorkspaceResourceSpec",
     "discover_logic_nodes",
 ]
