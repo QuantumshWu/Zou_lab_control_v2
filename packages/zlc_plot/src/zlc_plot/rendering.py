@@ -2584,7 +2584,7 @@ class MatplotlibRenderer:
                     "",
                     ha="center",
                     va="bottom",
-                    fontsize=self.style.fonts.annotation_pt,
+                    fontsize=self.style.fonts.fit_annotation_pt,
                     zorder=self.style.artists.point_label_zorder,
                     clip_on=True,
                 )
@@ -2598,6 +2598,7 @@ class MatplotlibRenderer:
             if not visible:
                 continue
             label.set_position(tuple(points[index]))
+            label.set_color(edgecolors[index])
             explicit = None if point_labels is None else point_labels[index]
             point_id = None if point_ids is None else point_ids[index]
             label.set_text(explicit or point_id or "")

@@ -15,6 +15,7 @@ from zlc_plot import (
 )
 from zlc_plot._fit_projection import FitSelection
 from zlc_plot.fit import FacetFitBatchResult
+from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 
 
 def _snapshot(*, revision: int = 0, repeats: int = 1) -> DatasetSnapshot:
@@ -91,6 +92,45 @@ def test_image_site_overlay_is_plain_roundtrippable_display_state() -> None:
         curve.close()
         if restored is not None:
             restored.close()
+        session.close()
+
+
+def test_image_site_numbers_use_their_ring_status_style() -> None:
+    """A small ordinal must remain visually attached to its status ring."""
+
+    from matplotlib.colors import to_rgba
+
+    snapshot = _image_snapshot()
+    overlay = ImagePointOverlay(
+        1,
+        np.asarray(((0.5, 0.5), (1.5, 0.5), (2.5, 1.5))),
+        point_ids=("trap-a", "trap-b", "trap-c"),
+        labels=("1", "2", "3"),
+        statuses=(PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID),
+    )
+    session = PlotSession(
+        ImageFrame(snapshot, overlay),
+        ImagePlot(AxisRef.data("column"), AxisRef.data("row")),
+        parameters={"show_point_labels": True},
+    )
+    try:
+        artists = session._renderer._artists["image:point-labels"]
+        tokens = (
+            session._renderer.style.artists.point_empty,
+            session._renderer.style.artists.point_occupied,
+            session._renderer.style.artists.point_invalid,
+        )
+        assert tuple(label.get_text() for label in artists) == ("1", "2", "3")
+        assert all(
+            to_rgba(label.get_color(), label.get_alpha())
+            == to_rgba(token.color, token.alpha)
+            for label, token in zip(artists, tokens, strict=True)
+        )
+        assert all(
+            label.get_fontsize() == session._renderer.style.fonts.fit_annotation_pt
+            for label in artists
+        )
+    finally:
         session.close()
 
 

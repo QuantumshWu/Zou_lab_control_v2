@@ -213,13 +213,16 @@ class ImageOverlayResolver:
                 float(center[0]),
                 float(center[1]),
                 status,
-                str(site_id),
+                str(ordinal),
             )
-            for site_id, center, status in zip(
-                site_map.site_ids,
-                site_map.centers_xy,
-                statuses,
-                strict=True,
+            for ordinal, (site_id, center, status) in enumerate(
+                zip(
+                    site_map.site_ids,
+                    site_map.centers_xy,
+                    statuses,
+                    strict=True,
+                ),
+                start=1,
             )
         )
         overlay = ImagePointOverlay.from_markers(overlay_revision, markers)

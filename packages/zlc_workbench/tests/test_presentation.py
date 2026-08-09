@@ -433,6 +433,7 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
 
     assert resolved.resolved_mode == "occupancy"
     assert resolved.frame.overlay.point_ids == site_ids
+    assert resolved.frame.overlay.labels == ("1", "2", "3")
     assert resolved.frame.overlay.statuses == (
         PointStatus.EMPTY,
         PointStatus.OCCUPIED,
