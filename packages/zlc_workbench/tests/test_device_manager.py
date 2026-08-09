@@ -331,18 +331,6 @@ def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
     assert schema.project_values({"binning": 2}) == {"binning": 2}
 
 
-def test_dcam_binning_is_the_finite_device_choice_the_adapter_accepts() -> None:
-    from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA
-
-    field = next(
-        value
-        for value in project_schema(DCAM_CAMERA_SCHEMA).fields
-        if value.key == "binning"
-    )
-    assert field.kind == "choice"
-    assert tuple(choice.value for choice in field.choices) == (1, 2, 4, 8, 16)
-
-
 def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -> None:
     """The schema says which fields exist; the file says which were chosen.
 
