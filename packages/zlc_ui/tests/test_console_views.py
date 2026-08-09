@@ -81,7 +81,7 @@ else:
 def test_panel_card_qtest_signal_payloads() -> None:
     _run_qt(
         """
-from PyQt5 import QtCore, QtTest
+from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import PanelCardView
 app = ensure_qt_app(['test'])
@@ -96,7 +96,7 @@ card.set_panel_projection({
     'semantic_unavailable': '', 'display_unavailable': '',
     'fit_unavailable': '',
 })
-card.show(); app.processEvents()
+card.resize(340, 180); card.show(); app.processEvents()
 events = []
 card.remove_requested.connect(lambda: events.append(('remove',)))
 card.edit_requested.connect(lambda: events.append(('edit',)))
@@ -104,13 +104,23 @@ card.state_changed.connect(lambda patch: events.append(('state', patch)))
 # The operator's own route: Edit and Remove live in the Setting popup, beside
 # every other per-panel decision.  Reached any other way they were hidden
 # widgets nothing ever showed, so a panel could not be removed at all.
+top_levels = {widget for widget in app.topLevelWidgets() if widget.isVisible()}
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
+assert card._settings_frame.parentWidget() is card
+assert not card._settings_frame.isWindow()
+assert card.rect().contains(card._settings_frame.geometry())
+assert {widget for widget in app.topLevelWidgets() if widget.isVisible()} == top_levels
+assert not hasattr(card, 'apply_button')
+assert card._settings_scroll.verticalScrollBar().maximum() > 0
 title = card._settings_form.widget_for('title')
 title.setText('Card changed')
-QtTest.QTest.mouseClick(card.apply_button, QtCore.Qt.LeftButton)
-QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+title.editingFinished.emit()
+interval = card._settings_form.widget_for('interval_ms')
+interval.setCurrentIndex(interval.findData(800))
+interval.activated.emit(interval.currentIndex())
 app.processEvents()
+assert card._settings_frame.isVisible()
 QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
@@ -118,6 +128,7 @@ QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('edit',) in events
 assert ('remove',) in events
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
+assert ('state', {'interval_ms': 800}) in events
 """
     )
 

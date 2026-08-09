@@ -19,11 +19,11 @@ from zlc_ui.fluent import (
     CARD_TITLE_PX,
     FluentButton,
     FluentComboBox,
+    FluentFrame,
     FluentGroupBox,
     FluentLabel,
     FluentLineEdit,
-    FluentPopup,
-    FluentSettingsPopupAnchor,
+    FluentScrollArea,
     FluentStatusDot,
     GREY,
     ORANGE,
@@ -77,9 +77,10 @@ class PanelCardView(FluentGroupBox):
         self.panel_id = str(panel_id)
         self._base_title = str(title)
         self._surface: QtWidgets.QWidget | None = None
-        self._settings_popup: FluentPopup | None = None
+        self._settings_frame: FluentFrame | None = None
+        self._settings_scroll: FluentScrollArea | None = None
+        self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
-        self._settings_anchor: FluentSettingsPopupAnchor | None = None
         self._groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
         # A replace-only projection of the Workbench state.  It is view state,
         # never a second saved panel configuration or an authority of its own.
@@ -268,9 +269,22 @@ class PanelCardView(FluentGroupBox):
         )
         button.raise_()
 
+    def _place_settings_frame(self) -> None:
+        frame = self._settings_frame
+        if frame is None:
+            return
+        inset = max(1, CARD_PAD // 2)
+        top = max(inset, scaled_px(CARD_TITLE_PX))
+        area = self.rect().adjusted(inset, top, -inset, -inset)
+        frame.setGeometry(area)
+        if frame.isVisible():
+            frame.raise_()
+            self.settings_button.raise_()
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
         self._place_settings_button()
+        self._place_settings_frame()
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
         """Mount or replace an arbitrary view surface."""
@@ -348,8 +362,8 @@ class PanelCardView(FluentGroupBox):
 
         self._editing_enabled = bool(enabled)
         self.settings_button.setEnabled(self._editing_enabled)
-        if not self._editing_enabled and self._settings_popup is not None:
-            self._settings_popup.hide()
+        if not self._editing_enabled and self._settings_frame is not None:
+            self._settings_frame.hide()
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()
@@ -489,31 +503,40 @@ class PanelCardView(FluentGroupBox):
                 self._settings_form.widget_for("cell_kind").setEnabled(False)
             if "display_unavailable" in self._settings_form.spec.keys:
                 self._settings_form.widget_for("display_unavailable").setEnabled(False)
+            if self._settings_body is not None:
+                self._settings_body.setMinimumHeight(
+                    self._settings_body.sizeHint().height()
+                )
 
     def _open_settings(self) -> None:
-        if self._settings_popup is None:
-            popup = FluentPopup(self)
-            layout = QtWidgets.QVBoxLayout(popup)
+        if self._settings_frame is None:
+            frame = FluentFrame(self)
+            layout = QtWidgets.QVBoxLayout(frame)
             pad = max(1, scaled_px(10))
             layout.setContentsMargins(pad, pad, pad, pad)
-            layout.setSpacing(max(1, scaled_px(5)))
+            layout.setSpacing(0)
+            scroll = FluentScrollArea(frame)
+            body = QtWidgets.QWidget()
+            body.setStyleSheet("background: transparent;")
+            body_layout = QtWidgets.QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(max(1, scaled_px(5)))
             self._settings_form = FluentParameterForm(
                 self._form_spec(),
                 self._form_values(),
                 runtime=FormRuntimeContext(),
-                parent=popup,
+                parent=body,
             )
+            self._settings_form.changed.connect(self._setting_changed)
             self._settings_form.widget_for("kind").setEnabled(False)
             if "cell_kind" in self._settings_form.spec.keys:
                 self._settings_form.widget_for("cell_kind").setEnabled(False)
             if "display_unavailable" in self._settings_form.spec.keys:
                 self._settings_form.widget_for("display_unavailable").setEnabled(False)
-            layout.addWidget(self._settings_form)
+            body_layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()
             buttons.setContentsMargins(0, 0, 0, 0)
             buttons.setSpacing(max(1, scaled_px(5)))
-            self.apply_button = FluentButton("Apply")
-            self.apply_button.clicked.connect(self._apply_settings)
             # Here rather than on the card face, which is where every other
             # per-panel decision already lives.  They existed as hidden widgets
             # nothing ever showed, so a panel opened in the real window could
@@ -523,57 +546,65 @@ class PanelCardView(FluentGroupBox):
             self.remove_button = FluentButton("Remove", color=ORANGE)
             self.remove_button.clicked.connect(self._request_remove)
             self.remove_button.setVisible(self._live)
-            buttons.addWidget(self.apply_button)
             buttons.addWidget(self.edit_button)
             buttons.addStretch(1)
             buttons.addWidget(self.remove_button)
-            layout.addLayout(buttons)
-            self._settings_popup = popup
-            self._settings_anchor = FluentSettingsPopupAnchor(popup, self.settings_button)
-        self._settings_anchor.toggle(
-            self._settings_form,
-            prepare=self._rebuild_settings_form,
-        )
+            body_layout.addLayout(buttons)
+            body.setMinimumHeight(body.sizeHint().height())
+            scroll.setWidget(body)
+            layout.addWidget(scroll)
+            self._settings_frame = frame
+            self._settings_scroll = scroll
+            self._settings_body = body
+            frame.hide()
+        if self._settings_frame.isVisible():
+            self._settings_frame.hide()
+            return
+        self._rebuild_settings_form()
+        self._place_settings_frame()
+        self._settings_frame.show()
+        self._settings_frame.raise_()
+        self.settings_button.raise_()
 
     def _request_edit(self) -> None:
-        self._settings_popup.hide()
+        self._settings_frame.hide()
         self.edit_requested.emit()
 
     def _request_remove(self) -> None:
-        self._settings_popup.hide()
+        self._settings_frame.hide()
         self.remove_requested.emit()
 
-    def _apply_settings(self) -> None:
+    def _setting_changed(self, key: str) -> None:
         if self._settings_form is None:
             return
-        values = self._settings_form.read_all()
-        display: dict[str, object] = {}
-        declared = {
-            str(field["key"]): field
-            for field in parameter_fields(self._parameter_surface, "display")
-        }
-        for form_key, value in values.items():
-            if not str(form_key).startswith("display__"):
-                continue
-            key = str(form_key).split("__", 1)[1]
-            try:
-                display[key] = decode_parameter_value(declared[key], value)
-            except (KeyError, TypeError, ValueError) as error:
-                self.set_status(str(error), error=True)
+        name = str(key)
+        if name in {"kind", "cell_kind", "display_unavailable"}:
+            return
+        try:
+            value = self._settings_form.read_value(name)
+            if name.startswith("display__"):
+                display_key = name.split("__", 1)[1]
+                declared = {
+                    str(field["key"]): field
+                    for field in parameter_fields(self._parameter_surface, "display")
+                }
+                patch: dict[str, object] = {
+                    "display": {
+                        display_key: decode_parameter_value(
+                            declared[display_key], value
+                        )
+                    }
+                }
+            elif name == "interval_ms":
+                patch = {name: int(value)}
+            elif name in {"title", "signal", "size", "site_overlay"}:
+                patch = {name: str(value or "")}
+            else:
                 return
-        patch: dict[str, object] = {
-            "title": str(values["title"]),
-            "signal": str(values.get("signal") or ""),
-            "size": str(values["size"]),
-        }
-        if "interval_ms" in values:
-            patch["interval_ms"] = int(values["interval_ms"])
-        if "site_overlay" in values:
-            patch["site_overlay"] = str(values["site_overlay"])
-        if display:
-            patch["display"] = display
+        except (KeyError, TypeError, ValueError) as error:
+            self.set_status(str(error), error=True)
+            return
         self.state_changed.emit(patch)
-        self._settings_popup.hide()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == QtCore.Qt.LeftButton:
