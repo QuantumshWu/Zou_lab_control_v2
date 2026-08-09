@@ -52,7 +52,7 @@ class TaskConsoleHandle(QtCore.QObject):
     panel_edit_requested = QtCore.pyqtSignal(str)
     panel_state_changed = QtCore.pyqtSignal(str, object)
     panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
-    panel_producer_apply_requested = QtCore.pyqtSignal(str)
+    panel_producer_restart_requested = QtCore.pyqtSignal(str)
     panel_save_figure_requested = QtCore.pyqtSignal(str)
     panel_editor_closed = QtCore.pyqtSignal(str)
 
@@ -338,8 +338,8 @@ class TaskConsoleHandle(QtCore.QObject):
             editor.producer_draft_changed.connect(
                 lambda node_id, patch: self.logic_draft_changed.emit(str(node_id), patch)
             )
-            editor.producer_apply_requested.connect(
-                lambda _=None, pid=key: self.panel_producer_apply_requested.emit(pid)
+            editor.producer_restart_requested.connect(
+                lambda _=None, pid=key: self.panel_producer_restart_requested.emit(pid)
             )
             editor.save_figure_requested.connect(
                 lambda _=None, pid=key: self.panel_save_figure_requested.emit(pid)

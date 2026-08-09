@@ -126,7 +126,7 @@ class _ConsoleView:
         "panel_edit_requested", "logic_start_requested", "logic_stop_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
-        "panel_producer_apply_requested", "panel_editor_closed",
+        "panel_producer_restart_requested", "panel_editor_closed",
     )
 
     def __init__(self) -> None:
@@ -1226,7 +1226,7 @@ def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     assert presenter.apply_layout(old_layout) is False
 
 
-def test_panel_edit_projects_the_direct_producer_and_apply_uses_start(
+def test_panel_edit_projects_the_direct_producer_and_restart_uses_start(
     presenter, session, monkeypatch
 ) -> None:
     node_id = presenter.add_logic("camera_measurement")
@@ -1244,7 +1244,7 @@ def test_panel_edit_projects_the_direct_producer_and_apply_uses_start(
         "start_logic",
         lambda selected: started.append(str(selected)) or True,
     )
-    presenter.view.panel_producer_apply_requested.emit(panel.panel_id)
+    presenter.view.panel_producer_restart_requested.emit(panel.panel_id)
     assert started == [node_id]
 
 

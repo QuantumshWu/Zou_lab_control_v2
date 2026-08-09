@@ -248,9 +248,9 @@ class ConsolePresenter:
         )
         if refresh_requested is not None:
             refresh_requested.connect(self.refresh_panel_snapshot)
-        producer_apply = getattr(self.view, "panel_producer_apply_requested", None)
-        if producer_apply is not None:
-            producer_apply.connect(self.apply_panel_producer)
+        producer_restart = getattr(self.view, "panel_producer_restart_requested", None)
+        if producer_restart is not None:
+            producer_restart.connect(self.restart_panel_producer)
         save_figure = getattr(self.view, "panel_save_figure_requested", None)
         if save_figure is not None:
             save_figure.connect(self.save_panel_figure)
@@ -1567,7 +1567,7 @@ class ConsolePresenter:
         )
         return written
 
-    def apply_panel_producer(self, panel_id: str) -> bool:
+    def restart_panel_producer(self, panel_id: str) -> bool:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return False

@@ -136,7 +136,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
             for name in ("roi_x", "roi_y", "roi_width", "roi_height")
         ) == selected_roi
 
-        assert presenter.apply_panel_producer(panel.panel_id) is True
+        assert presenter.restart_panel_producer(panel.panel_id) is True
         _wait_until(lambda: presenter.logic[node_id].host is not old_host, presenter)
         replacement = presenter.logic[node_id].host
         assert replacement is not None and replacement.running

@@ -50,7 +50,7 @@ class PanelEditorView(QtWidgets.QWidget):
     state_changed = QtCore.pyqtSignal(object)
     snapshot_refresh_requested = QtCore.pyqtSignal()
     producer_draft_changed = QtCore.pyqtSignal(str, object)
-    producer_apply_requested = QtCore.pyqtSignal()
+    producer_restart_requested = QtCore.pyqtSignal()
     save_figure_requested = QtCore.pyqtSignal()
 
     def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
@@ -175,12 +175,14 @@ class PanelEditorView(QtWidgets.QWidget):
         self.producer_layout.addWidget(self.producer_empty)
         producer_actions = QtWidgets.QHBoxLayout()
         producer_actions.addStretch(1)
-        self.producer_apply_button = FluentButton("Producer Apply", color=GREEN)
-        self.producer_apply_button.setToolTip(
+        self.producer_restart_button = FluentButton("Producer Restart", color=GREEN)
+        self.producer_restart_button.setToolTip(
             "Restart the direct producer once with its current shared draft"
         )
-        self.producer_apply_button.clicked.connect(self.producer_apply_requested.emit)
-        producer_actions.addWidget(self.producer_apply_button)
+        self.producer_restart_button.clicked.connect(
+            self.producer_restart_requested.emit
+        )
+        producer_actions.addWidget(self.producer_restart_button)
         self.producer_layout.addLayout(producer_actions)
         body_layout.addWidget(self.producer_group)
 
@@ -330,7 +332,7 @@ class PanelEditorView(QtWidgets.QWidget):
             and self._projection.get("frozen_snapshot") is not None
             and not bool(self._projection.get("stale"))
         )
-        self.producer_apply_button.setEnabled(
+        self.producer_restart_button.setEnabled(
             self._mutation_enabled and self._producer_editor is not None
         )
         if self._producer_editor is not None:
@@ -371,7 +373,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 self._producer_editor.deleteLater()
                 self._producer_editor = None
             self.producer_empty.show()
-            self.producer_apply_button.setEnabled(False)
+            self.producer_restart_button.setEnabled(False)
             return
 
         node_id = str(projection.get("node_id") or "")
@@ -391,7 +393,7 @@ class PanelEditorView(QtWidgets.QWidget):
         else:
             self._producer_editor.update_projection(projection)
         self.producer_empty.hide()
-        self.producer_apply_button.setEnabled(self._mutation_enabled)
+        self.producer_restart_button.setEnabled(self._mutation_enabled)
 
     @staticmethod
     def _snapshot_text(projection: Mapping[str, object], *, stale: bool) -> str:

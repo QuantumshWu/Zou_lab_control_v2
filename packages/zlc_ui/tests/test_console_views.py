@@ -563,8 +563,8 @@ handle.logic_draft_changed.connect(
 handle.panel_snapshot_refresh_requested.connect(
     lambda panel_id: events.append(('refresh', panel_id))
 )
-handle.panel_producer_apply_requested.connect(
-    lambda panel_id: events.append(('apply', panel_id))
+handle.panel_producer_restart_requested.connect(
+    lambda panel_id: events.append(('restart', panel_id))
 )
 handle.panel_save_figure_requested.connect(
     lambda panel_id: events.append(('save', panel_id))
@@ -618,7 +618,7 @@ editor_interval.setCurrentIndex(editor_interval.findData(800))
 editor_interval.activated.emit(editor_interval.currentIndex())
 editor._producer_editor.form.widget_for('repeat').setValue(2)
 editor.refresh_button.click()
-editor.producer_apply_button.click()
+editor.producer_restart_button.click()
 editor.save_button.click()
 app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events
@@ -629,7 +629,7 @@ assert ('state', 'panel-1', {
 }) in events
 assert ('draft', 'cm', {'values': {'repeat': 2}}) in events
 assert ('refresh', 'panel-1') in events
-assert ('apply', 'panel-1') in events
+assert ('restart', 'panel-1') in events
 assert ('save', 'panel-1') in events
 
 changed = dict(state, title='Retitled', interval_ms=800)
