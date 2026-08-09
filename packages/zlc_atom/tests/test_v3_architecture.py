@@ -380,7 +380,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         )
         assert report_images == (
             "box.png",
+            "fidelity.png",
             "psf.png",
+            "psf_kernels.png",
             "site_map.png",
             "uniform_psf.png",
         )

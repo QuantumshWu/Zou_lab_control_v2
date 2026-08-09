@@ -475,7 +475,7 @@ session.close()
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
 
 
-def test_calibration_terminal_writes_four_images_without_report_panels(
+def test_calibration_terminal_writes_six_images_without_report_panels(
     workspace,
 ) -> None:
     """The Task owns its files; Workbench only owns the live preview."""
@@ -561,14 +561,17 @@ artifact_path = Path(artifact_row['path'])
 report_root = artifact_path.with_suffix('') / 'report'
 expected_report_files = {
     report_root / f'{stem}.png'
-    for stem in ('site_map', 'box', 'psf', 'uniform_psf')
+    for stem in (
+        'site_map', 'fidelity', 'box', 'psf', 'uniform_psf', 'psf_kernels'
+    )
 }
 until(lambda: all(
     path.is_file() and path.stat().st_size > 0
     for path in expected_report_files
 ))
 assert {path.name for path in report_root.iterdir()} == {
-    'site_map.png', 'box.png', 'psf.png', 'uniform_psf.png',
+    'site_map.png', 'fidelity.png', 'box.png', 'psf.png',
+    'uniform_psf.png', 'psf_kernels.png',
 }
 
 first_artifact_path = artifact_path

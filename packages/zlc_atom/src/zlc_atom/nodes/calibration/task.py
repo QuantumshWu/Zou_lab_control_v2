@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from zlc_data import AxisId, PointColumn, SITE, SPATIAL_X, SPATIAL_Y
+from zlc_data import (
+    COMPONENT,
+    SITE,
+    SPATIAL_X,
+    SPATIAL_Y,
+    AxisId,
+    AxisSpec,
+    PointColumn,
+)
 from zlc_durable import unique_path
 from zlc_pulse import PulseSequence
 
@@ -239,9 +247,11 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
     from zlc_plot import (
         AxisRef,
         HistogramPlot,
+        ImagePlot,
         ImagePointOverlay,
         PlotLabels,
         PointStatus,
+        curve,
         facet_grid,
         image,
     )
@@ -286,7 +296,7 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
 
     site_column = PointColumn(
         AxisId("calibration.site"),
-        "site",
+        "Site",
         SITE,
         PointColumn.TEXT,
         site_map.site_ids,
@@ -296,6 +306,65 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
     )
     labels_valid = np.asarray(result.report["labels_valid"], dtype=bool)
     model_reports = result.report["models"]
+
+    model_names = tuple(model.kind.value for model in calibration.models)
+    site_ordinal_column = PointColumn(
+        AxisId("calibration.site_ordinal"),
+        "Site",
+        SITE,
+        PointColumn.NUMERIC,
+        tuple(range(1, site_map.n_sites + 1)),
+        coordinate_labels=tuple(
+            str(index) for index in range(1, site_map.n_sites + 1)
+        ),
+    )
+    fidelity_values = np.stack(
+        [
+            np.asarray(model_reports[name]["site_fidelity"], dtype="<f8")
+            for name in model_names
+        ],
+        axis=-1,
+    )[np.newaxis, ...]
+    fidelity_valid = np.stack(
+        [
+            site_map.valid_sites
+            & model.usable_sites
+            & np.isfinite(fidelity_values[0, :, index])
+            for index, model in enumerate(calibration.models)
+        ],
+        axis=-1,
+    )[np.newaxis, ...]
+    fidelity_snapshot = _snapshot(
+        fidelity_values,
+        signal="readout_fidelity",
+        roles=(SITE, COMPONENT),
+        point_columns={SITE: site_ordinal_column},
+        axis_specs={
+            COMPONENT: AxisSpec(
+                AxisId("calibration.model"),
+                "readout model",
+                COMPONENT,
+                len(model_names),
+                coordinate_labels=tuple(name.replace("_", " ") for name in model_names),
+            )
+        },
+        generation=generation,
+        revision=revision,
+        cell_validity=np.all(fidelity_valid, axis=-1),
+    )
+    with curve(
+        fidelity_snapshot,
+        AxisRef.point("calibration.site_ordinal"),
+        group=AxisRef.data("calibration.model"),
+        labels=PlotLabels(
+            title="Held-out fidelity by readout model",
+            x="Site",
+            y="Fidelity",
+        ),
+        size="4x4",
+    ) as plot:
+        plot.save(report_root / "fidelity.png")
+
     for model in calibration.models:
         model_report = model_reports[model.kind.value]
         short_signals = np.asarray(model_report["short_signals"], dtype="<f8")
@@ -334,6 +403,58 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
                 classifier_thresholds=thresholds,
             )
             plot.save(report_root / f"{model.kind.value}.png")
+
+    psf_model = calibration.select_model(ReadoutModelKind.PER_SITE_PSF)
+    psf_kernels = np.asarray(psf_model.psf_weights, dtype="<f8")
+    kernel_height, kernel_width = psf_kernels.shape[-2:]
+    kernel_valid = (
+        site_map.valid_sites
+        & psf_model.usable_sites
+        & np.all(np.isfinite(psf_kernels), axis=(-2, -1))
+    )[np.newaxis, :]
+    psf_snapshot = _snapshot(
+        psf_kernels[np.newaxis, ...],
+        signal="psf_kernels",
+        roles=(SITE, SPATIAL_Y, SPATIAL_X),
+        point_columns={SITE: site_column},
+        axis_specs={
+            SPATIAL_Y: AxisSpec(
+                AxisId("calibration.psf.y"),
+                "y",
+                SPATIAL_Y,
+                kernel_height,
+                coordinates=tuple(
+                    range(-(kernel_height // 2), -(kernel_height // 2) + kernel_height)
+                ),
+                unit="pixel",
+            ),
+            SPATIAL_X: AxisSpec(
+                AxisId("calibration.psf.x"),
+                "x",
+                SPATIAL_X,
+                kernel_width,
+                coordinates=tuple(
+                    range(-(kernel_width // 2), -(kernel_width // 2) + kernel_width)
+                ),
+                unit="pixel",
+            ),
+        },
+        generation=generation,
+        revision=revision,
+        cell_validity=kernel_valid,
+    )
+    with facet_grid(
+        psf_snapshot,
+        AxisRef.point("calibration.site"),
+        ImagePlot(
+            AxisRef.data("calibration.psf.x"),
+            AxisRef.data("calibration.psf.y"),
+            labels=PlotLabels(x="x (pixel)", y="y (pixel)", value="Weight"),
+        ),
+        labels=PlotLabels(title="Per-site PSF kernels"),
+        size="4x4",
+    ) as plot:
+        plot.save(report_root / "psf_kernels.png")
 
     return report_root
 

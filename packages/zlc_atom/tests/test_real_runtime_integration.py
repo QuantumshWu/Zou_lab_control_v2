@@ -108,7 +108,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         report_images = tuple(sorted(report_directory.glob("*.png")))
         assert tuple(path.name for path in report_images) == (
             "box.png",
+            "fidelity.png",
             "psf.png",
+            "psf_kernels.png",
             "site_map.png",
             "uniform_psf.png",
         )

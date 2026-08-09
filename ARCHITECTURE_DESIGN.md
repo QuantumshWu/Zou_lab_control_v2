@@ -32,7 +32,7 @@ Calibration Task
     -> repeat: camera measurement -> progress + current image -> Monitor panel
     -> finish loop: calculate SiteMap + box/psf/uniform_psf models once
     -> save that result as calibration JSON
-    -> pass that same result to zlc_plot: site map + three model grids
+    -> pass that same result to zlc_plot: site map + fidelity + three classifier grids + PSF kernels
 Camera Measurement
     -> frames signal
 Occupancy Processor(frames + calibration path + readout-model choice)
@@ -238,7 +238,7 @@ SiteMap 只负责“site 在哪里、身份如何对齐”。科学积分框/PSF
 
 Calibration result 中的所有 site 数据共享 SiteMap 的实际 `site_ids` 和同一 pixel coordinate frame。每种模型都在这个结果中保存自己的 held-out samples、fidelity、thresholds 和 fit 所需数据；不能只保留 default model 后再重算另外两种模型。
 
-循环结束后的代码路径保持直接：Calibration Task 先把该结果写成 calibration JSON，然后把同一个 Python result 交给现有 `zlc_plot` 公开 API，保存四张 report 图片：(1) site-map image + centers；(2) box 模型的 per-site grid；(3) per-site PSF 模型的 per-site grid；(4) uniform PSF 模型的 per-site grid。三个 Distribution grid 都启用 plot-owned threshold classifier，并在同一次 `configure()` 中使用该 readout model 已算出的 per-site thresholds；不得再启用普通 `bimodal_gaussian` fit 伪装 classifier。JSON 和四张图是同一次 Calibration 的两种文件输出，不是两次分析。TaskConsole 不显示、挂载或自动打开 report；Monitor 只显示循环中的 measurement-linked preview。Calibration Task 决定 report 内容，`zlc_plot` 实现绘图；Task 不持有 Qt、TaskConsole panel state 或另一个 renderer，也不为这一条路径引入通用 report registry/coordinator/transaction 框架。
+循环结束后的代码路径保持直接：Calibration Task 先把该结果写成 calibration JSON，然后把同一个 Python result 交给现有 `zlc_plot` 公开 API，保存六张 report 图片：(1) site-map image + centers；(2) 三种 readout model 的 per-site held-out fidelity；(3–5) box、per-site PSF、uniform PSF 三个 classifier distribution grids；(6) per-site PSF kernel `FacetGrid[Image]`。三个 Distribution grid 都启用 plot-owned threshold classifier，并在同一次 `configure()` 中使用该 readout model 已算出的 per-site thresholds；不得再启用普通 `bimodal_gaussian` fit 伪装 classifier。JSON 和六张图是同一次 Calibration result 的两种文件投影，不是两次分析。TaskConsole 不显示、挂载或自动打开 report；Monitor 只显示循环中的 measurement-linked preview。Calibration Task 决定 report 内容，`zlc_plot` 实现绘图；Task 不持有 Qt、TaskConsole panel state 或另一个 renderer，也不为这一条路径引入通用 report registry/coordinator/transaction 框架。
 
 `SiteMap` 不是 plot kind，UI 中也不存在 `SiteMap Plot`。它是 Calibration artifact 里的 domain data。Occupancy 在与 `frame_judged` 相同的 publication 中显式发布 typed `site_overlay` sibling：canonical site ids、人类短标签、pixel centers 和当前 status。固定的 `Image` panel 分别选择 Image signal 与可选 Overlay signal；Workbench 只核对二者属于同一 publication，不从 run record 偷读 calibration JSON，也不从 signal 名称猜 SiteMap。`zlc_plot` 只把这份通用 point-overlay data 画成 markers。绘图圈半径是 Image display 属性（可由 point spacing 自动给出），不与科学 integration half-width 混为一个参数。
 
@@ -312,7 +312,7 @@ Calibration 中所谓“必要的高级检测参数”只能是算法确实需�
 
 ### 9.3 Task takeover、LIVE preview 与 terminal 清理
 
-- Calibration 循环中的 `capture_preview` 是唯一自动加入 Monitor 的 measurement-linked panel；它显示最新一张二维 camera image，不携带累计采集维度。循环完成后，Calibration Task 直接把 result 交给 `zlc_plot` 保存四张 report 图片。Workbench 只显示 Task 的进度和运行中 preview，不组装、不显示、不自动打开 report。
+- Calibration 循环中的 `capture_preview` 是唯一自动加入 Monitor 的 measurement-linked panel；它显示最新一张二维 camera image，不携带累计采集维度。循环完成后，Calibration Task 直接把 result 交给 `zlc_plot` 保存 site map、fidelity、三个 classifier grids 和 PSF kernels 六张 report 图片。Workbench 只显示 Task 的进度和运行中 preview，不组装、不显示、不自动打开 report。
 - Task active 时，TaskConsole header 的可操作区切换为唯一的 task status strip：显示当前阶段、进度和唯一 `Stop Task`。所有会改变系统状态的 header controls、logic rows/cards、Setting/Edit controls、Add/Start/Restart/Stop/Remove 都禁用，不能与 exclusive Task 并行改写 draft 或设备状态。
 - Monitor 中 selector、zoom、pan、fit inspection 只允许 view-only；Task active 时 selector commit 不能回写任何 producer draft。
 - 每个 task generation 的 LIVE preview 都带明确生命周期。它只在该 Task host 正在运行时允许自动创建；terminal、Stop、失败或取消统一移除 transient preview，后续 beat 即使仍能读到该 generation 的最后 publication 也不得重建。下一次 Restart 的新 generation 才能创建新的 preview。
@@ -416,7 +416,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 
 本文不作完成声明。此前基于六个 sites、旧 plot surface 和旧 Calibration artifact/report 的所谓正式 UI 验收已经撤销，不能作为当前树的产品证据；virtual apparatus 的默认验收目标是 `5 x 7 = 35` sites 和 `96 x 128` frames。
 
-最新实现完成后必须从根 `bin\experiment.bat` 重新走一次真实按钮路径，而不是调用 presenter/private API 代替点击：Device Manager `Init devices` -> 同 session 同时出现 Pulse UI 和 TaskConsole -> Calibration Task takeover/progress/唯一 Monitor LIVE preview/Stop Task -> 确认 JSON 和四张 report 图片已写出且 UI 未创建 report panel/tab/window -> `Repeat=0` Camera Measurement -> Pulse JSON Load/On -> Occupancy readout-model choice -> 五种固定 panel kind 的 blank/full-schema/finite interval/即时 Setting commit -> signal/overlay/selector/Producer Restart -> 三种 Save -> Stop Pulse -> close。随后还必须验证窗口、session、workers、claims 和项目 Python 进程归零。当前真实按钮复验、性能复验、受影响测试和全树测试的未完成状态只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
+最新实现完成后必须从根 `bin\experiment.bat` 重新走一次真实按钮路径，而不是调用 presenter/private API 代替点击：Device Manager `Init devices` -> 同 session 同时出现 Pulse UI 和 TaskConsole -> Calibration Task takeover/progress/唯一 Monitor LIVE preview/Stop Task -> 确认 JSON 和六张 report 图片已写出且 UI 未创建 report panel/tab/window -> `Repeat=0` Camera Measurement -> Pulse JSON Load/On -> Occupancy readout-model choice -> 五种固定 panel kind 的 blank/full-schema/finite interval/即时 Setting commit -> signal/overlay/selector/Producer Restart -> 三种 Save -> Stop Pulse -> close。随后还必须验证窗口、session、workers、claims 和项目 Python 进程归零。当前真实按钮复验、性能复验、受影响测试和全树测试的未完成状态只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
 
 ## 14. 本轮 review 的结论和非问题
 
@@ -424,7 +424,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 
 - Calibration 自动发现 sites；无 grid shape/count 输入。
 - Calibration 用同一 labels/split 训练 `box`、per-site `psf`、`uniform_psf` 三种模型；Occupancy 显式选择 default/具体模型。
-- Calibration 跑一次采集循环并计算一次结果；同一结果写 JSON 后直接交给 `zlc_plot` 保存 site-map + 三模型 grid 四张 report 图片。Monitor 只含循环中的 preview；Workbench 不显示 report。Task active 时 header takeover 并阻止所有状态改写，只保留 `Stop Task`。
+- Calibration 跑一次采集循环并计算一次结果；同一结果写 JSON 后直接交给 `zlc_plot` 保存 site-map、fidelity、三模型 classifier grids 和 PSF kernel grid 六张 report 图片。Monitor 只含循环中的 preview；Workbench 不显示 report。Task active 时 header takeover 并阻止所有状态改写，只保留 `Stop Task`。
 - Virtual devices 只位于独立 simulation package，满足与真实设备相同的 `CameraAdapter`/`SequencerDevice` 契约，默认 `5 x 7 = 35` sites、`96 x 128` image。
 - Pulse 文件只有 `zlc.pulse.v1` JSON 和一条 readable writer/readback 路径，不存在 `.py` pulse 或第二套排版。
 - exposure/ROI 是 measurement 参数，由 UI 接线层维护共享 draft 并在 Start/Restart 时传给 device。

@@ -213,7 +213,14 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             for path in (
                 first_calibration.artifact_path.with_suffix("") / "report"
             ).iterdir()
-        } == {"site_map.png", "box.png", "psf.png", "uniform_psf.png"}
+        } == {
+            "site_map.png",
+            "fidelity.png",
+            "box.png",
+            "psf.png",
+            "uniform_psf.png",
+            "psf_kernels.png",
+        }
         assert plane.freeze().signals == {}
 
         plane.retire(calibration_host)
@@ -233,7 +240,14 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             for path in (
                 second_calibration.artifact_path.with_suffix("") / "report"
             ).iterdir()
-        } == {"site_map.png", "box.png", "psf.png", "uniform_psf.png"}
+        } == {
+            "site_map.png",
+            "fidelity.png",
+            "box.png",
+            "psf.png",
+            "uniform_psf.png",
+            "psf_kernels.png",
+        }
         assert plane.freeze().signals == {}
 
         one_window_program = _one_camera_window_program()
