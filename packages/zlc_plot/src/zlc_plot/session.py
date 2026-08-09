@@ -16,6 +16,7 @@ import math
 import numpy as np
 
 from zlc_data import OwnedSnapshot
+from zlc_durable import atomic_write_file
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -3679,12 +3680,25 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             selected_dpi = self.surface_plan.logical_dpi * float(export_scale)
         if not math.isfinite(selected_dpi) or selected_dpi <= 0.0:
             raise ValueError("export dpi must be a positive finite number")
+        target = Path(path)
+        image_format = target.suffix.removeprefix(".").casefold()
+        if not image_format:
+            raise ValueError("plot export target must have an image suffix")
+        options = dict(kwargs)
+        options["format"] = image_format
         with self._render_lock:
             with self._lock:
                 self._assert_open()
             assert self._renderer is not None
             with self._renderer.raster_transaction():
-                self._renderer.save(path, dpi=selected_dpi, **kwargs)
+                atomic_write_file(
+                    target,
+                    lambda stream: self._renderer.save(
+                        stream,
+                        dpi=selected_dpi,
+                        **options,
+                    ),
+                )
 
     def rgba(self) -> np.ndarray:
         with self._render_lock:

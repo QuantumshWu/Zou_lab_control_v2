@@ -21,6 +21,8 @@ from uuid import uuid4
 
 import numpy as np
 from PIL import Image
+from zlc_durable import atomic_write_bytes
+
 from .units import UnitRegistry
 
 from ._axis_transform import AxisTransform
@@ -140,7 +142,8 @@ class RasterBuffer:
         selected = format
         if selected is None:
             selected = target.suffix.removeprefix(".")
-        target.write_bytes(
+        atomic_write_bytes(
+            target,
             self.encode(text(selected, "image format"), **options)
         )
 

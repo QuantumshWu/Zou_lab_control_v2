@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from threading import Event
 from concurrent.futures import Future
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,7 +11,8 @@ from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot
 from zlc_plot.fit import FacetFitBatchResult
-from zlc_plot.raster import RasterPlotHost
+from zlc_plot.raster import RasterBuffer, RasterPlotHost
+from zlc_plot.rendering import MatplotlibRenderer
 
 
 def _snapshot() -> DatasetSnapshot:
@@ -265,3 +267,76 @@ def test_a_host_that_could_not_start_says_why_not_that_it_is_closing() -> None:
         assert "failed to start" in str(again.value), str(again.value)
     finally:
         host.close()
+
+
+def test_host_save_preserves_existing_file_when_renderer_fails_after_partial_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed export must never expose the renderer's partial output."""
+
+    target = tmp_path / "panel.png"
+    original = b"existing-production-image"
+    target.write_bytes(original)
+    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        host.wait_for_front(timeout=10)
+        host.save(target).result(timeout=10)
+        assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        target.write_bytes(original)
+        observed: list[tuple[object, dict[str, object]]] = []
+
+        def fail_after_partial_write(
+            _renderer: object,
+            output: object,
+            **_options: object,
+        ) -> None:
+            observed.append((output, dict(_options)))
+            if hasattr(output, "write"):
+                output.write(b"partial-render")  # type: ignore[attr-defined]
+            else:
+                Path(output).write_bytes(b"partial-render")  # type: ignore[arg-type]
+            raise RuntimeError("renderer failed after a partial write")
+
+        monkeypatch.setattr(
+            MatplotlibRenderer,
+            "save",
+            fail_after_partial_write,
+        )
+
+        with pytest.raises(RuntimeError, match="partial write"):
+            host.save(target).result(timeout=10)
+
+        assert target.read_bytes() == original
+        assert tuple(tmp_path.iterdir()) == (target,)
+        assert len(observed) == 1
+        output, options = observed[0]
+        assert not isinstance(output, (str, Path))
+        assert options["format"] == "png"
+    finally:
+        host.close(timeout=10)
+
+
+def test_raster_buffer_save_preserves_existing_file_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Physical-pixel export uses the same durable replacement owner."""
+
+    import zlc_durable.durability as durability
+
+    target = tmp_path / "front.png"
+    original = b"existing-production-image"
+    target.write_bytes(original)
+    buffer = RasterBuffer(1, 1, b"\x10\x20\x30\xff")
+
+    def fail_replace(_source: object, _destination: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(durability.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        buffer.save(target)
+
+    assert target.read_bytes() == original
+    assert tuple(tmp_path.iterdir()) == (target,)
