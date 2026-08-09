@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from zlc_durable import readable_json_bytes
 from zlc_pulse import (
     PULSE_TREE_FORMAT,
     PulseTarget,
@@ -182,6 +183,7 @@ def test_pulse_resolver_uses_the_project_json_document(
     packaged = calibration_pulse_template_bytes()
     assert packaged == asset.read_bytes()
     tree = json.loads(packaged)
+    assert packaged == readable_json_bytes(tree)
     assert tuple(tree) == (
         "format",
         "name",

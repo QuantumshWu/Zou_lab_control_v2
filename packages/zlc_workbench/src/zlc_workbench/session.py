@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from zlc_durable import day_folder
+from zlc_durable import atomic_write_bytes, day_folder
 
 from .archive import write_figure
 from .device_use import DeviceClaim, DeviceUseCoordinator
@@ -144,7 +144,7 @@ class Workspace:
         if not template.exists():
             from zlc_atom.nodes import calibration_pulse_template_bytes
 
-            template.write_bytes(calibration_pulse_template_bytes())
+            atomic_write_bytes(template, calibration_pulse_template_bytes())
         return cls(home)
 
     @classmethod

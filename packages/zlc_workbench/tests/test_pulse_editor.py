@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 
 import pytest
+from zlc_durable import readable_json_bytes
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -32,7 +33,7 @@ from zlc_workbench.pulse_editor import (
     replace_sequence,
     timeline_of,
 )
-from zlc_workbench.pulse_state import PulseEditorState
+from zlc_workbench.pulse_state import PulseEditorState, state_to_tree
 
 from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
@@ -1093,6 +1094,9 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
 
         assert presenter.save_pulse() == str(written)
         assert written.exists() and written.stat().st_size > 0
+        assert written.read_bytes() == readable_json_bytes(
+            state_to_tree(presenter._state)
+        )
         assert presenter._state is presenter._saved_state
         assert presenter.view.schedule_view.control_state[2] is False
         tree = json.loads(written.read_text(encoding="utf-8"))

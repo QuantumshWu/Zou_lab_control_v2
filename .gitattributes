@@ -12,3 +12,7 @@
 
 # Verilog constraints and sources are read by Vivado on Windows only.
 *.xdc text eol=crlf
+
+# This packaged pulse is also the exact UTF-8 seed copied into a workspace.
+# Keep its readable-writer bytes unchanged by a Windows checkout.
+packages/zlc_atom/src/zlc_atom/nodes/calibration/imaging_template.json text eol=lf

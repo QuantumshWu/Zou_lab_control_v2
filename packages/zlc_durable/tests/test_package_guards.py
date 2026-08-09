@@ -18,12 +18,12 @@ import zlc_durable
 # the only anti-bloat mechanism that has held anywhere in this project. It lives
 # in the guard rather than in the package so that it does not count against
 # itself.
-# 12 -> 14 for readable JSON.  Choosing WHERE a file goes and writing it so a
-# crash cannot halve it were already one concern here; how a file a person will
-# open is laid out is the same concern, and the alternative was three packages
-# each deciding for themselves -- which is what produced 62 lines of one
-# channel name each in a saved pulse.
-MAX_PUBLIC_NAMES = 14
+# 12 -> 15 for readable JSON text, UTF-8 bytes and file output. Choosing WHERE
+# a file goes and writing it so a crash cannot halve it were already one
+# concern here; how a file a person will open is laid out is the same concern,
+# and the alternative was three packages each deciding for themselves -- which
+# is what produced 62 lines of one channel name each in a saved pulse.
+MAX_PUBLIC_NAMES = 15
 
 
 SRC = Path(zlc_durable.__file__).resolve().parent

@@ -23,10 +23,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .durability import atomic_write_text
+from .durability import atomic_write_bytes
 
 
-__all__ = ["readable_json", "write_readable_json"]
+__all__ = ["readable_json", "readable_json_bytes", "write_readable_json"]
 
 #: Where an inline list is wrapped.  Wide enough that a row of numbers or a
 #: handful of names is one line, narrow enough to read without scrolling
@@ -40,6 +40,12 @@ def readable_json(tree: Any, *, indent: int = 2) -> str:
     return _render(tree, int(indent), 0) + "\n"
 
 
+def readable_json_bytes(tree: Any, *, indent: int = 2) -> bytes:
+    """The UTF-8 bytes of :func:`readable_json`, with no second layout path."""
+
+    return readable_json(tree, indent=indent).encode("utf-8")
+
+
 def write_readable_json(path: str | Path, tree: Any, *, indent: int = 2) -> Path:
     """Write one readable JSON document, atomically.
 
@@ -49,7 +55,7 @@ def write_readable_json(path: str | Path, tree: Any, *, indent: int = 2) -> Path
     """
 
     target = Path(path)
-    atomic_write_text(target, readable_json(tree, indent=indent))
+    atomic_write_bytes(target, readable_json_bytes(tree, indent=indent))
     return target
 
 
@@ -64,7 +70,8 @@ def _render(value: Any, indent: int, depth: int) -> str:
         if not value:
             return "{}"
         items = [
-            f"{inner}{json.dumps(str(key))}: {_render(item, indent, depth + 1)}"
+            f"{inner}{json.dumps(str(key), ensure_ascii=False)}: "
+            f"{_render(item, indent, depth + 1)}"
             for key, item in value.items()
         ]
         return "{\n" + ",\n".join(items) + "\n" + pad + "}"
@@ -76,7 +83,7 @@ def _render(value: Any, indent: int, depth: int) -> str:
             return _inline(items, indent, depth)
         rendered = [f"{inner}{_render(item, indent, depth + 1)}" for item in items]
         return "[\n" + ",\n".join(rendered) + "\n" + pad + "]"
-    return json.dumps(value, allow_nan=False)
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
 def _inline(items: list[Any], indent: int, depth: int) -> str:
@@ -84,7 +91,7 @@ def _inline(items: list[Any], indent: int, depth: int) -> str:
 
     pad = " " * (indent * depth)
     inner = " " * (indent * (depth + 1))
-    parts = [json.dumps(item, allow_nan=False) for item in items]
+    parts = [json.dumps(item, ensure_ascii=False, allow_nan=False) for item in items]
     one_line = "[" + ", ".join(parts) + "]"
     if len(one_line) + len(pad) <= WIDTH:
         return one_line

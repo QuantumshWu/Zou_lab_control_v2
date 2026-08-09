@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from zlc_durable import durable_mkdir, flush_directory
+from zlc_durable import (
+    durable_mkdir,
+    flush_directory,
+    readable_json,
+    readable_json_bytes,
+    write_readable_json,
+)
 from zlc_durable.durability import (
     atomic_write_bytes,
     atomic_write_file,
@@ -72,6 +79,27 @@ def test_atomic_writers_replace_through_a_same_directory_temporary(
     assert previous == b"new"
     assert durability_events == ["file-fsync", "replace", "directory-flush"]
     assert target.read_bytes() == b"bytes"
+
+
+def test_readable_json_has_one_unicode_text_bytes_and_file_representation(
+    tmp_path,
+) -> None:
+    tree = {
+        "label": "成像",
+        "channels": ["cooling", "trap", "emCCD"],
+        "values": [1, 2, 3],
+        "nested": [{"enabled": True}, {"enabled": False}],
+    }
+    expected = readable_json(tree)
+    payload = readable_json_bytes(tree)
+    target = tmp_path / "pulse.json"
+
+    assert payload == expected.encode("utf-8")
+    assert b"\\u6210" not in payload
+    assert '"channels": ["cooling", "trap", "emCCD"]' in expected
+    assert json.loads(payload) == tree
+    assert write_readable_json(target, tree) == target
+    assert target.read_bytes() == payload
 
 
 def test_atomic_write_file_cleans_temporary_and_preserves_target_on_failure(
