@@ -39,10 +39,16 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
     host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
     widget = None
     try:
-        front = host.wait_for_front(timeout=10)
+        def forbidden_wait(*_args, **_kwargs):
+            raise AssertionError("a Qt widget must not wait for the worker's first front")
+
+        host.wait_for_front = forbidden_wait
         widget = Qt5PlotWidget(host)
         widget.show()
-        app.processEvents()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and widget.presented_front is None:
+            app.processEvents()
+            time.sleep(0.005)
         assert widget.presented_front is not None
         width, height = widget.width(), widget.height()
         start = QPoint(max(2, width // 3), max(2, height // 3))

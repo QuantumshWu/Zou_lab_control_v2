@@ -28,6 +28,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.panel_catalog import task_console_fitting_spec
+from zlc_workbench.panel_state import compose_panel_spec
 from zlc_workbench.session import ExperimentSession, Workspace
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
@@ -371,11 +372,21 @@ def presenter(session):
     def spec_for(snapshot, kind="", cell_kind=""):
         return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def make_host(initial, _signal, kind="", cell_kind=""):
+    def make_host(plot_input, state):
         # The same rule the real composition root uses.  A double that builds
         # its hosts a different way is a double that stops being evidence.
+        initial = getattr(plot_input, "snapshot", plot_input)
+        spec = spec_for(initial, state.kind, state.cell_kind)
+        spec = compose_panel_spec(initial.block.schema, spec, state)
+        parameters = dict(state.display)
+        parameters["title"] = state.title
+        if state.kind == "image":
+            parameters["site_overlay"] = state.site_overlay
         return plot.RasterPlotHost.from_plot(
-            initial, spec_for(initial, kind, cell_kind)
+            plot_input,
+            spec,
+            size=state.size,
+            parameters=parameters,
         )
 
     presenter = ConsolePresenter(
@@ -405,6 +416,16 @@ def _one_shot(session, producer: str = "cm"):
     result = capture.collect()
     session.nodes = [node]
     return node, result.publication.value(node.signal_key("frames")).snapshot
+
+
+def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("panel hosts did not settle")
 
 
 def _commit_area(host) -> None:
@@ -440,6 +461,9 @@ def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, ses
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frames"), snapshot)
     assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter, lambda: binding.editor_selections is not None
+    )
     live_host = binding.host
     editor_host = binding.editor_host
     editor_selections = binding.editor_selections
@@ -556,7 +580,7 @@ def test_site_grid_add_fixes_curve_cells_before_a_signal_exists(presenter) -> No
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
-    presenter, session
+    presenter, session, monkeypatch
 ) -> None:
     """The signal picker completes a panel; it is not a creation precondition."""
 
@@ -570,6 +594,25 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert binding.signal == signal
     assert binding.host is not None
     assert binding.port is not None
+    first_host = binding.host
+    close_timeouts = []
+    close_first_host = first_host.close
+
+    def record_close(*, timeout=None):
+        close_timeouts.append(timeout)
+        return close_first_host(timeout=timeout)
+
+    monkeypatch.setattr(first_host, "close", record_close)
+    assert presenter.update_panel_state(
+        binding.panel_id, {"title": "Camera without owner-thread wait"}
+    )
+    assert binding.host is not first_host
+    assert close_timeouts and close_timeouts[0] == 0.0
+    first_front = binding.host.wait_for_front(timeout=10.0)
+    assert first_front.identity.sequence == 1, (
+        "initial panel state was applied as repeated renders instead of one "
+        "precomposed host"
+    )
     assert binding.editor_host is not None
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
@@ -596,6 +639,7 @@ def test_turning_selectors_off_stops_panels_deriving(presenter, session) -> None
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
     assert binding.bridge is not None and binding.bridge.started
 
     presenter.view.selectors_toggled.emit(False)
@@ -748,6 +792,9 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.edit_panel(panel.panel_id)
     first_editor_host = panel.editor_host
     assert first_editor_host is not None
+    _settle_panel_hosts(
+        presenter, lambda: panel.editor_selections is not None
+    )
 
     first_before = dict(presenter.logic[first_id].draft.values)
     second_before = dict(presenter.logic[second_id].draft.values)
@@ -767,6 +814,9 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.refresh_panel_snapshot(panel.panel_id)
     second_editor_host = panel.editor_host
     assert second_editor_host is not None and second_editor_host is not first_editor_host
+    _settle_panel_hosts(
+        presenter, lambda: panel.editor_selections is not None
+    )
     _commit_area(second_editor_host)
     assert presenter.logic[first_id].draft.values == first_selected
     assert presenter.logic[second_id].draft.values != second_before
@@ -891,6 +941,10 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     binding = presenter.add_panel(
         node.signal_key("frames"), snapshot, kind="image"
     )
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.parameter_surface["semantic_unavailable"],
+    )
 
     surface = binding.parameter_surface
     assert presenter.view.panel_parameter_surfaces[binding.panel_id] is surface
@@ -927,6 +981,10 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     assert presenter.update_panel_state(
         binding.panel_id, {"display": {"colormap": colormap}}
     )
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.parameter_surface["semantic_unavailable"],
+    )
     assert binding.state.display["colormap"] == colormap
     description = presenter._plot_operation_value(binding.host.describe_display())
     assert description.display_state.values["colormap"] == colormap
@@ -942,6 +1000,10 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     )
     assert presenter.update_panel_state(
         binding.panel_id, {"semantic": {"reduction": reduction}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.parameter_surface["semantic_unavailable"],
     )
     assert binding.state.semantic["reduction"] is reduction
     refreshed = {
@@ -962,6 +1024,10 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
     first = presenter.add_panel(signal, snapshot, title="camera", kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: not first.parameter_surface["semantic_unavailable"],
+    )
     semantic_field = next(
         field
         for field in first.parameter_surface["semantic"]
@@ -1035,6 +1101,13 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
 
     assert presenter.apply_layout(document) is True
     restored = list(presenter.panels.values())
+    _settle_panel_hosts(
+        presenter,
+        lambda: all(
+            not binding.parameter_surface["semantic_unavailable"]
+            for binding in restored
+        ),
+    )
     assert [binding.title for binding in restored] == ["camera", "again"]
     assert restored[0].kind == "image"
     assert restored[0].size == "4x4"

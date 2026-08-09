@@ -74,6 +74,7 @@ def build_console(session, *, window_ratio=None):
 
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
+    from ..panel_state import compose_panel_spec
     from ..task_reports import default_task_report_registry
 
     # One call, one handle: this layer never names a widget class.
@@ -86,16 +87,23 @@ def build_console(session, *, window_ratio=None):
             snapshot.block.schema, kind, cell_kind
         )
 
-    def _make_host(initial, signal, kind="", cell_kind=""):
-        # The operator's kind when they chose one, the signal's own schema when
-        # they did not.  Every panel used to be built as an image against two
-        # named spatial axes, so Add Panel on anything that is not a camera
-        # frame -- an ROI total, a fit centre, a scan curve -- could not draw.
-        spec = _spec_for(initial, kind, cell_kind)
+    def _make_host(plot_input, state):
+        snapshot = getattr(plot_input, "snapshot", plot_input)
+        spec = _spec_for(snapshot, state.kind, state.cell_kind)
         if spec is None:
-            raise ValueError(f"{signal!r} cannot be drawn as {kind or 'anything'}")
+            raise ValueError(
+                f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
+            )
+        spec = compose_panel_spec(snapshot.block.schema, spec, state)
+        parameters = dict(state.display)
+        parameters["title"] = state.title
+        if state.kind == "image":
+            parameters["site_overlay"] = state.site_overlay
         return plot.RasterPlotHost.from_plot(
-            initial, replace(spec, labels=replace(spec.labels, title=str(signal)))
+            plot_input,
+            replace(spec, labels=replace(spec.labels, title=state.title)),
+            size=state.size,
+            parameters=parameters,
         )
 
     presenter = ConsolePresenter(

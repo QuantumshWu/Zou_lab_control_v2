@@ -521,8 +521,6 @@ def _qt5_plot_widget_class() -> type[Any]:
             ensure_qt5_application()
             _register_qt5_font(modules.QtGui)
             _enable_ipython_qt_loop()
-            ready_timeout = host.defaults.runtime.shutdown_timeout_ms / 1000.0
-            initial_front = host.wait_for_front(timeout=ready_timeout)
             super().__init__(parent)
             self._host = host
             self._closed = False
@@ -566,17 +564,9 @@ def _qt5_plot_widget_class() -> type[Any]:
             try:
                 if auto_present:
                     self._unsubscribe = self._host.subscribe_front(self._on_front)
-                if not self._install_front(self._host.front or initial_front):
-                    raise RuntimeError("Qt rejected the initial raster front")
-                assert self._front is not None
-                self._requested_dpr = self._front.device_pixel_ratio
-                self._pixel_ratio_observer = _RasterPixelRatioObserver(
-                    self,
-                    self._apply_device_pixel_ratio,
-                )
-                self._apply_device_pixel_ratio(
-                    self._pixel_ratio_observer.current_ratio
-                )
+                initial_front = self._host.front
+                if initial_front is not None:
+                    self._install_front(initial_front)
             except Exception:
                 self.close_adapter()
                 raise
@@ -832,6 +822,15 @@ def _qt5_plot_widget_class() -> type[Any]:
             width, height = front.logical_size
             if self.width() != width or self.height() != height:
                 self.setFixedSize(width, height)
+            if self._pixel_ratio_observer is None:
+                self._requested_dpr = front.device_pixel_ratio
+                self._pixel_ratio_observer = _RasterPixelRatioObserver(
+                    self,
+                    self._apply_device_pixel_ratio,
+                )
+                self._apply_device_pixel_ratio(
+                    self._pixel_ratio_observer.current_ratio
+                )
             self.update()
             surface_changed = (
                 current is None

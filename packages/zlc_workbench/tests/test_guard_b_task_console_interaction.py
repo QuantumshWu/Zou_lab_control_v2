@@ -25,7 +25,7 @@ from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 def _wait_until(predicate, presenter, *, timeout: float = 10.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        presenter.poll_logic()
+        presenter.beat()
         if predicate():
             return
         time.sleep(0.005)
@@ -120,6 +120,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_apply_restarts(
         assert panel.signal == signal_key and panel.host is not None
         assert presenter.edit_panel(panel.panel_id) is True
         assert panel.editor_host is not None and panel.editor_host is not panel.host
+        _wait_until(lambda: panel.editor_selections is not None, presenter)
 
         _commit_area(panel.editor_host)
         draft = presenter.logic[node_id].draft.values

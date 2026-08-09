@@ -576,6 +576,8 @@ class RasterPlotHost:
         self._host_id = uuid4().hex
         self._sequence = 0
         self._front: RasterFront | None = None
+        self._initial_metadata: tuple[object, object] | None = None
+        self._initial_error: BaseException | None = None
         #: Built on demand by :meth:`qt_widget`; a headless host never has one.
         self._qt_widget = None
         #: Whether dragging on this plot is allowed.  Held here rather than
@@ -595,6 +597,15 @@ class RasterPlotHost:
             mode=_DispatchMode.PUBLISH,
             coalesce_key="initial-front",
         )
+        initial_metadata = self._submit(
+            lambda: (
+                self._require_session().describe_display(),
+                self._require_session().fit_models,
+            ),
+            mode=_DispatchMode.CONTROL,
+            coalesce_key="initial-metadata",
+        )
+        initial_metadata.add_done_callback(self._capture_initial_operation)
 
     @classmethod
     def from_plot(
@@ -686,6 +697,33 @@ class RasterPlotHost:
     def front(self) -> RasterFront | None:
         with self._condition:
             return self._front
+
+    def _capture_initial_operation(
+        self,
+        completed: Future[RasterOperation[object]],
+    ) -> None:
+        """Cache the initial worker result so the GUI owner never resolves it."""
+
+        try:
+            operation = completed.result()
+            metadata = operation.value
+            if not isinstance(metadata, tuple) or len(metadata) != 2:
+                raise TypeError("initial raster metadata must be a pair")
+        except BaseException as error:
+            with self._condition:
+                self._initial_error = error
+        else:
+            with self._condition:
+                self._initial_metadata = metadata
+
+    @property
+    def initial_state(
+        self,
+    ) -> tuple[tuple[object, object] | None, BaseException | None]:
+        """Already-completed metadata/error for non-blocking owner projection."""
+
+        with self._condition:
+            return self._initial_metadata, self._initial_error
 
     @property
     def host_id(self) -> str:
