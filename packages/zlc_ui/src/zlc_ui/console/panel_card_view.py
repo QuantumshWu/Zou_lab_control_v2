@@ -463,40 +463,46 @@ class PanelCardView(FluentGroupBox):
                     state["interval_ms"],
                 )
             )
-        declared_display = tuple(
-            parameter_fields(self._parameter_surface, "display")
-        )
-        for declared in declared_display:
-            field = parameter_form_spec(
-                (declared,),
-                automatic_none=True,
-            ).fields[0]
-            fields.append(
-                FormFieldProps(
-                    key=f"display__{str(declared['key'])}",
-                    kind=field.kind,
-                    label=field.label,
-                    default=field.default,
-                    required=field.required,
-                    minimum=field.minimum,
-                    maximum=field.maximum,
-                    choices=field.choices,
-                    allow_blank=field.allow_blank,
-                    automatic=field.automatic,
-                )
+        section_labels = {
+            "semantic": "Semantic parameters",
+            "display": "Display / interaction parameters",
+            "fit": "Fit parameters / result",
+        }
+        for section in ("semantic", "display", "fit"):
+            declared_fields = tuple(
+                parameter_fields(self._parameter_surface, section)
             )
-        display_unavailable = str(
-            self._parameter_surface.get("display_unavailable") or ""
-        )
-        if display_unavailable:
-            fields.append(
-                FormFieldProps(
-                    "display_unavailable",
-                    "text",
-                    "Display parameters",
-                    default=display_unavailable,
+            for declared in declared_fields:
+                field = parameter_form_spec(
+                    (declared,),
+                    automatic_none=section == "display",
+                ).fields[0]
+                fields.append(
+                    FormFieldProps(
+                        key=f"{section}__{str(declared['key'])}",
+                        kind=field.kind,
+                        label=field.label,
+                        default=field.default,
+                        required=field.required,
+                        minimum=field.minimum,
+                        maximum=field.maximum,
+                        choices=field.choices,
+                        allow_blank=field.allow_blank,
+                        automatic=field.automatic,
+                    )
                 )
+            unavailable = str(
+                self._parameter_surface.get(f"{section}_unavailable") or ""
             )
+            if unavailable:
+                fields.append(
+                    FormFieldProps(
+                        f"{section}_unavailable",
+                        "text",
+                        section_labels[section],
+                        default=unavailable,
+                    )
+                )
         return FormSpec(tuple(fields))
 
     def _form_values(self) -> dict[str, object]:
@@ -515,19 +521,22 @@ class PanelCardView(FluentGroupBox):
             values["cell_kind"] = str(self._state_projection["cell_kind"])
         if self._live and self._interval_choices:
             values["interval_ms"] = int(self._state_projection["interval_ms"])
-        declared_display = tuple(
-            parameter_fields(self._parameter_surface, "display")
-        )
-        declared_values = parameter_form_values(
-            declared_display,
-            automatic_none=True,
-        )
-        for key, value in declared_values.items():
-            values[f"display__{key}"] = value
-        if "display_unavailable" in self._form_spec().keys:
-            values["display_unavailable"] = str(
-                self._parameter_surface.get("display_unavailable") or ""
+        form_keys = self._form_spec().keys
+        for section in ("semantic", "display", "fit"):
+            declared_fields = tuple(
+                parameter_fields(self._parameter_surface, section)
             )
+            declared_values = parameter_form_values(
+                declared_fields,
+                automatic_none=section == "display",
+            )
+            for key, value in declared_values.items():
+                values[f"{section}__{key}"] = value
+            unavailable_key = f"{section}_unavailable"
+            if unavailable_key in form_keys:
+                values[unavailable_key] = str(
+                    self._parameter_surface.get(unavailable_key) or ""
+                )
         return values
 
     def _rebuild_settings_form(self) -> None:
@@ -539,8 +548,10 @@ class PanelCardView(FluentGroupBox):
             self._settings_form.widget_for("kind").setEnabled(False)
             if "cell_kind" in self._settings_form.spec.keys:
                 self._settings_form.widget_for("cell_kind").setEnabled(False)
-            if "display_unavailable" in self._settings_form.spec.keys:
-                self._settings_form.widget_for("display_unavailable").setEnabled(False)
+            for section in ("semantic", "display", "fit"):
+                key = f"{section}_unavailable"
+                if key in self._settings_form.spec.keys:
+                    self._settings_form.widget_for(key).setEnabled(False)
             if self._settings_body is not None:
                 self._settings_body.setMinimumHeight(
                     self._settings_body.sizeHint().height()
@@ -570,8 +581,10 @@ class PanelCardView(FluentGroupBox):
             self._settings_form.widget_for("kind").setEnabled(False)
             if "cell_kind" in self._settings_form.spec.keys:
                 self._settings_form.widget_for("cell_kind").setEnabled(False)
-            if "display_unavailable" in self._settings_form.spec.keys:
-                self._settings_form.widget_for("display_unavailable").setEnabled(False)
+            for section in ("semantic", "display", "fit"):
+                key = f"{section}_unavailable"
+                if key in self._settings_form.spec.keys:
+                    self._settings_form.widget_for(key).setEnabled(False)
             body_layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()
             buttons.setContentsMargins(0, 0, 0, 0)
@@ -617,20 +630,26 @@ class PanelCardView(FluentGroupBox):
         if self._settings_form is None:
             return
         name = str(key)
-        if name in {"kind", "cell_kind", "display_unavailable"}:
+        if name in {
+            "kind",
+            "cell_kind",
+            "semantic_unavailable",
+            "display_unavailable",
+            "fit_unavailable",
+        }:
             return
         try:
             value = self._settings_form.read_value(name)
-            if name.startswith("display__"):
-                display_key = name.split("__", 1)[1]
+            section, separator, parameter_key = name.partition("__")
+            if separator and section in {"semantic", "display", "fit"}:
                 declared = {
                     str(field["key"]): field
-                    for field in parameter_fields(self._parameter_surface, "display")
+                    for field in parameter_fields(self._parameter_surface, section)
                 }
                 patch: dict[str, object] = {
-                    "display": {
-                        display_key: decode_parameter_value(
-                            declared[display_key], value
+                    section: {
+                        parameter_key: decode_parameter_value(
+                            declared[parameter_key], value
                         )
                     }
                 }

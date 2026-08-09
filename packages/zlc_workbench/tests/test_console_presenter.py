@@ -600,9 +600,21 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert binding.signal == signal
     assert binding.host is not None
     assert binding.port is not None
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface["fit"]),
+    )
     first_host = binding.host
     first_editor_host = binding.editor_host
     assert first_editor_host is not None
+    configurations = []
+    configure = first_host.configure
+
+    def record_configuration(**values):
+        configurations.append(values)
+        return configure(**values)
+
+    monkeypatch.setattr(first_host, "configure", record_configuration)
 
     def unexpected_close(*, timeout=None):
         raise AssertionError(f"a parameter edit closed the live host ({timeout=})")
@@ -636,6 +648,19 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     )
     described = presenter._plot_operation_value(binding.host.describe_display())
     assert described.display_state.values["title"] is None
+    fit_model = next(
+        value
+        for _label, value in binding.parameter_surface["fit"][0]["choices"]
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"fit": {"model": fit_model}}
+    )
+    assert configurations[-1] == {
+        "semantic": dict(binding.state.semantic),
+        "parameters": dict(binding.state.display),
+        "size": binding.state.size,
+        "fit_model": fit_model,
+    }
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
 

@@ -626,6 +626,8 @@ assert card._settings_form.read_all()['display__colormap'] == 'viridis'
 assert card._settings_form.read_all()['display__title'] is None
 assert card._settings_form.auto_switch_for('display__title').isChecked()
 assert not card._settings_form.widget_for('display__title').isEnabled()
+assert card._settings_form.read_all()['semantic__x'] == 'sensor_x'
+assert card._settings_form.widget_for('fit__model').currentText() == '(none)'
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
 assert 'display__interpolation' in card._settings_form.spec.keys
 interval_combo = card._settings_form.widget_for('interval_ms')
@@ -679,6 +681,12 @@ handle.panel_save_figure_requested.connect(
 handle.panel_editor_closed.connect(
     lambda panel_id: events.append(('closed', panel_id))
 )
+card_semantic = card._settings_form.widget_for('semantic__x')
+card_semantic.setCurrentIndex(1)
+card_semantic.activated.emit(1)
+card_fit = card._settings_form.widget_for('fit__model')
+card_fit.setCurrentIndex(1)
+card_fit.activated.emit(1)
 handle.open_panel_editor('panel-1', projection)
 editor = handle._panel_editors['panel-1']
 assert isinstance(editor.panel_form.widget_for('signal'), FluentTreeComboBox)
@@ -768,6 +776,9 @@ editor.save_button.click()
 app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events
 assert ('state', 'panel-1', {'semantic': {'x': 'point_row'}}) in events
+assert ('state', 'panel-1', {
+    'fit': {'model': 'anisotropic_gaussian_center'}
+}) in events
 assert ('state', 'panel-1', {'display': {'colormap': 'magma'}}) in events
 assert ('state', 'panel-1', {'display': {'title': 'Camera image'}}) in events
 assert ('state', 'panel-1', {'display': {'title': None}}) in events
