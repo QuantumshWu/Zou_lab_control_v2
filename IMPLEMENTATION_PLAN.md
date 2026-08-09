@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Panel UI逐项审计确认Save Fig、Auto、完整fit controls、tree signal/source与Producer Restart已存在；Setting popup唯一真实缺口已修，准备独立提交。`
-- Last completed action：`PanelCard删除卡片内嵌FluentFrame覆盖层，直接复用现有FluentPopup、FluentSettingsPopupAnchor和popup gap；popup创建时即带card parent，唯一预期top-level可外部关闭，窄宽度、内部滚动并由同一View标题拖动，没有新增文件、类、Apply或状态机。`
-- Last verified tests：`现有QTest在旧生产精确红为PanelCard无_settings_popup；修后真实Setting点击只产生一个有card parent的FluentPopup Show，拖动/scroll/toggle/Edit/Remove/即时commit均通过。完整zlc_ui 79 passed in 42.11s；完整zlc_workbench 334 passed in 86.61s；diff-check通过且无项目Python进程。每个测试进程导入路径均指向当前v2树。`
-- Pending acceptance gates：`独立提交Setting popup切片；继续审计panel frame默认signal标题及Goal末尾新增项，随后重跑full/detached和由用户执行可见bin\\experiment.bat验收。`
-- Next action：`提交本切片后核对panel frame title是否从authoritative signal label派生且独立于plot内title；已完成的全局100 ms display clock、Simulation非均匀性和MOT virtual不重复实现。`
+- Current phase：`Setting popup阶段已提交；panel frame标题及Goal末尾五项已在当前HEAD直接审计通过，进入完整交付定义的剩余缺口审计与Stage D验证。`
+- Last completed action：`确认Panel frame默认随所选signal命名而图内title独立，自定义frame title在换signal/更新时保持；确认SimulationWorld已有约2倍site效率跨度、per-site PSF sigma/angle/skew、随机装载与trap-off loss；独立mot_camera复用VirtualCamera并为1200 x 1920；Calibration同一result保存site_map/fidelity/box/psf/uniform_psf/psf_kernels六图；100 ms HarmonicClock按同一publication group成组提交same-shot panels。没有为这些已满足行为重复修改生产代码。`
+- Last verified tests：`当前HEAD 5dfc528；九项定向行为测试9 passed in 7.74s，覆盖上述panel title、virtual非均匀/随机/trap loss、MOT camera、Calibration六图、全局谐波clock与same-shot batch。此前完整zlc_ui 79 passed、完整zlc_workbench 334 passed；当前工作树在Checkpoint更新前clean且无项目Python进程。每个验证进程先import根包并打印当前v2生产模块路径。`
+- Pending acceptance gates：`按交付定义审计剩余代码与产品文档；受影响包、Guard A/B/C、全树与独立路径验证；最后由操作者从bin\\experiment.bat执行真实可见按钮验收并确认零窗口/worker/claim/进程。`
+- Next action：`从当前HEAD逐条建立交付定义证据表，先定位尚无直接证据或与现状矛盾的实现/README/contract/notebook，只对真实缺口做最小现有文件修改并分阶段提交。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
