@@ -34,6 +34,7 @@ class VirtualCamera:
         config: VirtualCameraConfig | None = None,
         *,
         frame_source: Callable[[int, float], np.ndarray] | None = None,
+        free_running: bool = False,
     ) -> None:
         if frame_source is None or not callable(frame_source):
             raise TypeError("virtual camera requires an injected frame_source")
@@ -44,6 +45,7 @@ class VirtualCamera:
         if float(self.config.exposure_seconds) <= 0:
             raise ValueError("exposure_seconds must be positive")
         self._frame_source = frame_source
+        self._free_running = bool(free_running)
         self._condition = threading.Condition()
         self._sensor_shape_yx = shape
         self._exposure_seconds = float(self.config.exposure_seconds)
@@ -75,7 +77,7 @@ class VirtualCamera:
             exposure = self._exposure_seconds
             x, y, width, height = self._roi_xywh
         return CameraWorkingPoint(
-            "EXTERNAL_TRIGGERED",
+            "FREE_RUNNING" if self._free_running else "EXTERNAL_TRIGGERED",
             (height, width),
             self._sensor_shape_yx,
             (y, x),
@@ -84,10 +86,14 @@ class VirtualCamera:
             self.frame_dtype,
             "count",
             exposure,
-            exposure,
-            0.0,
+            None if self._free_running else exposure,
+            None if self._free_running else 0.0,
             1.0,
-            "virtual-external-trigger",
+            (
+                "virtual-free-running"
+                if self._free_running
+                else "virtual-external-trigger"
+            ),
         )
 
     def configure_measurement(
@@ -191,16 +197,32 @@ class VirtualCamera:
         try:
             while True:
                 with self._condition:
-                    while not self._trigger_queue and self._accepting and not stop.is_set():
-                        self._condition.wait()
-                    if self._trigger_queue:
-                        ordinal, provided = self._trigger_queue.popleft()
+                    if self._free_running:
+                        if not self._accepting or stop.is_set():
+                            break
+                        self._condition.wait(timeout=self._exposure_seconds)
+                        if not self._accepting or stop.is_set():
+                            break
+                        ordinal = self._next_ordinal
+                        self._next_ordinal += 1
+                        provided = None
                         exposure = self._exposure_seconds
                         roi = self._roi_xywh
-                    elif not self._accepting or stop.is_set():
-                        break
                     else:
-                        continue
+                        while (
+                            not self._trigger_queue
+                            and self._accepting
+                            and not stop.is_set()
+                        ):
+                            self._condition.wait()
+                        if self._trigger_queue:
+                            ordinal, provided = self._trigger_queue.popleft()
+                            exposure = self._exposure_seconds
+                            roi = self._roi_xywh
+                        elif not self._accepting or stop.is_set():
+                            break
+                        else:
+                            continue
                 source = (
                     provided
                     if provided is not None
@@ -218,6 +240,11 @@ class VirtualCamera:
                     if stop.is_set() or not self._armed:
                         break
                     self._produced_count += 1
+                    if (
+                        self._expected_frames is not None
+                        and self._produced_count >= self._expected_frames
+                    ):
+                        self._accepting = False
                     record = CameraFrameRecord(
                         image,
                         ordinal,
@@ -246,6 +273,8 @@ class VirtualCamera:
                 self._condition.notify_all()
 
     def trigger(self, count: int = 1, *, frame: np.ndarray | None = None) -> None:
+        if self._free_running:
+            raise RuntimeError("free-running virtual camera does not accept triggers")
         count = int(count)
         if count <= 0:
             raise ValueError("trigger count must be positive")

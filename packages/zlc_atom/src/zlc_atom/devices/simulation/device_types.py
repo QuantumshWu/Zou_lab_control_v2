@@ -130,8 +130,8 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
             ordinal,
             exposure_seconds=exposure,
         ),
+        free_running=True,
     )
-    world.register_camera(camera, render)
     return bind_camera(
         context,
         key,
