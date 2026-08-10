@@ -218,6 +218,7 @@ class DcamSdkDriver:
             self._dll = ctypes.WinDLL(requested)
         except OSError as exc:
             raise RuntimeError(f"could not load DCAM library {requested!r}") from exc
+        self._device_count: int | None = None
         self._bind()
 
     def _bind(self) -> None:
@@ -287,12 +288,21 @@ class DcamSdkDriver:
         init = _DcamApiInit()
         code = int(self._dll.dcamapi_init(ctypes.byref(init)))
         if code == _DCAMERR_ALREADY_INITIALIZED:
+            self._device_count = int(init.device_count)
             return False
         _checked("dcamapi_init", code)
+        self._device_count = int(init.device_count)
         return True
+
+    @property
+    def device_count(self) -> int:
+        if self._device_count is None:
+            raise RuntimeError("DCAM driver is not initialized")
+        return self._device_count
 
     def uninitialize(self) -> None:
         _checked("dcamapi_uninit", self._dll.dcamapi_uninit())
+        self._device_count = None
 
     def open_device(self, index: int) -> "DcamSdkDevice":
         opened = _DcamDeviceOpen(index)

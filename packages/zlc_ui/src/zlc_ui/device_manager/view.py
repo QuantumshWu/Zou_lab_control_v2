@@ -119,6 +119,7 @@ class DeviceManagerView(QtWidgets.QWidget):
     save_requested = QtCore.pyqtSignal()
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
+    discovered_add_requested = QtCore.pyqtSignal(str)
     load_requested = QtCore.pyqtSignal()
     save_as_requested = QtCore.pyqtSignal()
     cancel_requested = QtCore.pyqtSignal()
@@ -134,6 +135,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._choices_by_domain: dict[str, tuple[tuple[str, str], ...]] = {}
         self._cards: dict[str, _DeviceCard] = {}
         self._card_domains: dict[str, str] = {}
+        self._discovered_widgets: dict[str, tuple[FluentFrame, ElidedLabel, QtWidgets.QLabel, FluentButton]] = {}
+        self._configured_discoveries: set[str] = set()
         self._loaded_widgets: list[QtWidgets.QWidget] = []
         self._dirty = False
         self._busy = False
@@ -396,6 +399,51 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._discovery_disabled_reason = str(reason)
         self._refresh_controls()
 
+    def set_discovered_devices(
+        self,
+        devices: tuple[tuple[str, str, str, bool], ...],
+    ) -> None:
+        wanted = {str(instance_id) for instance_id, _role, _type_id, _added in devices}
+        for instance_id in tuple(self._discovered_widgets):
+            if instance_id not in wanted:
+                frame, _title, _detail, _button = self._discovered_widgets.pop(instance_id)
+                self.discovered_cards_layout.removeWidget(frame)
+                frame.hide()
+                frame.deleteLater()
+        self._configured_discoveries = {
+            str(instance_id)
+            for instance_id, _role, _type_id, added in devices
+            if added
+        }
+        for index, (instance_id, role, type_id, _added) in enumerate(devices):
+            instance_id = str(instance_id)
+            widgets = self._discovered_widgets.get(instance_id)
+            if widgets is None:
+                frame = FluentFrame(self.discovered_group, bordered=True)
+                row = QtWidgets.QHBoxLayout(frame)
+                row.setContentsMargins(
+                    window_pad(0.45), window_pad(0.35),
+                    window_pad(0.45), window_pad(0.35),
+                )
+                title = ElidedLabel("")
+                detail = muted_note_label("")
+                button = FluentButton("Add", color=ACCENT)
+                row.addWidget(title)
+                row.addWidget(detail, 1)
+                row.addWidget(button)
+                button.clicked.connect(
+                    lambda _checked=False, value=instance_id:
+                    self.discovered_add_requested.emit(value)
+                )
+                widgets = (frame, title, detail, button)
+                self._discovered_widgets[instance_id] = widgets
+            frame, title, detail, _button = widgets
+            title.setText(str(role))
+            detail.setText(f"{type_id} · {instance_id}")
+            self.discovered_cards_layout.insertWidget(index, frame)
+        self.discovered_empty.setVisible(not devices)
+        self._refresh_controls()
+
     def set_lifecycle(
         self,
         text: str,
@@ -506,6 +554,8 @@ class DeviceManagerView(QtWidgets.QWidget):
             button.setEnabled(enabled and bool(self._choices_by_domain.get(domain)))
         for card in self._cards.values():
             card.setEnabled(enabled)
+        for instance_id, (_frame, _title, _detail, button) in self._discovered_widgets.items():
+            button.setEnabled(enabled and instance_id not in self._configured_discoveries)
 
 
 __all__ = ["DeviceManagerView"]

@@ -6,6 +6,8 @@ from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.dcam import DcamCameraAdapter, DcamCameraConfig
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
+from zlc_atom.devices.camera._dcam_driver import DcamSdkDriver
+from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 
@@ -58,6 +60,40 @@ PYLON_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
     )
 )
+
+
+def _discover_dcam() -> tuple[DeviceInstanceConfig, ...]:
+    driver = DcamSdkDriver()
+    owned = driver.initialize()
+    try:
+        return tuple(
+            DeviceInstanceConfig(
+                instance_id=f"dcam_{index}",
+                role=f"dcam_{index}",
+                type_id="camera.dcam",
+                parameters=DCAM_CAMERA_SCHEMA.project_values({"device_index": index}),
+            )
+            for index in range(driver.device_count)
+        )
+    finally:
+        if owned:
+            driver.uninitialize()
+
+
+def _discover_pylon() -> tuple[DeviceInstanceConfig, ...]:
+    from pypylon import pylon
+
+    factory = pylon.TlFactory.GetInstance()
+    return tuple(
+        DeviceInstanceConfig(
+            instance_id=f"pylon_{serial.replace('/', '_')}",
+            role=f"pylon_{serial.replace('/', '_')}",
+            type_id="camera.pylon",
+            parameters=PYLON_CAMERA_SCHEMA.project_values({"serial": serial}),
+        )
+        for info in factory.EnumerateDevices()
+        for serial in (str(info.GetSerialNumber()),)
+    )
 
 
 def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -117,6 +153,7 @@ DEVICE_TYPES = (
         DCAM_CAMERA_SCHEMA,
         ("camera.adapter", "camera.working_point"),
         factory=_dcam_factory,
+        discover=_discover_dcam,
     ),
     DeviceTypeDescriptor(
         "camera.pylon",
@@ -124,6 +161,7 @@ DEVICE_TYPES = (
         PYLON_CAMERA_SCHEMA,
         ("camera.adapter", "camera.working_point"),
         factory=_pylon_factory,
+        discover=_discover_pylon,
     ),
 )
 

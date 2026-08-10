@@ -81,6 +81,7 @@ class DeviceManagerPresenter:
             for descriptor in self.catalog.available
         }
         self.devices: list[DeviceInstanceConfig] = []
+        self.discovered: tuple[DeviceInstanceConfig, ...] = ()
         self._baseline_devices: tuple[DeviceInstanceConfig, ...] = ()
         self.saved = True
         self.busy = False
@@ -104,6 +105,8 @@ class DeviceManagerPresenter:
         self.view.type_picked.connect(self.set_type)
         self.view.parameter_committed.connect(self.commit_parameters)
         self.view.template_selected.connect(self.new_from_template)
+        self.view.discovery_requested.connect(self.discover)
+        self.view.discovered_add_requested.connect(self.add_discovered)
         self.view.load_requested.connect(self.load_from_dialog)
         self.view.save_requested.connect(self.save)
         self.view.save_as_requested.connect(self.save_as)
@@ -131,6 +134,9 @@ class DeviceManagerPresenter:
                 (name.replace("_", " ").title(), name)
                 for name in installation_template_names()
             )
+        )
+        self.view.set_discovery_enabled(
+            any(descriptor.discover is not None for descriptor in self.types.values())
         )
 
     # ------------------------------------------------------------------- state
@@ -240,6 +246,49 @@ class DeviceManagerPresenter:
         )
         self._touch(f"added {role} ({descriptor.type_id})")
         return role
+
+    def discover(self) -> bool:
+        """Scan each hardware family without connecting or configuring it."""
+
+        if self.busy:
+            return False
+        self.busy = True
+        self._show()
+        self._report("scanning hardware")
+        found: list[DeviceInstanceConfig] = []
+        failures: list[str] = []
+        for descriptor in self.types.values():
+            if descriptor.discover is None:
+                continue
+            try:
+                found.extend(descriptor.discover())
+            except Exception as error:
+                failures.append(f"{descriptor.type_id}: {error}")
+        self.discovered = tuple(found)
+        self.busy = False
+        self._show()
+        message = f"discovered {len(found)} device(s)"
+        if failures:
+            message += "; " + "; ".join(failures)
+        self._report(message, severity="warning" if failures else "task")
+        return True
+
+    def add_discovered(self, instance_id: str) -> str:
+        candidate = next(
+            (item for item in self.discovered if item.instance_id == str(instance_id)),
+            None,
+        )
+        if candidate is None:
+            return ""
+        if any(
+            item.instance_id == candidate.instance_id or item.role == candidate.role
+            for item in self.devices
+        ):
+            self._report(f"{candidate.role} is already configured", severity="warning")
+            return ""
+        self.devices.append(candidate)
+        self._touch(f"added discovered {candidate.role} ({candidate.type_id})")
+        return candidate.instance_id
 
     def remove_device(self, instance_id: str) -> bool:
         before = len(self.devices)
@@ -601,6 +650,18 @@ class DeviceManagerPresenter:
             )
         )
         self.view.set_loaded_devices(active_devices)
+        configured = {item.instance_id for item in self.devices}
+        self.view.set_discovered_devices(
+            tuple(
+                (
+                    item.instance_id,
+                    item.role,
+                    item.type_id,
+                    item.instance_id in configured,
+                )
+                for item in self.discovered
+            )
+        )
         active = self._active_session is not None
         restart = active and self._active_differs()
         self.view.set_lifecycle(

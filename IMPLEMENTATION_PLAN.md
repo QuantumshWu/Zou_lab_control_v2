@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`awaiting manual acceptance — Area and viewport now map their actual canvas geometry to Producer ROI`
-- Production HEAD at final verification：`d2cb266；Logic publisher remains complete in a1d503f`
+- Goal status：`active — Device Manager physical-camera discovery implemented; lab-machine acceptance pending`
+- Production HEAD at final verification：`Device Manager physical-camera discovery phase commit（本提交）；Logic publisher remains complete in a1d503f`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`完成。zlc_plot viewport event 保留未裁剪的实际 canonical canvas bounds；Camera Measurement 的同一个 SelectionMapping 把 Area 或 viewport 的真实范围映射到 sensor coordinates，只在物理 sensor 边界裁剪。Area selector 仍优先于 viewport。ROI/Fit Dataset materialization 继续由 SelectionBridge 按 data domain 切片，二者不再共用错误的裁剪语义。`
-- Last completed action：`提交 d2cb266。没有新增文件、类、状态机或兼容路径；只删除 zlc_plot viewport event 的 data-extent clamp，并把既有 camera ROI mapping 的 current-frame clamp 改为 physical-sensor clamp。`
-- Last verified tests：`旧红：真实 Guard B zoom-out 后 viewport_roi[0] 实得 4、未小于 authored 4；Atom selection mapping 对画布 y=-3.2 实得 roi_y=7、错误裁回 frame。修后正式 PanelEditorView Guard B 1 passed（4.81 s）；Atom sensor mapping 1 passed；SelectionBridge partial-outside data materialization 1 passed。每个进程首行导入 v2 并打印生产模块路径；只跑直接相关测试，未跑包/全仓。`
-- Pending acceptance gates：`只剩用户正式手动验收：Frozen snapshot zoom/pan 使用实际可见画布范围；Area selector 存在时优先且同样按真实矩形更新 Producer ROI；二者只在 sensor 边界停止。`
-- Next action：`停止修改与测试，交用户手动验收；上下文压缩后不得重开 Logic publisher、Area/viewport ROI 或 camera buffer 已完成项，除非用户给出新的直接反证。`
+- Current phase：`Device Manager 的现有 Scan hardware/Discovered hardware 骨架已接通。camera.pylon 只读枚举精确 serial；camera.dcam 只初始化 SDK 读取 device index 数量并立即释放。发现卡片的 Add 把该设备 schema 的完整默认参数投影成普通 config card，不连接设备。`
+- Last completed action：`最小实现落盘；没有新增文件、类、manager、DTO 或 discovery framework。Pylon/DCAM 任一 vendor runtime 缺失不会阻断另一家扫描。`
+- Last verified tests：`按用户本轮明确要求未新增、未运行测试；仅 git diff --check 静态范围审计通过。真机枚举只能在实验机手动验收。`
+- Pending acceptance gates：`实验机点击 Scan hardware：确认 Pylon serial 与 DCAM index 均出现；点击各自 Add 后确认完整参数进入 config card；保存并 Init devices。此前 Frozen snapshot ROI 验收项仍保持完成实现、等待用户需要时复验。`
+- Next action：`提交 discovery phase 后停止；由用户在实验机验收。不得因上下文压缩重开 Logic publisher、Area/viewport ROI 或 camera buffer 已完成项。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律

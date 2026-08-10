@@ -43,6 +43,8 @@ class _ManagerView:
         self.device_add_requested = _Signal()
         self.save_requested = _Signal()
         self.template_selected = _Signal()
+        self.discovery_requested = _Signal()
+        self.discovered_add_requested = _Signal()
         self.load_requested = _Signal()
         self.save_as_requested = _Signal()
         self.cancel_requested = _Signal()
@@ -56,6 +58,12 @@ class _ManagerView:
         self.forms: dict = {}
         self.values: dict = {}
         self.status: list[tuple[str, str]] = []
+
+    def set_discovery_enabled(self, enabled, reason="") -> None:
+        self.discovery_enabled = (bool(enabled), str(reason))
+
+    def set_discovered_devices(self, devices) -> None:
+        self.discovered_devices = tuple(devices)
 
     def set_apparatus(self, name: str, dirty: bool, saved: bool) -> None:
         self.apparatus = (str(name), bool(dirty), bool(saved))

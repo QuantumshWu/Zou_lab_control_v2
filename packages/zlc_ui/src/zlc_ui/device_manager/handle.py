@@ -31,6 +31,7 @@ class DeviceManagerHandle(QtCore.QObject):
     parameter_committed = QtCore.pyqtSignal(str, str)
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
+    discovered_add_requested = QtCore.pyqtSignal(str)
     load_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     save_as_requested = QtCore.pyqtSignal()
@@ -45,6 +46,7 @@ class DeviceManagerHandle(QtCore.QObject):
         "parameter_committed",
         "template_selected",
         "discovery_requested",
+        "discovered_add_requested",
         "load_requested",
         "save_requested",
         "save_as_requested",
@@ -144,6 +146,12 @@ class DeviceManagerHandle(QtCore.QObject):
         reason: str = "No installed device type declares discovery",
     ) -> None:
         self._view.set_discovery_enabled(enabled, reason)
+
+    def set_discovered_devices(
+        self,
+        devices: tuple[tuple[str, str, str, bool], ...],
+    ) -> None:
+        self._view.set_discovered_devices(devices)
 
     def set_lifecycle(
         self,
