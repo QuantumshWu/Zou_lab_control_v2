@@ -157,16 +157,18 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         host.close(timeout=10)
 
 
-def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
+def test_live_fit_pairs_every_front_and_coalesces_queued_frames(
     monkeypatch,
 ) -> None:
-    """Data fronts wait at most the commit budget for an armed live fit.
+    """A fit-armed frame is data@N with fit@N, born complete.
 
-    A solver that cannot finish inside the commit budget signals the
-    deadline (the in-commit attempt always carries one), the data front
-    publishes without the overlay, and the solve continues asynchronously;
-    a newer revision cancels the stale solve and only the latest
-    revision's overlay is accepted.
+    The publish gate: while revision 1's solve runs, no new front appears —
+    a pair never half-shows.  No preemption: newer revisions arriving during
+    the solve replace only the QUEUED frame (revision 2's future cancels,
+    its solve never starts), while the in-flight pair runs to completion and
+    publishes.  The next pair then jumps to the newest revision, so under
+    solve > period the pair rate drops and shots skip, but pairs never
+    split.
     """
 
     x = np.linspace(-4.0, 4.0, 81)
@@ -174,7 +176,7 @@ def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
         Axis.create("repeat", size=1),
         PointTable.from_columns({"x": x}),
         dtype=np.float64,
-        generation="raster-live-fit-latest",
+        generation="raster-live-fit-pairs",
     )
 
     def snapshot(revision: int, center: float) -> DatasetSnapshot:
@@ -183,33 +185,17 @@ def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
 
     engine = FitEngine()
     original_fit = engine.fit
+    solved_revisions: list[int] = []
     first_started = Event()
-    first_cancelled = Event()
-    latest_started = Event()
-    release_latest = Event()
+    release_first = Event()
 
     def controlled_fit(model, coordinates, observations=None, **kwargs):
         revision = int(kwargs["data_revision"])
-        cancelled = kwargs.get("cancelled")
-        options = kwargs.get("options")
-        in_commit = getattr(options, "deadline_seconds", None) is not None
+        solved_revisions.append(revision)
         if revision == 1:
-            if in_commit:
-                raise FitDeadlineExceeded("over the commit budget")
             first_started.set()
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                if cancelled is not None and cancelled():
-                    first_cancelled.set()
-                    raise FitCancelled("superseded live fit")
-                time.sleep(0.002)
-            raise AssertionError("revision 1 fit was not cancelled")
-        if revision == 2:
-            if in_commit:
-                raise FitDeadlineExceeded("over the commit budget")
-            latest_started.set()
-            if not release_latest.wait(5.0):
-                raise AssertionError("revision 2 fit was not released")
+            if not release_first.wait(5.0):
+                raise AssertionError("revision 1 fit was never released")
         return original_fit(model, coordinates, observations, **kwargs)
 
     monkeypatch.setattr(engine, "fit", controlled_fit)
@@ -219,35 +205,39 @@ def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
         fit_engine=engine,
     )
     accepted: list[int] = []
-    accepted_latest = Event()
     release_subscription = None
     try:
         host.wait_for_front(timeout=10)
         host.fit("gaussian_offset", live=True).result(timeout=30)
         release_subscription = host.subscribe_fit(
-            lambda event: (
-                accepted.append(int(event.result.source_revision)),
-                accepted_latest.set()
-                if int(event.result.source_revision) == 2
-                else None,
-            )
+            lambda event: accepted.append(int(event.result.source_revision))
         ).result(timeout=10).value
 
-        host.update_data(snapshot(1, 0.1)).result(timeout=5)
-        assert host.front is not None
-        assert host.front.identity.data_revision == 1
+        first = host.update_data(snapshot(1, 0.1))
         assert first_started.wait(2.0)
-
-        host.update_data(snapshot(2, 0.2)).result(timeout=5)
+        # The publish gate: the pair is incomplete, so the front holds.
+        time.sleep(0.05)
         assert host.front is not None
-        assert host.front.identity.data_revision == 2
-        assert first_cancelled.wait(2.0)
-        assert latest_started.wait(2.0)
-        release_latest.set()
-        assert accepted_latest.wait(10.0)
-        assert accepted == [2]
+        assert host.front.identity.data_revision == 0
+
+        second = host.update_data(snapshot(2, 0.2))
+        third = host.update_data(snapshot(3, 0.3))
+        # Latest-only queueing: revision 2 was replaced before it started.
+        assert second.cancelled()
+
+        release_first.set()
+        # No preemption: the in-flight pair completed and published even
+        # though newer data had arrived.
+        first.result(timeout=10)
+        third.result(timeout=10)
+        assert host.front is not None
+        assert host.front.identity.data_revision == 3
+        # Every published front carried its own shot's overlay; revision 2
+        # was skipped entirely — never solved, never shown.
+        assert accepted == [1, 3]
+        assert 2 not in solved_revisions
     finally:
-        release_latest.set()
+        release_first.set()
         if release_subscription is not None:
             release_subscription().result(timeout=10)
         host.close(timeout=10)

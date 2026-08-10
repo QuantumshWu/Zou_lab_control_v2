@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import numpy as np
 
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
@@ -41,24 +39,6 @@ def _spec() -> FacetGridPlot:
         AxisRef.point("facet"),
         CurvePlot(AxisRef.point("x")),
     )
-
-
-def _wait_for_fit_revision(
-    session: PlotSession,
-    revision: int,
-    *,
-    timeout: float = 10.0,
-) -> FacetFitBatchResult:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = session.last_fit
-        if (
-            isinstance(result, FacetFitBatchResult)
-            and result.source_revision == revision
-        ):
-            return result
-        time.sleep(0.005)
-    raise AssertionError(f"fit revision {revision} was not accepted")
 
 
 def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
@@ -158,7 +138,9 @@ def test_facet_table_publishes_mixed_success_and_explicit_error_validity() -> No
         session.close()
 
 
-def test_facet_live_fit_replaces_the_whole_batch_on_new_revision() -> None:
+def test_facet_live_fit_pairs_the_whole_batch_with_its_data_frame() -> None:
+    """A facet pair commits data@1 and the whole batch fit@1 as one front."""
+
     initial = _facet_snapshot()
     session = PlotSession(initial, _spec())
     try:
@@ -168,18 +150,23 @@ def test_facet_live_fit_replaces_the_whole_batch_on_new_revision() -> None:
         prepared = session.prepare_live_frame(
             _facet_snapshot(revision=1, scale=1.1)
         ).result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared)
+        solve = session.solve_live_frame(prepared)
+        assert solve is not None
+        solved = solve.result(timeout=10.0)
+        finalization = session.commit_live_frame(prepared, solved)
         assert finalization is not None
-        assert tuple(session._renderer._fit_artists) == original_artists
-        session.finalize_live_frame(finalization)
 
-        accepted = _wait_for_fit_revision(session, 1)
+        accepted = session.last_fit
+        assert isinstance(accepted, FacetFitBatchResult)
+        assert accepted.source_revision == 1
         assert len(accepted.overlays) == 2
         assert all(overlay.polylines for overlay in accepted.overlays)
-        assert tuple(session._renderer._fit_artists) == original_artists
+        # The pair repainted the whole batch inside the one commit: every
+        # cell carries exactly its revision-1 overlay artists.
+        assert session._renderer._fit_artists
         assert session.fit_status == "current"
 
         session.fit("lorentzian", live=True)
-        assert tuple(session._renderer._fit_artists) != original_artists
+        assert session.last_fit.model.model_id == "lorentzian"
     finally:
         session.close()

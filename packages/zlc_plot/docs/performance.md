@@ -372,13 +372,17 @@ matrices differed by 1.1e-15 relatively. Complete `PlotSession` transactions,
 including overlay presentation, measured 204 / 151 ms cold/warm at 1024² and
 332 / 325 ms at 2048² on the reference machine. Both returned the exact
 all-pixel sample count, full fitted/residual/index arrays, finite parameter
-uncertainties and a current overlay. An armed live fit solves inside the data
-commit under the caller's refresh-interval budget, so an in-budget overlay
-publishes in the same front as its data; only a solve that exceeds the budget
-falls back to the asynchronous path, where the old solver is cancelled and
-only the latest matching result may add an overlay — there is no catch-up
-burst. Custom Image models remain on the general coordinate-expansion solver
-path unless they provide a specialization.
+uncertainties and a current overlay. An armed live fit makes every data
+frame a pair: the solve runs to completion on the fit executor while the
+render worker stays free (hosted pipeline prepare → solve → commit), and
+the overlay is accepted into the same presented front as its data — the
+frame is born complete, with no budget and no asynchronous catch-up. A
+solve slower than the producer period lowers the pair rate (newer frames
+replace only the queued next pair; the in-flight pair always completes), so
+shots skip but pairs never split. Reference 2048² numbers: paint 15–25 ms,
+projection 10–25 ms, warm radial solve ~33 ms — a fit-armed canonical board
+holds ~10 Hz whole-pair flips. Custom Image models remain on the general
+coordinate-expansion solver path unless they provide a specialization.
 
 ## GridTopology comparison
 

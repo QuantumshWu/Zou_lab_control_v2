@@ -637,15 +637,18 @@ Selector 或 pan gesture 不暂停 live consumer、render 或 live fit；可见 
 The producer revision is passed through to `PlotSession`; it becomes the
 session, selection-event, selected-data, and fit data revision. Direct
 `update_data(pulse)` calls without an envelope advance the current
-session revision by one. The same `update_data()` path remains valid while a
-live fit is armed: the solve runs inside the presentation under a budget of
-the caller's refresh cadence (`update_data(refresh_interval_ms=...)`, the
-library default when omitted), so an in-budget overlay publishes in the same
-front as its data; on deadline the front publishes without it, the previous
-solve is cancelled, and only the latest matching fit result may add an
-overlay asynchronously. `LivePlotController.publish()` adds only capacity-one
-ingress and cadence, and its commits carry the controller's actual interval
-as that budget.
+session revision by one. While a live fit is armed, every data frame is a
+PAIR: `update_data()` solves the fit to completion and accepts the overlay
+into the same presented front as its data — the frame is born complete.
+Hosted panels run the identical pair off the render worker through the live
+protocol `prepare_live_frame` → `solve_live_frame` (fit executor) →
+`commit_live_frame(prepared, solved)`; the returned finalization is
+acknowledged with `publish_live_frame` after promotion (or rolled back with
+`abort_live_frame`). There is no solve budget and no asynchronous
+catch-up: a slow solve lowers the pair rate while newer frames coalesce in
+the latest-only mailbox, and an in-flight pair always runs to completion —
+cancellation happens only on re-arm, `replace_spec`, and close.
+`LivePlotController.publish()` adds only capacity-one ingress and cadence.
 
 ## Notebook
 

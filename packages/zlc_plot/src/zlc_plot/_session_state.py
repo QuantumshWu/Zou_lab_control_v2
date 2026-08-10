@@ -110,9 +110,26 @@ class _PreparedLiveFrame:
     projection: FitProjection
 
 @dataclass(frozen=True, slots=True)
+class _SolvedLiveFit:
+    """One pair-solved live fit travelling from the fit executor to its commit.
+
+    ``result`` is None when the solve was cancelled, hit a caller-authored
+    deadline, or failed; the paired data frame then commits without an
+    overlay and the next data revision is the only automatic retry.
+    """
+
+    started: _StartedFitRequest
+    result: "FitResult | FacetFitBatchResult | None"
+
+
+@dataclass(frozen=True, slots=True)
 class _LiveFrameFinalization:
     session_identity: object
     presentation: "_ProjectionPresentation"
+    #: The pair's accepted-fit completion, resolved only after the committed
+    #: front is promoted (``publish_live_frame``) so a waiting fit future
+    #: never observes a front older than its result.
+    fit_resolution: "_FitResolution | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,5 +175,5 @@ __all__ = [
     "_AcceptedFit", "_FitPresentation", "_FitResolution", "_LiveFitRequest",
     "_LiveFrameFinalization", "_LiveFrameSnapshot", "_PointerUpdate",
     "_PreparedLiveFrame", "_ProjectionPresentation", "_ResolvedFit",
-    "_StartedFitRequest", "FitEvent", "SelectionChange",
+    "_SolvedLiveFit", "_StartedFitRequest", "FitEvent", "SelectionChange",
 ]

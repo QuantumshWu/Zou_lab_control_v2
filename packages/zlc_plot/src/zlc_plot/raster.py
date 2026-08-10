@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, InvalidStateError
+from concurrent.futures import CancelledError, Future, InvalidStateError
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
@@ -306,6 +306,25 @@ class _DispatchMode(str, Enum):
         return self in {_DispatchMode.PUBLISH, _DispatchMode.PRESENTATION}
 
 
+class _FrameSuperseded(RuntimeError):
+    """A data frame's commit found the session context had moved past it.
+
+    Flow control, not failure: the producer's next revision (or the
+    scheduler's next tick) renders against the new context and heals the
+    panel.  The pair pipeline reports it as a cancelled future so consumers
+    treat it exactly like a coalesced frame.
+    """
+
+
+@dataclass(slots=True)
+class _QueuedDataFrame:
+    """The latest-only next pair waiting for the in-flight pair to finish."""
+
+    data: object
+    revision: int | None
+    completion: Future["RasterOperation[None]"]
+
+
 _CoalesceResolver = Callable[[tuple[Any, ...], Mapping[str, Any]], object | None]
 
 
@@ -366,32 +385,8 @@ class _WorkerSessionAdapter:
     def defaults(self) -> PlotLibraryDefaults:
         return self._host.defaults
 
-    def update_data(
-        self,
-        data: object,
-        *,
-        revision: int | None = None,
-        refresh_interval_ms: int | None = None,
-    ) -> object:
-        return self._session().update_data(
-            data,
-            revision=revision,
-            refresh_interval_ms=refresh_interval_ms,
-        )
-
     def update_image_overlay(self, overlay: object) -> object:
         return self._session().update_image_overlay(overlay)
-
-    def update_image_frame(
-        self,
-        frame: object,
-        *,
-        refresh_interval_ms: int | None = None,
-    ) -> object:
-        return self._session().update_image_frame(
-            frame,
-            refresh_interval_ms=refresh_interval_ms,
-        )
 
     def set_parameter(self, name: str, value: object) -> object:
         return self._session().set_parameter(name, value)
@@ -550,11 +545,22 @@ class _WorkerSessionAdapter:
             cancelled=cancelled,
         )
 
-    def commit_live_frame(self, prepared: object) -> object | None:
-        return self._session().commit_live_frame(prepared)
+    def solve_live_frame(self, prepared: object) -> Future[object] | None:
+        # Deliberately no worker-thread assertion: solving happens on the fit
+        # executor, and submitting is lock-protected session state access —
+        # the pair pipeline calls this from whichever thread completed the
+        # preparation.
+        return self._host._require_session().solve_live_frame(prepared)
 
-    def finalize_live_frame(self, finalization: object) -> None:
-        self._session().finalize_live_frame(finalization)
+    def commit_live_frame(
+        self,
+        prepared: object,
+        solved: object | None = None,
+    ) -> object | None:
+        return self._session().commit_live_frame(prepared, solved)
+
+    def publish_live_frame(self, finalization: object) -> None:
+        self._session().publish_live_frame(finalization)
 
     def abort_live_frame(self, finalization: object) -> None:
         self._session().abort_live_frame(finalization)
@@ -612,6 +618,13 @@ class RasterPlotHost:
         self._worker_adapter = _WorkerSessionAdapter(self)
         self._condition = Condition(Lock())
         self._pending: deque[_WorkerTask] = deque()
+        #: The pair pipeline: at most one data frame travels
+        #: prepare -> solve -> commit at a time, and at most one newer frame
+        #: waits its turn.  A newer producer revision replaces the QUEUED
+        #: frame only — the in-flight pair always runs to completion, which is
+        #: what keeps fit-armed panels pairing when solve > producer period.
+        self._frame_inflight = False
+        self._frame_queued: _QueuedDataFrame | None = None
         #: Wheel ticks accumulated across coalesced scroll tasks.  The one
         #: surviving scroll task drains the whole sum, so a fast wheel burst
         #: renders once with the combined magnitude instead of queueing one
@@ -1152,16 +1165,17 @@ class RasterPlotHost:
         data: object,
         *,
         revision: int | None = None,
-        refresh_interval_ms: int | None = None,
     ) -> Future[RasterOperation[None]]:
-        return self._dispatch_session(
-            self._worker_adapter.update_data,
-            data,
-            revision=revision,
-            refresh_interval_ms=refresh_interval_ms,
-            _mode=_DispatchMode.PUBLISH,
-            coalesce_key="data",
-        )
+        """Present one data frame as a complete pair through the pipeline.
+
+        The frame travels prepare (projection, off-worker) -> solve (armed
+        live fit, fit executor) -> commit (paint data + overlay + capture,
+        one short worker item).  The returned future resolves when the
+        committed front is promoted; a frame replaced by a newer one while
+        queued resolves cancelled, exactly like the old coalesced task.
+        """
+
+        return self._enqueue_data_frame(data, revision)
 
     def update_image_overlay(
         self,
@@ -1179,18 +1193,208 @@ class RasterPlotHost:
     def update_image_frame(
         self,
         frame: "ImageFrame",
-        *,
-        refresh_interval_ms: int | None = None,
-    ) -> Future[RasterOperation["ImageFrame"]]:
-        """Coalesce complete image frames on the serial render worker."""
+    ) -> Future[RasterOperation[None]]:
+        """Present one complete image frame through the pair pipeline."""
 
-        return self._dispatch_session(
-            self._worker_adapter.update_image_frame,
-            frame,
-            refresh_interval_ms=refresh_interval_ms,
-            _mode=_DispatchMode.PUBLISH,
-            coalesce_key="data",
+        return self._enqueue_data_frame(frame, None)
+
+    # ---------------------------------------------------------- pair pipeline
+
+    def _enqueue_data_frame(
+        self,
+        data: object,
+        revision: int | None,
+    ) -> Future[RasterOperation[None]]:
+        completion: Future[RasterOperation[None]] = Future()
+        superseded: Future[RasterOperation[None]] | None = None
+        start = False
+        with self._condition:
+            if self._closing:
+                completion.set_exception(self._unusable())
+                return completion
+            if self._frame_inflight:
+                queued = self._frame_queued
+                superseded = None if queued is None else queued.completion
+                self._frame_queued = _QueuedDataFrame(data, revision, completion)
+            else:
+                self._frame_inflight = True
+                start = True
+        # Future.cancel() invokes done callbacks synchronously; never under
+        # the queue lock.
+        if superseded is not None:
+            superseded.cancel()
+        if start:
+            self._begin_data_frame(data, revision, completion)
+        return completion
+
+    def _begin_data_frame(
+        self,
+        data: object,
+        revision: int | None,
+        completion: Future[RasterOperation[None]],
+    ) -> None:
+        def stage_prepare() -> Future[object]:
+            return self._require_session().prepare_live_frame(
+                data,
+                revision=revision,
+            )
+
+        dispatched = self._submit(stage_prepare, mode=_DispatchMode.CONTROL)
+        dispatched.add_done_callback(
+            lambda done: self._on_frame_prepare_submitted(done, completion)
         )
+
+    def _on_frame_prepare_submitted(
+        self,
+        dispatched: Future[RasterOperation[Future[object]]],
+        completion: Future[RasterOperation[None]],
+    ) -> None:
+        try:
+            prepare_future = dispatched.result().value
+        except BaseException as error:
+            self._finish_data_frame(completion, error=error)
+            return
+        prepare_future.add_done_callback(
+            lambda done: self._on_frame_prepared(done, completion)
+        )
+
+    def _on_frame_prepared(
+        self,
+        prepare_future: Future[object],
+        completion: Future[RasterOperation[None]],
+    ) -> None:
+        from .fit import FitCancelled
+
+        try:
+            prepared = prepare_future.result()
+        except (FitCancelled, CancelledError):
+            # The preparation was cancelled by a context change (replace_spec,
+            # clear_fit, close); the producer's next revision heals the panel.
+            self._finish_data_frame(completion, cancelled=True)
+            return
+        except BaseException as error:
+            self._finish_data_frame(completion, error=error)
+            return
+        try:
+            solve_future = self._worker_adapter.solve_live_frame(prepared)
+        except BaseException as error:
+            self._finish_data_frame(completion, error=error)
+            return
+        if solve_future is None:
+            self._dispatch_frame_commit(prepared, None, completion)
+            return
+        solve_future.add_done_callback(
+            lambda done: self._on_frame_solved(done, prepared, completion)
+        )
+
+    def _on_frame_solved(
+        self,
+        solve_future: Future[object],
+        prepared: object,
+        completion: Future[RasterOperation[None]],
+    ) -> None:
+        try:
+            solved: object | None = solve_future.result()
+        except BaseException:
+            # Solve futures resolve failures internally; reaching here means
+            # the executor was torn down mid-flight.  Commit data-only.
+            solved = None
+        self._dispatch_frame_commit(prepared, solved, completion)
+
+    def _dispatch_frame_commit(
+        self,
+        prepared: object,
+        solved: object | None,
+        completion: Future[RasterOperation[None]],
+    ) -> None:
+        accepted: list[object] = []
+
+        def stage_commit() -> None:
+            finalization = self._worker_adapter.commit_live_frame(
+                prepared,
+                solved,
+            )
+            if finalization is None:
+                raise _FrameSuperseded(
+                    "live frame superseded before presentation"
+                )
+            accepted.append(finalization)
+
+        def published() -> None:
+            if accepted:
+                self._worker_adapter.publish_live_frame(accepted[0])
+
+        def abort() -> None:
+            if accepted:
+                try:
+                    self._worker_adapter.abort_live_frame(accepted[0])
+                except Exception:
+                    pass
+
+        dispatched = self._submit(
+            stage_commit,
+            mode=_DispatchMode.PRESENTATION,
+            after_publish=published,
+            on_abort=abort,
+        )
+        dispatched.add_done_callback(
+            lambda done: self._on_frame_committed(done, completion)
+        )
+
+    def _on_frame_committed(
+        self,
+        dispatched: Future[RasterOperation[None]],
+        completion: Future[RasterOperation[None]],
+    ) -> None:
+        try:
+            operation = dispatched.result()
+        except (_FrameSuperseded, CancelledError):
+            self._finish_data_frame(completion, cancelled=True)
+            return
+        except BaseException as error:
+            self._finish_data_frame(completion, error=error)
+            return
+        self._finish_data_frame(completion, operation=operation)
+
+    def _finish_data_frame(
+        self,
+        completion: Future[RasterOperation[None]],
+        *,
+        operation: RasterOperation[None] | None = None,
+        error: BaseException | None = None,
+        cancelled: bool = False,
+    ) -> None:
+        with self._condition:
+            closing = self._closing
+        try:
+            if cancelled or (error is not None and closing):
+                completion.cancel()
+            elif error is not None:
+                if not completion.done():
+                    completion.set_exception(error)
+            elif not completion.done():
+                completion.set_result(operation)
+        except InvalidStateError:
+            pass
+        self._advance_data_frame()
+
+    def _advance_data_frame(self) -> None:
+        cancel: Future[RasterOperation[None]] | None = None
+        start: _QueuedDataFrame | None = None
+        with self._condition:
+            queued = self._frame_queued
+            self._frame_queued = None
+            if queued is None:
+                self._frame_inflight = False
+            elif self._closing:
+                self._frame_inflight = False
+                cancel = queued.completion
+            else:
+                start = queued
+        if cancel is not None:
+            cancel.cancel()
+        if start is not None:
+            self._begin_data_frame(start.data, start.revision, start.completion)
 
     def set_parameter(
         self,
@@ -2157,16 +2361,21 @@ class RasterPlotHost:
             if self._closing:
                 thread = self._thread
                 pending: tuple[_WorkerTask, ...] = ()
+                queued_frame: _QueuedDataFrame | None = None
             else:
                 self._closing = True
                 pending = tuple(self._pending)
                 self._pending.clear()
+                queued_frame = self._frame_queued
+                self._frame_queued = None
                 self._front_callbacks.clear()
                 self._condition.notify_all()
                 thread = self._thread
         # See _submit(): cancellation callbacks may re-enter this host.
         for task in pending:
             task.completion.cancel()
+        if queued_frame is not None:
+            queued_frame.completion.cancel()
         if thread is not None and thread is not current_thread():
             thread.join(timeout)
         stopped = thread is None or not thread.is_alive()

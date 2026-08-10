@@ -144,7 +144,10 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
 
         models = host.fit_models().result(timeout=10).value
         assert models
-        host.fit(models[0].model_id, live=True).result(timeout=30)
+        # Arm without blocking, exactly as the console does: the future
+        # resolves at the first accepted pair — the arming solve itself, or
+        # the next frame's pair when new data raced the arming solve.
+        armed = host.fit(models[0].model_id, live=True)
         previous = presented
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -156,10 +159,16 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
                 lambda panel_id: port if panel_id == port.panel_id else None
             )
             presented = port.presented_publication()
-            if presented is not None and presented is not previous:
+            if (
+                armed.done()
+                and presented is not None
+                and presented is not previous
+            ):
                 break
             time.sleep(0.05)
         assert presented is not None and presented is not previous
+        assert armed.done()
+        assert armed.result(timeout=0).value is not None
         assert port.last_error is None
     finally:
         host.close()

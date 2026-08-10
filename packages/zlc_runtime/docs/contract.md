@@ -30,8 +30,6 @@ publish_final(
     outputs: Mapping[str, FinalDatasetOutput],
 ) -> Mapping[str, SignalValue]
 latest_publication(signal_key: str) -> SignalPublication | None
-retain_recent_publications(signal_key: str) -> None
-recent_publication(signal_key: str, revision: int) -> SignalPublication | None
 set_front_signals(signal_names: Iterable[str]) -> None
 attach_latest_only_processor(
     node: LatestProcessorControl,
@@ -58,6 +56,8 @@ close() -> None
 The following narrow lineage and generation seams are also part of the plane
 contract: `direct_parent_publications(publication) ->
 tuple[SignalPublication, ...]` resolves the exact retained parent payloads;
+`follower_edges() -> frozenset[tuple[str, str]]` lists the (source signal,
+follower signal) pairs of live presentation-paced routes;
 `publication_owner(publication) -> object | None` returns an opaque active
 generation token; and `withdraw_processor(control) -> None` removes a
 latest-only processor binding after its lane has acknowledged cancellation or
@@ -80,22 +80,38 @@ component: the source waits for the follower that waits for the source's
 next presentation.  Autonomous processors (occupancy, committed-selection
 recuts) stay `coherent=True` and are exactly what same-shot holding is for.
 
-A follower also PUBLISHES trailing: at live cadence a fit for shot N is
-accepted when the route is already at N+1.  `retain_recent_publications`
-declares a short strong per-route window (the retainer declares retention —
-unrequested routes keep the weak payload-lifetime contract), and
-`recent_publication` resolves the exact publication a trailing result
-derived from, so every accepted fit publishes with a truthful parent
-(fit@N names camera@N) instead of being dropped for no longer being
-current.  `publish_processor` accepts any issued same-generation parent
-whose sequence does not regress.
+A follower can PUBLISH trailing: a fit for shot N may be accepted when the
+route is already at N+1.  Its exact parent is resolved by PROVENANCE, not
+retention: the panel port that rendered the fit still holds publication N
+(pending or presented — the accept fired inside revision N's own commit),
+and `SelectionBridge(..., source_publication_for=resolver)` asks that port
+by data revision.  Every accepted fit publishes with a truthful parent
+(fit@N names camera@N); the plane keeps its weak payload-lifetime contract
+with no retention window.  A fit signal's dataset revision is the bridge's
+own strictly-increasing batch counter, so follower consumers (a rolling
+trace) always see advancing revisions.  `publish_processor` accepts any
+issued same-generation parent whose sequence does not regress.
 
-The scheduler batches presents only for multi-signal lineage components.
-Ports whose signal stands alone — including several views of ONE signal —
-schedule per panel at their own display intervals: the front already serves
-every view one publication per signal, and welding same-signal views into
-one batch turned one slow view's coalesced render into the whole board's
-abandoned batch.
+Presentation is SHOT-COHORT based: one lineage group shows one shot number
+on screen and flips as one.  Every display tick the scheduler stages each
+due panel individually and stamps the staged batch with its shot-root set
+(the parentless ancestors reached by walking
+`direct_parent_publications`; unresolvable lineage presents solo).  The
+arbiter assembles equal-root batches into one `_ShotCohort` and presents a
+complete sealed cohort in ONE owner-thread accept pass — several views of
+one signal, a camera and its derived panels, and a panel's own fit trace
+all flip together.  A superseded member abandons the WHOLE cohort (the
+group skips to the newest shot together, never half a board one shot
+ahead); cohorts sharing a panel present strictly in formation order, and
+cohorts with disjoint panels never wait on each other, so a slow solo
+panel cannot throttle the board.  When both sides of a follower edge are
+displayed, a cohort holds a join window for exactly those follower panels:
+the follower's batch stages one tick after its source pair's commit, the
+window closes the moment every follower joined (typical cross-panel phase
+≤ 1 beat), and two tick boundaries after the cohort's own work completed
+serve as the fallback for a follower that never stages (a not-due slow
+panel must not hold its shot open).  `tick_boundary()` is called by the
+scheduler at the end of every tick and is what advances these windows.
 
 Continuous derived sibling bundles use one stable binding and one explicit
 lineage publication path:
@@ -250,6 +266,7 @@ SelectionBridge(
     selection_data: SelectionDataReader,
     *,
     bridge_id: str,
+    source_publication_for: Callable[[int], SignalPublication | None] | None = None,
 ) -> SelectionBridge
 start() -> None
 close() -> None
@@ -260,6 +277,13 @@ subscribes to both event streams. `UPDATED` is ignored. `COMMITTED` performs
 one immediate cut; each later source publication performs a latest-only
 re-cut. `REMOVED` withdraws the derived generation; a later committed state
 may create it again. Close unsubscribes and retires all bridge outputs.
+`source_publication_for` resolves a fit's exact parent publication by data
+revision: the panel port that rendered the fit is the deterministic causal
+holder (the accept fires inside that revision's own commit), so the console
+passes its port's `publication_for_revision`.  Without a resolver the bridge
+accepts only a fit whose revision still matches the current publication; a
+fit trailing a panel that already advanced is superseded flow control and is
+dropped silently.
 
 For an image `area`, the bridge publishes
 `@logic/{bridge_id}/roi_frame` (the selected 2-D role-axis sub-box) and

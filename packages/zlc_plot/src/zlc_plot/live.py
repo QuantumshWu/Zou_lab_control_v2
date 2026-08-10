@@ -177,22 +177,6 @@ class _LatestPlotIngress(
                     raise ValueError("live payload schema differs from ingress schema")
             return self._accept_item_locked(revision, payload)
 
-@dataclass(frozen=True, slots=True)
-class _PacedLiveFrame:
-    """A prepared live frame paired with the controller's actual cadence.
-
-    The commit-time synchronous fit budget must reflect the refresh interval
-    the controller is really running at (any preset from
-    ``defaults.live.refresh_intervals_ms``), not the library default.  Host
-    adapters forward the prepared object opaquely between ``prepare`` and
-    ``commit``, so the cadence travels inside it: ``commit_live_frame``
-    unwraps this envelope and hands the interval to the commit-time budget.
-    """
-
-    prepared: object
-    refresh_interval_ms: int
-
-
 class _LiveSession(Protocol):
     """Minimal session surface required by :class:`LivePlotController`."""
 
@@ -207,9 +191,15 @@ class _LiveSession(Protocol):
         cancelled: Callable[[], bool] | None = None,
     ) -> Future[object]: ...
 
-    def commit_live_frame(self, prepared: object) -> object | None: ...
+    def solve_live_frame(self, prepared: object) -> Future[object] | None: ...
 
-    def finalize_live_frame(self, finalization: object) -> None: ...
+    def commit_live_frame(
+        self,
+        prepared: object,
+        solved: object | None = None,
+    ) -> object | None: ...
+
+    def publish_live_frame(self, finalization: object) -> None: ...
 
     def abort_live_frame(self, finalization: object) -> None: ...
 
@@ -311,8 +301,9 @@ class LivePlotController:
     ) -> None:
         for method_name in (
             "prepare_live_frame",
+            "solve_live_frame",
             "commit_live_frame",
-            "finalize_live_frame",
+            "publish_live_frame",
             "abort_live_frame",
         ):
             if not callable(getattr(session, method_name, None)):
@@ -646,13 +637,27 @@ class LivePlotController:
                 raise _StoppedDispatch("live-frame preparation stopped") from error
             raise _RetryLiveFrame("live-frame context changed during preparation") from error
 
+        # The fit half of the pair: solved to completion on the fit executor
+        # before the commit is dispatched, so the committed front is born
+        # complete.  The controller thread is the natural place to wait — the
+        # render worker stays free for interaction while the solver runs.
+        solved: object | None = None
+        solve_future = self._session.solve_live_frame(prepared_frame)
+        if solve_future is not None:
+            if not isinstance(solve_future, Future):
+                raise TypeError(
+                    "solve_live_frame must return concurrent.futures.Future or None"
+                )
+            solved = self._wait_for_future(solve_future)
+
         accepted: list[object] = []
 
         def commit() -> None:
             if self._stop_event.is_set():
                 raise _StoppedDispatch("live-frame commit reached its owner after shutdown")
             finalization = self._session.commit_live_frame(
-                _PacedLiveFrame(prepared_frame, self.refresh_interval_ms)
+                prepared_frame,
+                solved,
             )
             if finalization is None:
                 raise _RetryLiveFrame(
@@ -660,10 +665,9 @@ class LivePlotController:
                 )
             accepted.append(finalization)
 
-        def finalize() -> None:
-            if len(accepted) != 1:
-                raise RuntimeError("live-frame presentation has no finalization")
-            self._session.finalize_live_frame(accepted[0])
+        def published() -> None:
+            if len(accepted) == 1:
+                self._session.publish_live_frame(accepted[0])
 
         def abort() -> None:
             if len(accepted) == 1:
@@ -671,13 +675,13 @@ class LivePlotController:
 
         presentation_dispatch = self._presentation_dispatch
         if presentation_dispatch is None:
-            def present_and_finalize() -> None:
+            def present_and_publish() -> None:
                 commit()
-                finalize()
+                published()
 
-            self._dispatch_and_wait(self._dispatch, present_and_finalize)
+            self._dispatch_and_wait(self._dispatch, present_and_publish)
             return
-        dispatched = presentation_dispatch(commit, finalize, abort)
+        dispatched = presentation_dispatch(commit, published, abort)
         if not isinstance(dispatched, Future):
             raise TypeError(
                 "presentation_dispatch must return concurrent.futures.Future"

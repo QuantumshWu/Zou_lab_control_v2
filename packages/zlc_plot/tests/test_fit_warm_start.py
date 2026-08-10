@@ -17,8 +17,7 @@ from zlc_plot import (
     PlotSession,
 )
 from zlc_plot.fit import FacetFitBatchResult, FitResult
-from zlc_plot.fit import FitDeadlineExceeded, FitEngine
-from zlc_plot.live import _PacedLiveFrame
+from zlc_plot.fit import FitDeadlineExceeded, FitEngine, FitOptions
 
 
 class _RecordingFitEngine(FitEngine):
@@ -77,17 +76,22 @@ def _present_and_wait(
     snapshot: DatasetSnapshot,
     revision: int,
 ) -> FitResult | FacetFitBatchResult:
+    """Drive one complete data/fit pair through the live protocol.
+
+    The commit installs data@N and fit@N together, so the accepted result is
+    available synchronously afterwards — no finalize step, no polling.
+    """
+
     prepared = session.prepare_live_frame(snapshot).result(timeout=10.0)
-    finalization = session.commit_live_frame(prepared)
+    solve = session.solve_live_frame(prepared)
+    solved = None if solve is None else solve.result(timeout=10.0)
+    finalization = session.commit_live_frame(prepared, solved)
     assert finalization is not None
-    session.finalize_live_frame(finalization)
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        result = session.last_fit
-        if result is not None and result.source_revision == revision:
-            return result
-        time.sleep(0.005)
-    raise AssertionError(f"fit revision {revision} was not accepted")
+    result = session.last_fit
+    assert result is not None and result.source_revision == revision, (
+        f"fit revision {revision} was not accepted with its own data frame"
+    )
+    return result
 
 
 def test_live_facet_revision_reuses_last_accepted_cell_parameters() -> None:
@@ -194,7 +198,7 @@ def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
 
 
 def test_live_fit_overlay_lands_in_the_same_committed_front() -> None:
-    """The armed live fit solves inside commit: no finalize, no polling."""
+    """A fit-armed frame is a pair: data@N and fit@N install in one commit."""
 
     session = PlotSession(
         _dense_facet_snapshot(),
@@ -203,18 +207,13 @@ def test_live_fit_overlay_lands_in_the_same_committed_front() -> None:
     try:
         first = session.fit("gaussian_offset", live=True)
         assert first.success
-        prepared = session.prepare_live_frame(
-            _dense_facet_snapshot(revision=1, scale=1.001)
-        ).result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared)
-        assert finalization is not None
-        accepted = session.last_fit
+        accepted = _present_and_wait(
+            session,
+            _dense_facet_snapshot(revision=1, scale=1.001),
+            1,
+        )
         assert isinstance(accepted, FitResult)
-        assert accepted.source_revision == 1
         assert session.fit_status == "current"
-        # finalize must not schedule a second solve for the same front
-        session.finalize_live_frame(finalization)
-        assert session.last_fit is accepted
     finally:
         session.close()
 
@@ -235,8 +234,12 @@ class _DeadlineOnceFitEngine(_RecordingFitEngine):
         return super().fit(model, coordinates, observations, **kwargs)
 
 
-def test_live_fit_deadline_falls_back_to_the_async_path() -> None:
-    """A deadline publishes the data front and the executor finishes the fit."""
+def test_deadline_exceeded_pair_commits_data_only_and_next_revision_retries() -> None:
+    """A pair whose solve hits a deadline never half-shows a stale overlay.
+
+    The frame commits honestly data-only, and the next data revision is the
+    only automatic retry — where the pair lands complete again.
+    """
 
     engine = _DeadlineOnceFitEngine()
     session = PlotSession(
@@ -251,21 +254,18 @@ def test_live_fit_deadline_falls_back_to_the_async_path() -> None:
         prepared = session.prepare_live_frame(
             _dense_facet_snapshot(revision=1, scale=1.001)
         ).result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared)
+        solve = session.solve_live_frame(prepared)
+        assert solve is not None
+        solved = solve.result(timeout=10.0)
+        finalization = session.commit_live_frame(prepared, solved)
         assert finalization is not None
-        # The synchronous attempt hit its deadline: the data front published
-        # without a revision-1 overlay.
-        lagging = session.last_fit
-        assert isinstance(lagging, FitResult)
-        assert lagging.source_revision == 0
-        session.finalize_live_frame(finalization)
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            result = session.last_fit
-            if result is not None and result.source_revision == 1:
-                break
-            time.sleep(0.005)
-        assert session.last_fit.source_revision == 1
+        # Data-only: the revision-0 overlay did not ride into revision 1.
+        assert session.last_fit is None
+        _present_and_wait(
+            session,
+            _dense_facet_snapshot(revision=2, scale=1.002),
+            2,
+        )
     finally:
         session.close()
 
@@ -461,32 +461,29 @@ def test_chi_square_blowup_drops_the_remembered_seed() -> None:
         session.close()
 
 
-# --- commit-time budget follows the controller's actual cadence -------------
+# --- the pair solve runs unbudgeted; only caller deadlines apply -------------
 
 
-class _PacedFitEngine(_RecordingFitEngine):
-    """Honor commit deadlines like the real solver, at a scripted duration."""
+def test_pair_solves_carry_no_library_deadline() -> None:
+    """The pair engine solves to completion: no cadence budget exists.
 
-    def __init__(self, solve_seconds: float) -> None:
-        super().__init__()
-        self.solve_seconds = solve_seconds
-        self.deadlines: list[float | None] = []
+    A caller-authored ``FitOptions.deadline_seconds`` still travels with the
+    request; without one, the solver sees no deadline at all.
+    """
 
-    def fit(self, model, coordinates, observations=None, **kwargs):  # type: ignore[no-untyped-def]
-        options = kwargs.get("options")
-        deadline = None if options is None else options.deadline_seconds
-        self.deadlines.append(deadline)
-        if deadline is not None:
-            if deadline < self.solve_seconds:
-                raise FitDeadlineExceeded("scripted solve exceeds the budget")
-            time.sleep(self.solve_seconds)
-        return super().fit(model, coordinates, observations, **kwargs)
+    class _DeadlineRecorder(_RecordingFitEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deadlines: list[float | None] = []
 
+        def fit(self, model, coordinates, observations=None, **kwargs):  # type: ignore[no-untyped-def]
+            options = kwargs.get("options")
+            self.deadlines.append(
+                None if options is None else options.deadline_seconds
+            )
+            return super().fit(model, coordinates, observations, **kwargs)
 
-def test_slow_solve_lands_same_frame_at_a_wide_cadence() -> None:
-    """At a 400 ms cadence a ~150 ms solve must not be aborted to async."""
-
-    engine = _PacedFitEngine(solve_seconds=0.15)
+    engine = _DeadlineRecorder()
     session = PlotSession(
         _dense_facet_snapshot(),
         CurvePlot(AxisRef.point("x")),
@@ -494,49 +491,27 @@ def test_slow_solve_lands_same_frame_at_a_wide_cadence() -> None:
     )
     try:
         assert session.fit("gaussian_offset", live=True).success
-        prepared = session.prepare_live_frame(
-            _dense_facet_snapshot(revision=1, scale=1.001)
-        ).result(timeout=10.0)
-        finalization = session.commit_live_frame(_PacedLiveFrame(prepared, 400))
-        assert finalization is not None
-        accepted = session.last_fit
-        assert isinstance(accepted, FitResult)
-        assert accepted.source_revision == 1, "solve was aborted to async"
-        assert engine.deadlines[-1] is not None and engine.deadlines[-1] > 0.15
-        session.finalize_live_frame(finalization)
-        assert session.last_fit is accepted
-    finally:
-        session.close()
+        assert engine.deadlines == [None]
+        _present_and_wait(
+            session,
+            _dense_facet_snapshot(revision=1, scale=1.001),
+            1,
+        )
+        assert engine.deadlines == [None, None]
 
-
-def test_slow_solve_still_defers_to_async_at_the_default_cadence() -> None:
-    """Without a paced envelope the 100 ms default budget aborts the solve."""
-
-    engine = _PacedFitEngine(solve_seconds=0.15)
-    session = PlotSession(
-        _dense_facet_snapshot(),
-        CurvePlot(AxisRef.point("x")),
-        fit_engine=engine,
-    )
-    try:
-        assert session.fit("gaussian_offset", live=True).success
-        prepared = session.prepare_live_frame(
-            _dense_facet_snapshot(revision=1, scale=1.001)
-        ).result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared)
-        assert finalization is not None
-        assert engine.deadlines[-1] is not None and engine.deadlines[-1] <= 0.1
-        lagging = session.last_fit
-        assert isinstance(lagging, FitResult)
-        assert lagging.source_revision == 0
-        session.finalize_live_frame(finalization)
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            result = session.last_fit
-            if result is not None and result.source_revision == 1:
-                break
-            time.sleep(0.005)
-        assert session.last_fit.source_revision == 1
+        session.clear_fit()
+        assert session.fit(
+            "gaussian_offset",
+            live=True,
+            options=FitOptions(deadline_seconds=2.5),
+        ).success
+        assert engine.deadlines[-1] == 2.5
+        _present_and_wait(
+            session,
+            _dense_facet_snapshot(revision=2, scale=1.002),
+            2,
+        )
+        assert engine.deadlines[-1] == 2.5
     finally:
         session.close()
 
@@ -555,13 +530,14 @@ def test_fit_warm_cache_is_cleared_after_solver_exception() -> None:
         prepared = session.prepare_live_frame(
             _dense_facet_snapshot(revision=1, scale=1.001)
         ).result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared)
+        solve = session.solve_live_frame(prepared)
+        assert solve is not None
+        solved = solve.result(timeout=10.0)
+        finalization = session.commit_live_frame(prepared, solved)
         assert finalization is not None
-        session.finalize_live_frame(finalization)
-        deadline = time.monotonic() + 10.0
-        while engine.fail_next and time.monotonic() < deadline:
-            time.sleep(0.005)
+        # The failed pair committed data-only and dropped the poisoned seeds.
         assert not engine.fail_next
+        assert session.last_fit is None
         _present_and_wait(
             session,
             _dense_facet_snapshot(revision=2, scale=1.002),

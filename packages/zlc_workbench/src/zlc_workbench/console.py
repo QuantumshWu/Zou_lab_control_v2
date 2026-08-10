@@ -2479,6 +2479,14 @@ class ConsolePresenter:
             binding.host,
             binding.signal,
             bridge_id=binding.panel_id,
+            # The panel's port holds a fit's exact parent publication
+            # (pending or presented) at accept time; resolve lazily so a
+            # port attached after this bridge still answers.
+            source_publication_for=lambda revision: (
+                None
+                if binding.port is None
+                else binding.port.publication_for_revision(revision)
+            ),
             on_committed=lambda selection: self._enqueue_panel_selection(
                 binding.panel_id, selection
             ),

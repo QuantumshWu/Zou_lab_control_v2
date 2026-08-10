@@ -787,12 +787,12 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
 def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
     """A fit accepted AFTER its source advanced still publishes, honestly.
 
-    The fit trails its source by construction: at 10 Hz a fit for shot N is
-    accepted while the camera already published N+1.  Demanding the parent
-    still be current silently dropped most accepted fits -- a rolling trace
-    of the fit saw an occasional point while the panel overlay updated
-    every shot.  The plane's recent-publication window resolves the EXACT
-    parent, so lineage stays truthful: fit@N names camera@N.
+    The fit trails its source by construction: at 10 Hz a fit for shot N can
+    be accepted while the camera already published N+1.  The panel port that
+    rendered the fit is the causal holder of its exact parent publication
+    (the accept fires inside revision N's own commit), so the bridge asks
+    the port's resolver — never a plane-side retention window — and lineage
+    stays truthful: fit@N names camera@N.
     """
 
     schema = _curve_schema()
@@ -800,9 +800,29 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/trail/center"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="trail")
+
+    # The port's role in miniature: it holds every publication it staged or
+    # presented, keyed by the data revision the renderer saw.
+    held: dict[int, object] = {}
+
+    def remember_current() -> None:
+        publication = plane.latest_publication("camera/frame")
+        assert publication is not None
+        value = publication.value("camera/frame")
+        assert value is not None
+        held[value.snapshot.ref.revision.value] = publication
+
+    bridge = SelectionBridge(
+        plane,
+        "camera/frame",
+        events,
+        events,
+        bridge_id="trail",
+        source_publication_for=lambda revision: held.get(revision),
+    )
     bridge.start()
     try:
+        remember_current()
         # The camera advances to revision 2 BEFORE the fit of revision 1
         # arrives -- the live-cadence ordering.
         state["frame"] = LiveDatasetOutput(
@@ -812,6 +832,7 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
         )
         plane.mark_changed(source, slot)
         plane.freeze()
+        remember_current()
 
         events.emit_fit(_batch_fit_event(source_revision=1, batch_revision=1))
         assert bridge.last_error is None
@@ -828,8 +849,7 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
         second = plane.freeze().publication("@logic/trail/center")
         assert second.direct_parent_refs[0].sequence == 2
 
-        # A revision that already left the plane's retained window reports,
-        # not silently vanishes.
+        # A revision no panel ever held reports, not silently vanishes.
         events.emit_fit(_batch_fit_event(source_revision=77, batch_revision=3))
         assert bridge.last_error is not None
     finally:

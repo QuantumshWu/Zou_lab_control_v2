@@ -38,7 +38,6 @@ def test_prepare_commit_abort_is_atomic_and_abort_restores_front() -> None:
         prepared = session.prepare_live_frame(_snap(1)).result(timeout=10)
         finalization = session.commit_live_frame(prepared)
         assert finalization is not None
-        session.finalize_live_frame(finalization)
         assert session.data_revision == 1
     finally:
         session.close()

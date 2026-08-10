@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from threading import Event
-import time
 
 import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot import DEFAULTS
-from zlc_plot.live import LivePlotController, _PacedLiveFrame
+from zlc_plot.live import LivePlotController
 
 
 def _snapshot(revision: int) -> DatasetSnapshot:
@@ -24,14 +23,21 @@ def _snapshot(revision: int) -> DatasetSnapshot:
 class FakeSession:
     defaults = DEFAULTS
 
-    def __init__(self, *, block_prepare: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        block_prepare: bool = False,
+        armed: bool = False,
+    ) -> None:
         self.data_revision = 0
         self.prepared: list[int] = []
         self.presented: list[int] = []
-        self.commit_intervals_ms: list[int] = []
+        self.solved: list[int] = []
+        self.committed_pairs: list[tuple[int, object | None]] = []
         self.prepare_started = Event()
         self.prepare_future: Future[object] | None = None
         self.block_prepare = block_prepare
+        self.armed = armed
 
     def prepare_live_frame(self, data, *, revision=None, cancelled=None):
         self.prepare_started.set()
@@ -42,19 +48,25 @@ class FakeSession:
         future.set_result((int(revision), data))
         return future
 
-    def commit_live_frame(self, prepared):
-        # The controller wraps every prepared frame in a paced envelope
-        # carrying its actual refresh cadence.
-        assert isinstance(prepared, _PacedLiveFrame)
-        self.commit_intervals_ms.append(prepared.refresh_interval_ms)
-        revision, _data = prepared.prepared
+    def solve_live_frame(self, prepared):
+        if not self.armed:
+            return None
+        revision, _data = prepared
+        self.solved.append(int(revision))
+        future: Future[object] = Future()
+        future.set_result(("fit", int(revision)))
+        return future
+
+    def commit_live_frame(self, prepared, solved=None):
+        revision, _data = prepared
+        self.committed_pairs.append((int(revision), solved))
         if revision <= self.data_revision:
             return None
         self.data_revision = revision
         self.prepared.append(revision)
         return revision
 
-    def finalize_live_frame(self, finalization):
+    def publish_live_frame(self, finalization):
         self.presented.append(int(finalization))
 
     def abort_live_frame(self, finalization):
@@ -77,19 +89,28 @@ def test_controller_pump_is_latest_only_and_records_metrics() -> None:
         controller.close()
 
 
-def test_controller_commit_carries_its_actual_refresh_interval() -> None:
-    """Each commit receives the cadence the controller is running at."""
+def test_controller_commits_the_solved_pair_for_an_armed_session() -> None:
+    """The commit receives the solved fit half beside its prepared data."""
 
-    session = FakeSession()
-    controller = LivePlotController(session, _snapshot(0), refresh_interval_ms=400)
+    session = FakeSession(armed=True)
+    controller = LivePlotController(session, _snapshot(0), refresh_interval_ms=100)
     try:
         controller.publish(_snapshot(1))
         assert controller.pump_once() is True
-        assert session.commit_intervals_ms == [400]
-        controller.set_refresh_interval(200)
-        controller.publish(_snapshot(2))
+        assert session.solved == [1]
+        assert session.committed_pairs == [(1, ("fit", 1))]
+    finally:
+        controller.close()
+
+
+def test_controller_commits_data_only_when_no_fit_is_armed() -> None:
+    session = FakeSession(armed=False)
+    controller = LivePlotController(session, _snapshot(0), refresh_interval_ms=100)
+    try:
+        controller.publish(_snapshot(1))
         assert controller.pump_once() is True
-        assert session.commit_intervals_ms == [400, 200]
+        assert session.solved == []
+        assert session.committed_pairs == [(1, None)]
     finally:
         controller.close()
 

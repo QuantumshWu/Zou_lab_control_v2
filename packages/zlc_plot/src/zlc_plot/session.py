@@ -8,7 +8,6 @@ from enum import Enum
 from numbers import Integral, Real
 from pathlib import Path
 from threading import Event, RLock, current_thread
-from time import monotonic
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence, TypeAlias, TypeVar
 import math
@@ -478,6 +477,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             thread_name_prefix=_LIVE_PREPARE_THREAD_PREFIX,
         )
         self._fit_cancel = Event()
+        #: Request-scoped cancellation for live pair solves.  Set only on
+        #: re-arm, replace_spec, and close: an in-flight pair always runs to
+        #: completion under data pressure (newer frames replace the queued
+        #: pair, never the running one), so pairing survives solve > period.
+        self._live_fit_cancel = Event()
         self._live_prepare_cancel = Event()
         self._live_prepare_future: Future[_PreparedLiveFrame] | None = None
         self._fit_context_generation = 0
@@ -2175,6 +2179,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
                 self._fit_cancel.set()
+                self._live_fit_cancel.set()
+                self._live_fit_cancel = Event()
                 self._live_prepare_cancel.set()
                 completion = self._live_fit_completion
                 self._live_fit_completion = None
@@ -2539,30 +2545,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         data: PlotInput,
         *,
         revision: int | None = None,
-        refresh_interval_ms: int | None = None,
     ) -> None:
         """Present new data, optionally preserving a producer-owned revision.
 
         OwnedSnapshot keeps its intrinsic revision. PulseTimeline callers may
         provide the revision from a live transport envelope; direct
         calls without one advance the current session revision by exactly one.
-        An armed live fit solves inside this presentation under the caller's
-        refresh cadence (``refresh_interval_ms``, the library default when
-        omitted), so an in-budget overlay lands in the same front as its
-        data; on deadline the front presents without it and the asynchronous
-        restart takes over — the same contract the live-controller commit
-        path keeps.
+        An armed live fit makes this frame a pair: the solve runs to
+        completion on the caller thread and the overlay is accepted into the
+        same presented front as its data — the frame is born complete.
+        Hosted panels pipeline the same pair off the render worker through
+        ``prepare_live_frame``/``solve_live_frame``/``commit_live_frame``.
         """
 
-        update_started = monotonic()
-        if refresh_interval_ms is not None:
-            if isinstance(refresh_interval_ms, bool) or not isinstance(
-                refresh_interval_ms, Integral
-            ):
-                raise TypeError("refresh_interval_ms must be an integer or None")
-            if int(refresh_interval_ms) <= 0:
-                raise ValueError("refresh_interval_ms must be positive")
-            refresh_interval_ms = int(refresh_interval_ms)
         data, image_frame = self._split_image_frame(data, self._spec)
         image_overlay = _UNSET if image_frame is None else image_frame.overlay
         FitProjection._validate_input(data, self._spec)
@@ -2627,19 +2622,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if image_overlay is _UNSET
                     else image_overlay
                 )
-                accepted_fit = (
-                    self._accepted_fit
-                    if self._live_fit_request is not None
-                    else None
-                )
+            # The previous revision's overlay never rides into this frame:
+            # the pair's own fit is accepted below, or the frame is honestly
+            # data-only.  One shot on screen is one shot throughout.
             self._present_projection_transaction(
                 projection,
                 image_overlay=accepted_overlay,
-                accepted_fit=accepted_fit,
+                accepted_fit=None,
             )
-            live_fit_work = self._run_live_fit_in_commit(
-                update_started,
-                refresh_interval_ms,
+            started = self._pair_started(self._projected)
+            live_fit_work = (
+                None
+                if started is None
+                else self._accept_pair_fit(self._solve_live_pair(started))
             )
         if live_fit_work is not None:
             # Futures and observer callbacks resolve only after the render
@@ -2650,21 +2645,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._resolve_fit_completion(resolution)
             if fit_event is not None:
                 self._notify_fit(fit_event)
-        self._restart_live_fit_for_current_data()
 
-    def update_image_frame(
-        self,
-        frame: ImageFrame,
-        *,
-        refresh_interval_ms: int | None = None,
-    ) -> ImageFrame:
+    def update_image_frame(self, frame: ImageFrame) -> ImageFrame:
         """Present image data and its point layer in one render transaction."""
 
         if not isinstance(frame, ImageFrame):
             raise TypeError("frame must be ImageFrame")
         if not isinstance(self._spec, ImagePlot):
             raise TypeError("ImageFrame requires ImagePlot")
-        self.update_data(frame, refresh_interval_ms=refresh_interval_ms)
+        self.update_data(frame)
         return frame
 
     @property
@@ -3258,6 +3247,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._accepted_fit,
                 )
                 fit_cancel = self._fit_cancel
+                live_fit_cancel = self._live_fit_cancel
                 live_prepare_cancel = self._live_prepare_cancel
                 request = self._live_fit_request
                 bound_request = bool(
@@ -3271,8 +3261,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if affects_fit:
                     self._fit_context_generation += 1
                     if bound_request:
+                        # Removing the bound selector un-arms the live fit —
+                        # a request replacement, so the pair token turns over.
                         self._fit_request_generation += 1
                         self._fit_warm_starts.clear()
+                        self._live_fit_cancel = Event()
                         cancelled_fit = self._live_fit_completion
                         self._live_fit_completion = None
                         self._live_fit_request = None
@@ -3307,6 +3300,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if affects_fit:
                 fit_cancel.set()
                 if bound_request:
+                    live_fit_cancel.set()
                     live_prepare_cancel.set()
         if emit_change:
             self._emit_selection(SelectionChange.REMOVED, state)
@@ -4013,6 +4007,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._closed = True
                 self._cancel_gesture()
                 self._fit_cancel.set()
+                self._live_fit_cancel.set()
                 self._live_prepare_cancel.set()
                 self._fit_context_generation += 1
                 self._fit_request_generation += 1

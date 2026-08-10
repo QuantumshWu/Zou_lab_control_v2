@@ -305,18 +305,30 @@ def attach_selection_bridge(
     source_signal: str,
     *,
     bridge_id: str,
+    source_publication_for: Callable[[int], object | None] | None = None,
     on_committed: Callable[[SelectionState], object] | None = None,
     on_removed: Callable[[SelectionState], object] | None = None,
     on_viewport: Callable[[SelectionState, object | None], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
     """Connect one panel's gestures to the plane, deriving as they commit.
 
+    ``source_publication_for`` resolves a fit's exact parent publication by
+    data revision — the panel port that rendered the fit is the causal
+    holder, so the console passes its port's resolver here.
+
     Returns both so the caller can close them: the bridge outlives any single
     selection, and the subscription outlives the bridge only if it leaks.
     """
 
     source = PlotSelectionSource(host)
-    bridge = SelectionBridge(plane, source_signal, source, source, bridge_id=bridge_id)
+    bridge = SelectionBridge(
+        plane,
+        source_signal,
+        source,
+        source,
+        bridge_id=bridge_id,
+        source_publication_for=source_publication_for,
+    )
     bridge.start()
     if on_committed is not None or on_removed is not None:
         if on_committed is not None and not callable(on_committed):

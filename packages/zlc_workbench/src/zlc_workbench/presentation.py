@@ -130,6 +130,25 @@ class PlotPanelPort:
 
         return self._presented_input
 
+    def publication_for_revision(self, revision: object) -> object | None:
+        """The publication whose snapshot carries ``revision``, if held here.
+
+        A fit accepted by this panel's renderer fires inside revision N's own
+        commit, so N is either still travelling toward the batch (pending) or
+        already on screen (presented).  The port is therefore the
+        deterministic causal holder of a fit publication's exact parent — no
+        plane-side retention window exists or is needed.
+        """
+
+        if revision is None:
+            return None
+        for prepared in self._pending.values():
+            if _revision_of(prepared.plot_input) == revision:
+                return prepared.publication
+        if self._presented is not None and self._shown_revision == revision:
+            return self._presented
+        return None
+
     @property
     def host(self) -> Any:
         return self._host
@@ -235,13 +254,11 @@ class PlotPanelPort:
         serial = self._serial
         self._pending[serial] = _Prepared(publication, plot_input)
         try:
-            # The panel's own cadence is the render budget: a slow panel gets
-            # its whole interval for in-presentation work (an armed live fit),
-            # instead of the library's default budget.
-            future = self._host.update_data(
-                plot_input,
-                refresh_interval_ms=self._interval_ms,
-            )
+            # The host pipelines the frame as a complete pair: projection off
+            # the worker, an armed live fit solved on the fit executor, then
+            # one short paint-and-capture item.  The future resolves when the
+            # complete front is promoted.
+            future = self._host.update_data(plot_input)
         except BaseException:
             self._pending.pop(serial, None)
             raise

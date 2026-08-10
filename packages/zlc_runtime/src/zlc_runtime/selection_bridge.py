@@ -436,6 +436,7 @@ class SelectionBridge:
         selection_data: SelectionDataReader,
         *,
         bridge_id: str,
+        source_publication_for: Callable[[int], object | None] | None = None,
     ) -> None:
         if not isinstance(plane, SignalDataPlane):
             raise TypeError("plane must be SignalDataPlane")
@@ -443,6 +444,10 @@ class SelectionBridge:
             raise TypeError("selection_source must implement SelectionEventSource")
         if not isinstance(selection_data, SelectionDataReader):
             raise TypeError("selection_data must implement SelectionDataReader")
+        if source_publication_for is not None and not callable(
+            source_publication_for
+        ):
+            raise TypeError("source_publication_for must be callable or None")
         source_signal = canonical_text(source_signal, "SelectionBridge source_signal")
         bridge_id = canonical_text(bridge_id, "SelectionBridge bridge_id")
         if "/" in bridge_id or bridge_id.startswith("@"):
@@ -451,6 +456,11 @@ class SelectionBridge:
         self._source_signal = source_signal
         self._selection_source = selection_source
         self._selection_data = selection_data
+        #: Resolves a fit's exact parent publication by data revision.  The
+        #: renderer's panel port is the deterministic causal holder (the fit
+        #: accepted inside that revision's own commit), so provenance comes
+        #: from the presentation side, never from a plane retention window.
+        self._source_publication_for = source_publication_for
         self.bridge_id = bridge_id
         self._lock = RLock()
         self._wake_event = Event()
@@ -513,10 +523,6 @@ class SelectionBridge:
             if self._started:
                 return
             self._started = True
-        # Fits publish trailing (a fit for shot N is accepted after the
-        # route advanced); declare retention up front so their exact parents
-        # stay resolvable by revision.
-        self._plane.retain_recent_publications(self._source_signal)
         subscriptions: list[Callable[[], None]] = []
         try:
             subscriptions.append(
@@ -595,26 +601,47 @@ class SelectionBridge:
         with self._lock:
             if self._closed or not self._started:
                 return
-        # The fit trails its source by construction: by accept time the
-        # route has usually advanced one shot.  Resolve the EXACT parent
-        # the fit derived from out of the plane's recent-publication
-        # window; demanding it still be current dropped most accepted
-        # fits on a live camera (the rolling trace saw an occasional
-        # point while the panel's overlay updated every shot).  Retention
-        # re-declares idempotently: a source generation replaced since
-        # start() gets its window back on the first fit that follows.
-        self._plane.retain_recent_publications(self._source_signal)
-        publication = self._plane.recent_publication(
-            self._source_signal,
-            event.source_revision,
-        )
-        if publication is None:
-            self._record_error(
-                RuntimeError(
-                    "fit event source publication is no longer retained"
+        # The EXACT parent the fit derived from comes from the panel port
+        # that rendered it: the fit accepted inside that revision's own
+        # commit, so the port still holds the publication (pending or
+        # presented).  A bridge without a port (headless benches, tests)
+        # resolves against the current publication when the revision still
+        # matches exactly.
+        publication: SignalPublication | None = None
+        resolver = self._source_publication_for
+        if resolver is not None:
+            candidate = resolver(event.source_revision)
+            if candidate is not None and not isinstance(
+                candidate, SignalPublication
+            ):
+                raise TypeError(
+                    "source_publication_for must return SignalPublication or None"
                 )
-            )
-            return
+            publication = candidate
+        if publication is None:
+            current = self._current_source_publication()
+            current_revision = None
+            if current is not None:
+                value = current.value(self._source_signal)
+                if value is not None:
+                    current_revision = value.snapshot.ref.revision.value
+                    if current_revision == event.source_revision:
+                        publication = current
+            if publication is None:
+                if (
+                    current_revision is not None
+                    and current_revision > event.source_revision
+                ):
+                    # The panel already moved past this fit's shot: the fit
+                    # is superseded flow control, not a failure — the next
+                    # pair publishes a fresher one.
+                    return
+                self._record_error(
+                    RuntimeError(
+                        "fit event source publication is no longer resolvable"
+                    )
+                )
+                return
         source = publication.value(self._source_signal)
         assert source is not None
         with self._lock:

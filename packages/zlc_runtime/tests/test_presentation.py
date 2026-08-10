@@ -143,6 +143,7 @@ class _Port:
         self.fail_prepare = fail_prepare
         self.acceptable = True
         self.updates = []
+        self.pending = []
         self.observed = []
         self.accepted = []
         self.rejected = []
@@ -157,6 +158,12 @@ class _Port:
         if self.fail_prepare:
             self.fail_prepare -= 1
             raise ValueError("synthetic prepare failure")
+        # The real port never hands the same publication to its host twice
+        # while a staged render for it is still travelling toward the batch.
+        if any(
+            update.publication is publication for update in self.pending
+        ):
+            return None
         future = Future()
         update = SurfaceUpdate(
             self.panel_id,
@@ -168,6 +175,7 @@ class _Port:
             False,
         )
         self.updates.append(update)
+        self.pending.append(update)
         self.futures.append(future)
         return update
 
@@ -180,13 +188,19 @@ class _Port:
     def accept(self, update, operation):
         self.presented = update.publication
         self.accepted.append((update, operation))
+        if update in self.pending:
+            self.pending.remove(update)
         return True
 
     def reject(self, update, error):
         self.rejected.append((update, error))
+        if update in self.pending:
+            self.pending.remove(update)
 
     def finish_unpresented(self, update):
         self.finished.append(update)
+        if update in self.pending:
+            self.pending.remove(update)
 
     def report_waiting(self, missing_signal):
         self.waiting.append(missing_signal)
@@ -216,7 +230,9 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
     assert arbiter.pending_batches == 0
 
 
-def test_same_shot_siblings_wait_for_one_global_due_tick_and_commit_together() -> None:
+def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
+    """Sibling signals of one publication present as one atomic cohort."""
+
     first = _front("camera/frame_0")
     first_value = first.value("camera/frame_0")
     assert first_value is not None
@@ -243,7 +259,7 @@ def test_same_shot_siblings_wait_for_one_global_due_tick_and_commit_together() -
         {name: siblings for name in siblings},
     )
     ports = (
-        _Port("first", "camera/frame_0", interval=100),
+        _Port("first", "camera/frame_0", interval=400),
         _Port("second", "camera/frame_1", interval=400),
     )
     channels = OwnerChannels(_Sink())
@@ -260,6 +276,7 @@ def test_same_shot_siblings_wait_for_one_global_due_tick_and_commit_together() -
     assert not ports[0].updates and not ports[1].updates
     scheduler.on_tick()
     assert len(ports[0].updates) == len(ports[1].updates) == 1
+    assert arbiter.pending_batches == 1  # equal shot roots: one cohort
     ports[0].futures[0].set_result("first")
     ports[1].futures[0].set_result("second")
     scheduler.on_owner_turn(lambda: None)
@@ -380,6 +397,8 @@ class _Plane:
         self.front = front
         self.freezes = 0
         self.front_signals: frozenset[str] = frozenset()
+        self.edges: frozenset[tuple[str, str]] = frozenset()
+        self.parents: dict[object, tuple] = {}
 
     def set_front_signals(self, signal_names) -> None:
         self.front_signals = frozenset(signal_names)
@@ -388,16 +407,22 @@ class _Plane:
         self.freezes += 1
         return self.front
 
+    def direct_parent_publications(self, publication):
+        return self.parents.get(publication, ())
 
-def test_two_views_of_one_signal_schedule_per_panel_not_as_one_batch() -> None:
-    """Same-signal ports are NOT welded into one batch.
+    def follower_edges(self):
+        return self.edges
 
-    The front already serves every view one publication per signal, so two
-    panels of the same camera are same-shot by construction.  Present-time
-    batching would couple their cadences and turn one slow view's coalesced
-    render into both panels' abandoned batch -- a 1D projection lagging once
-    stuttered the 2D image beside it.  Only multi-signal causal components
-    batch.
+
+def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:
+    """Two views of one signal are one shot on screen — they flip as one.
+
+    Each panel stages its own batch at its own cadence, but the batches
+    carry the same shot roots and the arbiter assembles them into ONE
+    cohort: both present in one accept pass, and when either view's render
+    is coalesced away for a newer frame the WHOLE cohort leaves
+    unpresented — the group skips to the newest shot together instead of
+    one view running a shot ahead of the other.
     """
 
     front = _front()
@@ -411,14 +436,86 @@ def test_two_views_of_one_signal_schedule_per_panel_not_as_one_batch() -> None:
 
     scheduler.on_tick()
     assert len(fast.updates) == len(slow.updates) == 1
-    assert arbiter.pending_batches == 2  # one batch per panel, not one of two
+    assert arbiter.pending_batches == 1  # equal roots: one cohort of two
 
-    # The slow view's render is coalesced away; the fast view still presents.
+    # The slow view's render is coalesced away: the whole shot leaves
+    # unpresented; the newer shot presents both views together.
     assert slow.futures[0].cancel()
     fast.futures[0].set_result("fast")
     arbiter.drain(lambda panel_id: {"fast": fast, "slow": slow}.get(panel_id))
-    assert len(fast.accepted) == 1
-    assert not slow.accepted and not slow.rejected
+    assert not fast.accepted and not slow.accepted
+    assert not fast.rejected and not slow.rejected
+    assert fast.finished == [fast.updates[0]]
+    assert slow.finished == [slow.updates[0]]
+    assert arbiter.pending_batches == 0
+
+
+def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
+    """A fit-signal batch staged one tick late still flips with its shot.
+
+    The pair engine publishes a panel's fit signal during the shot's own
+    commit, so the rolling trace of that fit stages on the NEXT tick.  With
+    both sides of the follower edge on the board, the shot's cohort keeps
+    its join window open one extra tick boundary: the source's batch waits,
+    the follower's batch joins, and the whole shot presents in one accept
+    pass — never the camera one shot ahead of its own fit trace.
+    """
+
+    camera_front = _front("camera/frame", sequence=7)
+    camera_publication = camera_front.publication("camera/frame")
+    assert camera_publication is not None
+    fit_front = _front("@logic/panel/center", sequence=1)
+    fit_publication = fit_front.publication("@logic/panel/center")
+    assert fit_publication is not None
+    object.__setattr__(
+        fit_publication,
+        "direct_parent_refs",
+        (camera_publication.event_ref,),
+    )
+    both = SignalFront(
+        {
+            "camera/frame": camera_front.value("camera/frame"),
+            "@logic/panel/center": fit_front.value("@logic/panel/center"),
+        },
+        {},
+        {
+            "camera/frame": camera_publication,
+            "@logic/panel/center": fit_publication,
+        },
+        {
+            "camera/frame": frozenset(("camera/frame",)),
+            "@logic/panel/center": frozenset(("@logic/panel/center",)),
+        },
+    )
+
+    plane = _Plane(camera_front)
+    plane.edges = frozenset({("camera/frame", "@logic/panel/center")})
+    plane.parents = {fit_publication: (camera_publication,)}
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    camera = _Port("camera", "camera/frame", interval=100)
+    trace = _Port("trace", "@logic/panel/center", interval=100)
+    clock = HarmonicClock((100, 200, 400, 800), 100)
+    scheduler = BoardScheduler(plane, clock, arbiter, lambda: (camera, trace))
+
+    # Tick 1: the camera's pair is on the plane, the follower is not yet.
+    scheduler.on_tick()
+    assert len(camera.updates) == 1 and not trace.updates
+    camera.futures[0].set_result("camera")
+    arbiter.drain(lambda panel_id: {"camera": camera, "trace": trace}.get(panel_id))
+    # The window is open: the complete camera batch waits for its follower.
+    assert not camera.accepted
+
+    # Tick 2: the follower's publication arrived and joins the same cohort.
+    plane.front = both
+    scheduler.on_tick()
+    assert len(trace.updates) == 1
+    assert arbiter.pending_batches == 1
+    trace.futures[0].set_result("trace")
+    arbiter.drain(lambda panel_id: {"camera": camera, "trace": trace}.get(panel_id))
+    assert camera.presented is camera_publication
+    assert trace.presented is fit_publication
+    assert len(camera.accepted) == len(trace.accepted) == 1
 
 
 def test_board_scheduler_declares_its_port_signals_on_every_tick() -> None:

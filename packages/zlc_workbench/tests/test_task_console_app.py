@@ -102,6 +102,8 @@ def test_task_console_display_beat_is_the_display_clock_base() -> None:
         SimpleNamespace(
             freeze=lambda: None,
             set_front_signals=lambda names: None,
+            direct_parent_publications=lambda publication: (),
+            follower_edges=lambda: frozenset(),
         ),
         tuple,
         intervals=DEFAULTS.live.refresh_intervals_ms,

@@ -5,7 +5,6 @@ from __future__ import annotations
 from concurrent.futures import Future
 from numbers import Integral
 from threading import Event
-from time import monotonic
 from typing import TYPE_CHECKING, Callable
 
 from zlc_data import OwnedSnapshot
@@ -17,9 +16,9 @@ from ._session_state import (
     _LiveFrameFinalization,
     _LiveFrameSnapshot,
     _PreparedLiveFrame,
+    _SolvedLiveFit,
 )
 from .fit import FitCancelled
-from .live import _PacedLiveFrame
 from .parameters import RenderEffect
 from .primitives import PlotInput
 
@@ -56,13 +55,18 @@ class LiveSessionMixin:
                     )
             selected_revision = snapshot_revision(data)
         else:
-            if isinstance(revision, bool) or not isinstance(revision, Integral):
-                raise TypeError(
-                    "PulseTimeline live frames require an integer revision"
-                )
-            selected_revision = int(revision)
-            if selected_revision < 0:
-                raise ValueError("revision must be non-negative")
+            if revision is None:
+                # Direct pulse-timeline updates advance the session revision
+                # by exactly one, matching update_data's contract.
+                selected_revision = self.data_revision + 1
+            else:
+                if isinstance(revision, bool) or not isinstance(revision, Integral):
+                    raise TypeError(
+                        "PulseTimeline live frames require an integer revision"
+                    )
+                selected_revision = int(revision)
+                if selected_revision < 0:
+                    raise ValueError("revision must be non-negative")
 
         with self._render_lock:
             with self._lock:
@@ -142,35 +146,26 @@ class LiveSessionMixin:
 
     def commit_live_frame(
         self,
-        prepared: _PreparedLiveFrame | _PacedLiveFrame,
+        prepared: _PreparedLiveFrame,
+        solved: _SolvedLiveFit | None = None,
     ) -> _LiveFrameFinalization | None:
-        """Atomically install and draw one prepared data frame.
+        """Atomically install and draw one complete data/fit pair.
 
-        After the data presentation transaction, and still inside the render
-        lock (so before the frontend captures the front), the armed live fit
-        is solved synchronously under a refresh-interval deadline: an
-        in-budget solve paints its overlay into the same published front as
-        the data it describes.  On deadline the front publishes without the
-        overlay and ``finalize_live_frame`` continues the solve
-        asynchronously exactly as before.
-
-        A live controller wraps the prepared frame in a
-        :class:`~zlc_plot.live._PacedLiveFrame` carrying the cadence it is
-        really running at; that interval sizes the synchronous fit budget.
-        Direct callers commit the prepared frame as-is and get the library's
-        default refresh interval as the budget.
+        The frame of a fit-armed panel is data@N together with fit@N: the
+        caller solves the pair on the fit executor (``solve_live_frame``)
+        before committing, and this commit paints the data and its overlay
+        under one render-lock hold — the captured front is born complete.
+        A pair whose solve was cancelled or failed commits data-only; the
+        next data revision is the only automatic retry.  Un-armed frames
+        commit exactly as before.
         """
 
-        commit_started = monotonic()
-        refresh_interval_ms: int | None = None
-        if isinstance(prepared, _PacedLiveFrame):
-            refresh_interval_ms = prepared.refresh_interval_ms
-            prepared = prepared.prepared
         if not isinstance(prepared, _PreparedLiveFrame):
             raise TypeError("prepared must be a prepared live frame")
         if prepared.session_identity is not self._session_identity:
             raise ValueError("prepared live frame belongs to another PlotSession")
-        live_fit_work = None
+        if solved is not None and not isinstance(solved, _SolvedLiveFit):
+            raise TypeError("solved must be a solved live fit or None")
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -211,42 +206,43 @@ class LiveSessionMixin:
                     if prepared.image_overlay is None
                     else prepared.image_overlay
                 )
-                accepted_fit = (
-                    self._accepted_fit
-                    if self._live_fit_request is not None
-                    else None
-                )
+            # The previous revision's overlay never rides into this frame:
+            # the pair's own fit is accepted below, or the frame is honestly
+            # data-only.  One shot on screen is one shot throughout.
             presentation = self._present_projection_transaction(
                 prepared.projection,
                 image_overlay=accepted_image_overlay,
-                accepted_fit=accepted_fit,
+                accepted_fit=None,
             )
-            live_fit_work = self._run_live_fit_in_commit(
-                commit_started,
-                refresh_interval_ms,
+            live_fit_work = (
+                None if solved is None else self._accept_pair_fit(solved)
             )
+        resolution = None
         if live_fit_work is not None:
-            # Futures and observer callbacks resolve only after the render
-            # lock is released; the ownership gate is taken inside these
-            # calls, and render-lock-first ordering would invert it.
+            # Observer callbacks fire only after the render lock is released;
+            # the ownership gate is taken inside them, and render-lock-first
+            # ordering would invert it.  The logical fit completion travels
+            # in the finalization token: it resolves in publish_live_frame,
+            # after the caller promoted the committed front, so a waiting
+            # fit future never observes a front older than its result.
             resolution, fit_event = live_fit_work
-            if resolution is not None:
-                self._resolve_fit_completion(resolution)
             if fit_event is not None:
                 self._notify_fit(fit_event)
         return _LiveFrameFinalization(
             self._session_identity,
             presentation,
+            resolution,
         )
 
-    def finalize_live_frame(self, finalization: _LiveFrameFinalization) -> None:
-        """Start the current fit only after the data front was promoted."""
+    def publish_live_frame(self, finalization: _LiveFrameFinalization) -> None:
+        """Acknowledge that the committed front reached the frontend."""
 
         if not isinstance(finalization, _LiveFrameFinalization):
             raise TypeError("finalization must be a live-frame finalization token")
         if finalization.session_identity is not self._session_identity:
             raise ValueError("live-frame finalization belongs to another PlotSession")
-        self._restart_live_fit_for_current_data()
+        if finalization.fit_resolution is not None:
+            self._resolve_fit_completion(finalization.fit_resolution)
 
     def abort_live_frame(self, finalization: _LiveFrameFinalization) -> None:
         """Roll back a drawn live frame that the frontend could not promote."""
@@ -256,3 +252,11 @@ class LiveSessionMixin:
         if finalization.session_identity is not self._session_identity:
             raise ValueError("live-frame finalization belongs to another PlotSession")
         self._abort_projection_presentation(finalization.presentation)
+        resolution = finalization.fit_resolution
+        if resolution is not None:
+            # The pair's accept was rolled back with the frame; give the
+            # logical completion back to the request so a later pair can
+            # still resolve it.
+            with self._lock:
+                if not self._closed and self._live_fit_completion is None:
+                    self._live_fit_completion = resolution.completion

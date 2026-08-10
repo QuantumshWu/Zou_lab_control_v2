@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
@@ -298,16 +297,48 @@ class SurfacePort(Protocol):
     def report_waiting(self, missing_signal: str) -> None: ...
 
 
-class SurfaceBatchArbiter:
-    """Stage and commit complete surface groups without presenting partial boards."""
+@dataclass(slots=True)
+class _ShotCohort:
+    """One shot's presentation group: every staged update sharing its roots.
 
-    __slots__ = ("_batches", "_channels", "_closed")
+    A cohort is THE same-shot unit: its members flip together in one accept
+    pass or not at all.  ``roots`` is the frozen set of shot-root event refs
+    the members' publications descend from (None: unresolvable lineage — the
+    cohort stays solo).  While unsealed, later staged batches with equal
+    roots join.  ``window_panels`` names the displayed follower panels whose
+    batches arrive one tick behind their source's pair: the cohort seals the
+    moment every one of them has joined, with ``boundaries_left`` display
+    ticks (counted only after the staged work completes) as the fallback for
+    a follower that never stages — a not-due slow panel must not hold its
+    shot open forever.
+    """
+
+    roots: frozenset | None
+    window_panels: frozenset[str]
+    boundaries_left: int
+    sealed: bool
+    abandoned: bool
+    updates: list[SurfaceUpdate]
+
+
+class SurfaceBatchArbiter:
+    """Assemble staged updates into shot cohorts and present them whole.
+
+    One lineage group shows one shot number on screen: every member of a
+    cohort is accepted in one owner-thread pass, a cohort that cannot
+    complete never half-shows (a superseded member abandons the WHOLE
+    cohort — the group skips to the newest shot together), and cohorts that
+    share a panel present strictly in formation order so no panel ever
+    regresses.
+    """
+
+    __slots__ = ("_channels", "_closed", "_cohorts")
 
     def __init__(self, channels: OwnerChannels) -> None:
         if not callable(getattr(channels, "notify_surface", None)):
             raise TypeError("surface arbiter requires owner channels")
         self._channels = channels
-        self._batches: deque[tuple[SurfaceUpdate, ...]] = deque()
+        self._cohorts: list[_ShotCohort] = []
         self._closed = False
 
     @property
@@ -316,7 +347,7 @@ class SurfaceBatchArbiter:
 
     @property
     def pending_batches(self) -> int:
-        return len(self._batches)
+        return len(self._cohorts)
 
     @staticmethod
     def _panel_id(port: SurfacePort) -> str:
@@ -346,6 +377,9 @@ class SurfaceBatchArbiter:
         self,
         ports: Sequence[SurfacePort],
         front: SignalFront,
+        *,
+        shot_roots: frozenset | None = None,
+        window_panels: frozenset[str] = frozenset(),
     ) -> bool:
         if self._closed:
             return False
@@ -386,12 +420,67 @@ class SurfaceBatchArbiter:
             return False
 
         batch = tuple(update for _port, update in submitted)
-        self._batches.append(batch)
+        cohort: _ShotCohort | None = None
+        if shot_roots is not None:
+            for candidate in self._cohorts:
+                # An abandoned cohort still collects its shot's stragglers
+                # while unsealed: a follower batch for an abandoned shot must
+                # leave unpresented with its group, never present alone one
+                # shot ahead of (or behind) its source panel.
+                if not candidate.sealed and candidate.roots == shot_roots:
+                    cohort = candidate
+                    break
+        if cohort is None:
+            cohort = _ShotCohort(
+                roots=shot_roots,
+                window_panels=window_panels,
+                boundaries_left=2 if window_panels else 1,
+                # Unresolvable lineage never joins anything: seal now so it
+                # presents the moment it completes.
+                sealed=shot_roots is None,
+                abandoned=False,
+                updates=[],
+            )
+            self._cohorts.append(cohort)
+        cohort.updates.extend(batch)
+        if not cohort.sealed and cohort.window_panels and cohort.window_panels <= {
+            update.panel_id for update in cohort.updates
+        }:
+            # Every displayed follower is aboard: nothing else can join this
+            # shot, so seal now rather than waiting out the fallback window.
+            cohort.sealed = True
         for update in batch:
             update.future.add_done_callback(
                 lambda _future: self._channels.notify_surface()
             )
         return True
+
+    def tick_boundary(self) -> None:
+        """Advance every unsealed cohort's join window by one display tick.
+
+        Called by the scheduler at the end of each tick.  An ordinary cohort
+        seals at its formation tick's boundary (same-tick siblings joined).
+        An open-window cohort counts boundaries only once its own staged
+        work is COMPLETE: a follower's publication is emitted during its
+        source pair's commit, so it can only be staged on a tick after that
+        commit — counting from formation would close the window while the
+        pair was still rendering and strand every follower one cohort
+        behind its shot.  Two boundaries after completion guarantee one full
+        tick in which the follower's already-published signal gets staged.
+        """
+
+        if self._closed:
+            return
+        for cohort in self._cohorts:
+            if cohort.sealed:
+                continue
+            if cohort.window_panels and not all(
+                update.future.done() for update in cohort.updates
+            ):
+                continue
+            cohort.boundaries_left -= 1
+            if cohort.boundaries_left <= 0:
+                cohort.sealed = True
 
     @staticmethod
     def _reject(
@@ -426,105 +515,129 @@ class SurfaceBatchArbiter:
             raise TypeError("surface batch resolver must be callable")
         if self._closed:
             return
-        pending: deque[tuple[SurfaceUpdate, ...]] = deque()
-        while self._batches:
-            batch = self._batches.popleft()
-            if not all(update.future.done() for update in batch):
-                pending.append(batch)
-                continue
-
-            if any(self._superseded(update.future) for update in batch):
-                # A batch is one causal group frozen from one front.  When any
-                # member was coalesced away, the newer render replacing it is
-                # part of a NEWER batch for the same group -- presenting the
-                # remaining members now would put half the group one shot
-                # ahead of the other half, which is exactly what a batch
-                # exists to prevent.  The whole batch leaves unpresented and
-                # the newer batch presents every member together.
-                resolved: list[tuple[SurfacePort, SurfaceUpdate]] = []
-                for update in batch:
-                    try:
-                        port = resolve(update.panel_id)
-                    except BaseException:
-                        port = None
-                    if port is not None:
-                        resolved.append((port, update))
-                self._finish_unpresented(resolved)
-                continue
-
-            records: list[
-                tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]
-            ] = []
-            batch_error: BaseException | None = None
-            for update in batch:
-                try:
-                    port = resolve(update.panel_id)
-                except BaseException as error:
-                    port = None
-                    batch_error = batch_error or error
-                if port is None:
-                    batch_error = batch_error or RuntimeError(
-                        f"surface port {update.panel_id!r} no longer exists"
-                    )
-                    records.append((None, update, None, False))
+        progressed = True
+        while progressed:
+            progressed = False
+            # A panel's cohorts present strictly in formation order; a cohort
+            # sharing any panel with an earlier still-pending cohort waits.
+            # Cohorts with disjoint panels never block each other, so a slow
+            # solo panel cannot throttle the rest of the board.
+            blocked_panels: set[str] = set()
+            for cohort in tuple(self._cohorts):
+                panel_ids = {update.panel_id for update in cohort.updates}
+                if panel_ids & blocked_panels:
+                    blocked_panels |= panel_ids
                     continue
-                try:
-                    operation = update.future.result()
-                except BaseException as error:
-                    batch_error = batch_error or error
-                    records.append((port, update, error, False))
+                if not cohort.abandoned and any(
+                    update.future.done() and self._superseded(update.future)
+                    for update in cohort.updates
+                ):
+                    # One member was coalesced away for a newer frame: the
+                    # WHOLE shot leaves unpresented and the group jumps to
+                    # the newest shot together — never half a board one shot
+                    # ahead of the other half.
+                    cohort.abandoned = True
+                if not cohort.sealed or not all(
+                    update.future.done() for update in cohort.updates
+                ):
+                    blocked_panels |= panel_ids
                     continue
-                try:
-                    port.observe(update, operation)
-                except BaseException as error:
-                    batch_error = batch_error or error
-                    records.append((port, update, error, False))
+                if cohort.abandoned:
+                    resolved: list[tuple[SurfacePort, SurfaceUpdate]] = []
+                    for update in cohort.updates:
+                        try:
+                            port = resolve(update.panel_id)
+                        except BaseException:
+                            port = None
+                        if port is not None:
+                            resolved.append((port, update))
+                    self._finish_unpresented(resolved)
+                    self._cohorts.remove(cohort)
+                    progressed = True
                     continue
-                records.append((port, update, operation, True))
+                self._present_cohort(cohort, resolve)
+                self._cohorts.remove(cohort)
+                progressed = True
 
-            if batch_error is None:
-                for port, update, operation, successful in records:
-                    if not successful or port is None:
-                        batch_error = batch_error or RuntimeError(
-                            "surface batch contains an unusable operation"
-                        )
-                        break
-                    try:
-                        accepted = port.can_accept(update, operation)
-                    except BaseException as error:
-                        batch_error = error
-                        break
-                    if not accepted:
-                        batch_error = RuntimeError(
-                            f"surface update {update.panel_id!r} is no longer acceptable"
-                        )
-                        break
+    def _present_cohort(
+        self,
+        cohort: _ShotCohort,
+        resolve: Callable[[str], SurfacePort | None],
+    ) -> None:
+        """Present one complete sealed cohort in a single accept pass."""
 
-            if batch_error is not None:
-                for port, update, _operation, _successful in records:
-                    self._reject(port, update, batch_error)
-                continue
-
-            accepted: list[tuple[SurfacePort, SurfaceUpdate]] = []
+        records: list[
+            tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]
+        ] = []
+        batch_error: BaseException | None = None
+        for update in cohort.updates:
             try:
-                for port, update, operation, successful in records:
-                    assert port is not None and successful
-                    if not port.accept(update, operation):
-                        raise RuntimeError(
-                            f"surface port {update.panel_id!r} rejected an acceptable update"
-                        )
-                    accepted.append((port, update))
+                port = resolve(update.panel_id)
             except BaseException as error:
-                accepted_ids = {id(update) for _port, update in accepted}
-                for port, update, _operation, _successful in records:
-                    if id(update) not in accepted_ids:
-                        self._reject(port, update, error)
-        self._batches.extend(pending)
+                port = None
+                batch_error = batch_error or error
+            if port is None:
+                batch_error = batch_error or RuntimeError(
+                    f"surface port {update.panel_id!r} no longer exists"
+                )
+                records.append((None, update, None, False))
+                continue
+            try:
+                operation = update.future.result()
+            except BaseException as error:
+                batch_error = batch_error or error
+                records.append((port, update, error, False))
+                continue
+            try:
+                port.observe(update, operation)
+            except BaseException as error:
+                batch_error = batch_error or error
+                records.append((port, update, error, False))
+                continue
+            records.append((port, update, operation, True))
+
+        if batch_error is None:
+            for port, update, operation, successful in records:
+                if not successful or port is None:
+                    batch_error = batch_error or RuntimeError(
+                        "surface batch contains an unusable operation"
+                    )
+                    break
+                try:
+                    accepted = port.can_accept(update, operation)
+                except BaseException as error:
+                    batch_error = error
+                    break
+                if not accepted:
+                    batch_error = RuntimeError(
+                        f"surface update {update.panel_id!r} is no longer acceptable"
+                    )
+                    break
+
+        if batch_error is not None:
+            for port, update, _operation, _successful in records:
+                self._reject(port, update, batch_error)
+            return
+
+        accepted: list[tuple[SurfacePort, SurfaceUpdate]] = []
+        try:
+            for port, update, operation, successful in records:
+                assert port is not None and successful
+                if not port.accept(update, operation):
+                    raise RuntimeError(
+                        f"surface port {update.panel_id!r} rejected an acceptable update"
+                    )
+                accepted.append((port, update))
+        except BaseException as error:
+            accepted_ids = {id(update) for _port, update in accepted}
+            for port, update, _operation, _successful in records:
+                if id(update) not in accepted_ids:
+                    self._reject(port, update, error)
 
     def cancel_all(self) -> None:
-        while self._batches:
-            batch = self._batches.popleft()
-            for update in batch:
+        while self._cohorts:
+            cohort = self._cohorts.pop()
+            for update in cohort.updates:
                 try:
                     update.future.cancel()
                 except BaseException:
@@ -557,8 +670,11 @@ class BoardScheduler:
         arbiter: SurfaceBatchArbiter,
         ports: Callable[[], Sequence[SurfacePort]],
     ) -> None:
-        if not callable(getattr(plane, "freeze", None)) or not callable(
-            getattr(plane, "set_front_signals", None)
+        if (
+            not callable(getattr(plane, "freeze", None))
+            or not callable(getattr(plane, "set_front_signals", None))
+            or not callable(getattr(plane, "direct_parent_publications", None))
+            or not callable(getattr(plane, "follower_edges", None))
         ):
             raise TypeError("board scheduler requires a signal data plane")
         if not isinstance(clock, HarmonicClock):
@@ -605,6 +721,33 @@ class BoardScheduler:
     def _resolve_port(self, panel_id: str) -> SurfacePort | None:
         return self._port_map().get(panel_id)
 
+    def _shot_roots(
+        self,
+        publication: SignalPublication,
+    ) -> frozenset | None:
+        """The shot-root event refs one publication descends from.
+
+        Walking ``direct_parent_publications`` terminates at the parentless
+        producers (the shot's cameras); a derived or follower publication
+        therefore stamps the SAME roots as its source, which is what lets
+        the arbiter assemble them into one cohort.  None means the lineage
+        could not be resolved — the batch presents solo rather than guessing.
+        """
+
+        roots: set[object] = set()
+        stack = [publication]
+        while stack:
+            current = stack.pop()
+            refs = current.direct_parent_refs
+            if not refs:
+                roots.add(current.event_ref)
+                continue
+            parents = self._plane.direct_parent_publications(current)
+            if len(parents) != len(refs):
+                return None
+            stack.extend(parents)
+        return frozenset(roots)
+
     def on_tick(self) -> SignalFront:
         if self._closed:
             return self._last_front
@@ -617,64 +760,72 @@ class BoardScheduler:
         # ahead of the panel derived from it.  The plane no-ops on an
         # unchanged set, so this scheduler is the sole declaration authority.
         ports = tuple(self._ports())
-        self._plane.set_front_signals(
-            {SurfaceBatchArbiter._signal_name(port) for port in ports}
-        )
+        displayed = {SurfaceBatchArbiter._signal_name(port) for port in ports}
+        self._plane.set_front_signals(displayed)
         front = self._plane.freeze()
         if not isinstance(front, SignalFront):
             raise TypeError("signal data plane freeze() must return SignalFront")
         self._last_front = front
         elapsed = self._clock.advance()
-        # Batch keys couple exactly what causality couples: ports whose
-        # signals share one multi-signal lineage component present as one
-        # same-shot batch.  Everything else -- including several views of the
-        # SAME signal -- schedules per panel: the front already serves every
-        # view one publication per signal, and batching same-signal views
-        # would weld their cadences together and turn one slow view's
-        # coalesced render into the whole board's abandoned batch.
-        members_by_key: dict[object, list[SurfacePort]] = {}
+        # A presentation-paced follower's batch (a rolling trace of a
+        # panel's fit signal) is published during its source pair's commit
+        # and therefore stages one tick behind it.  Cohorts formed while
+        # both sides of a follower edge are on the board hold a join window
+        # for exactly those follower panels: the window closes the moment
+        # every one has joined, or after the fallback boundaries when one
+        # never stages.  Without a displayed follower nothing ever waits.
+        edges = self._plane.follower_edges()
+        follower_outputs = {
+            output
+            for source, output in edges
+            if source in displayed and output in displayed
+        }
+        window_panels = frozenset(
+            SurfaceBatchArbiter._panel_id(port)
+            for port in ports
+            if SurfaceBatchArbiter._signal_name(port) in follower_outputs
+        )
+        # Panels stage individually; the arbiter couples exactly what
+        # causality couples by assembling equal shot-root batches into one
+        # cohort.  Several views of one signal share roots and flip
+        # together; unrelated panels never wait on each other.
         for port in ports:
             signal_name = SurfaceBatchArbiter._signal_name(port)
-            continuous = front.continuous_group(signal_name)
-            if continuous and len(continuous) > 1:
-                key: object = ("continuous", continuous)
-            else:
-                key = ("panel", SurfaceBatchArbiter._panel_id(port))
-            members_by_key.setdefault(key, []).append(port)
-
-        for key, members in members_by_key.items():
-            if isinstance(key, tuple) and key[0] == "continuous":
-                # A debt owed by a port scheduled alone earlier carries into
-                # the causal group it now belongs to.
-                for port in members:
-                    panel_key = ("panel", SurfaceBatchArbiter._panel_id(port))
-                    if self._owed.pop(panel_key, None) is not None:
-                        self._owed[key] = True
-
-        active_keys = set(members_by_key)
-        for key in tuple(self._owed):
-            if key not in active_keys:
-                self._owed.pop(key, None)
-
-        for key, members in members_by_key.items():
-            current = True
-            intervals: list[int] = []
-            for port in members:
-                signal_name = SurfaceBatchArbiter._signal_name(port)
-                publication = front.publication(signal_name)
-                if publication is None or self._presented_publication(port) is not publication:
-                    current = False
-                intervals.append(getattr(port, "display_interval_ms"))
-            if current:
+            key = ("panel", SurfaceBatchArbiter._panel_id(port))
+            publication = front.publication(signal_name)
+            if (
+                publication is not None
+                and self._presented_publication(port) is publication
+            ):
                 self._owed.pop(key, None)
                 continue
-            due = self._clock.group_due(elapsed, intervals)
+            due = self._clock.group_due(
+                elapsed, (getattr(port, "display_interval_ms"),)
+            )
             if not due and key not in self._owed:
                 continue
-            if self._arbiter.enqueue_group(tuple(members), front):
+            if self._arbiter.enqueue_group(
+                (port,),
+                front,
+                shot_roots=(
+                    None
+                    if publication is None
+                    else self._shot_roots(publication)
+                ),
+                window_panels=(
+                    window_panels if publication is not None else frozenset()
+                ),
+            ):
                 self._owed.pop(key, None)
             else:
                 self._owed[key] = True
+        active_keys = {
+            ("panel", SurfaceBatchArbiter._panel_id(port)) for port in ports
+        }
+        for key in tuple(self._owed):
+            if key not in active_keys:
+                self._owed.pop(key, None)
+        self._arbiter.tick_boundary()
         return front
 
     def on_owner_turn(self, poll_lifecycle: Callable[[], None]) -> None:

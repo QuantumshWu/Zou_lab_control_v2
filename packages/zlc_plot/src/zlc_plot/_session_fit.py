@@ -6,7 +6,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import math
 from threading import Event
-from time import monotonic
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 import warnings
@@ -21,6 +20,8 @@ from ._session_state import (
     _FitPresentation,
     _FitResolution,
     _LiveFitRequest,
+    _PreparedLiveFrame,
+    _SolvedLiveFit,
     _StartedFitRequest,
     FitEvent,
 )
@@ -53,13 +54,6 @@ _CLASSIFIER_REQUEST_GENERATION = -1
 # serial loop (25.9 ms pooled vs 14.2 ms serial for 8x4000-point solves).
 # Raise this only with a measurement showing the pool winning.
 _FACET_FIT_WORKERS = 1
-
-# Synchronous live-fit budget: the solve runs inside the data commit so the
-# overlay lands in the same published front; on deadline the front publishes
-# without it and the asynchronous path takes over.  The floor covers the
-# measured warm 2048^2 solve (~33 ms) after a full-frame draw has consumed
-# most of the refresh interval.
-_LIVE_FIT_MIN_BUDGET_SECONDS = 0.04
 
 # Warm-seed memory hardening: a degenerate accepted solve must never seed
 # later revisions (one poisoned seed used to replicate itself into every
@@ -591,15 +585,19 @@ class FitSessionMixin:
                         if logical_completion is None or not live:
                             raise
                 previous_fit_cancel = self._fit_cancel
-                previous_live_prepare_cancel = self._live_prepare_cancel
+                previous_live_fit_cancel = self._live_fit_cancel
                 self._fit_context_generation += 1
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
-                self._live_fit_solved_revision = None
                 superseded = self._live_fit_completion
                 self._live_fit_completion = logical_completion if live else None
                 cancellation = Event()
                 self._fit_cancel = cancellation
+                # Replacing the request authority is one of the only three
+                # events allowed to cancel an in-flight live pair solve (the
+                # others are replace_spec and close).  Data-frame pairs then
+                # share the fresh token until the next replacement.
+                self._live_fit_cancel = Event()
                 self._live_fit_request = request if live else None
                 started = (
                     _StartedFitRequest(
@@ -614,163 +612,109 @@ class FitSessionMixin:
                     else None
                 )
             previous_fit_cancel.set()
-            previous_live_prepare_cancel.set()
+            previous_live_fit_cancel.set()
         if superseded is not None and not superseded.done():
             superseded.set_exception(FitCancelled("fit request superseded"))
         return started
 
-    def _restart_live_fit_for_current_data(self) -> None:
-        """Cancel the previous solve and fit only the data now on screen.
+    def _pair_started(
+        self,
+        projection: FitProjection,
+    ) -> _DeferredStartedFitRequest | None:
+        """Freeze the armed live request against one prepared data frame.
 
-        The selection freeze runs inside the submitted solver task (guarded by
-        the captured projection and generations), so the render worker never
-        pays for it here.  When the commit-time synchronous solve already
-        accepted a result for the front on screen, there is nothing to do.
+        The selection freeze runs inside the solver task (from the captured
+        immutable projection), so neither the caller nor the render worker
+        pays for it.  The cancellation token is the request-scoped live token:
+        a running pair solve completes even when newer data arrives — the
+        newer frame replaces the QUEUED pair, never the running one — and is
+        cancelled only by re-arm, replace_spec, or close.
         """
 
-        started: _StartedFitRequest | None = None
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-                request = self._live_fit_request
-                if (
-                    request is not None
-                    and getattr(self, "_live_fit_solved_revision", None)
-                    == self._projection.data_revision
-                ):
-                    return
-                previous_cancel = self._fit_cancel
-                self._fit_context_generation += 1
-                context_generation = self._fit_context_generation
-                request_generation = self._fit_request_generation
-                cancellation = Event()
-                self._fit_cancel = cancellation
-                if request is not None:
-                    started = _DeferredStartedFitRequest(
-                        request=request,
-                        selection=None,
-                        projection=self._projected,
-                        cancellation=cancellation,
-                        context_generation=context_generation,
-                        request_generation=request_generation,
-                    )
-            previous_cancel.set()
-        if started is not None:
-            self._submit_started_fit(
-                started,
-                live=True,
-                logical_completion=None,
+        with self._lock:
+            if self._closed or self._live_fit_request is None:
+                return None
+            return _DeferredStartedFitRequest(
+                request=self._live_fit_request,
+                selection=None,
+                projection=projection,
+                cancellation=self._live_fit_cancel,
+                context_generation=self._fit_context_generation,
+                request_generation=self._fit_request_generation,
             )
 
-    def _run_live_fit_in_commit(
+    def _solve_live_pair(
         self,
-        commit_started: float,
-        refresh_interval_ms: int | None = None,
-    ) -> tuple[_FitResolution | None, FitEvent | None] | None:
-        """Solve the armed live fit into the same front as its data.
+        started: _DeferredStartedFitRequest,
+    ) -> _SolvedLiveFit:
+        """Solve one pair fit to completion; never raises into the pipeline."""
 
-        Called by ``commit_live_frame`` under the render lock, after the data
-        presentation transaction and before the front is captured, so an
-        in-budget solve paints its overlay into the very frame it describes.
-        The budget is the caller's live refresh interval
-        (``refresh_interval_ms``, the cadence the live controller is really
-        running at; the library default applies when the caller supplies
-        none) minus the time the commit has already spent, floored at
-        ``_LIVE_FIT_MIN_BUDGET_SECONDS``; on deadline the front publishes
-        without the overlay and the asynchronous restart (already
-        warm-started) takes over via ``finalize_live_frame``.
+        try:
+            result = self._solve_started_fit(started)
+        except (FitCancelled, FitDeadlineExceeded):
+            return _SolvedLiveFit(started, None)
+        except Exception as error:
+            self._forget_fit_warm_starts(started.request_generation)
+            failed = self._retire_failed_live_presentation(started, error)
+            if failed is not None:
+                self._resolve_fit_completion(failed)
+            return _SolvedLiveFit(started, None)
+        return _SolvedLiveFit(started, result)
+
+    def solve_live_frame(
+        self,
+        prepared: object,
+    ) -> Future[_SolvedLiveFit] | None:
+        """Start the fit half of one data/fit pair on the fit executor.
+
+        Returns None when no live fit is armed (the frame commits data-only)
+        or the session is closing.  The returned future always resolves to a
+        ``_SolvedLiveFit`` — cancellations and solver failures travel as
+        ``result=None`` so the paired data frame still presents.
+        """
+
+        if not isinstance(prepared, _PreparedLiveFrame):
+            raise TypeError("prepared must be a prepared live frame")
+        if prepared.session_identity is not self._session_identity:
+            raise ValueError("prepared live frame belongs to another PlotSession")
+        started = self._pair_started(prepared.projection)
+        if started is None:
+            return None
+        try:
+            return self._fit_executor.submit(self._solve_live_pair, started)
+        except RuntimeError:
+            # The executor is shutting down; the frame commits data-only.
+            return None
+
+    def _accept_pair_fit(
+        self,
+        solved: _SolvedLiveFit,
+    ) -> tuple[_FitResolution | None, FitEvent | None] | None:
+        """Accept a pair-solved fit inside its data commit (render lock held).
 
         Returns completion/notification work the caller must run after
         releasing the render lock (futures and observer callbacks must never
         resolve under it), or None when nothing was accepted.
         """
 
-        with self._lock:
-            if self._closed or self._live_fit_request is None:
-                return None
-            request = self._live_fit_request
-            if request.all_facets:
-                return None
-            previous_cancel = self._fit_cancel
-            self._fit_context_generation += 1
-            context_generation = self._fit_context_generation
-            request_generation = self._fit_request_generation
-            cancellation = Event()
-            self._fit_cancel = cancellation
-            projection = self._projected
-        previous_cancel.set()
-        try:
-            selection = projection.fit_selection(
-                request.model,
-                selector_kind=request.selector_kind,
-            )
-        except (KeyError, TypeError, ValueError):
-            # Nothing selectable in this front; the asynchronous restart
-            # would reach the same conclusion, so mark the front handled.
-            self._live_fit_solved_revision = projection.data_revision
+        result = solved.result
+        if result is None:
             return None
-        started = _StartedFitRequest(
-            request=request,
-            selection=selection,
-            projection=projection,
-            cancellation=cancellation,
-            context_generation=context_generation,
-            request_generation=request_generation,
-        )
-        interval_ms = (
-            self._defaults.live.default_refresh_interval_ms
-            if refresh_interval_ms is None
-            else refresh_interval_ms
-        )
-        budget = max(
-            interval_ms / 1000.0 - (monotonic() - commit_started),
-            _LIVE_FIT_MIN_BUDGET_SECONDS,
-        )
-        base_options = request.options or FitOptions()
-        deadline = (
-            budget
-            if base_options.deadline_seconds is None
-            else min(budget, base_options.deadline_seconds)
-        )
-        options = replace(base_options, deadline_seconds=deadline)
         try:
-            result = self._solve_fit_selection(
-                projection,
-                request.model,
-                selection,
-                initial=request.initial,
-                bounds=request.bounds,
-                options=options,
-                cancelled=cancellation.is_set,
-                request_generation=request_generation,
-            )
-            result = self._stamp_fit_batch_revision(result)
-        except (FitCancelled, FitDeadlineExceeded):
-            # Publish the data front without the overlay; the asynchronous
-            # path continues the solve on the fit executor.
-            return None
-        except Exception as error:
-            # A solver failure completes this front's solve; the next data
-            # revision is the only automatic retry (matching the async path).
-            self._forget_fit_warm_starts(request_generation)
-            self._live_fit_solved_revision = projection.data_revision
-            failed = self._retire_failed_live_presentation(started, error)
-            return (failed, None) if failed is not None else None
-        try:
-            presentation = self._accept_fit(result, started)
+            presentation = self._accept_fit(result, solved.started)
         except Exception:
-            # The overlay paint failed and rolled itself back; keep the data
-            # front and let the asynchronous restart try again.
+            # The overlay paint failed and rolled itself back; the data front
+            # stands and the next data revision retries.
             return None
         if presentation is None:
             return None
-        self._live_fit_solved_revision = projection.data_revision
         resolution: _FitResolution | None = None
         with self._lock:
             request_current = (
                 not self._closed
                 and self._live_fit_request is not None
-                and request_generation == self._fit_request_generation
+                and solved.started.request_generation
+                == self._fit_request_generation
             )
             completion = self._live_fit_completion if request_current else None
             if completion is not None:
@@ -1562,11 +1506,11 @@ class FitSessionMixin:
                     self._accepted_fit,
                 )
                 fit_cancel = self._fit_cancel
-                live_prepare_cancel = self._live_prepare_cancel
+                live_fit_cancel = self._live_fit_cancel
+                self._live_fit_cancel = Event()
                 self._live_fit_completion = None
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
-                self._live_fit_solved_revision = None
                 self._live_fit_request = None
                 self._fit_context_generation += 1
                 self._accepted_fit = None
@@ -1593,6 +1537,6 @@ class FitSessionMixin:
                     self.redraw_surface()
                 raise
             fit_cancel.set()
-            live_prepare_cancel.set()
+            live_fit_cancel.set()
         if logical_completion is not None and not logical_completion.done():
             logical_completion.set_exception(FitCancelled("fit request cleared"))
