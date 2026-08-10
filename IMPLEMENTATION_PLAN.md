@@ -34,11 +34,11 @@
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
 - Current phase：`正式可见按钮验收已在ce5b4c2发现七个真实产品断点，先复现根因并按最短现有骨架修复。`
-- Last completed action：`Camera Measurement的Repeat=0公共buffer从128个完整cycle扩大为1024个完整cycle；frames_per_cycle=3时即3072帧。容量仍只由共同采集层给出，adapter不实现shot grouping；公共层继续按物理ordinal拒绝缺帧后的跨shot拼组。七个正式GUI断点仍待逐项根修。`
-- Last verified tests：`buffer旧实现纵向守卫先红：3073帧积压后128-cycle队列从ordinal 2689附近开始；根修后保留ordinal 1..3072并正确发布3/4/5。定向1 passed；zlc_atom全包146 passed。此前1158项主树/detached测试已被正式可见验收反证，不能作为七个GUI断点的当前产品完成证据。`
+- Last completed action：`按用户最终裁决把Camera Measurement的Repeat=0公共buffer固定为4个完整cycle；frames_per_cycle=3时即12帧。容量仍只由共同采集层给出，adapter不实现shot grouping；公共层继续按物理ordinal拒绝缺帧后的跨shot拼组。该buffer事项已解决，除非用户另行明确要求，后续不得重新调查、扩容或改写。七个正式GUI断点仍待逐项根修。`
+- Last verified tests：`4-cycle守卫在错误的1024-cycle实现上先红（13帧未发生预期覆盖，latest ordinal为2而非3）；改为4-cycle后定向1 passed，zlc_atom全包146 passed。此前1158项主树/detached测试已被正式可见验收反证，不能作为七个GUI断点的当前产品完成证据。`
 - Pending acceptance gates：`七项根修、受影响包/Guard/full/detached重验，以及同一最终HEAD的正式可见按钮复验与零残留。`
 - Next action：`扩写现有纵向/UI测试并在未改生产前复现overlay/fixed-limits/popup/derived catalog/MOT free-run/selector-refresh/viewport producer七个红点；按共同根因分阶段最小修改并提交。`
-- New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor统一保留1024个完整cycle，容量由共同层一次给出，device不得另设分组策略。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
+- New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
 
@@ -130,7 +130,7 @@
 2. finite-source processor 接 `FollowTap`，按提交顺序无损处理。
 3. source 已结束时，让 processor 可对 retained final `OwnedSnapshot` 处理一次，不重跑设备。
 4. infinite Camera Measurement 在自己的 worker 上读 camera 并覆盖 latest slot；UI beat 只从 plane freeze。
-5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 是 `1024 * frames_per_cycle`；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。
+5. `frames_per_cycle` 只在 Camera Measurement 的共同采集实现中组装：adapter 必须交付保留物理顺序/缺口的 frame records，共同层只接受连续且 cycle-aligned 的完整 tuple；infinite latest 只覆盖完整 tuple，不能让任一 device plugin 自己按 buffer 状态猜 shot 分组。连续采集内部 buffer 固定为 `4 * frames_per_cycle`；共同层一次给出容量，Virtual/DCAM/Pylon 必须真正落实同一个数值。该容量已经由用户最终裁决，后续不得自行扩容或重新设计。
 6. infinite-source processor 只处理当前 latest，不追历史。
 7. 删除 `missed_events/current_gap/behind/missed` 等 loss telemetry；保留 keyed sweep 断续时清 stale cells 的科学正确性规则。
 
