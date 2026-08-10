@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`6c15ae0已完成MOT virtual camera free-run；继续live/Edit selector与viewport同步。`
-- Last completed action：`6c15ae0：mot_camera此前复用triggered VirtualCamera并注册进SimulationWorld.fire，所以没有On Pulse就不产帧。现有VirtualCamera增加一个简单free_running模式；MOT factory选择该模式并不再注册pulse routing，按exposure cadence自行产帧；普通atom virtual camera保持external-triggered。旧测试在EXTERNAL_TRIGGERED处精确红，修改后未调用world.fire也能读到MOT帧；另一个既有triggered camera测试通过。无新文件/类，未跑package/full。此前buffer已按用户最终裁决固定为4个完整cycle，禁止重新调查或扩容。`
-- Last verified tests：`MOT正式installation路径旧红后1 passed；现有triggered VirtualCamera因共享类受影响而窄跑1 passed。ROI/fit、Setting、overlay/fixed证据保持不变。按执行纪律未跑package/full。`
-- Pending acceptance gates：`live/Edit selector+viewport同步、zoom producer联动两项根修；随后重大phase/full/detached重验，以及同一最终HEAD的正式可见按钮复验与零残留。`
-- Next action：`只追同一panel的live host、Panel Edit frozen host、Refresh和selection/viewport event路径；先确认哪一处把共享状态丢掉或重新建空状态，再在现有PanelState/selection接线内最简修复，不新增transaction、owner类或文件。`
+- Current phase：`944e5cf已完成live/Edit selector同步与Refresh保留；继续viewport/zoom到producer联动。`
+- Last completed action：`944e5cf：此前live host与frozen Edit host各自保存selector，提交只更新producer，Refresh重建空editor host，所以两张图不同步且selector消失。现由既有PanelBinding保存一个canonical selector，现有selection接线把任一surface的提交投影到另一surface，并在live/editor host替换时重放。无新文件/类/公共API；旧红为live host无AREA selector，修改后同一既有测试1 passed；未跑package/full。此前buffer固定4 cycle、Setting、ROI/fit signal、MOT free-run均关闭且禁止重开。`
+- Last verified tests：`selector正式live/Edit/retarget/Refresh路径1 passed；其余已完成阶段证据保持不变。按执行纪律未跑package/full。`
+- Pending acceptance gates：`viewport/zoom producer联动根修；随后重大phase/full/detached重验，以及同一最终HEAD的正式可见按钮复验与零残留。`
+- Next action：`只追zlc_plot现有viewport commit与Workbench direct producer selection_patch之间缺失的一段；在现有session callback、selection translator和PanelBinding内最简接线，使live/Edit viewport同步并把canonical范围交给同一producer mapping，不新增event class、transaction、owner或文件。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
