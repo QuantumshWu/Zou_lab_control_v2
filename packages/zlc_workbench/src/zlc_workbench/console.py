@@ -204,6 +204,9 @@ class ConsolePresenter:
         # What every card's picker was last told, so it is only rebuilt when
         # the offer really changed.
         self._offered_groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+        self._shown_panel_publishers: tuple[
+            tuple[str, tuple[tuple[str, str, str], ...]], ...
+        ] = ()
         self._paused = False
         self._deriving = False
         self._shown_console_summary: str | None = None
@@ -707,6 +710,30 @@ class ConsolePresenter:
         Pushed only when the offer actually changes: a combo rebuilt on every
         beat is a combo that closes itself while an operator is reading it.
         """
+
+        descriptions = {
+            item.name: item for item in self.session.signal_plane.describe_signals()
+        }
+        projected = project_signals(self.session.signal_plane)
+        panel_publishers = tuple(
+            (
+                panel_id,
+                tuple(
+                    (
+                        row.name.rsplit("/", 1)[-1] or row.name,
+                        format_signal_shape(descriptions[row.name].shape),
+                        f"{row.state} · {row.name}",
+                    )
+                    for row in projected
+                    if row.producer == panel_id
+                ),
+            )
+            for panel_id in self.panels
+            if any(row.producer == panel_id for row in projected)
+        )
+        if panel_publishers != self._shown_panel_publishers:
+            self._shown_panel_publishers = panel_publishers
+            self.view.set_panel_publishers(panel_publishers)
 
         groups = self.signal_groups()
         if groups == self._offered_groups:

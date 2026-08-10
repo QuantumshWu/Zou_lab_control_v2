@@ -69,6 +69,7 @@ class TaskConsoleHandle(QtCore.QObject):
         self._view = view
         self._cards: dict[str, PanelCardView] = {}
         self._rows: dict[str, LogicRowView] = {}
+        self._panel_publisher_rows: dict[str, LogicRowView] = {}
         self._logic_editors: dict[str, LogicEditorView] = {}
         self._panel_editors: dict[str, PanelEditorView] = {}
         self._panel_intervals: tuple[int, ...] = ()
@@ -384,6 +385,11 @@ class TaskConsoleHandle(QtCore.QObject):
 
     # ---------------------------------------------------------- logic rows
 
+    def _show_logic_rows(self) -> None:
+        self._view.set_logic_rows(
+            tuple(self._rows.values()) + tuple(self._panel_publisher_rows.values())
+        )
+
     def add_logic_row(self, node_id: str, kind: str) -> None:
         key = str(node_id)
         row = self._rows.get(key)
@@ -403,7 +409,7 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             self._rows[key] = row
             row.set_task_takeover(self._task_takeover)
-        self._view.set_logic_rows(tuple(self._rows.values()))
+        self._show_logic_rows()
 
     def remove_logic_row(self, node_id: str) -> None:
         key = str(node_id)
@@ -411,7 +417,7 @@ class TaskConsoleHandle(QtCore.QObject):
         row = self._rows.pop(key, None)
         if row is not None:
             row.setParent(None)
-        self._view.set_logic_rows(tuple(self._rows.values()))
+        self._show_logic_rows()
 
     def logic_row_ids(self) -> tuple[str, ...]:
         return tuple(self._rows)
@@ -429,6 +435,35 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def set_logic_publishes(self, node_id: str, rows: tuple[tuple[str, str, str], ...]) -> None:
         self._rows[str(node_id)].set_publishes(rows)
+
+    def set_panel_publishers(
+        self,
+        publishers: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...],
+    ) -> None:
+        """Show panel-owned signals beside, not inside, LogicNode rows."""
+
+        incoming: dict[str, LogicRowView] = {}
+        for panel_id, published in publishers:
+            key = str(panel_id)
+            row = self._panel_publisher_rows.get(key)
+            if row is None:
+                row = LogicRowView(key, "panel publisher")
+                row.dot.hide()
+                row.status_label.hide()
+                for button in (
+                    row.start_button,
+                    row.stop_button,
+                    row.edit_button,
+                    row.remove_button,
+                ):
+                    button.hide()
+            row.set_publishes(published)
+            incoming[key] = row
+        for key, row in tuple(self._panel_publisher_rows.items()):
+            if key not in incoming:
+                row.setParent(None)
+        self._panel_publisher_rows = incoming
+        self._show_logic_rows()
 
     # --------------------------------------------------------- logic editors
 

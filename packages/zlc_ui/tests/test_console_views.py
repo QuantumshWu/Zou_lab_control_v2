@@ -446,6 +446,10 @@ app = ensure_qt_app(['logic-editor'])
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
 handle.add_logic_row('camera-1', 'measurement')
+handle.set_panel_publishers((('panel-1', (
+    ('center_x', '35', 'held · @logic/panel-1/center_x'),
+    ('roi', '4', 'live · @logic/panel-1/roi'),
+)),))
 projection = {
     'node_id': 'camera-1',
     'api_name': 'camera_measurement',
@@ -495,6 +499,13 @@ assert editor.source_combo.itemText(1) == 'frames  [1 × 1 × (3×96×128)]'
 handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()
+publisher = handle._panel_publisher_rows['panel-1']
+assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
+assert not publisher.publishes_label.isHidden()
+assert all(button.isHidden() for button in (
+    publisher.start_button, publisher.stop_button,
+    publisher.edit_button, publisher.remove_button,
+))
 assert view.tabs.count() == 3
 assert view.tabs.currentWidget() is editor
 assert not editor.start_button.isEnabled()

@@ -169,6 +169,7 @@ class _ConsoleView:
         self.focused_panel_editor = ""
         self.task_takeover = False
         self.panel_mutation_enabled: dict[str, bool] = {}
+        self.panel_publishers: dict[str, tuple] = {}
 
     # -- what a test reads ------------------------------------------------
 
@@ -282,6 +283,12 @@ class _ConsoleView:
 
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         self._cards[str(panel_id)].set_selectors_enabled(enabled)
+
+    def set_panel_publishers(self, publishers) -> None:
+        self.panel_publishers = {
+            str(panel_id): tuple(rows)
+            for panel_id, rows in publishers
+        }
 
     def open_panel_editor(self, panel_id: str, projection) -> None:
         self.panel_editors[str(panel_id)] = dict(projection)
@@ -884,6 +891,15 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     panel_group = dict(presenter.signal_groups())[binding.panel_id]
     panel_signal_names = {name for _label, name in panel_group}
     assert {row.name for row in fit_signals}.union({roi_signal}) <= panel_signal_names
+    logic_tab_panel_names = {
+        detail.rsplit(" · ", 1)[-1]
+        for _name, _shape, detail in presenter.view.panel_publishers[
+            binding.panel_id
+        ]
+    }
+    assert {row.name for row in fit_signals}.union({roi_signal}) <= (
+        logic_tab_panel_names
+    )
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
