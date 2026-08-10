@@ -194,6 +194,7 @@ generation 原子取代；它不能因为 FINAL 数据仍可读而阻止同一 r
 - `zlc_workbench` 沿 panel -> signal -> producer row 把 selection/zoom/pan 路由到同一个 descriptor mapping，更新同一 measurement draft，并把同一 display viewport 投影给 live/Edit 两张 surface。这个 seam 也供以后的 measurement 使用，不在 Workbench 写死 camera `if`。
 - Image Area 用当前 ROI origin/binning 把显示坐标转回 sensor 坐标，adapter 在 Start/Restart 时做硬件 increment 对齐。
 - selector 只更新共享 draft；用户按同一个 `Restart` 后，才用新 ROI/exposure 重启 measurement。
+- ROI 数据和 fit 参数同时是 data plane 中的普通 typed Dataset。Logic input 可以声明一个固定 contract，也可以显式声明 source-neutral；后一种由插件用实际 Dataset schema 和自己的动态 artifact/request 判断是否可用。Occupancy 属于后一种，因为可用 frame shape 由所选 Calibration 决定，Workbench 不得用 producer 名称或固定 `camera.frames` 字符串提前隐藏 ROI/fit signal。
 
 ## 8. 三个目标 Logic Node
 

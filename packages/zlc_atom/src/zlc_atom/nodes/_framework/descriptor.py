@@ -31,12 +31,17 @@ class DeviceAccess(str, Enum):
 @dataclass(frozen=True)
 class DatasetInputSpec:
     name: str
-    contract_id: str
+    contract_id: str | None
     required: bool = True
 
     def __post_init__(self) -> None:
-        if not self.name or not self.contract_id:
-            raise ValueError("dataset input requires name and contract_id")
+        if not self.name or (self.contract_id is not None and not self.contract_id):
+            raise ValueError("dataset input requires a name and a contract or None")
+
+    def accepts(self, contract_id: str | None) -> bool:
+        return contract_id is not None and (
+            self.contract_id is None or contract_id == self.contract_id
+        )
 
 
 @dataclass(frozen=True)

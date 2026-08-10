@@ -46,7 +46,6 @@ from zlc_data import canonical_text
 from .dataset import MonitorCoverage
 from .dataset_output import (
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 from .plane import SignalDataPlane, SignalPublication, SignalValue
@@ -630,7 +629,21 @@ class SelectionBridge:
             trigger_revision = self._fit_trigger_revision
             processor = self._fit_processor
             output_names = self._fit_output_names(event)
-            if processor is None:
+            if processor is not None and tuple(
+                item.name for item in processor.dataset_output_declarations
+            ) != output_names:
+                raise ValueError("fit parameter/error vocabulary changed inside one bridge")
+        outputs = self._materialize_fit_outputs(source.snapshot, event)
+        if not self._plane.is_generation_live(self._source_signal):
+            if processor is not None:
+                with self._lock:
+                    if self._fit_processor is processor:
+                        self._fit_processor = None
+                self._withdraw_processor(processor)
+            self._publish_final("fit", outputs, publication)
+            return
+        with self._lock:
+            if self._fit_processor is None:
                 processor = self._new_processor("fit", output_names)
                 self._fit_processor = processor
                 self._plane.attach_latest_only_processor(
@@ -638,20 +651,20 @@ class SelectionBridge:
                     source_name=self._source_signal,
                     initial_publication=publication,
                 )
-            elif tuple(item.name for item in processor.dataset_output_declarations) != output_names:
-                raise ValueError("fit parameter/error vocabulary changed inside one bridge")
-            outputs = self._materialize_fit_outputs(source.snapshot, event)
-            try:
-                self._publish_processor(
-                    processor,
-                    outputs,
-                    publication,
-                    trigger=("fit", trigger_revision),
-                )
-            except RuntimeError as error:
-                if "obsolete parent" in str(error):
-                    return
-                raise
+            else:
+                processor = self._fit_processor
+        assert processor is not None
+        try:
+            self._publish_processor(
+                processor,
+                outputs,
+                publication,
+                trigger=("fit", trigger_revision),
+            )
+        except RuntimeError as error:
+            if "obsolete parent" in str(error):
+                return
+            raise
 
     def _commit_selection(self, state: SelectionState) -> None:
         with self._lock:
@@ -688,7 +701,7 @@ class SelectionBridge:
         # so it is answered once, terminally, instead of being refused because
         # the only machinery on offer was the live kind.
         if not self._plane.is_generation_live(self._source_signal):
-            self._publish_final_selection(state, outputs)
+            self._publish_final("selection", outputs, publication)
             return
 
         with self._lock:
@@ -739,41 +752,43 @@ class SelectionBridge:
             self._withdraw_processor(processor)
             raise
 
-    def _publish_final_selection(
+    def _publish_final(
         self,
-        state: SelectionState,
+        role: str,
         outputs: Mapping[str, LiveDatasetOutput],
+        source_publication: SignalPublication,
     ) -> None:
-        """Answer one selection over a finished parent, once.
+        """Answer one selection or fit over a finished parent, once.
 
-        The cut is identical to the live one -- the same materialization, under
-        the same names -- and only its lifetime differs: it is published as a
-        terminal generation of its own, because there is no stream left to
-        follow and a value that claims to be live would be lying about it.
+        Materialization is identical to the live path; only its lifetime is
+        terminal because there is no source stream left to follow.
         """
 
         with self._lock:
             if self._closed or not self._started:
                 return
-            owner = self._new_processor("selection", tuple(outputs))
-            self._selection_processor = owner
+            owner = self._new_processor(role, tuple(outputs))
+            if role == "selection":
+                self._selection_processor = owner
+            else:
+                self._fit_processor = owner
         try:
-            self._plane.reserve(owner)
-            self._plane.publish_final(
+            self._plane.reserve_frozen_processor(
                 owner,
-                {
-                    name: FinalDatasetOutput(
-                        output.declaration,
-                        output.snapshot,
-                        output.run_record,
-                    )
-                    for name, output in outputs.items()
-                },
+                source_name=self._source_signal,
+                source_publication=source_publication,
+            )
+            self._plane.publish_terminal_processor(
+                owner,
+                outputs,
+                source_publication=source_publication,
             )
         except BaseException:
             with self._lock:
                 if self._selection_processor is owner:
                     self._selection_processor = None
+                if self._fit_processor is owner:
+                    self._fit_processor = None
             self._withdraw_processor(owner)
             raise
         self._processor_wake()

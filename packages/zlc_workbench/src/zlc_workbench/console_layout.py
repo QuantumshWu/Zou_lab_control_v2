@@ -245,17 +245,24 @@ def resolve_layout(
                 )
             output_contracts[signal] = contract
     for binding in bindings:
-        expected = {str(spec.contract_id) for spec in dataset_inputs(binding.descriptor)}
+        input_specs = dataset_inputs(binding.descriptor)
         source = binding.draft.source_signal
-        if source and not expected:
+        if source and not input_specs:
             raise LayoutError(
                 f"{binding.node_id}: {binding.descriptor.api_name} has no dataset input"
             )
         actual = output_contracts.get(source) if source else None
-        if actual is not None and actual not in expected:
+        if actual is not None and not any(
+            spec.accepts(actual) for spec in input_specs
+        ):
+            expected = sorted(
+                str(spec.contract_id)
+                for spec in input_specs
+                if spec.contract_id is not None
+            )
             raise LayoutError(
                 f"{binding.node_id}: {source!r} publishes {actual!r}, expected "
-                f"{', '.join(sorted(expected))}"
+                f"{', '.join(expected) if expected else 'a compatible Dataset'}"
             )
 
     offered_kinds = {str(kind) for kind in panel_kinds}

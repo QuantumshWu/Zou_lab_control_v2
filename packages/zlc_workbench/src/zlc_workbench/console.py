@@ -3099,20 +3099,22 @@ class ConsolePresenter:
     def _source_options(self, descriptor: Any) -> tuple[str, ...]:
         """Stable keys whose declared Dataset contract matches this input."""
 
-        contracts = {
-            str(spec.contract_id) for spec in dataset_inputs(descriptor)
-        }
-        if not contracts:
+        specs = dataset_inputs(descriptor)
+        if not specs:
             return ()
+
+        def accepts(contract_id: str | None) -> bool:
+            return any(spec.accepts(contract_id) for spec in specs)
+
         compatible: set[str] = set()
         for binding in self.logic.values():
             for output in self._logic_outputs(binding):
-                if str(output.contract_id) in contracts:
+                if accepts(str(output.contract_id)):
                     compatible.add(stable_signal_key(binding.node_id, output.name))
         compatible.update(
             description.name
             for description in self.session.signal_plane.describe_signals()
-            if description.contract_id in contracts
+            if accepts(description.contract_id)
         )
         return tuple(sorted(compatible))
 

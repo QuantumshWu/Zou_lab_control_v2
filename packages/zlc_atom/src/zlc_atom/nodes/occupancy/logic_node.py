@@ -71,7 +71,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     NodeKind.PROCESSOR,
     OCCUPANCY_SCHEMA,
     input_specs=(
-        DatasetInputSpec("frames", "camera.frames.v1"),
+        DatasetInputSpec("frames", None),
         ArtifactInputSpec(
             "calibration_path",
             "Calibration artifact",

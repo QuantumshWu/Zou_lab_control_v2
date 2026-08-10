@@ -765,17 +765,16 @@ def test_turning_selectors_off_stops_panels_deriving(presenter, session) -> None
     assert binding.bridge is not None and binding.bridge.started
 
 
-def test_committed_selection_outputs_are_logic_source_choices(
-    presenter, session
+def test_committed_selection_outputs_enter_the_real_occupancy_input(
+    presenter, session, tmp_path
 ) -> None:
-    from zlc_atom.authoring import AuthoringSchema
-    from zlc_atom.nodes import (
-        DatasetInputSpec,
-        LogicNodeDescriptor,
-        NodeKind,
-        OutputSpec,
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
     )
-    from zlc_workbench.logic import LogicCatalog
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(
@@ -786,19 +785,7 @@ def test_committed_selection_outputs_are_logic_source_choices(
         presenter,
         lambda: binding.bridge is not None and binding.selections is not None,
     )
-    descriptor = LogicNodeDescriptor(
-        "selection_consumer",
-        NodeKind.PROCESSOR,
-        AuthoringSchema(),
-        input_specs=(
-            DatasetInputSpec("selection", "zlc.selection.roi_frame.v1"),
-        ),
-        outputs=(OutputSpec("result", "selection.result.v1"),),
-        build=lambda **_: object(),
-    )
-    presenter.catalog = LogicCatalog((descriptor,))
-    consumer_id = presenter.add_logic("selection_consumer")
-    assert presenter.view.logic_editors[consumer_id]["source_options"] == ()
+    consumer_id = presenter.add_logic("occupancy")
 
     _commit_area(binding.host)
     roi_signal = f"@logic/{binding.panel_id}/roi_frame"
@@ -808,8 +795,62 @@ def test_committed_selection_outputs_are_logic_source_choices(
     )
 
     projection = presenter.view.logic_editors[consumer_id]
-    assert projection["source_options"] == (roi_signal,)
+    assert roi_signal in projection["source_options"]
     assert projection["source_labels"][roi_signal].startswith("roi_frame  [")
+
+    fit_model = next(
+        value
+        for _label, value in binding.parameter_surface["fit"][0]["choices"]
+    )
+    binding.host.fit(fit_model).result()
+    fit_signals = tuple(
+        row
+        for row in session.signal_plane.describe_signals()
+        if row.contract_id == "zlc.selection.fit.parameter.v2"
+    )
+    assert fit_signals, (binding.bridge.last_error, binding.selections.last_error)
+    projection = presenter.logic_editor_projection(consumer_id)
+    assert projection is not None
+    assert any(
+        name in projection["source_options"]
+        for name in (row.name for row in fit_signals)
+    )
+
+    source = session.signal_plane.freeze().value(roi_signal)
+    assert source is not None
+    height, width = source.values.shape[-2:]
+    site_ids = ("site_0001",)
+    calibration = TrapCalibration(
+        SiteMap(
+            site_ids,
+            np.asarray(((width / 2.0, height / 2.0),)),
+            np.asarray((True,)),
+            np.asarray((1.0,)),
+        ),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((0.0,)),
+                np.asarray((True,)),
+                np.asarray((1.0,)),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract((height, width)),
+    )
+    artifact = calibration.save(tmp_path / "roi-calibration.json")
+    assert presenter.update_logic_draft(
+        consumer_id,
+        source_signal=roi_signal,
+        artifact_inputs={"calibration_path": str(artifact)},
+    )
+    assert presenter.start_logic(consumer_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: presenter.logic[consumer_id].host is not None,
+    )
+    host = presenter.logic[consumer_id].host
+    assert host is not None and host.source_signal == roi_signal
 
 
 

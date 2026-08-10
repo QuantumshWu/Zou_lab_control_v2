@@ -271,9 +271,13 @@ def finalize_logic_draft(
         if not source:
             issues.append("source_signal must be selected")
         elif source not in compatible_sources:
-            contracts = ", ".join(str(spec.contract_id) for spec in wants_source)
+            contracts = ", ".join(
+                str(spec.contract_id)
+                for spec in wants_source
+                if spec.contract_id is not None
+            ) or "a compatible"
             issues.append(
-                f"{source!r} is not declared as a compatible {contracts} Dataset"
+                f"{source!r} is not declared as {contracts} Dataset"
             )
         elif signal_plane.latest_publication(source) is None:
             issues.append(f"{source!r} has not published a Dataset yet")
