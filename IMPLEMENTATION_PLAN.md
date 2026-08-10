@@ -54,6 +54,8 @@
 10. 凡计划明确要求“参考 v1”，必须从绝对路径 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1` 读取并记录具体文件；禁止使用其他副本。同时不得把该参考扩张为重做 v2 架构的依据。
 11. 只保持整体 plugin/host/session/device/signal/plot 骨架稳定；Logic Node、device plugin 和 Workbench 功能都必须在现有骨架内采用最简单的本地实现，Workbench 只做基本逻辑和接线。未经用户明确批准，禁止把任何 plugin 的需求提升成新的通用抽象；已有单消费者 registry/coordinator/transaction/DTO/adapter 直接删除，不保留兼容层。
 12. `zlc_atom` foundation（顶层基础模块、公共 contract、install/runtime glue、`nodes/_framework`）继续禁止 Qt/`zlc_plot`/`zlc_ui` 依赖；具体 `nodes/<plugin>`、`devices/<plugin>` 可在本插件目录内声明和实现独有 plot/UI，只调用公共 API。测试必须分别守住 foundation 禁令与 plugin 局部许可，不能用一个全包字符串禁令抹掉 plugin 能力，也不能让 plugin 依赖渗回 foundation。
+13. 非常小、局部且不引入新行为边界的修改不运行任何测试；实质缺陷修复只运行直接相关的旧红/新绿测试。package全包、全仓、full-tree和detached全量只允许在真正重大的phase边界或整个Goal结束时运行，不得在每个小改动后机械执行。
+14. 每次上下文压缩、自动续跑或恢复任务后，先读取Checkpoint再选择工作。凡Checkpoint已写明“完成”“已解决”或“禁止重做”的事项，除非用户明确重新打开或当前树出现直接反证，否则不得重新调查、重新设计、重复实现或重复测试；摘要不确定不构成反证。每完成一步立即把裁决、证据、commit和下一个未完成事项写入Checkpoint，不能只留在对话记忆里。
 
 ## 1.1 Phase 0：隔离错误目标入口（已完成）
 

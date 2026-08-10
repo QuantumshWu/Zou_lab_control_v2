@@ -93,4 +93,19 @@ They constrain implementation method; product and architecture truth remain in
 13. GUI acceptance uses the formal launcher/composition and real Qt or desktop
     button interaction. Direct presenter calls do not prove the human flow.
 14. Keep one topic in flight, stage only its exact files, run the narrow red/green
-    proof, then commit and detached-verify before starting another topic.
+    proof, then commit before starting another topic. A very small, local change
+    that introduces no new behavior boundary runs no tests at all. A substantive
+    defect fix runs only the directly relevant red/green tests. Package-wide,
+    repository-wide, full-tree, and detached full suites are reserved for a
+    genuinely major phase boundary or the end of the active Goal; never run them
+    reflexively after a small edit.
+15. After every context compaction, automatic continuation, or resumed turn,
+    read the persistent Checkpoint before selecting work. An item recorded there
+    as completed, settled, or "do not revisit" is closed and must not be
+    re-investigated, redesigned, reimplemented, or retested unless the user
+    explicitly reopens it or new current-state evidence directly contradicts it.
+    Conversation-summary uncertainty is never such evidence.
+16. Immediately after completing a step, write its exact decision, evidence,
+    commit, and next unfinished action into the Checkpoint. Do not leave the
+    status only in chat or memory; that is what causes completed work to be
+    repeated after compaction.
