@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`自动化、静态和detached验证门全部通过，只等待操作者正式可见按钮验收。`
-- Last completed action：`在commit 3d0cdd0的临时detached worktree重跑全仓；root、Workbench、Atom、Plot导入均指向临时树，1158项通过。临时树测试后clean并已安全移除，目录与worktree注册均不存在，项目Python进程归零。`
-- Last verified tests：`zlc_data+zlc_plot+zlc_runtime 444 passed；zlc_atom 146 passed；zlc_ui 79 passed；Guard A/B/C 3 passed；zlc_workbench 334 passed；主树全仓1158 passed in 184.82s；detached全仓1158 passed in 192.22s。`
-- Pending acceptance gates：`按用户已声明的亲自验收边界，由操作者从bin\\experiment.bat执行真实可见按钮全流程，并在关闭后确认零窗口/worker/device claim/项目Python进程。`
-- Next action：`不由自动化代理擅自打开任何可见窗口；交付当前commit和最短正式按钮验收路径，收到操作者结果后只处理真实验收发现。`
+- Current phase：`正式可见按钮验收已在ce5b4c2发现七个真实产品断点，先复现根因并按最短现有骨架修复。`
+- Last completed action：`操作者实测确认：Occupancy overlay可选到非sibling并使TaskConsole退出；fixed color limits的逐字段即时提交可构造非法中间态并使raster host启动失败；Setting popup滚动/高度/gap/Auto与dependent limits投影错误；ROI/fit derived signals未进入可选Logic signal tree；mot_camera错误等待pulse trigger；Panel Edit与Monitor selector/viewport不同步且Refresh清空；viewport zoom未走producer draft联动。`
+- Last verified tests：`此前1158项主树/detached测试只能证明合成路径，已被正式可见验收反证，不能作为当前产品完成证据。当前尚未形成这七个断点的旧生产自动化红证据。`
+- Pending acceptance gates：`七项根修、受影响包/Guard/full/detached重验，以及同一最终HEAD的正式可见按钮复验与零残留。`
+- Next action：`扩写现有纵向/UI测试并在未改生产前复现overlay/fixed-limits/popup/derived catalog/MOT free-run/selector-refresh/viewport producer七个红点；按共同根因分阶段最小修改并提交。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
