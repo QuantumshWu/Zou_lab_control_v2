@@ -415,6 +415,27 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if parameters is not None and not isinstance(parameters, Mapping):
             raise TypeError("parameters must be a mapping or None")
         initial_parameters = {} if parameters is None else dict(parameters)
+        deferred_fixed_limits: dict[str, object] | None = None
+        if initial_parameters.get("relim_mode") == "fixed":
+            for low_name, high_name in (
+                ("color_min", "color_max"),
+                ("y_min", "y_max"),
+            ):
+                if (
+                    low_name in self._parameter_schema
+                    and high_name in self._parameter_schema
+                    and initial_parameters.get(low_name) is None
+                    and initial_parameters.get(high_name) is None
+                ):
+                    deferred_fixed_limits = {
+                        "relim_mode": "fixed",
+                        low_name: None,
+                        high_name: None,
+                    }
+                    initial_parameters.pop("relim_mode", None)
+                    initial_parameters.pop(low_name, None)
+                    initial_parameters.pop(high_name, None)
+                    break
         self._display_store = DisplayStateStore(
             self._parameter_schema,
             initial_parameters,
@@ -499,6 +520,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         renderer = MatplotlibRenderer(spec, plan, style=defaults.style)
         self._update_renderer(renderer, RenderEffect.LAYOUT)
         self._renderer = renderer
+        if deferred_fixed_limits is not None:
+            previous = self.display_state
+            prepared = self._parameter_schema.prepare_updates(
+                deferred_fixed_limits
+            )
+            self._materialize_fixed_limits(prepared, previous)
+            candidate = self._parameter_schema._transition_prepared(
+                previous.values,
+                prepared,
+            )
+            self._display_store._commit_prepared(previous, candidate)
 
     @staticmethod
     def _split_image_frame(

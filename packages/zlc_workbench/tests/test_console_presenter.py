@@ -663,6 +663,50 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
 
+def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
+    presenter, session
+) -> None:
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frame_0"), snapshot, kind="image"
+    )
+    original = binding.state
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"overlay_signal": "@logic/other/site_overlay"},
+    ) is False
+    assert binding.state is original
+    assert any(
+        "not a sibling" in text
+        for severity, text in presenter.view.status
+        if severity == "error"
+    )
+
+
+def test_plot_materialized_fixed_limits_become_the_panel_state(
+    presenter, session
+) -> None:
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frame_0"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.parameter_surface["display_unavailable"],
+    )
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"relim_mode": "fixed"}},
+    )
+    _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+
+    assert binding.state.display["relim_mode"] == "fixed"
+    assert binding.state.display["color_min"] is not None
+    assert binding.state.display["color_max"] is not None
+
+
 def test_pausing_is_reversible_and_the_window_is_told(presenter, session) -> None:
     """A one-way pause is a stopped console with no way back."""
 

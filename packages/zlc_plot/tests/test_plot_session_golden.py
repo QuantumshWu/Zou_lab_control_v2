@@ -11,6 +11,7 @@ from zlc_plot import (
     AxisRef,
     CurvePlot,
     FacetGridPlot,
+    ImagePlot,
     PlotSession,
     curve,
     histogram,
@@ -48,6 +49,26 @@ def image_snapshot() -> DatasetSnapshot:
     )
     values = np.arange(6, dtype=np.float64).reshape(1, 1, 3, 2)
     return DatasetSnapshot(schema, values, revision=0)
+
+
+def test_initial_fixed_color_mode_materializes_the_visible_limits() -> None:
+    session = PlotSession(
+        image_snapshot(),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        parameters={
+            "relim_mode": "fixed",
+            "color_min": None,
+            "color_max": None,
+        },
+    )
+    try:
+        values = session.display_state.values
+        assert values["relim_mode"] == "fixed"
+        assert values["color_min"] is not None
+        assert values["color_max"] is not None
+        assert float(values["color_min"]) < float(values["color_max"])
+    finally:
+        session.close()
 
 
 _GOLDEN_ROOT = Path(__file__).with_name("goldens")

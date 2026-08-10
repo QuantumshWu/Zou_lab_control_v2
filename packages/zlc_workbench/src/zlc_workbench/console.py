@@ -490,13 +490,15 @@ class ConsolePresenter:
             raise TypeError("a panel signal value must carry an OwnedSnapshot")
         if selected.kind != "image" or not selected.overlay_signal:
             return snapshot
-        binding.overlay_revision += 1
-        return image_frame_from_publication(
+        revision = binding.overlay_revision + 1
+        frame = image_frame_from_publication(
             value,
             publication,
             overlay_signal=selected.overlay_signal,
-            overlay_revision=binding.overlay_revision,
+            overlay_revision=revision,
         )
+        binding.overlay_revision = revision
+        return frame
 
     @staticmethod
     def _initial_plot_input(plot_input: object, state: PanelState) -> object:
@@ -1025,44 +1027,53 @@ class ConsolePresenter:
             ):
                 configuration["image_overlay"] = None
                 editor_configuration["image_overlay"] = None
-                publication = binding.display_publication
-                value = self._publication_value(publication, candidate.signal)
-                if value is not None:
-                    plot_input = self._project_panel_input(
-                        binding,
-                        value,
-                        publication,
-                        state=candidate,
-                    )
-                    if isinstance(plot_input, ImageFrame):
-                        configuration["image_overlay"] = plot_input.overlay
-                frozen = binding.frozen_data
-                if frozen is not None and frozen.publication is not None:
-                    frozen_value = self._publication_value(
-                        frozen.publication,
-                        frozen.signal,
-                    )
-                    if frozen_value is not None:
-                        frozen_input = self._project_panel_input(
+                previous_overlay_revision = binding.overlay_revision
+                frozen_replacement = None
+                try:
+                    publication = binding.display_publication
+                    value = self._publication_value(publication, candidate.signal)
+                    if value is not None:
+                        plot_input = self._project_panel_input(
                             binding,
-                            frozen_value,
-                            frozen.publication,
+                            value,
+                            publication,
                             state=candidate,
                         )
-                        binding.frozen_data = replace(
-                            frozen,
-                            plot_input=frozen_input,
-                            overlay=self._overlay_annotation(
-                                binding,
-                                frozen.publication,
-                                frozen_input,
-                                state=candidate,
-                            ),
+                        if isinstance(plot_input, ImageFrame):
+                            configuration["image_overlay"] = plot_input.overlay
+                    frozen = binding.frozen_data
+                    if frozen is not None and frozen.publication is not None:
+                        frozen_value = self._publication_value(
+                            frozen.publication,
+                            frozen.signal,
                         )
-                        if isinstance(frozen_input, ImageFrame):
-                            editor_configuration["image_overlay"] = (
-                                frozen_input.overlay
+                        if frozen_value is not None:
+                            frozen_input = self._project_panel_input(
+                                binding,
+                                frozen_value,
+                                frozen.publication,
+                                state=candidate,
                             )
+                            frozen_replacement = replace(
+                                frozen,
+                                plot_input=frozen_input,
+                                overlay=self._overlay_annotation(
+                                    binding,
+                                    frozen.publication,
+                                    frozen_input,
+                                    state=candidate,
+                                ),
+                            )
+                            if isinstance(frozen_input, ImageFrame):
+                                editor_configuration["image_overlay"] = (
+                                    frozen_input.overlay
+                                )
+                except (TypeError, ValueError) as error:
+                    binding.overlay_revision = previous_overlay_revision
+                    self._report(f"{panel_id}: {error}", severity="error")
+                    return False
+                if frozen_replacement is not None:
+                    binding.frozen_data = frozen_replacement
             binding.configuration = binding.host.configure(**configuration)
             if binding.editor_host is not None:
                 binding.editor_configuration = binding.editor_host.configure(
@@ -1253,14 +1264,12 @@ class ConsolePresenter:
         )
 
     @staticmethod
-    def _state_with_described_semantics(
+    def _state_with_described_parameters(
         state: PanelState,
         surface: Mapping[str, object],
     ) -> PanelState:
-        """Keep layout-loaded semantic choices typed in the one PanelState."""
+        """Keep the exact zlc_plot-accepted configuration in PanelState."""
 
-        if not state.semantic:
-            return state
         described = {
             str(entry["key"]): entry.get("value")
             for entry in tuple(surface.get("semantic", ()))
@@ -1269,7 +1278,11 @@ class ConsolePresenter:
             name: described.get(name, value)
             for name, value in state.semantic.items()
         }
-        return replace(state, semantic=resolved)
+        display = {
+            str(entry["key"]): entry.get("value")
+            for entry in tuple(surface.get("display", ()))
+        }
+        return replace(state, semantic=resolved, display=display)
 
     def _settle_panel_hosts(self) -> None:
         """Project metadata and selectors only after each initial render finished."""
@@ -1295,7 +1308,7 @@ class ConsolePresenter:
                             description.semantics,
                             description.fit_models,
                         )
-                        binding.state = self._state_with_described_semantics(
+                        binding.state = self._state_with_described_parameters(
                             binding.state,
                             surface,
                         )
@@ -1332,7 +1345,7 @@ class ConsolePresenter:
                                 display.semantics,
                                 models,
                             )
-                            binding.state = self._state_with_described_semantics(
+                            binding.state = self._state_with_described_parameters(
                                 binding.state, surface
                             )
                             binding.parameter_surface = surface
