@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`implementation complete for the reopened Setting、Refresh/Edit、ROI/Fit defects — awaiting the user's visible-button acceptance`
+- Goal status：`active — reopened Setting、Refresh/Edit、ROI/Fit defects are in completion audit after the user's signal-label correction`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`本次重新打开的三个缺陷实现与受影响测试均已完成；停止实现，交由用户本人做正式可见按钮验收。`
-- Last completed action：`Phase 3 production commit b01aa43：Panel host ready 后始终接唯一 SelectionBridge；Selectors 只控制可交互性，不再控制 ROI/Fit signal 生命周期。移除 ROI 只撤回 ROI processor，既有 fit 保留。Workbench 从 zlc_plot 的 FitResult/FacetFitBatchResult.parameter_names 取得真实参数名，发布 center_x/center_x_err 等短 leaf；ComboBox 内部仍保存完整 stable key，收起后只显示 leaf，展开后仍按 producer 分组。Setting 与 Edit 的 selector/viewport 继续投影同一 PanelBinding canonical state。未新增文件/类/框架。`
-- Last verified tests：`Goal末尾只跑三个直接受影响测试文件：SelectionBridge 19 passed；Qt Console views 25 passed；Workbench Console presenter 先为32 passed/1条旧长标签期望失败，生产未再变化，迁移该既有期望后失败项单跑1 passed。此前Phase 3旧红/新绿还明确覆盖Selectors默认OFF仍发布fit、ROI removal不清fit、center_x_err使用zlc.selection.fit.error.v2、真实ROI signal可启动Occupancy、Logic/Setting/Edit ComboBox显示短leaf。每个进程先打印root/被测模块路径指向当前v2；未跑package/full。`
-- Pending acceptance gates：`只剩用户本人正式可见按钮验收；验收若出现新的直接反证再重新打开对应phase。`
-- Next action：`停止代码修改和测试，向用户交付当前commit与精确验收点。`
+- Current phase：`用户明确恢复通用 signal 的 producer + 完整 shape 显示；Fit 只修错误名字来源。该修正已绿，继续对 Setting、双视图 selector 与 Refresh 做真实 offscreen Qt 完成审计。`
+- Last completed action：`Phase 3 production commit b01aa43 保留 SelectionBridge 生命周期修复和 FitResult.parameter_names 单一名字来源；后续修正恢复所有普通/ROI/Fit signal 的 producer 分组与完整 shape 文本。Fit leaf 仍为 center_x/center_x_err，不再出现 FitParameterSpec(...) 或重复 fit_..._error。未新增文件/类/框架。`
+- Last verified tests：`用户修正前的当前生产精确红：Workbench 2 failed（frame_0 与 Fit/ROI 均缺shape），Qt 1 failed（collapsed picker缺producer）；恢复原通用投影后相同测试分别2 passed和1 passed。此前SelectionBridge 19 passed、Qt Console views 25 passed以及selector/Refresh窄测试证据仍有效。所有进程先打印root/被测模块路径指向当前v2；未跑package/full。`
+- Pending acceptance gates：`真实 offscreen Qt逐项完成审计、必要的直接缺口修复、阶段提交，以及用户本人正式可见按钮验收。`
+- Next action：`提交 signal label correction；随后审计真实 Setting widget geometry、live/frozen selector双向同步和Refresh无重建/无低分辨率中间态。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律

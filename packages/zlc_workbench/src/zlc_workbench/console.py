@@ -72,10 +72,6 @@ from .topology import format_signal_shape, project_signals
 __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
-def _signal_leaf_label(name: str) -> str:
-    return str(name).rsplit("/", 1)[-1] or str(name)
-
-
 _UNCHANGED = object()
 
 
@@ -642,12 +638,10 @@ class ConsolePresenter:
         """
 
         groups: dict[str, list[tuple[str, str]]] = {}
-        for name, _label, _state, producer, _derived in self.offered_signals(
+        for name, label, _state, producer, _derived in self.offered_signals(
             include_shown=True
         ):
-            groups.setdefault(producer or "signals", []).append(
-                (_signal_leaf_label(name), name)
-            )
+            groups.setdefault(producer or "signals", []).append((label, name))
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
@@ -671,16 +665,14 @@ class ConsolePresenter:
                     output.contract_id
                 )
         groups: dict[str, list[tuple[str, str]]] = {}
-        for name, _label, _state, producer, _derived in self.offered_signals(
+        for name, label, _state, producer, _derived in self.offered_signals(
             include_shown=True
         ):
             if (
                 name in sibling_names
                 and contracts.get(name) == ImagePointOverlay.CONTRACT_ID
             ):
-                groups.setdefault(producer or "signals", []).append(
-                    (_signal_leaf_label(name), name)
-                )
+                groups.setdefault(producer or "signals", []).append((label, name))
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
@@ -3158,9 +3150,13 @@ class ConsolePresenter:
         descriptor: Any,
         consumer_node_id: str,
     ) -> dict[str, str]:
+        compatible = set(
+            self._source_options(descriptor, consumer_node_id)
+        )
         return {
-            name: _signal_leaf_label(name)
-            for name in self._source_options(descriptor, consumer_node_id)
+            row.name: row.label
+            for row in project_signals(self.session.signal_plane)
+            if row.name in compatible
         }
 
     def _build_logic_candidate(

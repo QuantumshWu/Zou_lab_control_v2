@@ -99,7 +99,7 @@ def choice_tree_groups(
         if current_source is None:
             raise ValueError("choice rows must begin with a source header")
         short = _choice_short_label(key, labels)
-        leaves.append((display.strip(), key, short))
+        leaves.append((display.strip(), key, f"{current_source} · {short}"))
     if current_source is not None:
         groups.append((current_source, leaves))
     return groups

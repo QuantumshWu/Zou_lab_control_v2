@@ -31,6 +31,7 @@ from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import compose_panel_spec
 from zlc_workbench.session import ExperimentSession, Workspace
+from zlc_workbench.topology import format_signal_shape
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
@@ -813,7 +814,10 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     )
     for row in fit_signals:
         if row.name in projection["source_options"]:
-            assert projection["source_labels"][row.name] == row.name.rsplit("/", 1)[-1]
+            leaf = row.name.rsplit("/", 1)[-1]
+            assert projection["source_labels"][row.name] == (
+                f"{leaf}  [{format_signal_shape(row.shape)}]"
+            )
 
     presenter.set_deriving(True)
     _commit_area(binding.host)
@@ -825,7 +829,14 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
 
     projection = presenter.view.logic_editors[consumer_id]
     assert roi_signal in projection["source_options"]
-    assert projection["source_labels"][roi_signal] == "roi_frame"
+    roi_description = next(
+        row
+        for row in session.signal_plane.describe_signals()
+        if row.name == roi_signal
+    )
+    assert projection["source_labels"][roi_signal] == (
+        f"roi_frame  [{format_signal_shape(roi_description.shape)}]"
+    )
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
@@ -914,7 +925,9 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
         for display, key in leaves
     }
     assert binding.signal in offered
-    assert offered[binding.signal] == "frame_0"
+    shape = snapshot.block.values.shape
+    shape_text = f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
+    assert offered[binding.signal] == f"frame_0  [{shape_text}]"
     assert card.chosen == binding.signal
 
     card.edit_requested.emit()
