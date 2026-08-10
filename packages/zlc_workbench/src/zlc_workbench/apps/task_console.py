@@ -223,7 +223,6 @@ class ExperimentGuiFlow:
 
     def _open_work_windows(self, session: object) -> None:
         from ..board import attach_qt
-        from .pulse_editor import create_bound_window
 
         if self.session is not None:
             raise RuntimeError("this experiment flow already has an active session")
@@ -233,18 +232,26 @@ class ExperimentGuiFlow:
                 session,
                 window_ratio=self.window_ratio,
             )
-            pulse = create_bound_window(
-                workspace=self.space,
-                sequence=None,
-                sequencer=session.sequencer,
-                device_use=session.device_use,
-                path="",
-                window_ratio=self.window_ratio,
-            )
+            try:
+                sequencer = session.sequencer
+            except KeyError:
+                sequencer = None
+            if sequencer is not None:
+                from .pulse_editor import create_bound_window
+
+                pulse = create_bound_window(
+                    workspace=self.space,
+                    sequence=None,
+                    sequencer=sequencer,
+                    device_use=session.device_use,
+                    path="",
+                    window_ratio=self.window_ratio,
+                )
 
             def beat() -> None:
                 presenter.beat()
-                pulse.presenter.refresh_run_state()
+                if pulse is not None:
+                    pulse.presenter.refresh_run_state()
 
             timer = attach_qt(
                 beat, interval_ms=_beat_interval_ms(presenter, self.interval_ms)
