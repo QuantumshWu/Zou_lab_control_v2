@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`awaiting manual acceptance — the reopened Panel publisher and real Frozen snapshot paths are complete`
-- Production HEAD at final verification：`9a963db；Panel publisher projection landed in a1d503f`
+- Goal status：`awaiting manual acceptance — Area and viewport now map their actual canvas geometry to Producer ROI`
+- Production HEAD at final verification：`d2cb266；Logic publisher remains complete in a1d503f`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`完成。Logic tab 同时显示 LogicNode direct outputs 与独立只读 Panel publisher ROI/Fit。Guard B 已从 fake ConsoleView/host 根控件改为正式 build_console -> TaskConsoleHandle -> PanelEditorView -> 实际 Frozen QWidget；Area 存在时 producer ROI 不变，移除 Area 后 wheel viewport 同步更新嵌入 Producer form、主 Logic Edit form 与 Producer Restart request。`
-- Last completed action：`提交 9a963db：真实 UI Guard B 取代假验收，并把 Panel Edit 中错误的“Zoom and pan remain display-only”说明改成 Area > viewport 的真实优先级。该纵向测试在修改行为代码前已经到达 ROI 更新断言，说明 3a2ebb2 的现有行为接线有效；本轮没有为制造旧红再加补丁。`
-- Last verified tests：`Panel publisher presenter + Qt projection 2 passed；正式真实 PanelEditorView Guard B 1 passed（5.01 s）；SelectionBridge Fit event batch 跨 source revision retention 1 passed。只跑直接相关测试，未机械跑包/全仓。`
-- Pending acceptance gates：`只剩用户正式手动按钮验收：Logic tab 的 Panel publisher 行、Fit membership不闪烁、Frozen snapshot Area > wheel viewport 的可见 Producer ROI。`
-- Next action：`停止代码修改与测试，释放所有进程/窗口，交用户手动验收；除非用户给出新的直接反证，不得在上下文压缩后重新打开这两项。`
+- Current phase：`完成。zlc_plot viewport event 保留未裁剪的实际 canonical canvas bounds；Camera Measurement 的同一个 SelectionMapping 把 Area 或 viewport 的真实范围映射到 sensor coordinates，只在物理 sensor 边界裁剪。Area selector 仍优先于 viewport。ROI/Fit Dataset materialization 继续由 SelectionBridge 按 data domain 切片，二者不再共用错误的裁剪语义。`
+- Last completed action：`提交 d2cb266。没有新增文件、类、状态机或兼容路径；只删除 zlc_plot viewport event 的 data-extent clamp，并把既有 camera ROI mapping 的 current-frame clamp 改为 physical-sensor clamp。`
+- Last verified tests：`旧红：真实 Guard B zoom-out 后 viewport_roi[0] 实得 4、未小于 authored 4；Atom selection mapping 对画布 y=-3.2 实得 roi_y=7、错误裁回 frame。修后正式 PanelEditorView Guard B 1 passed（4.81 s）；Atom sensor mapping 1 passed；SelectionBridge partial-outside data materialization 1 passed。每个进程首行导入 v2 并打印生产模块路径；只跑直接相关测试，未跑包/全仓。`
+- Pending acceptance gates：`只剩用户正式手动验收：Frozen snapshot zoom/pan 使用实际可见画布范围；Area selector 存在时优先且同样按真实矩形更新 Producer ROI；二者只在 sensor 边界停止。`
+- Next action：`停止修改与测试，交用户手动验收；上下文压缩后不得重开 Logic publisher、Area/viewport ROI 或 camera buffer 已完成项，除非用户给出新的直接反证。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
