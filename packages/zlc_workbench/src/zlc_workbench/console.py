@@ -700,6 +700,8 @@ class ConsolePresenter:
                 and front.value(binding.state.signal) is not None
             ):
                 self.update_panel_state(panel_id, {"signal": binding.state.signal})
+        for node_id in tuple(self.logic):
+            self.refresh_logic_editor(node_id)
 
     def retarget_panel(self, panel_id: str, signal: str) -> bool:
         """Point one fixed-kind panel at a different compatible signal."""
@@ -3032,15 +3034,11 @@ class ConsolePresenter:
             for output in self._logic_outputs(binding):
                 if str(output.contract_id) in contracts:
                     compatible.add(stable_signal_key(binding.node_id, output.name))
-        for node in tuple(getattr(self.session, "nodes", ()) or ()):
-            signal_key = getattr(node, "signal_key", None)
-            if not callable(signal_key):
-                continue
-            for declaration in tuple(
-                getattr(node, "dataset_output_declarations", ()) or ()
-            ):
-                if str(getattr(declaration, "contract_id", "")) in contracts:
-                    compatible.add(str(signal_key(declaration.name)))
+        compatible.update(
+            description.name
+            for description in self.session.signal_plane.describe_signals()
+            if description.contract_id in contracts
+        )
         return tuple(sorted(compatible))
 
     def _source_labels(self, descriptor: Any) -> dict[str, str]:

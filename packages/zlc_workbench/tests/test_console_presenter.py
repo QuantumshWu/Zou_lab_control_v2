@@ -748,6 +748,53 @@ def test_turning_selectors_off_stops_panels_deriving(presenter, session) -> None
     assert binding.bridge is not None and binding.bridge.started
 
 
+def test_committed_selection_outputs_are_logic_source_choices(
+    presenter, session
+) -> None:
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes import (
+        DatasetInputSpec,
+        LogicNodeDescriptor,
+        NodeKind,
+        OutputSpec,
+    )
+    from zlc_workbench.logic import LogicCatalog
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frame_0"), snapshot, kind="image"
+    )
+    presenter.set_deriving(True)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.bridge is not None and binding.selections is not None,
+    )
+    descriptor = LogicNodeDescriptor(
+        "selection_consumer",
+        NodeKind.PROCESSOR,
+        AuthoringSchema(),
+        input_specs=(
+            DatasetInputSpec("selection", "zlc.selection.roi_frame.v1"),
+        ),
+        outputs=(OutputSpec("result", "selection.result.v1"),),
+        build=lambda **_: object(),
+    )
+    presenter.catalog = LogicCatalog((descriptor,))
+    consumer_id = presenter.add_logic("selection_consumer")
+    assert presenter.view.logic_editors[consumer_id]["source_options"] == ()
+
+    _commit_area(binding.host)
+    roi_signal = f"@logic/{binding.panel_id}/roi_frame"
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.freeze().value(roi_signal) is not None,
+    )
+
+    projection = presenter.view.logic_editors[consumer_id]
+    assert projection["source_options"] == (roi_signal,)
+    assert projection["source_labels"][roi_signal].startswith("roi_frame  [")
+
+
 
 def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None:
     """The control on the card and the bridge behind it must agree.

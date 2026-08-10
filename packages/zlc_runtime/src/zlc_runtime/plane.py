@@ -220,6 +220,7 @@ class SignalDescription:
     name: str
     owner_id: str
     kind: str
+    contract_id: str | None
     live: bool
     source_name: str | None
     revision: int
@@ -1057,7 +1058,18 @@ class SignalDataPlane:
             for state in states:
                 if state.retired:
                     continue
+                declarations = (
+                    {}
+                    if state.node is None
+                    else _declared_outputs(
+                        _require_signal_producer(
+                            state.node
+                        ).dataset_output_declarations
+                    )
+                )
                 for name in state.output_names:
+                    bare_name = state.bare_names.get(name)
+                    declaration = declarations.get(bare_name)
                     value = (
                         None
                         if state.publication is None
@@ -1068,6 +1080,11 @@ class SignalDataPlane:
                             name=name,
                             owner_id=state.owner_id,
                             kind=state.kind,
+                            contract_id=(
+                                None
+                                if declaration is None
+                                else declaration.contract_id
+                            ),
                             live=not state.terminal,
                             source_name=state.source_name,
                             revision=(
