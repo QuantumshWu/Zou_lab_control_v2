@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`78eff07已完成Setting popup投影与几何；继续ROI/fit derived signal catalog。`
-- Last completed action：`78eff07：Setting popup高度不再超过所属panel，scrollbar贴右且body高度不再累积旧sizeHint；zlc_plot的同一ParameterControl现在声明automatic与不可编辑原因，Workbench只透传，Form把Auto/Manual switch放在label列。color_min/color_max与Y limits没有独立Auto，只在fixed limits时可编辑。旧实现三条目标测试精确红，修后同三条直接测试通过；未运行package/full suite，项目Python/Qt进程为零。此前buffer已按用户最终裁决固定为4个完整cycle，禁止重新调查或扩容。`
-- Last verified tests：`overlay/fixed三条旧生产守卫先得3 failed，根修后3 passed；现有Guard C正确Occupancy sibling overlay 1 passed。按执行纪律未跑package/full。`
-- Pending acceptance gates：`derived signal catalog、MOT free-run、live/Edit selector+viewport同步、zoom producer联动四项根修；随后重大phase/full/detached重验，以及同一最终HEAD的正式可见按钮复验与零残留。`
-- Next action：`只追现有Camera Measurement/Logic publication到TaskConsole signal chooser的单一路径，确认ROI/fit derived outputs为何未进入catalog；在现有descriptor/publication/chooser owner内最简修复，不新增文件或抽象。`
+- Current phase：`57f2508已完成ROI/fit derived signal catalog；继续MOT virtual camera free-run。`
+- Last completed action：`57f2508：现有SelectionBridge本来已经发布ROI/fit derived signals，缺口只是SignalDescription没有contract，Logic chooser又扫描session.nodes静态声明而不消费plane当前拓扑。现在plane从现有producer/processor declaration投影contract；chooser保留未启动本地Logic row的预接线key，同时直接消费plane并删除session.nodes第二份运行时扫描；derived signal出现时刷新已打开Logic Edit。唯一纵向测试旧实现精确红、修后通过。未跑package/full。此前buffer已按用户最终裁决固定为4个完整cycle，禁止重新调查或扩容。`
+- Last verified tests：`ROI committed selection -> derived roi_frame -> 已打开Logic Edit source chooser这一条纵向守卫先红后1 passed；Setting三条与overlay/fixed/Guard C证据保持不变。按执行纪律未跑package/full。`
+- Pending acceptance gates：`MOT free-run、live/Edit selector+viewport同步、zoom producer联动三项根修；随后重大phase/full/detached重验，以及同一最终HEAD的正式可见按钮复验与零残留。`
+- Next action：`只追正式mot_camera descriptor -> SimulationWorld/VirtualCamera acquisition链，确认为什么仍依赖pulse trigger；在现有simulation device/adapter配置内最简改成source-less free-running，不新增device类、文件或抽象。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
