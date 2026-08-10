@@ -758,7 +758,7 @@ def _form_label_width(fields) -> int:
             width,
             setting_label_width(
                 _automatic_label(field, False) for field in automatic
-            ) + scaled_px(68),
+            ) + scaled_px(34),
         )
     return width
 
@@ -838,6 +838,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(scaled_px(6, minimum=4))
+        self._layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         label_width = self._label_width or _form_label_width(spec.fields)
         for field in spec.fields:
             handler = FORM_WIDGET_HANDLERS[field.kind]

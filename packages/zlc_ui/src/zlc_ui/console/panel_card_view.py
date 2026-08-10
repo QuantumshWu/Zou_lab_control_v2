@@ -28,6 +28,7 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     GREY,
     ORANGE,
+    popup_gap,
     RED,
     scaled_px,
     signals_blocked,
@@ -241,8 +242,8 @@ class PanelCardView(FluentGroupBox):
             size_index = self.size_combo.findData(incoming["size"])
             if size_index >= 0:
                 self.size_combo.setCurrentIndex(size_index)
-        self._apply_card_size(str(incoming["size"]))
         if incoming["size"] != previous_size:
+            self._apply_card_size(str(incoming["size"]))
             self.geometry_changed.emit()
         self._rebuild_settings_form()
 
@@ -644,12 +645,18 @@ class PanelCardView(FluentGroupBox):
             self._sync_settings_body_size()
             popup.hide()
         anchor = self._settings_anchor
+        available_height = max(
+            1,
+            self.rect().bottom()
+            - self.settings_button.geometry().bottom()
+            - popup_gap(),
+        )
         anchor.toggle(
             self._settings_body,
             prepare=self._rebuild_settings_form,
             minimum_width=1,
             minimum_height=320,
-            maximum_height=max(1, self.height()),
+            maximum_height=available_height,
         )
 
     def _request_edit(self) -> None:

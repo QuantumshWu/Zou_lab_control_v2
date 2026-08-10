@@ -182,6 +182,9 @@ assert {
 } == top_levels | {popup}
 assert 240 <= popup.width() <= 320
 assert popup.height() <= card.height()
+assert popup.mapToGlobal(popup.rect().bottomRight()).y() <= card.mapToGlobal(
+    card.rect().bottomRight()
+).y()
 assert card._settings_scroll.geometry().right() == popup.rect().right()
 assert not hasattr(card, 'apply_button')
 app.processEvents()
@@ -577,7 +580,7 @@ print(zou_lab_control_v2.__file__)
 print(tested_module.__file__)
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from PyQt5 import QtCore, QtTest, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
 from zlc_ui.fluent import FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -649,7 +652,26 @@ surface = {
 }
 handle.set_panel_projection('panel-1', state, surface)
 card = handle._cards['panel-1']
+blank_surface = {
+    'semantic': (), 'display': (), 'fit': (),
+    'semantic_unavailable': '', 'display_unavailable': '',
+    'fit_unavailable': '',
+}
+handle.set_panel_projection('panel-1', state, blank_surface)
 card._open_settings()
+card._settings_popup.hide()
+card.resize(340, 180)
+authored_size = card.size()
+handle.set_panel_projection('panel-1', state, surface)
+app.processEvents()
+assert card.size() == authored_size, 'same-size projection reset the card geometry'
+card._open_settings()
+app.processEvents()
+for key, row in card._settings_form._rows.items():
+    assert row.height() >= row.minimumSizeHint().height(), (
+        f'Setting row {key!r} was vertically cut off: '
+        f'{row.height()} < {row.minimumSizeHint().height()}'
+    )
 title_widget = card._settings_form.widget_for('title')
 natural_title_width = title_widget.minimumWidth()
 title_widget.setMinimumWidth(520)
@@ -795,6 +817,17 @@ title_auto = editor.parameter_forms['display'].auto_switch_for('title')
 title_edit = editor.parameter_forms['display'].widget_for('title')
 assert title_auto.isChecked()
 assert title_auto.text() == 'Auto Title'
+switch_image = QtGui.QImage(
+    title_auto.sizeHint(), QtGui.QImage.Format_ARGB32_Premultiplied
+)
+switch_image.fill(QtCore.Qt.transparent)
+title_auto.resize(title_auto.sizeHint())
+title_auto.render(switch_image)
+middle_y = switch_image.height() // 2
+assert all(
+    QtGui.qAlpha(switch_image.pixel(x, middle_y)) > 0
+    for x in range(2, title_auto._content_width() - 2)
+), 'Auto/Manual text is painted outside rather than inside the switch track'
 title_row = editor.parameter_forms['display']._rows['title']
 assert title_row.layout().itemAt(0).widget() is title_auto
 assert title_row.layout().itemAt(1).widget() is title_edit

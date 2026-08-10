@@ -2649,28 +2649,20 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         self._apply_metrics()
 
     def _content_width(self) -> int:
-        """Exactly what paintEvent draws: track + gap + label + a little air.
+        """Width of the single painted track, including its optional text."""
 
-        Derived from the same track width and gap the painting uses, because
-        the previous arrangement had a hand-written minimum width beside a
-        computed size hint -- and the layout obeys the minimum.  At 1.25 scale
-        the reserve came out one pixel short of the label and the header's
-        "Selectors" lost its last glyph, which no amount of correcting the hint
-        could fix while a second number outranked it.
-        """
-
-        track_w = scaled_px(60, minimum=48)
+        track_h = scaled_px(30, minimum=24)
         if not self.text():
-            return track_w
-        gap = scaled_px(8)
+            return scaled_px(60, minimum=48)
         text_w = fluent_text_width(QtGui.QFontMetrics(self.font()), self.text())
-        return track_w + gap + text_w + scaled_px(4)
+        return max(
+            scaled_px(60, minimum=48),
+            track_h + scaled_px(8) + text_w + scaled_px(8),
+        )
 
     def _apply_metrics(self) -> None:
-        # The reserve keeps switches aligned down a form column; the content is
-        # what must never be clipped.  Whichever is larger wins.
         self.setMinimumSize(
-            max(scaled_px(126, minimum=96), self._content_width()),
+            self._content_width(),
             scaled_px(30, minimum=24),
         )
 
@@ -2687,21 +2679,16 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         return self.sizeHint()
 
     def hitButton(self, pos) -> bool:
-        # Only the visible switch TRACK (and its label, if any) toggles.  The widget reserves a wider
-        # minimum width for column alignment, so without this the dead padding to the right of the
-        # 60 px track -- which fills the form row's control cell -- would flip the switch on a click
-        # that never landed on it (a click anywhere "on the row" toggling is the reported bug).
-        track_w = scaled_px(60, minimum=48)
-        hit_w = track_w
-        if self.text():
-            hit_w = track_w + scaled_px(8) + fluent_text_width(QtGui.QFontMetrics(self.font()), self.text())
-        return 0 <= int(pos.x()) <= int(hit_w) and 0 <= int(pos.y()) <= self.height()
+        return (
+            0 <= int(pos.x()) <= self._content_width()
+            and 0 <= int(pos.y()) <= self.height()
+        )
 
     def paintEvent(self, event) -> None:
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        track_w = scaled_px(60, minimum=48)
+        track_w = self._content_width()
         track_h = min(self.height(), scaled_px(30, minimum=24))
         y = int((self.height() - track_h) / 2)
         track_color = ACCENT if self.isChecked() and self.isEnabled() else (PLACEHOLDER if self.isEnabled() else BG)
@@ -2716,9 +2703,29 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         painter.drawEllipse(int(offset), y + margin, thumb_d, thumb_d)
 
         if self.text():
-            painter.setPen(QtGui.QColor(TEXT))
-            text_rect = QtCore.QRect(track_w + scaled_px(8), 0, max(0, self.width() - track_w - scaled_px(8)), self.height())
-            painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, self.text())
+            gap = scaled_px(5, minimum=3)
+            if self.isChecked():
+                text_rect = QtCore.QRect(
+                    margin + gap,
+                    y,
+                    max(0, track_w - thumb_d - 3 * margin - gap),
+                    track_h,
+                )
+            else:
+                text_rect = QtCore.QRect(
+                    thumb_d + 2 * margin + gap,
+                    y,
+                    max(0, track_w - thumb_d - 3 * margin - gap),
+                    track_h,
+                )
+            painter.setPen(
+                QtGui.QColor("#FFFFFF" if self.isEnabled() else PLACEHOLDER)
+            )
+            painter.drawText(
+                text_rect,
+                QtCore.Qt.AlignCenter,
+                self.text(),
+            )
         painter.end()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -2727,7 +2734,7 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         super().mouseReleaseEvent(event)
 
     def _checked_offset(self, track_w: int | None = None, thumb_d: int | None = None, margin: int | None = None) -> float:
-        track_w = scaled_px(60, minimum=48) if track_w is None else int(track_w)
+        track_w = self._content_width() if track_w is None else int(track_w)
         track_h = min(self.height() or scaled_px(30, minimum=24), scaled_px(30, minimum=24))
         margin = scaled_px(3, minimum=2) if margin is None else int(margin)
         thumb_d = max(1, track_h - margin * 2) if thumb_d is None else int(thumb_d)
