@@ -30,13 +30,13 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`active — 自动验证已完成，等待用户亲自进行正式可见按钮验收`
+- Goal status：`implementation complete — 自动实现与验证已完成；正式可见按钮验收按用户裁决由用户本人执行`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`自动验证收口；当前树交给用户亲自进行正式可见按钮验收。`
+- Current phase：`附件列出的产品缺陷与后续ROI/fit、live-fit和Setting裁决均已实现并完成自动验证；当前树已交给用户验收。`
 - Last completed action：`52b075a：source-neutral Occupancy首次暴露Console source catalog会把consumer自己的声明输出及上一generation publication列回自己的输入候选。现有catalog现在只按SignalDescription.owner_id/binding.node_id排除consumer自身，不猜signal key前缀；同时把两条旧测试同步到既定语义：Occupancy input contract显式为None、layout持久化完整zlc_plot accepted display state。未新增文件、类、状态或抽象。`
 - Last verified tests：`最终HEAD单次全树为1162 passed in 184.86s；同一进程首句import并打印ROOT与ATOM/DURABLE/PLOT/PULSE/RUNTIME/UI/WORKBENCH，全部绝对路径指向当前v2树。随后在c35ffb3临时detached worktree只做同组import隔离，全部路径指向该临时树；临时目录与worktree registration均已删除。主树git status/diff-check clean，项目Python/pytest进程为0。此前四package 767 passed/3 failed中的三条已由52b075a精确3 passed闭合，未重复full。`
-- Pending acceptance gates：`只余用户从正式launcher亲自进行可见按钮验收；自动端不再启动GUI。`
+- Pending acceptance gates：`无剩余自动实施门；用户从正式launcher进行的可见按钮验收属于已明确保留的人类验收。`
 - Next action：`等待用户验收反馈；若出现新当前状态证据，只处理对应真实缺陷，不重开Checkpoint已关闭事项。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
