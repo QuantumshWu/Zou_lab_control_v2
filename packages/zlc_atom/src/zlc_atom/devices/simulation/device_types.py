@@ -59,7 +59,7 @@ VIRTUAL_MOT_CAMERA_SCHEMA = AuthoringSchema(
             "exposure_seconds",
             "float",
             "Exposure seconds",
-            0.05,
+            0.1,
             minimum=1e-9,
         ),
     )

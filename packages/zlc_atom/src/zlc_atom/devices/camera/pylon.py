@@ -64,7 +64,7 @@ class PylonCameraConfig:
     """What an operator writes down to reach and set up one Basler camera."""
 
     serial: str
-    exposure_seconds: float = 5e-3
+    exposure_seconds: float = 0.1
     trigger_source: str = "Line1"
     roi_xywh: tuple[int, int, int, int] | None = None
     timeout_seconds: float = 2.0

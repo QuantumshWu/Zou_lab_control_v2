@@ -11,7 +11,13 @@ from zlc_atom.devices.camera import (
     PylonCameraAdapter,
 )
 from zlc_atom.devices.camera.binding import bind_camera
-from zlc_atom.devices.simulation import SimulationWorld, VirtualCamera, VirtualCameraConfig
+from zlc_atom.devices.simulation import (
+    SimulationWorld,
+    VirtualCamera,
+    VirtualCameraConfig,
+    VirtualPulseStreamer,
+)
+from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.execution import (
     DeviceIdentityEvidenceKind,
     DeviceBroker,
@@ -23,6 +29,7 @@ from zlc_atom.execution import (
     bind_verified_device,
     run_plan,
 )
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 
 def test_real_and_virtual_cameras_share_one_runtime_contract() -> None:
@@ -112,20 +119,36 @@ def test_external_gate_can_only_shorten_the_camera_working_point() -> None:
         ordinal: int,
         *,
         exposure_seconds: float,
+        probe_seconds: float | None = None,
         occupancy: object | None = None,
     ) -> np.ndarray:
         rendered.append((float(exposure_seconds), np.asarray(occupancy, dtype=bool)))
         return render(
             ordinal,
             exposure_seconds=exposure_seconds,
+            probe_seconds=probe_seconds,
             occupancy=occupancy,
         )
 
     world.render_frame = record_render  # type: ignore[method-assign]
     camera.arm(3, source_group_sizes=(3,), buffer_frame_count=3, timeout=1.0)
-    world.fire(3, frame_exposures=(0.1, 0.002, 0.2))
+    sequencer = VirtualPulseStreamer(world=world)
+    sequencer.open()
+    pulse = resolve_pulse(
+        IMAGING_PULSE_RESOURCE.value,
+        path=IMAGING_PULSE_RESOURCE.path,
+        board=sequencer.describe(),
+        api_values={
+            "reference_probe_duration_before": 0.1,
+            "readout_probe_duration": 0.002,
+            "reference_probe_duration_after": 0.2,
+        },
+    )
+    sequencer.load(pulse.program, source=pulse.sequence)
+    sequencer.fire()
     records = camera.read_frame_records(3, timeout=1.0, exact=True)
     camera.finish_record_capture()
+    sequencer.close()
 
     assert [exposure for exposure, _occupancy in rendered] == [
         pytest.approx(0.013),

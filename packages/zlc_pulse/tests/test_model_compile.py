@@ -16,7 +16,7 @@ from zlc_pulse import (
 )
 from zlc_pulse.model import PulseFieldRef
 from zlc_pulse.engine_model import ScanUnderflow, reference_play, streaming_scan_play
-from zlc_pulse.schedule import trigger_times
+from zlc_pulse.schedule import trigger_times, trigger_windows
 from zlc_pulse.wire import StreamerParams
 
 
@@ -203,3 +203,5 @@ def test_a_bracket_around_the_whole_pulse_is_the_pulse_saying_how_many_times() -
     assert program.loop_count == 3
     assert program.loop_end_tick == program.ticks[-1]
     assert not program.repeat_forever
+    assert trigger_windows(program, "d0") == ((0, 1), (3, 4), (6, 7))
+    assert trigger_windows(program, "d1") == ((1, 2), (4, 5), (7, 8))

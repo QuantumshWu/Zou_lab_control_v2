@@ -52,7 +52,7 @@ def _roi_xywh(authored: dict) -> tuple[int, int, int, int] | None:
 PYLON_CAMERA_SCHEMA = AuthoringSchema(
     (
         AuthoringField("serial", "str", "Serial number", "", required=True),
-        AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.005, minimum=1e-9),
+        AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.1, minimum=1e-9),
         AuthoringField("trigger_source", "str", "Trigger source", "Line1"),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),

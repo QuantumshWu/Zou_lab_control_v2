@@ -8,6 +8,9 @@ from typing import Any, Callable
 
 import numpy as np
 
+from zlc_pulse.compile import CompiledProgram
+from zlc_pulse.schedule import run_duration_seconds, trigger_windows
+
 
 DEFAULT_SIMULATION_GRID_SHAPE_YX = (5, 7)
 DEFAULT_SIMULATION_IMAGE_SHAPE_YX = (96, 128)
@@ -109,8 +112,10 @@ class SimulationWorld:
         self._site_psf_skew = _readonly(
             np.clip(0.45 + self.rng.normal(0.0, 0.08, site_count), 0.15, 0.75)
         )
-        self._occupancy = self.rng.random(site_count) < self.loading_probability
+        self._occupancy = np.zeros(site_count, dtype=bool)
         self._forced_occupancy: np.ndarray | None = None
+        self._mot_population = 0.0
+        self._dac_values = {"da_bias_x": 0, "da_bias_y": 0, "da_bias_z": 0}
         #: Read-only pixel coordinate vectors per MOT frame shape.  A frame
         #: shape is a configuration fact, so this holds one or two entries.
         self._mot_axis_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
@@ -158,25 +163,38 @@ class SimulationWorld:
         with self._lock:
             return self._fire_count
 
-    def _load_shot(self, trap_off_seconds: float) -> np.ndarray:
+    def _load_shot(self) -> np.ndarray:
         if self._forced_occupancy is None:
             shot = self.rng.random(len(self.geometry.site_centers_xy)) < self.loading_probability
         else:
             shot = np.array(self._forced_occupancy, copy=True)
+        self._occupancy = shot
+        self._mot_population = 1.0
+        return np.array(shot, copy=True)
+
+    def _lose_atoms(self, trap_off_seconds: float) -> None:
         off_time = float(trap_off_seconds)
         if not np.isfinite(off_time) or off_time < 0:
             raise ValueError("trap_off_seconds must be finite and non-negative")
         if off_time:
             survival = np.exp(-off_time / self.trap_off_lifetime_s)
-            shot &= self.rng.random(shot.size) < survival
-        self._occupancy = shot
-        return np.array(shot, copy=True)
+            self._occupancy &= self.rng.random(self._occupancy.size) < survival
+            self._mot_population *= float(survival)
+
+    def safe(self) -> None:
+        """Return the simulated apparatus to the board target's safe outputs."""
+
+        with self._lock:
+            self._occupancy[:] = False
+            self._mot_population = 0.0
+            self._dac_values.update(da_bias_x=0, da_bias_y=0, da_bias_z=0)
 
     def render_frame(
         self,
         ordinal: int,
         *,
         exposure_seconds: float = 0.005,
+        probe_seconds: float | None = None,
         occupancy: object | None = None,
     ) -> np.ndarray:
         with self._lock:
@@ -184,6 +202,9 @@ class SimulationWorld:
             exposure = float(exposure_seconds)
             if not np.isfinite(exposure) or exposure <= 0:
                 raise ValueError("exposure_seconds must be positive and finite")
+            probe = exposure if probe_seconds is None else float(probe_seconds)
+            if not np.isfinite(probe) or probe < 0 or probe > exposure:
+                raise ValueError("probe_seconds must be finite and between zero and exposure")
             floor_e = (self.background_rate + self.dark_current_e_per_s) * exposure
             expected_electrons = np.full((height, width), floor_e, dtype=float)
             yy, xx = np.mgrid[:height, :width]
@@ -214,7 +235,7 @@ class SimulationWorld:
                     spot = np.clip(core * (1.0 + float(skew) * dx / sigma_x), 0.0, None)
                     expected_electrons += (
                         self.atom_rate
-                        * exposure
+                        * probe
                         * float(gain)
                         * base_area
                         / (sigma_x * sigma_y)
@@ -246,7 +267,7 @@ class SimulationWorld:
         self,
         ordinal: int,
         *,
-        exposure_seconds: float = 0.05,
+        exposure_seconds: float = 0.1,
         occupancy: object | None = None,
         frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX,
     ) -> np.ndarray:
@@ -267,17 +288,24 @@ class SimulationWorld:
             exposure = float(exposure_seconds)
             if not np.isfinite(exposure) or exposure <= 0:
                 raise ValueError("exposure_seconds must be positive and finite")
-            atoms = self._occupancy if occupancy is None else np.asarray(occupancy, dtype=bool)
-            loading = float(np.mean(np.asarray(atoms, dtype=bool)))
-            center_x = 0.5 * width + 0.015 * width * np.sin(0.31 * int(ordinal))
-            center_y = 0.5 * height + 0.015 * height * np.cos(0.23 * int(ordinal))
+            if occupancy is None:
+                loading = self._mot_population
+            else:
+                loading = float(np.mean(np.asarray(occupancy, dtype=bool)))
+            scale = 1.0 / 512.0
+            field_x = self._dac_values["da_bias_x"] * scale
+            field_y = self._dac_values["da_bias_y"] * scale
+            field_z = self._dac_values["da_bias_z"] * scale
+            center_x = width * (0.5 + 0.2 * field_x)
+            center_y = height * (0.5 + 0.2 * field_y)
             sigma_x = 40.0 / 2.354820045
             sigma_y = 20.0 / 2.354820045
             x_axis, y_axis = self._mot_axes(height, width)
             counts = self.rng.standard_normal((height, width), dtype=np.float32)
             counts *= 1.5
             counts += 7.0
-            peak = 93.0 * loading * (exposure / 0.05)
+            field_distance_sq = field_x * field_x + field_y * field_y + field_z * field_z
+            peak = 93.0 * loading * np.exp(-1.5 * field_distance_sq) * (exposure / 0.1)
             if peak > 0.0:
                 x_low = max(0, int(np.floor(center_x - 8.0 * sigma_x)))
                 x_high = min(width, int(np.ceil(center_x + 8.0 * sigma_x)) + 1)
@@ -299,58 +327,98 @@ class SimulationWorld:
 
     def fire(
         self,
-        count: int = 1,
+        program: CompiledProgram,
         *,
-        frame_exposures: object | None = None,
-        trap_off_seconds: float = 0.0,
+        table: object | None = None,
+        camera_channel: str = "emCCD",
     ) -> None:
-        """Route one shot's camera windows using one shared atom occupancy.
+        """Play one applied board point through the shared physical world."""
 
-        ``count`` is the number of camera windows in the loaded pulse, not the
-        number of independent shots.  The sequencer calls this once per
-        ``fire``; all windows rendered during that call therefore share the
-        occupancy selected for that shot.  A camera working point owns the
-        maximum integration exposure.  An explicitly compiled external gate
-        may shorten an individual window, as the calibration long/readout/long
-        protocol does, but it cannot extend the configured camera exposure.
-        """
+        if not isinstance(program, CompiledProgram):
+            raise TypeError("program must be CompiledProgram")
+        row = None if table is None else np.asarray(table, dtype=np.int64).reshape(1, -1)
+        clock = float(program.clock_hz)
+        cooling = trigger_windows(program, "cooling", row)
+        probe = trigger_windows(program, "probe", row)
+        trap = trigger_windows(program, "trap", row)
+        camera_windows = trigger_windows(program, str(camera_channel), row)
+        duration_ticks = run_duration_seconds(program, row) * clock
 
-        windows = int(count)
-        if windows <= 0:
-            raise ValueError("camera window count must be positive")
-        if frame_exposures is None:
-            gates: tuple[float, ...] | None = None
-        else:
-            gates = tuple(float(value) for value in frame_exposures)  # type: ignore[arg-type]
-            if len(gates) != windows or any(
-                not np.isfinite(value) or value <= 0 for value in gates
-            ):
-                raise ValueError(
-                    "frame_exposures must contain one positive finite value per camera window"
-                )
         with self._lock:
             ordinal = self._fire_count
-            shot_occupancy = self._load_shot(trap_off_seconds)
             self._fire_count += 1
-            # Devices own their protocol; the world only performs explicit
-            # trigger routing and never exposes private backend channels.
-            for camera, registered_renderer in tuple(self._cameras):
-                if not camera.capture_state():
-                    continue
-                configured = float(camera.capture_working_point().exposure_seconds)
-                effective = (
-                    (configured,) * windows
-                    if gates is None
-                    else tuple(min(configured, gate) for gate in gates)
-                )
-                renderer = self.render_frame if registered_renderer is None else registered_renderer
-                for exposure in effective:
-                    frame = renderer(
-                        ordinal,
-                        exposure_seconds=exposure,
-                        occupancy=shot_occupancy,
-                    )
-                    camera.trigger(1, frame=frame)
+            load_tick = float(cooling[0][1]) if cooling else None
+            loaded = False
+            cursor = 0.0
+
+            for start_tick, end_tick in camera_windows:
+                start = float(start_tick)
+                if load_tick is not None and not loaded and load_tick <= start:
+                    self._lose_atoms(_low_time(cursor, load_tick, trap, clock))
+                    self._load_shot()
+                    cursor = load_tick
+                    loaded = True
+                self._lose_atoms(_low_time(cursor, start, trap, clock))
+                cursor = start
+                shot_occupancy = np.array(self._occupancy, copy=True)
+                for device, registered_renderer in tuple(self._cameras):
+                    if not device.capture_state():
+                        continue
+                    configured = float(device.capture_working_point().exposure_seconds)
+                    exposure = min(configured, (end_tick - start_tick) / clock)
+                    integration_end = start + exposure * clock
+                    probe_seconds = _overlap_ticks(start, integration_end, probe) / clock
+                    if registered_renderer is None:
+                        frame = self.render_frame(
+                            ordinal,
+                            exposure_seconds=exposure,
+                            probe_seconds=probe_seconds,
+                            occupancy=shot_occupancy,
+                        )
+                    else:
+                        frame = registered_renderer(
+                            ordinal,
+                            exposure_seconds=exposure,
+                            occupancy=shot_occupancy,
+                        )
+                    device.trigger(1, frame=frame)
+
+            if load_tick is not None and not loaded:
+                self._lose_atoms(_low_time(cursor, load_tick, trap, clock))
+                self._load_shot()
+                cursor = load_tick
+            self._lose_atoms(_low_time(cursor, duration_ticks, trap, clock))
+            self._dac_values.update(_final_dac_values(program, row))
+
+
+def _overlap_ticks(
+    start: float,
+    end: float,
+    windows: tuple[tuple[int, int], ...],
+) -> float:
+    return sum(max(0.0, min(end, stop) - max(start, begin)) for begin, stop in windows)
+
+
+def _low_time(
+    start: float,
+    end: float,
+    high_windows: tuple[tuple[int, int], ...],
+    clock_hz: float,
+) -> float:
+    return max(0.0, end - start - _overlap_ticks(start, end, high_windows)) / clock_hz
+
+
+def _final_dac_values(
+    program: CompiledProgram,
+    table: np.ndarray | None,
+) -> dict[str, int]:
+    point = () if table is None else tuple(int(value) for value in table.reshape(-1))
+    values = {name: 0 for name in program.bus_names}
+    for segment in program.bus_segments:
+        selector = segment.stop_value_select or segment.value_select
+        code = point[selector - 1] if selector else segment.stop_value
+        values[segment.bus_name] = int(code) - int(program.bus_safe_values[segment.bus_index])
+    return values
 
 
 __all__ = [

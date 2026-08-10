@@ -12,15 +12,70 @@ from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_runtime import SignalDataPlane
+from zlc_pulse import (
+    AnalogStep,
+    PulsePeriod,
+    PulseSequence,
+    compile_sequence,
+    load_streamer_config,
+)
 from tests.pulse_fixture import (
     CAMERA_CHANNEL,
     IMAGING_PULSE_RESOURCE,
-    build_calibration_pulse,
 )
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _world_pulse(
+    *,
+    duration: float = 0.02,
+    cooling: bool = False,
+    probe: bool = False,
+    trap: bool = False,
+    camera: bool = False,
+    da_x: int = 0,
+    da_y: int = 0,
+    da_z: int = 0,
+) -> PulseSequence:
+    target = IMAGING_PULSE_RESOURCE.value.target
+    lane_index = {lane: index for index, lane in enumerate(target.raw_lanes)}
+    states = [0] * len(target.raw_lanes)
+    for name, active in (
+        ("cooling", cooling),
+        ("probe", probe),
+        ("trap", trap),
+        ("emCCD", camera),
+    ):
+        if active:
+            states[lane_index[target.by_key[name].lanes[0]]] = 1
+    return PulseSequence(
+        name="world_physics",
+        target=target,
+        time_step_ns=20.0,
+        periods=(
+            PulsePeriod(
+                "state",
+                duration,
+                "s",
+                tuple(states),
+                (
+                    AnalogStep("da_bias_x", "edge", da_x),
+                    AnalogStep("da_bias_y", "edge", da_y),
+                    AnalogStep("da_bias_z", "edge", da_z),
+                ),
+            ),
+        ),
+    )
+
+
+def _fire_world(world: SimulationWorld, pulse: PulseSequence) -> None:
+    config = load_streamer_config()
+    world.fire(
+        compile_sequence(pulse, config["params"], float(config["clock_hz"]))
+    )
 
 
 def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() -> None:
@@ -36,9 +91,23 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     assert world.atom_rate * exposure == pytest.approx(22.0)
     site_count = len(world.geometry.site_centers_xy)
     world.set_occupancy(np.zeros(site_count, dtype=bool))
-    dark = np.asarray([world.render_frame(index, exposure_seconds=exposure) for index in range(24)])
+    dark = np.asarray(
+        [
+            world.render_frame(index, exposure_seconds=exposure, probe_seconds=0.0)
+            for index in range(24)
+        ]
+    )
     world.set_occupancy(np.ones(site_count, dtype=bool))
-    bright = np.asarray([world.render_frame(index, exposure_seconds=exposure) for index in range(24)])
+    bright = np.asarray(
+        [
+            world.render_frame(
+                index,
+                exposure_seconds=exposure,
+                probe_seconds=exposure,
+            )
+            for index in range(24)
+        ]
+    )
     assert dark.dtype == np.dtype("<u2")
     assert bright.dtype == np.dtype("<u2")
     assert float(np.mean(bright)) > float(np.mean(dark))
@@ -51,18 +120,17 @@ def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
     The spot is separable and Poisson samples are drawn only inside the
     +/-8 sigma window, so everything outside that window must be pure
     offset-plus-read-noise -- and the loaded spot must still rise far above
-    it at the wobbling center.
+    it at the field-controlled center.
     """
 
     world = SimulationWorld(seed=7)
     site_count = len(world.geometry.site_centers_xy)
-    world.set_occupancy(np.ones(site_count, dtype=bool))
+    _fire_world(world, _world_pulse(cooling=True, trap=True))
     frame = world.render_mot_frame(0, frame_shape_yx=(400, 640))
     assert frame.dtype == np.dtype("|u1")
     assert frame.shape == (400, 640)
 
-    # At ordinal 0 the wobble puts the center at (y, x) = (206, 320).
-    spot = frame[203:210, 317:324].astype(float)
+    spot = frame[197:204, 317:324].astype(float)
     assert float(np.mean(spot)) > 60.0
 
     # 8 sigma_x is ~136 px and 8 sigma_y is ~68 px: the left margin and the
@@ -74,16 +142,31 @@ def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
         assert float(np.std(values)) == pytest.approx(1.5, abs=0.3)
         assert int(np.max(margin)) < 20
 
-    world.set_occupancy(np.zeros(site_count, dtype=bool))
+    world.safe()
     empty = world.render_mot_frame(0, frame_shape_yx=(400, 640))
     assert float(np.mean(empty.astype(float))) == pytest.approx(6.5, abs=0.3)
     assert int(np.max(empty)) < 20
 
 
-def test_mot_frames_are_seed_deterministic_and_wobble_with_the_ordinal() -> None:
-    def frames(seed: int) -> tuple[np.ndarray, np.ndarray]:
+def test_mot_position_is_seed_deterministic_and_follows_the_bias_dacs() -> None:
+    def frames(
+        seed: int,
+        *,
+        da_x: int = 0,
+        da_y: int = 0,
+        da_z: int = 0,
+    ) -> tuple[np.ndarray, np.ndarray]:
         world = SimulationWorld(seed=seed)
-        world.set_occupancy(np.ones(len(world.geometry.site_centers_xy), dtype=bool))
+        _fire_world(
+            world,
+            _world_pulse(
+                cooling=True,
+                trap=True,
+                da_x=da_x,
+                da_y=da_y,
+                da_z=da_z,
+            ),
+        )
         return (
             world.render_mot_frame(0, frame_shape_yx=(200, 320)),
             world.render_mot_frame(9, frame_shape_yx=(200, 320)),
@@ -94,13 +177,23 @@ def test_mot_frames_are_seed_deterministic_and_wobble_with_the_ordinal() -> None
     np.testing.assert_array_equal(first_a, second_a)
     np.testing.assert_array_equal(first_b, second_b)
 
-    # The spot center wobbles with the ordinal, so its centroid moves.
     def centroid_y(frame: np.ndarray) -> float:
         weights = np.clip(frame.astype(float) - 12.0, 0.0, None)
         rows = np.arange(frame.shape[0], dtype=float)
         return float(np.sum(rows * np.sum(weights, axis=1)) / np.sum(weights))
 
-    assert abs(centroid_y(first_a) - centroid_y(first_b)) > 2.0
+    def centroid_x(frame: np.ndarray) -> float:
+        weights = np.clip(frame.astype(float) - 12.0, 0.0, None)
+        columns = np.arange(frame.shape[1], dtype=float)
+        return float(np.sum(columns * np.sum(weights, axis=0)) / np.sum(weights))
+
+    assert abs(centroid_y(first_a) - centroid_y(first_b)) < 1.0
+    shifted, _ = frames(5, da_y=256)
+    assert centroid_y(shifted) - centroid_y(first_a) > 10.0
+    shifted, _ = frames(5, da_x=256)
+    assert centroid_x(shifted) - centroid_x(first_a) > 20.0
+    defocused, _ = frames(5, da_z=256)
+    assert float(np.sum(defocused)) < float(np.sum(first_a))
 
 
 def test_virtual_sites_have_repeatable_efficiency_and_psf_diversity() -> None:
@@ -127,9 +220,10 @@ def test_virtual_sites_have_repeatable_efficiency_and_psf_diversity() -> None:
 
 def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> None:
     world = SimulationWorld(seed=11)
+    pulse = _world_pulse(cooling=True, trap=True)
     patterns: list[np.ndarray] = []
     for _ in range(8):
-        world.fire()
+        _fire_world(world, pulse)
         patterns.append(world.occupancy)
 
     assert len({pattern.tobytes() for pattern in patterns}) > 2
@@ -141,8 +235,10 @@ def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> 
 
 def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
     world = SimulationWorld(seed=3)
+    _fire_world(world, _world_pulse(trap=True))
+    assert not np.any(world.occupancy), "a pulse without cooling cannot load atoms"
     world.set_occupancy(np.ones(35, dtype=bool))
-    world.fire(trap_off_seconds=1.0)
+    _fire_world(world, _world_pulse(duration=1.0))
     assert not np.any(world.occupancy)
 
 
@@ -154,8 +250,18 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
     )
     streamer.open()
     try:
-        program, _metadata = build_calibration_pulse(streamer.describe())
-        streamer.load(program)
+        pulse = resolve_pulse(
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=streamer.describe(),
+            api_values={
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
+            },
+        )
+        program = pulse.program
+        streamer.load(program, source=pulse.sequence)
         started = time.monotonic()
         streamer.fire()
         time.sleep(program.duration_seconds * 0.25)
