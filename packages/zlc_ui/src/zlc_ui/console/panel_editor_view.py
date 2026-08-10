@@ -175,8 +175,8 @@ class PanelEditorView(QtWidgets.QWidget):
         interaction_layout = QtWidgets.QVBoxLayout(interaction_group)
         interaction_layout.setContentsMargins(margin, margin, margin, margin)
         self.interaction_note = FluentLabel(
-            "Zoom and pan remain display-only. Committed Area/Range selections "
-            "are routed to the direct producer draft shown below."
+            "Area controls the direct producer ROI when present; otherwise "
+            "the frozen plot's zoom/pan viewport controls it."
         )
         self.interaction_note.setWordWrap(True)
         self.interaction_note.setStyleSheet(
@@ -364,8 +364,8 @@ class PanelEditorView(QtWidgets.QWidget):
             )
             if stale
             else (
-                "Zoom and pan remain display-only. Committed Area/Range "
-                "selections are routed to the direct producer draft shown below."
+                "Area controls the direct producer ROI when present; otherwise "
+                "the frozen plot's zoom/pan viewport controls it."
             )
         )
         self._update_producer(incoming.get("producer_logic"))
