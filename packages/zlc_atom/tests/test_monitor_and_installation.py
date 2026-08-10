@@ -3,6 +3,7 @@ from __future__ import annotations
 from threading import Thread
 import time
 
+import numpy as np
 import pytest
 
 from tests.fakes import FakePlane
@@ -72,13 +73,13 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert isinstance(monitor, MonitorCapture)
         camera = installation.device("camera")
 
-        # Continuous capture keeps 128 whole cycles.  Let that 384-frame
+        # Continuous capture keeps 1024 whole cycles.  Let that 3072-frame
         # raw buffer advance once before the consumer reads: it now contains
-        # ordinals 1..384.  The leading 1/2 cannot be combined with 3, and the
+        # ordinals 1..3072.  The leading 1/2 cannot be combined with 3, and the
         # retained capacity must still leave 3/4/5 available as the next shot.
-        camera.trigger(385)
+        camera.trigger(3073, frame=np.zeros((96, 128), dtype=np.uint16))
         deadline = time.monotonic() + 5.0
-        while camera.produced_count < 385 and time.monotonic() < deadline:
+        while camera.produced_count < 3073 and time.monotonic() < deadline:
             time.sleep(0.001)
         for _ in range(3):
             monitor.poll()
