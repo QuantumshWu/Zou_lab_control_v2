@@ -434,14 +434,25 @@ def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
     raise AssertionError("panel hosts did not settle")
 
 
-def _commit_area(host) -> None:
+def _commit_area(
+    host,
+    *,
+    lower_fraction: float = 0.25,
+    upper_fraction: float = 0.75,
+) -> None:
     """Commit one real Area gesture through the mounted raster surface."""
 
     front = host.wait_for_front(5.0)
     axes = front.interaction.axes[0]
     left, bottom, right, top = axes.bounds
-    start = (left + 0.25 * (right - left), bottom + 0.25 * (top - bottom))
-    end = (left + 0.75 * (right - left), bottom + 0.75 * (top - bottom))
+    start = (
+        left + lower_fraction * (right - left),
+        bottom + lower_fraction * (top - bottom),
+    )
+    end = (
+        left + upper_fraction * (right - left),
+        bottom + upper_fraction * (top - bottom),
+    )
     for action, point in (("press", start), ("move", end), ("release", end)):
         host._pointer_event(
             action,
@@ -1052,6 +1063,24 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
         app.processEvents()
         time.sleep(0.005)
     assert live_widget.presented_front.identity.sequence > live_sequence
+
+    editor_sequence = editor_widget.presented_front.identity.sequence
+    _commit_area(
+        panel.host,
+        lower_fraction=0.10,
+        upper_fraction=0.60,
+    )
+    editor_selector = first_editor_host.selector_state(SelectorKind.AREA).result().value
+    live_selector = panel.host.selector_state(SelectorKind.AREA).result().value
+    assert editor_selector.value == live_selector.value
+    deadline = time.monotonic() + 2.0
+    while (
+        editor_widget.presented_front.identity.sequence <= editor_sequence
+        and time.monotonic() < deadline
+    ):
+        app.processEvents()
+        time.sleep(0.005)
+    assert editor_widget.presented_front.identity.sequence > editor_sequence
 
     assert presenter.refresh_panel_snapshot(panel.panel_id)
     assert panel.editor_host is first_editor_host
