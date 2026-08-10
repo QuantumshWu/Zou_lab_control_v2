@@ -784,6 +784,58 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         _close(bridge, plane, source)
 
 
+def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
+    """A fit accepted AFTER its source advanced still publishes, honestly.
+
+    The fit trails its source by construction: at 10 Hz a fit for shot N is
+    accepted while the camera already published N+1.  Demanding the parent
+    still be current silently dropped most accepted fits -- a rolling trace
+    of the fit saw an occasional point while the panel overlay updated
+    every shot.  The plane's recent-publication window resolves the EXACT
+    parent, so lineage stays truthful: fit@N names camera@N.
+    """
+
+    schema = _curve_schema()
+    values = np.zeros((1, 5, 1), dtype=np.float64)
+    plane, source, slot, state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/trail/center"})
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="trail")
+    bridge.start()
+    try:
+        # The camera advances to revision 2 BEFORE the fit of revision 1
+        # arrives -- the live-cadence ordering.
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 2, schema, values + 1.0),
+            MonitorCoverage(1, 5),
+        )
+        plane.mark_changed(source, slot)
+        plane.freeze()
+
+        events.emit_fit(_batch_fit_event(source_revision=1, batch_revision=1))
+        assert bridge.last_error is None
+        front = plane.freeze()
+        published = front.value("@logic/trail/center")
+        assert published is not None, "the trailing fit was dropped"
+        publication = front.publication("@logic/trail/center")
+        parent_ref = publication.direct_parent_refs[0]
+        assert parent_ref.sequence == 1  # camera@1: the shot it was fitted on
+
+        # The next shot's fit follows normally against camera@2.
+        events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
+        assert bridge.last_error is None
+        second = plane.freeze().publication("@logic/trail/center")
+        assert second.direct_parent_refs[0].sequence == 2
+
+        # A revision that already left the plane's retained window reports,
+        # not silently vanishes.
+        events.emit_fit(_batch_fit_event(source_revision=77, batch_revision=3))
+        assert bridge.last_error is not None
+    finally:
+        _close(bridge, plane, source)
+
+
 def test_fit_event_value_freezes_batch_inputs_and_rejects_invalid_tables() -> None:
     values = np.asarray([1.0, np.nan])
     errors = np.asarray([0.1, np.nan])

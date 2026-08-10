@@ -389,6 +389,38 @@ class _Plane:
         return self.front
 
 
+def test_two_views_of_one_signal_schedule_per_panel_not_as_one_batch() -> None:
+    """Same-signal ports are NOT welded into one batch.
+
+    The front already serves every view one publication per signal, so two
+    panels of the same camera are same-shot by construction.  Present-time
+    batching would couple their cadences and turn one slow view's coalesced
+    render into both panels' abandoned batch -- a 1D projection lagging once
+    stuttered the 2D image beside it.  Only multi-signal causal components
+    batch.
+    """
+
+    front = _front()
+    plane = _Plane(front)
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    fast = _Port("fast", "camera/frame", interval=100)
+    slow = _Port("slow", "camera/frame", interval=100)
+    clock = HarmonicClock((100, 200, 400, 800), 100)
+    scheduler = BoardScheduler(plane, clock, arbiter, lambda: (fast, slow))
+
+    scheduler.on_tick()
+    assert len(fast.updates) == len(slow.updates) == 1
+    assert arbiter.pending_batches == 2  # one batch per panel, not one of two
+
+    # The slow view's render is coalesced away; the fast view still presents.
+    assert slow.futures[0].cancel()
+    fast.futures[0].set_result("fast")
+    arbiter.drain(lambda panel_id: {"fast": fast, "slow": slow}.get(panel_id))
+    assert len(fast.accepted) == 1
+    assert not slow.accepted and not slow.rejected
+
+
 def test_board_scheduler_declares_its_port_signals_on_every_tick() -> None:
     """The reader declares what it reads: the port list IS the front request.
 

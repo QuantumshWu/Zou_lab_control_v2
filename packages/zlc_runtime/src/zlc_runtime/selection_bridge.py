@@ -513,6 +513,10 @@ class SelectionBridge:
             if self._started:
                 return
             self._started = True
+        # Fits publish trailing (a fit for shot N is accepted after the
+        # route advanced); declare retention up front so their exact parents
+        # stay resolvable by revision.
+        self._plane.retain_recent_publications(self._source_signal)
         subscriptions: list[Callable[[], None]] = []
         try:
             subscriptions.append(
@@ -591,19 +595,28 @@ class SelectionBridge:
         with self._lock:
             if self._closed or not self._started:
                 return
-        publication = self._current_source_publication()
+        # The fit trails its source by construction: by accept time the
+        # route has usually advanced one shot.  Resolve the EXACT parent
+        # the fit derived from out of the plane's recent-publication
+        # window; demanding it still be current dropped most accepted
+        # fits on a live camera (the rolling trace saw an occasional
+        # point while the panel's overlay updated every shot).  Retention
+        # re-declares idempotently: a source generation replaced since
+        # start() gets its window back on the first fit that follows.
+        self._plane.retain_recent_publications(self._source_signal)
+        publication = self._plane.recent_publication(
+            self._source_signal,
+            event.source_revision,
+        )
         if publication is None:
-            self._record_error(RuntimeError("fit event arrived before source publication"))
-            return
-        source = publication.value(self._source_signal)
-        assert source is not None
-        if source.snapshot.ref.revision.value != event.source_revision:
             self._record_error(
-                ValueError(
-                    "fit event source_revision does not match the current source snapshot"
+                RuntimeError(
+                    "fit event source publication is no longer retained"
                 )
             )
             return
+        source = publication.value(self._source_signal)
+        assert source is not None
         with self._lock:
             if (
                 self._last_fit_batch_revision is not None
@@ -634,16 +647,41 @@ class SelectionBridge:
                     if self._fit_processor is processor:
                         self._fit_processor = None
                 self._withdraw_processor(processor)
+            if publication is not self._current_source_publication():
+                # The generation finished on a NEWER shot than this fit's;
+                # a terminal answer must describe the final snapshot.
+                self._record_error(
+                    RuntimeError("fit event trails a finished source generation")
+                )
+                return
             self._publish_final("fit", outputs, publication)
             return
         with self._lock:
             if self._fit_processor is None:
                 processor = self._new_processor("fit", output_names)
                 self._fit_processor = processor
+                # Attaching binds the route and demands the exact CURRENT
+                # publication; the publication the fit derived from may
+                # already be one behind it, and is what gets published.
+                current = self._current_source_publication()
+                if current is None:
+                    self._fit_processor = None
+                    self._record_error(
+                        RuntimeError("fit route lost its source while attaching")
+                    )
+                    return
+                # A fit signal is a presentation-paced follower: it advances
+                # only after its source panel PRESENTS and its live fit
+                # accepts (the lane recompute raises _StaleFit on any newer
+                # parent).  It must therefore never hold its source in the
+                # same-shot front -- consuming a fit signal on one panel
+                # would freeze the source panel, which freezes the fit, which
+                # freezes everything in the component.
                 self._plane.attach_latest_only_processor(
                     processor,
                     source_name=self._source_signal,
-                    initial_publication=publication,
+                    initial_publication=current,
+                    coherent=False,
                 )
             else:
                 processor = self._fit_processor

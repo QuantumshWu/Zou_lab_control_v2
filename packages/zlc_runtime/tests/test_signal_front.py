@@ -98,6 +98,7 @@ def _state(
     names: tuple[str, ...],
     publication: SignalPublication | None,
     source_name: str | None = None,
+    coherent: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         owner_id=owner,
@@ -105,6 +106,7 @@ def _state(
         kind=kind,
         output_names=names,
         source_name=source_name,
+        coherent=coherent,
         publication=publication,
         failure=None,
         terminal=False,
@@ -158,6 +160,49 @@ def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
         for name in recovered.names()
     }
     assert len(roots) == 1
+
+
+def test_a_presentation_paced_follower_never_holds_its_source() -> None:
+    """A coherent=False route keeps lineage but joins no same-shot component.
+
+    A panel's accepted-fit signal only advances AFTER its source presents:
+    letting it hold the source's front selection deadlocks the whole
+    component (the source waits for the fit that waits for the source's
+    next presentation).  The follower's own consumers simply see its latest
+    value, one shot behind by nature.
+    """
+
+    root = _publication("camera", "g1", 1, "camera/frame")
+    fit = _publication("fit", "g3", 1, "fit/value", (root,))
+    parents = {root: (), fit: (root,)}
+    states = [
+        _state("camera", "g1", "producer", ("camera/frame",), root),
+        _state(
+            "fit", "g3", "processor", ("fit/value",), fit,
+            "camera/frame", coherent=False,
+        ),
+    ]
+    requested = {"camera/frame", "fit/value"}
+
+    first = build_front(states, requested, None, parents.__getitem__)
+    assert first.continuous_group("camera/frame") == frozenset({"camera/frame"})
+    assert first.continuous_group("fit/value") == frozenset({"fit/value"})
+
+    # The camera advances two shots; the follower's fit is still for shot 1.
+    root3 = _publication("camera", "g1", 3, "camera/frame")
+    states[0].publication = root3
+    parents[root3] = ()
+    flowing = build_front(states, requested, first, parents.__getitem__)
+    assert flowing.publication("camera/frame").event_ref.sequence == 3
+    assert flowing.publication("fit/value").event_ref.sequence == 1
+
+    # The same topology WITH coherence is the occupancy contract: the source
+    # is held at the follower's shot instead of running ahead.
+    states[1] = _state(
+        "fit", "g3", "processor", ("fit/value",), fit, "camera/frame"
+    )
+    held = build_front(states, requested, first, parents.__getitem__)
+    assert held.publication("camera/frame").event_ref.sequence == 1
 
 
 def _root_refs(

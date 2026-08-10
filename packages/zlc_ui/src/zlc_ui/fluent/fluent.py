@@ -2795,26 +2795,14 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         painter.drawEllipse(int(offset), y + margin, thumb_d, thumb_d)
 
         if self.text():
-            gap = scaled_px(5, minimum=3)
-            if self.isChecked():
-                text_rect = QtCore.QRect(
-                    margin + gap,
-                    y,
-                    max(0, track_w - thumb_d - 3 * margin - gap),
-                    track_h,
-                )
-            else:
-                text_rect = QtCore.QRect(
-                    thumb_d + 2 * margin + gap,
-                    y,
-                    max(0, track_w - thumb_d - 3 * margin - gap),
-                    track_h,
-                )
+            # The label is centered in the WHOLE track, drawn over the thumb:
+            # a true overlay, not a layout sibling the dot shoves aside -- so
+            # toggling never makes the text jump left and right.
             painter.setPen(
                 QtGui.QColor("#FFFFFF" if self.isEnabled() else PLACEHOLDER)
             )
             painter.drawText(
-                text_rect,
+                QtCore.QRect(0, y, track_w, track_h),
                 QtCore.Qt.AlignCenter,
                 self.text(),
             )

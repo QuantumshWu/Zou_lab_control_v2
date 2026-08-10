@@ -639,9 +639,14 @@ class GestureSessionMixin:
             assert self._renderer is not None
             with self._renderer.raster_transaction():
                 self._renderer.preview_color_limit_candidate(candidate)
+                # The recolor rides the ONE continuous-gesture cadence pan
+                # uses.  It once had its own slower lane because a preview
+                # step cost a background recapture and a colorbar redraw;
+                # now it is an RGBA recompose, and throttling it to 10 Hz
+                # was itself the drag lag the throttle guarded against.
                 if gesture.lane_due(
                     "raster",
-                    self._defaults.interaction.raster_preview_interval_ms,
+                    self._defaults.interaction.pointer_update_interval_ms,
                 ):
                     self._renderer.preview_color_limits(
                         candidate.value.low,

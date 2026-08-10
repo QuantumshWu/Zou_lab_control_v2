@@ -20,6 +20,7 @@ against -- signals from different runs advance independently.
 
 from __future__ import annotations
 
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 import threading
@@ -479,6 +480,12 @@ class _GenerationState:
     node: object | None = None
     slot: object | None = None
     source_name: str | None = None
+    #: Whether this route participates in same-shot front coherence.  False
+    #: for presentation-paced followers (a panel's accepted-fit signals):
+    #: their publications only advance AFTER their source presents, so
+    #: letting them hold the source's front selection is a deadlock -- the
+    #: source waits for the follower that waits for the source.
+    coherent: bool = True
     source_owner_id: str | None = None
     source_generation: StreamGenerationId | None = None
     publication: SignalPublication | None = None
@@ -486,6 +493,16 @@ class _GenerationState:
     last_parent_trigger: tuple[str, int] | None = None
     published_names: tuple[str, ...] | None = None
     published_schemas: Mapping[str, DatasetSchema] | None = None
+    #: A short window of recently issued publications, or None.  A follower
+    #: publishes a trailing result against the EXACT publication it derived
+    #: from; by then the route has usually advanced, so the latest
+    #: publication alone cannot resolve the true parent.  None by default:
+    #: unrequested retention would keep megapixel frames alive against the
+    #: plane's weak payload-lifetime contract, so only a route someone
+    #: declared they will follow retains, for the current generation.
+    recent_publications: deque[SignalPublication] | None = field(
+        default=None, repr=False
+    )
     next_sequence: int = 1
     failure: str | None = None
     terminal: bool = False
@@ -828,6 +845,7 @@ class SignalDataPlane:
         node: object | None = None,
         slot: object | None = None,
         source_name: str | None = None,
+        coherent: bool = True,
     ) -> _GenerationState:
         identity = canonical_text(owner_id, "signal generation owner_id")
         kind = canonical_text(kind, "signal generation kind")
@@ -865,6 +883,7 @@ class SignalDataPlane:
             node=node,
             slot=slot,
             source_name=source_name,
+            coherent=bool(coherent),
             source_owner_id=(
                 None if source_state is None else source_state.owner_id
             ),
@@ -1119,6 +1138,66 @@ class SignalDataPlane:
             state = self._state_for_signal_locked(name)
             return None if state is None else state.publication
 
+    def retain_recent_publications(self, signal_name: str) -> None:
+        """Keep a short strong window of this route's publications.
+
+        The retainer declares retention: a presentation-paced follower (a
+        panel's fit bridge) will later resolve trailing parents by revision,
+        and by then the exact publications have left ``latest_publication``.
+        Unrequested routes keep the plane's weak payload-lifetime contract
+        untouched.  Retention lasts for the route's current generation and
+        seeds with the publication current now; a no-op when the route is
+        not active yet or already retains.
+        """
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            state = self._state_for_signal_locked(name)
+            if state is None or state.recent_publications is not None:
+                return
+            window: deque[SignalPublication] = deque(maxlen=4)
+            if state.publication is not None:
+                window.append(state.publication)
+            state.recent_publications = window
+
+    def recent_publication(
+        self,
+        signal_name: str,
+        revision: int,
+    ) -> SignalPublication | None:
+        """Resolve a recently issued publication by its snapshot revision.
+
+        A presentation-paced follower publishes a trailing result against the
+        EXACT publication it derived from -- by then the route has usually
+        advanced, so ``latest_publication`` alone cannot name the true
+        parent, and demanding the parent still be current silently dropped
+        most trailing results (an accepted fit per shot became an occasional
+        one).  Resolution reads the window ``retain_recent_publications``
+        declared; None means no retention or a revision that left it.
+        """
+
+        name = canonical_text(signal_name, "signal name")
+        revision = int(revision)
+        with self._lock:
+            state = self._state_for_signal_locked(name)
+            if state is None:
+                return None
+            window = state.recent_publications
+            candidates = (
+                () if window is None
+                else tuple(reversed(window))
+            )
+            if not candidates and state.publication is not None:
+                candidates = (state.publication,)
+            for publication in candidates:
+                value = publication.value(name)
+                if (
+                    value is not None
+                    and value.snapshot.ref.revision.value == revision
+                ):
+                    return publication
+        return None
+
     def direct_parent_publications(
         self,
         publication: SignalPublication,
@@ -1156,7 +1235,18 @@ class SignalDataPlane:
         *,
         source_name: str,
         initial_publication: SignalPublication,
+        coherent: bool = True,
     ) -> None:
+        """Attach one reactive latest-only Processor to a live source.
+
+        ``coherent=False`` declares a presentation-paced follower: a route
+        whose publications advance only AFTER its source was presented (a
+        panel's accepted-fit signals).  Such a route keeps full lineage but
+        never joins the same-shot front component of its source -- holding
+        the source's selection for it would deadlock: the source waits for
+        the follower that waits for the source's next presentation.
+        """
+
         source_name = canonical_text(source_name, "processor source name")
         if not isinstance(initial_publication, SignalPublication):
             raise TypeError("Processor requires an exact SignalPublication")
@@ -1186,6 +1276,7 @@ class SignalDataPlane:
                 bare_names=bare_names,
                 node=node,
                 source_name=source_name,
+                coherent=coherent,
             )
         try:
             self._lane.attach_processor(
@@ -1449,6 +1540,8 @@ class SignalDataPlane:
         self._publication_parents[publication] = parents
         state.next_sequence += 1
         state.publication = publication
+        if state.recent_publications is not None:
+            state.recent_publications.append(publication)
         state.failure = None
         state.terminal = terminal
         if terminal:

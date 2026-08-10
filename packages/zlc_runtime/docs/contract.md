@@ -30,12 +30,15 @@ publish_final(
     outputs: Mapping[str, FinalDatasetOutput],
 ) -> Mapping[str, SignalValue]
 latest_publication(signal_key: str) -> SignalPublication | None
+retain_recent_publications(signal_key: str) -> None
+recent_publication(signal_key: str, revision: int) -> SignalPublication | None
 set_front_signals(signal_names: Iterable[str]) -> None
 attach_latest_only_processor(
     node: LatestProcessorControl,
     *,
     source_name: str,
     initial_publication: SignalPublication,
+    coherent: bool = True,
 ) -> None
 cancel_latest_only_processor(control: LatestProcessorControl) -> bool
 withdraw_processor(control: LatestProcessorControl) -> None
@@ -66,6 +69,33 @@ freezing, so the coherent set always equals what the board shows and no
 membership bookkeeping exists beside the ports.  An undeclared plane builds
 no lineage components and every signal floats at its own latest publication
 — the camera-ahead-of-its-derived skew this declaration exists to prevent.
+
+`attach_latest_only_processor(..., coherent=False)` declares a
+presentation-paced follower: a route whose publications advance only AFTER
+its source was presented (a panel's accepted-fit signals; the lane's
+recompute of such a route raises stale rather than recutting).  A follower
+keeps full `direct_parent_refs` lineage but never joins its source's
+same-shot component — holding the source's selection for it deadlocks the
+component: the source waits for the follower that waits for the source's
+next presentation.  Autonomous processors (occupancy, committed-selection
+recuts) stay `coherent=True` and are exactly what same-shot holding is for.
+
+A follower also PUBLISHES trailing: at live cadence a fit for shot N is
+accepted when the route is already at N+1.  `retain_recent_publications`
+declares a short strong per-route window (the retainer declares retention —
+unrequested routes keep the weak payload-lifetime contract), and
+`recent_publication` resolves the exact publication a trailing result
+derived from, so every accepted fit publishes with a truthful parent
+(fit@N names camera@N) instead of being dropped for no longer being
+current.  `publish_processor` accepts any issued same-generation parent
+whose sequence does not regress.
+
+The scheduler batches presents only for multi-signal lineage components.
+Ports whose signal stands alone — including several views of ONE signal —
+schedule per panel at their own display intervals: the front already serves
+every view one publication per signal, and welding same-signal views into
+one batch turned one slow view's coalesced render into the whole board's
+abandoned batch.
 
 Continuous derived sibling bundles use one stable binding and one explicit
 lineage publication path:

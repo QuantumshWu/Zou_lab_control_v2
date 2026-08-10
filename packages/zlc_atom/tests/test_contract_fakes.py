@@ -20,6 +20,7 @@ def test_fake_plane_exposes_the_frozen_runtime_call_shapes() -> None:
         "node",
         "source_name",
         "initial_publication",
+        "coherent",
     )
     assert not any(path.name == "signal_plane.py" for path in (Path(__file__).parents[1] / "src").rglob("*.py"))
 

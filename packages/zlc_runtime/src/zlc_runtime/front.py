@@ -94,10 +94,11 @@ def build_front(
 ) -> SignalFront:
     """Build one coherent front from an immutable state view.
 
-    ``states_view`` is read once; its members must expose the seven state
+    ``states_view`` is read once; its members must expose the eight state
     fields used by the algorithm (retired, failure, publication, terminal,
-    output_names, kind, and source_name).  ``resolve_parents`` is the plane's
-    read-only parent lookup.  No object in the input view is mutated.
+    output_names, kind, source_name, and coherent).  ``resolve_parents`` is
+    the plane's read-only parent lookup.  No object in the input view is
+    mutated.
     """
 
     states = _values(states_view)
@@ -131,7 +132,13 @@ def build_front(
                 adjacency.setdefault(name, set()).update(
                     candidate for candidate in siblings if candidate != name
                 )
-        if getattr(state, "kind") in {"processor", "continuous"}:
+        if getattr(state, "kind") in {"processor", "continuous"} and getattr(
+            state, "coherent"
+        ):
+            # A presentation-paced follower (coherent=False) keeps lineage
+            # but never joins its source's same-shot component: it advances
+            # only after the source presents, so holding the source for it
+            # would deadlock the whole component.
             source_name = getattr(state, "source_name")
             if source_name is not None:
                 for output_name in getattr(state, "output_names"):

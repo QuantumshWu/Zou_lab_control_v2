@@ -545,7 +545,6 @@ class BoardScheduler:
         "_clock",
         "_closed",
         "_last_front",
-        "_group_key_by_signal",
         "_owed",
         "_plane",
         "_ports",
@@ -573,7 +572,6 @@ class BoardScheduler:
         self._arbiter = arbiter
         self._ports = ports
         self._owed: dict[object, bool] = {}
-        self._group_key_by_signal: dict[str, object] = {}
         self._closed = False
         self._last_front = SignalFront({}, {})
 
@@ -627,28 +625,31 @@ class BoardScheduler:
             raise TypeError("signal data plane freeze() must return SignalFront")
         self._last_front = front
         elapsed = self._clock.advance()
+        # Batch keys couple exactly what causality couples: ports whose
+        # signals share one multi-signal lineage component present as one
+        # same-shot batch.  Everything else -- including several views of the
+        # SAME signal -- schedules per panel: the front already serves every
+        # view one publication per signal, and batching same-signal views
+        # would weld their cadences together and turn one slow view's
+        # coalesced render into the whole board's abandoned batch.
         members_by_key: dict[object, list[SurfacePort]] = {}
         for port in ports:
             signal_name = SurfaceBatchArbiter._signal_name(port)
             continuous = front.continuous_group(signal_name)
             if continuous and len(continuous) > 1:
                 key: object = ("continuous", continuous)
-                for member in continuous:
-                    self._group_key_by_signal[member] = key
-                if any(
-                    ("signal", member) in self._owed
-                    for member in continuous
-                ):
-                    self._owed[key] = True
-            elif continuous:
-                key = ("signal", signal_name)
-                self._group_key_by_signal[signal_name] = key
             else:
-                key = self._group_key_by_signal.get(
-                    signal_name,
-                    ("signal", signal_name),
-                )
+                key = ("panel", SurfaceBatchArbiter._panel_id(port))
             members_by_key.setdefault(key, []).append(port)
+
+        for key, members in members_by_key.items():
+            if isinstance(key, tuple) and key[0] == "continuous":
+                # A debt owed by a port scheduled alone earlier carries into
+                # the causal group it now belongs to.
+                for port in members:
+                    panel_key = ("panel", SurfaceBatchArbiter._panel_id(port))
+                    if self._owed.pop(panel_key, None) is not None:
+                        self._owed[key] = True
 
         active_keys = set(members_by_key)
         for key in tuple(self._owed):

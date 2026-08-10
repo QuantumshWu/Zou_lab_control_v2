@@ -506,8 +506,111 @@ class DataView:
         groups = tuple(group_by)
         self.validate_curve(x, group_by=groups)
         aggregation = _validate_aggregation(aggregation)
+        dense = self._dense_data_curve(x, groups, aggregation)
+        if dense is not None:
+            return dense
         positions = self._all_positions()
         return self._curve_from_positions(x, positions, groups, aggregation)
+
+    def _dense_data_curve(
+        self,
+        x: AxisRef,
+        groups: tuple[AxisRef, ...],
+        aggregation: Reduction,
+    ) -> CurveData | None:
+        """Project one declared dense data axis without materializing samples.
+
+        The narrow twin of ``_dense_data_image``: an ungrouped curve over a
+        declared DATA axis with finite, strictly increasing coordinates is a
+        straight tensor reduction along every other dimension -- the same
+        operation the generic path performs by flattening every sample into a
+        (position, value) pair and aggregating per unique coordinate code,
+        which on a camera frame is millions of pairs, a sort, and a Python
+        loop of per-bucket reductions.  Groups, point domains, facet subsets
+        and unordered coordinates keep the generic algorithm.
+        """
+
+        if groups or x.domain is not AxisDomain.DATA:
+            return None
+        try:
+            x_resolved = self._resolve(x)
+        except AxisResolutionError:
+            # Let the normal resolver produce the public missing-axis error.
+            return None
+        _require_real_numeric(x_resolved.coordinate.canonical, x)
+        x_canonical = np.asarray(x_resolved.domain_canonical)
+        if not np.all(_finite_coordinate(x_canonical)):
+            return None
+        if x_canonical.size > 1 and not np.all(np.diff(x_canonical) > 0):
+            # The generic path aggregates over SORTED unique coordinates;
+            # only a strictly increasing declared domain is bit-identical.
+            return None
+
+        values = np.moveaxis(
+            self._samples.value.canonical, x_resolved.dimension, -1
+        )
+        usable = np.moveaxis(self._samples.valid_mask, x_resolved.dimension, -1)
+        nx = int(x_canonical.size)
+        values = np.reshape(values, (-1, nx), order="C")
+        usable = np.reshape(usable, (-1, nx), order="C")
+        counts = np.sum(usable, axis=0, dtype=np.int64)
+        with warnings.catch_warnings():
+            # Empty positions are intentionally NaN and marked invalid below.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            if aggregation is Reduction.MEAN:
+                y = np.mean(values, axis=0, where=usable)
+            elif aggregation is Reduction.MEDIAN:
+                converted = np.asarray(values, dtype=np.float64)
+                y = np.nanmedian(np.where(usable, converted, np.nan), axis=0)
+            elif aggregation is Reduction.SUM:
+                y = np.sum(values, axis=0, where=usable, initial=0)
+                y = np.where(counts > 0, y, np.nan)
+            elif aggregation is Reduction.MIN:
+                converted = np.asarray(values, dtype=np.float64)
+                y = np.min(converted, axis=0, where=usable, initial=np.inf)
+                y = np.where(counts > 0, y, np.nan)
+            elif aggregation is Reduction.MAX:
+                converted = np.asarray(values, dtype=np.float64)
+                y = np.max(converted, axis=0, where=usable, initial=-np.inf)
+                y = np.where(counts > 0, y, np.nan)
+            elif aggregation is Reduction.FIRST:
+                first = np.argmax(usable, axis=0)
+                y = np.take_along_axis(values, first[np.newaxis, :], axis=0)[0]
+                y = np.where(counts > 0, y, np.nan)
+            else:
+                raise AssertionError(f"unsupported reduction: {aggregation!r}")
+        y = np.asarray(y, dtype=np.float64)
+        valid = (counts > 0) & np.isfinite(y)
+        y_display = self._samples.value.canonical_unit.convert_value_to(
+            y, self._samples.value.display_unit
+        )
+        series = CurveSeries(
+            x=QuantityArray(
+                x_canonical,
+                np.asarray(x_resolved.domain_display),
+                x_resolved.coordinate.canonical_unit,
+                x_resolved.coordinate.display_unit,
+                x_resolved.coordinate.label,
+            ),
+            y=QuantityArray(
+                y,
+                y_display,
+                self._samples.value.canonical_unit,
+                self._samples.value.display_unit,
+                self._samples.value.label,
+            ),
+            valid=valid,
+            counts=counts,
+            group_key=(),
+            label=self._samples.value.label,
+        )
+        return CurveData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            x_ref=x,
+            group_by=groups,
+            series=(series,),
+        )
 
     def _curve_from_positions(
         self,
@@ -1484,6 +1587,22 @@ def _require_real_numeric(values: NDArray[Any], ref: AxisRef | None) -> None:
         raise DataViewError(f"{target} must be real numeric for this projection")
 
 
+def _reduce_group(group: NDArray[Any], aggregation: Reduction) -> Any:
+    if aggregation is Reduction.MEAN:
+        return np.mean(group)
+    if aggregation is Reduction.MEDIAN:
+        return np.median(group)
+    if aggregation is Reduction.SUM:
+        return np.sum(group)
+    if aggregation is Reduction.MIN:
+        return np.min(group)
+    if aggregation is Reduction.MAX:
+        return np.max(group)
+    if aggregation is Reduction.FIRST:
+        return group[0]
+    raise AssertionError(f"unsupported reduction: {aggregation!r}")
+
+
 def _aggregate_by_codes(
     values: NDArray[Any],
     usable: NDArray[np.bool_],
@@ -1496,31 +1615,26 @@ def _aggregate_by_codes(
     counts = np.zeros(bucket_count, dtype=np.int64)
     positions = np.flatnonzero(usable & (codes >= 0))
     if positions.size:
-        selected_codes = codes[positions]
-        order = np.argsort(selected_codes, kind="stable")
-        ordered_codes = selected_codes[order]
-        ordered_values = values[positions[order]]
-        boundaries = np.flatnonzero(np.diff(ordered_codes)) + 1
-        starts = np.concatenate(([0], boundaries))
-        stops = np.concatenate((boundaries, [ordered_codes.size]))
-        for start, stop in zip(starts, stops):
-            code = int(ordered_codes[start])
-            group = ordered_values[start:stop]
-            counts[code] = group.size
-            if aggregation is Reduction.MEAN:
-                output[code] = np.mean(group)
-            elif aggregation is Reduction.MEDIAN:
-                output[code] = np.median(group)
-            elif aggregation is Reduction.SUM:
-                output[code] = np.sum(group)
-            elif aggregation is Reduction.MIN:
-                output[code] = np.min(group)
-            elif aggregation is Reduction.MAX:
-                output[code] = np.max(group)
-            elif aggregation is Reduction.FIRST:
-                output[code] = group[0]
-            else:
-                raise AssertionError(f"unsupported reduction: {aggregation!r}")
+        if bucket_count == 1:
+            # One bucket needs no code sort: an ungrouped reduction of a
+            # camera-sized signal (a rolling trace on the frame itself) was
+            # paying a full stable argsort of millions of identical codes.
+            group = values[positions]
+            counts[0] = group.size
+            output[0] = _reduce_group(group, aggregation)
+        else:
+            selected_codes = codes[positions]
+            order = np.argsort(selected_codes, kind="stable")
+            ordered_codes = selected_codes[order]
+            ordered_values = values[positions[order]]
+            boundaries = np.flatnonzero(np.diff(ordered_codes)) + 1
+            starts = np.concatenate(([0], boundaries))
+            stops = np.concatenate((boundaries, [ordered_codes.size]))
+            for start, stop in zip(starts, stops):
+                code = int(ordered_codes[start])
+                group = ordered_values[start:stop]
+                counts[code] = group.size
+                output[code] = _reduce_group(group, aggregation)
     output.setflags(write=False)
     counts.setflags(write=False)
     return output, counts

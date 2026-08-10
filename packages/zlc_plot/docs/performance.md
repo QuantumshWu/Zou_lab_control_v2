@@ -63,7 +63,28 @@ triggered a complete `colorbar._draw_all`).  The committed path reapplies
 colorbar state once on release through its `colorbar_state` comparison.
 One drag step (preview + overlay render + capture) went from 17.7 ms to
 6.8 ms median at bench size, and the per-step cost no longer scales with a
-full-figure Agg redraw at larger panels.
+full-figure Agg redraw at larger panels.  With the step that cheap, the
+color preview's own 100 ms throttle lane became the drag lag it once
+guarded against — the recolor now rides the same 30 ms pointer cadence as
+pan (`raster_preview_interval_ms` is gone), with latest-only coalescing as
+the real flow control.  Measured through the live pointer path under
+concurrent 10 Hz 2048² updates: 7–8 ms per recolor for either handle.
+
+The projection layer's dense fast paths were completed in the same pass.
+`curve()` over a declared dense data axis (the console's 1D-vector panel on
+a camera frame) reduced through the generic sample-materializing
+aggregator: flatten 4.2 M (position, value) pairs, sort-unique the
+positions, then a Python loop of per-bucket reductions — 290 ms per
+revision at 2048², which saturated the render worker and stuttered every
+panel scheduled beside it.  `_dense_data_curve` — the narrow twin of the
+image projection's `_dense_data_image` — is a straight tensor reduction,
+bit-identical across all six reductions: 5.3 ms at 2048², ~25 ms for the
+whole 1D panel update including its in-commit Gaussian fit.  The same
+audit gave `_aggregate_by_codes` a sortless single-bucket branch (a rolling
+trace pointed at the frame itself was paying a stable argsort of millions
+of identical codes); histograms were already one vectorized
+`np.histogram`, and facet cells and scan-point curves are small by
+construction.
 
 ## Source-size audit (2026-08-03)
 
