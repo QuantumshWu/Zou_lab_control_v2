@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from zlc_plot import PlotKind, fitting_spec
+from zlc_plot import PlotKind, fitting_spec, updated_spec
+from zlc_plot.semantics import axis_choices_for_schema, axis_size
 
 
 __all__ = ["fitting_panel_spec"]
@@ -15,6 +16,43 @@ _FACET_CELL_KINDS = {
     PlotKind.IMAGE,
     PlotKind.HISTOGRAM,
 }
+
+
+def _dense_series_x(schema: object, spec: object) -> object:
+    """Land a defaulted series x on an axis that can actually carry a series.
+
+    A camera frame's point table has one row, and the library's curve default
+    walks the point domain -- so "1D vector on a camera signal" opened as one
+    invisible point.  The size authority is ``zlc_plot.semantics.axis_size``
+    (the same one the semantic editor's choices use), and the re-point goes
+    through ``updated_spec``, the one semantic composition authority, so no
+    second spec-editing path exists here.
+    """
+
+    cell = getattr(spec, "cell", None)
+    semantic = cell if cell is not None else spec
+    if getattr(semantic, "kind", None) is not PlotKind.CURVE:
+        return spec
+    x = getattr(semantic, "x", None)
+    if x is None or axis_size(schema, x) > 1:
+        return spec
+    taken = {
+        value
+        for value in (
+            getattr(semantic, "y", None),
+            getattr(semantic, "group", None),
+            getattr(spec, "facet", None),
+        )
+        if value is not None
+    }
+    for candidate in axis_choices_for_schema(schema):
+        if candidate in taken or axis_size(schema, candidate) <= 1:
+            continue
+        try:
+            return updated_spec(schema, spec, "x", candidate)
+        except Exception:
+            continue
+    return spec
 
 
 def fitting_panel_spec(
@@ -29,7 +67,8 @@ def fitting_panel_spec(
     if resolved is not PlotKind.FACET_GRID:
         if cell_text:
             raise ValueError("only a FacetGrid panel has a cell kind")
-        return fitting_spec(schema, resolved)
+        spec = fitting_spec(schema, resolved)
+        return None if spec is None else _dense_series_x(schema, spec)
 
     cell = PlotKind(cell_text)
     if cell not in _FACET_CELL_KINDS:
@@ -38,4 +77,4 @@ def fitting_panel_spec(
     cell_spec = fitting_spec(schema, cell)
     if outer_spec is None or cell_spec is None:
         return None
-    return replace(outer_spec, cell=cell_spec)
+    return _dense_series_x(schema, replace(outer_spec, cell=cell_spec))

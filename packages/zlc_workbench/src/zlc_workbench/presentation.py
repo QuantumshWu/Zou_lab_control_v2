@@ -61,6 +61,7 @@ class PlotPanelPort:
         project_input: Callable[[object, object], object] | None = None,
         replace_host: Callable[[object, object, object], Any] | None = None,
         on_presented: Callable[[object, object], None] | None = None,
+        present: Callable[[object], None] | None = None,
     ) -> None:
         self._panel_id = str(panel_id)
         self._signal_name = str(signal_name)
@@ -71,6 +72,12 @@ class PlotPanelPort:
         self._project_input = project_input
         self._replace_host = replace_host
         self._on_presented = on_presented
+        #: Puts the accepted render's pixels on screen.  The batch is the
+        #: same-shot unit: every member of one causal group is accepted in one
+        #: owner-thread pass, so presenting from ``accept`` is what makes the
+        #: group land as one shot.  ``None`` keeps the port presentation-free
+        #: for hosts whose widgets present their own fronts.
+        self._present = present
         #: What the host was BUILT from.  A host constructed from a snapshot is
         #: already holding that revision, and handing it the same one back is
         #: refused -- correctly, but the refusal then arrived as an error on
@@ -126,6 +133,12 @@ class PlotPanelPort:
     @property
     def host(self) -> Any:
         return self._host
+
+    @property
+    def has_pending(self) -> bool:
+        """Whether a staged render is still travelling toward this panel."""
+
+        return bool(self._pending)
 
     # -------------------------------------------------------------- the tick
 
@@ -222,7 +235,13 @@ class PlotPanelPort:
         serial = self._serial
         self._pending[serial] = _Prepared(publication, plot_input)
         try:
-            future = self._host.update_data(plot_input)
+            # The panel's own cadence is the render budget: a slow panel gets
+            # its whole interval for in-presentation work (an armed live fit),
+            # instead of the library's default budget.
+            future = self._host.update_data(
+                plot_input,
+                refresh_interval_ms=self._interval_ms,
+            )
         except BaseException:
             self._pending.pop(serial, None)
             raise
@@ -262,6 +281,17 @@ class PlotPanelPort:
         self._shown_generation = _publication_generation(publication)
         self._shown_revision = _revision_of(self._presented_input)
         self.last_error = None
+        if self._present is not None:
+            # The pixels, on the owner thread, inside the batch's one accept
+            # pass -- this is the group's atomic present.  A refused present
+            # (the surface changed between staging and now) is remembered as
+            # the panel's error, never allowed to unwind the batch bookkeeping
+            # mid-pass: the next revision renders against the new surface and
+            # heals the pixels.
+            try:
+                self._present(operation)
+            except BaseException as error:
+                self.last_error = error
         if self._on_presented is not None:
             self._on_presented(publication, self._presented_input)
         return True

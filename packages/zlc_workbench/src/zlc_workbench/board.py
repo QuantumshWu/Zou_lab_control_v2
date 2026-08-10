@@ -32,7 +32,7 @@ from zlc_runtime import (
 )
 
 
-__all__ = ["LiveBoard", "OwnerWake"]
+__all__ = ["LiveBoard", "OwnerWake", "attach_qt", "attach_qt_owner_turn"]
 
 
 class OwnerWake:
@@ -45,6 +45,17 @@ class OwnerWake:
 
     def __init__(self, notify: Callable[[], None] | None = None) -> None:
         self._pending = False
+        self._notify = notify
+
+    def set_notify(self, notify: Callable[[], None] | None) -> None:
+        """Bind the owner-turn trigger after composition has one to give.
+
+        The board exists before the event-loop shim that can hop threads, so
+        the trigger arrives late.  Without one, a wake only raises the pending
+        flag and the next beat takes the turn -- which is exactly the headless
+        behavior every test drives.
+        """
+
         self._notify = notify
 
     def request_owner_wake(self) -> None:
@@ -111,8 +122,13 @@ class LiveBoard:
         return self._scheduler.on_tick()
 
     def commit(self) -> None:
-        """Put ready boards on screen.  The GUI thread, and only it."""
+        """Put ready boards on screen.  The GUI thread, and only it.
 
+        The wake is claimed first, so a surface finishing while the drain runs
+        notifies again instead of being lost inside the turn it missed.
+        """
+
+        self.wake.take()
         self._arbiter.drain(self._resolve)
 
     def _resolve(self, panel_id: str) -> Any | None:
@@ -151,3 +167,30 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     timer.timeout.connect(beat)
     timer.start()
     return timer
+
+
+def attach_qt_owner_turn(turn: Callable[[], None]) -> Callable[[], None]:
+    """Return a thread-safe trigger that runs ``turn`` on the Qt GUI thread.
+
+    This is the completion-driven half of the beat: a finished render's done
+    callback fires on a worker thread, and the surfaces it completed must be
+    committed by the GUI thread NOW, not on the next timer beat -- a group's
+    latency is its slowest member plus this one queued hop.  The returned
+    trigger owns its relay QObject, so the caller only keeps the callable.
+    """
+
+    from PyQt5 import QtCore  # noqa: PLC0415 -- only a Qt application needs this
+
+    if not callable(turn):
+        raise TypeError("attach_qt_owner_turn relays a turn callable")
+
+    class _OwnerTurnRelay(QtCore.QObject):
+        woke = QtCore.pyqtSignal()
+
+    relay = _OwnerTurnRelay()
+    relay.woke.connect(turn, type=QtCore.Qt.QueuedConnection)
+
+    def trigger(relay: "_OwnerTurnRelay" = relay) -> None:
+        relay.woke.emit()
+
+    return trigger

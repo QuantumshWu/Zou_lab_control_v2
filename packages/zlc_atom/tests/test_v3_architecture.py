@@ -314,6 +314,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             camera=camera,
             camera_key="camera",
             signal_plane=plane,
+            # The authored default repeat=0 is the infinite monitor mode;
+            # a finite prepare() must author its acquisition explicitly.
+            repeat=1,
             frames_per_cycle=3,
         )
         assert camera_node.camera is camera

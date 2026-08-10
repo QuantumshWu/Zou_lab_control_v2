@@ -485,6 +485,7 @@ projection = {
     'source_signal': '',
     'source_options': ('camera-1.frames',),
     'source_labels': {'camera-1.frames': 'frames  [1 × 1 × (3×96×128)]'},
+    'source_groups': {'camera-1.frames': 'camera-1'},
     'device_keys': {'camera': 'camera'},
     'device_options': {'camera': ('camera', 'mot_camera')},
     'running': False,
@@ -509,7 +510,14 @@ def accept_and_refresh(node_id, patch):
 handle.logic_draft_changed.connect(accept_and_refresh)
 handle.open_logic_editor('camera-1', projection)
 editor = handle._logic_editors['camera-1']
-assert editor.source_combo.itemText(1) == 'frames  [1 × 1 × (3×96×128)]'
+# The frame-signal picker is the SAME grouped tree every signal chooser uses:
+# a producer header with keyed leaves, not a flat list.
+from zlc_ui.fluent import FluentTreeComboBox
+assert isinstance(editor.source_combo, FluentTreeComboBox)
+assert editor.source_combo.model().item(0).text() == '(not selected)'
+source_header = editor.source_combo.model().item(1)
+assert source_header.text() == 'camera-1'
+assert source_header.child(0).text() == 'frames  [1 × 1 × (3×96×128)]'
 handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()
@@ -549,8 +557,20 @@ source_combo.model().rowsRemoved.connect(
 source_combo.model().rowsInserted.connect(
     lambda *_args: source_model_events.append('inserted')
 )
-pick_from_popup(source_combo, 'camera-1.frames')
+source_combo.showPopup()
+app.processEvents()
+header_index = source_combo.model().index(1, 0)
+source_combo.view().expand(header_index)
+app.processEvents()
+leaf_index = source_combo.model().index(0, 0, header_index)
+leaf_rect = source_combo.view().visualRect(leaf_index)
+assert leaf_rect.isValid() and not leaf_rect.isEmpty()
+QtTest.QTest.mouseClick(
+    source_combo.view().viewport(), QtCore.Qt.LeftButton,
+    QtCore.Qt.NoModifier, leaf_rect.center(),
+)
 assert editor.source_combo is source_combo
+assert source_combo.current_choice_key() == 'camera-1.frames'
 assert not source_model_events
 camera_combo = editor._device_combos['camera']
 camera_model_events = []

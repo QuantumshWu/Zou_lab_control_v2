@@ -412,8 +412,9 @@ class SurfaceBatchArbiter:
 
         A latest-only host cancels a queued render when a newer frame arrives
         behind it.  That is flow control -- the newer render is already queued
-        on the same host -- so a cancelled member is an unpresented update, not
-        a failed one, and must never sink the batch it travelled in.
+        on the same host, inside a newer batch for the same group -- so a
+        cancelled member is an unpresented update, not a failed one, and must
+        never sink the batch it travelled in as an error.
         """
 
         if future.cancelled():
@@ -432,20 +433,30 @@ class SurfaceBatchArbiter:
                 pending.append(batch)
                 continue
 
-            superseded: list[tuple[SurfacePort, SurfaceUpdate]] = []
-            records: list[
-                tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]
-            ] = []
-            batch_error: BaseException | None = None
-            for update in batch:
-                if self._superseded(update.future):
+            if any(self._superseded(update.future) for update in batch):
+                # A batch is one causal group frozen from one front.  When any
+                # member was coalesced away, the newer render replacing it is
+                # part of a NEWER batch for the same group -- presenting the
+                # remaining members now would put half the group one shot
+                # ahead of the other half, which is exactly what a batch
+                # exists to prevent.  The whole batch leaves unpresented and
+                # the newer batch presents every member together.
+                resolved: list[tuple[SurfacePort, SurfaceUpdate]] = []
+                for update in batch:
                     try:
                         port = resolve(update.panel_id)
                     except BaseException:
                         port = None
                     if port is not None:
-                        superseded.append((port, update))
-                    continue
+                        resolved.append((port, update))
+                self._finish_unpresented(resolved)
+                continue
+
+            records: list[
+                tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]
+            ] = []
+            batch_error: BaseException | None = None
+            for update in batch:
                 try:
                     port = resolve(update.panel_id)
                 except BaseException as error:
@@ -470,10 +481,6 @@ class SurfaceBatchArbiter:
                     records.append((port, update, error, False))
                     continue
                 records.append((port, update, operation, True))
-
-            # Superseded members leave quietly whatever happens to the rest of
-            # the batch: their panels are about to receive the newer render.
-            self._finish_unpresented(superseded)
 
             if batch_error is None:
                 for port, update, operation, successful in records:

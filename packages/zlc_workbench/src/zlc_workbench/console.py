@@ -138,6 +138,12 @@ class PanelBinding:
     #: Image annotation has its own presentation revision while its data remains
     #: an explicit sibling in the selected publication.
     overlay_revision: int = -1
+    #: Whether this host's very first render has been put on screen.  Console
+    #: panel widgets stage their fronts (the board presents them per same-shot
+    #: batch), so the initial render -- which no batch carries, because the
+    #: host was built from that exact snapshot -- is presented once from the
+    #: beat when it is ready.
+    initial_presented: bool = False
     #: UI-neutral parameter descriptions projected from this host's public
     #: zlc_plot control plane.  This is editor metadata, not a second authored
     #: state; accepted values still live only in ``state``.
@@ -493,6 +499,9 @@ class ConsolePresenter:
             on_presented=lambda pub, projected: self._panel_presented(
                 binding, pub, projected
             ),
+            present=lambda operation: self._present_panel_operation(
+                binding, operation
+            ),
         )
         binding.host = host
         binding.port = port
@@ -599,6 +608,69 @@ class ConsolePresenter:
 
         binding.display_publication = publication
 
+    # ------------------------------------------------------------ presentation
+    #
+    # Console panel widgets stage their fronts instead of auto-presenting them:
+    # every render lands on screen through exactly one of these helpers, so a
+    # causal group's members are presented together (the port's ``present``
+    # inside one batch accept pass) and every non-batch render a host produces
+    # -- configure, an armed fit, a mirrored selector -- still reaches pixels.
+
+    def _present_panel_front(self, binding: PanelBinding, front: object) -> None:
+        """Put one completed immutable front on the panel's staged widget."""
+
+        if front is None:
+            return
+        present = getattr(self.view, "present_panel_front", None)
+        if not callable(present):
+            return
+        try:
+            present(binding.panel_id, front)
+        except Exception as error:
+            # A front can lose its surface between completion and this present
+            # (the operator reconfigured meanwhile).  The next render against
+            # the new surface heals the pixels; the refusal is still recorded
+            # so a panel that stops changing is never silent about why.
+            binding.reported_error = error
+            self._report(
+                f"{binding.title}: {_error_text(error)}", severity="error"
+            )
+
+    def _present_panel_operation(
+        self,
+        binding: PanelBinding,
+        operation: object,
+    ) -> None:
+        """Present the exact front painted by one completed host operation."""
+
+        self._present_panel_front(binding, getattr(operation, "front", None))
+
+    def _present_when_done(self, binding: PanelBinding, operation: object) -> object:
+        """Present a host operation's front once its worker completes.
+
+        Completion callbacks fire on the plot worker; the present crosses to
+        the GUI thread through the same interaction queue every other raster
+        callback already uses, and is drained by the beat.
+        """
+
+        add = getattr(operation, "add_done_callback", None)
+        if not callable(add):
+            return operation
+
+        def completed(future: object) -> None:
+            try:
+                result = future.result()
+            except BaseException:
+                # Cancelled or failed operations have no front; their errors
+                # surface through the paths that already own them.
+                return
+            self._panel_interactions.put(
+                lambda: self._present_panel_operation(binding, result)
+            )
+
+        add(completed)
+        return operation
+
     def _replace_panel_host(
         self,
         binding: PanelBinding,
@@ -620,11 +692,16 @@ class ConsolePresenter:
             binding.bridge.close()
         binding.bridge = binding.selections = None
         binding.host = host
+        binding.initial_presented = False
         if binding.interaction_selection is not None:
-            _apply_panel_selection(host, binding.interaction_selection)
+            self._present_when_done(
+                binding, _apply_panel_selection(host, binding.interaction_selection)
+            )
         if binding.interaction_viewport is not None:
             _selection, viewport = binding.interaction_viewport
-            _apply_panel_viewport(host, viewport)
+            self._present_when_done(
+                binding, _apply_panel_viewport(host, viewport)
+            )
         binding.display_publication = publication
         self.view.show_panel(binding.panel_id, host)
         if old_host is not None:
@@ -1014,10 +1091,15 @@ class ConsolePresenter:
             self._release_panel(binding)
             binding.host = host
             if binding.interaction_selection is not None:
-                _apply_panel_selection(host, binding.interaction_selection)
+                self._present_when_done(
+                    binding,
+                    _apply_panel_selection(host, binding.interaction_selection),
+                )
             if binding.interaction_viewport is not None:
                 _selection, viewport = binding.interaction_viewport
-                _apply_panel_viewport(host, viewport)
+                self._present_when_done(
+                    binding, _apply_panel_viewport(host, viewport)
+                )
             binding.port = PlotPanelPort(
                 panel_id,
                 candidate.signal,
@@ -1033,7 +1115,11 @@ class ConsolePresenter:
                 on_presented=lambda pub, projected: self._panel_presented(
                     binding, pub, projected
                 ),
+                present=lambda operation: self._present_panel_operation(
+                    binding, operation
+                ),
             )
+            binding.initial_presented = False
             binding.display_publication = publication
             binding.state = candidate
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
@@ -1383,7 +1469,8 @@ class ConsolePresenter:
                 binding.configuration = None
                 if not pending.cancelled():
                     try:
-                        description = pending.result().value
+                        operation = pending.result()
+                        description = operation.value
                     except Exception as error:
                         if binding.reported_error is not error:
                             binding.reported_error = error
@@ -1392,6 +1479,10 @@ class ConsolePresenter:
                                 severity="error",
                             )
                     else:
+                        # A configure re-renders on the worker; its exact front
+                        # must reach the staged widget or the Setting edit is
+                        # invisible until the next data revision.
+                        self._present_panel_operation(binding, operation)
                         surface = self._parameter_surface_from_descriptions(
                             binding.state,
                             description,
@@ -1418,6 +1509,17 @@ class ConsolePresenter:
                             severity="error",
                         )
             if host is not None:
+                if not binding.initial_presented:
+                    port = binding.port
+                    if port is not None and port.has_pending:
+                        # A staged board batch is already travelling; it will
+                        # present this panel inside its same-shot group.
+                        binding.initial_presented = True
+                    else:
+                        front = getattr(host, "front", None)
+                        if front is not None:
+                            self._present_panel_front(binding, front)
+                            binding.initial_presented = True
                 metadata, error = host.initial_state
                 if metadata is not None or error is not None:
                     if error is not None:
@@ -1446,7 +1548,9 @@ class ConsolePresenter:
                                 str(getattr(model, "model_id")) for model in models
                             }
                             if selected is not None and str(selected) in compatible:
-                                host.fit(str(selected), live=True)
+                                self._present_when_done(
+                                    binding, host.fit(str(selected), live=True)
+                                )
                             self._publish_panel_state(binding)
                         binding.reported_error = None
                         self._apply_deriving(binding)
@@ -1989,17 +2093,35 @@ class ConsolePresenter:
         )
 
     def beat(self) -> None:
-        """Advance lifecycle always; Pause freezes only Monitor presentation."""
+        """Advance lifecycle always; Pause freezes only the Monitor tick.
+
+        The commit runs even while paused: Pause stops NEW shots from being
+        staged, but a batch already travelling must still land -- atomically,
+        as one group -- or pausing at the wrong moment would freeze half a
+        causal group one shot behind the other half.
+        """
 
         self._drain_panel_interactions()
         self._poll_retired_plot_hosts()
         self._settle_panel_hosts()
         if not self._paused:
             self.board.tick()
-            self.board.commit()
-            self._report_panel_errors()
+        self.board.commit()
+        self._report_panel_errors()
         self.poll_logic()
         self._refresh_signal_choices()
+
+    def commit_surfaces(self) -> None:
+        """The completion-driven owner turn: commit what finished, NOW.
+
+        Driven by the board's wake through the composition root's GUI-thread
+        relay, so a group's present latency is its slowest member plus one
+        queued hop -- not the remainder of the current display beat.  Runs
+        during Pause for the same reason the beat's commit does.
+        """
+
+        self.board.commit()
+        self._report_panel_errors()
 
     def _drain_panel_interactions(self) -> None:
         while True:
@@ -2409,6 +2531,13 @@ class ConsolePresenter:
     ) -> object:
         """Keep live and frozen views on one selector/viewport truth."""
 
+        def mirror(operation: object) -> None:
+            # The live panel's widget stages its fronts, so a selector mirrored
+            # onto it must be presented when drawn; the frozen Edit surface
+            # presents its own fronts.
+            if other_host is binding.host:
+                self._present_when_done(binding, operation)
+
         if viewport is not _UNCHANGED:
             if (
                 binding.interaction_viewport is not None
@@ -2417,7 +2546,7 @@ class ConsolePresenter:
                 return _UNCHANGED
             binding.interaction_viewport = (selection, viewport)
             if other_host is not None:
-                _apply_panel_viewport(other_host, viewport)
+                mirror(_apply_panel_viewport(other_host, viewport))
             area = binding.interaction_selection
             return (
                 _UNCHANGED
@@ -2431,7 +2560,7 @@ class ConsolePresenter:
                 return _UNCHANGED
             binding.interaction_selection = None
             if other_host is not None:
-                _remove_panel_selection(other_host, previous)
+                mirror(_remove_panel_selection(other_host, previous))
             return (
                 _UNCHANGED
                 if binding.interaction_viewport is None
@@ -2445,7 +2574,7 @@ class ConsolePresenter:
             return _UNCHANGED
         binding.interaction_selection = selection
         if other_host is not None:
-            _apply_panel_selection(other_host, selection)
+            mirror(_apply_panel_selection(other_host, selection))
         return selection
 
     def _route_panel_selection(
@@ -2939,6 +3068,9 @@ class ConsolePresenter:
             "source_labels": self._source_labels(
                 binding.descriptor, binding.node_id
             ),
+            "source_groups": self._source_groups(
+                binding.descriptor, binding.node_id
+            ),
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
             "running": bool(binding.host is not None and binding.host.running),
@@ -3362,6 +3494,31 @@ class ConsolePresenter:
             for row in project_signals(self.session.signal_plane)
             if row.name in compatible
         }
+
+    def _source_groups(
+        self,
+        descriptor: Any,
+        consumer_node_id: str,
+    ) -> dict[str, str]:
+        """Which producer each compatible source belongs under.
+
+        The same producer grouping every signal chooser shows: the plane's
+        projection for published signals, and the declaring node's id for a
+        compatible output that has not published yet.
+        """
+
+        compatible = set(self._source_options(descriptor, consumer_node_id))
+        groups = {
+            row.name: row.producer
+            for row in project_signals(self.session.signal_plane)
+            if row.name in compatible
+        }
+        for binding in self.logic.values():
+            for output in self._logic_outputs(binding):
+                key = stable_signal_key(binding.node_id, output.name)
+                if key in compatible:
+                    groups.setdefault(key, binding.node_id)
+        return groups
 
     def _build_logic_candidate(
         self,

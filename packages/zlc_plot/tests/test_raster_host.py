@@ -18,7 +18,12 @@ from zlc_plot import (
     SelectorKind,
     parameter_controls,
 )
-from zlc_plot.fit import FacetFitBatchResult, FitCancelled, FitEngine
+from zlc_plot.fit import (
+    FacetFitBatchResult,
+    FitCancelled,
+    FitDeadlineExceeded,
+    FitEngine,
+)
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
 from zlc_plot.ui import ControlKind
@@ -155,6 +160,15 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
 def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
     monkeypatch,
 ) -> None:
+    """Data fronts wait at most the commit budget for an armed live fit.
+
+    A solver that cannot finish inside the commit budget signals the
+    deadline (the in-commit attempt always carries one), the data front
+    publishes without the overlay, and the solve continues asynchronously;
+    a newer revision cancels the stale solve and only the latest
+    revision's overlay is accepted.
+    """
+
     x = np.linspace(-4.0, 4.0, 81)
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
@@ -177,7 +191,11 @@ def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
     def controlled_fit(model, coordinates, observations=None, **kwargs):
         revision = int(kwargs["data_revision"])
         cancelled = kwargs.get("cancelled")
+        options = kwargs.get("options")
+        in_commit = getattr(options, "deadline_seconds", None) is not None
         if revision == 1:
+            if in_commit:
+                raise FitDeadlineExceeded("over the commit budget")
             first_started.set()
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
@@ -187,6 +205,8 @@ def test_live_fit_never_delays_new_data_and_accepts_only_the_latest_revision(
                 time.sleep(0.002)
             raise AssertionError("revision 1 fit was not cancelled")
         if revision == 2:
+            if in_commit:
+                raise FitDeadlineExceeded("over the commit budget")
             latest_started.set()
             if not release_latest.wait(5.0):
                 raise AssertionError("revision 2 fit was not released")

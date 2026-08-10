@@ -35,6 +35,7 @@ from .style import (
     FLUENT_SCALE_MIN,
     FONT,
     FONT_SIZE,
+    GRAPHITE,
     GREEN,
     GREY,
     HOVER,
@@ -558,6 +559,57 @@ class FluentPopup(QtWidgets.QFrame):
         painter.drawRoundedRect(rect, self._radius, self._radius)
 
 
+def _popup_content_chrome(
+    popup: FluentPopup,
+    content: QtWidgets.QWidget,
+) -> tuple[int, int]:
+    """Measure the decoration between a popup's edge and its mounted content.
+
+    Walks the real ancestor chain -- layout margins, scroll-area frames, the
+    reserved vertical scrollbar, and fixed siblings stacked in vertical box
+    layouts (a drag handle above the scroll) -- so the popup is sized from
+    what is actually there instead of a hand-tuned padding constant.  A magic
+    pad drifts the moment the chrome changes, and a too-small guess clips the
+    content's right edge under a scrollbar that was never accounted for.
+    """
+
+    width = height = 0
+    child: QtWidgets.QWidget = content
+    widget = content.parentWidget()
+    while widget is not None:
+        if isinstance(widget, QtWidgets.QAbstractScrollArea):
+            frame = 2 * widget.frameWidth()
+            width += frame
+            height += frame
+            if widget.verticalScrollBarPolicy() != QtCore.Qt.ScrollBarAlwaysOff:
+                width += widget.verticalScrollBar().sizeHint().width()
+        layout = widget.layout()
+        if layout is not None:
+            margins = layout.contentsMargins()
+            width += margins.left() + margins.right()
+            height += margins.top() + margins.bottom()
+            if (
+                isinstance(layout, QtWidgets.QBoxLayout)
+                and layout.direction()
+                in (
+                    QtWidgets.QBoxLayout.TopToBottom,
+                    QtWidgets.QBoxLayout.BottomToTop,
+                )
+            ):
+                for index in range(layout.count()):
+                    item = layout.itemAt(index)
+                    sibling = None if item is None else item.widget()
+                    if sibling is None or sibling is child or sibling.isHidden():
+                        continue
+                    if not sibling.isAncestorOf(child):
+                        height += sibling.sizeHint().height() + layout.spacing()
+        if widget is popup:
+            break
+        child = widget
+        widget = widget.parentWidget()
+    return width, height
+
+
 def show_fluent_popup_for_anchor(
     popup: FluentPopup,
     anchor: QtWidgets.QWidget,
@@ -566,6 +618,7 @@ def show_fluent_popup_for_anchor(
     minimum_width: int = 360,
     minimum_height: int = 300,
     maximum_height: int | None = None,
+    content_width: int | None = None,
 ) -> None:
     """Size and place one Fluent popup beside its anchor on the active screen.
 
@@ -573,6 +626,11 @@ def show_fluent_popup_for_anchor(
     Workbench surfaces: prefer below, fall back above, clamp to the current
     screen, and leave the shared Fluent outer gap.  Popup content and its draft
     lifecycle remain entirely owned by the caller.
+
+    ``content_width`` is the content's own required width in device pixels
+    (a form's widest row).  Passing it explicitly lets a width-bounded scroll
+    content stay a width CONSUMER -- no manual minimum pinned onto the widget
+    that would clip when the screen clamps the popup narrower.
     """
 
     if not isinstance(popup, FluentPopup):
@@ -593,6 +651,12 @@ def show_fluent_popup_for_anchor(
         or maximum_height <= 0
     ):
         raise ValueError("maximum_height must be a positive integer or None")
+    if content_width is not None and (
+        isinstance(content_width, bool)
+        or not isinstance(content_width, int)
+        or content_width <= 0
+    ):
+        raise ValueError("content_width must be a positive integer or None")
 
     popup.adjustSize()
     hint = content.sizeHint()
@@ -610,14 +674,16 @@ def show_fluent_popup_for_anchor(
     if screen is None:
         screen = QtWidgets.QApplication.primaryScreen()
     available = None if screen is None else screen.availableGeometry()
+    chrome_width, chrome_height = _popup_content_chrome(popup, content)
     desired_width = max(
         scaled_px(minimum_width),
-        hint.width() + scaled_px(28, minimum=20),
-        content.minimumWidth() + scaled_px(28, minimum=20),
+        hint.width() + chrome_width,
+        content.minimumWidth() + chrome_width,
+        (0 if content_width is None else content_width) + chrome_width,
     )
     desired_height = max(
         scaled_px(minimum_height, minimum=260),
-        hint.height() + scaled_px(120, minimum=96),
+        hint.height() + chrome_height,
     )
     if maximum_height is not None:
         desired_height = min(desired_height, maximum_height)
@@ -707,6 +773,7 @@ class FluentSettingsPopupAnchor:
         minimum_width: int = 360,
         minimum_height: int = 300,
         maximum_height: int | None = None,
+        content_width: int | None = None,
     ) -> None:
         """Close a visible popup, otherwise prepare and show it beside the anchor."""
 
@@ -732,6 +799,7 @@ class FluentSettingsPopupAnchor:
                 minimum_width=minimum_width,
                 minimum_height=minimum_height,
                 maximum_height=maximum_height,
+                content_width=content_width,
             )
         else:
             present()
@@ -2633,6 +2701,26 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         return btn
 
 
+def fluent_switch_width(text: str) -> int:
+    """The exact track width a :class:`FluentSwitch` paints for ``text``.
+
+    The ONE switch-width authority.  A layout that must reserve a column for a
+    switch (a form's Auto label column) asks THIS instead of predicting the
+    geometry with its own padding constant -- two independent guesses is how a
+    switch's painted track ended up wider than the cell it was given and drew
+    underneath its neighbour.
+    """
+
+    track_h = scaled_px(30, minimum=24)
+    if not text:
+        return scaled_px(60, minimum=48)
+    metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
+    return max(
+        scaled_px(60, minimum=48),
+        track_h + scaled_px(8) + fluent_text_width(metrics, str(text)) + scaled_px(8),
+    )
+
+
 class FluentSwitch(QtWidgets.QAbstractButton):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
@@ -2649,20 +2737,21 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         self._apply_metrics()
 
     def _content_width(self) -> int:
-        """Width of the single painted track, including its optional text."""
+        """Width of the single painted track, including its optional text.
 
-        track_h = scaled_px(30, minimum=24)
-        if not self.text():
-            return scaled_px(60, minimum=48)
-        text_w = fluent_text_width(QtGui.QFontMetrics(self.font()), self.text())
-        return max(
-            scaled_px(60, minimum=48),
-            track_h + scaled_px(8) + text_w + scaled_px(8),
-        )
+        Clamped to the widget's actual width: a switch never paints or accepts
+        clicks outside the cell a layout gave it, so a mis-sized cell degrades
+        to a clipped track instead of drawing over the neighbouring control.
+        """
+
+        wanted = fluent_switch_width(self.text())
+        return min(wanted, self.width()) if self.width() > 0 else wanted
 
     def _apply_metrics(self) -> None:
+        # The REQUESTED width (never the clamped one): what this switch needs,
+        # for layouts that honour minimums.
         self.setMinimumSize(
-            self._content_width(),
+            fluent_switch_width(self.text()),
             scaled_px(30, minimum=24),
         )
 
@@ -2702,30 +2791,21 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         margin = scaled_px(3, minimum=2)
         thumb_d = max(1, track_h - margin * 2)
         offset = self._offset if self._animating else self._checked_offset(track_w, thumb_d, margin)
-        painter.setBrush(QtGui.QBrush(QtGui.QColor("#FFFFFF")))
+        # A neutral grey dot: the thumb slides UNDER the label as a pure state
+        # indicator, so it must neither carry the text's color nor vanish into
+        # either track color.
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(GRAPHITE)))
         painter.drawEllipse(int(offset), y + margin, thumb_d, thumb_d)
 
         if self.text():
-            gap = scaled_px(5, minimum=3)
-            if self.isChecked():
-                text_rect = QtCore.QRect(
-                    margin + gap,
-                    y,
-                    max(0, track_w - thumb_d - 3 * margin - gap),
-                    track_h,
-                )
-            else:
-                text_rect = QtCore.QRect(
-                    thumb_d + 2 * margin + gap,
-                    y,
-                    max(0, track_w - thumb_d - 3 * margin - gap),
-                    track_h,
-                )
+            # The label is centered in the WHOLE track, drawn over the thumb:
+            # a true overlay, not a layout sibling the dot shoves aside -- so
+            # toggling never makes the text jump left and right.
             painter.setPen(
                 QtGui.QColor("#FFFFFF" if self.isEnabled() else PLACEHOLDER)
             )
             painter.drawText(
-                text_rect,
+                QtCore.QRect(0, y, track_w, track_h),
                 QtCore.Qt.AlignCenter,
                 self.text(),
             )

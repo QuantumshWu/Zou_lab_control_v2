@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+import math
 from numbers import Integral
 from typing import Any, TypeAlias
 import warnings
@@ -1049,7 +1050,7 @@ class DataView:
             values = display_values[flat_valid]
             _require_real_numeric(values, None)
             values = values[np.isfinite(values)]
-            shared_bins = np.histogram_bin_edges(values, bins=int(bins))
+            shared_bins = aligned_histogram_edges(values, int(bins))
         cells: list[FacetCell] = []
         for facet_index, (key, cell_positions) in enumerate(
             self._groups((spec.facet,), base_positions)
@@ -1404,6 +1405,49 @@ class DataView:
         )
         self._axis_cache[ref] = resolved
         return resolved
+
+
+def aligned_histogram_edges(
+    values: ArrayLike,
+    bins: int,
+    *,
+    limits: tuple[float, float] | None = None,
+) -> NDArray[np.float64]:
+    """Bin edges for one histogram; integer-valued samples get integer bins.
+
+    Equal-width float bins over integer-valued samples alias: a non-integer
+    bin width leaves some bins containing no representable value, which shows
+    up as structural zero-count holes in the middle of the distribution.
+    Integer-valued data therefore bins with an integer width on half-open
+    ``k - 0.5`` boundaries (the bin count may shrink below the request when
+    the value range is narrower); everything else keeps NumPy's equal-width
+    edges over the same range.
+    """
+
+    bins = max(1, int(bins))
+    flat = np.asarray(values).reshape(-1)
+    if flat.dtype.kind == "f":
+        flat = flat[np.isfinite(flat)]
+    if limits is not None:
+        low, high = (float(value) for value in limits)
+    elif flat.size:
+        low, high = float(np.min(flat)), float(np.max(flat))
+    else:
+        low, high = 0.0, 1.0
+    if high <= low:
+        high = low + 1.0
+    integral = flat.dtype.kind in "iub"
+    if not integral and flat.size:
+        probe = flat[:65536]
+        integral = bool(np.all(probe == np.floor(probe)))
+    if not integral:
+        return np.linspace(low, high, bins + 1, dtype=float)
+    first = math.floor(low + 0.5)
+    last = math.floor(high + 0.5)
+    covered = max(1, last - first + 1)
+    width = max(1, math.ceil(covered / bins))
+    count = math.ceil(covered / width)
+    return (first - 0.5) + width * np.arange(count + 1, dtype=float)
 
 
 def _broadcast_1d(

@@ -86,6 +86,11 @@ class PanelCardView(FluentGroupBox):
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
+        #: The form's required content width in device pixels.  Carried to the
+        #: popup sizer explicitly: the scroll body stays a width CONSUMER (its
+        #: minimum is never pinned), so a screen-clamped popup reflows the
+        #: rows instead of clipping their right edge under the scrollbar.
+        self._settings_content_width: int | None = None
         self._groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
         self._overlay_groups: tuple[
             tuple[str, tuple[tuple[str, str], ...]], ...
@@ -292,11 +297,20 @@ class PanelCardView(FluentGroupBox):
         super().resizeEvent(event)
         self._place_settings_button()
 
+    @property
+    def surface(self) -> QtWidgets.QWidget | None:
+        """The mounted view surface, so its owner can reuse or address it."""
+
+        return self._surface
+
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
         """Mount or replace an arbitrary view surface."""
 
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("surface must be QWidget or None")
+        if widget is not None and widget is self._surface:
+            widget.show()
+            return
         if widget is not None:
             # The switch may have been thrown while this card was empty.
             _set_interaction(widget, self._selectors_on)
@@ -606,28 +620,43 @@ class PanelCardView(FluentGroupBox):
         )
         required_height = body.layout().sizeHint().height()
         geometry_changed = False
-        if body.minimumWidth() != required_width:
-            body.setMinimumWidth(required_width)
+        if self._settings_content_width != required_width:
+            self._settings_content_width = required_width
             geometry_changed = True
         if body.minimumHeight() != required_height:
             body.setMinimumHeight(required_height)
             geometry_changed = True
         popup = self._settings_popup
         if geometry_changed and popup is not None and popup.isVisible():
-            available_height = max(
-                1,
-                self.rect().bottom()
-                - self.settings_button.geometry().bottom()
-                - popup_gap(),
-            )
-            show_fluent_popup_for_anchor(
-                popup,
-                self.settings_button,
-                body,
-                minimum_width=1,
-                minimum_height=320,
-                maximum_height=available_height,
-            )
+            self._show_settings_popup()
+
+    def _settings_available_height(self) -> int:
+        """Vertical room the popup may take: from below Setting to the card foot."""
+
+        return max(
+            1,
+            self.rect().bottom()
+            - self.settings_button.geometry().bottom()
+            - popup_gap(),
+        )
+
+    def _show_settings_popup(self) -> None:
+        """The card's ONE popup placement call, always with fresh geometry.
+
+        Toggle-open and open-while-visible resize both come through here, so
+        the popup can never be shown from a stale width measured before the
+        form was rebuilt.
+        """
+
+        show_fluent_popup_for_anchor(
+            self._settings_popup,
+            self.settings_button,
+            self._settings_body,
+            minimum_width=1,
+            minimum_height=320,
+            maximum_height=self._settings_available_height(),
+            content_width=self._settings_content_width,
+        )
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
@@ -690,18 +719,13 @@ class PanelCardView(FluentGroupBox):
             self._sync_settings_body_size()
             popup.hide()
         anchor = self._settings_anchor
-        available_height = max(
-            1,
-            self.rect().bottom()
-            - self.settings_button.geometry().bottom()
-            - popup_gap(),
-        )
         anchor.toggle(
             self._settings_body,
             prepare=self._rebuild_settings_form,
-            minimum_width=1,
-            minimum_height=320,
-            maximum_height=available_height,
+            # The card's own placement call: it reads the width the rebuild
+            # just measured, where a value passed alongside ``prepare`` would
+            # be the one measured BEFORE it ran.
+            present=self._show_settings_popup,
         )
 
     def _request_edit(self) -> None:

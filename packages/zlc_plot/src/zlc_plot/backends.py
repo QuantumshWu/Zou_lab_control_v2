@@ -914,7 +914,22 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._requested_dpr = selected
             if self._pointer_button is not None or self._gesture_front is not None:
                 self._cancel_active_interaction()
-            self._track(self._host.set_device_pixel_ratio(selected))
+            future = self._host.set_device_pixel_ratio(selected)
+            if self._unsubscribe is None:
+                # A staged widget has no front subscription, but a DPR change
+                # is this widget's own surface event: hand the re-rendered
+                # front through the queued handoff auto-present uses.  The
+                # front carries the same data revision at the new backing
+                # density, so cross-host shot coordination is unaffected.
+                def hand_over(done: Future[object]) -> None:
+                    if done.cancelled() or done.exception() is not None:
+                        return
+                    front = getattr(done.result(), "front", None)
+                    if front is not None and not self._closed:
+                        self._on_front(front)
+
+                future.add_done_callback(hand_over)
+            self._track(future)
 
         def paintEvent(self, event: object) -> None:
             painter = modules.QtGui.QPainter(self)

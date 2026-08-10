@@ -371,14 +371,27 @@ class _WorkerSessionAdapter:
         data: object,
         *,
         revision: int | None = None,
+        refresh_interval_ms: int | None = None,
     ) -> object:
-        return self._session().update_data(data, revision=revision)
+        return self._session().update_data(
+            data,
+            revision=revision,
+            refresh_interval_ms=refresh_interval_ms,
+        )
 
     def update_image_overlay(self, overlay: object) -> object:
         return self._session().update_image_overlay(overlay)
 
-    def update_image_frame(self, frame: object) -> object:
-        return self._session().update_image_frame(frame)
+    def update_image_frame(
+        self,
+        frame: object,
+        *,
+        refresh_interval_ms: int | None = None,
+    ) -> object:
+        return self._session().update_image_frame(
+            frame,
+            refresh_interval_ms=refresh_interval_ms,
+        )
 
     def set_parameter(self, name: str, value: object) -> object:
         return self._session().set_parameter(name, value)
@@ -1139,11 +1152,13 @@ class RasterPlotHost:
         data: object,
         *,
         revision: int | None = None,
+        refresh_interval_ms: int | None = None,
     ) -> Future[RasterOperation[None]]:
         return self._dispatch_session(
             self._worker_adapter.update_data,
             data,
             revision=revision,
+            refresh_interval_ms=refresh_interval_ms,
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="data",
         )
@@ -1164,12 +1179,15 @@ class RasterPlotHost:
     def update_image_frame(
         self,
         frame: "ImageFrame",
+        *,
+        refresh_interval_ms: int | None = None,
     ) -> Future[RasterOperation["ImageFrame"]]:
         """Coalesce complete image frames on the serial render worker."""
 
         return self._dispatch_session(
             self._worker_adapter.update_image_frame,
             frame,
+            refresh_interval_ms=refresh_interval_ms,
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="data",
         )

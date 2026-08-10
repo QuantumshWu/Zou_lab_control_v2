@@ -63,10 +63,22 @@ class TaskConsoleHandle(QtCore.QObject):
     logic_remove_requested = QtCore.pyqtSignal(str)
     logic_draft_changed = QtCore.pyqtSignal(str, object)
 
-    def __init__(self, window: Any, view: TaskConsoleView) -> None:
+    def __init__(
+        self,
+        window: Any,
+        view: TaskConsoleView,
+        *,
+        plot_surface: Any | None = None,
+    ) -> None:
         super().__init__()
         self._window = window
         self._view = view
+        # The composition root's panel-widget policy: host -> QWidget.  The
+        # console injects a staging widget factory here so the board can
+        # present same-shot groups atomically; without one the host supplies
+        # its own default widget.  Widgets are reused per host (a host owns
+        # one surface), matching the host's own widget caching.
+        self._plot_surface = plot_surface if callable(plot_surface) else None
         self._cards: dict[str, PanelCardView] = {}
         self._rows: dict[str, LogicRowView] = {}
         self._panel_publisher_rows: dict[str, LogicRowView] = {}
@@ -287,7 +299,33 @@ class TaskConsoleHandle(QtCore.QObject):
         """Draw what this host holds on a named panel, given the host itself."""
 
         card = self._cards[str(panel_id)]
-        card.set_surface(None if host is None else host.qt_widget())
+        card.set_surface(None if host is None else self._surface_for(card, host))
+
+    def _surface_for(self, card: PanelCardView, host: Any) -> Any:
+        """One widget per host: reuse the mounted surface when it is his."""
+
+        current = card.surface
+        if current is not None and getattr(current, "host", None) is host:
+            return current
+        if self._plot_surface is not None:
+            return self._plot_surface(host)
+        return host.qt_widget()
+
+    def present_panel_front(self, panel_id: str, front: Any) -> bool:
+        """Put one completed immutable front on a panel's staged widget.
+
+        Duck-typed like the interaction gate: a plot widget owns
+        ``present_front``, a placeholder standing in for one does not.  The
+        return says whether pixels actually changed (a stale front is refused
+        by the widget's own monotonic-sequence gate).
+        """
+
+        card = self._cards.get(str(panel_id))
+        surface = None if card is None else card.surface
+        present = getattr(surface, "present_front", None)
+        if not callable(present):
+            return False
+        return bool(present(front))
 
     def set_panel_signal_choices(self, panel_id: str, *args: Any, **kwargs: Any) -> None:
         self._cards[str(panel_id)].set_signal_choices(*args, **kwargs)

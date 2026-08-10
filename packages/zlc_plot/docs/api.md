@@ -637,10 +637,15 @@ Selector 或 pan gesture 不暂停 live consumer、render 或 live fit；可见 
 The producer revision is passed through to `PlotSession`; it becomes the
 session, selection-event, selected-data, and fit data revision. Direct
 `update_data(pulse)` calls without an envelope advance the current
-session revision by one. The same `update_data()` path remains valid while live
-fit is armed: data is promoted first, the previous solve is cancelled, and only
-the latest matching fit result may add an overlay. `LivePlotController.publish()`
-adds only capacity-one ingress and cadence.
+session revision by one. The same `update_data()` path remains valid while a
+live fit is armed: the solve runs inside the presentation under a budget of
+the caller's refresh cadence (`update_data(refresh_interval_ms=...)`, the
+library default when omitted), so an in-budget overlay publishes in the same
+front as its data; on deadline the front publishes without it, the previous
+solve is cancelled, and only the latest matching fit result may add an
+overlay asynchronously. `LivePlotController.publish()` adds only capacity-one
+ingress and cadence, and its commits carry the controller's actual interval
+as that budget.
 
 ## Notebook
 

@@ -22,6 +22,7 @@ import numpy as np
 
 from ._image_raster import ImageFrontStore, PreparedImageFront
 from ._fit_scene import FitOverlay, FitPolyline
+from .data_view import aligned_histogram_edges
 from ._kinds import handler_for
 from ._rendering.pulse import update_pulse_timeline
 from ._pulse_time import pulse_time_scale
@@ -1528,7 +1529,7 @@ class MatplotlibRenderer:
             values = values[np.isfinite(values)]
             count_values, edge_values = np.histogram(
                 values,
-                bins=int(state["bin_count"]),
+                bins=aligned_histogram_edges(values, int(state["bin_count"])),
             )
             count_values = count_values.astype(float)
         density = bool(state["density"])
@@ -1631,46 +1632,6 @@ class MatplotlibRenderer:
         axes.set_ylabel(y_label)
         apply_smart_ticks(axes)
 
-    def _stable_pooled_limits(
-        self,
-        key: str,
-        target: tuple[float, float],
-    ) -> tuple[float, float]:
-        """Damp per-revision jitter in pooled facet axis limits.
-
-        Ordinary statistical fluctuation nudges pooled bin edges and data
-        hulls a little on every revision, and each nudge dirties every cell's
-        chrome, forcing a full background recapture.  Previous limits are held
-        while the new ones lie inside them and still cover most of their span;
-        a breach expands to the union; a large collapse adopts the new limits
-        so drifting data cannot inflate the union forever.
-        """
-
-        low, high = float(target[0]), float(target[1])
-        previous = self._artists.get(key)
-        if previous is not None:
-            prior_low, prior_high = previous
-            span = prior_high - prior_low
-            if span > 0.0 and (high - low) < 0.8 * span:
-                pass  # collapse: adopt the tighter limits
-            elif low >= prior_low and high <= prior_high:
-                return previous
-            else:
-                # Expand past the breach with margin: sample extremes creep
-                # outward for a few revisions, and padding the breached side
-                # absorbs that growth in one recapture instead of one per
-                # revision.
-                low = min(low, prior_low)
-                high = max(high, prior_high)
-                margin = 0.08 * (high - low)
-                if low < prior_low:
-                    low -= margin
-                if high > prior_high:
-                    high += margin
-        selected = (low, high)
-        self._artists[key] = selected
-        return selected
-
     def _resolve_histogram_y_limits(
         self,
         key: str,
@@ -1679,6 +1640,17 @@ class MatplotlibRenderer:
     ) -> tuple[float, float]:
         mode = str(state["relim_mode"])
         logarithmic = bool(state["log_y"])
+        # Everything that changes what one count MEANS belongs in the
+        # retention signature: toggling density/cumulative or re-binning is a
+        # representation change the axis must re-fit to cleanly, not
+        # shot-to-shot jitter for the expand/shrink hysteresis to damp.
+        count_semantics = (
+            mode,
+            logarithmic,
+            bool(state["density"]),
+            bool(state["cumulative"]),
+            int(state["bin_count"]),
+        )
         shrink_ratio = self.style.render.distribution_count_shrink_ratio
         state_key = f"{key}:histogram_limits"
         mode_key = f"{key}:histogram_mode"
@@ -1700,10 +1672,13 @@ class MatplotlibRenderer:
                     target = (0.8, 1.2)
             else:
                 peak = float(np.max(finite)) if finite.size else 0.0
-                target = (0.0, max(1.0, peak * 1.08))
+                # The 1.0 fallback guards a degenerate axis over empty data
+                # only; it must not act as a counts floor, which pinned
+                # density histograms (peaks ~1e-2) to the bottom of the axis.
+                target = (0.0, peak * 1.08 if peak > 0.0 else 1.0)
             force = (
                 previous is None
-                or previous_mode != (mode, logarithmic)
+                or previous_mode != count_semantics
                 or mode == "tight"
             )
             if force:
@@ -1745,7 +1720,7 @@ class MatplotlibRenderer:
         if logarithmic and selected[0] <= 0.0:
             raise RuntimeError("resolved logarithmic limits are not positive")
         self._artists[state_key] = selected
-        self._artists[mode_key] = (mode, logarithmic)
+        self._artists[mode_key] = count_semantics
         return selected
 
     def _cached_image_range(
@@ -2293,8 +2268,11 @@ class MatplotlibRenderer:
                     samples = np.asarray([histogram_limits[0]], dtype=float)
                 counts, edges = np.histogram(
                     samples,
-                    bins=bin_count,
-                    range=histogram_limits,
+                    bins=aligned_histogram_edges(
+                        samples,
+                        bin_count,
+                        limits=histogram_limits,
+                    ),
                 )
                 self._artists[cache_name] = (cache_key, counts, edges)
                 distribution_changed = True
@@ -2423,6 +2401,21 @@ class MatplotlibRenderer:
             x_label=payload_x if explicit_x is None else explicit_x,
             y_label=y_label,
         )
+        # The shot axis frames the FULL configured window from the first
+        # revision on: a filling trace grows rightward inside a fixed
+        # ``window``-wide frame instead of the axis hugging however many
+        # shots happen to exist, so the window parameter is what you see.
+        shot_values = np.concatenate(
+            [item.x[item.valid] for item in sliced]
+        ) if sliced else np.asarray([], dtype=float)
+        if shot_values.size:
+            last_shot = float(np.max(shot_values))
+            window = int(state["window"])
+            frame = _curve_x_limits(
+                np.asarray([last_shot - window + 1, last_shot])
+            )
+            if frame is not None:
+                self._set_xlim(history, *frame)
         latest = None
         if sliced:
             usable = sliced[0].y[sliced[0].valid]
@@ -2535,7 +2528,7 @@ class MatplotlibRenderer:
                 y_range = _data_limits(np.concatenate(y_groups))
                 assert x_target is not None
                 curve_limits = (
-                    self._stable_pooled_limits("facet:curve_x", x_target),
+                    x_target,
                     self._resolve_curve_y_limits(
                         "facet:curve",
                         y_range,
@@ -2562,10 +2555,12 @@ class MatplotlibRenderer:
                     for edges, _counts in usable[1:]
                 ):
                     raise ValueError("FacetGrid histogram cells must share one bin projection")
-                x_limits = self._stable_pooled_limits(
-                    "facet:histogram_x",
-                    (float(shared_edges[0]), float(shared_edges[-1])),
-                )
+                # The shared edges already carry relim_mode's retention: the
+                # session's histogram projection holds them under ``normal``
+                # and ``fixed`` and recomputes them under ``tight``, so their
+                # span applies directly — a second damping layer here would
+                # override the authored mode.
+                x_limits = (float(shared_edges[0]), float(shared_edges[-1]))
                 pooled_counts = np.concatenate(
                     tuple(np.asarray(counts, dtype=float) for _edges, counts in usable)
                 )

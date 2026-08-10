@@ -30,6 +30,7 @@ from .data_view import (
     ImageData,
     QuantityArray,
     RollingSample,
+    aligned_histogram_edges,
 )
 from .fit import (
     FitModelSpec,
@@ -626,9 +627,10 @@ class FitProjection:
                 low -= padding
                 high += padding
 
+        edges = aligned_histogram_edges(values, count, limits=(low, high))
         selected = HistogramProjection(
-            count,
-            np.linspace(low, high, count + 1, dtype=float),
+            len(edges) - 1,
+            edges,
         )
         if previous is None or not (
             previous.bin_count == selected.bin_count

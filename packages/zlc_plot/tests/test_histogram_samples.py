@@ -36,3 +36,50 @@ def test_histogram_spec_needs_no_axis_declaration() -> None:
         assert names == ("kind",)
     finally:
         session.close()
+
+
+def test_representation_toggles_refit_the_count_axis() -> None:
+    """Density/cumulative/bin edits re-fit the axis; they are not jitter.
+
+    The expand/shrink hysteresis exists for shot-to-shot noise on live
+    data.  A representation change alters what one count MEANS, so the
+    axis snaps to the new scale — and a density peak far below one count
+    must fill the axis instead of being pinned under a counts floor.
+    """
+
+    rng = np.random.default_rng(3)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=300),
+        PointTable.from_columns({"x": np.arange(1.0)}),
+        dtype=np.float64,
+        generation="histogram-refit",
+    )
+    snapshot = DatasetSnapshot(schema, rng.normal(50, 8, (300, 1)), revision=0)
+    session = PlotSession(snapshot, HistogramPlot())
+    try:
+        axes = session._renderer.primary_axes
+
+        def ceiling() -> float:
+            return float(axes.get_ylim()[1])
+
+        counts_ceiling = ceiling()
+        assert counts_ceiling > 10.0
+
+        session.set_parameter("density", True)
+        density_ceiling = ceiling()
+        assert density_ceiling < 1.0  # fills the axis, no counts floor
+        assert density_ceiling > 0.0
+
+        session.set_parameter("density", False)
+        assert ceiling() == counts_ceiling
+
+        session.set_parameter("cumulative", True)
+        assert abs(ceiling() - 300 * 1.08) < 1e-6
+
+        session.set_parameter("cumulative", False)
+        assert ceiling() == counts_ceiling
+
+        session.set_parameter("bin_count", 15)
+        assert ceiling() > counts_ceiling  # fewer bins, taller peaks, refit
+    finally:
+        session.close()

@@ -180,6 +180,43 @@ def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
     return tuple(dict.fromkeys(refs))
 
 
+def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
+    """Return how many distinct positions one axis reference spans.
+
+    This is the single size authority for semantic axis choices: the same
+    reference vocabulary ``axis_choices_for_schema`` offers, measured against
+    the same schema, so "can this axis carry a series" is answered in exactly
+    one place.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("schema must be DatasetSchema")
+    if not isinstance(ref, AxisRef):
+        raise TypeError("ref must be AxisRef")
+    if ref.domain is AxisDomain.REPEAT:
+        return int(schema.repeat_axis.size)
+    if ref.domain in {AxisDomain.POINT_ROW, AxisDomain.POINT_COORDINATE}:
+        # A point column spans the point rows; the row ordinal is the same
+        # domain under its degenerate name.
+        return int(schema.point_table.row_count)
+    if ref.domain is AxisDomain.POINT_DIMENSION:
+        assert ref.axis_id is not None
+        if schema.grid_topology is not None:
+            for axis_id, domain in zip(
+                schema.grid_topology.dimension_ids,
+                schema.grid_topology.coordinate_domains,
+                strict=True,
+            ):
+                if str(axis_id) == ref.axis_id:
+                    return int(len(domain))
+        raise KeyError(ref.axis_id)
+    assert ref.domain is AxisDomain.DATA and ref.axis_id is not None
+    for axis in schema.cell_schema.data_axes:
+        if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id:
+            return int(axis.size)
+    raise KeyError(ref.axis_id)
+
+
 def schema_summary(schema: DatasetSchema) -> str:
     """One-line human description of a dataset's structure.
 
@@ -433,9 +470,21 @@ def describe_semantics(
     reduction = getattr(semantic, "reduction", None)
     used = tuple(item for item in (x, y, group) if isinstance(item, AxisRef))
     facet_axes = _without(axes, used)
+    # A series is drawn ALONG its x and split BY its group; a size-1 axis can
+    # carry neither -- it yields one invisible point or one redundant split.
+    # Series-family kinds therefore never offer degenerate axes for those
+    # roles; the current value stays offered because it is the actual state.
+    series = handler_for(semantic).fit_target == "series"
+    series_axes = (
+        tuple(value for value in axes if axis_size(schema, value) > 1)
+        if series
+        else axes
+    )
 
-    def _axes_with_current(current: object) -> tuple[SemanticChoice, ...]:
-        values = axes
+    def _axes_with_current(
+        current: object,
+        values: tuple[AxisRef, ...] = axes,
+    ) -> tuple[SemanticChoice, ...]:
         if isinstance(current, AxisRef) and current not in values:
             values = (*values, current)
         return _choice_pairs(values, lambda value: _axis_label(schema, value))
@@ -445,7 +494,9 @@ def describe_semantics(
         if name == "kind":
             fields.append(_field(name, "Plot kind", spec.kind, kind_choices, True))
         elif name == "x":
-            fields.append(_field(name, "X axis", x, _axes_with_current(x), True))
+            fields.append(
+                _field(name, "X axis", x, _axes_with_current(x, series_axes), True)
+            )
         elif name == "y":
             fields.append(_field(name, "Y axis", y, _axes_with_current(y), True))
         elif name == "group":
@@ -454,7 +505,7 @@ def describe_semantics(
                     name,
                     "Group",
                     group,
-                    ((None, "(none)"), *_axes_with_current(group)),
+                    ((None, "(none)"), *_axes_with_current(group, series_axes)),
                     False,
                 )
             )
@@ -500,6 +551,7 @@ __all__ = [
     "SemanticFeasibility",
     "SemanticField",
     "axis_choices_for_schema",
+    "axis_size",
     "describe_semantics",
     "schema_summary",
     "updated_spec",

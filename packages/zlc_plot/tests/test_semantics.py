@@ -8,12 +8,14 @@ from zlc_plot import (
     DEFAULTS,
     FacetGridPlot,
     HistogramPlot,
+    ImagePlot,
     PlotKind,
     PlotSession,
     PulseTimelinePlot,
     Reduction,
     describe_semantics,
 )
+from zlc_plot.semantics import axis_size
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot._kinds import HANDLERS
 from zlc_plot.selectors import NumericRange, RectangleRange
@@ -95,6 +97,85 @@ def test_facet_domain_excludes_cell_axes() -> None:
     facet_values = description.field("facet").choice_values
     assert AxisRef.point("x") not in facet_values
     assert AxisRef.point("row") in facet_values
+
+def _camera_frame_schema():
+    """One camera frame: R=1, one point row, dense y × x data axes."""
+
+    return DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"frame": np.zeros(1)}),
+        data_axes=(
+            Axis.create("spatial-y", size=8),
+            Axis.create("spatial-x", size=6),
+        ),
+        dtype=np.float64,
+    )
+
+
+def test_axis_size_measures_every_semantic_axis_domain() -> None:
+    schema = _camera_frame_schema()
+    assert axis_size(schema, AxisRef.repeat()) == 1
+    assert axis_size(schema, AxisRef.point_rows()) == 1
+    assert axis_size(schema, AxisRef.point("frame")) == 1
+    assert axis_size(schema, AxisRef.data("spatial-y")) == 8
+    assert axis_size(schema, AxisRef.data("spatial-x")) == 6
+    scanned = _snapshot().block.schema
+    assert axis_size(scanned, AxisRef.repeat()) == 2
+    assert axis_size(scanned, AxisRef.point("x")) == 4
+
+
+def test_series_x_and_group_choices_exclude_degenerate_axes() -> None:
+    """A size-1 axis can never carry a multi-point series.
+
+    On a camera frame the point domain has one row, so offering it as a curve
+    x yields one invisible point.  The x/group domains of series-family kinds
+    exclude every size-1 axis; the current value stays offered because it is
+    the actual state.
+    """
+
+    schema = _camera_frame_schema()
+    description = describe_semantics(schema, CurvePlot(AxisRef.point("frame")))
+    x_values = description.field("x").choice_values
+    assert AxisRef.point("frame") in x_values  # the current state stays
+    assert AxisRef.point_rows() not in x_values
+    assert AxisRef.repeat() not in x_values
+    assert AxisRef.data("spatial-y") in x_values
+    assert AxisRef.data("spatial-x") in x_values
+    group_values = description.field("group").choice_values
+    assert AxisRef.point("frame") not in group_values
+    assert AxisRef.point_rows() not in group_values
+    assert AxisRef.repeat() not in group_values
+    # The axis vocabulary itself is unfiltered; only series roles are.
+    assert AxisRef.point_rows() in description.axis_choices
+
+
+def test_non_series_kinds_keep_degenerate_axes_where_legitimate() -> None:
+    schema = _camera_frame_schema()
+    description = describe_semantics(
+        schema,
+        ImagePlot(AxisRef.data("spatial-x"), AxisRef.data("spatial-y")),
+    )
+    # An image is not a series; its axis domains stay the schema's own.
+    x_values = description.field("x").choice_values
+    assert AxisRef.data("spatial-x") in x_values
+
+
+def test_facet_grid_series_cell_filters_its_x_domain_too() -> None:
+    points = PointTable.from_columns(
+        {
+            "x": np.arange(4.0),
+            "row": np.array([0.0, 0.0, 1.0, 1.0]),
+        }
+    )
+    schema = DatasetSchema.create(Axis.create("repeat", size=1), points)
+    description = describe_semantics(
+        schema,
+        FacetGridPlot(AxisRef.point("row"), CurvePlot(AxisRef.point("x"))),
+    )
+    x_values = description.field("x").choice_values
+    assert AxisRef.repeat() not in x_values  # size 1 cannot carry a series
+    assert AxisRef.point("x") in x_values
+
 
 def test_pulse_semantics_has_the_same_frontend_contract_without_dataset_axes() -> None:
     description = describe_semantics(None, PulseTimelinePlot())

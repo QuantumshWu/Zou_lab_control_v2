@@ -86,6 +86,28 @@ def test_window_slides_forward_keeping_absolute_indices() -> None:
         session.close()
 
 
+def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
+    """The axis spans exactly ``window`` shots even while the trace fills.
+
+    What you configure is what you see: a young trace grows rightward
+    inside the fixed frame instead of the axis hugging the few shots that
+    exist so far.
+    """
+
+    session = PlotSession(_snapshot(0, repeats=1), RollingPlot(), parameters={"window": 20})
+    try:
+        axes = session._renderer.primary_axes
+        assert tuple(map(float, axes.get_xlim())) == (-19.0, 0.0)
+        for revision in range(1, 4):
+            session.update_data(_snapshot(revision, repeats=1))
+        assert tuple(map(float, axes.get_xlim())) == (-16.0, 3.0)
+        for revision in range(4, 30):
+            session.update_data(_snapshot(revision, repeats=1))
+        assert tuple(map(float, axes.get_xlim())) == (10.0, 29.0)
+    finally:
+        session.close()
+
+
 def test_window_selects_display_without_truncating_retention() -> None:
     """The window is a view, not a destructive cap on measured history.
 

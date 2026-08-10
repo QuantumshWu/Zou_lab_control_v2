@@ -22,6 +22,8 @@ from zlc_ui.fluent import (
     FluentLabel,
     FluentReadoutEdit,
     FluentScrollArea,
+    FluentTreeComboBox,
+    fill_grouped_choice_combo,
     scaled_px,
 )
 from zlc_ui.form import FluentParameterForm, FormSpec
@@ -79,7 +81,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self._selector_layout = QtWidgets.QFormLayout(self._selector_frame)
         self._selector_layout.setContentsMargins(margin, margin, margin, margin)
         self._selector_layout.setSpacing(scaled_px(8, minimum=5))
-        self.source_combo: FluentComboBox | None = None
+        self.source_combo: FluentTreeComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
         empty = FormSpec(())
@@ -195,22 +197,34 @@ class LogicEditorView(QtWidgets.QWidget):
             current = str(projection.get("source_signal") or "")
             options = tuple(str(item) for item in projection.get("source_options", ()))
             source_labels = projection.get("source_labels") or {}
+            source_groups = projection.get("source_groups") or {}
             if not isinstance(source_labels, Mapping):
                 raise TypeError("logic editor source labels must be a mapping")
+            if not isinstance(source_groups, Mapping):
+                raise TypeError("logic editor source groups must be a mapping")
             if self.source_combo is None:
-                self.source_combo = FluentComboBox()
-                self.source_combo.currentIndexChanged[int].connect(
-                    self._source_changed
-                )
+                self.source_combo = FluentTreeComboBox()
+                # ``activated`` covers both pick paths -- the combo's native
+                # activation and the tree's own leaf-click re-emission --
+                # exactly as the shared keyed-choice form handler wires it.
+                self.source_combo.activated[int].connect(self._source_changed)
                 self._selector_layout.insertRow(
                     0, "Frames signal", self.source_combo
                 )
-            self._fill_combo(
+            # The one grouped signal chooser every other picker already uses:
+            # a producer tree with keyed leaves, not a second flat list.
+            fill_grouped_choice_combo(
                 self.source_combo,
-                current,
-                options,
-                blank=True,
+                names=options,
+                sources={
+                    str(key): (str(value),)
+                    for key, value in source_groups.items()
+                },
+                metadata={},
                 labels={str(key): str(value) for key, value in source_labels.items()},
+                current=current,
+                none_label="(not selected)",
+                empty_source_label="signals",
             )
         elif self.source_combo is not None:
             self._retire_selector(self.source_combo)
@@ -258,7 +272,6 @@ class LogicEditorView(QtWidgets.QWidget):
         options: tuple[str, ...],
         *,
         blank: bool,
-        labels: Mapping[str, str] | None = None,
     ) -> None:
         ordered: list[str] = []
         if blank:
@@ -266,9 +279,8 @@ class LogicEditorView(QtWidgets.QWidget):
         if current and current not in options:
             ordered.append(current)
         ordered.extend(item for item in options if item not in ordered)
-        names = {} if labels is None else dict(labels)
         desired = tuple(
-            ((names.get(value, value) if value else "(not selected)"), value)
+            ((value if value else "(not selected)"), value)
             for value in ordered
         )
         existing = tuple(
@@ -326,7 +338,7 @@ class LogicEditorView(QtWidgets.QWidget):
         if self.source_combo is None:
             return
         self.draft_changed.emit(
-            {"source_signal": str(self.source_combo.currentData() or "")}
+            {"source_signal": str(self.source_combo.current_choice_key() or "")}
         )
 
     def _device_changed(self, argument_name: str, combo: FluentComboBox) -> None:

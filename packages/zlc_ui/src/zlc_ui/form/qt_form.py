@@ -37,6 +37,7 @@ from ..fluent import (
     FluentSpinBox,
     FluentSwitch,
     FluentTreeComboBox,
+    fluent_switch_width,
     scaled_px,
     setting_label_width,
     signals_blocked,
@@ -756,16 +757,24 @@ def _automatic_label(field: FormFieldProps, checked: bool) -> str:
 
 
 def _form_label_width(fields) -> int:
+    """The label column: wide enough for every text label AND every switch.
+
+    An automatic field's label IS a :class:`FluentSwitch`, so its column need
+    is the switch's own painted width -- asked from the one switch-width
+    authority, never re-derived here with a padding constant.  Two independent
+    formulas drifted apart and the switch's track painted underneath the
+    editor beside it.
+    """
+
     fields = tuple(fields)
     width = setting_label_width(field.row_label for field in fields)
-    automatic = tuple(field for field in fields if field.automatic)
-    if automatic:
-        width = max(
-            width,
-            setting_label_width(
-                _automatic_label(field, False) for field in automatic
-            ) + scaled_px(34),
-        )
+    for field in fields:
+        if field.automatic:
+            width = max(
+                width,
+                fluent_switch_width(_automatic_label(field, False)),
+                fluent_switch_width(_automatic_label(field, True)),
+            )
     return width
 
 

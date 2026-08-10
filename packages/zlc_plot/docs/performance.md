@@ -342,11 +342,13 @@ matrices differed by 1.1e-15 relatively. Complete `PlotSession` transactions,
 including overlay presentation, measured 204 / 151 ms cold/warm at 1024² and
 332 / 325 ms at 2048² on the reference machine. Both returned the exact
 all-pixel sample count, full fitted/residual/index arrays, finite parameter
-uncertainties and a current overlay. If a live fit exceeds the display cadence,
-incoming data fronts continue immediately, the old solver is cancelled, and
-only the latest matching result may add an overlay; there is no catch-up burst. Custom Image
-models remain on the general coordinate-expansion solver path unless they
-provide a specialization.
+uncertainties and a current overlay. An armed live fit solves inside the data
+commit under the caller's refresh-interval budget, so an in-budget overlay
+publishes in the same front as its data; only a solve that exceeds the budget
+falls back to the asynchronous path, where the old solver is cancelled and
+only the latest matching result may add an overlay — there is no catch-up
+burst. Custom Image models remain on the general coordinate-expansion solver
+path unless they provide a specialization.
 
 ## GridTopology comparison
 

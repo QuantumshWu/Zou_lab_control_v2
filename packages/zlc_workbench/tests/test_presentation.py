@@ -222,7 +222,7 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     calls: list[object] = []
     host = SimpleNamespace(
         host_id=object(),
-        update_data=lambda snapshot: calls.append(snapshot) or Future(),
+        update_data=lambda snapshot, **_render: calls.append(snapshot) or Future(),
     )
     port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
     first = port.prepare(value, publication)
@@ -236,12 +236,12 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     assert len(calls) == 2
     port.finish_unpresented(retry)
 
-    host.update_data = lambda _snapshot: (_ for _ in ()).throw(
+    host.update_data = lambda _snapshot, **_render: (_ for _ in ()).throw(
         RuntimeError("synchronous render rejection")
     )
     with pytest.raises(RuntimeError, match="synchronous render rejection"):
         port.prepare(value, publication)
-    host.update_data = lambda snapshot: calls.append(snapshot) or Future()
+    host.update_data = lambda snapshot, **_render: calls.append(snapshot) or Future()
     recovered = port.prepare(value, publication)
     assert recovered is not None
     port.finish_unpresented(recovered)
@@ -358,7 +358,7 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
 
     host = SimpleNamespace(
         host_id=object(),
-        update_data=lambda _snapshot: Future(),
+        update_data=lambda _snapshot, **_render: Future(),
     )
     port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
     update = port.prepare(value, publication)
@@ -392,7 +392,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
     completion: Future[object] = Future()
     host = SimpleNamespace(
         host_id=object(),
-        update_data=lambda snapshot: calls.append(snapshot) or completion,
+        update_data=lambda snapshot, **_render: calls.append(snapshot) or completion,
     )
     presented: list[object] = []
     port = PlotPanelPort(

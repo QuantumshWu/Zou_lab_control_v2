@@ -108,8 +108,15 @@ def open_task_console(
     *,
     title: str = "TaskConsole@Zou lab",
     window_ratio: float | None = None,
+    plot_surface: Any | None = None,
 ) -> Any:
-    """Open the task console and return the handle that drives it."""
+    """Open the task console and return the handle that drives it.
+
+    ``plot_surface`` is the composition root's panel-widget policy: called
+    with a plotting host, it returns the QWidget that shows it (the console
+    passes a staging widget so the board can present same-shot groups
+    atomically).  ``None`` keeps the host's own default widget.
+    """
 
     from .console.handle import TaskConsoleHandle
     from .console.task_console_view import TaskConsoleView
@@ -128,7 +135,7 @@ def open_task_console(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
         ),
     )
-    return TaskConsoleHandle(window, held["view"])
+    return TaskConsoleHandle(window, held["view"], plot_surface=plot_surface)
 
 
 __all__ = [

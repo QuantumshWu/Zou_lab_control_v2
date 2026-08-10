@@ -2539,17 +2539,30 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         data: PlotInput,
         *,
         revision: int | None = None,
+        refresh_interval_ms: int | None = None,
     ) -> None:
         """Present new data, optionally preserving a producer-owned revision.
 
         OwnedSnapshot keeps its intrinsic revision. PulseTimeline callers may
         provide the revision from a live transport envelope; direct
         calls without one advance the current session revision by exactly one.
-        If automatic live fit is armed, the data front is presented first and
-        the previous solve is replaced by one background fit for this revision.
-        Callers therefore use this same method with or without fitting.
+        An armed live fit solves inside this presentation under the caller's
+        refresh cadence (``refresh_interval_ms``, the library default when
+        omitted), so an in-budget overlay lands in the same front as its
+        data; on deadline the front presents without it and the asynchronous
+        restart takes over — the same contract the live-controller commit
+        path keeps.
         """
 
+        update_started = monotonic()
+        if refresh_interval_ms is not None:
+            if isinstance(refresh_interval_ms, bool) or not isinstance(
+                refresh_interval_ms, Integral
+            ):
+                raise TypeError("refresh_interval_ms must be an integer or None")
+            if int(refresh_interval_ms) <= 0:
+                raise ValueError("refresh_interval_ms must be positive")
+            refresh_interval_ms = int(refresh_interval_ms)
         data, image_frame = self._split_image_frame(data, self._spec)
         image_overlay = _UNSET if image_frame is None else image_frame.overlay
         FitProjection._validate_input(data, self._spec)
@@ -2619,21 +2632,39 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if self._live_fit_request is not None
                     else None
                 )
-            presentation = self._present_projection_transaction(
+            self._present_projection_transaction(
                 projection,
                 image_overlay=accepted_overlay,
                 accepted_fit=accepted_fit,
             )
-            self._restart_live_fit_for_current_data()
+            live_fit_work = self._run_live_fit_in_commit(
+                update_started,
+                refresh_interval_ms,
+            )
+        if live_fit_work is not None:
+            # Futures and observer callbacks resolve only after the render
+            # lock is released; the ownership gate is taken inside these
+            # calls, and render-lock-first ordering would invert it.
+            resolution, fit_event = live_fit_work
+            if resolution is not None:
+                self._resolve_fit_completion(resolution)
+            if fit_event is not None:
+                self._notify_fit(fit_event)
+        self._restart_live_fit_for_current_data()
 
-    def update_image_frame(self, frame: ImageFrame) -> ImageFrame:
+    def update_image_frame(
+        self,
+        frame: ImageFrame,
+        *,
+        refresh_interval_ms: int | None = None,
+    ) -> ImageFrame:
         """Present image data and its point layer in one render transaction."""
 
         if not isinstance(frame, ImageFrame):
             raise TypeError("frame must be ImageFrame")
         if not isinstance(self._spec, ImagePlot):
             raise TypeError("ImageFrame requires ImagePlot")
-        self.update_data(frame)
+        self.update_data(frame, refresh_interval_ms=refresh_interval_ms)
         return frame
 
     @property

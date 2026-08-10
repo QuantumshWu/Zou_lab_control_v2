@@ -281,14 +281,15 @@ def test_surface_arbiter_rejects_the_whole_completed_batch_once() -> None:
     assert len(first.rejected) == len(second.rejected) == 1
 
 
-def test_a_superseded_member_finishes_quietly_and_its_siblings_still_commit() -> None:
+def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None:
     """A latest-only host cancels a queued render when a newer frame arrives.
 
-    That is flow control -- the newer render is already queued on the same
-    host -- so the cancelled member must leave as unpresented, without an
-    error, and without dragging the siblings' completed renders down with it.
-    Rejected as a batch error, every panel on that camera went red once per
-    coalesced frame, saying nothing.
+    That is flow control, not failure -- so no member is rejected and no panel
+    goes red.  But the batch is one causal group frozen from one front:
+    presenting the surviving sibling now would put it one shot ahead of the
+    member whose render was coalesced away.  The whole batch therefore leaves
+    unpresented, and the newer batch already queued behind it presents every
+    member of the group together.
     """
 
     channels = OwnerChannels(_Sink())
@@ -303,9 +304,10 @@ def test_a_superseded_member_finishes_quietly_and_its_siblings_still_commit() ->
     arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
 
     assert first.finished == [first.updates[0]]
+    assert second.finished == [second.updates[0]]
     assert not first.rejected and not second.rejected
-    assert not first.accepted and len(second.accepted) == 1
-    assert second.presented is front.publication("camera/frame")
+    assert not first.accepted and not second.accepted
+    assert second.presented is None
     assert arbiter.pending_batches == 0
 
 
@@ -324,8 +326,9 @@ def test_a_render_that_raised_cancellation_is_superseded_not_failed() -> None:
     arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
 
     assert first.finished == [first.updates[0]]
+    assert second.finished == [second.updates[0]]
     assert not first.rejected and not second.rejected
-    assert len(second.accepted) == 1
+    assert not first.accepted and not second.accepted
 
 
 def test_a_batch_whose_every_member_was_superseded_just_finishes() -> None:
@@ -348,7 +351,13 @@ def test_a_batch_whose_every_member_was_superseded_just_finishes() -> None:
 
 
 def test_a_sibling_error_still_never_marks_the_superseded_member() -> None:
-    """One member superseded, one failed: only the failure is an error."""
+    """One member superseded, one failed: the batch is abandoned, not rejected.
+
+    Supersession means a newer batch for the same group is already queued;
+    that batch re-renders the failed member too, so its error resurfaces
+    there if it is real -- while a red mark for an abandoned batch would be a
+    complaint about pixels nobody was going to show.
+    """
 
     channels = OwnerChannels(_Sink())
     arbiter = SurfaceBatchArbiter(channels)
@@ -362,8 +371,8 @@ def test_a_sibling_error_still_never_marks_the_superseded_member() -> None:
     arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
 
     assert first.finished == [first.updates[0]]
-    assert not first.rejected
-    assert len(second.rejected) == 1
+    assert second.finished == [second.updates[0]]
+    assert not first.rejected and not second.rejected
 
 
 class _Plane:

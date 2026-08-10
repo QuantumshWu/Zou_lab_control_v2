@@ -93,12 +93,29 @@ def build_console(session, *, window_ratio=None):
 
     from zlc_ui import open_task_console
 
+    from ..board import attach_qt_owner_turn
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
     from ..panel_state import compose_panel_spec
 
+    def _panel_surface(host):
+        """A board panel's widget STAGES its fronts; the board presents them.
+
+        Auto-present would put each panel's pixels up the moment its own
+        render lands, so two panels of one causal group (a camera frame and
+        the occupancy derived from it) could show different shots.  With
+        staging, the presenter presents each same-shot batch atomically and
+        routes every non-batch render through the same present helpers.
+        """
+
+        return plot.Qt5PlotWidget(host, auto_present=False)
+
     # One call, one handle: this layer never names a widget class.
-    view = open_task_console(title="TaskConsole@Zou lab", window_ratio=window_ratio)
+    view = open_task_console(
+        title="TaskConsole@Zou lab",
+        window_ratio=window_ratio,
+        plot_surface=_panel_surface,
+    )
 
     def _spec_for(snapshot, kind: str = "", cell_kind: str = ""):
         """The spec this data admits, as the chosen kind or as its own shape."""
@@ -129,6 +146,11 @@ def build_console(session, *, window_ratio=None):
         make_host=_make_host,
         spec_for=_spec_for,
         open_saved=lambda start: _open_saved_figure(view, start),
+    )
+    # Completion-driven presentation: a finished render's wake hops to the GUI
+    # thread and commits immediately, instead of waiting for the next beat.
+    presenter.board.wake.set_notify(
+        attach_qt_owner_turn(presenter.commit_surfaces)
     )
     return view, presenter
 
