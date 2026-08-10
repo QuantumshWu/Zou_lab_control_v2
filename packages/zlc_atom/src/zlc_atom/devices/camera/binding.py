@@ -26,25 +26,31 @@ def bind_camera(
 ) -> InstalledLeaf:
     if not isinstance(camera, CameraAdapter):
         raise TypeError("camera must implement the canonical CameraAdapter contract")
-    binding, proof = bind_verified_device(
-        context.broker,
-        key=ResourceKey.parse(f"device/{key}"),
-        identity_probe=lambda: PhysicalDeviceIdentity(
-            identity,
-            DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-        ),
-        execute_command=_reject_untyped_command,
-        capability_probe=lambda: {
-            "camera.adapter": camera,
-            "camera.working_point": camera.capture_working_point(),
-        },
-        close_session=lambda _command: camera.finish_record_capture()
-        if camera.capture_state()
-        else None,
-        interrupt_operations={
-            SafetyOperation.DISARM: lambda: camera.finish_record_capture()
-        },
-    )
+    try:
+        binding, proof = bind_verified_device(
+            context.broker,
+            key=ResourceKey.parse(f"device/{key}"),
+            identity_probe=lambda: PhysicalDeviceIdentity(
+                identity,
+                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
+            ),
+            execute_command=_reject_untyped_command,
+            capability_probe=lambda: {
+                "camera.adapter": camera,
+                "camera.working_point": camera.capture_working_point(),
+            },
+            close_session=lambda _command: camera.finish_record_capture()
+            if camera.capture_state()
+            else None,
+            interrupt_operations={
+                SafetyOperation.DISARM: lambda: camera.finish_record_capture()
+            },
+        )
+    except BaseException:
+        close = getattr(camera, "close", None)
+        if callable(close):
+            close()
+        raise
     return InstalledLeaf(
         key,
         type_id,

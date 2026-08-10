@@ -78,6 +78,9 @@ class _Result:
     def GrabSucceeded(self):
         return self._succeeded
 
+    def IsValid(self):
+        return True
+
     def Release(self):
         self.released = True
 

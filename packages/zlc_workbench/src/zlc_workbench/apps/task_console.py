@@ -219,7 +219,18 @@ class ExperimentGuiFlow:
 
         if self.catalog is None:
             raise RuntimeError("experiment device catalog is not initialized")
-        return ExperimentSession.from_config(self.space, config, catalog=self.catalog)
+        session = ExperimentSession.from_config(self.space, config, catalog=self.catalog)
+        failures = session.failures
+        if not failures:
+            return session
+        details = "; ".join(f"{key}: {error}" for key, error in failures.items())
+        try:
+            session.close()
+        except BaseException as close_error:
+            raise RuntimeError(
+                f"device initialization failed: {details}; cleanup failed: {close_error}"
+            ) from close_error
+        raise RuntimeError(f"device initialization failed: {details}")
 
     def _open_work_windows(self, session: object) -> None:
         from ..board import attach_qt

@@ -543,7 +543,7 @@ class PylonCameraAdapter:
                 max(1, int(min(remaining, 0.2) * 1000)),
                 _timeout_handling(),
             )
-            if result is None:
+            if result is None or not result.IsValid():
                 continue
             try:
                 if not result.GrabSucceeded():
