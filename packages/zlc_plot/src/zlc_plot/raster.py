@@ -878,6 +878,17 @@ class RasterPlotHost:
             lambda session, listener: session.subscribe_display(listener),
         )
 
+    def subscribe_viewport(
+        self,
+        callback: Callable[[object], object],
+    ) -> Future[RasterOperation[Callable[[], Future[RasterOperation[None]]]]]:
+        """Install a committed viewport callback on the raster worker."""
+
+        return self._subscribe_session_event(
+            callback,
+            lambda session, listener: session.subscribe_viewport(listener),
+        )
+
     def subscribe_fit(
         self,
         callback: Callable[["FitEvent"], object],

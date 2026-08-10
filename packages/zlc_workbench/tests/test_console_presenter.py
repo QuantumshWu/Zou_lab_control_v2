@@ -453,6 +453,22 @@ def _commit_area(host) -> None:
         ).result()
 
 
+def _zoom_in(host) -> None:
+    """Zoom one real mounted raster surface with its wheel gesture."""
+
+    front = host.wait_for_front(5.0)
+    host._pointer_event(
+        "scroll",
+        0.5,
+        0.5,
+        button=None,
+        step=-1.0,
+        identity=front.identity,
+        axes=front.interaction.axes[0],
+        interaction=front.interaction,
+    ).result()
+
+
 def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frame_0"), snapshot, title="frames")
@@ -981,6 +997,21 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     _commit_area(second_editor_host)
     assert presenter.logic[first_id].draft.values == first_selected
     assert presenter.logic[second_id].draft.values != second_before
+
+    before_zoom = dict(presenter.logic[second_id].draft.values)
+    _zoom_in(second_editor_host)
+    deadline = time.monotonic() + 2.0
+    while (
+        presenter.logic[second_id].draft.values == before_zoom
+        and time.monotonic() < deadline
+    ):
+        presenter.beat()
+        time.sleep(0.005)
+    assert panel.editor_selections.last_error is None
+    assert presenter.logic[second_id].draft.values != before_zoom
+    editor_viewport = second_editor_host.describe_display().result().value.viewport
+    live_viewport = panel.host.describe_display().result().value.viewport
+    assert editor_viewport is not None and live_viewport == editor_viewport
 
 
 def test_pointing_a_panel_at_a_signal_that_never_published_is_refused(

@@ -82,6 +82,12 @@ def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
     return host.set_x_selector(value.lower, value.upper, display=False)
 
 
+def _apply_panel_viewport(host: Any, viewport: object | None) -> object:
+    if viewport is None:
+        return host.reset_viewport()
+    return host.set_viewport(viewport.x, viewport.y)
+
+
 class _Unbridgeable(Exception):
     """A selection this translator cannot express, with the reason why."""
 
@@ -146,6 +152,24 @@ class PlotSelectionSource:
                 self._deliver(callback, change, state)
 
         return self._install(self._host.subscribe_selection, _on_selection)
+
+    def subscribe_viewport(
+        self,
+        callback: Callable[[SelectionState, object | None], object],
+    ) -> Callable[[], None]:
+        """Report zoom/pan as the same canonical range used by a producer."""
+
+        def _on_viewport(event: object) -> None:
+            try:
+                state, display = _viewport_state(event)
+            except Exception as error:
+                self._last_error = error
+                return
+            self._last_error = None
+            if state is not None:
+                self._deliver(callback, state, display)
+
+        return self._install(self._host.subscribe_viewport, _on_viewport)
 
     def subscribe_fit(
         self,
@@ -267,6 +291,7 @@ def attach_selection_bridge(
     *,
     bridge_id: str,
     on_committed: Callable[[SelectionState], object] | None = None,
+    on_viewport: Callable[[SelectionState, object | None], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
     """Connect one panel's gestures to the plane, deriving as they commit.
 
@@ -291,12 +316,16 @@ def attach_selection_bridge(
                 on_committed(selection)
 
         source.subscribe_selection(_on_selection)
+    if on_viewport is not None:
+        source.subscribe_viewport(on_viewport)
     return bridge, source
 
 
 def subscribe_committed_selection(
     host: Any,
     callback: Callable[[SelectionState], object],
+    *,
+    on_viewport: Callable[[SelectionState, object | None], object] | None = None,
 ) -> PlotSelectionSource:
     """Translate committed gestures without publishing a derived signal.
 
@@ -319,6 +348,8 @@ def subscribe_committed_selection(
 
     try:
         source.subscribe_selection(_on_selection)
+        if on_viewport is not None:
+            source.subscribe_viewport(on_viewport)
     except Exception:
         source.close()
         raise
@@ -338,6 +369,37 @@ def _range(axis: object, bounds: object, role: str) -> SelectionRange:
     if not isinstance(name, str) or not name:
         raise _Unbridgeable(f"the {role} axis of this plot has no upstream name")
     return SelectionRange(axis=name, lower=float(bounds.low), upper=float(bounds.high))
+
+
+def _viewport_state(event: object) -> tuple[SelectionState | None, object | None]:
+    canonical, display, subject = event
+    plot_kind = _PLOT_KINDS.get(_name_of(subject.plot_kind))
+    if plot_kind is None:
+        return None, display
+    x = getattr(subject, "x", None)
+    y = getattr(subject, "y", None)
+    if x is None:
+        return None, display
+    if y is None:
+        return (
+            SelectionState(
+                plot_kind=plot_kind,
+                selector_kind="x_range",
+                ranges=(_range(x, canonical.x, "x"),),
+            ),
+            display,
+        )
+    return (
+        SelectionState(
+            plot_kind=plot_kind,
+            selector_kind="area",
+            ranges=(
+                _range(x, canonical.x, "x"),
+                _range(y, canonical.y, "y"),
+            ),
+        ),
+        display,
+    )
 
 
 def _fit_value(event: object) -> FitEventValue:

@@ -62,6 +62,7 @@ from .panel_state import PanelFrozenData, PanelState
 from .presentation import PlotPanelPort
 from .selection import (
     _apply_panel_selection,
+    _apply_panel_viewport,
     attach_selection_bridge,
     subscribe_committed_selection,
 )
@@ -96,6 +97,8 @@ class PanelBinding:
     selections: Any = None
     #: Canonical selector shared by the live and frozen views of this panel.
     interaction_selection: Any = None
+    #: Canonical producer range plus display viewport shared by both views.
+    interaction_viewport: Any = None
     #: The last failure already shown, so one refusal is reported once.
     reported_error: Any = None
     #: Exact publication used to construct a not-yet-board-anchored host.
@@ -581,6 +584,9 @@ class ConsolePresenter:
         binding.host = host
         if binding.interaction_selection is not None:
             _apply_panel_selection(host, binding.interaction_selection)
+        if binding.interaction_viewport is not None:
+            _selection, viewport = binding.interaction_viewport
+            _apply_panel_viewport(host, viewport)
         binding.display_publication = publication
         self.view.show_panel(binding.panel_id, host)
         if old_host is not None:
@@ -946,6 +952,9 @@ class ConsolePresenter:
             binding.host = host
             if binding.interaction_selection is not None:
                 _apply_panel_selection(host, binding.interaction_selection)
+            if binding.interaction_viewport is not None:
+                _selection, viewport = binding.interaction_viewport
+                _apply_panel_viewport(host, viewport)
             binding.port = PlotPanelPort(
                 panel_id,
                 candidate.signal,
@@ -1392,6 +1401,9 @@ class ConsolePresenter:
                     _display, models = metadata
                     if binding.interaction_selection is not None:
                         _apply_panel_selection(editor, binding.interaction_selection)
+                    if binding.interaction_viewport is not None:
+                        _selection, viewport = binding.interaction_viewport
+                        _apply_panel_viewport(editor, viewport)
                     binding.editor_selections = subscribe_committed_selection(
                         editor,
                         lambda selection, expected=frozen, expected_host=editor: (
@@ -1400,6 +1412,15 @@ class ConsolePresenter:
                                 expected_host,
                                 expected,
                                 selection,
+                            )
+                        ),
+                        on_viewport=lambda selection, viewport, expected=frozen, expected_host=editor: (
+                            self._route_panel_editor_selection(
+                                binding.panel_id,
+                                expected_host,
+                                expected,
+                                selection,
+                                viewport=viewport,
                             )
                         ),
                     )
@@ -1547,6 +1568,15 @@ class ConsolePresenter:
                     expected_host,
                     expected,
                     selection,
+                )
+            ),
+            on_viewport=lambda selection, viewport, expected=frozen, expected_host=host: (
+                self._route_panel_editor_selection(
+                    binding.panel_id,
+                    expected_host,
+                    expected,
+                    selection,
+                    viewport=viewport,
                 )
             ),
         )
@@ -2197,6 +2227,9 @@ class ConsolePresenter:
                 on_committed=lambda selection: self._route_panel_selection(
                     binding.panel_id, selection
                 ),
+                on_viewport=lambda selection, viewport: self._route_panel_selection(
+                    binding.panel_id, selection, viewport=viewport
+                ),
             )
             return
         if binding.selections is not None:
@@ -2205,7 +2238,13 @@ class ConsolePresenter:
             binding.bridge.close()
         binding.bridge = binding.selections = None
 
-    def _route_panel_selection(self, panel_id: str, selection: object) -> None:
+    def _route_panel_selection(
+        self,
+        panel_id: str,
+        selection: object,
+        *,
+        viewport: object = _UNCHANGED,
+    ) -> None:
         """Apply one committed semantic selection to its direct producer draft.
 
         The descriptor owns whether a selection means anything and how its
@@ -2219,9 +2258,17 @@ class ConsolePresenter:
             return
         if binding.port is None:
             return
-        binding.interaction_selection = selection
-        if binding.editor_host is not None:
-            _apply_panel_selection(binding.editor_host, selection)
+        if viewport is _UNCHANGED:
+            binding.interaction_selection = selection
+            if binding.editor_host is not None:
+                _apply_panel_selection(binding.editor_host, selection)
+        else:
+            current = (selection, viewport)
+            if binding.interaction_viewport == current:
+                return
+            binding.interaction_viewport = current
+            if binding.editor_host is not None:
+                _apply_panel_viewport(binding.editor_host, viewport)
         publication = binding.port.presented_publication()
         if publication is None:
             # A newly-created host already displays ``shown`` before the first
@@ -2242,6 +2289,8 @@ class ConsolePresenter:
         host: object,
         frozen: PanelFrozenData,
         selection: object,
+        *,
+        viewport: object = _UNCHANGED,
     ) -> None:
         """Route only a commit from the still-current, non-stale frozen view."""
 
@@ -2253,9 +2302,17 @@ class ConsolePresenter:
             or binding.frozen_stale
         ):
             return
-        binding.interaction_selection = selection
-        if binding.host is not None:
-            _apply_panel_selection(binding.host, selection)
+        if viewport is _UNCHANGED:
+            binding.interaction_selection = selection
+            if binding.host is not None:
+                _apply_panel_selection(binding.host, selection)
+        else:
+            current = (selection, viewport)
+            if binding.interaction_viewport == current:
+                return
+            binding.interaction_viewport = current
+            if binding.host is not None:
+                _apply_panel_viewport(binding.host, viewport)
         self._route_exact_panel_selection(
             panel_id,
             frozen.signal,

@@ -458,6 +458,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._renderer: MatplotlibRenderer | None = None
         self._surface_callbacks: list[SurfaceCallback] = []
         self._display_callbacks: list[DisplayCallback] = []
+        self._viewport_callbacks: list[Callable[[object], object]] = []
         self._fit_callbacks: list[FitCallback] = []
         self._selection_subscriptions: list[_SelectionSubscription] = []
         self._selector_controller = _SelectorController()
@@ -2694,6 +2695,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         return self._subscribe_callback(self._display_callbacks, callback)
 
+    def subscribe_viewport(
+        self, callback: Callable[[object], object]
+    ) -> Callable[[], None]:
+        """Observe committed viewport geometry in canonical and display units."""
+
+        return self._subscribe_callback(self._viewport_callbacks, callback)
+
     def _notify_display(self, state: DisplayState) -> None:
         with self._lock:
             callbacks = tuple(self._display_callbacks)
@@ -3549,6 +3557,25 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self.redraw_surface()
                 raise
             fit_cancel.set()
+        display = selected
+        canonical = self._area_display_to_canonical(
+            self._current_display_limits() if display is None else display
+        )
+        subject = self._selection_subject()
+        x = canonical.x
+        y = canonical.y
+        if isinstance(subject.x, AxisRef):
+            bounds = self._coordinate_bounds(subject.x)
+            x = NumericRange(max(x.low, bounds.low), min(x.high, bounds.high))
+        if isinstance(subject.y, AxisRef):
+            bounds = self._coordinate_bounds(subject.y)
+            y = NumericRange(max(y.low, bounds.low), min(y.high, bounds.high))
+        with self._lock:
+            callbacks = tuple(self._viewport_callbacks)
+        self._notify_callbacks(
+            callbacks,
+            (RectangleRange(x, y), display, subject),
+        )
         return True
 
     def reset_viewport(self) -> None:
@@ -3927,6 +3954,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._live_fit_request = None
                 self._surface_callbacks.clear()
                 self._display_callbacks.clear()
+                self._viewport_callbacks.clear()
                 self._fit_callbacks.clear()
                 self._selection_subscriptions.clear()
         if logical_completion is not None and not logical_completion.done():

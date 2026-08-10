@@ -189,9 +189,9 @@ generation 原子取代；它不能因为 FINAL 数据仍可读而阻止同一 r
 
 ### 7.4 Selector 联动
 
-- `zlc_plot` 只发出带坐标语义的 committed selection；zoom/pan 不自动改 measurement 参数。
+- `zlc_plot` 发出带坐标语义的 committed selection 和 viewport；viewport 由 plot owner 同时给出 canonical data range 与 display range，Workbench 不重复推断轴或单位。
 - `zlc_atom` 的 logic descriptor 声明哪类 selection 可以更新哪个 measurement 字段，例如 Image Area -> Camera Measurement ROI。映射是 data-only，不返回 QWidget 或 device instance。
-- `zlc_workbench` 沿 panel -> signal -> producer row 路由 selection，更新同一 measurement draft。这个 seam 也供以后的 measurement 使用，不在 Workbench 写死 camera `if`。
+- `zlc_workbench` 沿 panel -> signal -> producer row 把 selection/zoom/pan 路由到同一个 descriptor mapping，更新同一 measurement draft，并把同一 display viewport 投影给 live/Edit 两张 surface。这个 seam 也供以后的 measurement 使用，不在 Workbench 写死 camera `if`。
 - Image Area 用当前 ROI origin/binning 把显示坐标转回 sensor 坐标，adapter 在 Start/Restart 时做硬件 increment 对齐。
 - selector 只更新共享 draft；用户按同一个 `Restart` 后，才用新 ROI/exposure 重启 measurement。
 
@@ -361,7 +361,7 @@ Edit 是一个 tab，不是 modal。它包含：
 - 与 producer row 共用的 `Start/Restart` action；
 - `Save Fig`：保存这个 panel 当前图像和对应数据。
 
-这种重复是有意的：用户在图上做 Area/range selection 时，可以同时看到 ROI/range 等 producer 参数更新，然后调用同一个 `Restart`。
+这种重复是有意的：用户在图上做 Area/range selection 或 zoom/pan 时，可以同时看到 ROI/range 等 producer 参数更新，然后调用同一个 `Restart`。
 
 Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `PanelState`，两个 view 和 monitor panel 都收到同一次更新。不写“Setting -> Edit”和“Edit -> Setting”两套手工拷贝逻辑。Edit 中的 frozen data snapshot 与 `PanelState` 分开：参数始终同步；如果换了 signal，旧 frozen 图标为 stale，用户 Refresh 后取新 signal 的 snapshot。
 
