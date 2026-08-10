@@ -84,3 +84,53 @@ def test_window_slides_forward_keeping_absolute_indices() -> None:
         np.testing.assert_array_equal(x, np.arange(total - x.size, total))
     finally:
         session.close()
+
+
+def test_window_selects_display_without_truncating_retention() -> None:
+    """The window is a view, not a destructive cap on measured history.
+
+    Shrinking must narrow the display immediately; committing new data under
+    the small window must not discard older shots; enlarging must immediately
+    reveal them again.
+    """
+
+    session = PlotSession(_snapshot(0), RollingPlot())
+    try:
+        for revision in range(1, 8):
+            session.update_data(_snapshot(revision))
+        # 6 seeded + 7 live shots recorded so far.
+        session.set_parameter("window", 4)
+        x = np.asarray(session._payload.series[0].x.canonical)
+        np.testing.assert_array_equal(x, np.arange(9.0, 13.0))
+
+        # A commit under the small window keeps the full record.
+        session.update_data(_snapshot(8))
+        session.set_parameter("window", 100)
+        x = np.asarray(session._payload.series[0].x.canonical)
+        np.testing.assert_array_equal(x, np.arange(14.0))
+    finally:
+        session.close()
+
+
+def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
+    """A form submit that keeps group and reduction keeps the trace.
+
+    Changing the reduction changes what one history point IS, so that
+    replacement reseeds from the current snapshot instead.
+    """
+
+    from zlc_plot import Reduction
+
+    session = PlotSession(_snapshot(0), RollingPlot())
+    try:
+        for revision in range(1, 5):
+            session.update_data(_snapshot(revision))
+        session.replace_spec(RollingPlot())
+        x = np.asarray(session._payload.series[0].x.canonical)
+        np.testing.assert_array_equal(x, np.arange(10.0))
+
+        session.replace_spec(RollingPlot(reduction=Reduction.MEDIAN))
+        x = np.asarray(session._payload.series[0].x.canonical)
+        np.testing.assert_array_equal(x, np.arange(6.0))
+    finally:
+        session.close()

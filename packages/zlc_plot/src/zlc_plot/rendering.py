@@ -1075,8 +1075,71 @@ class MatplotlibRenderer:
             renderer = get_renderer()
             for _key, artist in sorted(dynamics, key=lambda entry: entry[0]):
                 if artist.get_visible():
-                    artist.draw(renderer)
+                    if not self._blit_exact_rgba_image(artist, canvas):
+                        artist.draw(renderer)
         self._raster_generation += 1
+
+    def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
+        """Copy a 1:1 precomposed RGBA front straight into the Agg buffer.
+
+        Even an identity nearest resample pays Matplotlib's full image
+        machinery per draw.  When the artist holds this renderer's own
+        composed uint8 RGBA, fills its axes' whole data view, and its box
+        lands on integer pixels at exactly the array's size, the draw is a
+        row-aligned copy.  Every other case falls back to the artist.
+        """
+
+        from matplotlib.image import AxesImage
+
+        if not isinstance(artist, AxesImage):
+            return False
+        axes = artist.axes
+        if axes is None or artist.get_alpha() is not None:
+            return False
+        shown = artist.get_array()
+        if not (
+            isinstance(shown, np.ndarray)
+            and not isinstance(shown, np.ma.MaskedArray)
+            and shown.dtype == np.uint8
+            and shown.ndim == 3
+            and shown.shape[2] == 4
+        ):
+            return False
+        if artist.get_interpolation() not in ("nearest", "antialiased", "auto"):
+            return False
+        left, right, bottom, top = (float(v) for v in artist.get_extent())
+        x_low, x_high = sorted(map(float, axes.get_xlim()))
+        y_low, y_high = sorted(map(float, axes.get_ylim()))
+        if not (
+            math.isclose(x_low, min(left, right), rel_tol=1e-12, abs_tol=1e-9)
+            and math.isclose(x_high, max(left, right), rel_tol=1e-12, abs_tol=1e-9)
+            and math.isclose(y_low, min(bottom, top), rel_tol=1e-12, abs_tol=1e-9)
+            and math.isclose(y_high, max(bottom, top), rel_tol=1e-12, abs_tol=1e-9)
+        ):
+            return False
+        bbox = axes.bbox
+        rows, columns = shown.shape[:2]
+        x0, y0 = float(bbox.x0), float(bbox.y0)
+        x1, y1 = float(bbox.x1), float(bbox.y1)
+        if any(
+            abs(value - round(value)) > 1e-6 for value in (x0, y0, x1, y1)
+        ):
+            return False
+        if round(x1) - round(x0) != columns or round(y1) - round(y0) != rows:
+            return False
+        try:
+            buffer = np.asarray(canvas.buffer_rgba())
+            if not buffer.flags.writeable:
+                return False
+            height = buffer.shape[0]
+            row_start = height - int(round(y1))
+            buffer[
+                row_start : row_start + rows,
+                int(round(x0)) : int(round(x0)) + columns,
+            ] = shown
+        except Exception:
+            return False
+        return True
 
     @staticmethod
     def _native_draw(canvas: Any) -> None:
@@ -1568,6 +1631,46 @@ class MatplotlibRenderer:
         axes.set_ylabel(y_label)
         apply_smart_ticks(axes)
 
+    def _stable_pooled_limits(
+        self,
+        key: str,
+        target: tuple[float, float],
+    ) -> tuple[float, float]:
+        """Damp per-revision jitter in pooled facet axis limits.
+
+        Ordinary statistical fluctuation nudges pooled bin edges and data
+        hulls a little on every revision, and each nudge dirties every cell's
+        chrome, forcing a full background recapture.  Previous limits are held
+        while the new ones lie inside them and still cover most of their span;
+        a breach expands to the union; a large collapse adopts the new limits
+        so drifting data cannot inflate the union forever.
+        """
+
+        low, high = float(target[0]), float(target[1])
+        previous = self._artists.get(key)
+        if previous is not None:
+            prior_low, prior_high = previous
+            span = prior_high - prior_low
+            if span > 0.0 and (high - low) < 0.8 * span:
+                pass  # collapse: adopt the tighter limits
+            elif low >= prior_low and high <= prior_high:
+                return previous
+            else:
+                # Expand past the breach with margin: sample extremes creep
+                # outward for a few revisions, and padding the breached side
+                # absorbs that growth in one recapture instead of one per
+                # revision.
+                low = min(low, prior_low)
+                high = max(high, prior_high)
+                margin = 0.08 * (high - low)
+                if low < prior_low:
+                    low -= margin
+                if high > prior_high:
+                    high += margin
+        selected = (low, high)
+        self._artists[key] = selected
+        return selected
+
     def _resolve_histogram_y_limits(
         self,
         key: str,
@@ -1607,7 +1710,23 @@ class MatplotlibRenderer:
                 automatic = target
             else:
                 prior_low, prior_high = tuple(map(float, previous))
-                expand = target[0] < prior_low or target[1] > prior_high
+                # Expansion triggers on the DATA breaching the held bound,
+                # not on the padded target exceeding it: a rising sample
+                # maximum otherwise ratchets the axis (and every dependent
+                # cell's chrome) on each revision.  An actual breach expands
+                # with extra headroom so ordinary jitter fits under the new
+                # bound for many revisions.
+                if logarithmic:
+                    breach_low = float(np.min(positive)) if positive.size else prior_low
+                    breach_high = float(np.max(positive)) if positive.size else prior_high
+                    expand = breach_low < prior_low or breach_high > prior_high
+                    expanded = (
+                        min(target[0], prior_low),
+                        max(breach_high * 1.5, prior_high),
+                    )
+                else:
+                    expand = peak > prior_high
+                    expanded = (0.0, max(1.0, peak * 1.25))
                 shrink = (
                     target[1] < shrink_ratio * prior_high
                     or (
@@ -1616,7 +1735,12 @@ class MatplotlibRenderer:
                         > prior_low / shrink_ratio
                     )
                 )
-                automatic = target if expand or shrink else (prior_low, prior_high)
+                if expand:
+                    automatic = expanded
+                elif shrink:
+                    automatic = target
+                else:
+                    automatic = (prior_low, prior_high)
         selected = _select_display_limits(mode, automatic, state, "y")
         if logarithmic and selected[0] <= 0.0:
             raise RuntimeError("resolved logarithmic limits are not positive")
@@ -1823,34 +1947,71 @@ class MatplotlibRenderer:
             ),
         )
 
+        # Precomposed RGBA sidesteps Matplotlib's per-draw normalize + LUT +
+        # second mask-resample machinery: the same 256-level quantization is
+        # applied once per (front, colormap, limits) here instead of on every
+        # draw.  Nearest resampling commutes with colormapping exactly; the
+        # default antialiased/auto kernels act on the prepared front's ≤1.25x
+        # residual only, where filtering composed colors is indistinguishable
+        # from filtering scalars for the closed colormap set.  Explicitly
+        # smooth kernels, masked fronts and unresolved limits keep the scalar
+        # path.
+        self._artists[f"{key}:prepared_current"] = prepared
+        rgba_front = (
+            self._image_rgba_front(key, prepared, cmap_name, cmap, color_limits)
+            if color_limits is not None
+            and interpolation in ("nearest", "antialiased", "auto")
+            and not isinstance(prepared.values, np.ma.MaskedArray)
+            else None
+        )
+        self._artists[f"{key}:color_mode"] = (
+            "scalar" if rgba_front is None else "rgba"
+        )
+        shown: Any = prepared.values if rgba_front is None else rgba_front
         applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
         if image is None:
+            scalar_options = (
+                {
+                    "cmap": cmap,
+                    "vmin": None if color_limits is None else color_limits[0],
+                    "vmax": None if color_limits is None else color_limits[1],
+                }
+                if rgba_front is None
+                else {}
+            )
             image = axes.imshow(
-                prepared.values,
+                shown,
                 origin=policy.image_origin,
                 aspect="auto" if coordinate_aspect is None else coordinate_aspect,
                 extent=prepared.extent,
                 interpolation=interpolation,
                 interpolation_stage=prepared.interpolation_stage,
-                cmap=cmap,
-                vmin=None if color_limits is None else color_limits[0],
-                vmax=None if color_limits is None else color_limits[1],
+                **scalar_options,
             )
-            self._artists[key] = image
-            self._artists[applied_key] = prepared
-        else:
-            if self._artists.get(applied_key) is not prepared:
-                # ``set_data`` copies the front; skip it when the artist
-                # already holds this exact prepared object (cache hit).
-                image.set_data(prepared.values)
-                image.set_extent(prepared.extent)
-                self._artists[applied_key] = prepared
-            if previous_mapping is None or previous_mapping[0] != cmap_name:
+            if rgba_front is not None:
+                # RGBA rendering ignores these, but the artist stays the
+                # authority every painted-limits consumer reads.
                 image.set_cmap(cmap)
+                assert color_limits is not None
+                image.set_clim(*color_limits)
+            self._artists[key] = image
+            self._artists[applied_key] = shown
+        else:
+            if self._artists.get(applied_key) is not shown:
+                # ``set_data`` copies the front; skip it when the artist
+                # already holds this exact composed object (cache hit).
+                image.set_data(shown)
+                image.set_extent(prepared.extent)
+                self._artists[applied_key] = shown
             if previous_mapping is None or previous_mapping[1] != interpolation:
                 image.set_interpolation(interpolation)
             image.set_interpolation_stage(prepared.interpolation_stage)
+            # The artist's cmap/clim stay authoritative in both modes: RGBA
+            # rendering ignores them, but selector handles, rail guides and
+            # pointer snapshots all read the painted limits off the artist.
+            if previous_mapping is None or previous_mapping[0] != cmap_name:
+                image.set_cmap(cmap)
             if (
                 color_limits is not None
                 and (
@@ -1867,10 +2028,79 @@ class MatplotlibRenderer:
                 image.set_clim(*color_limits)
         self._artists[mapping_key] = mapping_state
         # ``imshow``/``set_extent`` may autoscale a new artist.  Reassert the
-        # transaction's final transform after mutating the scalar front.
+        # transaction's final transform after mutating the front.
         self._set_xlim(axes, *x_limits)
         self._set_ylim(axes, *y_limits)
         return image, cmap
+
+    def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
+        """The colormap's 256-entry uint8 RGBA table, cached per colormap."""
+
+        lut_key = (cmap_name, self.style.palette.bad)
+        cached = self._artists.get("image:lut_cache")
+        if cached is not None and cached[0] == lut_key:
+            return cached[1]
+        # Midpoint sampling reads back exactly the colormap's own internal
+        # 256-slot table, so index ``floor(norm * 256)`` reproduces what
+        # Matplotlib's scalar draw would have picked.
+        lut = cmap((np.arange(256, dtype=float) + 0.5) / 256.0, bytes=True)
+        lut.setflags(write=False)
+        self._artists["image:lut_cache"] = (lut_key, lut)
+        return lut
+
+    def _image_rgba_front(
+        self,
+        key: str,
+        prepared: PreparedImageFront,
+        cmap_name: str,
+        cmap: Any,
+        color_limits: tuple[float, float],
+    ) -> np.ndarray | None:
+        """Compose the front's uint8 RGBA once per (front, colormap, limits)."""
+
+        vmin, vmax = (float(value) for value in color_limits)
+        if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
+            return None
+        cache_key = (id(prepared), cmap_name, vmin, vmax)
+        cache_name = f"{key}:rgba_front"
+        cached = self._artists.get(cache_name)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        lut = self._image_color_lut(cmap_name, cmap)
+        values = np.asarray(prepared.values)
+        if values.dtype.kind == "u" and values.dtype.itemsize <= 2:
+            # Raw unsigned fronts color through one direct table over the
+            # dtype's whole domain: a single integer gather, no float pass.
+            table_key = (cmap_name, vmin, vmax, values.dtype.str)
+            table_cached = self._artists.get("image:direct_color_table")
+            if table_cached is not None and table_cached[0] == table_key:
+                table = table_cached[1]
+            else:
+                domain = np.arange(
+                    np.iinfo(values.dtype).max + 1, dtype=np.float32
+                )
+                table = lut[
+                    np.clip(
+                        (domain - np.float32(vmin))
+                        * np.float32(256.0 / (vmax - vmin)),
+                        0.0,
+                        255.0,
+                    ).astype(np.uint8)
+                ]
+                self._artists["image:direct_color_table"] = (table_key, table)
+            rgba = table[values]
+        else:
+            # In-place float32 passes; boundary pixels may differ from
+            # Matplotlib's float64 normalize by one 256-level step, which is
+            # the same quantization the colormap applies anyway.
+            scaled = values.astype(np.float32, copy=True)
+            scaled -= np.float32(vmin)
+            scaled *= np.float32(256.0 / (vmax - vmin))
+            np.clip(scaled, 0.0, 255.0, out=scaled)
+            rgba = lut[scaled.astype(np.uint8)]
+        rgba.setflags(write=False)
+        self._artists[cache_name] = (cache_key, rgba)
+        return rgba
 
     def _update_horizontal_histogram(
         self,
@@ -2105,8 +2335,18 @@ class MatplotlibRenderer:
         if colorbar_axes:
             colorbar_key = f"{key}:colorbar"
             colorbar = self._artists.get(colorbar_key)
+            mappable_key = f"{key}:colorbar_mappable"
+            mappable = self._artists.get(mappable_key)
             if colorbar is None:
-                colorbar = self._figure.colorbar(image, cax=colorbar_axes[0])
+                from matplotlib.cm import ScalarMappable
+                from matplotlib.colors import Normalize
+
+                # The colorbar reads a dedicated proxy mappable: the image
+                # artist may hold precomposed RGBA, which carries no norm or
+                # colormap for a colorbar to describe.
+                mappable = ScalarMappable(norm=Normalize(vmin, vmax), cmap=cmap)
+                self._artists[mappable_key] = mappable
+                colorbar = self._figure.colorbar(mappable, cax=colorbar_axes[0])
                 self._artists[colorbar_key] = colorbar
             colorbar_state = (
                 cmap_name,
@@ -2116,6 +2356,9 @@ class MatplotlibRenderer:
             state_key = f"{key}:colorbar_state"
             previous_colorbar_state = self._artists.get(state_key)
             if colorbar_state != previous_colorbar_state:
+                if mappable is not None:
+                    mappable.set_cmap(cmap)
+                    mappable.set_clim(vmin, vmax)
                 colorbar.set_label(
                     value_label,
                     labelpad=policy.colorbar_endpoint_label_pad_pt,
@@ -2292,7 +2535,7 @@ class MatplotlibRenderer:
                 y_range = _data_limits(np.concatenate(y_groups))
                 assert x_target is not None
                 curve_limits = (
-                    x_target,
+                    self._stable_pooled_limits("facet:curve_x", x_target),
                     self._resolve_curve_y_limits(
                         "facet:curve",
                         y_range,
@@ -2319,9 +2562,9 @@ class MatplotlibRenderer:
                     for edges, _counts in usable[1:]
                 ):
                     raise ValueError("FacetGrid histogram cells must share one bin projection")
-                x_limits = (
-                    float(shared_edges[0]),
-                    float(shared_edges[-1]),
+                x_limits = self._stable_pooled_limits(
+                    "facet:histogram_x",
+                    (float(shared_edges[0]), float(shared_edges[-1])),
                 )
                 pooled_counts = np.concatenate(
                     tuple(np.asarray(counts, dtype=float) for _edges, counts in usable)
@@ -2969,7 +3212,29 @@ class MatplotlibRenderer:
         if image is None:
             raise TypeError("color-limit preview requires an Image")
         with style_context(self.style):
-            image.set_clim(float(selected[0]), float(selected[1]))
+            limits = (float(selected[0]), float(selected[1]))
+            prepared = self._artists.get(f"{key}:prepared_current")
+            mapping = self._artists.get(f"{key}:mapping_state")
+            cmap_cache = self._artists.get("image:cmap_cache")
+            rgba = None
+            if (
+                self._artists.get(f"{key}:color_mode") == "rgba"
+                and prepared is not None
+                and mapping is not None
+                and cmap_cache is not None
+            ):
+                rgba = self._image_rgba_front(
+                    key, prepared, mapping[0], cmap_cache[1], limits
+                )
+            if rgba is not None:
+                image.set_data(rgba)
+                self._artists[f"{key}:applied_front"] = rgba
+            # The artist clim stays authoritative for selector geometry and
+            # snapshots in both modes.
+            image.set_clim(*limits)
+            mappable = self._artists.get(f"{key}:colorbar_mappable")
+            if mappable is not None:
+                mappable.set_clim(*limits)
             colorbar = self._artists.get(f"{key}:colorbar")
             if colorbar is not None:
                 low, high = map(float, selected)

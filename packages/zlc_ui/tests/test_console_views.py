@@ -58,6 +58,20 @@ class _GatedSurface(QtWidgets.QLabel):
         self.interaction = bool(enabled)
 surface = _GatedSurface('fake surface')
 card.set_surface(surface)
+# The status mark: a dot overlaying the title strip beside Setting, so the
+# card body reserves no status row and the message rides the tooltip.
+from zlc_ui.fluent import GREY, RED
+card.set_status('ready', error=False)
+assert not card.status_dot.isHidden(), 'a status did not surface its dot'
+assert card.status_dot.toolTip() == 'ready'
+assert GREY in card.status_dot.styleSheet()
+card.set_status('the renderer refused this frame', error=True)
+assert not card.status_dot.isHidden()
+assert card.status_dot.toolTip() == 'the renderer refused this frame'
+assert RED in card.status_dot.styleSheet()
+assert card.status_dot.x() < card.settings_button.x(), 'the dot must sit beside Setting'
+card.set_status('', error=False)
+assert card.status_dot.isHidden(), 'clearing the status must clear the mark'
 card.set_status('ready', error=False)
 assert card.panel_id == 'panel-1'
 signal_field = next(field for field in card._form_spec().fields if field.key == 'signal')

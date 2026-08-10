@@ -9,6 +9,13 @@ from zlc_data import DatasetSchema
 from ..specs import Reduction, RollingPlot
 from .base import KindHandler
 
+#: How many history points survive between revisions.  Retention is a memory
+#: bound, deliberately independent of the ``window`` display parameter: the
+#: window selects what is SHOWN, so enlarging it mid-run must immediately
+#: reveal history that was already measured.  At a few hundred bytes per
+#: point this cap holds tens of megabytes at worst.
+RETAINED_HISTORY_LIMIT = 100_000
+
 
 def render(renderer: Any, payload: Any, state: Any) -> None:
     renderer._update_rolling(payload, state)
@@ -44,11 +51,14 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
                 history[-1].shot_index + 1,
             )
         )
-    window = int(state["window"])
-    projection._rolling_history_cache = tuple(history[-window:])
+    # The retained history is capped by memory policy only; the display
+    # window is applied inside ``_rolling_payload``.  Persisting the display
+    # slice here once made shrinking the window destructive and enlarging it
+    # inert, because the truncated cache doubled as the permanent record.
+    projection._rolling_history_cache = tuple(history[-RETAINED_HISTORY_LIMIT:])
     projection._payload = projection._rolling_payload(
         projection._rolling_history_cache,
-        window=window,
+        window=int(state["window"]),
     )
 
 

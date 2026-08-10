@@ -139,10 +139,12 @@ class PanelCardView(FluentGroupBox):
         )
         self.settings_button.clicked.connect(self._open_settings)
 
+        # The presenter marks the card a board-wide error line is about.  v1
+        # reserves no status row in the card body, so the dot overlays the
+        # title strip beside Setting -- geometry never changes -- and the full
+        # message travels as the dot's tooltip.
         self.status_dot = FluentStatusDot(size=12, parent=self)
         self.status_dot.hide()
-        self.status_label = FluentLabel("", parent=self)
-        self.status_label.hide()
         # FigureViewer also embeds this card and exposes these lightweight
         # handles through its own port. TaskConsole state never reads them.
         self.title_edit = FluentLineEdit(str(title), parent=self)
@@ -278,6 +280,13 @@ class PanelCardView(FluentGroupBox):
             max(0, scaled_px(2)),
         )
         button.raise_()
+        dot = getattr(self, "status_dot", None)
+        if dot is not None:
+            dot.move(
+                max(0, button.x() - dot.width() - CARD_PAD),
+                max(0, button.y() + (button.height() - dot.height()) // 2),
+            )
+            dot.raise_()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
@@ -386,12 +395,21 @@ class PanelCardView(FluentGroupBox):
         self._rebuild_settings_form()
 
     def set_status(self, text: str, *, error: bool) -> None:
+        """Say on the card itself what a board-wide status line says about it.
+
+        These widgets existed hidden and nothing ever showed them, so a panel
+        named in a red strip line could not be told apart by looking at the
+        board.  The dot rides the title strip as an overlay, like the Setting
+        button, so the v1 card body still reserves no status row; hovering it
+        reads the full message.  An empty text clears the mark.
+        """
+
         value = str(text)
-        self.status_label.setText(value)
         self.status_dot.set_color(RED if error else GREY)
-        # v1 does not reserve a transient status row in the card body.  Keep
-        # the status available to the presenter without changing geometry.
-        self.status_label.setToolTip(value)
+        self.status_dot.setToolTip(value)
+        self.status_dot.setVisible(bool(value))
+        if value:
+            self._place_settings_button()
 
     def set_selectors_enabled(self, enabled: bool) -> None:
         """Allow or suspend dragging on this panel's plot.
@@ -728,7 +746,7 @@ class PanelCardView(FluentGroupBox):
             else:
                 return
         except (KeyError, TypeError, ValueError) as error:
-            self.set_status(str(error), error=True)
+            self.set_status(str(error) or type(error).__name__, error=True)
             return
         self.state_changed.emit(patch)
 

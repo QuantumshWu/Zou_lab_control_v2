@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
 from pathlib import Path
 import threading
 
@@ -279,6 +279,91 @@ def test_surface_arbiter_rejects_the_whole_completed_batch_once() -> None:
     arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
     assert not first.accepted and not second.accepted
     assert len(first.rejected) == len(second.rejected) == 1
+
+
+def test_a_superseded_member_finishes_quietly_and_its_siblings_still_commit() -> None:
+    """A latest-only host cancels a queued render when a newer frame arrives.
+
+    That is flow control -- the newer render is already queued on the same
+    host -- so the cancelled member must leave as unpresented, without an
+    error, and without dragging the siblings' completed renders down with it.
+    Rejected as a batch error, every panel on that camera went red once per
+    coalesced frame, saying nothing.
+    """
+
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    front = _front()
+    first = _Port("one", "camera/frame")
+    second = _Port("two", "camera/frame")
+    assert arbiter.enqueue_group((first, second), front)
+    assert first.futures[0].cancel()
+    second.futures[0].set_result("second")
+
+    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
+
+    assert first.finished == [first.updates[0]]
+    assert not first.rejected and not second.rejected
+    assert not first.accepted and len(second.accepted) == 1
+    assert second.presented is front.publication("camera/frame")
+    assert arbiter.pending_batches == 0
+
+
+def test_a_render_that_raised_cancellation_is_superseded_not_failed() -> None:
+    """The worker may surface its own supersession as a raised CancelledError."""
+
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    front = _front()
+    first = _Port("one", "camera/frame")
+    second = _Port("two", "camera/frame")
+    assert arbiter.enqueue_group((first, second), front)
+    first.futures[0].set_exception(CancelledError())
+    second.futures[0].set_result("second")
+
+    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
+
+    assert first.finished == [first.updates[0]]
+    assert not first.rejected and not second.rejected
+    assert len(second.accepted) == 1
+
+
+def test_a_batch_whose_every_member_was_superseded_just_finishes() -> None:
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    front = _front()
+    first = _Port("one", "camera/frame")
+    second = _Port("two", "camera/frame")
+    assert arbiter.enqueue_group((first, second), front)
+    assert first.futures[0].cancel()
+    assert second.futures[0].cancel()
+
+    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
+
+    assert first.finished == [first.updates[0]]
+    assert second.finished == [second.updates[0]]
+    assert not first.rejected and not second.rejected
+    assert not first.accepted and not second.accepted
+    assert arbiter.pending_batches == 0
+
+
+def test_a_sibling_error_still_never_marks_the_superseded_member() -> None:
+    """One member superseded, one failed: only the failure is an error."""
+
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    front = _front()
+    first = _Port("one", "camera/frame")
+    second = _Port("two", "camera/frame")
+    assert arbiter.enqueue_group((first, second), front)
+    assert first.futures[0].cancel()
+    second.futures[0].set_exception(RuntimeError("worker failed"))
+
+    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
+
+    assert first.finished == [first.updates[0]]
+    assert not first.rejected
+    assert len(second.rejected) == 1
 
 
 class _Plane:

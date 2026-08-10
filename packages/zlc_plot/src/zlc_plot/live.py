@@ -177,6 +177,22 @@ class _LatestPlotIngress(
                     raise ValueError("live payload schema differs from ingress schema")
             return self._accept_item_locked(revision, payload)
 
+@dataclass(frozen=True, slots=True)
+class _PacedLiveFrame:
+    """A prepared live frame paired with the controller's actual cadence.
+
+    The commit-time synchronous fit budget must reflect the refresh interval
+    the controller is really running at (any preset from
+    ``defaults.live.refresh_intervals_ms``), not the library default.  Host
+    adapters forward the prepared object opaquely between ``prepare`` and
+    ``commit``, so the cadence travels inside it: ``commit_live_frame``
+    unwraps this envelope and hands the interval to the commit-time budget.
+    """
+
+    prepared: object
+    refresh_interval_ms: int
+
+
 class _LiveSession(Protocol):
     """Minimal session surface required by :class:`LivePlotController`."""
 
@@ -635,7 +651,9 @@ class LivePlotController:
         def commit() -> None:
             if self._stop_event.is_set():
                 raise _StoppedDispatch("live-frame commit reached its owner after shutdown")
-            finalization = self._session.commit_live_frame(prepared_frame)
+            finalization = self._session.commit_live_frame(
+                _PacedLiveFrame(prepared_frame, self.refresh_interval_ms)
+            )
             if finalization is None:
                 raise _RetryLiveFrame(
                     "live-frame context changed before presentation"

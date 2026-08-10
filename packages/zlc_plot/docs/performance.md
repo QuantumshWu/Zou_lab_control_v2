@@ -30,6 +30,32 @@ compounding wheel ticks, BLAS-backed separable fit objectives with
 Gauss-Newton/multigrid refinement and lazy result arrays, the same-frame
 budgeted live fit, and the separable windowed MOT synthesis.
 
+A same-day follow-up pass tightened the remaining hot paths (same machine,
+same harnesses):
+
+| Case | Overhaul | Follow-up |
+|---|---:|---:|
+| live 2x2: commit / pipeline | 33 / 34 ms | 14 / 15 ms (10 Hz held) |
+| live 8x8: commit / pipeline @100 ms | 93 / 96 ms, 5.9 Hz | 54 / 57 ms, 10 Hz |
+| Qt update -> paint | 29 / 91 ms | 16 / 58 ms |
+| FacetGrid 35x300 update, classifier off | ~100 ms | ~36 ms |
+| wheel step 8x8 / pan 8x8 | 50 / 56 ms | 41 / 51 ms |
+
+The follow-up levers: pyramid levels decimate straight to the deepest evenly
+divisible power of two with at least one source sample per display pixel
+(the residual oversample goes to Matplotlib's resample stage, as fractional
+DPR always has); nearest-compatible image fronts precompose uint8 RGBA
+through a cached colormap table (unsigned raw fronts through one direct
+domain table) while the artist's cmap/clim remain the authority selector
+geometry reads; a 1:1 integer-aligned RGBA front blits straight into the
+Agg buffer during composition; and pooled facet limits hold steady under
+shot-to-shot jitter, expanding with margin only when data actually breaches
+the held bound.  The same pass fixed the live warm-start regression (stale
+seeds now compete against the cold moment search instead of short-circuiting
+it), made the rolling window a pure display selector over retained history,
+routed the live-fit budget through the controller's actual cadence, and
+stopped reporting superseded render futures as panel errors.
+
 ## Source-size audit (2026-08-03)
 
 The current `src/zlc_plot` tree contains 25,825 non-blank Python lines (28,627

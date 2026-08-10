@@ -247,6 +247,132 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     port.finish_unpresented(recovered)
 
 
+def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
+    live_bench,
+) -> None:
+    """Latest-only coalescing is flow control, not failure.
+
+    When the camera publishes faster than the worker draws, the queued render
+    is superseded and its future cancelled.  The arbiter used to turn that
+    cancellation into a batch error, so every live camera panel went red once
+    per coalesced frame -- with an empty message, because CancelledError
+    stringifies to nothing.  A superseded update must simply finish, and the
+    newer frame must present.
+    """
+
+    from zlc_data import owned_snapshot_from_arrays
+    from zlc_runtime.plane import SignalFront
+
+    plot = pytest.importorskip("zlc_plot")
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frame_0")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    host = plot.RasterPlotHost.from_plot(
+        value.snapshot,
+        plot.ImagePlot(
+            plot.AxisRef.data("spatial-x"),
+            plot.AxisRef.data("spatial-y"),
+        ),
+    )
+    try:
+        port = PlotPanelPort(
+            "panel-1",
+            signal,
+            host,
+            display_interval_ms=100,
+            shown=value.snapshot,
+        )
+        channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+        arbiter = SurfaceBatchArbiter(channels)
+
+        def moment(step: int) -> SignalFront:
+            snapshot = owned_snapshot_from_arrays(
+                schema=value.snapshot.block.schema,
+                values=value.snapshot.block.values,
+                revision=value.snapshot.block.revision.value + step,
+                validity=value.snapshot.block.validity,
+                block_id=value.snapshot.block.block_id,
+                stream_generation=value.snapshot.ref.stream_generation,
+            )
+            stepped_value = replace(value, snapshot=snapshot, transient=True)
+            stepped = replace(
+                publication,
+                event_ref=replace(
+                    publication.event_ref,
+                    sequence=publication.event_ref.sequence + step,
+                ),
+                signals={**publication.signals, signal: stepped_value},
+            )
+            return SignalFront(
+                {signal: stepped_value},
+                {},
+                {signal: stepped},
+                {signal: frozenset((signal,))},
+            )
+
+        # Anchor the identity of the snapshot the host was built from.
+        assert not arbiter.enqueue_group((port,), moment(0))
+
+        # Occupy the serial render worker so the next update stays queued.
+        gate = Event()
+        blocker = host.dispatch_control(lambda: gate.wait(10))
+        newer, newest = moment(1), moment(2)
+        assert arbiter.enqueue_group((port,), newer)
+        assert arbiter.enqueue_group((port,), newest)
+        gate.set()
+        blocker.result(timeout=10)
+
+        deadline = time.monotonic() + 10.0
+        while arbiter.pending_batches and time.monotonic() < deadline:
+            arbiter.drain(
+                lambda panel_id: port if panel_id == port.panel_id else None
+            )
+            time.sleep(0.01)
+
+        assert arbiter.pending_batches == 0
+        assert port.last_error is None, (
+            f"a coalesced frame became an error: {port.last_error!r}"
+        )
+        assert port.presented_publication() is newest.publication(signal)
+    finally:
+        host.close()
+
+
+def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
+    live_bench,
+) -> None:
+    """Whatever path hands reject() a CancelledError, it is not a failure."""
+
+    from concurrent.futures import CancelledError, Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frame_0")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda _snapshot: Future(),
+    )
+    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
+    update = port.prepare(value, publication)
+    assert update is not None
+
+    port.reject(update, CancelledError())
+    assert port.last_error is None
+
+    retry = port.prepare(value, publication)
+    assert retry is not None, "the superseded update did not release its slot"
+    port.reject(retry, RuntimeError("a real render failure"))
+    assert isinstance(port.last_error, RuntimeError)
+
+
 def test_same_snapshot_final_reanchors_pending_and_presented_identity(
     live_bench,
 ) -> None:

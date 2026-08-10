@@ -406,6 +406,20 @@ class SurfaceBatchArbiter:
         except BaseException:
             pass
 
+    @staticmethod
+    def _superseded(future: Future) -> bool:
+        """Whether the host coalesced this update away for a newer one.
+
+        A latest-only host cancels a queued render when a newer frame arrives
+        behind it.  That is flow control -- the newer render is already queued
+        on the same host -- so a cancelled member is an unpresented update, not
+        a failed one, and must never sink the batch it travelled in.
+        """
+
+        if future.cancelled():
+            return True
+        return isinstance(future.exception(), CancelledError)
+
     def drain(self, resolve: Callable[[str], SurfacePort | None]) -> None:
         if not callable(resolve):
             raise TypeError("surface batch resolver must be callable")
@@ -418,11 +432,20 @@ class SurfaceBatchArbiter:
                 pending.append(batch)
                 continue
 
+            superseded: list[tuple[SurfacePort, SurfaceUpdate]] = []
             records: list[
                 tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]
             ] = []
             batch_error: BaseException | None = None
             for update in batch:
+                if self._superseded(update.future):
+                    try:
+                        port = resolve(update.panel_id)
+                    except BaseException:
+                        port = None
+                    if port is not None:
+                        superseded.append((port, update))
+                    continue
                 try:
                     port = resolve(update.panel_id)
                 except BaseException as error:
@@ -447,6 +470,10 @@ class SurfaceBatchArbiter:
                     records.append((port, update, error, False))
                     continue
                 records.append((port, update, operation, True))
+
+            # Superseded members leave quietly whatever happens to the rest of
+            # the batch: their panels are about to receive the newer render.
+            self._finish_unpresented(superseded)
 
             if batch_error is None:
                 for port, update, operation, successful in records:

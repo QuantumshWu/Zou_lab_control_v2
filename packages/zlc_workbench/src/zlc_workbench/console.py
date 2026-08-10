@@ -77,6 +77,17 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 _UNCHANGED = object()
 
 
+def _error_text(error: BaseException) -> str:
+    """The message an exception carries, or its class name when it has none.
+
+    ``CancelledError``, a bare ``assert`` and ``TimeoutError`` all stringify
+    to nothing, and ``f"{title}: {error}"`` then put a red line on the status
+    strip with nothing after the colon.
+    """
+
+    return str(error) or type(error).__name__
+
+
 def _same_panel_selection(left: object, right: object) -> bool:
     def _signature(selection: object) -> tuple[object, ...]:
         return (
@@ -347,7 +358,7 @@ class ConsolePresenter:
                 self._default_interval_ms if interval_ms is None else interval_ms
             )
         except (TypeError, ValueError) as error:
-            self._report(str(error), severity="warning")
+            self._report(_error_text(error), severity="warning")
             return None
 
         self._panel_serial += 1
@@ -817,7 +828,8 @@ class ConsolePresenter:
                     self._replace_panel_editor_host(binding)
                 except Exception as error:
                     self._report(
-                        f"cannot open {binding.state.title} plot editor: {error}",
+                        f"cannot open {binding.state.title} plot editor: "
+                        f"{_error_text(error)}",
                         severity="error",
                     )
                     return False
@@ -881,7 +893,7 @@ class ConsolePresenter:
                     changes["interval_ms"]
                 )
             except (TypeError, ValueError) as error:
-                self._report(f"{panel_id}: {error}", severity="error")
+                self._report(f"{panel_id}: {_error_text(error)}", severity="error")
                 return False
 
         signal = str(changes.get("signal", current.signal)).strip()
@@ -915,7 +927,7 @@ class ConsolePresenter:
         try:
             candidate = replace(current, **merged)
         except Exception as error:
-            self._report(f"{panel_id}: {error}", severity="error")
+            self._report(f"{panel_id}: {_error_text(error)}", severity="error")
             return False
         needs_mount = (
             bool(candidate.signal)
@@ -997,7 +1009,7 @@ class ConsolePresenter:
             except Exception as error:
                 if "host" in locals():
                     host.close()
-                self._report(f"{panel_id}: {error}", severity="error")
+                self._report(f"{panel_id}: {_error_text(error)}", severity="error")
                 return False
             self._release_panel(binding)
             binding.host = host
@@ -1070,7 +1082,8 @@ class ConsolePresenter:
                     self._replace_panel_editor_host(binding)
                 except Exception as error:
                     self._report(
-                        f"cannot mount {binding.state.title} plot editor: {error}",
+                        f"cannot mount {binding.state.title} plot editor: "
+                        f"{_error_text(error)}",
                         severity="error",
                     )
             self._report(
@@ -1142,7 +1155,7 @@ class ConsolePresenter:
                                 )
                 except (TypeError, ValueError) as error:
                     binding.overlay_revision = previous_overlay_revision
-                    self._report(f"{panel_id}: {error}", severity="error")
+                    self._report(f"{panel_id}: {_error_text(error)}", severity="error")
                     return False
                 if frozen_replacement is not None:
                     binding.frozen_data = frozen_replacement
@@ -1243,7 +1256,7 @@ class ConsolePresenter:
             )
         except (TypeError, ValueError, KeyError) as error:
             controls = ()
-            display_unavailable = str(error)
+            display_unavailable = _error_text(error)
         else:
             display_unavailable = ""
         data_reason = "Choose a compatible signal to resolve dataset-dependent choices."
@@ -1375,7 +1388,8 @@ class ConsolePresenter:
                         if binding.reported_error is not error:
                             binding.reported_error = error
                             self._report(
-                                f"{binding.panel_id}: {error}", severity="error"
+                                f"{binding.panel_id}: {_error_text(error)}",
+                                severity="error",
                             )
                     else:
                         surface = self._parameter_surface_from_descriptions(
@@ -1399,7 +1413,8 @@ class ConsolePresenter:
                         editor_pending.result()
                     except Exception as error:
                         self._report(
-                            f"cannot update {binding.state.title} plot editor: {error}",
+                            f"cannot update {binding.state.title} plot editor: "
+                            f"{_error_text(error)}",
                             severity="error",
                         )
             if host is not None:
@@ -1409,7 +1424,8 @@ class ConsolePresenter:
                         if binding.reported_error is not error:
                             binding.reported_error = error
                             self._report(
-                                f"{binding.panel_id}: {error}", severity="error"
+                                f"{binding.panel_id}: {_error_text(error)}",
+                                severity="error",
                             )
                     else:
                         assert metadata is not None
@@ -1494,7 +1510,8 @@ class ConsolePresenter:
                         editor.fit(str(selected), live=True)
                 except Exception as error:
                     self._report(
-                        f"cannot prepare {binding.state.title} plot editor: {error}",
+                        f"cannot prepare {binding.state.title} plot editor: "
+                        f"{_error_text(error)}",
                         severity="error",
                     )
 
@@ -1760,7 +1777,8 @@ class ConsolePresenter:
                 binding.frozen_data = previous
                 binding.frozen_stale = previous_stale
                 self._report(
-                    f"cannot refresh {binding.state.title} plot editor: {error}",
+                    f"cannot refresh {binding.state.title} plot editor: "
+                    f"{_error_text(error)}",
                     severity="error",
                 )
                 return False
@@ -1804,7 +1822,7 @@ class ConsolePresenter:
             )
         except Exception as error:
             self._report(
-                f"cannot save {binding.state.title}: {error}",
+                f"cannot save {binding.state.title}: {_error_text(error)}",
                 severity="error",
             )
             return None
@@ -1993,7 +2011,8 @@ class ConsolePresenter:
                 interaction()
             except (TypeError, ValueError) as error:
                 self._report(
-                    f"cannot apply panel interaction: {error}", severity="error"
+                    f"cannot apply panel interaction: {_error_text(error)}",
+                    severity="error",
                 )
 
     # -------------------------------------------------------------- the board
@@ -2135,7 +2154,9 @@ class ConsolePresenter:
                     binding.host.close()
                     binding.host = None
                     binding.port = None
-            raise LayoutError(f"cannot prepare the layout panels: {error}") from error
+            raise LayoutError(
+                f"cannot prepare the layout panels: {_error_text(error)}"
+            ) from error
         return _LayoutCandidate(
             resolved.logic,
             tuple(panels),
@@ -2149,7 +2170,7 @@ class ConsolePresenter:
             for state in document.panels:
                 task_console_panel_identity(state.kind, state.cell_kind)
         except (TypeError, ValueError) as error:
-            raise LayoutError(str(error)) from error
+            raise LayoutError(_error_text(error)) from error
         resolved = resolve_layout(
             document,
             catalog=self.catalog,
@@ -2230,7 +2251,9 @@ class ConsolePresenter:
             )
             candidate = self._build_layout_candidate(parsed)
         except Exception as error:
-            self._report(f"cannot load the layout: {error}", severity="error")
+            self._report(
+                f"cannot load the layout: {_error_text(error)}", severity="error"
+            )
             return False
         self._commit_layout_candidate(candidate)
         if candidate.missing_signals:
@@ -2265,7 +2288,9 @@ class ConsolePresenter:
         try:
             self._layout_document().write(path)
         except Exception as error:
-            self._report(f"cannot save the layout: {error}", severity="error")
+            self._report(
+                f"cannot save the layout: {_error_text(error)}", severity="error"
+            )
             return ""
         self._report(f"layout saved to {path}", severity="task")
         return str(path)
@@ -2284,7 +2309,9 @@ class ConsolePresenter:
         try:
             document = LayoutDocument.read(path)
         except Exception as error:
-            self._report(f"cannot read that layout: {error}", severity="error")
+            self._report(
+                f"cannot read that layout: {_error_text(error)}", severity="error"
+            )
             return False
         return self.apply_layout(document)
 
@@ -2304,7 +2331,9 @@ class ConsolePresenter:
         try:
             written = self.view.save_screenshot(str(target))
         except Exception as error:
-            self._report(f"cannot save screenshot: {error}", severity="error")
+            self._report(
+                f"cannot save screenshot: {_error_text(error)}", severity="error"
+            )
             return ""
         self._report(f"screenshot saved to {written}", severity="task")
         return str(written)
@@ -2559,11 +2588,13 @@ class ConsolePresenter:
             if error is None or error is binding.reported_error:
                 continue
             binding.reported_error = error
-            self._report(f"{binding.title}: {error}", severity="error")
+            self._report(
+                f"{binding.title}: {_error_text(error)}", severity="error"
+            )
             # And on the card itself, which has a status line nothing wrote to.
             # A board-wide line says which panel; the panel says it is the one.
             if panel_id in self.view.panel_ids():
-                self.view.set_panel_status(panel_id, str(error), error=True)
+                self.view.set_panel_status(panel_id, _error_text(error), error=True)
 
     def _report(self, text: str, *, severity: str) -> None:
         show = getattr(self.view, "show_status", None)
@@ -3008,8 +3039,8 @@ class ConsolePresenter:
         try:
             candidate = self._build_logic_candidate(binding, finalization)
         except Exception as error:
-            binding.draft_error = str(error)
-            self._report(f"{node_id}: {error}", severity="error")
+            binding.draft_error = _error_text(error)
+            self._report(f"{node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
@@ -3026,15 +3057,15 @@ class ConsolePresenter:
             )
         except DeviceUseBusy as error:
             self._discard_candidate(binding, candidate)
-            binding.draft_error = str(error)
-            self._report(f"{node_id}: {error}", severity="error")
+            binding.draft_error = _error_text(error)
+            self._report(f"{node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
         except Exception as error:
             self._discard_candidate(binding, candidate)
-            binding.draft_error = str(error)
-            self._report(f"{node_id}: {error}", severity="error")
+            binding.draft_error = _error_text(error)
+            self._report(f"{node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
@@ -3133,7 +3164,9 @@ class ConsolePresenter:
             try:
                 binding.host.shutdown()
             except Exception as error:
-                self._report(f"{binding.node_id}: {error}", severity="error")
+                self._report(
+                    f"{binding.node_id}: {_error_text(error)}", severity="error"
+                )
                 return False
         if binding.lease is not None:
             binding.lease.release()
@@ -3159,7 +3192,10 @@ class ConsolePresenter:
                 try:
                     binding.host.poll()
                 except Exception as error:
-                    self._report(f"{binding.node_id}: {error}", severity="error")
+                    self._report(
+                        f"{binding.node_id}: {_error_text(error)}",
+                        severity="error",
+                    )
                 self._capture_artifact_results(binding)
                 self._ensure_task_previews(binding)
                 if not binding.host.running and binding.lease is not None:
@@ -3379,7 +3415,7 @@ class ConsolePresenter:
         try:
             candidate.host.shutdown()
         except Exception as error:
-            self._report(f"{binding.node_id}: {error}", severity="error")
+            self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
 
     def _activate_candidate(
         self,
@@ -3398,8 +3434,10 @@ class ConsolePresenter:
                 old_host.shutdown()
             except Exception as error:
                 self._discard_candidate(binding, candidate)
-                binding.draft_error = str(error)
-                self._report(f"{binding.node_id}: {error}", severity="error")
+                binding.draft_error = _error_text(error)
+                self._report(
+                    f"{binding.node_id}: {_error_text(error)}", severity="error"
+                )
                 self._refresh_console_projection()
                 return False
         reservation = candidate.reservation
@@ -3416,8 +3454,8 @@ class ConsolePresenter:
             return True
         except Exception as error:
             self._discard_candidate(binding, candidate)
-            binding.draft_error = str(error)
-            self._report(f"{binding.node_id}: {error}", severity="error")
+            binding.draft_error = _error_text(error)
+            self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             return False
         candidate.reservation = None
@@ -3433,8 +3471,8 @@ class ConsolePresenter:
         except Exception as error:
             lease.release()
             binding.lease = None
-            binding.draft_error = str(error)
-            self._report(f"{binding.node_id}: {error}", severity="error")
+            binding.draft_error = _error_text(error)
+            self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             return False
         binding.draft_error = ""

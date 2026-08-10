@@ -1278,6 +1278,53 @@ def test_a_panel_that_could_not_draw_says_so_on_its_own_card(presenter, session)
     assert any("refused this frame" in text for _severity, text in presenter.view.status)
 
 
+def test_an_anonymous_render_error_is_named_after_its_class(
+    presenter, session
+) -> None:
+    """CancelledError, a bare assert and TimeoutError all stringify to nothing.
+
+    The strip then showed ``camera: `` with nothing after the colon -- a red
+    line that named the panel and refused to say what happened.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frame_0"), snapshot, title="camera"
+    )
+
+    binding.port.reject(object(), AssertionError())
+    presenter.beat()
+
+    card = presenter.view.cards[0]
+    assert card.status == ("AssertionError", True)
+    assert ("error", "camera: AssertionError") in presenter.view.status
+
+
+def test_a_superseded_render_is_not_reported_at_all(presenter, session) -> None:
+    """A cancelled render means a newer frame is already queued behind it.
+
+    Reported red, a camera merely outpacing the render worker looked like a
+    camera failing -- once per coalesced frame, with an empty message.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frame_0"), snapshot, title="camera"
+    )
+    presenter.view.status.clear()
+
+    from concurrent.futures import CancelledError
+
+    binding.port.reject(object(), CancelledError())
+    presenter.beat()
+
+    assert binding.port.last_error is None
+    assert presenter.view.cards[0].status == ("", False)
+    assert not any(
+        severity == "error" for severity, _text in presenter.view.status
+    )
+
+
 def test_add_panel_adds_a_panel_of_the_kind_chosen_beside_the_button(
     presenter, session
 ) -> None:

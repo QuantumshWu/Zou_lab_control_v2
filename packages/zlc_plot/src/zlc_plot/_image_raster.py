@@ -278,7 +278,7 @@ class ImageFrontStore:
     """
 
     _LRU_CAPACITY = 6
-    _MAX_LEVEL = 8
+    _MAX_LEVEL = 16
 
     def __init__(self) -> None:
         self._fronts: "OrderedDict[tuple, PreparedImageFront]" = OrderedDict()
@@ -321,7 +321,6 @@ class ImageFrontStore:
                 x_limits=x_limits,
                 y_limits=y_limits,
                 display_pixel_shape=display_pixel_shape,
-                policy=policy,
             )
             if level > 1:
                 level_values = self._level(source, level, revision_token)
@@ -348,7 +347,6 @@ class ImageFrontStore:
         x_limits: tuple[float, float],
         y_limits: tuple[float, float],
         display_pixel_shape: tuple[int, int],
-        policy: ImageFrontPolicy,
     ) -> int:
         rows, columns = shape
         left, right, bottom, top = (float(value) for value in extent)
@@ -363,11 +361,13 @@ class ImageFrontStore:
         column_block = (column_stop - column_start) / max(1, int(display_width))
         block = min(row_block, column_block)
         level = 1
-        # Stay at least two source samples per display pixel after leveling so
-        # the authored minimum-reduction policy still decides the final step.
+        # Halve while at least one source sample per display pixel remains
+        # and the source divides evenly.  A residual oversample below the
+        # reduction policy's ratio is left to Matplotlib's resample stage —
+        # the same treatment fractional-DPR fronts already receive.
         while (
             level * 2 <= self._MAX_LEVEL
-            and block / (level * 2) >= max(2.0, policy.minimum_reduction_ratio)
+            and block / (level * 2) >= 1.0
             and rows % (level * 2) == 0
             and columns % (level * 2) == 0
         ):
@@ -386,21 +386,20 @@ class ImageFrontStore:
         cached = self._pyramid.get(level)
         if cached is not None:
             return cached
-        previous_level = 1
-        previous = source
-        for built_level in sorted(self._pyramid):
-            if built_level < level:
-                previous_level, previous = built_level, self._pyramid[built_level]
-        while previous_level < level:
-            rows, columns = previous.shape
-            mean_dtype = np.result_type(previous.dtype, np.float32)
-            previous = previous.reshape(
-                rows // 2, 2, columns // 2, 2
-            ).mean(axis=(1, 3), dtype=mean_dtype)
-            previous_level *= 2
-            previous.setflags(write=False)
-            self._pyramid[previous_level] = previous
-        return previous
+        rows, columns = source.shape
+        mean_dtype = np.result_type(source.dtype, np.float32)
+        # One vectorized pass straight to the requested level: cascading
+        # through intermediate halvings would re-read the full plane once
+        # per step for identical block means.
+        reduced = source.reshape(
+            rows // level,
+            level,
+            columns // level,
+            level,
+        ).mean(axis=(1, 3), dtype=mean_dtype)
+        reduced.setflags(write=False)
+        self._pyramid[level] = reduced
+        return reduced
 
 
 __all__ = [

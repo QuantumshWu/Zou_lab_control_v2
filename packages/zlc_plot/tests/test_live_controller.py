@@ -8,7 +8,7 @@ import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot import DEFAULTS
-from zlc_plot.live import LivePlotController
+from zlc_plot.live import LivePlotController, _PacedLiveFrame
 
 
 def _snapshot(revision: int) -> DatasetSnapshot:
@@ -28,6 +28,7 @@ class FakeSession:
         self.data_revision = 0
         self.prepared: list[int] = []
         self.presented: list[int] = []
+        self.commit_intervals_ms: list[int] = []
         self.prepare_started = Event()
         self.prepare_future: Future[object] | None = None
         self.block_prepare = block_prepare
@@ -42,7 +43,11 @@ class FakeSession:
         return future
 
     def commit_live_frame(self, prepared):
-        revision, _data = prepared
+        # The controller wraps every prepared frame in a paced envelope
+        # carrying its actual refresh cadence.
+        assert isinstance(prepared, _PacedLiveFrame)
+        self.commit_intervals_ms.append(prepared.refresh_interval_ms)
+        revision, _data = prepared.prepared
         if revision <= self.data_revision:
             return None
         self.data_revision = revision
@@ -68,6 +73,23 @@ def test_controller_pump_is_latest_only_and_records_metrics() -> None:
         assert metrics.coalesced_updates == 1
         assert metrics.successful_updates == 1
         assert metrics.last_presented_revision == 2
+    finally:
+        controller.close()
+
+
+def test_controller_commit_carries_its_actual_refresh_interval() -> None:
+    """Each commit receives the cadence the controller is running at."""
+
+    session = FakeSession()
+    controller = LivePlotController(session, _snapshot(0), refresh_interval_ms=400)
+    try:
+        controller.publish(_snapshot(1))
+        assert controller.pump_once() is True
+        assert session.commit_intervals_ms == [400]
+        controller.set_refresh_interval(200)
+        controller.publish(_snapshot(2))
+        assert controller.pump_once() is True
+        assert session.commit_intervals_ms == [400, 200]
     finally:
         controller.close()
 

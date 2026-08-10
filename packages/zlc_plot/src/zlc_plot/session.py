@@ -41,7 +41,7 @@ from ._gesture_engine import (
     pan_rectangle,
     range_endpoint_hit,
 )
-from ._session_fit import FitSessionMixin
+from ._session_fit import FitSessionMixin, _WarmSeed
 from ._session_gesture import GestureSessionMixin
 from ._session_live import LiveSessionMixin
 from ._session_state import (
@@ -485,7 +485,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._live_fit_request: _LiveFitRequest | None = None
         self._live_fit_future: Future[FitResult | FacetFitBatchResult] | None = None
         self._live_fit_completion: Future[FitResult | FacetFitBatchResult] | None = None
-        self._fit_warm_starts: dict[tuple[int, str, int | None], tuple[float, ...]] = {}
+        self._fit_warm_starts: dict[tuple[int, str, int | None], _WarmSeed] = {}
         self._fit_batch_revision = 0
         self._viewport: RectangleRange | None = None
         self._rolling_history: tuple[RollingHistoryPoint, ...] = ()
@@ -1984,6 +1984,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             initial_revision=old_state.revision + 1,
         )
         focused = 0 if isinstance(spec, FacetGridPlot) else None
+        # A rolling trace survives a spec replacement when the points still
+        # mean the same thing — same group and reduction.  Anything else
+        # changes what one history point IS, so the trace reseeds.
+        retained_history: tuple[RollingHistoryPoint, ...] = ()
+        if (
+            isinstance(spec, RollingPlot)
+            and isinstance(self._spec, RollingPlot)
+            and spec.group == self._spec.group
+            and spec.reduction == self._spec.reduction
+        ):
+            retained_history = self._rolling_history
         projection = FitProjection(
             data=data,
             revision=self.data_revision,
@@ -1993,6 +2004,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 SelectorSnapshot(()),
                 viewport=initial_state.viewport,
                 focused_facet_index=focused,
+                rolling_history=retained_history,
             ),
             unit_registry=self._unit_registry,
             defaults=self._defaults,

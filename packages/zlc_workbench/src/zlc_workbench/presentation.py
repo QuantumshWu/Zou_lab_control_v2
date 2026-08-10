@@ -16,6 +16,7 @@ while an experiment is running.
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -271,12 +272,17 @@ class PlotPanelPort:
         It used to be a silent no-op, so a panel whose render failed simply
         stopped changing -- indistinguishable from a signal that had stopped
         arriving, which is the other thing a still panel means.
+
+        A ``CancelledError`` is not remembered.  A cancelled render was
+        coalesced away because a newer frame is already queued behind it (or
+        the host is shutting down) -- flow control, not failure -- and shown
+        red on the card it read as the camera failing once per skipped frame.
         """
 
         serial = getattr(update, "serial", None)
         if serial is not None:
             self._pending.pop(serial, None)
-        if error is not None:
+        if error is not None and not isinstance(error, CancelledError):
             self.last_error = error
 
     def finish_unpresented(self, update: SurfaceUpdate) -> None:

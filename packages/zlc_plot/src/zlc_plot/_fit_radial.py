@@ -909,29 +909,35 @@ def fit_regular_separable_image(
             kernel, context, parameters, full_scale, loss, True
         )[3]
 
+    def gradient_converged(parameters: np.ndarray, gradient: np.ndarray) -> bool:
+        """Exact first-order convergence test in the solver's scaled space."""
+
+        parameter_scale = np.maximum(np.abs(parameters), natural_scale)
+        return (
+            float(np.max(np.abs(gradient * parameter_scale)))
+            <= _REGULAR_IMAGE_GTOL
+        )
+
     def newton_polish(
         parameters: np.ndarray,
         cost: float,
         gradient: np.ndarray,
-    ) -> np.ndarray | None:
+    ) -> tuple[np.ndarray, float] | None:
         """Drive the full-resolution gradient under gtol with Gauss-Newton.
 
         The separable information matrix is nearly free, so a handful of
         Newton steps replaces an L-BFGS restart that would otherwise spend
         tens of full-image evaluations rebuilding curvature.  Returns the
-        polished parameters, or None when the quadratic model fails (the
-        caller falls back to the bounded L-BFGS refinement).
+        polished parameters with their full-resolution cost, or None when
+        the quadratic model fails (the caller falls back to the bounded
+        L-BFGS refinement).
         """
 
         current, current_cost, current_gradient = parameters, cost, gradient
         for _step in range(_REGULAR_IMAGE_MAX_NEWTON_STEPS):
             check()
-            parameter_scale = np.maximum(np.abs(current), natural_scale)
-            if (
-                float(np.max(np.abs(current_gradient * parameter_scale)))
-                <= _REGULAR_IMAGE_GTOL
-            ):
-                return current
+            if gradient_converged(current, current_gradient):
+                return current, current_cost
             try:
                 step = np.linalg.solve(
                     full_information(current), -current_gradient
@@ -955,34 +961,34 @@ def fit_regular_separable_image(
                 candidate_cost,
                 candidate_gradient,
             )
-        parameter_scale = np.maximum(np.abs(current), natural_scale)
-        if (
-            float(np.max(np.abs(current_gradient * parameter_scale)))
-            <= _REGULAR_IMAGE_GTOL
-        ):
-            return current
+        if gradient_converged(current, current_gradient):
+            return current, current_cost
         return None
 
     def full_resolution_gate(
         parameters: np.ndarray,
         status: _SolverStatus,
         evaluated: tuple[float, np.ndarray] | None = None,
-    ) -> tuple[np.ndarray, _SolverStatus]:
-        """Exact full-resolution convergence gate shared by every path."""
+    ) -> tuple[np.ndarray, _SolverStatus, float]:
+        """Exact full-resolution convergence gate shared by every path.
 
-        parameter_scale = np.maximum(np.abs(parameters), natural_scale)
+        Returns the gated parameters, their solver status, and their
+        full-resolution cost so competing candidate paths can be compared
+        on one exact scale.
+        """
+
         cost, gradient = (
             evaluated if evaluated is not None else full_objective(parameters)
         )
-        if (
-            float(np.max(np.abs(gradient * parameter_scale)))
-            <= _REGULAR_IMAGE_GTOL
-        ):
-            return parameters, status
+        if gradient_converged(parameters, gradient):
+            return parameters, status, cost
         polished = newton_polish(parameters, cost, gradient)
         if polished is not None:
-            return polished, _SolverStatus(
-                True, "full-resolution Newton refinement converged"
+            polished_parameters, polished_cost = polished
+            return (
+                polished_parameters,
+                _SolverStatus(True, "full-resolution Newton refinement converged"),
+                polished_cost,
             )
         solved, refined = solve_stage(full_objective, parameters)
         refined_cost, _gradient = full_objective(refined)
@@ -990,12 +996,16 @@ def fit_regular_separable_image(
             raise FloatingPointError(
                 "full-resolution regular-image refinement is non-finite"
             )
-        return refined, _SolverStatus(bool(solved.success), str(solved.message))
+        return (
+            refined,
+            _SolverStatus(bool(solved.success), str(solved.message)),
+            refined_cost,
+        )
 
     def refine_to_full(
         parameters: np.ndarray,
         status: _SolverStatus,
-    ) -> tuple[np.ndarray, _SolverStatus]:
+    ) -> tuple[np.ndarray, _SolverStatus, float]:
         """Climb the subsample ladder, then apply the full-resolution gate."""
 
         if proxy is not data:
@@ -1072,11 +1082,49 @@ def fit_regular_separable_image(
             covariance_valid=covariance_valid,
         )
 
+    def solve_from_cold_seeds() -> tuple[np.ndarray, _SolverStatus, float]:
+        """Moment-seeded proxy search refined through the subsample ladder."""
+
+        seeds = _initial_candidates(
+            model, seed_coordinates, seed_values, initial, None
+        )
+        if initial is None:
+            strongest = max(abs(float(seed[0])) for seed in seeds)
+            seeds = tuple(
+                seed
+                for seed in seeds
+                if abs(float(seed[0]))
+                >= strongest * _REGULAR_IMAGE_MIN_RELATIVE_CONTRAST
+            )
+        seeds = tuple(np.clip(seed, lower_inside, upper_inside) for seed in seeds)
+        candidates: list[tuple[float, object, np.ndarray]] = []
+        last_error: Exception | None = None
+        for seed in seeds:
+            check()
+            try:
+                solved, parameters = solve_stage(proxy_objective, seed)
+                cost, _gradient = proxy_objective(parameters)
+                if math.isfinite(cost) and np.all(np.isfinite(parameters)):
+                    candidates.append((cost, solved, parameters))
+            except (FitCancelled, FitDeadlineExceeded):
+                raise
+            except (ValueError, RuntimeError, FloatingPointError) as error:
+                last_error = error
+        if not candidates:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(
+                "regular-image optimizer failed for every initializer"
+            )
+        _cost, solved, parameters = min(
+            candidates, key=lambda item: (not bool(item[1].success), item[0])
+        )
+        return refine_to_full(
+            parameters, _SolverStatus(bool(solved.success), str(solved.message))
+        )
+
+    warm_candidate: tuple[np.ndarray, _SolverStatus, float] | None = None
     if warm_start is not None:
-        # Warm fast path: check full-resolution convergence at the warm
-        # parameters first; refine from them when the gradient is not yet
-        # inside tolerance.  The candidate seed search only runs when the
-        # warm solve fails outright.
         try:
             warm = np.clip(
                 _initial_values(model, seed_coordinates, seed_values, warm_start),
@@ -1088,55 +1136,58 @@ def fit_regular_separable_image(
                 np.isfinite(warm_gradient)
             ):
                 raise FloatingPointError("warm start objective is non-finite")
-            # The warm seed already has full-resolution quality; apply the
-            # full-resolution gate (immediate accept under gtol, Newton
-            # polish, bounded L-BFGS fallback) without re-climbing the
-            # subsample ladder.
-            parameters, status = full_resolution_gate(
-                warm,
-                _SolverStatus(
-                    True,
-                    "warm start satisfies full-resolution convergence",
-                ),
-                evaluated=(warm_cost, warm_gradient),
-            )
-            return build_result(parameters, status)
+            if gradient_converged(warm, warm_gradient):
+                # Steady scene: the remembered solution is already an exact
+                # full-resolution stationary point, so accept it without
+                # paying for a cold seed search.
+                return build_result(
+                    warm,
+                    _SolverStatus(
+                        True,
+                        "warm start satisfies full-resolution convergence",
+                    ),
+                )
+            # The scene changed under the warm seed.  A bounded Gauss-Newton
+            # descent from it tracks small displacements at full-resolution
+            # quality, but only as one COMPETING candidate: local descent
+            # from a stale basin can settle on a degenerate stationary point
+            # far from the blob (center pinned at a frame edge, radius the
+            # size of the frame) with solver success, so the moment-seeded
+            # cold search below always runs and the better full-resolution
+            # cost wins.  A full-image L-BFGS descent from the stale point is
+            # deliberately not attempted: it is the path that produced those
+            # degenerate accepts and it is redundant next to the cold search.
+            polished = newton_polish(warm, warm_cost, warm_gradient)
+            if polished is not None:
+                polished_parameters, polished_cost = polished
+                warm_candidate = (
+                    polished_parameters,
+                    _SolverStatus(
+                        True, "full-resolution Newton refinement converged"
+                    ),
+                    polished_cost,
+                )
         except (FitCancelled, FitDeadlineExceeded):
             raise
         except (ValueError, RuntimeError, FloatingPointError):
-            pass  # fall back to the cold candidate search
+            warm_candidate = None  # the cold search stands alone
 
-    seeds = _initial_candidates(model, seed_coordinates, seed_values, initial, None)
-    if initial is None:
-        strongest = max(abs(float(seed[0])) for seed in seeds)
-        seeds = tuple(
-            seed
-            for seed in seeds
-            if abs(float(seed[0])) >= strongest * _REGULAR_IMAGE_MIN_RELATIVE_CONTRAST
-        )
-    seeds = tuple(np.clip(seed, lower_inside, upper_inside) for seed in seeds)
-
-    candidates: list[tuple[float, object, np.ndarray]] = []
-    last_error: Exception | None = None
-    for seed in seeds:
-        check()
-        try:
-            solved, parameters = solve_stage(proxy_objective, seed)
-            cost, _gradient = proxy_objective(parameters)
-            if math.isfinite(cost) and np.all(np.isfinite(parameters)):
-                candidates.append((cost, solved, parameters))
-        except (FitCancelled, FitDeadlineExceeded):
+    cold_candidate: tuple[np.ndarray, _SolverStatus, float] | None
+    try:
+        cold_candidate = solve_from_cold_seeds()
+    except (FitCancelled, FitDeadlineExceeded):
+        raise
+    except (ValueError, RuntimeError, FloatingPointError):
+        if warm_candidate is None:
             raise
-        except (ValueError, RuntimeError, FloatingPointError) as error:
-            last_error = error
-    if not candidates:
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("regular-image optimizer failed for every initializer")
+        cold_candidate = None
 
-    _cost, solved, parameters = min(
-        candidates, key=lambda item: (not bool(item[1].success), item[0])
+    finalists = [
+        candidate
+        for candidate in (warm_candidate, cold_candidate)
+        if candidate is not None
+    ]
+    parameters, status, _cost = min(
+        finalists, key=lambda item: (not item[1].success, item[2])
     )
-    status = _SolverStatus(bool(solved.success), str(solved.message))
-    parameters, status = refine_to_full(parameters, status)
     return build_result(parameters, status)

@@ -19,6 +19,7 @@ from ._session_state import (
     _PreparedLiveFrame,
 )
 from .fit import FitCancelled
+from .live import _PacedLiveFrame
 from .parameters import RenderEffect
 from .primitives import PlotInput
 
@@ -141,7 +142,7 @@ class LiveSessionMixin:
 
     def commit_live_frame(
         self,
-        prepared: _PreparedLiveFrame,
+        prepared: _PreparedLiveFrame | _PacedLiveFrame,
     ) -> _LiveFrameFinalization | None:
         """Atomically install and draw one prepared data frame.
 
@@ -152,9 +153,19 @@ class LiveSessionMixin:
         the data it describes.  On deadline the front publishes without the
         overlay and ``finalize_live_frame`` continues the solve
         asynchronously exactly as before.
+
+        A live controller wraps the prepared frame in a
+        :class:`~zlc_plot.live._PacedLiveFrame` carrying the cadence it is
+        really running at; that interval sizes the synchronous fit budget.
+        Direct callers commit the prepared frame as-is and get the library's
+        default refresh interval as the budget.
         """
 
         commit_started = monotonic()
+        refresh_interval_ms: int | None = None
+        if isinstance(prepared, _PacedLiveFrame):
+            refresh_interval_ms = prepared.refresh_interval_ms
+            prepared = prepared.prepared
         if not isinstance(prepared, _PreparedLiveFrame):
             raise TypeError("prepared must be a prepared live frame")
         if prepared.session_identity is not self._session_identity:
@@ -210,7 +221,10 @@ class LiveSessionMixin:
                 image_overlay=accepted_image_overlay,
                 accepted_fit=accepted_fit,
             )
-            live_fit_work = self._run_live_fit_in_commit(commit_started)
+            live_fit_work = self._run_live_fit_in_commit(
+                commit_started,
+                refresh_interval_ms,
+            )
         if live_fit_work is not None:
             # Futures and observer callbacks resolve only after the render
             # lock is released; the ownership gate is taken inside these
