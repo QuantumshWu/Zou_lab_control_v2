@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`active — user visible-button acceptance directly disproved two claims in 3a2ebb2: panel ROI/Fit disappeared from the Logic tab, and Edit frozen-snapshot wheel zoom does not update producer ROI`
-- Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
+- Goal status：`awaiting manual acceptance — the reopened Panel publisher and real Frozen snapshot paths are complete`
+- Production HEAD at final verification：`9a963db；Panel publisher projection landed in a1d503f`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Logic tab 已恢复独立、只读的 Panel publisher 行：Camera Measurement 行仍只列 direct outputs，ROI/Fit 按 signal plane 已有 producer=panel-id 的唯一分组显示，不伪装成 LogicNode 输出。下一步只剩在真实 PanelEditorView 嵌入路径复现并修复 frozen snapshot 滚轮 viewport -> producer ROI。`
-- Last completed action：`原缺陷先红为 panel_publishers 缺 panel-1；随后复用既有 LogicRowView 与 project_signals producer 分组完成最短接线，无新文件/类。定向 presenter + 真实 TaskConsoleHandle Qt 投影 2 passed。`
-- Last verified tests：`test_committed_selection_outputs_enter_the_real_occupancy_input 与 test_logic_editor_is_a_live_closable_draft_projection：2 passed；分别证明 direct 与 Panel ownership 分离、Logic tab 可见 Panel ROI/Fit 且该行无 Start/Stop/Edit/Remove 命令。`
-- Pending acceptance gates：`Logic tab 同时显示 Logic direct outputs 与按 Panel publisher 分组的 ROI/Fit，且 Fit membership稳定；在真实 PanelEditorView 内对 frozen plot canvas 滚轮 zoom/pan 后 producer ROI 必须变化，Area selector 存在时仍优先。`
-- Next action：`扩写既有 Guard B，走真实 TaskConsoleHandle/PanelEditorView/Frozen snapshot 实际命中 QWidget，先取得 wheel 后可见 Producer ROI 不更新的旧红；再只修现有事件/投影接线，保持 Area selector > viewport。`
+- Current phase：`完成。Logic tab 同时显示 LogicNode direct outputs 与独立只读 Panel publisher ROI/Fit。Guard B 已从 fake ConsoleView/host 根控件改为正式 build_console -> TaskConsoleHandle -> PanelEditorView -> 实际 Frozen QWidget；Area 存在时 producer ROI 不变，移除 Area 后 wheel viewport 同步更新嵌入 Producer form、主 Logic Edit form 与 Producer Restart request。`
+- Last completed action：`提交 9a963db：真实 UI Guard B 取代假验收，并把 Panel Edit 中错误的“Zoom and pan remain display-only”说明改成 Area > viewport 的真实优先级。该纵向测试在修改行为代码前已经到达 ROI 更新断言，说明 3a2ebb2 的现有行为接线有效；本轮没有为制造旧红再加补丁。`
+- Last verified tests：`Panel publisher presenter + Qt projection 2 passed；正式真实 PanelEditorView Guard B 1 passed（5.01 s）；SelectionBridge Fit event batch 跨 source revision retention 1 passed。只跑直接相关测试，未机械跑包/全仓。`
+- Pending acceptance gates：`只剩用户正式手动按钮验收：Logic tab 的 Panel publisher 行、Fit membership不闪烁、Frozen snapshot Area > wheel viewport 的可见 Producer ROI。`
+- Next action：`停止代码修改与测试，释放所有进程/窗口，交用户手动验收；除非用户给出新的直接反证，不得在上下文压缩后重新打开这两项。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
