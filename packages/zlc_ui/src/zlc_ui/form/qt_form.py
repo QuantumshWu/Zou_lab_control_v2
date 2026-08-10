@@ -888,7 +888,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         field = self._fields[key]
         widget = self._widgets[key]
         switch = self._auto_switches[key]
-        switch.setText(_automatic_label(field, automatic))
+        self._set_automatic_label(key)
         widget.setEnabled(not automatic and not field.unavailable)
         if not automatic and self._handlers[key].is_empty(field, widget):
             if field.kind == "choice" and field.choices:
@@ -897,6 +897,15 @@ class FluentParameterForm(QtWidgets.QWidget):
                 value = field.minimum if field.minimum is not None else 0
                 self._handlers[key].write(field, widget, value)
         self.changed.emit(key)
+
+    def _set_automatic_label(self, key: str) -> None:
+        field = self._fields[key]
+        switch = self._auto_switches[key]
+        row = self._rows[key]
+        row.set_label(
+            _automatic_label(field, switch.isChecked()),
+            width=self._label_width or _form_label_width(self._spec.fields),
+        )
 
     @property
     def spec(self) -> FormSpec:
@@ -976,7 +985,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     )
                 if switch is not None:
                     switch.setChecked(selected)
-                    switch.setText(_automatic_label(field, selected))
+                    self._set_automatic_label(field.key)
                     switch.setEnabled(not field.unavailable)
                     self._widgets[field.key].setEnabled(
                         not selected and not field.unavailable
@@ -1165,9 +1174,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 automatic = self._auto_switches.get(field.key)
                 if automatic is not None:
                     automatic.setEnabled(not field.unavailable)
-                    automatic.setText(
-                        _automatic_label(field, automatic.isChecked())
-                    )
+                    self._set_automatic_label(field.key)
                 self._widgets[field.key].setEnabled(
                     not field.unavailable
                     and not (automatic is not None and automatic.isChecked())

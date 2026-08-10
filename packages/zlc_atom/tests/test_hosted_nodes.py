@@ -50,6 +50,7 @@ def test_descriptor_role_is_independent_of_camera_measurement_extent() -> None:
     assert camera.kind is NodeKind.MEASUREMENT
     assert descriptors["calibration"].kind is NodeKind.TASK
     assert descriptors["occupancy"].kind is NodeKind.PROCESSOR
+    assert camera.authoring_schema.project_values({})["repeat"] == 0
     assert camera.authoring_schema.project_values({"repeat": 0})["repeat"] == 0
     assert camera.authoring_schema.project_values({"repeat": 3})["repeat"] == 3
 
@@ -138,21 +139,25 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
             SelectionRange(
                 "camera_measurement.frames.2.spatial-x", 1.2, 5.8
             ),
-            SelectionRange("spatial-y", 2.0, 6.0),
+            SelectionRange("spatial-y", -3.2, 6.0),
         ),
     )
 
     patch = descriptor.selection_patch(
         selection,
         draft=draft,
-        context={"binning_yx": (2, 3), "roi_origin_yx": (7, 11)},
+        context={
+            "frame_shape_yx": (10, 30),
+            "binning_yx": (2, 3),
+            "roi_origin_yx": (7, 11),
+        },
     )
 
     assert patch == {
         "roi_x": 17,
-        "roi_y": 11,
+        "roi_y": 7,
         "roi_width": 12,
-        "roi_height": 10,
+        "roi_height": 14,
     }
     assert all(type(value) is int for value in patch.values())
     assert descriptor.authoring_schema.project_values({**draft, **patch}) == {
@@ -171,7 +176,11 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
             ranges=(SelectionRange("spatial-x", 1.0, 3.0),),
         ),
         draft=draft,
-        context={"binning_yx": (2, 3), "roi_origin_yx": (7, 11)},
+        context={
+            "frame_shape_yx": (10, 30),
+            "binning_yx": (2, 3),
+            "roi_origin_yx": (7, 11),
+        },
     ) is None
 
 

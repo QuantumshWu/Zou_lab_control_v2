@@ -35,7 +35,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from zlc_plot import NumericRange
+from zlc_plot import NumericRange, SelectorKind
 
 from zlc_runtime import (
     FitEventValue,
@@ -80,6 +80,12 @@ def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
         )
     value = ranges[0]
     return host.set_x_selector(value.lower, value.upper, display=False)
+
+
+def _remove_panel_selection(host: Any, selection: SelectionState) -> object:
+    """Remove the same selector kind from the panel's other plot surface."""
+
+    return host.remove_selector(SelectorKind(selection.selector_kind))
 
 
 def _apply_panel_viewport(host: Any, viewport: object | None) -> object:
@@ -291,6 +297,7 @@ def attach_selection_bridge(
     *,
     bridge_id: str,
     on_committed: Callable[[SelectionState], object] | None = None,
+    on_removed: Callable[[SelectionState], object] | None = None,
     on_viewport: Callable[[SelectionState, object | None], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
     """Connect one panel's gestures to the plane, deriving as they commit.
@@ -302,18 +309,24 @@ def attach_selection_bridge(
     source = PlotSelectionSource(host)
     bridge = SelectionBridge(plane, source_signal, source, source, bridge_id=bridge_id)
     bridge.start()
-    if on_committed is not None:
-        if not callable(on_committed):
+    if on_committed is not None or on_removed is not None:
+        if on_committed is not None and not callable(on_committed):
             bridge.close()
             source.close()
             raise TypeError("on_committed must be callable or None")
+        if on_removed is not None and not callable(on_removed):
+            bridge.close()
+            source.close()
+            raise TypeError("on_removed must be callable or None")
 
         def _on_selection(
             change: SelectionChange,
             selection: SelectionState,
         ) -> None:
-            if change is SelectionChange.COMMITTED:
+            if change is SelectionChange.COMMITTED and on_committed is not None:
                 on_committed(selection)
+            elif change is SelectionChange.REMOVED and on_removed is not None:
+                on_removed(selection)
 
         source.subscribe_selection(_on_selection)
     if on_viewport is not None:
@@ -325,6 +338,7 @@ def subscribe_committed_selection(
     host: Any,
     callback: Callable[[SelectionState], object],
     *,
+    on_removed: Callable[[SelectionState], object] | None = None,
     on_viewport: Callable[[SelectionState, object | None], object] | None = None,
 ) -> PlotSelectionSource:
     """Translate committed gestures without publishing a derived signal.
@@ -337,6 +351,8 @@ def subscribe_committed_selection(
 
     if not callable(callback):
         raise TypeError("callback must be callable")
+    if on_removed is not None and not callable(on_removed):
+        raise TypeError("on_removed must be callable or None")
     source = PlotSelectionSource(host)
 
     def _on_selection(
@@ -345,6 +361,8 @@ def subscribe_committed_selection(
     ) -> None:
         if change is SelectionChange.COMMITTED:
             callback(selection)
+        elif change is SelectionChange.REMOVED and on_removed is not None:
+            on_removed(selection)
 
     try:
         source.subscribe_selection(_on_selection)

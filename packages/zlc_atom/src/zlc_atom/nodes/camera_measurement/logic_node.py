@@ -46,15 +46,35 @@ def _spatial_range(selection: SelectionState, role: str) -> SelectionRange:
     return matches[0]
 
 
-def _selected_pixel_interval(value: SelectionRange, role: str) -> tuple[int, int]:
+def _selected_pixel_interval(
+    value: SelectionRange,
+    role: str,
+    size: int,
+) -> tuple[int, int]:
     # SelectionRange is a closed coordinate interval.  Camera spatial axes are
     # implicit pixel centres (0..n-1), so this is the same interval resolution
-    # used by zlc_data selection derivation: [ceil(low), floor(high)].
-    start = math.ceil(value.lower)
-    stop = math.floor(value.upper) + 1
+    # used by zlc_data selection derivation: [ceil(low), floor(high)], clipped
+    # to the exact frame when a plotted axis includes display margin.
+    start = max(0, math.ceil(value.lower))
+    stop = min(size, math.floor(value.upper) + 1)
     if stop <= start:
         raise ValueError(f"{role} selection contains no image pixels")
     return start, stop
+
+
+def _current_frame_shape(context: Mapping[str, object]) -> tuple[int, int]:
+    raw = context.get("frame_shape_yx")
+    try:
+        values = tuple(raw)  # type: ignore[arg-type]
+    except TypeError as error:
+        raise TypeError("frame_shape_yx must contain two positive integers") from error
+    if (
+        len(values) != 2
+        or any(isinstance(value, bool) or not isinstance(value, Integral) for value in values)
+        or any(int(value) <= 0 for value in values)
+    ):
+        raise ValueError("frame_shape_yx must contain two positive integers")
+    return int(values[0]), int(values[1])
 
 
 def _current_origin(context: Mapping[str, object]) -> tuple[int, int]:
@@ -99,15 +119,18 @@ def _image_area_to_roi_patch(
 ) -> dict[str, int]:
     x_range = _spatial_range(selection, SPATIAL_X.value)
     y_range = _spatial_range(selection, SPATIAL_Y.value)
-    x_start, x_stop = _selected_pixel_interval(x_range, SPATIAL_X.value)
-    y_start, y_stop = _selected_pixel_interval(y_range, SPATIAL_Y.value)
+    frame_height, frame_width = _current_frame_shape(context)
+    x_start, x_stop = _selected_pixel_interval(
+        x_range, SPATIAL_X.value, frame_width
+    )
+    y_start, y_stop = _selected_pixel_interval(
+        y_range, SPATIAL_Y.value, frame_height
+    )
     del draft
     origin_x, origin_y = _current_origin(context)
     binning_y, binning_x = _current_binning(context)
     roi_x = origin_x + x_start * binning_x
     roi_y = origin_y + y_start * binning_y
-    if roi_x < 0 or roi_y < 0:
-        raise ValueError("image area maps outside the sensor origin")
     return {
         "roi_x": roi_x,
         "roi_y": roi_y,
@@ -133,7 +156,7 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
         AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
-        AuthoringField("repeat", "int", "Repeat", 1, minimum=0),
+        AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
         AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1),
     ),
     validator=_validate_measurement,

@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import time
 from typing import Any
 
@@ -63,6 +64,7 @@ from .presentation import PlotPanelPort
 from .selection import (
     _apply_panel_selection,
     _apply_panel_viewport,
+    _remove_panel_selection,
     attach_selection_bridge,
     subscribe_committed_selection,
 )
@@ -73,6 +75,25 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
 _UNCHANGED = object()
+
+
+def _same_panel_selection(left: object, right: object) -> bool:
+    def _signature(selection: object) -> tuple[object, ...]:
+        return (
+            selection.selector_kind,
+            tuple(
+                (
+                    str(entry.axis).rsplit(".", 1)[-1],
+                    entry.lower,
+                    entry.upper,
+                    entry.coordinate_frame,
+                )
+                for entry in selection.ranges
+            ),
+            selection.facets,
+        )
+
+    return _signature(left) == _signature(right)
 
 
 @dataclass
@@ -171,6 +192,9 @@ class ConsolePresenter:
         self._transient_task_previews: dict[str, dict[str, str]] = {}
         self._artifact_completion_order = 0
         self.panels: dict[str, PanelBinding] = {}
+        # Raster callbacks run on the plot worker.  Their translated, immutable
+        # values cross here and are applied only by the existing GUI beat.
+        self._panel_interactions: SimpleQueue[Callable[[], None]] = SimpleQueue()
         # Superseded raster hosts finish their current worker task without
         # making the Qt callback wait.  The presenter remains their owner and
         # joins any that are still retiring when the console closes.
@@ -1406,17 +1430,28 @@ class ConsolePresenter:
                         _apply_panel_viewport(editor, viewport)
                     binding.editor_selections = subscribe_committed_selection(
                         editor,
-                        lambda selection, expected=frozen, expected_host=editor: (
-                            self._route_panel_editor_selection(
-                                binding.panel_id,
+                        lambda selection, expected=frozen, expected_host=editor,
+                        expected_panel=binding.panel_id: (
+                            self._enqueue_panel_editor_selection(
+                                expected_panel,
                                 expected_host,
                                 expected,
                                 selection,
                             )
                         ),
-                        on_viewport=lambda selection, viewport, expected=frozen, expected_host=editor: (
-                            self._route_panel_editor_selection(
-                                binding.panel_id,
+                        on_removed=lambda _selection, expected=frozen,
+                        expected_host=editor, expected_panel=binding.panel_id: (
+                            self._enqueue_panel_editor_selection(
+                                expected_panel,
+                                expected_host,
+                                expected,
+                                None,
+                            )
+                        ),
+                        on_viewport=lambda selection, viewport, expected=frozen,
+                        expected_host=editor, expected_panel=binding.panel_id: (
+                            self._enqueue_panel_editor_selection(
+                                expected_panel,
                                 expected_host,
                                 expected,
                                 selection,
@@ -1563,15 +1598,23 @@ class ConsolePresenter:
         selections = subscribe_committed_selection(
             host,
             lambda selection, expected=frozen, expected_host=host: (
-                self._route_panel_editor_selection(
+                self._enqueue_panel_editor_selection(
                     binding.panel_id,
                     expected_host,
                     expected,
                     selection,
                 )
             ),
+            on_removed=lambda _selection, expected=frozen, expected_host=host: (
+                self._enqueue_panel_editor_selection(
+                    binding.panel_id,
+                    expected_host,
+                    expected,
+                    None,
+                )
+            ),
             on_viewport=lambda selection, viewport, expected=frozen, expected_host=host: (
-                self._route_panel_editor_selection(
+                self._enqueue_panel_editor_selection(
                     binding.panel_id,
                     expected_host,
                     expected,
@@ -1903,6 +1946,7 @@ class ConsolePresenter:
     def beat(self) -> None:
         """Advance lifecycle always; Pause freezes only Monitor presentation."""
 
+        self._drain_panel_interactions()
         self._poll_retired_plot_hosts()
         self._settle_panel_hosts()
         if not self._paused:
@@ -1911,6 +1955,19 @@ class ConsolePresenter:
             self._report_panel_errors()
         self.poll_logic()
         self._refresh_signal_choices()
+
+    def _drain_panel_interactions(self) -> None:
+        while True:
+            try:
+                interaction = self._panel_interactions.get_nowait()
+            except Empty:
+                return
+            try:
+                interaction()
+            except (TypeError, ValueError) as error:
+                self._report(
+                    f"cannot apply panel interaction: {error}", severity="error"
+                )
 
     # -------------------------------------------------------------- the board
 
@@ -2244,18 +2301,101 @@ class ConsolePresenter:
             binding.host,
             binding.signal,
             bridge_id=binding.panel_id,
-            on_committed=lambda selection: self._route_panel_selection(
+            on_committed=lambda selection: self._enqueue_panel_selection(
                 binding.panel_id, selection
             ),
-            on_viewport=lambda selection, viewport: self._route_panel_selection(
+            on_removed=lambda _selection: self._enqueue_panel_selection(
+                binding.panel_id, None
+            ),
+            on_viewport=lambda selection, viewport: self._enqueue_panel_selection(
                 binding.panel_id, selection, viewport=viewport
             ),
         )
 
+    def _enqueue_panel_selection(
+        self,
+        panel_id: str,
+        selection: object | None,
+        *,
+        viewport: object = _UNCHANGED,
+    ) -> None:
+        self._panel_interactions.put(
+            lambda: self._route_panel_selection(
+                panel_id, selection, viewport=viewport
+            )
+        )
+
+    def _enqueue_panel_editor_selection(
+        self,
+        panel_id: str,
+        host: object,
+        frozen: PanelFrozenData,
+        selection: object | None,
+        *,
+        viewport: object = _UNCHANGED,
+    ) -> None:
+        self._panel_interactions.put(
+            lambda: self._route_panel_editor_selection(
+                panel_id,
+                host,
+                frozen,
+                selection,
+                viewport=viewport,
+            )
+        )
+
+    def _synchronize_panel_interaction(
+        self,
+        binding: PanelBinding,
+        other_host: object | None,
+        selection: object | None,
+        viewport: object,
+    ) -> object:
+        """Keep live and frozen views on one selector/viewport truth."""
+
+        if viewport is not _UNCHANGED:
+            if (
+                binding.interaction_viewport is not None
+                and binding.interaction_viewport[1] == viewport
+            ):
+                return _UNCHANGED
+            binding.interaction_viewport = (selection, viewport)
+            if other_host is not None:
+                _apply_panel_viewport(other_host, viewport)
+            area = binding.interaction_selection
+            return (
+                _UNCHANGED
+                if getattr(area, "selector_kind", "") == "area"
+                else selection
+            )
+
+        if selection is None:
+            previous = binding.interaction_selection
+            if previous is None:
+                return _UNCHANGED
+            binding.interaction_selection = None
+            if other_host is not None:
+                _remove_panel_selection(other_host, previous)
+            return (
+                _UNCHANGED
+                if binding.interaction_viewport is None
+                else binding.interaction_viewport[0]
+            )
+
+        if (
+            binding.interaction_selection is not None
+            and _same_panel_selection(binding.interaction_selection, selection)
+        ):
+            return _UNCHANGED
+        binding.interaction_selection = selection
+        if other_host is not None:
+            _apply_panel_selection(other_host, selection)
+        return selection
+
     def _route_panel_selection(
         self,
         panel_id: str,
-        selection: object,
+        selection: object | None,
         *,
         viewport: object = _UNCHANGED,
     ) -> None:
@@ -2272,17 +2412,11 @@ class ConsolePresenter:
             return
         if binding.port is None:
             return
-        if viewport is _UNCHANGED:
-            binding.interaction_selection = selection
-            if binding.editor_host is not None:
-                _apply_panel_selection(binding.editor_host, selection)
-        else:
-            current = (selection, viewport)
-            if binding.interaction_viewport == current:
-                return
-            binding.interaction_viewport = current
-            if binding.editor_host is not None:
-                _apply_panel_viewport(binding.editor_host, viewport)
+        selection = self._synchronize_panel_interaction(
+            binding, binding.editor_host, selection, viewport
+        )
+        if selection is _UNCHANGED:
+            return
         publication = binding.port.presented_publication()
         if publication is None:
             # A newly-created host already displays ``shown`` before the first
@@ -2302,7 +2436,7 @@ class ConsolePresenter:
         panel_id: str,
         host: object,
         frozen: PanelFrozenData,
-        selection: object,
+        selection: object | None,
         *,
         viewport: object = _UNCHANGED,
     ) -> None:
@@ -2316,17 +2450,11 @@ class ConsolePresenter:
             or binding.frozen_stale
         ):
             return
-        if viewport is _UNCHANGED:
-            binding.interaction_selection = selection
-            if binding.host is not None:
-                _apply_panel_selection(binding.host, selection)
-        else:
-            current = (selection, viewport)
-            if binding.interaction_viewport == current:
-                return
-            binding.interaction_viewport = current
-            if binding.host is not None:
-                _apply_panel_viewport(binding.host, viewport)
+        selection = self._synchronize_panel_interaction(
+            binding, binding.host, selection, viewport
+        )
+        if selection is _UNCHANGED:
+            return
         self._route_exact_panel_selection(
             panel_id,
             frozen.signal,
@@ -3077,7 +3205,7 @@ class ConsolePresenter:
         host = binding.host
         finalization = self._finalize_logic_binding(binding)
         state, status = self._logic_state(binding)
-        names = (
+        direct_names = (
             host.published_signals()
             if host is not None
             else tuple(
@@ -3088,13 +3216,29 @@ class ConsolePresenter:
         descriptions = {
             item.name: item for item in self.session.signal_plane.describe_signals()
         }
+        names = tuple(dict.fromkeys((
+            *direct_names,
+            *(
+                item.name
+                for item in descriptions.values()
+                if item.source_name in direct_names
+            ),
+        )))
         published = tuple(
             (
                 name,
                 format_signal_shape(
                     None if descriptions.get(name) is None else descriptions[name].shape
                 ),
-                "live" if host is not None and host.running else "held",
+                (
+                    "live"
+                    if (
+                        descriptions[name].live
+                        if name in descriptions
+                        else host is not None and host.running
+                    )
+                    else "held"
+                ),
             )
             for name in names
         )

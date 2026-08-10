@@ -784,7 +784,10 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         TrapCalibration,
     )
 
-    node, snapshot = _one_shot(session)
+    producer_id = presenter.add_logic(
+        "camera_measurement", node_id="cm", open_editor=False
+    )
+    node, snapshot = _one_shot(session, producer=producer_id)
     binding = presenter.add_panel(
         node.signal_key("frame_0"), snapshot, kind="image"
     )
@@ -848,6 +851,11 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     assert projection["source_labels"][roi_signal] == (
         f"roi_frame  [{format_signal_shape(roi_description.shape)}]"
     )
+    presenter.beat()
+    shown_in_logic_tab = {
+        name for name, _shape, _state in presenter.view._rows[producer_id].publishes
+    }
+    assert {row.name for row in fit_signals}.union({roi_signal}) <= shown_in_logic_tab
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
@@ -1049,6 +1057,8 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     first_before = dict(presenter.logic[first_id].draft.values)
     second_before = dict(presenter.logic[second_id].draft.values)
     _commit_area(first_editor_host)
+    assert presenter.logic[first_id].draft.values == first_before
+    presenter.beat()
     first_selected = dict(presenter.logic[first_id].draft.values)
     assert first_selected != first_before
     assert presenter.logic[second_id].draft.values == second_before
@@ -1070,6 +1080,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
         lower_fraction=0.10,
         upper_fraction=0.60,
     )
+    presenter.beat()
     editor_selector = first_editor_host.selector_state(SelectorKind.AREA).result().value
     live_selector = panel.host.selector_state(SelectorKind.AREA).result().value
     assert editor_selector.value == live_selector.value
@@ -1081,6 +1092,8 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
         app.processEvents()
         time.sleep(0.005)
     assert editor_widget.presented_front.identity.sequence > editor_sequence
+    first_current = dict(presenter.logic[first_id].draft.values)
+    assert first_current != first_selected
 
     assert presenter.refresh_panel_snapshot(panel.panel_id)
     assert panel.editor_host is first_editor_host
@@ -1092,7 +1105,8 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     )
     assert panel.frozen_stale and panel.editor_host is first_editor_host
     _commit_area(first_editor_host)
-    assert presenter.logic[first_id].draft.values == first_selected
+    presenter.beat()
+    assert presenter.logic[first_id].draft.values == first_current
     assert presenter.logic[second_id].draft.values == second_before
 
     assert presenter.refresh_panel_snapshot(panel.panel_id)
@@ -1104,10 +1118,19 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     refreshed_selector = second_editor_host.selector_state(SelectorKind.AREA).result().value
     live_selector = panel.host.selector_state(SelectorKind.AREA).result().value
     assert refreshed_selector.value == live_selector.value
-    second_editor_host.remove_selector(SelectorKind.AREA).result()
     _commit_area(second_editor_host)
-    assert presenter.logic[first_id].draft.values == first_selected
+    presenter.beat()
+    assert presenter.logic[first_id].draft.values == first_current
     assert presenter.logic[second_id].draft.values != second_before
+
+    area_draft = dict(presenter.logic[second_id].draft.values)
+    _zoom_in(second_editor_host)
+    presenter.beat()
+    assert presenter.logic[second_id].draft.values == area_draft
+
+    second_editor_host.remove_selector(SelectorKind.AREA).result()
+    presenter.beat()
+    assert panel.interaction_selection is None
 
     before_zoom = dict(presenter.logic[second_id].draft.values)
     _zoom_in(second_editor_host)

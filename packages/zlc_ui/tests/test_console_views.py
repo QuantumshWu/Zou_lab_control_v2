@@ -672,6 +672,57 @@ for key, row in card._settings_form._rows.items():
         f'Setting row {key!r} was vertically cut off: '
         f'{row.height()} < {row.minimumSizeHint().height()}'
     )
+parameter_left_edges = {
+    key: card._settings_form.widget_for(key).mapTo(
+        card._settings_form, QtCore.QPoint(0, 0)
+    ).x()
+    for key in ('display__title', 'display__x_label', 'display__colormap')
+}
+assert len(set(parameter_left_edges.values())) == 1, parameter_left_edges
+label_slot_widths = {
+    key: card._settings_form._rows[key].layout().itemAt(0).widget().width()
+    for key in ('display__title', 'display__x_label', 'display__colormap')
+}
+assert len(set(label_slot_widths.values())) == 1, label_slot_widths
+stable_geometry = {
+    key: (
+        card._settings_form._rows[key].geometry(),
+        card._settings_form.widget_for(key).geometry(),
+    )
+    for key in card._settings_form.spec.keys
+}
+interval_control = card._settings_form.widget_for('interval_ms')
+interval_control.setCurrentIndex(interval_control.findData(800))
+interval_control.activated.emit(interval_control.currentIndex())
+state = dict(state, interval_ms=800)
+handle.set_panel_projection('panel-1', state, surface)
+app.processEvents()
+assert {
+    key: (
+        card._settings_form._rows[key].geometry(),
+        card._settings_form.widget_for(key).geometry(),
+    )
+    for key in card._settings_form.spec.keys
+} == stable_geometry
+compact_surface = dict(
+    surface,
+    semantic=(),
+    display=(surface['display'][0], surface['display'][1], surface['display'][4]),
+    fit=(),
+)
+handle.set_panel_projection('panel-1', state, compact_surface)
+card._settings_popup.hide()
+QtTest.QTest.qWait(300)
+card._open_settings()
+app.processEvents()
+compact_left_edges = {
+    key: card._settings_form.widget_for(key).mapTo(
+        card._settings_form, QtCore.QPoint(0, 0)
+    ).x()
+    for key in ('display__title', 'display__x_label', 'display__colormap')
+}
+assert len(set(compact_left_edges.values())) == 1, compact_left_edges
+handle.set_panel_projection('panel-1', state, surface)
 title_widget = card._settings_form.widget_for('title')
 natural_title_width = title_widget.minimumWidth()
 title_widget.setMinimumWidth(520)
