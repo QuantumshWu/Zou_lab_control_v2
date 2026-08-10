@@ -1006,6 +1006,17 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     _settle_panel_hosts(
         presenter, lambda: panel.editor_selections is not None
     )
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["panel-editor-selection"])
+    live_widget = panel.host.qt_widget()
+    editor_widget = first_editor_host.qt_widget()
+    deadline = time.monotonic() + 2.0
+    while live_widget.presented_front is None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    assert live_widget.presented_front is not None
+    live_sequence = live_widget.presented_front.identity.sequence
 
     first_before = dict(presenter.logic[first_id].draft.values)
     second_before = dict(presenter.logic[second_id].draft.values)
@@ -1016,6 +1027,19 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     editor_selector = first_editor_host.selector_state(SelectorKind.AREA).result().value
     live_selector = panel.host.selector_state(SelectorKind.AREA).result().value
     assert live_selector.value == editor_selector.value
+    deadline = time.monotonic() + 2.0
+    while (
+        live_widget.presented_front.identity.sequence <= live_sequence
+        and time.monotonic() < deadline
+    ):
+        app.processEvents()
+        time.sleep(0.005)
+    assert live_widget.presented_front.identity.sequence > live_sequence
+
+    assert presenter.refresh_panel_snapshot(panel.panel_id)
+    assert panel.editor_host is first_editor_host
+    assert panel.editor_host.qt_widget() is editor_widget
+    assert not first_editor_host._closing
 
     assert presenter.retarget_panel(
         panel.panel_id, second_node.signal_key("frame_0")

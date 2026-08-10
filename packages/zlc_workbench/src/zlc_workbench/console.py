@@ -1648,11 +1648,44 @@ class ConsolePresenter:
         )
         previous = binding.frozen_data
         previous_stale = binding.frozen_stale
+        if (
+            previous is not None
+            and previous.signal == frozen.signal
+            and previous.publication is publication
+        ):
+            binding.frozen_stale = False
+            self.refresh_panel_editor(panel_id)
+            return True
         binding.frozen_data = frozen
         binding.frozen_stale = False
         if binding.editor_host is not None:
             try:
-                self._replace_panel_editor_host(binding)
+                previous_ref = getattr(
+                    getattr(previous, "publication", None), "event_ref", None
+                )
+                current_ref = getattr(publication, "event_ref", None)
+                same_generation = (
+                    previous is not None
+                    and previous.signal == frozen.signal
+                    and previous_ref is not None
+                    and current_ref is not None
+                    and previous_ref.generation == current_ref.generation
+                )
+                if same_generation:
+                    editor_input = (
+                        frozen.snapshot
+                        if frozen.plot_input is None
+                        else frozen.plot_input
+                    )
+                    update = (
+                        binding.editor_host.update_image_frame
+                        if isinstance(editor_input, ImageFrame)
+                        else binding.editor_host.update_data
+                    )
+                    binding.editor_configuration = update(editor_input)
+                    self._refresh_panel_editor_selection(binding)
+                else:
+                    self._replace_panel_editor_host(binding)
             except Exception as error:
                 binding.frozen_data = previous
                 binding.frozen_stale = previous_stale
