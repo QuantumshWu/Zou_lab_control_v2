@@ -658,15 +658,27 @@ blank_surface = {
     'fit_unavailable': '',
 }
 handle.set_panel_projection('panel-1', state, blank_surface)
-card._open_settings()
-card._settings_popup.hide()
 card.resize(340, 180)
 authored_size = card.size()
+card._open_settings()
+assert card._settings_popup.isVisible()
+blank_popup_width = card._settings_popup.width()
 handle.set_panel_projection('panel-1', state, surface)
 app.processEvents()
 assert card.size() == authored_size, 'same-size projection reset the card geometry'
-card._open_settings()
-app.processEvents()
+assert card._settings_popup.isVisible()
+card._settings_body.layout().activate()
+bound_editor = card._settings_form.widget_for('display__colormap')
+bound_editor_right = bound_editor.mapTo(
+    card._settings_scroll.viewport(),
+    QtCore.QPoint(bound_editor.width() - 1, 0),
+).x()
+assert bound_editor_right < card._settings_scroll.viewport().width(), (
+    'an already-open Setting popup kept its blank-schema width after binding: '
+    f'blank={blank_popup_width}, bound={card._settings_popup.width()}, '
+    f'editor-right={bound_editor_right}, '
+    f'viewport={card._settings_scroll.viewport().width()}'
+)
 for key, row in card._settings_form._rows.items():
     assert row.height() >= row.minimumSizeHint().height(), (
         f'Setting row {key!r} was vertically cut off: '
@@ -697,13 +709,18 @@ interval_control.activated.emit(interval_control.currentIndex())
 state = dict(state, interval_ms=800)
 handle.set_panel_projection('panel-1', state, surface)
 app.processEvents()
-assert {
+projected_geometry = {
     key: (
         card._settings_form._rows[key].geometry(),
         card._settings_form.widget_for(key).geometry(),
     )
     for key in card._settings_form.spec.keys
-} == stable_geometry
+}
+assert projected_geometry == stable_geometry, {
+    key: (stable_geometry[key], projected_geometry[key])
+    for key in stable_geometry
+    if stable_geometry[key] != projected_geometry[key]
+}
 class LayoutProbe(QtCore.QObject):
     def __init__(self):
         super().__init__()

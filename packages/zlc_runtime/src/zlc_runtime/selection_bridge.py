@@ -860,14 +860,10 @@ class SelectionBridge:
         error: Exception,
     ) -> None:
         if isinstance(error, _StaleFit):
-            with self._lock:
-                if self._fit_processor is not processor:
-                    return
-                if error.trigger_revision != self._fit_trigger_revision:
-                    return
-                self._fit_processor = None
-            self._record_error(error)
-            self._withdraw_processor(processor)
+            # The source can advance while the plot is still fitting its last
+            # accepted frame.  That is normal latest-only timing, not a failed
+            # signal generation: retain the last accepted Fit publication
+            # until the plot emits the next batch for this same panel.
             return
         self._record_error(error)
         with self._lock:

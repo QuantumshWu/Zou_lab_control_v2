@@ -751,6 +751,14 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         events.emit_fit(first_event)
         first = plane.freeze().value("@logic/revision/center")
         assert first is not None
+        assert bridge.wait_for_wake(2.0)
+        plane.freeze()
+        bridge.wait_for_wake(0.0)
+        first_names = tuple(
+            item.name
+            for item in plane.describe_signals()
+            if item.owner_id.startswith("revision:fit:")
+        )
 
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
@@ -759,6 +767,14 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         )
         plane.mark_changed(source, slot)
         plane.freeze()
+        assert bridge.wait_for_wake(2.0)
+        between = plane.freeze()
+        assert between.value("@logic/revision/center") is first
+        assert tuple(
+            item.name
+            for item in plane.describe_signals()
+            if item.owner_id.startswith("revision:fit:")
+        ) == first_names
         events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
         front = _wait_for_signal(plane, bridge, "@logic/revision/center", 2)
         second = front.value("@logic/revision/center")

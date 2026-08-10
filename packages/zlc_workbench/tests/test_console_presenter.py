@@ -466,19 +466,33 @@ def _commit_area(
 
 
 def _zoom(host, step: float) -> None:
-    """Zoom one real mounted raster surface with its wheel gesture."""
+    """Zoom through the real Qt wheel route, not the private host seam."""
 
-    front = host.wait_for_front(5.0)
-    host._pointer_event(
-        "scroll",
-        0.5,
-        0.5,
-        button=None,
-        step=step,
-        identity=front.identity,
-        axes=front.interaction.axes[0],
-        interaction=front.interaction,
-    ).result()
+    from PyQt5 import QtCore, QtGui, QtWidgets
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["panel-wheel"])
+    widget = host.qt_widget()
+    before = host.describe_display().result().value.viewport
+    center = widget.rect().center()
+    wheel = QtGui.QWheelEvent(
+        QtCore.QPointF(center),
+        QtCore.QPointF(widget.mapToGlobal(center)),
+        QtCore.QPoint(),
+        QtCore.QPoint(0, 120 if step > 0 else -120),
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoModifier,
+        QtCore.Qt.NoScrollPhase,
+        False,
+    )
+    QtWidgets.QApplication.sendEvent(widget, wheel)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if host.describe_display().result().value.viewport != before:
+            return
+        time.sleep(0.005)
+    raise AssertionError("the real Qt wheel event did not change the plot viewport")
 
 
 def _zoom_in(host) -> None:
@@ -865,11 +879,11 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     expected_leaves = {
         row.name.rsplit("/", 1)[-1] for row in fit_signals
     }.union({"roi_frame"})
-    assert expected_leaves <= shown_in_logic_tab
-    details = {name: detail for name, _shape, detail in shown_rows}
-    for description in (*fit_signals, roi_description):
-        leaf = description.name.rsplit("/", 1)[-1]
-        assert description.name in details[leaf]
+    assert expected_leaves.isdisjoint(shown_in_logic_tab)
+    assert "frame_0" in shown_in_logic_tab
+    panel_group = dict(presenter.signal_groups())[binding.panel_id]
+    panel_signal_names = {name for _label, name in panel_group}
+    assert {row.name for row in fit_signals}.union({roi_signal}) <= panel_signal_names
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
@@ -1056,6 +1070,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     _settle_panel_hosts(
         presenter, lambda: panel.editor_selections is not None
     )
+    assert presenter.view.selectors is False
     from zlc_ui.qt import ensure_qt_app
 
     app = ensure_qt_app(["panel-editor-selection"])

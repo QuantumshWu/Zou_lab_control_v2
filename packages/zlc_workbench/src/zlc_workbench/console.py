@@ -3216,14 +3216,7 @@ class ConsolePresenter:
         descriptions = {
             item.name: item for item in self.session.signal_plane.describe_signals()
         }
-        names = tuple(dict.fromkeys((
-            *direct_names,
-            *(
-                item.name
-                for item in descriptions.values()
-                if item.source_name in direct_names
-            ),
-        )))
+        names = tuple(dict.fromkeys(direct_names))
         published = []
         for name in names:
             description = descriptions.get(name)

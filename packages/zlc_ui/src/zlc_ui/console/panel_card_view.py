@@ -31,6 +31,7 @@ from zlc_ui.fluent import (
     popup_gap,
     RED,
     scaled_px,
+    show_fluent_popup_for_anchor,
     signals_blocked,
 )
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
@@ -556,7 +557,9 @@ class PanelCardView(FluentGroupBox):
 
     def _rebuild_settings_form(self) -> None:
         if self._settings_form is not None:
-            self._settings_form.reconcile(self._form_spec(), self._form_values())
+            spec = self._form_spec()
+            structure_changed = self._settings_form.spec.keys != spec.keys
+            self._settings_form.reconcile(spec, self._form_values())
             self._settings_form.refresh()
             self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
             self._settings_form.widget_for("kind").setEnabled(False)
@@ -567,6 +570,11 @@ class PanelCardView(FluentGroupBox):
                 if key in self._settings_form.spec.keys:
                     self._settings_form.widget_for(key).setEnabled(False)
             self._sync_settings_body_size()
+            if structure_changed:
+                # Nested rows publish their final size on the next Qt layout
+                # turn.  Only a schema change gets that second measurement;
+                # a value edit must never become a layout operation.
+                QtCore.QTimer.singleShot(0, self._sync_settings_body_size)
 
     def _sync_settings_body_size(self) -> None:
         body = self._settings_body
@@ -579,10 +587,29 @@ class PanelCardView(FluentGroupBox):
             + margins.right()
         )
         required_height = body.layout().sizeHint().height()
+        geometry_changed = False
         if body.minimumWidth() != required_width:
             body.setMinimumWidth(required_width)
+            geometry_changed = True
         if body.minimumHeight() != required_height:
             body.setMinimumHeight(required_height)
+            geometry_changed = True
+        popup = self._settings_popup
+        if geometry_changed and popup is not None and popup.isVisible():
+            available_height = max(
+                1,
+                self.rect().bottom()
+                - self.settings_button.geometry().bottom()
+                - popup_gap(),
+            )
+            show_fluent_popup_for_anchor(
+                popup,
+                self.settings_button,
+                body,
+                minimum_width=1,
+                minimum_height=320,
+                maximum_height=available_height,
+            )
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
