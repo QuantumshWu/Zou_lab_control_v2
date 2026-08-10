@@ -558,7 +558,9 @@ class BoardScheduler:
         arbiter: SurfaceBatchArbiter,
         ports: Callable[[], Sequence[SurfacePort]],
     ) -> None:
-        if not callable(getattr(plane, "freeze", None)):
+        if not callable(getattr(plane, "freeze", None)) or not callable(
+            getattr(plane, "set_front_signals", None)
+        ):
             raise TypeError("board scheduler requires a signal data plane")
         if not isinstance(clock, HarmonicClock):
             raise TypeError("board scheduler requires HarmonicClock")
@@ -608,13 +610,25 @@ class BoardScheduler:
     def on_tick(self) -> SignalFront:
         if self._closed:
             return self._last_front
+        # The reader declares what it reads.  The port list IS the truth of
+        # what the board shows, so the coherent-front request is projected
+        # from it on every tick rather than book-kept beside every panel
+        # add/remove/retarget.  Without this declaration the plane has no
+        # requested set, builds no lineage components, and every signal
+        # floats at its own latest publication -- a camera panel one shot
+        # ahead of the panel derived from it.  The plane no-ops on an
+        # unchanged set, so this scheduler is the sole declaration authority.
+        ports = tuple(self._ports())
+        self._plane.set_front_signals(
+            {SurfaceBatchArbiter._signal_name(port) for port in ports}
+        )
         front = self._plane.freeze()
         if not isinstance(front, SignalFront):
             raise TypeError("signal data plane freeze() must return SignalFront")
         self._last_front = front
         elapsed = self._clock.advance()
         members_by_key: dict[object, list[SurfacePort]] = {}
-        for port in tuple(self._ports()):
+        for port in ports:
             signal_name = SurfaceBatchArbiter._signal_name(port)
             continuous = front.continuous_group(signal_name)
             if continuous and len(continuous) > 1:

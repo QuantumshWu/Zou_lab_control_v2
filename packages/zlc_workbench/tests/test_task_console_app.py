@@ -99,7 +99,10 @@ def test_task_console_display_beat_is_the_display_clock_base() -> None:
     assert _parser().parse_args(["--interval-ms", "250"]).interval_ms == 250
 
     board = LiveBoard(
-        SimpleNamespace(freeze=lambda: None),
+        SimpleNamespace(
+            freeze=lambda: None,
+            set_front_signals=lambda names: None,
+        ),
         tuple,
         intervals=DEFAULTS.live.refresh_intervals_ms,
         default_interval_ms=DEFAULTS.live.default_refresh_interval_ms,

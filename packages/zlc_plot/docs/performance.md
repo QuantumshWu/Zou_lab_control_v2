@@ -56,6 +56,15 @@ it), made the rolling window a pure display selector over retained history,
 routed the live-fit budget through the controller's actual cadence, and
 stopped reporting superseded render futures as panel errors.
 
+A later pass fixed the color-limit drag: the preview no longer rewrites the
+colorbar's endpoint labels (chrome whose edit forced a full background
+recapture on every drag step) nor pokes the proxy mappable (whose `set_clim`
+triggered a complete `colorbar._draw_all`).  The committed path reapplies
+colorbar state once on release through its `colorbar_state` comparison.
+One drag step (preview + overlay render + capture) went from 17.7 ms to
+6.8 ms median at bench size, and the per-step cost no longer scales with a
+full-figure Agg redraw at larger panels.
+
 ## Source-size audit (2026-08-03)
 
 The current `src/zlc_plot` tree contains 25,825 non-blank Python lines (28,627

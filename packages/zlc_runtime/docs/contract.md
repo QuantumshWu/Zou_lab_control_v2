@@ -59,7 +59,13 @@ tuple[SignalPublication, ...]` resolves the exact retained parent payloads;
 generation token; and `withdraw_processor(control) -> None` removes a
 latest-only processor binding after its lane has acknowledged cancellation or
 failure.  `set_front_signals` declares the signal family requested by the
-consumer; same-shot fallback is enforced for that declared set.
+consumer; same-shot fallback is enforced for that declared set.  The
+`BoardScheduler` is the sole production declaration authority: on every tick
+it projects its port list's signal names into `set_front_signals` before
+freezing, so the coherent set always equals what the board shows and no
+membership bookkeeping exists beside the ports.  An undeclared plane builds
+no lineage components and every signal floats at its own latest publication
+— the camera-ahead-of-its-derived skew this declaration exists to prevent.
 
 Continuous derived sibling bundles use one stable binding and one explicit
 lineage publication path:

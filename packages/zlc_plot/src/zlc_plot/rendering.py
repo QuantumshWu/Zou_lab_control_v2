@@ -1019,11 +1019,15 @@ class MatplotlibRenderer:
         for axes in {entry[1].axes for entry in tuple(collected)}:
             for axis in (axes.xaxis, axes.yaxis):
                 axis_z = float(axis.get_zorder())
-                for line in axis.get_gridlines():
-                    keyed(line, axes, axis_z)
-                for minor in (False, True):
-                    for line in axis.get_ticklines(minor=minor):
-                        keyed(line, axes, axis_z)
+                # The same ticks a full Axis.draw would paint: positions
+                # refreshed and clipped to the current view interval.  The
+                # raw ``majorTicks`` list keeps stale instances parked at
+                # out-of-view locations after a limit change, and painting
+                # those leaks mark segments outside the axes box.
+                for tick in axis._update_ticks():
+                    keyed(tick.gridline, axes, axis_z)
+                    keyed(tick.tick1line, axes, axis_z)
+                    keyed(tick.tick2line, axes, axis_z)
             for spine in axes.spines.values():
                 keyed(spine, axes, spine.get_zorder())
         return collected
@@ -2402,18 +2406,17 @@ class MatplotlibRenderer:
             y_label=y_label,
         )
         # The shot axis frames the FULL configured window from the first
-        # revision on: a filling trace grows rightward inside a fixed
-        # ``window``-wide frame instead of the axis hugging however many
-        # shots happen to exist, so the window parameter is what you see.
+        # revision on: it opens at shots [0, window-1] and slides only once
+        # the trace has filled it, so the window parameter is what you see
+        # and the axis never names a negative shot.
         shot_values = np.concatenate(
             [item.x[item.valid] for item in sliced]
         ) if sliced else np.asarray([], dtype=float)
         if shot_values.size:
             last_shot = float(np.max(shot_values))
             window = int(state["window"])
-            frame = _curve_x_limits(
-                np.asarray([last_shot - window + 1, last_shot])
-            )
+            low = max(0.0, last_shot - window + 1)
+            frame = _curve_x_limits(np.asarray([low, low + window - 1]))
             if frame is not None:
                 self._set_xlim(history, *frame)
         latest = None
@@ -3197,7 +3200,17 @@ class MatplotlibRenderer:
         return isinstance(semantic, HistogramPlot)
 
     def preview_color_limits(self, low: float, high: float) -> None:
-        """Preview image normalization without committing display state."""
+        """Preview image normalization without committing display state.
+
+        The preview repaints exactly what the gesture is about: the image
+        pixels and the artist clim every painted-limits consumer reads.
+        The colorbar is deliberately untouched -- its gradient is a fixed
+        proxy that clim changes never recolor, and its endpoint labels are
+        axes chrome whose rewrite forces a full background recapture per
+        drag step, which is what made large-image drags crawl.  The
+        committed path reapplies colorbar state once on release through
+        its own ``colorbar_state`` comparison.
+        """
 
         selected = np.asarray((low, high), dtype=float)
         if not np.all(np.isfinite(selected)) or selected[0] >= selected[1]:
@@ -3227,22 +3240,6 @@ class MatplotlibRenderer:
             # The artist clim stays authoritative for selector geometry and
             # snapshots in both modes.
             image.set_clim(*limits)
-            mappable = self._artists.get(f"{key}:colorbar_mappable")
-            if mappable is not None:
-                mappable.set_clim(*limits)
-            colorbar = self._artists.get(f"{key}:colorbar")
-            if colorbar is not None:
-                low, high = map(float, selected)
-                colorbar.set_ticks((low, high))
-                label_chars = self.style.render.colorbar_endpoint_label_chars
-                colorbar.set_ticklabels(
-                    (
-                        _compact_engineering(low, length=label_chars),
-                        _compact_engineering(high, length=label_chars),
-                    )
-                )
-                self._artists.pop(f"{key}:colorbar_state", None)
-        self._mark_axes_chrome_dirty(*self._axes.get("colorbar", ()))
 
     @staticmethod
     def _selector_target_for_axis(axis: Any) -> SelectorTarget:

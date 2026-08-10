@@ -379,10 +379,43 @@ class _Plane:
     def __init__(self, front: SignalFront) -> None:
         self.front = front
         self.freezes = 0
+        self.front_signals: frozenset[str] = frozenset()
+
+    def set_front_signals(self, signal_names) -> None:
+        self.front_signals = frozenset(signal_names)
 
     def freeze(self):
         self.freezes += 1
         return self.front
+
+
+def test_board_scheduler_declares_its_port_signals_on_every_tick() -> None:
+    """The reader declares what it reads: the port list IS the front request.
+
+    An undeclared plane builds no lineage components, so every signal floats
+    at its own latest publication -- a camera panel one shot ahead of the
+    panel derived from it.  The scheduler is the sole declaration authority;
+    no membership bookkeeping may exist beside the ports.
+    """
+
+    front = _front()
+    plane = _Plane(front)
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    ports: list[_Port] = [_Port("panel", "camera/frame", interval=100)]
+    clock = HarmonicClock((100, 200, 400, 800), 100)
+    scheduler = BoardScheduler(plane, clock, arbiter, lambda: tuple(ports))
+
+    scheduler.on_tick()
+    assert plane.front_signals == frozenset({"camera/frame"})
+
+    ports.append(_Port("second", "roi/value", interval=100))
+    scheduler.on_tick()
+    assert plane.front_signals == frozenset({"camera/frame", "roi/value"})
+
+    ports.pop(0)
+    scheduler.on_tick()
+    assert plane.front_signals == frozenset({"roi/value"})
 
 
 def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None:

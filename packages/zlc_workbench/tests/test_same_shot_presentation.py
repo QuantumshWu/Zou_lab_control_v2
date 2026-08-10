@@ -68,7 +68,10 @@ class _Bench:
         )
         self.plane.reserve(self.node)
         self.plane.attach(self.node, self.slot)
-        self.plane.set_front_signals({FRAME, OCCUPANCY})
+        # Deliberately NO set_front_signals here: declaring the coherent set
+        # is the scheduler's job on tick.  A bench that declares by hand hides
+        # a board that never does -- which is exactly how the same-shot suite
+        # once passed while the real console presented skewed shots.
         self.publish_shot()  # revision 1 binds the derived route
         root = self.plane.latest_publication(FRAME)
         self.derived_generation = self.plane.bind_continuous_derived(

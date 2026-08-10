@@ -356,6 +356,18 @@ class PanelCardView(FluentGroupBox):
             if event.type() == QtCore.QEvent.Hide:
                 self._settings_drag_offset = None
         if (
+            watched is self._settings_body
+            and event.type() == QtCore.QEvent.LayoutRequest
+        ):
+            # The settings body re-measures whenever ITS OWN layout says its
+            # geometry is stale -- however many layout turns nested rows take
+            # to settle.  A deferred one-shot measurement was a timing guess,
+            # and a guess that lost left the pinned body height short, with
+            # the Edit row painted over the form's last row until the popup
+            # was reopened.  Re-entry terminates: an unchanged measurement
+            # writes nothing and so requests no further layout.
+            self._sync_settings_body_size()
+        if (
             watched is self._surface
             and event.type() == QtCore.QEvent.Wheel
             and not self._selectors_on
@@ -590,7 +602,6 @@ class PanelCardView(FluentGroupBox):
     def _rebuild_settings_form(self) -> None:
         if self._settings_form is not None:
             spec = self._form_spec()
-            structure_changed = self._settings_form.spec.keys != spec.keys
             self._settings_form.reconcile(spec, self._form_values())
             self._settings_form.refresh()
             self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
@@ -602,11 +613,6 @@ class PanelCardView(FluentGroupBox):
                 if key in self._settings_form.spec.keys:
                     self._settings_form.widget_for(key).setEnabled(False)
             self._sync_settings_body_size()
-            if structure_changed:
-                # Nested rows publish their final size on the next Qt layout
-                # turn.  Only a schema change gets that second measurement;
-                # a value edit must never become a layout operation.
-                QtCore.QTimer.singleShot(0, self._sync_settings_body_size)
 
     def _sync_settings_body_size(self) -> None:
         body = self._settings_body
@@ -716,6 +722,9 @@ class PanelCardView(FluentGroupBox):
             self._settings_drag_handle = drag_handle
             self._settings_scroll = scroll
             self._settings_body = body
+            # LayoutRequest-driven measurement: the body says when its own
+            # geometry went stale (see eventFilter).
+            body.installEventFilter(self)
             self._sync_settings_body_size()
             popup.hide()
         anchor = self._settings_anchor

@@ -153,7 +153,14 @@ fit presentation and interaction transforms.
 renderer keeps one cached Agg chrome region — everything except its own
 dynamic artists, their boundary tick marks, grid lines and spines — and a
 payload-, selector- or fit-only change composes the next frame as restore +
-z-ordered dynamic repaint, bit-identical to a full draw. Selector and fit
+z-ordered dynamic repaint, bit-identical to a full draw. Boundary chrome is
+collected through each axis' `_update_ticks()` — the identical position-fresh,
+view-clipped subset a full `Axis.draw` paints — never the raw tick lists,
+which keep stale instances parked outside the view after a limit change and
+would leak mark segments beyond the axes box. During a color-limit drag the
+preview repaints only the image pixels and artist clim; the colorbar (a fixed
+proxy gradient whose endpoint labels are chrome) is reapplied once on commit,
+so a drag step never forces a background recapture. Selector and fit
 artists are part of every composed frame, so no cached background can ever be
 restored over a newer fit. Any text/chrome/layout effect, axes-limit move or
 canvas change marks chrome dirty, which forces a complete Agg draw and a fresh

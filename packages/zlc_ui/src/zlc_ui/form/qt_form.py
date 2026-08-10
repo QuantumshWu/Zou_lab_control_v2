@@ -1179,6 +1179,15 @@ class FluentParameterForm(QtWidgets.QWidget):
                 if order_changed:
                     self._layout.removeWidget(row)
                     self._layout.insertWidget(index, row)
+                    if self.isVisible() and not row.isVisible():
+                        # A row inserted while this form is visible stays
+                        # hidden until the next layout activation, and a
+                        # hidden child is an EMPTY layout item measuring
+                        # zero height.  Anyone sizing a popup right after
+                        # reconcile would pin a height with the new rows
+                        # missing -- and the buttons row then painted over
+                        # the form until the popup was reopened.
+                        row.show()
 
             self._spec = spec
             self._fields = {field.key: field for field in spec.fields}
