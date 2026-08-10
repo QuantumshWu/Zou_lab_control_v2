@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`active — Pylon invalid-grab and physical-camera ownership corrections implemented; lab-machine acceptance pending`
-- Production HEAD at final verification：`Pylon acquisition/ownership phase commit（本提交）；camera-only Init in 1f3e4da；discovery in 17a8d06`
+- Goal status：`active — Pylon invalid-grab and binding ownership corrections implemented; lab-machine acceptance pending`
+- Production HEAD at final verification：`partial-session semantic rollback phase commit（本提交）；Pylon acquisition/ownership in 72bf27a；camera-only Init in 1f3e4da；discovery in 17a8d06`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`Pylon TimeoutHandling_Return 的无帧结果按官方 GrabResultPtr.IsValid() 判定；无外触发时不再对空内部指针调用 GrabSucceeded。物理 camera 在打开后、注册 camera.adapter/读取 working point 失败时立即 close。正式 Init devices 拒绝缺 leaf 的部分 session，并先关闭同 session 已成功设备。`
-- Last completed action：`只修改现有 Pylon read seam、bind_camera ownership seam 与正式 Experiment Init seam；没有新增文件、类、manager 或清理框架。`
+- Current phase：`Pylon TimeoutHandling_Return 的无帧结果按官方 GrabResultPtr.IsValid() 判定；无外触发时不再对空内部指针调用 GrabSucceeded。物理 camera 在打开后、注册 camera.adapter/读取 working point 失败时立即 close。Installation 原有独立 leaf 部分成功语义保持不变。`
+- Last completed action：`确认 Release 顺序本来正确，未作修改；保留已证实的 invalid-result 与 bind-failure cleanup，撤回没有产品依据的 all-or-nothing Init 推断。没有新增文件、类或框架。`
 - Last verified tests：`按用户本轮明确要求未新增、未运行测试；仅 git diff --check 静态范围审计通过。真机枚举只能在实验机手动验收。`
-- Pending acceptance gates：`实验机重新 Init 并启动 Camera Measurement：Line1 未触发时保持 running/暂无帧且不得出现 grabresultptr NULL pointer；有触发时发布 frame。关闭后再次启动并 Init，确认相机可重复打开；任何 Init leaf failure 必须留在 Device Manager 显示精确错误。`
-- Next action：`提交 Pylon acquisition/ownership 修正后停止，由用户在实验机验收。`
+- Pending acceptance gates：`实验机重新 Init 并启动 Camera Measurement：Line1 未触发时保持 running/暂无帧且不得出现 grabresultptr NULL pointer；有触发时发布 frame。若 leaf 初始化失败，既有 session.failures/可用 leaf 语义保持不变。`
+- Next action：`提交 semantic rollback 后停止，由用户在实验机验收。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
