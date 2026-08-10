@@ -77,21 +77,30 @@ def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
             NumericRange(x.lower, x.upper),
             NumericRange(y.lower, y.upper),
             display=False,
+            emit_change=False,
         )
     value = ranges[0]
-    return host.set_x_selector(value.lower, value.upper, display=False)
+    return host.set_x_selector(
+        value.lower,
+        value.upper,
+        display=False,
+        emit_change=False,
+    )
 
 
 def _remove_panel_selection(host: Any, selection: SelectionState) -> object:
     """Remove the same selector kind from the panel's other plot surface."""
 
-    return host.remove_selector(SelectorKind(selection.selector_kind))
+    return host.remove_selector(
+        SelectorKind(selection.selector_kind),
+        emit_change=False,
+    )
 
 
 def _apply_panel_viewport(host: Any, viewport: object | None) -> object:
     if viewport is None:
-        return host.reset_viewport()
-    return host.set_viewport(viewport.x, viewport.y)
+        return host.reset_viewport(emit_change=False)
+    return host.set_viewport(viewport.x, viewport.y, emit_change=False)
 
 
 class _Unbridgeable(Exception):

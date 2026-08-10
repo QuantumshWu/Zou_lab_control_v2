@@ -2856,6 +2856,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         high: float,
         *,
         display: bool = True,
+        emit_change: bool = True,
     ) -> SelectorState:
         value = NumericRange(low, high)
         with self._render_lock:
@@ -2868,11 +2869,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     )
                 elif isinstance(self._spec, PulseTimelinePlot):
                     value = self._pulse_display_range_to_source(value)
-            return self._install_selector_state(SelectorState(
-                SelectorKind.X_RANGE,
-                value,
-                facet_index=self._focused_facet_index,
-            ))
+            return self._install_selector_state(
+                SelectorState(
+                    SelectorKind.X_RANGE,
+                    value,
+                    facet_index=self._focused_facet_index,
+                ),
+                emit_change=emit_change,
+            )
 
     def set_area_selector(
         self,
@@ -2880,6 +2884,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         y: NumericRange,
         *,
         display: bool = True,
+        emit_change: bool = True,
     ) -> SelectorState:
         value = RectangleRange(x, y)
         with self._render_lock:
@@ -2887,11 +2892,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._assert_open()
             if display:
                 value = self._area_display_to_canonical(value)
-            return self._install_selector_state(SelectorState(
-                SelectorKind.AREA,
-                value,
-                facet_index=self._focused_facet_index,
-            ))
+            return self._install_selector_state(
+                SelectorState(
+                    SelectorKind.AREA,
+                    value,
+                    facet_index=self._focused_facet_index,
+                ),
+                emit_change=emit_change,
+            )
 
     def _install_selector_state(
         self,
@@ -3179,7 +3187,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._emit_selection(SelectionChange.COMMITTED, state)
         return state
 
-    def remove_selector(self, kind: SelectorKind) -> SelectorState:
+    def remove_selector(
+        self,
+        kind: SelectorKind,
+        *,
+        emit_change: bool = True,
+    ) -> SelectorState:
         """Remove a selector and notify external subscribers."""
 
         cancelled_fit: Future[FitResult | FacetFitBatchResult] | None = None
@@ -3252,7 +3265,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 fit_cancel.set()
                 if bound_request:
                     live_prepare_cancel.set()
-        self._emit_selection(SelectionChange.REMOVED, state)
+        if emit_change:
+            self._emit_selection(SelectionChange.REMOVED, state)
         if cancelled_fit is not None and not cancelled_fit.done():
             cancelled_fit.set_exception(
                 FitCancelled(f"fit selector removed: {state.kind.value}")
@@ -3524,14 +3538,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self,
         x: NumericRange,
         y: NumericRange,
+        *,
+        emit_change: bool = True,
     ) -> RectangleRange:
         if not isinstance(x, NumericRange) or not isinstance(y, NumericRange):
             raise TypeError("viewport x and y must be NumericRange")
         selected = RectangleRange(x, y)
-        self._set_viewport_state(selected)
+        self._set_viewport_state(selected, emit_change=emit_change)
         return selected
 
-    def _set_viewport_state(self, selected: RectangleRange | None) -> bool:
+    def _set_viewport_state(
+        self,
+        selected: RectangleRange | None,
+        *,
+        emit_change: bool = True,
+    ) -> bool:
         """Commit viewport and fit authority only after their frame draws."""
 
         if selected is not None and not isinstance(selected, RectangleRange):
@@ -3567,6 +3588,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self.redraw_surface()
                 raise
             fit_cancel.set()
+        if not emit_change:
+            return True
         display = selected
         canonical = self._area_display_to_canonical(
             self._current_display_limits() if display is None else display
@@ -3588,8 +3611,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         return True
 
-    def reset_viewport(self) -> None:
-        self._set_viewport_state(None)
+    def reset_viewport(self, *, emit_change: bool = True) -> None:
+        self._set_viewport_state(None, emit_change=emit_change)
 
     def _pulse_display_x_to_source(self, value: float) -> float:
         return float(value) / self._projected._pulse_x_factor()

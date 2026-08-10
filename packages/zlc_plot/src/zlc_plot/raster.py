@@ -456,17 +456,41 @@ class _WorkerSessionAdapter:
     def selector_data(self, kind: SelectorKind) -> object:
         return self._session().selector_data(kind)
 
-    def remove_selector(self, kind: SelectorKind) -> object:
-        return self._session().remove_selector(kind)
+    def remove_selector(self, kind: SelectorKind, *, emit_change: bool = True) -> object:
+        return self._session().remove_selector(kind, emit_change=emit_change)
 
     def set_selector_value(self, kind: SelectorKind, value: object, *, display: bool = True) -> object:
         return self._session().set_selector_value(kind, value, display=display)
 
-    def set_area_selector(self, x: NumericRange, y: NumericRange, *, display: bool = True) -> object:
-        return self._session().set_area_selector(x, y, display=display)
+    def set_area_selector(
+        self,
+        x: NumericRange,
+        y: NumericRange,
+        *,
+        display: bool = True,
+        emit_change: bool = True,
+    ) -> object:
+        return self._session().set_area_selector(
+            x,
+            y,
+            display=display,
+            emit_change=emit_change,
+        )
 
-    def set_x_selector(self, low: float, high: float, *, display: bool = True) -> object:
-        return self._session().set_x_selector(low, high, display=display)
+    def set_x_selector(
+        self,
+        low: float,
+        high: float,
+        *,
+        display: bool = True,
+        emit_change: bool = True,
+    ) -> object:
+        return self._session().set_x_selector(
+            low,
+            high,
+            display=display,
+            emit_change=emit_change,
+        )
 
     def set_threshold_selector(self, value: float, *, display: bool = True) -> object:
         return self._session().set_threshold_selector(value, display=display)
@@ -477,14 +501,20 @@ class _WorkerSessionAdapter:
     def fit(self, model: object, **options: object) -> object:
         return self._session().fit_async(model, **options)
 
-    def set_viewport(self, x: NumericRange, y: NumericRange) -> object:
-        return self._session().set_viewport(x, y)
+    def set_viewport(
+        self,
+        x: NumericRange,
+        y: NumericRange,
+        *,
+        emit_change: bool = True,
+    ) -> object:
+        return self._session().set_viewport(x, y, emit_change=emit_change)
 
     def show_facet_overview(self) -> object:
         return self._session().show_facet_overview()
 
-    def reset_viewport(self) -> object:
-        return self._session().reset_viewport()
+    def reset_viewport(self, *, emit_change: bool = True) -> object:
+        return self._session().reset_viewport(emit_change=emit_change)
 
     def focus_facet(self, index: int) -> object:
         return self._session().focus_facet(index)
@@ -1489,12 +1519,18 @@ class RasterPlotHost:
             _mode=_DispatchMode.CONTROL,
         )
 
-    def remove_selector(self, kind: SelectorKind) -> Future[RasterOperation[SelectorState]]:
+    def remove_selector(
+        self,
+        kind: SelectorKind,
+        *,
+        emit_change: bool = True,
+    ) -> Future[RasterOperation[SelectorState]]:
         if not isinstance(kind, SelectorKind):
             raise TypeError("kind must be SelectorKind")
         return self._dispatch_session(
             self._worker_adapter.remove_selector,
             kind,
+            emit_change=emit_change,
             _mode=_DispatchMode.PUBLISH,
         )
 
@@ -1521,12 +1557,14 @@ class RasterPlotHost:
         y: NumericRange,
         *,
         display: bool = True,
+        emit_change: bool = True,
     ) -> Future[RasterOperation[SelectorState]]:
         return self._dispatch_session(
             self._worker_adapter.set_area_selector,
             x,
             y,
             display=display,
+            emit_change=emit_change,
             _mode=_DispatchMode.PUBLISH,
         )
 
@@ -1536,12 +1574,14 @@ class RasterPlotHost:
         high: float,
         *,
         display: bool = True,
+        emit_change: bool = True,
     ) -> Future[RasterOperation[SelectorState]]:
         return self._dispatch_session(
             self._worker_adapter.set_x_selector,
             low,
             high,
             display=display,
+            emit_change=emit_change,
             _mode=_DispatchMode.PUBLISH,
         )
 
@@ -1786,6 +1826,8 @@ class RasterPlotHost:
         self,
         x: NumericRange,
         y: NumericRange,
+        *,
+        emit_change: bool = True,
     ) -> Future[RasterOperation[RectangleRange]]:
         """Set visible ranges in the current display units."""
 
@@ -1793,6 +1835,7 @@ class RasterPlotHost:
             self._worker_adapter.set_viewport,
             x,
             y,
+            emit_change=emit_change,
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="viewport",
         )
@@ -1841,9 +1884,14 @@ class RasterPlotHost:
             coalesce_key="facet-presentation",
         )
 
-    def reset_viewport(self) -> Future[RasterOperation[None]]:
+    def reset_viewport(
+        self,
+        *,
+        emit_change: bool = True,
+    ) -> Future[RasterOperation[None]]:
         return self._dispatch_session(
             self._worker_adapter.reset_viewport,
+            emit_change=emit_change,
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="viewport",
         )
