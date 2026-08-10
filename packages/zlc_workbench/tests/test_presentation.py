@@ -214,6 +214,47 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
         other.close()
 
 
+def test_publication_for_revision_resolves_bare_integer_revisions(
+    live_bench,
+) -> None:
+    """A fit event names its parent by bare int; snapshots carry DatasetRevision.
+
+    Comparing the raw objects silently never matched, so once a panel had
+    staged a newer frame every trailing fit publication was dropped as
+    superseded — the rolling trace of a fit froze whenever the camera ran
+    faster than the solve, while every other panel kept flowing.
+    """
+
+    from concurrent.futures import Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frame_0")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    revision_object = value.snapshot.block.revision
+    revision_number = value.snapshot.ref.revision.value
+    assert not isinstance(revision_object, int)
+
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda snapshot, **_render: Future(),
+    )
+    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
+    update = port.prepare(value, publication)
+    assert update is not None
+
+    # Pending: the bare integer the fit event carries must resolve.
+    assert port.publication_for_revision(revision_number) is publication
+    assert port.publication_for_revision(revision_object) is publication
+    assert port.publication_for_revision(revision_number + 999) is None
+
+    # Presented: same identity rule after the batch accepted the update.
+    assert port.accept(update, None)
+    assert port.publication_for_revision(revision_number) is publication
+
+
 def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     live_bench,
 ) -> None:

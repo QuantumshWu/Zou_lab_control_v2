@@ -130,6 +130,19 @@ class PlotPanelPort:
 
         return self._presented_input
 
+    @staticmethod
+    def _revision_value(revision: object) -> int | None:
+        """Canonical integer revision for cross-boundary identity.
+
+        The port's snapshots carry ``DatasetRevision`` objects while a fit
+        event names its source by the bare integer value; comparing the raw
+        objects silently never matches, which starved every fit publication
+        whose panel had already staged a newer frame.
+        """
+
+        value = getattr(revision, "value", revision)
+        return value if isinstance(value, int) else None
+
     def publication_for_revision(self, revision: object) -> object | None:
         """The publication whose snapshot carries ``revision``, if held here.
 
@@ -140,12 +153,16 @@ class PlotPanelPort:
         plane-side retention window exists or is needed.
         """
 
-        if revision is None:
+        wanted = self._revision_value(revision)
+        if wanted is None:
             return None
         for prepared in self._pending.values():
-            if _revision_of(prepared.plot_input) == revision:
+            if self._revision_value(_revision_of(prepared.plot_input)) == wanted:
                 return prepared.publication
-        if self._presented is not None and self._shown_revision == revision:
+        if (
+            self._presented is not None
+            and self._revision_value(self._shown_revision) == wanted
+        ):
             return self._presented
         return None
 
