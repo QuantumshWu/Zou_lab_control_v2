@@ -553,7 +553,7 @@ class CameraMeasurementNode:
         timeout = float(self.camera.timeout)
         self.camera.arm(
             None,
-            source_group_sizes=(self.frames_per_cycle,),
+            source_group_sizes=None,
             buffer_frame_count=buffer_frames,
             timeout=timeout,
         )
