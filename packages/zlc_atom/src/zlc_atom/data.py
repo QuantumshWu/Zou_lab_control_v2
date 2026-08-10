@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+import threading
 
 import numpy as np
 from zlc_data import (
@@ -23,6 +25,19 @@ from zlc_data import (
     ValidityContract,
     ValueSchema,
 )
+
+
+#: DatasetSchema instances reused across publications.  A live camera monitor
+#: freezes at up to 10 Hz, and its schema is a pure function of
+#: (producer, signal, roles, repeat size, trailing shape, dtype, unit) when the
+#: caller supplies no explicit axis metadata.  Returning ONE instance per such
+#: key keeps schema identity stable, so the per-instance fingerprint cache and
+#: every downstream schema-fingerprint consumer hit instead of re-hashing per
+#: freeze.  A reconfigure changes the keyed facts and therefore simply selects
+#: another entry; the capacity bound retires abandoned configurations.
+_SCHEMA_CACHE: OrderedDict[tuple, DatasetSchema] = OrderedDict()
+_SCHEMA_CACHE_LOCK = threading.Lock()
+_SCHEMA_CACHE_CAPACITY = 128
 
 
 def snapshot_from_array(
@@ -124,61 +139,93 @@ def snapshot_from_array(
         if not cell_roles:
             tensor = tensor.reshape((repeat_size, point_size, 1))
 
-    point_column = normalized_point_columns.get(SITE)
-    if point_column is None:
-        point_column = PointColumn(
-            AxisId(f"{producer}.{signal}.site"),
-            "site",
-            SITE,
-            PointColumn.NUMERIC,
-            tuple(range(point_size)),
-        )
-    elif len(point_column.values) != point_size:
-        raise ValueError("SITE PointColumn length must match the SITE axis size")
-    point_table = (
-        PointTable(point_size, (point_column,))
-        if SITE in normalized_roles
-        else PointTable(1)
-    )
-    # Implicit coordinates: a spatial axis of a camera frame is indexed 0..n-1,
-    # which is exactly what an AxisSpec means when it carries none.  Writing
-    # them out made every published frame build a 2048-element tuple, validate
-    # each element, and then SHA-256 all of it into the schema fingerprint --
-    # 6.3 ms per frame to say what "no coordinates" already says.
-    cell_axes_list: list[AxisSpec] = []
-    for index, (role, size) in enumerate(
-        zip(cell_roles, cell_shape, strict=True)
+    # A schema built purely from generated metadata is a function of this key
+    # alone, so one instance is reused for every publication of the shape --
+    # explicit axis specs or point columns carry caller-owned metadata and are
+    # built fresh instead.
+    cache_key: tuple | None = None
+    if (
+        not normalized_axis_specs
+        and not normalized_point_columns
+        and (value_unit is None or isinstance(value_unit, str))
     ):
-        axis = normalized_axis_specs.get(role)
-        if axis is None:
-            axis = AxisSpec(
-                AxisId(f"{producer}.{signal}.{index}.{role.value}"),
-                role.value,
-                role,
-                int(size),
-            )
-        elif axis.size != size:
-            raise ValueError(
-                f"explicit {role.value} axis size {axis.size} does not match {size}"
-            )
-        cell_axes_list.append(axis)
-    cell_axes = tuple(cell_axes_list)
-    cell_schema = (
-        ValueSchema(cell_axes, ValidityContract.value(), array.dtype, value_unit)
-        if cell_axes
-        else ValueSchema.scalar(array.dtype, value_unit)
-    )
-    schema = DatasetSchema(
-        AxisSpec(
-            AxisId(f"{producer}.{signal}.repeat"),
-            "repeat",
-            REPEAT,
+        cache_key = (
+            producer,
+            signal,
+            normalized_roles,
             repeat_size,
-        ),
-        point_table,
-        None,
-        cell_schema,
-    )
+            trailing_shape,
+            array.dtype.str,
+            value_unit,
+        )
+    schema: DatasetSchema | None = None
+    if cache_key is not None:
+        with _SCHEMA_CACHE_LOCK:
+            schema = _SCHEMA_CACHE.get(cache_key)
+            if schema is not None:
+                _SCHEMA_CACHE.move_to_end(cache_key)
+    if schema is None:
+        point_column = normalized_point_columns.get(SITE)
+        if point_column is None:
+            point_column = PointColumn(
+                AxisId(f"{producer}.{signal}.site"),
+                "site",
+                SITE,
+                PointColumn.NUMERIC,
+                tuple(range(point_size)),
+            )
+        elif len(point_column.values) != point_size:
+            raise ValueError("SITE PointColumn length must match the SITE axis size")
+        point_table = (
+            PointTable(point_size, (point_column,))
+            if SITE in normalized_roles
+            else PointTable(1)
+        )
+        # Implicit coordinates: a spatial axis of a camera frame is indexed 0..n-1,
+        # which is exactly what an AxisSpec means when it carries none.  Writing
+        # them out made every published frame build a 2048-element tuple, validate
+        # each element, and then SHA-256 all of it into the schema fingerprint --
+        # 6.3 ms per frame to say what "no coordinates" already says.
+        cell_axes_list: list[AxisSpec] = []
+        for index, (role, size) in enumerate(
+            zip(cell_roles, cell_shape, strict=True)
+        ):
+            axis = normalized_axis_specs.get(role)
+            if axis is None:
+                axis = AxisSpec(
+                    AxisId(f"{producer}.{signal}.{index}.{role.value}"),
+                    role.value,
+                    role,
+                    int(size),
+                )
+            elif axis.size != size:
+                raise ValueError(
+                    f"explicit {role.value} axis size {axis.size} does not match {size}"
+                )
+            cell_axes_list.append(axis)
+        cell_axes = tuple(cell_axes_list)
+        cell_schema = (
+            ValueSchema(cell_axes, ValidityContract.value(), array.dtype, value_unit)
+            if cell_axes
+            else ValueSchema.scalar(array.dtype, value_unit)
+        )
+        schema = DatasetSchema(
+            AxisSpec(
+                AxisId(f"{producer}.{signal}.repeat"),
+                "repeat",
+                REPEAT,
+                repeat_size,
+            ),
+            point_table,
+            None,
+            cell_schema,
+        )
+        if cache_key is not None:
+            with _SCHEMA_CACHE_LOCK:
+                _SCHEMA_CACHE[cache_key] = schema
+                _SCHEMA_CACHE.move_to_end(cache_key)
+                while len(_SCHEMA_CACHE) > _SCHEMA_CACHE_CAPACITY:
+                    _SCHEMA_CACHE.popitem(last=False)
     block = DataBlock(
         BlockId(f"{producer}.{signal}"),
         DatasetRevision(int(revision)),

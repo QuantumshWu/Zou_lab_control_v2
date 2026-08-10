@@ -111,9 +111,12 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
         raise TypeError("camera.virtual_mot requires the installation SimulationWorld")
     authored = VIRTUAL_MOT_CAMERA_SCHEMA.project_values(values)
     world = context.world
+    # The real MOT monitor is a Basler read out as Mono8: the pylon adapter
+    # declares and enforces uint8 frames, so the virtual stand-in does too.
     config = VirtualCameraConfig(
         frame_shape_yx=tuple(authored["frame_shape_yx"]),
         exposure_seconds=float(authored["exposure_seconds"]),
+        frame_dtype="|u1",
     )
 
     def render(ordinal: int, *, exposure_seconds: float, occupancy=None):

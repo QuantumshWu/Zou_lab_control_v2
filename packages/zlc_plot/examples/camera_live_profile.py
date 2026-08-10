@@ -27,6 +27,11 @@ from threading import Event, Lock, Thread
 from time import monotonic, perf_counter, sleep
 from typing import Any
 
+# This checkout must win over any installed zlc_* distribution; without the
+# bootstrap a direct run silently profiles whatever pip wired up.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import zou_lab_control_v2  # noqa: F401
+
 import matplotlib
 
 matplotlib.use("Agg", force=True)

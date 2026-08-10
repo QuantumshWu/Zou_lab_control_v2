@@ -292,19 +292,25 @@ def apply_smart_ticks(
     if which not in {"x", "y", "both"}:
         raise ValueError("which must be 'x', 'y', or 'both'")
     if which in ("x", "both"):
-        locator = SmartOffsetLocator(
-            max_ticks=8 if max_ticks_x is None else max_ticks_x
-        )
-        axis.xaxis.set_major_locator(locator)
-        axis.xaxis.set_major_formatter(
-            SmartOffsetFormatter(
-                locator,
-                axis_type="x",
-                offset_xy=(0.9, -0.1),
-                offset_ha="left",
-                offset_va="top",
+        # Reinstalling a locator resets the axis' tick artists, which both
+        # reallocates them every frame and leaves them unpositioned until the
+        # next full Axis draw.  Install once per configuration.
+        signature = ("smart-x", 8 if max_ticks_x is None else int(max_ticks_x))
+        if getattr(axis.xaxis, "_zlc_tick_signature", None) != signature:
+            locator = SmartOffsetLocator(
+                max_ticks=signature[1]
             )
-        )
+            axis.xaxis.set_major_locator(locator)
+            axis.xaxis.set_major_formatter(
+                SmartOffsetFormatter(
+                    locator,
+                    axis_type="x",
+                    offset_xy=(0.9, -0.1),
+                    offset_ha="left",
+                    offset_va="top",
+                )
+            )
+            axis.xaxis._zlc_tick_signature = signature
     if which in ("y", "both"):
         if axis.get_yscale() == "log":
             low, high = sorted(map(float, axis.get_ylim()))
@@ -316,53 +322,68 @@ def apply_smart_ticks(
             # 2..9 ticks remain visual minor guides.
             if decades <= 1.5:
                 major_subs = (1.0, 2.0, 5.0)
-                formatter = ticker.LogFormatter(
-                    base=10.0,
-                    labelOnlyBase=False,
-                )
             else:
                 major_subs = (1.0,)
-                formatter = ticker.LogFormatterMathtext(
-                    base=10.0,
-                    labelOnlyBase=True,
-                )
-            axis.yaxis.set_major_locator(
-                ticker.LogLocator(
-                    base=10.0,
-                    subs=major_subs,
-                    numticks=8 if max_ticks_y is None else max_ticks_y,
-                )
+            signature = (
+                "smart-y-log",
+                8 if max_ticks_y is None else int(max_ticks_y),
+                major_subs,
             )
-            axis.yaxis.set_major_formatter(formatter)
-            axis.yaxis.set_minor_locator(
-                ticker.LogLocator(
-                    base=10.0,
-                    subs=tuple(float(value) for value in range(2, 10)),
-                    numticks=16 if max_ticks_y is None else max(2 * max_ticks_y, 8),
+            if getattr(axis.yaxis, "_zlc_tick_signature", None) != signature:
+                if decades <= 1.5:
+                    formatter = ticker.LogFormatter(
+                        base=10.0,
+                        labelOnlyBase=False,
+                    )
+                else:
+                    formatter = ticker.LogFormatterMathtext(
+                        base=10.0,
+                        labelOnlyBase=True,
+                    )
+                axis.yaxis.set_major_locator(
+                    ticker.LogLocator(
+                        base=10.0,
+                        subs=major_subs,
+                        numticks=signature[1],
+                    )
                 )
-            )
-            axis.yaxis.set_minor_formatter(ticker.NullFormatter())
-            axis.yaxis.get_offset_text().set_visible(False)
+                axis.yaxis.set_major_formatter(formatter)
+                axis.yaxis.set_minor_locator(
+                    ticker.LogLocator(
+                        base=10.0,
+                        subs=tuple(float(value) for value in range(2, 10)),
+                        numticks=(
+                            16 if max_ticks_y is None else max(2 * max_ticks_y, 8)
+                        ),
+                    )
+                )
+                axis.yaxis.set_minor_formatter(ticker.NullFormatter())
+                axis.yaxis.get_offset_text().set_visible(False)
+                axis.yaxis._zlc_tick_signature = signature
         else:
-            locator = SmartOffsetLocator(
-                max_ticks=8 if max_ticks_y is None else max_ticks_y
+            signature = (
+                "smart-y-lin",
+                8 if max_ticks_y is None else int(max_ticks_y),
             )
-            axis.yaxis.set_major_locator(locator)
-            axis.yaxis.set_major_formatter(
-                SmartOffsetFormatter(
-                    locator,
-                    axis_type="y",
-                    offset_xy=(0.0, 1.005),
-                    offset_ha="left",
-                    offset_va="bottom",
+            if getattr(axis.yaxis, "_zlc_tick_signature", None) != signature:
+                locator = SmartOffsetLocator(max_ticks=signature[1])
+                axis.yaxis.set_major_locator(locator)
+                axis.yaxis.set_major_formatter(
+                    SmartOffsetFormatter(
+                        locator,
+                        axis_type="y",
+                        offset_xy=(0.0, 1.005),
+                        offset_ha="left",
+                        offset_va="bottom",
+                    )
                 )
-            )
-            # Do not retain logarithmic minor ticks after switching back to a
-            # linear histogram.  The linear style deliberately has no minor
-            # labels or extra grid generated by this policy.
-            axis.yaxis.set_minor_locator(ticker.NullLocator())
-            axis.yaxis.set_minor_formatter(ticker.NullFormatter())
-            axis.yaxis.get_offset_text().set_visible(True)
+                # Do not retain logarithmic minor ticks after switching back
+                # to a linear histogram.  The linear style deliberately has no
+                # minor labels or extra grid generated by this policy.
+                axis.yaxis.set_minor_locator(ticker.NullLocator())
+                axis.yaxis.set_minor_formatter(ticker.NullFormatter())
+                axis.yaxis.get_offset_text().set_visible(True)
+                axis.yaxis._zlc_tick_signature = signature
 
 
 __all__ = [

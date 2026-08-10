@@ -191,7 +191,7 @@ class PlotLibraryDefaults:
 DEFAULTS = PlotLibraryDefaults(
     style=build_plot_style(),
     layout=_DEFAULT_LAYOUT,
-    live=LiveDefaults((100, 200, 400, 800), 400),
+    live=LiveDefaults((100, 200, 400, 800), 100),
     runtime=RuntimeDefaults(analysis_worker_count=1, shutdown_timeout_ms=5_000),
     interaction=InteractionDefaults(
         pointer_update_interval_ms=30,

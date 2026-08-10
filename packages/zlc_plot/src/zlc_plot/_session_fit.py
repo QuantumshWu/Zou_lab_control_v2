@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future
-from dataclasses import replace
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from threading import Event
+from time import monotonic
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 
 from ._fit_projection import FitProjection, FitSelection
+from ._fit_scene import FitOverlay
 from ._gesture_engine import _SelectorGesture
 from ._session_state import (
     _AcceptedFit,
@@ -23,6 +25,7 @@ from ._session_state import (
 from .fit import (
     FacetFitBatchResult,
     FitCancelled,
+    FitDeadlineExceeded,
     FitModelSpec,
     FitOptions,
     FitResult,
@@ -37,6 +40,41 @@ if TYPE_CHECKING:
 
 FitCallback = Callable[[FitEvent], object]
 
+# Stable warm-start generation for the threshold classifier: its per-cell
+# seeds survive data revisions independently of user fit requests.
+_CLASSIFIER_REQUEST_GENERATION = -1
+
+# Facet cells are solved serially: scipy's trf holds the GIL for these small
+# per-cell problems, and a measured 4-thread pool was ~20% SLOWER than the
+# serial loop (25.9 ms pooled vs 14.2 ms serial for 8x4000-point solves).
+# Raise this only with a measurement showing the pool winning.
+_FACET_FIT_WORKERS = 1
+
+# Synchronous live-fit budget: the solve runs inside the data commit so the
+# overlay lands in the same published front; on deadline the front publishes
+# without it and the asynchronous path takes over.  The floor covers the
+# measured warm 2048^2 solve (~33 ms) after a full-frame draw has consumed
+# most of the refresh interval.
+_LIVE_FIT_MIN_BUDGET_SECONDS = 0.04
+
+_UNRESOLVED_WARM_START: Any = object()
+
+
+class _LiveSelectionCell:
+    """Mutable slot carrying a worker-built live selection to acceptance."""
+
+    __slots__ = ("selection",)
+
+    def __init__(self) -> None:
+        self.selection: FitSelection | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _DeferredStartedFitRequest(_StartedFitRequest):
+    """A live restart whose selection freeze runs inside the solver task."""
+
+    selection_cell: _LiveSelectionCell = field(default_factory=_LiveSelectionCell)
+
 
 class FitSessionMixin:
 
@@ -49,7 +87,9 @@ class FitSessionMixin:
         with self._lock:
             self._fit_batch_revision += 1
             batch_revision = self._fit_batch_revision
-        return replace(result, batch_revision=batch_revision)
+        if isinstance(result, FacetFitBatchResult):
+            return replace(result, batch_revision=batch_revision)
+        return result.with_batch_revision(batch_revision)
 
     def _forget_fit_warm_starts(self, request_generation: int | None) -> None:
         """Drop seeds after any non-normal solve completion."""
@@ -224,8 +264,15 @@ class FitSessionMixin:
         options: FitOptions | None,
         cancelled: Callable[[], bool] | None,
         request_generation: int | None = None,
+        warm_start_as_initial: bool = False,
     ) -> tuple[FacetFitBatchResult, tuple[FitSelection | None, ...]]:
-        """Fit every projected cell and construct overlays through one path."""
+        """Fit every projected cell and construct overlays through one path.
+
+        ``warm_start_as_initial`` (classifier refreshes) solves each cell
+        directly from its previous accepted parameters and falls back to the
+        cold initializer when that solve fails; user fits keep the engine's
+        warm-start-as-extra-candidate semantics.
+        """
 
         if not isinstance(projection._spec, FacetGridPlot):
             raise TypeError("facet batch projection requires FacetGridPlot")
@@ -233,11 +280,21 @@ class FitSessionMixin:
         cells = tuple(getattr(payload, "cells", ()))
         if not cells:
             raise ValueError("facet grid has no cells to fit")
-        results: list[FitResult | None] = []
-        failure_messages: list[str | None] = []
-        overlays: list[object] = []
-        selections: list[FitSelection | None] = []
-        for index, cell in enumerate(cells):
+        # Warm starts are resolved on the calling thread so cell workers never
+        # touch session locks (the classifier solves under the session lock).
+        warm_starts = tuple(
+            self._fit_warm_start(
+                model,
+                None,
+                facet_index=index,
+                request_generation=request_generation,
+            )
+            for index in range(len(cells))
+        )
+
+        def solve_cell(
+            index: int,
+        ) -> tuple[FitResult | None, str | None, FitSelection | None, FitOverlay]:
             if cancelled is not None and bool(cancelled()):
                 raise FitCancelled("facet fit cancelled")
             cell_projection = projection._with_context(
@@ -246,40 +303,80 @@ class FitSessionMixin:
                     focused_facet_index=index,
                 )
             )
+            warm = warm_starts[index]
             try:
                 selection = cell_projection.fit_selection(model)
-                result = self._solve_fit_selection(
-                    cell_projection,
-                    model,
-                    selection,
-                    initial=initial,
-                    bounds=bounds,
-                    options=options,
-                    cancelled=cancelled,
-                    request_generation=request_generation,
-                )
+                if warm_start_as_initial and warm is not None and initial is None:
+                    try:
+                        result = self._solve_fit_selection(
+                            cell_projection,
+                            model,
+                            selection,
+                            initial=warm,
+                            bounds=bounds,
+                            options=options,
+                            cancelled=cancelled,
+                            request_generation=request_generation,
+                            warm_start=None,
+                        )
+                    except FitCancelled:
+                        raise
+                    except Exception:
+                        result = None
+                    if result is None or not result.success:
+                        result = self._solve_fit_selection(
+                            cell_projection,
+                            model,
+                            selection,
+                            initial=None,
+                            bounds=bounds,
+                            options=options,
+                            cancelled=cancelled,
+                            request_generation=request_generation,
+                            warm_start=None,
+                        )
+                else:
+                    result = self._solve_fit_selection(
+                        cell_projection,
+                        model,
+                        selection,
+                        initial=initial,
+                        bounds=bounds,
+                        options=options,
+                        cancelled=cancelled,
+                        request_generation=request_generation,
+                        warm_start=warm,
+                    )
                 overlay = cell_projection._make_fit_overlay(result, selection)
             except FitCancelled:
                 raise
             except Exception as error:
-                results.append(None)
                 message = str(error) or type(error).__name__
-                failure_messages.append(message)
-                selections.append(None)
-                from ._fit_scene import FitOverlay
-
-                overlays.append(
+                return (
+                    None,
+                    message,
+                    None,
                     FitOverlay(
                         success=False,
                         diagnostic=message,
                         facet_index=index,
-                    )
+                    ),
                 )
-            else:
-                results.append(result)
-                failure_messages.append(None)
-                selections.append(selection)
-                overlays.append(overlay)
+            return result, None, selection, overlay
+
+        worker_count = min(_FACET_FIT_WORKERS, len(cells))
+        if worker_count > 1:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="zlc-facet-fit",
+            ) as pool:
+                outcomes = list(pool.map(solve_cell, range(len(cells))))
+        else:
+            outcomes = [solve_cell(index) for index in range(len(cells))]
+        results = [outcome[0] for outcome in outcomes]
+        failure_messages = [outcome[1] for outcome in outcomes]
+        selections = [outcome[2] for outcome in outcomes]
+        overlays = [outcome[3] for outcome in outcomes]
         facet_coordinate = projection._coordinate(projection._spec.facet)
         facet_values = tuple(cell.facet_value_canonical for cell in cells)
         numeric_facet = all(
@@ -373,6 +470,7 @@ class FitSessionMixin:
                 self._fit_context_generation += 1
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
+                self._live_fit_solved_revision = None
                 superseded = self._live_fit_completion
                 self._live_fit_completion = logical_completion if live else None
                 cancellation = Event()
@@ -397,40 +495,40 @@ class FitSessionMixin:
         return started
 
     def _restart_live_fit_for_current_data(self) -> None:
-        """Cancel the previous solve and fit only the data now on screen."""
+        """Cancel the previous solve and fit only the data now on screen.
+
+        The selection freeze runs inside the submitted solver task (guarded by
+        the captured projection and generations), so the render worker never
+        pays for it here.  When the commit-time synchronous solve already
+        accepted a result for the front on screen, there is nothing to do.
+        """
 
         started: _StartedFitRequest | None = None
         with self._render_lock:
             with self._lock:
                 self._assert_open()
-                previous_cancel = self._fit_cancel
                 request = self._live_fit_request
+                if (
+                    request is not None
+                    and getattr(self, "_live_fit_solved_revision", None)
+                    == self._projection.data_revision
+                ):
+                    return
+                previous_cancel = self._fit_cancel
                 self._fit_context_generation += 1
                 context_generation = self._fit_context_generation
                 request_generation = self._fit_request_generation
                 cancellation = Event()
                 self._fit_cancel = cancellation
-                projection = self._projected
                 if request is not None:
-                    selection = None
-                    selectable = True
-                    if not request.all_facets:
-                        try:
-                            selection = projection.fit_selection(
-                                request.model,
-                                selector_kind=request.selector_kind,
-                            )
-                        except (KeyError, TypeError, ValueError):
-                            selectable = False
-                    if selectable:
-                        started = _StartedFitRequest(
-                            request=request,
-                            selection=selection,
-                            projection=projection,
-                            cancellation=cancellation,
-                            context_generation=context_generation,
-                            request_generation=request_generation,
-                        )
+                    started = _DeferredStartedFitRequest(
+                        request=request,
+                        selection=None,
+                        projection=self._projected,
+                        cancellation=cancellation,
+                        context_generation=context_generation,
+                        request_generation=request_generation,
+                    )
             previous_cancel.set()
         if started is not None:
             self._submit_started_fit(
@@ -438,6 +536,115 @@ class FitSessionMixin:
                 live=True,
                 logical_completion=None,
             )
+
+    def _run_live_fit_in_commit(
+        self,
+        commit_started: float,
+    ) -> tuple[_FitResolution | None, FitEvent | None] | None:
+        """Solve the armed live fit into the same front as its data.
+
+        Called by ``commit_live_frame`` under the render lock, after the data
+        presentation transaction and before the front is captured, so an
+        in-budget solve paints its overlay into the very frame it describes.
+        The budget is the live refresh interval minus the time the commit has
+        already spent, floored at ``_LIVE_FIT_MIN_BUDGET_SECONDS``; on
+        deadline the front publishes without the overlay and the asynchronous
+        restart (already warm-started) takes over via ``finalize_live_frame``.
+
+        Returns completion/notification work the caller must run after
+        releasing the render lock (futures and observer callbacks must never
+        resolve under it), or None when nothing was accepted.
+        """
+
+        with self._lock:
+            if self._closed or self._live_fit_request is None:
+                return None
+            request = self._live_fit_request
+            if request.all_facets:
+                return None
+            previous_cancel = self._fit_cancel
+            self._fit_context_generation += 1
+            context_generation = self._fit_context_generation
+            request_generation = self._fit_request_generation
+            cancellation = Event()
+            self._fit_cancel = cancellation
+            projection = self._projected
+        previous_cancel.set()
+        try:
+            selection = projection.fit_selection(
+                request.model,
+                selector_kind=request.selector_kind,
+            )
+        except (KeyError, TypeError, ValueError):
+            # Nothing selectable in this front; the asynchronous restart
+            # would reach the same conclusion, so mark the front handled.
+            self._live_fit_solved_revision = projection.data_revision
+            return None
+        started = _StartedFitRequest(
+            request=request,
+            selection=selection,
+            projection=projection,
+            cancellation=cancellation,
+            context_generation=context_generation,
+            request_generation=request_generation,
+        )
+        interval = self._defaults.live.default_refresh_interval_ms / 1000.0
+        budget = max(
+            interval - (monotonic() - commit_started),
+            _LIVE_FIT_MIN_BUDGET_SECONDS,
+        )
+        base_options = request.options or FitOptions()
+        deadline = (
+            budget
+            if base_options.deadline_seconds is None
+            else min(budget, base_options.deadline_seconds)
+        )
+        options = replace(base_options, deadline_seconds=deadline)
+        try:
+            result = self._solve_fit_selection(
+                projection,
+                request.model,
+                selection,
+                initial=request.initial,
+                bounds=request.bounds,
+                options=options,
+                cancelled=cancellation.is_set,
+                request_generation=request_generation,
+            )
+            result = self._stamp_fit_batch_revision(result)
+        except (FitCancelled, FitDeadlineExceeded):
+            # Publish the data front without the overlay; the asynchronous
+            # path continues the solve on the fit executor.
+            return None
+        except Exception as error:
+            # A solver failure completes this front's solve; the next data
+            # revision is the only automatic retry (matching the async path).
+            self._forget_fit_warm_starts(request_generation)
+            self._live_fit_solved_revision = projection.data_revision
+            failed = self._retire_failed_live_presentation(started, error)
+            return (failed, None) if failed is not None else None
+        try:
+            presentation = self._accept_fit(result, started)
+        except Exception:
+            # The overlay paint failed and rolled itself back; keep the data
+            # front and let the asynchronous restart try again.
+            return None
+        if presentation is None:
+            return None
+        self._live_fit_solved_revision = projection.data_revision
+        resolution: _FitResolution | None = None
+        with self._lock:
+            request_current = (
+                not self._closed
+                and self._live_fit_request is not None
+                and request_generation == self._fit_request_generation
+            )
+            completion = self._live_fit_completion if request_current else None
+            if completion is not None:
+                self._live_fit_completion = None
+        if completion is not None:
+            resolution = _FitResolution(completion, result=result)
+        return resolution, presentation.event
 
     def _prepare_fit_request(
         self,
@@ -516,12 +723,25 @@ class FitSessionMixin:
                 request_generation=started.request_generation,
             )
             return self._stamp_fit_batch_revision(batch)
-        if started.selection is None:
-            raise RuntimeError("a non-facet fit request has no frozen selection")
+        selection = started.selection
+        if selection is None:
+            # Deferred live restart: freeze the selection here, off the
+            # render worker, from the captured immutable projection.
+            try:
+                selection = started.projection.fit_selection(
+                    started.request.model,
+                    selector_kind=started.request.selector_kind,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise FitCancelled(
+                    "live fit selection is unavailable for this revision"
+                ) from error
+            if isinstance(started, _DeferredStartedFitRequest):
+                started.selection_cell.selection = selection
         result = self._solve_fit_selection(
             started.projection,
             started.request.model,
-            started.selection,
+            selection,
             initial=started.request.initial,
             bounds=started.request.bounds,
             options=started.request.options,
@@ -580,13 +800,15 @@ class FitSessionMixin:
         options: FitOptions | None,
         cancelled: Callable[[], bool] | None,
         request_generation: int | None = None,
+        warm_start: Any = _UNRESOLVED_WARM_START,
     ) -> FitResult:
-        warm_start = self._fit_warm_start(
-            model,
-            None,
-            facet_index=selection.facet_index,
-            request_generation=request_generation,
-        )
+        if warm_start is _UNRESOLVED_WARM_START:
+            warm_start = self._fit_warm_start(
+                model,
+                None,
+                facet_index=selection.facet_index,
+                request_generation=request_generation,
+            )
         regular = selection.regular_image
         if regular is not None:
             result = self._fit_engine.fit(
@@ -634,7 +856,13 @@ class FitSessionMixin:
         )
 
     def _refresh_threshold_classifier(self) -> None:
-        """Solve the Distribution classifier without touching accepted fit state."""
+        """Solve the Distribution classifier without touching accepted fit state.
+
+        The solve is synchronous: the threshold overlay publishes in the same
+        front as the data it classifies.  Steady live revisions stay cheap
+        because every cell warm-starts from its previous solution (through the
+        stable classifier request generation) and cells solve in parallel.
+        """
 
         if not self._threshold_classifier_enabled():
             self._classifier_results = ()
@@ -656,22 +884,50 @@ class FitSessionMixin:
                 bounds=None,
                 options=None,
                 cancelled=None,
+                request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                warm_start_as_initial=True,
             )
             results = batch.results
             overlays = batch.overlays
         else:
             selection = projection.fit_selection(model)
-            result = self._solve_fit_selection(
-                projection,
+            warm = self._fit_warm_start(
                 model,
-                selection,
-                initial=None,
-                bounds=None,
-                options=None,
-                cancelled=None,
+                None,
+                facet_index=None,
+                request_generation=_CLASSIFIER_REQUEST_GENERATION,
             )
+            result = None
+            if warm is not None:
+                try:
+                    result = self._solve_fit_selection(
+                        projection,
+                        model,
+                        selection,
+                        initial=warm,
+                        bounds=None,
+                        options=None,
+                        cancelled=None,
+                        request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                        warm_start=None,
+                    )
+                except (ValueError, RuntimeError, FloatingPointError):
+                    result = None
+            if result is None or not result.success:
+                result = self._solve_fit_selection(
+                    projection,
+                    model,
+                    selection,
+                    initial=None,
+                    bounds=None,
+                    options=None,
+                    cancelled=None,
+                    request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                    warm_start=None,
+                )
             results = (result,)
             overlays = (projection._make_fit_overlay(result, selection),)
+        self._remember_classifier_warm_starts(model, results)
         self._classifier_results = tuple(results)
         self._classifier_overlays = tuple(overlays)
         self._classifier_thresholds = tuple(
@@ -684,6 +940,28 @@ class FitSessionMixin:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
         except KeyError:
             pass
+
+    def _remember_classifier_warm_starts(
+        self,
+        model: FitModelSpec,
+        results: Sequence[FitResult | None],
+    ) -> None:
+        """Seed the next classifier refresh from each accepted cell solution."""
+
+        facet = isinstance(self._spec, FacetGridPlot)
+        with self._lock:
+            for index, result in enumerate(results):
+                key = (
+                    _CLASSIFIER_REQUEST_GENERATION,
+                    model.model_id,
+                    index if facet else None,
+                )
+                if result is None or not result.success:
+                    self._fit_warm_starts.pop(key, None)
+                else:
+                    self._fit_warm_starts[key] = tuple(
+                        float(value) for value in result.parameter_values
+                    )
 
     def _classifier_thresholds_for_render(self) -> tuple[float | None, ...]:
         thresholds = list(self._classifier_thresholds)
@@ -973,7 +1251,7 @@ class FitSessionMixin:
         started: _StartedFitRequest,
     ) -> _FitPresentation | None:
         batch = result if isinstance(result, FacetFitBatchResult) else None
-        selection = None if batch is not None else started.selection
+        selection = None if batch is not None else self._started_selection(started)
         result_revision = (
             batch.source_revision
             if batch is not None
@@ -1051,6 +1329,16 @@ class FitSessionMixin:
             accepted,
             previous,
         )
+
+    @staticmethod
+    def _started_selection(started: _StartedFitRequest) -> FitSelection | None:
+        """Return the frozen selection, whether eager or worker-built."""
+
+        if started.selection is not None:
+            return started.selection
+        if isinstance(started, _DeferredStartedFitRequest):
+            return started.selection_cell.selection
+        return None
 
     def _facet_fit_selections(
         self,
@@ -1145,6 +1433,7 @@ class FitSessionMixin:
                 self._live_fit_completion = None
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
+                self._live_fit_solved_revision = None
                 self._live_fit_request = None
                 self._fit_context_generation += 1
                 self._accepted_fit = None

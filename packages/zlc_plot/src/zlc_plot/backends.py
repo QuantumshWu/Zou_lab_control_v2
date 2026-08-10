@@ -1184,7 +1184,10 @@ def _qt5_plot_widget_class() -> type[Any]:
             if delta == 0.0:
                 event.ignore()
                 return
-            self._submit_pointer("scroll", event, step=delta)
+            # Session scroll steps are wheel ticks; Qt reports eighths of a
+            # degree (one notch = 120), so fractional trackpad deltas become
+            # fractional zoom steps rather than full notches.
+            self._submit_pointer("scroll", event, step=delta / 120.0)
             event.accept()
 
         def keyPressEvent(self, event: object) -> None:

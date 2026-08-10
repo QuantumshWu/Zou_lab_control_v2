@@ -514,7 +514,9 @@ class RenderPolicyConfig:
     distribution_bin_divisor: int = 4
     distribution_axis_max_ticks: int = 1
     distribution_guide_alpha: float = 0.3
-    image_distribution_sample_target: int = 200_000
+    # 50 bins x 1000 samples keeps the rail's shape stable while the strided
+    # gather stays ~4x cheaper than the former 200k sweep on megapixel frames.
+    image_distribution_sample_target: int = 50_000
     image_color_padding_fraction: float = 0.10
     image_color_deadband_fraction: float = 0.35
     distribution_count_floor: int = 10

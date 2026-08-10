@@ -48,6 +48,18 @@ def test_non_equivalent_image_uses_anisotropic_fit_and_recovers_center() -> None
         session.close()
 
 
+def test_anisotropic_image_fit_routes_through_the_regular_image_path() -> None:
+    """The separable capability, not a model-id literal, selects the fast path."""
+
+    session = _image_session(x_unit="m", y_unit="s")
+    try:
+        selection = session.fit_selection("anisotropic_gaussian_center")
+        assert selection.regular_image is not None
+        assert selection.regular_image.valid_mask is None
+    finally:
+        session.close()
+
+
 def test_equivalent_image_keeps_radial_catalogue_entry() -> None:
     session = _image_session()
     try:

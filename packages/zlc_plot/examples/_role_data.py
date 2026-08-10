@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 from typing import Any, Mapping
+
+# This checkout must win over any installed zlc_* distribution.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import zou_lab_control_v2  # noqa: F401
 
 import numpy as np
 from zlc_data import (

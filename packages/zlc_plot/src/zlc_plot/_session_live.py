@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 from numbers import Integral
 from threading import Event
+from time import monotonic
 from typing import TYPE_CHECKING, Callable
 
 from zlc_data import OwnedSnapshot
@@ -142,12 +143,23 @@ class LiveSessionMixin:
         self,
         prepared: _PreparedLiveFrame,
     ) -> _LiveFrameFinalization | None:
-        """Atomically install and draw one prepared data frame."""
+        """Atomically install and draw one prepared data frame.
 
+        After the data presentation transaction, and still inside the render
+        lock (so before the frontend captures the front), the armed live fit
+        is solved synchronously under a refresh-interval deadline: an
+        in-budget solve paints its overlay into the same published front as
+        the data it describes.  On deadline the front publishes without the
+        overlay and ``finalize_live_frame`` continues the solve
+        asynchronously exactly as before.
+        """
+
+        commit_started = monotonic()
         if not isinstance(prepared, _PreparedLiveFrame):
             raise TypeError("prepared must be a prepared live frame")
         if prepared.session_identity is not self._session_identity:
             raise ValueError("prepared live frame belongs to another PlotSession")
+        live_fit_work = None
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -198,6 +210,16 @@ class LiveSessionMixin:
                 image_overlay=accepted_image_overlay,
                 accepted_fit=accepted_fit,
             )
+            live_fit_work = self._run_live_fit_in_commit(commit_started)
+        if live_fit_work is not None:
+            # Futures and observer callbacks resolve only after the render
+            # lock is released; the ownership gate is taken inside these
+            # calls, and render-lock-first ordering would invert it.
+            resolution, fit_event = live_fit_work
+            if resolution is not None:
+                self._resolve_fit_completion(resolution)
+            if fit_event is not None:
+                self._notify_fit(fit_event)
         return _LiveFrameFinalization(
             self._session_identity,
             presentation,

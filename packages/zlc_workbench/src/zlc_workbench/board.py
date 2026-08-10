@@ -94,6 +94,17 @@ class LiveBoard:
 
         return self._clock.intervals
 
+    @property
+    def base_interval_ms(self) -> int:
+        """The clock base: the wall-time cadence the beat must be driven at.
+
+        ``HarmonicClock.advance`` credits one base per tick, so every panel's
+        labeled refresh interval is only truthful when the timer that drives
+        the beat fires at exactly this period.
+        """
+
+        return self._clock.base_ms
+
     def tick(self) -> object:
         """Freeze one front and stage whatever is due.  NOT the GUI thread."""
 
@@ -132,8 +143,11 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
 
     if not callable(beat):
         raise TypeError("attach_qt drives a beat, not a board")
+    interval = int(interval_ms)
+    if interval <= 0:
+        raise ValueError("attach_qt interval_ms must be positive")
     timer = QtCore.QTimer()
-    timer.setInterval(int(interval_ms))
+    timer.setInterval(interval)
     timer.timeout.connect(beat)
     timer.start()
     return timer

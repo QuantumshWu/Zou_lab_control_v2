@@ -8,6 +8,7 @@ the renderer cannot silently apply a second independent raster policy.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import math
 from typing import Any
@@ -102,8 +103,25 @@ def _area_mean(
     column_starts: np.ndarray,
 ) -> np.ndarray | np.ma.MaskedArray:
     all_valid = _all_true(valid)
-    source = values if all_valid else np.where(valid, values, 0)
     mean_dtype = np.result_type(values.dtype, np.float32)
+    if all_valid:
+        rows, columns = values.shape
+        row_block = rows // row_starts.size
+        column_block = columns // column_starts.size
+        if (
+            rows == row_block * row_starts.size
+            and columns == column_block * column_starts.size
+        ):
+            # Evenly divisible blocks — the common power-of-two camera case —
+            # reduce with one vectorized reshape mean, several times faster
+            # than the ragged reduceat partition below.
+            return values.reshape(
+                row_starts.size,
+                row_block,
+                column_starts.size,
+                column_block,
+            ).mean(axis=(1, 3), dtype=mean_dtype)
+    source = values if all_valid else np.where(valid, values, 0)
     summed = _reduce_blocks(source, row_starts, column_starts, mean_dtype)
     if all_valid:
         row_counts = np.diff(np.r_[row_starts, values.shape[0]])
@@ -248,4 +266,146 @@ def prepare_image_front(
     )
 
 
-__all__ = ["ImageFrontPolicy", "PreparedImageFront", "prepare_image_front"]
+class ImageFrontStore:
+    """Prepared-front LRU plus a per-revision mip pyramid for one image.
+
+    Wheel zoom and pan change the viewport every step, so the exact-key cache
+    alone misses constantly.  The pyramid serves those misses from a coarser
+    power-of-two level whose 2x2 block means compose exactly with the final
+    area reduction, making gesture-time preparation O(display pixels) instead
+    of O(source pixels).  Masked sources bypass the pyramid: per-level count
+    planes are not worth their complexity for the rare sparse-validity case.
+    """
+
+    _LRU_CAPACITY = 6
+    _MAX_LEVEL = 8
+
+    def __init__(self) -> None:
+        self._fronts: "OrderedDict[tuple, PreparedImageFront]" = OrderedDict()
+        self._pyramid_token: tuple | None = None
+        self._pyramid: dict[int, np.ndarray] = {}
+
+    def prepare(
+        self,
+        values: Any,
+        validity: Any | None,
+        extent: tuple[float, float, float, float],
+        *,
+        x_limits: tuple[float, float],
+        y_limits: tuple[float, float],
+        display_pixel_shape: tuple[int, int],
+        policy: ImageFrontPolicy,
+        revision_token: tuple,
+    ) -> PreparedImageFront:
+        front_key = (
+            revision_token,
+            tuple(map(float, extent)),
+            tuple(map(float, x_limits)),
+            tuple(map(float, y_limits)),
+            tuple(map(int, display_pixel_shape)),
+            policy,
+        )
+        cached = self._fronts.get(front_key)
+        if cached is not None:
+            self._fronts.move_to_end(front_key)
+            return cached
+        source = np.asarray(values)
+        level_values = values
+        level = 1
+        if source.ndim == 2 and source.dtype.kind in "biuf" and (
+            validity is None or _all_true(np.asarray(validity))
+        ):
+            level = self._pick_level(
+                source.shape,
+                extent,
+                x_limits=x_limits,
+                y_limits=y_limits,
+                display_pixel_shape=display_pixel_shape,
+                policy=policy,
+            )
+            if level > 1:
+                level_values = self._level(source, level, revision_token)
+                validity = None
+        prepared = prepare_image_front(
+            level_values,
+            validity,
+            extent,
+            x_limits=x_limits,
+            y_limits=y_limits,
+            display_pixel_shape=display_pixel_shape,
+            policy=policy,
+        )
+        self._fronts[front_key] = prepared
+        while len(self._fronts) > self._LRU_CAPACITY:
+            self._fronts.popitem(last=False)
+        return prepared
+
+    def _pick_level(
+        self,
+        shape: tuple[int, int],
+        extent: tuple[float, float, float, float],
+        *,
+        x_limits: tuple[float, float],
+        y_limits: tuple[float, float],
+        display_pixel_shape: tuple[int, int],
+        policy: ImageFrontPolicy,
+    ) -> int:
+        rows, columns = shape
+        left, right, bottom, top = (float(value) for value in extent)
+        column_start, column_stop = _index_window(
+            float(x_limits[0]), float(x_limits[1]), left, right, columns
+        )
+        row_start, row_stop = _index_window(
+            float(y_limits[0]), float(y_limits[1]), top, bottom, rows
+        )
+        display_width, display_height = display_pixel_shape
+        row_block = (row_stop - row_start) / max(1, int(display_height))
+        column_block = (column_stop - column_start) / max(1, int(display_width))
+        block = min(row_block, column_block)
+        level = 1
+        # Stay at least two source samples per display pixel after leveling so
+        # the authored minimum-reduction policy still decides the final step.
+        while (
+            level * 2 <= self._MAX_LEVEL
+            and block / (level * 2) >= max(2.0, policy.minimum_reduction_ratio)
+            and rows % (level * 2) == 0
+            and columns % (level * 2) == 0
+        ):
+            level *= 2
+        return level
+
+    def _level(
+        self,
+        source: np.ndarray,
+        level: int,
+        revision_token: tuple,
+    ) -> np.ndarray:
+        if self._pyramid_token != revision_token:
+            self._pyramid_token = revision_token
+            self._pyramid = {}
+        cached = self._pyramid.get(level)
+        if cached is not None:
+            return cached
+        previous_level = 1
+        previous = source
+        for built_level in sorted(self._pyramid):
+            if built_level < level:
+                previous_level, previous = built_level, self._pyramid[built_level]
+        while previous_level < level:
+            rows, columns = previous.shape
+            mean_dtype = np.result_type(previous.dtype, np.float32)
+            previous = previous.reshape(
+                rows // 2, 2, columns // 2, 2
+            ).mean(axis=(1, 3), dtype=mean_dtype)
+            previous_level *= 2
+            previous.setflags(write=False)
+            self._pyramid[previous_level] = previous
+        return previous
+
+
+__all__ = [
+    "ImageFrontPolicy",
+    "ImageFrontStore",
+    "PreparedImageFront",
+    "prepare_image_front",
+]

@@ -22,6 +22,10 @@ from pathlib import Path
 import sys
 from typing import Any, Callable
 
+# This checkout must win over any installed zlc_* distribution.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import zou_lab_control_v2  # noqa: F401
+
 import numpy as np
 
 try:

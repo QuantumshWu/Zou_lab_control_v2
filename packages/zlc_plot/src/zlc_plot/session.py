@@ -1009,7 +1009,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         if not isinstance(data, OwnedSnapshot):
             return
-        projection._build_view(eager_flatten=False)
+        projection._build_view()
         view = projection._view
         assert view is not None
         handler_for(spec).validate(view, spec)

@@ -479,10 +479,13 @@ for one compact parameter annotation in the upper-left of each FacetGrid
 overview cell. The annotation uses the same value/uncertainty formatter as the
 focused full annotation, including the parameter symbol, standard error and
 display unit. Cell titles remain the facet identity only.
-`FitModelSpec.capabilities` declares optional solver paths. The regular-image
-radial path is selected by the `regular_image_radial` capability bit, not by a
-model id or evaluator identity, so a compatible registered model can provide the
-same specialized contract explicitly.
+`FitModelSpec.capabilities` declares optional solver paths. The specialized
+regular-image path is selected by capability bit — `regular_image_radial` for
+the radial model, `regular_image_separable` for separable per-axis models such
+as the built-in anisotropic Gaussian — never by model id or evaluator
+identity, so a compatible registered model can provide the same specialized
+contract explicitly. A model with neither capability takes the general
+coordinate-expansion solver.
 `session.fit_models` returns only models compatible with the current semantic
 plot and coordinate units, with the default first. The same filtered tuple is
 available asynchronously through `plot_host.fit_models()`; Notebook and GUI

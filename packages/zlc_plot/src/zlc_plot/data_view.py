@@ -352,13 +352,6 @@ class FacetData:
 @dataclass(frozen=True, slots=True)
 class _ResolvedAxis:
     coordinate: CoordinateArray
-    # ``CoordinateArray`` deliberately keeps broadcast tensor views for
-    # renderers.  Projection grouping is flat and hot, however; flattening a
-    # stride-zero broadcast view inside every domain call materializes a full
-    # array repeatedly.  Resolve owns the one materialization and all domain
-    # consumers reuse these immutable planes.
-    canonical_flat: NDArray[Any] | None
-    indices_flat: NDArray[np.int64] | None
     domain_canonical: NDArray[Any]
     domain_display: NDArray[Any]
     coordinate_labels: tuple[str, ...] | None
@@ -386,7 +379,6 @@ class DataView:
         "_samples",
         "_axis_cache",
         "_flat_cache",
-        "_eager_flatten",
     )
 
     def __init__(
@@ -396,7 +388,6 @@ class DataView:
         axis_display_units: Mapping[AxisRef, str | Unit] | None = None,
         value_display_unit: str | Unit | None = None,
         unit_registry: UnitRegistry | None = None,
-        eager_flatten: bool = True,
     ) -> None:
         if not isinstance(snapshot, OwnedSnapshot):
             raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
@@ -416,8 +407,6 @@ class DataView:
             raise TypeError("axis_display_units keys must be AxisRef objects")
         if unit_registry is not None and not isinstance(unit_registry, UnitRegistry):
             raise TypeError("unit_registry must be UnitRegistry or None")
-        if not isinstance(eager_flatten, bool):
-            raise TypeError("eager_flatten must be bool")
         registry = unit_registry or DEFAULT_UNITS
         value_canonical_unit = schema_value_unit(schema, registry)
         value_display = (
@@ -449,7 +438,6 @@ class DataView:
             AxisRef,
             tuple[NDArray[Any], NDArray[np.int64]],
         ] = {}
-        self._eager_flatten = eager_flatten
         self._samples = SampleProjection(
             revision=snapshot_revision(snapshot),
             generation=snapshot_generation(snapshot),
@@ -1207,22 +1195,22 @@ class DataView:
         positions: NDArray[np.int64],
     ) -> _Domain:
         resolved = self._resolve(ref)
+        # ``CoordinateArray`` keeps broadcast tensor views for renderers.
+        # Grouping is flat and hot, so the one materialization lives in this
+        # cache and every domain call reuses the immutable planes.
         cached_flat = self._flat_cache.get(ref)
         if cached_flat is None:
-            if resolved.canonical_flat is None or resolved.indices_flat is None:
-                cached_flat = (
-                    _readonly(np.array(resolved.coordinate.canonical, copy=True).reshape(-1)),
-                    _readonly(
-                        np.array(
-                            resolved.coordinate.indices,
-                            dtype=np.int64,
-                            copy=True,
-                        ).reshape(-1)
-                    ),
-                )
-                self._flat_cache[ref] = cached_flat
-            else:
-                cached_flat = (resolved.canonical_flat, resolved.indices_flat)
+            cached_flat = (
+                _readonly(np.array(resolved.coordinate.canonical, copy=True).reshape(-1)),
+                _readonly(
+                    np.array(
+                        resolved.coordinate.indices,
+                        dtype=np.int64,
+                        copy=True,
+                    ).reshape(-1)
+                ),
+            )
+            self._flat_cache[ref] = cached_flat
         canonical, indices_flat = cached_flat
         selected = canonical[positions]
         coordinate_valid = _finite_coordinate(selected)
@@ -1406,18 +1394,6 @@ class DataView:
         )
         resolved = _ResolvedAxis(
             coordinate=coordinate,
-            canonical_flat=(
-                _readonly(np.array(canonical_full, copy=True).reshape(-1))
-                if self._eager_flatten
-                else None
-            ),
-            indices_flat=(
-                _readonly(
-                    np.array(index_full, dtype=np.int64, copy=True).reshape(-1)
-                )
-                if self._eager_flatten
-                else None
-            ),
             domain_canonical=_readonly(domain_canonical),
             domain_display=_readonly(display_domain),
             coordinate_labels=(

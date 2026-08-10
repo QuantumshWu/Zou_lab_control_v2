@@ -136,6 +136,43 @@ def test_external_gate_can_only_shorten_the_camera_working_point() -> None:
     assert [record.image.shape for record in records] == [(6, 8)] * 3
 
 
+def test_virtual_camera_clips_into_its_declared_dtype() -> None:
+    """The producer clips in place into the configured unsigned pixel format.
+
+    The one per-frame copy is the CameraFrameRecord bytes snapshot, made on
+    the producer thread; the reused clip buffer therefore must never leak
+    into a published record.
+    """
+
+    source = np.array([[300, -5], [7, 260]], dtype=np.int64)
+    camera = VirtualCamera(
+        VirtualCameraConfig(frame_shape_yx=(2, 2), frame_dtype="|u1"),
+        frame_source=lambda _ordinal, _exposure: source,
+    )
+    assert camera.frame_dtype == np.dtype("|u1")
+    camera.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=1.0)
+    camera.trigger(2)
+    first, second = camera.read_frame_records(2, timeout=1.0, exact=True)
+    camera.finish_record_capture()
+    for record in (first, second):
+        assert record.image.dtype.str == "|u1"
+        np.testing.assert_array_equal(
+            record.image, np.array([[255, 0], [7, 255]], dtype=np.uint8)
+        )
+        with pytest.raises(ValueError):
+            record.image[0, 0] = 1
+    assert (
+        first.image.__array_interface__["data"][0]
+        != second.image.__array_interface__["data"][0]
+    )
+
+    with pytest.raises(ValueError, match="unsigned integer"):
+        VirtualCamera(
+            VirtualCameraConfig(frame_shape_yx=(2, 2), frame_dtype="<f8"),
+            frame_source=lambda _ordinal, _exposure: source,
+        )
+
+
 def test_camera_frame_record_copies_reusable_storage() -> None:
     source = np.zeros((2, 2), dtype=np.uint16)
     record = CameraFrameRecord(source, 0, host_received_at_ns=1)

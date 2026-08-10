@@ -43,10 +43,32 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval-ms",
         type=int,
-        default=100,
-        help="TaskConsole event-loop beat in milliseconds (default: 100)",
+        default=None,
+        help=(
+            "TaskConsole event-loop beat in milliseconds "
+            "(default: the display clock base, 100)"
+        ),
     )
     return parser
+
+
+def _beat_interval_ms(presenter, interval_ms) -> int:
+    """The Qt beat cadence: the display clock's base unless overridden.
+
+    ``HarmonicClock.advance`` credits one clock base per beat, so the wall-time
+    truth of every panel's labeled refresh interval requires the timer to fire
+    at exactly that base.  Driving it from an independent constant silently
+    rescaled every label -- a beat of 200 ms made a "400 ms" panel refresh at
+    800 ms.  An explicit override remains an operator diagnostic and is
+    validated rather than guessed at.
+    """
+
+    if interval_ms is None:
+        return int(presenter.board.base_interval_ms)
+    value = int(interval_ms)
+    if value <= 0:
+        raise ValueError("interval_ms must be positive")
+    return value
 
 
 def open_experiment(workspace=None, template=None):
@@ -119,7 +141,7 @@ class ExperimentGuiFlow:
         *,
         workspace=None,
         template=None,
-        interval_ms=200,
+        interval_ms=None,
         window_ratio=None,
     ) -> None:
         from ..session import Workspace
@@ -127,7 +149,11 @@ class ExperimentGuiFlow:
         self.space = Workspace(workspace) if workspace is not None else Workspace.discover()
         self.template = template
         self.catalog = None
-        self.interval_ms = int(interval_ms)
+        # None means "the display clock base", resolved once a presenter with
+        # a board exists; an explicit value must at least be a real cadence.
+        self.interval_ms = None if interval_ms is None else int(interval_ms)
+        if self.interval_ms is not None and self.interval_ms <= 0:
+            raise ValueError("interval_ms must be positive")
         self.window_ratio = window_ratio
         self.devices = None
         self.session = None
@@ -198,7 +224,9 @@ class ExperimentGuiFlow:
                 presenter.beat()
                 pulse.presenter.refresh_run_state()
 
-            timer = attach_qt(beat, interval_ms=self.interval_ms)
+            timer = attach_qt(
+                beat, interval_ms=_beat_interval_ms(presenter, self.interval_ms)
+            )
             console.presenter = presenter
             console.session = session
             console.set_close_guard(self._console_close_guard)
@@ -296,7 +324,7 @@ def create_experiment_flow(
     *,
     workspace=None,
     template=None,
-    interval_ms=200,
+    interval_ms=None,
     window_ratio=None,
 ) -> ExperimentGuiFlow:
     """Open the v1-shaped experiment entry without entering Qt's event loop."""
@@ -313,7 +341,7 @@ def create_console_window(
     *,
     workspace=None,
     template=None,
-    interval_ms=200,
+    interval_ms=None,
     window_ratio=None,
 ):
     """Open only TaskConsole for notebook and acceptance-capture callers.
@@ -325,6 +353,8 @@ def create_console_window(
 
     from ..board import attach_qt
 
+    if interval_ms is not None and int(interval_ms) <= 0:
+        raise ValueError("interval_ms must be positive")
     _space, session = open_experiment(workspace, template)
     # The window is opened by build_console, through zlc_ui's one entry: this
     # layer composes and wires, and no longer knows what a window is made of.
@@ -332,8 +362,11 @@ def create_console_window(
         session,
         window_ratio=window_ratio,
     )
-    # The presenter's beat, not the board's: the board is one step of it.
-    timer = attach_qt(presenter.beat, interval_ms=interval_ms)
+    # The presenter's beat, not the board's: the board is one step of it, and
+    # the cadence is the display clock's own base unless explicitly overridden.
+    timer = attach_qt(
+        presenter.beat, interval_ms=_beat_interval_ms(presenter, interval_ms)
+    )
 
     def _release():
         """Release owners in order, never closing devices under a live node."""
@@ -381,7 +414,7 @@ def create_window(
     *,
     workspace=None,
     template=None,
-    interval_ms=200,
+    interval_ms=None,
     window_ratio=None,
 ):
     """Compatibility entry for callers that explicitly request one console."""

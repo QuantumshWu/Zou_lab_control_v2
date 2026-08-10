@@ -3,10 +3,11 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from test_facet_live_fit import _facet_snapshot, _spec
-from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
+from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, PlotSession
 from zlc_plot.fit import FacetFitBatchResult, FitResult
 from zlc_plot.fit import FitEngine
 
@@ -139,6 +140,125 @@ def test_live_warm_start_keeps_the_facet_result_within_solver_tolerance() -> Non
             )
     finally:
         warm_session.close()
+
+
+def _bimodal_snapshot(*, revision: int = 0) -> DatasetSnapshot:
+    rng = np.random.default_rng(3 + revision)
+    values = np.concatenate(
+        (rng.normal(-2.0, 0.6, 150), rng.normal(2.0, 0.7, 150))
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=values.size),
+        PointTable.from_columns({"sample": (0.0,)}),
+        dtype=np.float64,
+        generation="classifier-warm",
+    )
+    return DatasetSnapshot(schema, values[:, None], revision=revision)
+
+
+def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
+    """Classifier seeds persist under a stable generation across refreshes."""
+
+    session = PlotSession(
+        _bimodal_snapshot(),
+        HistogramPlot(),
+        parameters={"threshold_classifier": True},
+    )
+    try:
+        assert len(session._classifier_thresholds) == 1
+        assert session._classifier_thresholds[0] is not None
+        key = (-1, "bimodal_gaussian", None)
+        assert key in session._fit_warm_starts
+        seeded = session._fit_warm_starts[key]
+        first_threshold = session._classifier_thresholds[0]
+        session._refresh_threshold_classifier()
+        # The warm refresh re-solves from the prior solution; the threshold
+        # is reproducible to the classifier's own scalar-optimizer tolerance.
+        assert session._classifier_thresholds[0] == pytest.approx(
+            first_threshold, rel=1e-2, abs=1e-3
+        )
+        assert session._fit_warm_starts[key] == pytest.approx(
+            seeded, rel=1e-3, abs=1e-6
+        )
+    finally:
+        session.close()
+
+
+def test_live_fit_overlay_lands_in_the_same_committed_front() -> None:
+    """The armed live fit solves inside commit: no finalize, no polling."""
+
+    session = PlotSession(
+        _dense_facet_snapshot(),
+        CurvePlot(AxisRef.point("x")),
+    )
+    try:
+        first = session.fit("gaussian_offset", live=True)
+        assert first.success
+        prepared = session.prepare_live_frame(
+            _dense_facet_snapshot(revision=1, scale=1.001)
+        ).result(timeout=10.0)
+        finalization = session.commit_live_frame(prepared)
+        assert finalization is not None
+        accepted = session.last_fit
+        assert isinstance(accepted, FitResult)
+        assert accepted.source_revision == 1
+        assert session.fit_status == "current"
+        # finalize must not schedule a second solve for the same front
+        session.finalize_live_frame(finalization)
+        assert session.last_fit is accepted
+    finally:
+        session.close()
+
+
+class _DeadlineOnceFitEngine(_RecordingFitEngine):
+    """Raise FitDeadlineExceeded for exactly one solve, then delegate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deadline_next = False
+
+    def fit(self, model, coordinates, observations=None, **kwargs):  # type: ignore[no-untyped-def]
+        if self.deadline_next:
+            self.deadline_next = False
+            from zlc_plot.fit import FitDeadlineExceeded
+
+            raise FitDeadlineExceeded("forced live-fit deadline")
+        return super().fit(model, coordinates, observations, **kwargs)
+
+
+def test_live_fit_deadline_falls_back_to_the_async_path() -> None:
+    """A deadline publishes the data front and the executor finishes the fit."""
+
+    engine = _DeadlineOnceFitEngine()
+    session = PlotSession(
+        _dense_facet_snapshot(),
+        CurvePlot(AxisRef.point("x")),
+        fit_engine=engine,
+    )
+    try:
+        first = session.fit("gaussian_offset", live=True)
+        assert first.success
+        engine.deadline_next = True
+        prepared = session.prepare_live_frame(
+            _dense_facet_snapshot(revision=1, scale=1.001)
+        ).result(timeout=10.0)
+        finalization = session.commit_live_frame(prepared)
+        assert finalization is not None
+        # The synchronous attempt hit its deadline: the data front published
+        # without a revision-1 overlay.
+        lagging = session.last_fit
+        assert isinstance(lagging, FitResult)
+        assert lagging.source_revision == 0
+        session.finalize_live_frame(finalization)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            result = session.last_fit
+            if result is not None and result.source_revision == 1:
+                break
+            time.sleep(0.005)
+        assert session.last_fit.source_revision == 1
+    finally:
+        session.close()
 
 
 def test_fit_warm_cache_is_cleared_after_solver_exception() -> None:

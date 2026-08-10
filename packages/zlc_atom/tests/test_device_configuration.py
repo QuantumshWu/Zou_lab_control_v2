@@ -185,6 +185,8 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
         point = mot_camera.capture_working_point()
         assert point.sensor_shape_yx == (1200, 1920)
         assert point.acquisition_mode == "FREE_RUNNING"
+        # The real MOT monitor is a Basler read out as Mono8.
+        assert point.dtype.str == "|u1"
         mot_camera.configure_measurement(
             exposure_seconds=0.05,
             roi_xywh=(100, 50, 320, 240),
@@ -198,6 +200,7 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
         record = mot_camera.read_frame_records(1, timeout=2.0, exact=True)[0]
         assert installation.world.fire_count == 0
         assert record.image.shape == (240, 320)
+        assert record.image.dtype.str == "|u1"
         assert float(np.std(record.image)) > 0.0
         mot_camera.finish_record_capture()
     finally:

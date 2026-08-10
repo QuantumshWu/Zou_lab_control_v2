@@ -20,10 +20,16 @@ from .world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
 
 @dataclass(frozen=True)
 class VirtualCameraConfig:
-    """Geometry and exposure only; imaging physics belongs to SimulationWorld."""
+    """Geometry, exposure and pixel format; imaging physics belongs to SimulationWorld.
+
+    ``frame_dtype`` states the sensor's native unsigned pixel format, exactly
+    as the real adapters do: the qCMOS site camera reads out Mono16 (``<u2``)
+    and the Basler MOT monitor reads out Mono8 (``|u1``).
+    """
 
     frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
     exposure_seconds: float = 0.02
+    frame_dtype: str = "<u2"
 
 
 class VirtualCamera:
@@ -44,6 +50,14 @@ class VirtualCamera:
             raise ValueError("frame_shape_yx must contain two positive dimensions")
         if float(self.config.exposure_seconds) <= 0:
             raise ValueError("exposure_seconds must be positive")
+        dtype = np.dtype(self.config.frame_dtype)
+        if dtype.kind != "u":
+            raise ValueError("frame_dtype must be an unsigned integer dtype")
+        self._frame_dtype = dtype
+        self._frame_limits = np.iinfo(dtype)
+        #: Reused per-frame clip target; CameraFrameRecord makes the one
+        #: immutable bytes copy, so reuse never aliases a published frame.
+        self._clip_buffer: np.ndarray | None = None
         self._frame_source = frame_source
         self._free_running = bool(free_running)
         self._condition = threading.Condition()
@@ -70,7 +84,7 @@ class VirtualCamera:
 
     @property
     def frame_dtype(self) -> np.dtype:
-        return np.dtype("<u2")
+        return self._frame_dtype
 
     def capture_working_point(self) -> CameraWorkingPoint:
         with self._condition:
@@ -235,7 +249,22 @@ class VirtualCamera:
                     raise TypeError("virtual frame source must return an integer image")
                 x, y, width, height = roi
                 image = image[y : y + height, x : x + width]
-                image = np.clip(image, 0, np.iinfo(np.uint16).max).astype("<u2", copy=False)
+                # One in-place clip into a reused buffer instead of a fresh
+                # clip+astype allocation per frame; CameraFrameRecord then
+                # snapshots the buffer into immutable bytes -- the single
+                # per-frame copy, made here on the producer thread, which
+                # every downstream freeze retains as a view.
+                buffer = self._clip_buffer
+                if buffer is None or buffer.shape != image.shape:
+                    buffer = np.empty(image.shape, dtype=self._frame_dtype)
+                    self._clip_buffer = buffer
+                np.clip(
+                    image,
+                    self._frame_limits.min,
+                    self._frame_limits.max,
+                    out=buffer,
+                    casting="unsafe",
+                )
                 with self._condition:
                     if stop.is_set() or not self._armed:
                         break
@@ -246,7 +275,7 @@ class VirtualCamera:
                     ):
                         self._accepting = False
                     record = CameraFrameRecord(
-                        image,
+                        buffer,
                         ordinal,
                         self._produced_count,
                         ordinal,

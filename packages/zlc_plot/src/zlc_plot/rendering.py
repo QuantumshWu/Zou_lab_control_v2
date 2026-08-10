@@ -20,7 +20,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 
-from ._image_raster import PreparedImageFront, prepare_image_front
+from ._image_raster import ImageFrontStore, PreparedImageFront
 from ._fit_scene import FitOverlay, FitPolyline
 from ._kinds import handler_for
 from ._rendering.pulse import update_pulse_timeline
@@ -565,6 +565,14 @@ class MatplotlibRenderer:
         self._image_overlay: ImagePointOverlay | None = None
         self._image_overlay_signature: tuple[object, ...] | None = None
         self._data_revision: int | None = None
+        #: Cached Agg chrome region (everything except renderer-owned dynamic
+        #: artists) and the canvas signature it was captured for.  Payload-only
+        #: presents restore it and repaint just the dynamic artists; any
+        #: chrome-dirty axes, layout/text/chrome effect or canvas change forces
+        #: a fresh full draw and recapture, so a stale background can never be
+        #: published.
+        self._background_region: Any = None
+        self._background_signature: tuple[object, ...] | None = None
         #: The finite range of the image currently drawn, and the arrays it was
         #: measured from.  The range is a function of the data alone -- it
         #: cannot change when the viewport does -- yet it was rescanned on every
@@ -865,13 +873,16 @@ class MatplotlibRenderer:
                 model_id=frame.fit_model_id,
             )
             self._update_image_point_overlay(payload, frame.image_overlay, state)
-            image_blitted = (
-                base_changed
-                and not bool(selected_effects & RenderEffect.LAYOUT)
-                and self._try_image_axis_blit()
+            self._compose_frame(
+                chrome_stable=not bool(
+                    selected_effects
+                    & (
+                        RenderEffect.LAYOUT
+                        | RenderEffect.TEXT
+                        | RenderEffect.CHROME
+                    )
+                )
             )
-            if not image_blitted:
-                self.draw()
 
     def _capture_home_limits(self, axis: Any) -> None:
         semantic = (
@@ -935,76 +946,137 @@ class MatplotlibRenderer:
         with style_context(self.style):
             self._native_draw(self._figure.canvas)
             self._chrome_dirty_axes.clear()
+            # A direct full draw bakes dynamic artists into the buffer, so any
+            # previously captured chrome-only region is no longer current.
+            self._background_region = None
             self._raster_generation += 1
 
-    def _try_image_axis_blit(self) -> bool:
-        """Paint image artists separately without caching any old scene."""
+    def _dynamic_artists(self) -> list[tuple[tuple[int, float, int], Any]]:
+        """Every artist this renderer owns, keyed for full-draw-exact stacking.
 
-        from matplotlib.image import AxesImage
+        Axes-owned text chrome (tick labels, titles, axis labels, colorbar
+        internals) is deliberately absent: it forms the cached background.
+        Each entry's key is ``(figure axes index, effective zorder, insertion
+        sequence)``: a full draw composes one axes at a time, sorts within it
+        by zorder with child order breaking ties, and paints tick marks and
+        grid lines when their owning Axis draws — at the Axis' zorder, not
+        their own.
+        """
 
-        canvas = self._figure.canvas
-        blit = getattr(canvas, "blit", None)
-        get_renderer = getattr(canvas, "get_renderer", None)
-        if not callable(blit) or not callable(get_renderer):
-            return False
-        image_artists = tuple(
-            artist
-            for artist in self._artists.values()
-            if isinstance(artist, AxesImage)
-        )
-        image_artists = tuple(
-            artist for artist in image_artists if getattr(artist, "axes", None) is not None
-        )
-        if not image_artists:
-            return False
-        axes = tuple(dict.fromkeys(artist.axes for artist in image_artists))
-        dynamic: list[Any] = list(image_artists)
+        from matplotlib.artist import Artist
+
+        figure_axes = list(self._figure.axes)
+        axes_order = {id(axes): index for index, axes in enumerate(figure_axes)}
+        fallback_order = len(figure_axes)
+        collected: list[tuple[tuple[int, float, int], Any]] = []
+        seen: set[int] = set()
+
+        def keyed(artist: Any, owner: Any, zorder: float) -> None:
+            if id(artist) in seen:
+                return
+            seen.add(id(artist))
+            collected.append(
+                (
+                    (
+                        axes_order.get(id(owner), fallback_order),
+                        float(zorder),
+                        len(collected),
+                    ),
+                    artist,
+                )
+            )
 
         def add(value: Any) -> None:
-            if isinstance(value, (tuple, list)):
+            if isinstance(value, (tuple, list, set)):
                 for item in value:
                     add(item)
                 return
             if (
-                value is not None
-                and getattr(value, "axes", None) in axes
-                and callable(getattr(value, "draw", None))
-                and value not in dynamic
+                isinstance(value, Artist)
+                and getattr(value, "axes", None) is not None
             ):
-                dynamic.append(value)
+                keyed(value, value.axes, value.get_zorder())
 
-        add(self._fit_artists)
+        for value in self._artists.values():
+            add(value)
         for values in self._selector_artists.values():
             add(values)
-        add(self._artists.get("image:points"))
-        add(self._artists.get("image:point-labels"))
-        previous_animated = tuple(
-            (artist, bool(artist.get_animated()))
-            for artist in dynamic
-            if callable(getattr(artist, "get_animated", None))
+        add(self._fit_artists)
+        for lines, threshold_line, label in self._classifier_artists.values():
+            add(lines)
+            add(threshold_line)
+            add(label)
+        if self._fit_source_scatter is not None:
+            add(self._fit_source_scatter)
+        for axes in figure_axes:
+            add(axes.get_legend())
+        # Boundary chrome draws ABOVE low-z data in a full draw, so it must
+        # be composed beside the data rather than captured: tick children
+        # carry ``axes=None`` in Matplotlib, hence ownership and stacking
+        # position are supplied here.  Outside-the-box text (tick labels,
+        # titles) stays in the background and is painted exactly once.
+        for axes in {entry[1].axes for entry in tuple(collected)}:
+            for axis in (axes.xaxis, axes.yaxis):
+                axis_z = float(axis.get_zorder())
+                for line in axis.get_gridlines():
+                    keyed(line, axes, axis_z)
+                for minor in (False, True):
+                    for line in axis.get_ticklines(minor=minor):
+                        keyed(line, axes, axis_z)
+            for spine in axes.spines.values():
+                keyed(spine, axes, spine.get_zorder())
+        return collected
+
+    def _compose_frame(self, *, chrome_stable: bool) -> None:
+        """Compose one complete frame, reusing the cached chrome background.
+
+        The published buffer is always complete: either a plain full draw, or
+        the captured chrome region with every dynamic artist repainted in
+        z-order.  Limit moves, text/chrome/layout effects and colorbar edits
+        all mark axes chrome-dirty or drop ``chrome_stable``, which forces the
+        capture path, so a stale background can never reach a front.
+        """
+
+        canvas = self._figure.canvas
+        restore = getattr(canvas, "restore_region", None)
+        capture = getattr(canvas, "copy_from_bbox", None)
+        get_renderer = getattr(canvas, "get_renderer", None)
+        if not (callable(restore) and callable(capture) and callable(get_renderer)):
+            self.draw()
+            return
+        signature = (
+            id(canvas),
+            int(round(float(self._figure.bbox.width))),
+            int(round(float(self._figure.bbox.height))),
         )
-        try:
-            for artist, _previous in previous_animated:
-                artist.set_animated(True)
-            self._native_draw(canvas)
+        dynamics = self._dynamic_artists()
+        reusable = (
+            chrome_stable
+            and self._background_region is not None
+            and self._background_signature == signature
+            and not self._chrome_dirty_axes
+        )
+        with style_context(self.style):
+            if not reusable:
+                visibility = [
+                    (artist, artist.get_visible()) for _key, artist in dynamics
+                ]
+                try:
+                    for artist, _visible in visibility:
+                        artist.set_visible(False)
+                    self._native_draw(canvas)
+                finally:
+                    for artist, visible in visibility:
+                        artist.set_visible(visible)
+                self._background_region = capture(self._figure.bbox)
+                self._background_signature = signature
+                self._chrome_dirty_axes.clear()
+            restore(self._background_region)
             renderer = get_renderer()
-            for artist in sorted(
-                dynamic,
-                key=lambda item: float(item.get_zorder()),
-            ):
+            for _key, artist in sorted(dynamics, key=lambda entry: entry[0]):
                 if artist.get_visible():
-                    artist.set_animated(False)
                     artist.draw(renderer)
-            for axis in axes:
-                if axis.get_visible():
-                    blit(axis.bbox)
-            self._chrome_dirty_axes.clear()
-            return True
-        except Exception:
-            return False
-        finally:
-            for artist, previous in previous_animated:
-                artist.set_animated(previous)
+        self._raster_generation += 1
 
     @staticmethod
     def _native_draw(canvas: Any) -> None:
@@ -1030,7 +1102,7 @@ class MatplotlibRenderer:
         self._selector_candidate = None
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-        self.draw()
+        self._compose_frame(chrome_stable=True)
         return True
 
     def begin_color_limit_gesture(self, candidate: ColorLimitCandidate) -> bool:
@@ -1042,7 +1114,7 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-        self.draw()
+        self._compose_frame(chrome_stable=True)
         return True
 
     def preview_selector(self, state: SelectorState) -> bool:
@@ -1055,7 +1127,7 @@ class MatplotlibRenderer:
         self._selector_candidate = state
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-        self.draw()
+        self._compose_frame(chrome_stable=True)
         return True
 
     def preview_color_limit_candidate(self, candidate: ColorLimitCandidate) -> bool:
@@ -1068,7 +1140,7 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-        self.draw()
+        self._compose_frame(chrome_stable=True)
         return True
 
     def _update_plot(self, payload: Any, state: DisplayState) -> None:
@@ -1679,8 +1751,14 @@ class MatplotlibRenderer:
 
         policy = self.style.render
         cmap_name = str(state["colormap"])
-        cmap = matplotlib.colormaps[cmap_name].copy()
-        cmap.set_bad(self.style.palette.bad)
+        cmap_cache_key = (cmap_name, self.style.palette.bad)
+        cached_cmap = self._artists.get("image:cmap_cache")
+        if cached_cmap is not None and cached_cmap[0] == cmap_cache_key:
+            cmap = cached_cmap[1]
+        else:
+            cmap = matplotlib.colormaps[cmap_name].copy()
+            cmap.set_bad(self.style.palette.bad)
+            self._artists["image:cmap_cache"] = (cmap_cache_key, cmap)
         interpolation = str(state["interpolation"])
         mapping_state = (cmap_name, interpolation, color_limits)
         mapping_key = f"{key}:mapping_state"
@@ -1723,34 +1801,29 @@ class MatplotlibRenderer:
             max(1, round(float(axes.bbox.width))),
             max(1, round(float(axes.bbox.height))),
         )
-        front_key = (
-            self._data_revision,
-            id(values),
-            values.shape,
-            values.strides,
-            values.dtype.str,
-            tuple(map(float, extent)),
-            tuple(map(float, x_limits)),
-            tuple(map(float, y_limits)),
-            display_pixel_shape,
-            policy.image_front,
+        store_key = f"{key}:front_store"
+        store = self._artists.get(store_key)
+        if not isinstance(store, ImageFrontStore):
+            store = ImageFrontStore()
+            self._artists[store_key] = store
+        prepared: PreparedImageFront = store.prepare(
+            values,
+            valid,
+            extent,
+            x_limits=tuple(map(float, x_limits)),
+            y_limits=tuple(map(float, y_limits)),
+            display_pixel_shape=display_pixel_shape,
+            policy=policy.image_front,
+            revision_token=(
+                self._data_revision,
+                id(values),
+                values.shape,
+                values.strides,
+                values.dtype.str,
+            ),
         )
-        front_cache_key = f"{key}:prepared_front"
-        cached_front = self._artists.get(front_cache_key)
-        if cached_front is not None and cached_front[0] == front_key:
-            prepared: PreparedImageFront = cached_front[1]
-        else:
-            prepared = prepare_image_front(
-                values,
-                valid,
-                extent,
-                x_limits=x_limits,
-                y_limits=y_limits,
-                display_pixel_shape=display_pixel_shape,
-                policy=policy.image_front,
-            )
-            self._artists[front_cache_key] = (front_key, prepared)
 
+        applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
         if image is None:
             image = axes.imshow(
@@ -1765,9 +1838,14 @@ class MatplotlibRenderer:
                 vmax=None if color_limits is None else color_limits[1],
             )
             self._artists[key] = image
+            self._artists[applied_key] = prepared
         else:
-            image.set_data(prepared.values)
-            image.set_extent(prepared.extent)
+            if self._artists.get(applied_key) is not prepared:
+                # ``set_data`` copies the front; skip it when the artist
+                # already holds this exact prepared object (cache hit).
+                image.set_data(prepared.values)
+                image.set_extent(prepared.extent)
+                self._artists[applied_key] = prepared
             if previous_mapping is None or previous_mapping[0] != cmap_name:
                 image.set_cmap(cmap)
             if previous_mapping is None or previous_mapping[1] != interpolation:
@@ -2162,8 +2240,14 @@ class MatplotlibRenderer:
 
         if self._facet_focus_index is None:
             for index, axis in enumerate(axes):
-                axis.set_position(self.plan.axes[index].box.matplotlib_bounds())
-                axis.set_visible(index < self._visible_facet_count)
+                bounds = self.plan.axes[index].box.matplotlib_bounds()
+                # ``set_position`` invalidates the axes transform stack even
+                # for an identical box; skip the per-frame no-op.
+                if tuple(axis.get_position().bounds) != tuple(bounds):
+                    axis.set_position(bounds)
+                visible = index < self._visible_facet_count
+                if axis.get_visible() != visible:
+                    axis.set_visible(visible)
             return
         selected_index = self._facet_focus_index
         bounds = facet_focus_box(self.plan).matplotlib_bounds()
@@ -2408,14 +2492,28 @@ class MatplotlibRenderer:
                 length=2,
             )
             row, column = divmod(index, columns)
+            # Locator installs reset the axis' tick artists, so each branch
+            # runs only when its configuration actually changed; a reset tick
+            # is unpositioned until the next full Axis draw.
             if column:
-                axis.set_yticks([])
+                y_signature = ("facet-y-empty",)
+                if getattr(axis.yaxis, "_zlc_tick_signature", None) != y_signature:
+                    axis.set_yticks([])
+                    axis.yaxis._zlc_tick_signature = y_signature
             else:
-                axis.yaxis.set_major_locator(MaxNLocator(nbins=3, prune="both"))
-                axis.yaxis.set_major_formatter(ScalarFormatter())
-                axis.tick_params(axis="y", labelleft=True)
+                y_signature = ("facet-y-major",)
+                if getattr(axis.yaxis, "_zlc_tick_signature", None) != y_signature:
+                    axis.yaxis.set_major_locator(
+                        MaxNLocator(nbins=3, prune="both")
+                    )
+                    axis.yaxis.set_major_formatter(ScalarFormatter())
+                    axis.tick_params(axis="y", labelleft=True)
+                    axis.yaxis._zlc_tick_signature = y_signature
             if row < rows - 1 and index + columns < len(cells):
-                axis.set_xticks([])
+                x_signature = ("facet-x-empty",)
+                if getattr(axis.xaxis, "_zlc_tick_signature", None) != x_signature:
+                    axis.set_xticks([])
+                    axis.xaxis._zlc_tick_signature = x_signature
             else:
                 low, high = axis.get_xlim()
                 interior = tuple(
@@ -2433,9 +2531,12 @@ class MatplotlibRenderer:
                     if interior
                     else ()
                 )
-                axis.xaxis.set_major_locator(FixedLocator(picked))
-                axis.xaxis.set_major_formatter(ScalarFormatter())
-                axis.tick_params(axis="x", labelbottom=True)
+                x_signature = ("facet-x-fixed", picked)
+                if getattr(axis.xaxis, "_zlc_tick_signature", None) != x_signature:
+                    axis.xaxis.set_major_locator(FixedLocator(picked))
+                    axis.xaxis.set_major_formatter(ScalarFormatter())
+                    axis.tick_params(axis="x", labelbottom=True)
+                    axis.xaxis._zlc_tick_signature = x_signature
 
         outer_labels = (("x", outer_x, 0.5, 0.012, 0.0), ("y", outer_y, 0.008, 0.5, 90.0))
         for name, value, x_pos, y_pos, rotation in outer_labels:
@@ -3496,10 +3597,11 @@ class MatplotlibRenderer:
                 self._facet_fit_topologies.pop(index)
             )
             self._remove_artists(artists)
+            removed_ids = {id(removed) for removed in artists}
             self._fit_artists[:] = [
                 artist
                 for artist in self._fit_artists
-                if all(artist is not removed for removed in artists)
+                if id(artist) not in removed_ids
             ]
         for overlay in overlays:
             index = overlay.facet_index
@@ -3517,10 +3619,11 @@ class MatplotlibRenderer:
                 if topology is not None:
                     old_artists = topology[4]
                     self._remove_artists(old_artists)
+                    removed_ids = {id(removed) for removed in old_artists}
                     self._fit_artists[:] = [
                         artist
                         for artist in self._fit_artists
-                        if all(artist is not removed for removed in old_artists)
+                        if id(artist) not in removed_ids
                     ]
                 self._fit_slots = {}
                 first = len(self._fit_artists)

@@ -76,20 +76,27 @@ def test_replace_spec_and_rolling_projection_have_bounded_cost() -> None:
         rolling.close()
 
 
-def test_resolved_axis_materializes_one_flat_plane_for_domains() -> None:
-    """A broadcast coordinate is flattened once during resolution, not per group."""
+def test_flat_planes_materialize_lazily_and_exactly_once() -> None:
+    """Grouping flattens a broadcast coordinate on first use, then reuses it.
+
+    Axis resolution itself must NOT materialize the full-shape planes: the
+    dense image path never groups, and eagerly copying two full-size planes
+    per resolved axis once cost ~150 ms per 2048^2 live frame.
+    """
 
     snapshot = _scan_snapshot(points=80, sites=12)
     view = DataView(snapshot)
     ref = AxisRef.data("site")
-    resolved = view._resolve(ref)
-    assert resolved.canonical_flat.ndim == 1
-    assert resolved.indices_flat.ndim == 1
-    assert resolved.canonical_flat.flags.owndata
-    canonical_id = id(resolved.canonical_flat)
-    indices_id = id(resolved.indices_flat)
+    view._resolve(ref)
+    assert view._flat_cache == {}
     positions = np.arange(snapshot.block.values.size, dtype=np.int64)
+    view._domain(ref, positions)
+    canonical, indices = view._flat_cache[ref]
+    assert canonical.ndim == 1
+    assert indices.ndim == 1
+    assert canonical.flags.owndata
     for _ in range(12):
         view._domain(ref, positions)
-    assert id(view._resolve(ref).canonical_flat) == canonical_id
-    assert id(view._resolve(ref).indices_flat) == indices_id
+    cached_canonical, cached_indices = view._flat_cache[ref]
+    assert cached_canonical is canonical
+    assert cached_indices is indices

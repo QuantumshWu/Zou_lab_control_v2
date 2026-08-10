@@ -45,6 +45,64 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     assert float(np.var(dark)) > 0.0
 
 
+def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
+    """The MOT monitor renders like the Basler it stands in for: Mono8.
+
+    The spot is separable and Poisson samples are drawn only inside the
+    +/-8 sigma window, so everything outside that window must be pure
+    offset-plus-read-noise -- and the loaded spot must still rise far above
+    it at the wobbling center.
+    """
+
+    world = SimulationWorld(seed=7)
+    site_count = len(world.geometry.site_centers_xy)
+    world.set_occupancy(np.ones(site_count, dtype=bool))
+    frame = world.render_mot_frame(0, frame_shape_yx=(400, 640))
+    assert frame.dtype == np.dtype("|u1")
+    assert frame.shape == (400, 640)
+
+    # At ordinal 0 the wobble puts the center at (y, x) = (206, 320).
+    spot = frame[203:210, 317:324].astype(float)
+    assert float(np.mean(spot)) > 60.0
+
+    # 8 sigma_x is ~136 px and 8 sigma_y is ~68 px: the left margin and the
+    # top margin are outside the sampling window, so they carry only the
+    # offset-7 read-noise floor (truncation shifts its mean to ~6.5).
+    for margin in (frame[:, :150], frame[:120, :]):
+        values = margin.astype(float)
+        assert float(np.mean(values)) == pytest.approx(6.5, abs=0.3)
+        assert float(np.std(values)) == pytest.approx(1.5, abs=0.3)
+        assert int(np.max(margin)) < 20
+
+    world.set_occupancy(np.zeros(site_count, dtype=bool))
+    empty = world.render_mot_frame(0, frame_shape_yx=(400, 640))
+    assert float(np.mean(empty.astype(float))) == pytest.approx(6.5, abs=0.3)
+    assert int(np.max(empty)) < 20
+
+
+def test_mot_frames_are_seed_deterministic_and_wobble_with_the_ordinal() -> None:
+    def frames(seed: int) -> tuple[np.ndarray, np.ndarray]:
+        world = SimulationWorld(seed=seed)
+        world.set_occupancy(np.ones(len(world.geometry.site_centers_xy), dtype=bool))
+        return (
+            world.render_mot_frame(0, frame_shape_yx=(200, 320)),
+            world.render_mot_frame(9, frame_shape_yx=(200, 320)),
+        )
+
+    first_a, first_b = frames(5)
+    second_a, second_b = frames(5)
+    np.testing.assert_array_equal(first_a, second_a)
+    np.testing.assert_array_equal(first_b, second_b)
+
+    # The spot center wobbles with the ordinal, so its centroid moves.
+    def centroid_y(frame: np.ndarray) -> float:
+        weights = np.clip(frame.astype(float) - 12.0, 0.0, None)
+        rows = np.arange(frame.shape[0], dtype=float)
+        return float(np.sum(rows * np.sum(weights, axis=1)) / np.sum(weights))
+
+    assert abs(centroid_y(first_a) - centroid_y(first_b)) > 2.0
+
+
 def test_virtual_sites_have_repeatable_efficiency_and_psf_diversity() -> None:
     world = SimulationWorld(seed=4)
     efficiency = world.site_efficiency

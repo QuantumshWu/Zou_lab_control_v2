@@ -149,16 +149,19 @@ and presents the transaction once. This is why a label edit can repaint glyphs
 without rebuilding data, while a unit edit atomically updates axes, selectors,
 fit presentation and interaction transforms.
 
-`RenderFrame.effects` is the complete internal invalidation contract. Text,
-chrome, selector and fit changes mutate their persistent artists and end in one
-complete Agg draw; there is no cached selector/text background that can be
-restored over a newer fit. For an image payload-only update the renderer may
-exclude the image artist from the axis draw and paint that artist once with the
-axis blit API, but the resulting buffer is still one complete front. The
-	NotebookView consumes that complete `RasterFront`; the browser only blits it
-	and normalizes pointer input, so no second renderer or diff protocol can expose
-	a partial frame. `CHROME` is separate because grid, colorbar visibility and axis
-	presentation invalidate more than text glyphs.
+`RenderFrame.effects` is the complete internal invalidation contract. The
+renderer keeps one cached Agg chrome region — everything except its own
+dynamic artists, their boundary tick marks, grid lines and spines — and a
+payload-, selector- or fit-only change composes the next frame as restore +
+z-ordered dynamic repaint, bit-identical to a full draw. Selector and fit
+artists are part of every composed frame, so no cached background can ever be
+restored over a newer fit. Any text/chrome/layout effect, axes-limit move or
+canvas change marks chrome dirty, which forces a complete Agg draw and a fresh
+background capture before the next reuse; either path publishes one complete
+front. The NotebookView consumes that complete `RasterFront`; the browser only
+blits it and normalizes pointer input, so no second renderer or diff protocol
+can expose a partial frame. `CHROME` is separate because grid, colorbar
+visibility and axis presentation invalidate more than text glyphs.
 
 ## Static and live are the same model
 

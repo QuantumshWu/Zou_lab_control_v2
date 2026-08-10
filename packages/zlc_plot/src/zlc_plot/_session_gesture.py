@@ -377,26 +377,28 @@ class GestureSessionMixin:
         axes = self._axis_for_transform(interaction_transform)
         if axes is not self._renderer.primary_axes:
             return
-        point = interaction_transform.display_point(
-            event,
-            self._renderer.figure.canvas,
-        )
-        coordinates = None if point is None else (point.x, point.y)
-        if coordinates is None:
+        # Zoom against the axes' CURRENT limits, not the painted snapshot the
+        # frontend sampled: a queued tick must compound onto the previous one
+        # instead of re-deriving the same stale target and short-circuiting.
+        try:
+            inverted = axes.transData.inverted().transform(
+                (float(event.x), float(event.y))
+            )
+            center_x, center_y = float(inverted[0]), float(inverted[1])
+        except Exception:
             return
-        center_x, center_y = coordinates
+        if not (math.isfinite(center_x) and math.isfinite(center_y)):
+            return
         zoom_factor = self._defaults.interaction.wheel_zoom_factor
-        factor = zoom_factor if direction == "up" else 1.0 / zoom_factor
-        x_axes = NumericRange(
-            *(
-                interaction_transform.x_limits
-            )
-        )
-        y_axes = NumericRange(
-            *(
-                interaction_transform.y_limits
-            )
-        )
+        # ``step`` carries accumulated wheel ticks (positive = up); one tick
+        # reproduces the historical single-notch factor exactly, a coalesced
+        # burst compounds it.
+        ticks = float(getattr(event, "step", 0.0))
+        if ticks == 0.0:
+            ticks = 1.0 if direction == "up" else -1.0
+        factor = zoom_factor ** ticks
+        x_axes = NumericRange(*sorted(map(float, axes.get_xlim())))
+        y_axes = NumericRange(*sorted(map(float, axes.get_ylim())))
         zoomed_x = NumericRange(
             center_x + (x_axes.low - center_x) * factor,
             center_x + (x_axes.high - center_x) * factor,
@@ -513,6 +515,14 @@ class GestureSessionMixin:
         return state, handle
 
     def _coordinate_bounds(self, ref: AxisRef) -> NumericRange:
+        # The 1-D canonical domain carries the same extremes as the broadcast
+        # coordinate tensor without materializing megapixels per call.
+        view = self._projected._view
+        if view is not None:
+            domain = np.asarray(view._resolve(ref).domain_canonical, dtype=float)
+            finite = domain[np.isfinite(domain)]
+            if finite.size:
+                return NumericRange(float(np.min(finite)), float(np.max(finite)))
         values = np.asarray(self._projected._coordinate(ref).canonical, dtype=float)
         finite = values[np.isfinite(values)]
         return NumericRange(float(np.min(finite)), float(np.max(finite)))

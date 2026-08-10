@@ -422,6 +422,20 @@ class NotebookView:
         self._pointer_serial = 0
         self._consumed_serial = -1
         self._kernel_lock = threading.RLock()
+        # Latest-only front handoff: packet building and the ipywidgets comm
+        # send cost milliseconds per multi-megabyte frame, and running them on
+        # the raster worker (where subscribe_front callbacks execute) would
+        # block the next render.  A dedicated sender drains the newest front;
+        # a burst of promotions collapses to one send.
+        self._send_condition = threading.Condition(threading.Lock())
+        self._pending_front: RasterFront | None = None
+        self._sender_stopped = False
+        self._sender = threading.Thread(
+            target=self._send_fronts,
+            name="zlc-notebook-front-sender",
+            daemon=True,
+        )
+        self._sender.start()
 
     @property
     def session(self) -> "PlotSession":
@@ -486,7 +500,23 @@ class NotebookView:
             widget.frame_packet = _front_packet(front)
 
     def _on_front(self, front: RasterFront) -> None:
-        self._schedule(lambda: self._publish_front(front))
+        with self._send_condition:
+            self._pending_front = front
+            self._send_condition.notify()
+
+    def _send_fronts(self) -> None:
+        while True:
+            with self._send_condition:
+                while self._pending_front is None and not self._sender_stopped:
+                    self._send_condition.wait()
+                if self._sender_stopped:
+                    return
+                front = self._pending_front
+                self._pending_front = None
+            # ``_schedule`` documents why direct invocation is correct from
+            # any thread; the sequence guard in ``_publish_front`` drops any
+            # frame a newer send already superseded.
+            self._schedule(lambda: self._publish_front(front))
 
     def _axis_for(self, front: RasterFront, x: float, y: float) -> AxisTransform | None:
         for axis in front.interaction.axes:
@@ -668,6 +698,11 @@ class NotebookView:
         if self._front_release is not None:
             self._front_release()
         self._front_release = None
+        with self._send_condition:
+            self._sender_stopped = True
+            self._pending_front = None
+            self._send_condition.notify()
+        self._sender.join(timeout=5.0)
         if self._display_handle is not None and self._front is not None:
             # Closing the widget model removes every live view from the
             # Notebook, which blanks the cell output.  Replace the widget

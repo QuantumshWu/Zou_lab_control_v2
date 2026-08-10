@@ -329,7 +329,12 @@ def _labels_coalesce(
 
 
 def _pointer_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object | None:
-    return "pointer-motion" if args[0] == "move" else None
+    action = args[0]
+    if action == "move":
+        return "pointer-motion"
+    if action == "scroll":
+        return "pointer-scroll"
+    return None
 
 @dataclass(slots=True)
 class _WorkerTask:
@@ -594,6 +599,11 @@ class RasterPlotHost:
         self._worker_adapter = _WorkerSessionAdapter(self)
         self._condition = Condition(Lock())
         self._pending: deque[_WorkerTask] = deque()
+        #: Wheel ticks accumulated across coalesced scroll tasks.  The one
+        #: surviving scroll task drains the whole sum, so a fast wheel burst
+        #: renders once with the combined magnitude instead of queueing one
+        #: full render per tick.
+        self._scroll_steps = 0.0
         self._closing = False
         self._closed = False
         self._ready = False
@@ -1745,6 +1755,17 @@ class RasterPlotHost:
 
         def apply() -> object:
             session = self._require_session()
+            effective_step = step
+            if selected_action == "scroll":
+                # Drain before any currency check can raise, so rejected
+                # contexts cannot leak accumulated ticks into a later gesture.
+                with self._condition:
+                    effective_step = self._scroll_steps
+                    self._scroll_steps = 0.0
+                if effective_step == 0.0:
+                    # A newer coalesced scroll task already drained the
+                    # accumulated ticks; nothing is left to apply.
+                    return session._raster_pointer_state(publish_front=False)
             effective_identity = identity
             effective_axes = axes
             effective_interaction = interaction
@@ -1811,11 +1832,14 @@ class RasterPlotHost:
                 y_value,
                 button=button,
                 double=double,
-                step=step,
+                step=effective_step,
                 key=key,
                 axes_snapshot=effective_axes,
             )
 
+        if selected_action == "scroll":
+            with self._condition:
+                self._scroll_steps += float(step)
         return self._dispatch_session(
             apply,
             _mode=_DispatchMode.ADAPTIVE,

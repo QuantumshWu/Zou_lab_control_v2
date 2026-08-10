@@ -483,6 +483,8 @@ def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None
             notify=lambda: woken.append(1),
         )
         try:
+            # The cadence the Qt beat must be driven at: the clock's own base.
+            assert board.base_interval_ms == 100
             deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline and port.presented_publication() is None:
                 sequencer.fire()

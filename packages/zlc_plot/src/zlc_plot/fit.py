@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 import math
 from numbers import Real
@@ -37,6 +37,12 @@ BoundsInitializer = Callable[
 Jacobian = Callable[..., np.ndarray]
 
 _FIT_RSS_TIE_RELATIVE = 1e-10
+
+# Capability bits that route RegularImageFitInput to the separable
+# stripe/BLAS solver in ``_fit_radial`` instead of coordinate expansion.
+_REGULAR_IMAGE_CAPABILITIES = frozenset(
+    {"regular_image_radial", "regular_image_separable"}
+)
 
 
 class FitCancelled(RuntimeError):
@@ -600,6 +606,52 @@ def _readonly(array: np.ndarray) -> np.ndarray:
     return np.frombuffer(source.tobytes(order="C"), dtype=source.dtype).reshape(source.shape)
 
 
+class _DeferredFitData:
+    """One shared loader for lazily materialized per-observation fit arrays.
+
+    The regular-image solver retains only its fit input and the solved
+    parameters; ``fitted_values``, ``residuals`` and ``selected_indices`` are
+    computed on first access and cached, so accepting a fit never copies three
+    full-image planes inside the presentation transaction.
+    """
+
+    __slots__ = ("_loader", "_lock", "_arrays")
+
+    def __init__(
+        self,
+        loader: Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]],
+    ) -> None:
+        if not callable(loader):
+            raise TypeError("deferred fit data requires a callable loader")
+        self._loader: (
+            Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]] | None
+        ) = loader
+        self._lock = threading.Lock()
+        self._arrays: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+    def arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        with self._lock:
+            if self._arrays is None:
+                assert self._loader is not None
+                fitted, residuals, indices = self._loader()
+                fitted = _readonly(
+                    np.asarray(fitted, dtype=np.float64).reshape(-1)
+                )
+                residuals = _readonly(
+                    np.asarray(residuals, dtype=np.float64).reshape(-1)
+                )
+                indices = _readonly(
+                    np.asarray(indices, dtype=np.int64).reshape(-1)
+                )
+                if fitted.shape != residuals.shape or indices.shape != fitted.shape:
+                    raise ValueError(
+                        "deferred fit arrays must have one shared shape"
+                    )
+                self._arrays = (fitted, residuals, indices)
+                self._loader = None
+            return self._arrays
+
+
 def _numeric_fit_columns(
     columns: Mapping[str, np.ndarray],
     names: tuple[str, ...],
@@ -794,13 +846,31 @@ class FitResult:
         else:
             covariance = np.full((count, count), np.nan, dtype=np.float64)
             errors = np.full(count, np.nan, dtype=np.float64)
-        fitted = np.asarray(self.fitted_values, dtype=np.float64).reshape(-1)
-        residuals = np.asarray(self.residuals, dtype=np.float64).reshape(-1)
-        if fitted.shape != residuals.shape:
-            raise ValueError("fitted values and residuals must have equal shape")
-        indices = np.asarray(self.selected_indices, dtype=np.int64).reshape(-1)
-        if indices.shape != fitted.shape:
-            raise ValueError("selected indices must identify every fitted observation")
+        deferred = (
+            _FIT_RESULT_RAW["fitted_values"].__get__(self, type(self))
+            if _FIT_RESULT_RAW
+            else self.fitted_values
+        )
+        if isinstance(deferred, _DeferredFitData):
+            raw_residuals = _FIT_RESULT_RAW["residuals"].__get__(self, type(self))
+            raw_indices = _FIT_RESULT_RAW["selected_indices"].__get__(
+                self, type(self)
+            )
+            if raw_residuals is not deferred or raw_indices is not deferred:
+                raise TypeError(
+                    "deferred fit arrays must share one _DeferredFitData value"
+                )
+        else:
+            deferred = None
+            fitted = np.asarray(self.fitted_values, dtype=np.float64).reshape(-1)
+            residuals = np.asarray(self.residuals, dtype=np.float64).reshape(-1)
+            if fitted.shape != residuals.shape:
+                raise ValueError("fitted values and residuals must have equal shape")
+            indices = np.asarray(self.selected_indices, dtype=np.int64).reshape(-1)
+            if indices.shape != fitted.shape:
+                raise ValueError(
+                    "selected indices must identify every fitted observation"
+                )
         source_revision = integer(self.source_revision, "source_revision")
         if source_revision < 0:
             raise ValueError("source_revision must be non-negative")
@@ -810,9 +880,10 @@ class FitResult:
         object.__setattr__(self, "parameter_values", _readonly(parameters))
         object.__setattr__(self, "standard_errors", _readonly(errors))
         object.__setattr__(self, "covariance", _readonly(covariance))
-        object.__setattr__(self, "fitted_values", _readonly(fitted))
-        object.__setattr__(self, "residuals", _readonly(residuals))
-        object.__setattr__(self, "selected_indices", _readonly(indices))
+        if deferred is None:
+            object.__setattr__(self, "fitted_values", _readonly(fitted))
+            object.__setattr__(self, "residuals", _readonly(residuals))
+            object.__setattr__(self, "selected_indices", _readonly(indices))
         object.__setattr__(self, "source_revision", source_revision)
         object.__setattr__(self, "batch_revision", batch_revision)
         object.__setattr__(
@@ -919,8 +990,85 @@ class FitResult:
             batch_revision=self.batch_revision,
         )
 
+    def _clone(self, **overrides: Any) -> "FitResult":
+        """Copy this result while preserving still-deferred arrays.
+
+        ``dataclasses.replace`` reads every field through the lazy accessors
+        and would materialize the deferred arrays; this constructor-mirror
+        passes the raw slot values through instead.
+        """
+
+        values: dict[str, Any] = {
+            "model": self.model,
+            "parameter_values": self.parameter_values,
+            "standard_errors": self.standard_errors,
+            "covariance": self.covariance,
+            "fitted_values": _FIT_RESULT_RAW["fitted_values"].__get__(
+                self, type(self)
+            ),
+            "residuals": _FIT_RESULT_RAW["residuals"].__get__(self, type(self)),
+            "selected_indices": _FIT_RESULT_RAW["selected_indices"].__get__(
+                self, type(self)
+            ),
+            "source_revision": self.source_revision,
+            "success": self.success,
+            "message": self.message,
+            "reduced_chi_square": self.reduced_chi_square,
+            "covariance_valid": self.covariance_valid,
+            "parameter_units": self.parameter_units,
+            "batch_revision": self.batch_revision,
+        }
+        values.update(overrides)
+        return FitResult(**values)
+
     def with_parameter_units(self, units: Mapping[str, str]) -> "FitResult":
-        return replace(self, parameter_units=units)
+        return self._clone(parameter_units=units)
+
+    def with_batch_revision(self, batch_revision: int) -> "FitResult":
+        """Return a copy carrying one monotonic publication revision."""
+
+        return self._clone(batch_revision=batch_revision)
+
+
+_FIT_RESULT_RAW: dict[str, Any] = {}
+
+
+def _install_lazy_fit_result_fields() -> None:
+    """Route the per-observation FitResult fields through lazy accessors.
+
+    The dataclass slot descriptors are preserved in ``_FIT_RESULT_RAW`` and
+    replaced by properties that materialize a ``_DeferredFitData`` value on
+    first read.  Construction, ``dataclasses.replace`` and the frozen
+    ``__setattr__`` contract are unchanged.
+    """
+
+    lazy_fields = ("fitted_values", "residuals", "selected_indices")
+    for name in lazy_fields:
+        _FIT_RESULT_RAW[name] = FitResult.__dict__[name]
+
+    def make_accessor(name: str) -> property:
+        slot = _FIT_RESULT_RAW[name]
+
+        def getter(self: FitResult) -> np.ndarray:
+            value = slot.__get__(self, FitResult)
+            if isinstance(value, _DeferredFitData):
+                fitted, residuals, indices = value.arrays()
+                _FIT_RESULT_RAW["fitted_values"].__set__(self, fitted)
+                _FIT_RESULT_RAW["residuals"].__set__(self, residuals)
+                _FIT_RESULT_RAW["selected_indices"].__set__(self, indices)
+                value = slot.__get__(self, FitResult)
+            return value
+
+        def setter(self: FitResult, value: Any) -> None:
+            slot.__set__(self, value)
+
+        return property(getter, setter)
+
+    for name in lazy_fields:
+        setattr(FitResult, name, make_accessor(name))
+
+
+_install_lazy_fit_result_fields()
 
 
 def _bimodal_classifier_metrics(
@@ -1230,13 +1378,13 @@ class FitEngine:
                     "regular-image selected_indices belong inside "
                     "RegularImageFitInput"
                 )
-            if "regular_image_radial" not in spec.capabilities:
+            if not (spec.capabilities & _REGULAR_IMAGE_CAPABILITIES):
                 raise ValueError(
-                    "this model does not declare regular-image radial capability"
+                    "this model does not declare a regular-image capability"
                 )
-            from ._fit_radial import fit_regular_radial_image
+            from ._fit_radial import fit_regular_separable_image
 
-            return fit_regular_radial_image(
+            return fit_regular_separable_image(
                 spec,
                 coordinates,
                 data_revision=data_revision,
@@ -2496,6 +2644,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 ),
             ),
             coordinate_relations=(AXIS_0, AXIS_1),
+            capabilities=frozenset({"regular_image_separable"}),
         ),
         FitModelSpec(
             "radial_gaussian_center",

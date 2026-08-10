@@ -38,6 +38,7 @@ from .fit import (
     FitTarget,
     RegularImageFitInput,
     UnitRelation,
+    _REGULAR_IMAGE_CAPABILITIES,
 )
 from .kinds import AxisRef
 from .primitives import PulseTimelineData
@@ -86,6 +87,16 @@ class RollingHistoryPoint:
 
     sample: RollingSample
     shot_index: int
+
+
+def _broadcast_all_true(mask: np.ndarray) -> bool:
+    """True for a stride-0 broadcast plane that is constant True."""
+
+    if mask.size == 0:
+        return False
+    if any(stride != 0 for stride in mask.strides):
+        return False
+    return bool(mask.flat[0])
 
 
 _FIT_SELECTOR_KINDS = frozenset((
@@ -438,7 +449,7 @@ class FitProjection:
         self._build_view()
         self._build_payload_from_view()
 
-    def _build_view(self, *, eager_flatten: bool = True) -> None:
+    def _build_view(self) -> None:
         """Construct the unit-aware DataView without projecting any payload.
 
         The semantic feasibility probe stops here and runs the registry
@@ -469,7 +480,6 @@ class FitProjection:
             axis_display_units=overrides,
             value_display_unit=value_unit,
             unit_registry=self._unit_registry,
-            eager_flatten=eager_flatten,
         )
 
     def _build_payload_from_view(self) -> None:
@@ -871,9 +881,8 @@ class FitProjection:
                 selector_kind=selector_kind,
                 payload=payload,
             )
-        if (
-            isinstance(payload, ImageData)
-            and model.model_id == "radial_gaussian_center"
+        if isinstance(payload, ImageData) and (
+            model.capabilities & _REGULAR_IMAGE_CAPABILITIES
         ):
             return self._regular_image_fit_selection(
                 model,
@@ -1059,13 +1068,19 @@ class FitProjection:
             payload,
             selector_kind,
         )
-        valid &= np.isfinite(x_solver)[None, :] & np.isfinite(y_solver)[:, None]
+        finite_x = np.isfinite(x_solver)
+        finite_y = np.isfinite(y_solver)
+        if not (bool(np.all(finite_x)) and bool(np.all(finite_y))):
+            plane = finite_y[:, None] & finite_x[None, :]
+            valid = plane if valid is None else valid & plane
 
         regular = RegularImageFitInput(
             x_solver,
             y_solver,
             observations,
-            valid_mask=None if bool(np.all(valid)) else valid,
+            valid_mask=(
+                None if valid is None or bool(np.all(valid)) else valid
+            ),
         )
         return FitSelection(
             data_revision=self.data_revision,
@@ -1105,19 +1120,34 @@ class FitProjection:
             payload,
             selector_kind,
         )
-        valid &= np.isfinite(x_solver)[None, :] & np.isfinite(y_solver)[:, None]
-        selected = valid.reshape(-1)
+        finite_x = np.isfinite(x_solver)
+        finite_y = np.isfinite(y_solver)
+        if not (bool(np.all(finite_x)) and bool(np.all(finite_y))):
+            plane = finite_y[:, None] & finite_x[None, :]
+            valid = plane if valid is None else valid & plane
         x_solver_grid = np.broadcast_to(x_solver[None, :], observations.shape)
         y_solver_grid = np.broadcast_to(y_solver[:, None], observations.shape)
+        if valid is None:
+            coordinates = (
+                x_solver_grid.reshape(-1),
+                y_solver_grid.reshape(-1),
+            )
+            selected_observations = observations.reshape(-1)
+            selected_indices = np.arange(observations.size, dtype=np.int64)
+        else:
+            selected = valid.reshape(-1)
+            coordinates = (
+                x_solver_grid.reshape(-1)[selected],
+                y_solver_grid.reshape(-1)[selected],
+            )
+            selected_observations = observations.reshape(-1)[selected]
+            selected_indices = np.flatnonzero(selected)
         return FitSelection(
             data_revision=self.data_revision,
             scope=scope,
-            coordinates=(
-                x_solver_grid.reshape(-1)[selected],
-                y_solver_grid.reshape(-1)[selected],
-            ),
-            observations=observations.reshape(-1)[selected],
-            selected_indices=np.flatnonzero(selected),
+            coordinates=coordinates,
+            observations=selected_observations,
+            selected_indices=selected_indices,
             facet_index=self._focused_facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
@@ -1129,51 +1159,63 @@ class FitProjection:
         payload: ImageData,
         selector_kind: SelectorKind | None,
     ) -> tuple[
-        np.ndarray,
+        np.ndarray | None,
         np.ndarray,
         FitScope,
         SelectorState | None,
         FitAuthority,
     ]:
-        """Resolve one canonical mask over the already projected image."""
+        """Resolve one canonical mask over the already projected image.
+
+        A returned mask of ``None`` means every pixel is valid.  Integer and
+        boolean observations skip the always-true ``np.isfinite`` sweep, and a
+        stride-0 all-True broadcast validity plane short-circuits the mask
+        chain entirely, so the plain full-frame fit never touches a
+        full-image boolean plane.
+        """
 
         x = np.asarray(payload.x.canonical, dtype=float).reshape(-1)
         y = np.asarray(payload.y.canonical, dtype=float).reshape(-1)
         observations = np.asarray(payload.z.canonical)
-        valid = (
-            np.asarray(payload.valid, dtype=bool)
-            & np.isfinite(observations)
-            & np.isfinite(x)[None, :]
-            & np.isfinite(y)[:, None]
-        )
+        valid: np.ndarray | None = None
+        source = np.asarray(payload.valid, dtype=bool)
+        if not _broadcast_all_true(source):
+            valid = source
+        if observations.dtype.kind in "fc":
+            finite = np.isfinite(observations)
+            valid = finite if valid is None else valid & finite
+        finite_x = np.isfinite(x)
+        finite_y = np.isfinite(y)
+        if not (bool(np.all(finite_x)) and bool(np.all(finite_y))):
+            plane = finite_y[:, None] & finite_x[None, :]
+            valid = plane if valid is None else valid & plane
         authority = self._fit_selection_authority(selector_kind)
         active = authority.selector
         if active is not None:
             value = active.value
             if active.kind is SelectorKind.X_RANGE:
                 assert isinstance(value, NumericRange)
-                valid &= (x[None, :] >= value.low) & (x[None, :] <= value.high)
+                columns = (x >= value.low) & (x <= value.high)
+                band = np.broadcast_to(columns[None, :], observations.shape)
+                valid = band if valid is None else valid & band
             elif active.kind is SelectorKind.AREA:
                 assert isinstance(value, RectangleRange)
-                valid &= (x[None, :] >= value.x.low) & (
-                    x[None, :] <= value.x.high
-                )
-                valid &= (y[:, None] >= value.y.low) & (
-                    y[:, None] <= value.y.high
-                )
+                columns = (x >= value.x.low) & (x <= value.x.high)
+                rows = (y >= value.y.low) & (y <= value.y.high)
+                box = rows[:, None] & columns[None, :]
+                valid = box if valid is None else valid & box
             elif active.kind is SelectorKind.THRESHOLD:
-                valid &= observations >= float(value)
+                above = observations >= float(value)
+                valid = above if valid is None else valid & above
             else:
                 raise ValueError("selected geometry cannot define an image fit domain")
             scope = FitScope.SELECTOR
         elif authority.viewport is not None:
             viewport = authority.viewport
-            valid &= (x[None, :] >= viewport.x.low) & (
-                x[None, :] <= viewport.x.high
-            )
-            valid &= (y[:, None] >= viewport.y.low) & (
-                y[:, None] <= viewport.y.high
-            )
+            columns = (x >= viewport.x.low) & (x <= viewport.x.high)
+            rows = (y >= viewport.y.low) & (y <= viewport.y.high)
+            box = rows[:, None] & columns[None, :]
+            valid = box if valid is None else valid & box
             scope = FitScope.VIEWPORT
         else:
             scope = FitScope.ALL

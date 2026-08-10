@@ -1,5 +1,35 @@
 # Plot performance
 
+## Overhaul reference measurements (2026-08-10)
+
+Everything below this section predates the 2026-08-10 performance overhaul
+and is retained as a dated record; treat these numbers as the current
+reference.  Measured on the reference machine (Windows 11, Python 3.13.12,
+numpy 2.4.2, matplotlib 3.10.8), 2048^2 uint16 camera contract, warm p50,
+via the bootstrapped `examples/camera_live_profile.py` and the public
+session/host APIs:
+
+| Case | Before | After |
+|---|---:|---:|
+| live 2x2: projection / render / pipeline | 154 / 47 / 202 ms | 0.8 / 33 / 34 ms |
+| live 2x2: observed cadence | 3.3 Hz | 9.9 Hz (meets the 100 ms budget) |
+| live 8x8: pipeline @100 ms cadence | 297 ms, 2.5 Hz | 93 ms, 5.9 Hz |
+| Qt widget update -> paint | 207 (2x2) / 300 (8x8) ms | 29 / 91 ms |
+| wheel step | 21 (2x2) / 78 (8x8) ms | 18 / 50 ms |
+| 10-notch wheel flick | one zoom step survived | all ten compound, one render |
+| radial image fit transaction | 625 ms | 58 ms (31 ms warm-started) |
+| radial fit with Area selector | 3375 ms | 43 ms |
+| anisotropic image fit, 1024^2 | ~5.5 s (general path) | 24 ms (separable path) |
+| FacetGrid 35x300 update, classifier on | 226 ms | 137 ms (solve is same-frame) |
+| virtual MOT frame synthesis | 166 / 301 ms | 18 / 33 ms, uint8 |
+
+The structural changes behind these numbers: lazy flat-plane projection, the
+chrome background cache with bit-identical composition, the prepared-front
+LRU plus per-revision mip pyramid, reshape-mean decimation, coalesced
+compounding wheel ticks, BLAS-backed separable fit objectives with
+Gauss-Newton/multigrid refinement and lazy result arrays, the same-frame
+budgeted live fit, and the separable windowed MOT synthesis.
+
 ## Source-size audit (2026-08-03)
 
 The current `src/zlc_plot` tree contains 25,825 non-blank Python lines (28,627

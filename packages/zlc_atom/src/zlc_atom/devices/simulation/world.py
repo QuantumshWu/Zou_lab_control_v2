@@ -111,6 +111,9 @@ class SimulationWorld:
         )
         self._occupancy = self.rng.random(site_count) < self.loading_probability
         self._forced_occupancy: np.ndarray | None = None
+        #: Read-only pixel coordinate vectors per MOT frame shape.  A frame
+        #: shape is a configuration fact, so this holds one or two entries.
+        self._mot_axis_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 
     @property
     def site_efficiency(self) -> np.ndarray:
@@ -226,6 +229,19 @@ class SimulationWorld:
             )
             return np.clip(counts, 0, np.iinfo(np.uint16).max).astype("<u2")
 
+    def _mot_axes(self, height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+        """Cached read-only pixel coordinate vectors for one MOT frame shape."""
+
+        key = (height, width)
+        axes = self._mot_axis_cache.get(key)
+        if axes is None:
+            axes = (
+                _readonly(np.arange(width, dtype=float)),
+                _readonly(np.arange(height, dtype=float)),
+            )
+            self._mot_axis_cache[key] = axes
+        return axes
+
     def render_mot_frame(
         self,
         ordinal: int,
@@ -234,7 +250,15 @@ class SimulationWorld:
         occupancy: object | None = None,
         frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX,
     ) -> np.ndarray:
-        """Render one broad MOT fluorescence spot with the shared loading state."""
+        """Render one broad MOT fluorescence spot with the shared loading state.
+
+        The spot is an axis-aligned separable Gaussian, so its expected-photon
+        plane is the outer product of two 1-D profiles, and Poisson samples are
+        drawn only inside the +/-8 sigma window: outside it the rate is below
+        ``exp(-32)`` of the peak, an expected total well under one count over
+        the whole frame.  The read-noise plane is generated in float32.  The
+        real MOT monitor is a Basler Mono8 sensor, so the frame is uint8.
+        """
 
         with self._lock:
             height, width = (int(value) for value in frame_shape_yx)
@@ -249,19 +273,29 @@ class SimulationWorld:
             center_y = 0.5 * height + 0.015 * height * np.cos(0.23 * int(ordinal))
             sigma_x = 40.0 / 2.354820045
             sigma_y = 20.0 / 2.354820045
-            yy, xx = np.mgrid[:height, :width]
-            spot = np.exp(
-                -0.5
-                * (
-                    ((xx - center_x) / sigma_x) ** 2
-                    + ((yy - center_y) / sigma_y) ** 2
-                )
-            )
-            signal = self.rng.poisson(
-                93.0 * loading * (exposure / 0.05) * spot
-            )
-            counts = 7.0 + signal + self.rng.normal(0.0, 1.5, spot.shape)
-            return np.clip(counts, 0, np.iinfo(np.uint16).max).astype("<u2")
+            x_axis, y_axis = self._mot_axes(height, width)
+            counts = self.rng.standard_normal((height, width), dtype=np.float32)
+            counts *= 1.5
+            counts += 7.0
+            peak = 93.0 * loading * (exposure / 0.05)
+            if peak > 0.0:
+                x_low = max(0, int(np.floor(center_x - 8.0 * sigma_x)))
+                x_high = min(width, int(np.ceil(center_x + 8.0 * sigma_x)) + 1)
+                y_low = max(0, int(np.floor(center_y - 8.0 * sigma_y)))
+                y_high = min(height, int(np.ceil(center_y + 8.0 * sigma_y)) + 1)
+                if x_low < x_high and y_low < y_high:
+                    profile_x = np.exp(
+                        -0.5 * ((x_axis[x_low:x_high] - center_x) / sigma_x) ** 2
+                    )
+                    profile_y = np.exp(
+                        -0.5 * ((y_axis[y_low:y_high] - center_y) / sigma_y) ** 2
+                    )
+                    window = counts[y_low:y_high, x_low:x_high]
+                    window += self.rng.poisson(
+                        peak * np.outer(profile_y, profile_x)
+                    ).astype(np.float32)
+            np.clip(counts, 0.0, float(np.iinfo(np.uint8).max), out=counts)
+            return counts.astype(np.uint8)
 
     def fire(
         self,

@@ -80,10 +80,39 @@ def test_the_console_assembles_and_beats(workspace) -> None:
     assert "0 panel" in completed.stdout
 
 
-def test_task_console_display_beat_is_the_global_ten_hertz_clock() -> None:
-    from zlc_workbench.apps.task_console import _parser
+def test_task_console_display_beat_is_the_display_clock_base() -> None:
+    """The beat cadence derives from the harmonic clock, not a constant.
 
-    assert _parser().parse_args([]).interval_ms == 100
+    ``HarmonicClock.advance`` credits one clock base per beat, so any timer
+    period other than that base silently rescales every panel's labeled
+    refresh interval.  The default is therefore THE clock's own base; an
+    explicit ``--interval-ms`` stays available as an operator diagnostic.
+    """
+
+    from types import SimpleNamespace
+
+    from zlc_plot import DEFAULTS
+    from zlc_workbench.apps.task_console import _beat_interval_ms, _parser
+    from zlc_workbench.board import LiveBoard
+
+    assert _parser().parse_args([]).interval_ms is None
+    assert _parser().parse_args(["--interval-ms", "250"]).interval_ms == 250
+
+    board = LiveBoard(
+        SimpleNamespace(freeze=lambda: None),
+        tuple,
+        intervals=DEFAULTS.live.refresh_intervals_ms,
+        default_interval_ms=DEFAULTS.live.default_refresh_interval_ms,
+    )
+    try:
+        presenter = SimpleNamespace(board=board)
+        assert board.base_interval_ms == 100
+        assert _beat_interval_ms(presenter, None) == 100
+        assert _beat_interval_ms(presenter, 250) == 250
+        with pytest.raises(ValueError, match="positive"):
+            _beat_interval_ms(presenter, 0)
+    finally:
+        board.close()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the product launcher is a Windows batch file")
@@ -340,7 +369,9 @@ view._view.kind_combo.setCurrentIndex(image_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 panel = next(iter(presenter.panels.values()))
-assert panel.state.interval_ms == 400, 'GUI beat cadence is not panel refresh policy'
+from zlc_plot import DEFAULTS
+assert panel.state.interval_ms == DEFAULTS.live.default_refresh_interval_ms == 100, (
+    'a new panel starts at the live policy default')
 assert tuple(view._cards[panel.panel_id]._interval_choices) == (100, 200, 400, 800)
 assert len(presenter.panels) == 1
 blank = next(iter(presenter.panels.values()))
@@ -667,7 +698,7 @@ print(tested_module.__file__)
 from zlc_ui import ensure_qt_app
 application = ensure_qt_app([])
 flow = tested_module.create_experiment_flow(
-    workspace=r'%s', template='virtual', interval_ms=200,
+    workspace=r'%s', template='virtual',
 )
 try:
     assert flow.devices.is_visible()
@@ -677,6 +708,7 @@ try:
     assert flow.devices.presenter.toggle_lifecycle() is True
     application.processEvents()
     assert flow.session is flow.devices.presenter.active_session
+    assert flow.timer.interval() == flow.console_presenter.board.base_interval_ms == 100
     assert flow.console.is_visible()
     assert flow.pulse.is_visible()
     assert flow.console.session is flow.session
@@ -693,7 +725,7 @@ assert flow.session is None
 assert flow.console is None
 assert flow.pulse is None
 again = tested_module.create_experiment_flow(
-    workspace=r'%s', template='virtual', interval_ms=200,
+    workspace=r'%s', template='virtual',
 )
 try:
     assert again.devices.presenter.toggle_lifecycle() is True
