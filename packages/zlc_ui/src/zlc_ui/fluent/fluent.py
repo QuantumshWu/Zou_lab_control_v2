@@ -2667,7 +2667,10 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         )
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
-        super().setText(text)
+        value = str(text)
+        if value == self.text():
+            return
+        super().setText(value)
         self._apply_metrics()
 
     def sizeHint(self) -> QtCore.QSize:

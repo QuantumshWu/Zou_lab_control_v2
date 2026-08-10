@@ -704,6 +704,28 @@ assert {
     )
     for key in card._settings_form.spec.keys
 } == stable_geometry
+class LayoutProbe(QtCore.QObject):
+    def __init__(self):
+        super().__init__()
+        self.requests = 0
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.LayoutRequest:
+            self.requests += 1
+        return False
+layout_probe = LayoutProbe()
+for watched in (
+    card._settings_form,
+    *card._settings_form._rows.values(),
+):
+    watched.installEventFilter(layout_probe)
+card._settings_form.reconcile(
+    card._settings_form.spec,
+    card._settings_form.read_all(),
+)
+app.processEvents()
+assert layout_probe.requests == 0, (
+    'a value-only Setting projection rebuilt the form layout'
+)
 compact_surface = dict(
     surface,
     semantic=(),

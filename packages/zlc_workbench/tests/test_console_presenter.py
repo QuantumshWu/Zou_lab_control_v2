@@ -465,7 +465,7 @@ def _commit_area(
         ).result()
 
 
-def _zoom_in(host) -> None:
+def _zoom(host, step: float) -> None:
     """Zoom one real mounted raster surface with its wheel gesture."""
 
     front = host.wait_for_front(5.0)
@@ -474,11 +474,19 @@ def _zoom_in(host) -> None:
         0.5,
         0.5,
         button=None,
-        step=-1.0,
+        step=step,
         identity=front.identity,
         axes=front.interaction.axes[0],
         interaction=front.interaction,
     ).result()
+
+
+def _zoom_in(host) -> None:
+    _zoom(host, -1.0)
+
+
+def _zoom_out(host) -> None:
+    _zoom(host, 1.0)
 
 
 def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
@@ -852,10 +860,16 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         f"roi_frame  [{format_signal_shape(roi_description.shape)}]"
     )
     presenter.beat()
-    shown_in_logic_tab = {
-        name for name, _shape, _state in presenter.view._rows[producer_id].publishes
-    }
-    assert {row.name for row in fit_signals}.union({roi_signal}) <= shown_in_logic_tab
+    shown_rows = presenter.view._rows[producer_id].publishes
+    shown_in_logic_tab = {name for name, _shape, _detail in shown_rows}
+    expected_leaves = {
+        row.name.rsplit("/", 1)[-1] for row in fit_signals
+    }.union({"roi_frame"})
+    assert expected_leaves <= shown_in_logic_tab
+    details = {name: detail for name, _shape, detail in shown_rows}
+    for description in (*fit_signals, roi_description):
+        leaf = description.name.rsplit("/", 1)[-1]
+        assert description.name in details[leaf]
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
@@ -1127,6 +1141,9 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     _zoom_in(second_editor_host)
     presenter.beat()
     assert presenter.logic[second_id].draft.values == area_draft
+    _zoom_out(second_editor_host)
+    presenter.beat()
+    assert presenter.logic[second_id].draft.values == area_draft
 
     second_editor_host.remove_selector(SelectorKind.AREA).result()
     presenter.beat()
@@ -1142,7 +1159,20 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
         presenter.beat()
         time.sleep(0.005)
     assert panel.editor_selections.last_error is None
-    assert presenter.logic[second_id].draft.values != before_zoom
+    zoomed_in = dict(presenter.logic[second_id].draft.values)
+    assert zoomed_in != before_zoom
+    _zoom_out(second_editor_host)
+    deadline = time.monotonic() + 2.0
+    while (
+        presenter.logic[second_id].draft.values == zoomed_in
+        and time.monotonic() < deadline
+    ):
+        presenter.beat()
+        time.sleep(0.005)
+    zoomed_out = presenter.logic[second_id].draft.values
+    assert zoomed_out != zoomed_in
+    assert zoomed_out["roi_width"] >= zoomed_in["roi_width"]
+    assert zoomed_out["roi_height"] >= zoomed_in["roi_height"]
     editor_viewport = second_editor_host.describe_display().result().value.viewport
     live_viewport = panel.host.describe_display().result().value.viewport
     assert editor_viewport is not None and live_viewport == editor_viewport

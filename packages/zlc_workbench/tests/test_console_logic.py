@@ -98,14 +98,14 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(presenter) ->
     assert row.state[0] == "idle"
     assert presenter.logic[node_id].host is None
     assert presenter.logic[node_id].node is None
-    assert [name for name, _by, _state in row.publishes] == [
-        stable_signal_key(node_id, "frame_0")
-    ]
+    assert [name for name, _by, _state in row.publishes] == ["frame_0"]
+    assert stable_signal_key(node_id, "frame_0") in row.publishes[0][2]
     assert presenter.view.focused_logic_editor == node_id
     projection = presenter.view.logic_editors[node_id]
     assert projection["form_spec"].keys == tuple(
         field.name for field in presenter.logic[node_id].descriptor.authoring_schema.fields
     )
+    assert projection["form_values"]["repeat"] == 0
     assert projection["device_keys"]["camera"] == "camera"
 
 

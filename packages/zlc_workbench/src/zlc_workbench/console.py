@@ -3224,24 +3224,28 @@ class ConsolePresenter:
                 if item.source_name in direct_names
             ),
         )))
-        published = tuple(
-            (
-                name,
-                format_signal_shape(
-                    None if descriptions.get(name) is None else descriptions[name].shape
-                ),
-                (
-                    "live"
-                    if (
-                        descriptions[name].live
-                        if name in descriptions
-                        else host is not None and host.running
-                    )
-                    else "held"
-                ),
+        published = []
+        for name in names:
+            description = descriptions.get(name)
+            lifecycle = (
+                "live"
+                if (
+                    description.live
+                    if description is not None
+                    else host is not None and host.running
+                )
+                else "held"
             )
-            for name in names
-        )
+            published.append(
+                (
+                    name.rsplit("/", 1)[-1] or name,
+                    format_signal_shape(
+                        None if description is None else description.shape
+                    ),
+                    f"{lifecycle} · {name}",
+                )
+            )
+        published = tuple(published)
         artifacts = self._artifact_results(binding)
         can_start = finalization.can_start and binding.pending is None
         can_stop = bool(

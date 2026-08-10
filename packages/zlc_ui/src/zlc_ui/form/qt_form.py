@@ -530,8 +530,14 @@ class _ChoiceHandler(FormWidgetHandler):
     def refresh(self, field, widget, context=None):
         del context
         current = self.read(field, widget)
-        self._fill(widget, field.choices)
-        self.write(field, widget, current)
+        desired = tuple((choice.label, choice.value) for choice in field.choices)
+        existing = tuple(
+            (widget.itemText(index), widget.itemData(index))
+            for index in range(widget.count())
+        )
+        if existing != desired:
+            self._fill(widget, field.choices)
+            self.write(field, widget, current)
         widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
 
@@ -902,10 +908,10 @@ class FluentParameterForm(QtWidgets.QWidget):
         field = self._fields[key]
         switch = self._auto_switches[key]
         row = self._rows[key]
-        row.set_label(
-            _automatic_label(field, switch.isChecked()),
-            width=self._label_width or _form_label_width(self._spec.fields),
-        )
+        label = _automatic_label(field, switch.isChecked())
+        width = self._label_width or _form_label_width(self._spec.fields)
+        if switch.text() != label or switch.width() != width:
+            row.set_label(label, width=width)
 
     @property
     def spec(self) -> FormSpec:
@@ -1057,6 +1063,9 @@ class FluentParameterForm(QtWidgets.QWidget):
             tuple[QtWidgets.QWidget, QtWidgets.QWidget, FluentSwitch | None],
         ] = {}
         label_width = self._label_width or _form_label_width(spec.fields)
+        old_label_width = self._label_width or _form_label_width(
+            self._spec.fields
+        )
         for field in spec.fields:
             old_field = old_fields.get(field.key)
             if (
@@ -1141,18 +1150,26 @@ class FluentParameterForm(QtWidgets.QWidget):
                     automatic.setEnabled(not field.unavailable)
                     widget.setEnabled(not selected and not field.unavailable)
 
+            order_changed = self._spec.keys != spec.keys or bool(replacements)
             for index, field in enumerate(spec.fields):
                 row = self._rows[field.key]
                 if isinstance(row, FluentSettingRow):
                     automatic = self._auto_switches.get(field.key)
-                    row.set_label(
+                    label = (
                         _automatic_label(field, automatic.isChecked())
                         if automatic is not None
-                        else field.row_label,
-                        width=label_width,
+                        else field.row_label
                     )
-                self._layout.removeWidget(row)
-                self._layout.insertWidget(index, row)
+                    old_field = old_fields.get(field.key)
+                    if (
+                        old_label_width != label_width
+                        or old_field is None
+                        or old_field.row_label != field.row_label
+                    ):
+                        row.set_label(label, width=label_width)
+                if order_changed:
+                    self._layout.removeWidget(row)
+                    self._layout.insertWidget(index, row)
 
             self._spec = spec
             self._fields = {field.key: field for field in spec.fields}

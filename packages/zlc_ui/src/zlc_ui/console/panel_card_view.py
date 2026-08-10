@@ -556,7 +556,6 @@ class PanelCardView(FluentGroupBox):
 
     def _rebuild_settings_form(self) -> None:
         if self._settings_form is not None:
-            self._settings_form.refresh()
             self._settings_form.reconcile(self._form_spec(), self._form_values())
             self._settings_form.refresh()
             self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
@@ -573,16 +572,17 @@ class PanelCardView(FluentGroupBox):
         body = self._settings_body
         if body is None or body.layout() is None:
             return
-        body.setMinimumHeight(0)
-        body.setMinimumWidth(0)
-        body.layout().activate()
         margins = body.layout().contentsMargins()
-        body.setMinimumWidth(
+        required_width = (
             self._settings_form.minimum_content_width()
             + margins.left()
             + margins.right()
         )
-        body.setMinimumHeight(body.layout().sizeHint().height())
+        required_height = body.layout().sizeHint().height()
+        if body.minimumWidth() != required_width:
+            body.setMinimumWidth(required_width)
+        if body.minimumHeight() != required_height:
+            body.setMinimumHeight(required_height)
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
