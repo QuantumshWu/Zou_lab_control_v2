@@ -914,9 +914,7 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
         for display, key in leaves
     }
     assert binding.signal in offered
-    shape = snapshot.block.values.shape
-    shape_text = f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
-    assert offered[binding.signal] == f"frame_0  [{shape_text}]"
+    assert offered[binding.signal] == "frame_0"
     assert card.chosen == binding.signal
 
     card.edit_requested.emit()
