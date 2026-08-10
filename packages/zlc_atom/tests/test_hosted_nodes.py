@@ -148,6 +148,7 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         draft=draft,
         context={
             "frame_shape_yx": (10, 30),
+            "sensor_shape_yx": (40, 100),
             "binning_yx": (2, 3),
             "roi_origin_yx": (7, 11),
         },
@@ -155,9 +156,9 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
 
     assert patch == {
         "roi_x": 17,
-        "roi_y": 7,
+        "roi_y": 1,
         "roi_width": 12,
-        "roi_height": 14,
+        "roi_height": 20,
     }
     assert all(type(value) is int for value in patch.values())
     assert descriptor.authoring_schema.project_values({**draft, **patch}) == {
@@ -178,6 +179,7 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         draft=draft,
         context={
             "frame_shape_yx": (10, 30),
+            "sensor_shape_yx": (40, 100),
             "binning_yx": (2, 3),
             "roi_origin_yx": (7, 11),
         },

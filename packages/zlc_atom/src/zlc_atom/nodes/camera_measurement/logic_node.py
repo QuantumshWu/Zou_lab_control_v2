@@ -46,34 +46,39 @@ def _spatial_range(selection: SelectionState, role: str) -> SelectionRange:
     return matches[0]
 
 
-def _selected_pixel_interval(
+def _selected_sensor_interval(
     value: SelectionRange,
     role: str,
-    size: int,
+    *,
+    origin: int,
+    binning: int,
+    sensor_size: int,
 ) -> tuple[int, int]:
-    # SelectionRange is a closed coordinate interval.  Camera spatial axes are
-    # implicit pixel centres (0..n-1), so this is the same interval resolution
-    # used by zlc_data selection derivation: [ceil(low), floor(high)], clipped
-    # to the exact frame when a plotted axis includes display margin.
-    start = max(0, math.ceil(value.lower))
-    stop = min(size, math.floor(value.upper) + 1)
+    # Producer ROI follows the actual canvas rectangle, including viewport or
+    # Area bounds outside the current frame.  Only the physical sensor clips
+    # it; data-derived ROI/Fit signals keep their separate data-domain slicing.
+    start = max(0, origin + math.ceil(value.lower) * binning)
+    stop = min(
+        sensor_size,
+        origin + (math.floor(value.upper) + 1) * binning,
+    )
     if stop <= start:
-        raise ValueError(f"{role} selection contains no image pixels")
+        raise ValueError(f"{role} selection does not intersect the camera sensor")
     return start, stop
 
 
-def _current_frame_shape(context: Mapping[str, object]) -> tuple[int, int]:
-    raw = context.get("frame_shape_yx")
+def _current_sensor_shape(context: Mapping[str, object]) -> tuple[int, int]:
+    raw = context.get("sensor_shape_yx")
     try:
         values = tuple(raw)  # type: ignore[arg-type]
     except TypeError as error:
-        raise TypeError("frame_shape_yx must contain two positive integers") from error
+        raise TypeError("sensor_shape_yx must contain two positive integers") from error
     if (
         len(values) != 2
         or any(isinstance(value, bool) or not isinstance(value, Integral) for value in values)
         or any(int(value) <= 0 for value in values)
     ):
-        raise ValueError("frame_shape_yx must contain two positive integers")
+        raise ValueError("sensor_shape_yx must contain two positive integers")
     return int(values[0]), int(values[1])
 
 
@@ -119,23 +124,29 @@ def _image_area_to_roi_patch(
 ) -> dict[str, int]:
     x_range = _spatial_range(selection, SPATIAL_X.value)
     y_range = _spatial_range(selection, SPATIAL_Y.value)
-    frame_height, frame_width = _current_frame_shape(context)
-    x_start, x_stop = _selected_pixel_interval(
-        x_range, SPATIAL_X.value, frame_width
-    )
-    y_start, y_stop = _selected_pixel_interval(
-        y_range, SPATIAL_Y.value, frame_height
-    )
     del draft
     origin_x, origin_y = _current_origin(context)
     binning_y, binning_x = _current_binning(context)
-    roi_x = origin_x + x_start * binning_x
-    roi_y = origin_y + y_start * binning_y
+    sensor_height, sensor_width = _current_sensor_shape(context)
+    x_start, x_stop = _selected_sensor_interval(
+        x_range,
+        SPATIAL_X.value,
+        origin=origin_x,
+        binning=binning_x,
+        sensor_size=sensor_width,
+    )
+    y_start, y_stop = _selected_sensor_interval(
+        y_range,
+        SPATIAL_Y.value,
+        origin=origin_y,
+        binning=binning_y,
+        sensor_size=sensor_height,
+    )
     return {
-        "roi_x": roi_x,
-        "roi_y": roi_y,
-        "roi_width": (x_stop - x_start) * binning_x,
-        "roi_height": (y_stop - y_start) * binning_y,
+        "roi_x": x_start,
+        "roi_y": y_start,
+        "roi_width": x_stop - x_start,
+        "roi_height": y_stop - y_start,
     }
 
 

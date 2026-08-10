@@ -181,19 +181,25 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         )
         assert _visible_producer_roi(panel_editor) == selected_roi
 
-        _wheel_frozen_snapshot(panel_editor, panel.editor_host, delta=-120)
+        _wheel_frozen_snapshot(panel_editor, panel.editor_host, delta=120)
         _wait_until(lambda: panel.interaction_viewport is not None, presenter)
         assert _visible_producer_roi(panel_editor) == selected_roi
+        visible = panel.editor_host.describe_display().result().value.viewport
+        assert visible is not None
+        assert visible.x.span > authored_roi[2]
+        assert visible.y.span > authored_roi[3]
 
         panel.editor_host.remove_selector(plot.SelectorKind.AREA).result()
         _wait_until(lambda: panel.interaction_selection is None, presenter)
-        before_wheel = _visible_producer_roi(panel_editor)
-        _wheel_frozen_snapshot(panel_editor, panel.editor_host, delta=-120)
         _wait_until(
-            lambda: _visible_producer_roi(panel_editor) != before_wheel,
+            lambda: _visible_producer_roi(panel_editor) != selected_roi,
             presenter,
         )
         viewport_roi = _visible_producer_roi(panel_editor)
+        assert viewport_roi[0] < authored_roi[0]
+        assert viewport_roi[1] < authored_roi[1]
+        assert viewport_roi[0] + viewport_roi[2] > authored_roi[0] + authored_roi[2]
+        assert viewport_roi[1] + viewport_roi[3] > authored_roi[1] + authored_roi[3]
         logic_values = view._logic_editors[node_id].form.read_all()
         assert tuple(
             int(logic_values[name])

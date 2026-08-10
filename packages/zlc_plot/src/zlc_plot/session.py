@@ -3595,19 +3595,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._current_display_limits() if display is None else display
         )
         subject = self._selection_subject()
-        x = canonical.x
-        y = canonical.y
-        if isinstance(subject.x, AxisRef):
-            bounds = self._coordinate_bounds(subject.x)
-            x = NumericRange(max(x.low, bounds.low), min(x.high, bounds.high))
-        if isinstance(subject.y, AxisRef):
-            bounds = self._coordinate_bounds(subject.y)
-            y = NumericRange(max(y.low, bounds.low), min(y.high, bounds.high))
         with self._lock:
             callbacks = tuple(self._viewport_callbacks)
         self._notify_callbacks(
             callbacks,
-            (RectangleRange(x, y), display, subject),
+            (canonical, display, subject),
         )
         return True
 
