@@ -2633,7 +2633,7 @@ class ConsolePresenter:
     def _logic_finalization_key(self, binding: LogicBinding) -> tuple:
         """In-memory revisions that may change one draft's admission."""
 
-        source_options = self._source_options(binding.descriptor)
+        source_options = self._source_options(binding.descriptor, binding.node_id)
         source = binding.draft.source_signal.strip()
         publication = (
             self.session.signal_plane.latest_publication(source)
@@ -2663,7 +2663,9 @@ class ConsolePresenter:
                 installation=self.session.installation,
                 signal_plane=self.session.signal_plane,
                 workspace=self.session.workspace,
-                source_options=self._source_options(binding.descriptor),
+                source_options=self._source_options(
+                    binding.descriptor, binding.node_id
+                ),
             )
             binding.finalization_key = key
         return binding.finalization
@@ -2731,8 +2733,12 @@ class ConsolePresenter:
             "artifact_results": self._artifact_results(binding),
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_signal": binding.draft.source_signal,
-            "source_options": self._source_options(binding.descriptor),
-            "source_labels": self._source_labels(binding.descriptor),
+            "source_options": self._source_options(
+                binding.descriptor, binding.node_id
+            ),
+            "source_labels": self._source_labels(
+                binding.descriptor, binding.node_id
+            ),
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
             "running": bool(binding.host is not None and binding.host.running),
@@ -3096,7 +3102,11 @@ class ConsolePresenter:
         self.view.set_logic_publishes(binding.node_id, published)
         self.refresh_logic_editor(binding.node_id)
 
-    def _source_options(self, descriptor: Any) -> tuple[str, ...]:
+    def _source_options(
+        self,
+        descriptor: Any,
+        consumer_node_id: str,
+    ) -> tuple[str, ...]:
         """Stable keys whose declared Dataset contract matches this input."""
 
         specs = dataset_inputs(descriptor)
@@ -3108,18 +3118,27 @@ class ConsolePresenter:
 
         compatible: set[str] = set()
         for binding in self.logic.values():
+            if binding.node_id == consumer_node_id:
+                continue
             for output in self._logic_outputs(binding):
                 if accepts(str(output.contract_id)):
                     compatible.add(stable_signal_key(binding.node_id, output.name))
         compatible.update(
             description.name
             for description in self.session.signal_plane.describe_signals()
-            if accepts(description.contract_id)
+            if description.owner_id != consumer_node_id
+            and accepts(description.contract_id)
         )
         return tuple(sorted(compatible))
 
-    def _source_labels(self, descriptor: Any) -> dict[str, str]:
-        compatible = set(self._source_options(descriptor))
+    def _source_labels(
+        self,
+        descriptor: Any,
+        consumer_node_id: str,
+    ) -> dict[str, str]:
+        compatible = set(
+            self._source_options(descriptor, consumer_node_id)
+        )
         return {
             row.name: row.label
             for row in project_signals(self.session.signal_plane)

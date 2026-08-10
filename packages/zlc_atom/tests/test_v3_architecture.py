@@ -482,7 +482,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert len(descriptors["occupancy"].input_specs) == 2
         assert isinstance(descriptors["occupancy"].input_specs[0], DatasetInputSpec)
         assert descriptors["occupancy"].input_specs[0].name == "frames"
-        assert descriptors["occupancy"].input_specs[0].contract_id == "camera.frames.v1"
+        assert descriptors["occupancy"].input_specs[0].contract_id is None
         assert isinstance(descriptors["occupancy"].input_specs[1], ArtifactInputSpec)
         assert descriptors["occupancy"].input_specs[1].name == "calibration_path"
         assert descriptors["occupancy"].input_specs[1].contract_id == (

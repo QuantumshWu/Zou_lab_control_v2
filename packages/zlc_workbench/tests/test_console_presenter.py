@@ -1301,6 +1301,8 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
 
     import json
 
+    authored_display = dict(first.state.display)
+    assert authored_display["show_colorbar"] is False
     document = json.loads(json.dumps(presenter.layout()))
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert [panel["title"] for panel in document["panels"]] == ["camera", "again"]
@@ -1309,7 +1311,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "cell_kind": "",
         "size": "4x4", "interval_ms": 800,
         "semantic": {semantic_key: str(semantic_value)},
-        "display": {"show_colorbar": False},
+        "display": authored_display,
         "fit": {"model": "gaussian"}, "overlay_signal": "",
     }
     # Nothing of this session's bookkeeping: ids are minted fresh on the way in.
@@ -1353,7 +1355,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored[0].size == "4x4"
     assert restored[0].port.display_interval_ms == 800
     assert restored[0].state.semantic == {semantic_key: semantic_value}
-    assert restored[0].state.display == {"show_colorbar": False}
+    assert restored[0].state.display == authored_display
     assert restored[0].state.fit == {"model": "gaussian"}
     assert restored[0].state.overlay_signal == ""
     assert restored[0].panel_id != first.panel_id, "an id is never handed out twice"
