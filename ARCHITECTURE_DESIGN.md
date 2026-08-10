@@ -199,7 +199,7 @@ generation 原子取代；它不能因为 FINAL 数据仍可读而阻止同一 r
 - selector 只更新共享 draft；用户按同一个 `Restart` 后，才用新 ROI/exposure 重启 measurement。
 - ROI 数据和 fit 参数同时是 data plane 中的普通 typed Dataset。Logic input 可以声明一个固定 contract，也可以显式声明 source-neutral；后一种由插件用实际 Dataset schema 和自己的动态 artifact/request 判断是否可用。Occupancy 属于后一种，因为可用 frame shape 由所选 Calibration 决定，Workbench 不得用 producer 名称或固定 `camera.frames` 字符串提前隐藏 ROI/fit signal。
 
-## 8. 三个目标 Logic Node
+## 8. 目标 Logic Node
 
 ### 8.1 Calibration Task
 
@@ -282,7 +282,31 @@ frame counter、buffer overrun 和 failed grab 如实投影到该共同契约，
 
 Camera Measurement 不驱动 pulse。它监听外部时序，独占 camera、最多只读 sequencer 状态。Driver/internal buffer 大小不进用户表单。
 
-### 8.3 Occupancy Processor
+### 8.3 Pulse API Scan Measurement
+
+Pulse API Scan 是一个 finite Measurement，不是 Processor，也不是 Pulse Editor 的第二套
+scan engine。Logic Edit 用 concrete plugin 自己的 UI contribution 直接复用现有
+`PulseScanView`：用户选择 project `pulses` 下的 JSON template；template 必须至少声明
+一个 `api_parameter` 且不能同时声明 hardware scan slot。ScanTab 的 Python 只在用户按
+`Run` 时执行一次，结果经 `zlc_pulse.validate_scan_table()` 校验后作为 accepted rows 写回
+同一 Logic draft；`Start` 只消费这份已接受 table，不再次执行 Python。
+
+用户另选一个当前 LIVE Dataset signal。Start 冻结其 generation，并独占所选
+`sequencer.streamer`。每个 scan row 只走既有 Pulse 公共路径：
+`resolve_api_parameters -> compile_sequence -> sequencer.load -> On`。On 返回后，
+Measurement 从 `SignalDataPlane` 原子取得该 generation 的 exact current publication 与
+lossless future tap，保持 pulse 为 On，依次等待两个未来 publication，只保留第二个，
+随后关闭 tap 并 `safe()`，再进入下一个 row。Stop、source restart、signal terminal 或
+schema 改变都结束本次 Measurement，不能跨 generation 混合数据。
+
+完成后只发布一个 FINAL `scan` Dataset：保留所选 signal 的 repeat axis、cell schema、
+validity、PointTable 与已有 topology，并为每个 API parameter 增加 typed
+`SCAN_POINT` coordinate 和组合后的 `GridTopology`。因此 scalar、image、site vector 等
+普通 Dataset 都能沿现有 plot semantic 展示；插件不按 signal 名称或 producer 类型猜
+数据含义。Workbench 只做 generic Logic draft/source/device/UI-contribution 接线，不写
+`pulse_api_scan` 分支；这条功能不增加 manager、registry、scan DTO 或第二个执行器。
+
+### 8.4 Occupancy Processor
 
 Edit 中的理想参数：
 
@@ -310,6 +334,7 @@ Edit 中的理想参数：
 |---|---|---|
 | Calibration | Camera instance；Sequencer instance；以 project `pulses` 为起点的 JSON file picker；Samples（默认 300）；Reference exposure；Readout exposure；Camera ROI；默认 readout model；box/PSF 训练参数；必要的高级检测参数；完成后只读 Detected sites | grid rows/columns/site count；`bracket`；timeout；用户填写的 output signal |
 | Camera Measurement | Camera instance；Exposure；ROI；Repeat (`0=infinite`)；Frames per cycle | 独立 mode；user buffer；loss 计数；pulse drive；普通用户 timeout |
+| Pulse API Scan | Pulse JSON file picker；API ScanTab code/template/table；任意当前 LIVE Signal；Sequencer instance | hardware scan slots；第二 scan engine；source producer device；用户填写 output signal |
 | Occupancy | Frames signal；Calibration file；Readout model (`default` / `box` / `psf` / `uniform_psf`)；只读输出摘要 | Device；finite/infinite extent mode；buffer；隐式“current calibration” |
 
 Calibration 中所谓“必要的高级检测参数”只能是算法确实需要暴露的噪声门限、最小间距或 spot 尺度之类调整项；它们不能变相成“用户先告诉 site 数量/形状”。默认自动模式应当不需要用户调它们。

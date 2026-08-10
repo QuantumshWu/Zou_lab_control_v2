@@ -51,6 +51,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self._projection: dict[str, object] = {}
         self._device_combos: dict[str, FluentComboBox] = {}
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
+        self._contributions: dict[object, QtWidgets.QWidget] = {}
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -147,9 +148,17 @@ class LogicEditorView(QtWidgets.QWidget):
         self.title_label.setText(str(incoming.get("api_name") or self.node_id))
         kind = str(incoming.get("kind") or "logic")
         self.kind_label.setText(f"({kind})")
+        managed_fields = self._reconcile_contributions(incoming)
+        visible_spec = FormSpec(
+            tuple(field for field in spec.fields if field.key not in managed_fields)
+        )
         self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
         self.artifact_form.setVisible(bool(artifact_spec.keys))
-        self.form.reconcile(spec, dict(values))
+        self.form.reconcile(
+            visible_spec,
+            {key: values[key] for key in visible_spec.keys},
+        )
+        self.form.setVisible(bool(visible_spec.keys))
         self._reconcile_selectors(incoming)
         self._rebuild_artifact_results(incoming.get("artifact_results", ()))
 
@@ -174,7 +183,55 @@ class LogicEditorView(QtWidgets.QWidget):
         self._selector_frame.setEnabled(self._mutation_enabled)
         self.artifact_form.setEnabled(self._mutation_enabled)
         self.form.setEnabled(self._mutation_enabled)
+        for widget in self._contributions.values():
+            setter = getattr(widget, "set_mutation_enabled", None)
+            if callable(setter):
+                setter(self._mutation_enabled)
         self._project_commands()
+
+    def _reconcile_contributions(
+        self,
+        projection: Mapping[str, object],
+    ) -> frozenset[str]:
+        factories = tuple(projection.get("ui_contributions", ()) or ())
+        for factory in factories:
+            if factory in self._contributions:
+                continue
+            if not callable(factory):
+                raise TypeError("logic UI contributions must be widget factories")
+            widget = factory(self)
+            if not isinstance(widget, QtWidgets.QWidget):
+                raise TypeError("logic UI contribution factory must return QWidget")
+            changed = getattr(widget, "draft_changed", None)
+            updater = getattr(widget, "update_projection", None)
+            if changed is None or not callable(getattr(changed, "connect", None)):
+                raise TypeError("logic UI contribution must emit draft_changed")
+            if not callable(updater):
+                raise TypeError("logic UI contribution must update_projection")
+            changed.connect(self.draft_changed.emit)
+            self._contributions[factory] = widget
+            self._body_layout.insertWidget(
+                self._body_layout.indexOf(self._artifact_result_frame),
+                widget,
+            )
+        for factory in tuple(self._contributions):
+            if factory in factories:
+                continue
+            widget = self._contributions.pop(factory)
+            widget.hide()
+            widget.deleteLater()
+        managed: set[str] = set()
+        for factory in factories:
+            widget = self._contributions[factory]
+            fields = tuple(getattr(widget, "managed_fields", ()) or ())
+            if any(not isinstance(name, str) or not name for name in fields):
+                raise TypeError("logic UI contribution managed_fields must be names")
+            managed.update(fields)
+            widget.update_projection(projection)
+            setter = getattr(widget, "set_mutation_enabled", None)
+            if callable(setter):
+                setter(self._mutation_enabled)
+        return frozenset(managed)
 
     def _project_commands(self) -> None:
         pending = bool(self._projection.get("pending"))
@@ -209,7 +266,7 @@ class LogicEditorView(QtWidgets.QWidget):
                 # exactly as the shared keyed-choice form handler wires it.
                 self.source_combo.activated[int].connect(self._source_changed)
                 self._selector_layout.insertRow(
-                    0, "Frames signal", self.source_combo
+                    0, str(projection.get("source_label") or "Signal"), self.source_combo
                 )
             # The one grouped signal chooser every other picker already uses:
             # a producer tree with keyed leaves, not a second flat list.

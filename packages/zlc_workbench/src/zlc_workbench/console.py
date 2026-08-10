@@ -3051,6 +3051,7 @@ class ConsolePresenter:
             binding.pending is not None
             or (binding.host is not None and binding.host.running)
         )
+        source_specs = dataset_inputs(binding.descriptor)
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
@@ -3069,6 +3070,11 @@ class ConsolePresenter:
             "artifact_values": dict(binding.draft.artifact_inputs),
             "artifact_results": self._artifact_results(binding),
             "source_required": bool(dataset_inputs(binding.descriptor)),
+            "source_label": (
+                source_specs[0].name.replace("_", " ").title()
+                if source_specs
+                else "Signal"
+            ),
             "source_signal": binding.draft.source_signal,
             "source_options": self._source_options(
                 binding.descriptor, binding.node_id
@@ -3081,6 +3087,8 @@ class ConsolePresenter:
             ),
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
+            "ui_contributions": tuple(binding.descriptor.ui_contributions),
+            "workspace_resources": dict(finalization.resources),
             "running": bool(binding.host is not None and binding.host.running),
             "pending": binding.pending is not None,
             "can_start": can_start,

@@ -23,12 +23,15 @@ from .model import (
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
+    PulseFieldRef,
     PulseSequence,
 )
+from .wire import StreamerParams
 
 
 __all__ = [
     "ScanColumnSpec",
+    "api_parameter_columns_for",
     "resolve_scan_point",
     "scan_columns_for",
     "scan_table_template",
@@ -41,8 +44,9 @@ class ScanColumnSpec:
     """One column: its variable name and a range that suits its KIND.
 
     A DAC column sweeps integer codes over the bus's signed range, where 0 is
-    0 V.  A time column sweeps its own unit and never goes below one tick.
-    Seeding both the same way is the bug this separation exists to prevent.
+    0 V.  A duration never goes below one tick; an output delay is a signed
+    relative time.  Seeding them the same way is the bug this separation exists
+    to prevent.
     """
 
     name: str
@@ -80,55 +84,104 @@ class ScanColumnSpec:
             raise ValueError(f"scan column {self.name} needs hi > lo")
 
 
+def _column_for_field(
+    sequence: PulseSequence,
+    name: str,
+    reference: PulseFieldRef,
+    unit: str,
+    *,
+    api_parameter: bool,
+) -> ScanColumnSpec:
+    if reference.kind == FIELD_DAC:
+        # The SIGNED code, which is what the operator types into that same
+        # DAC's box three tabs away.  The wire holds offset-binary -- the
+        # compiler writes `value - signed_range[0]` -- and that offset is
+        # recorded here rather than demanded of the author.
+        port = sequence.target.by_key.get(reference.port)
+        low, high = (
+            port.signed_range
+            if port is not None and port.signed_range
+            else (-512, 511)
+        )
+        return ScanColumnSpec(
+            name,
+            float(low),
+            float(high),
+            True,
+            "DAC code (0 = 0 V)",
+            limit_lo=float(low),
+            limit_hi=float(high),
+            wire_offset=float(-low),
+        )
+
+    quantum = _quantum(sequence, unit)
+    if api_parameter and reference.kind == FIELD_DELAY:
+        nominal = float(pulse_field_value(sequence, reference, unit))
+        longest = (
+            StreamerParams().ttl_delay_max_ticks
+            / _ticks_per(sequence, unit)
+        )
+        span = max(quantum, abs(nominal) * 0.5)
+        return ScanColumnSpec(
+            name,
+            max(-longest, nominal - span),
+            min(longest, nominal + span),
+            False,
+            unit,
+            limit_lo=-longest,
+            limit_hi=longest,
+            wire_scale=_ticks_per(sequence, unit),
+        )
+
+    nominal = abs(float(pulse_field_value(sequence, reference, unit)))
+    longest_ticks = (
+        (1 << StreamerParams().tick_width) - 1
+        if api_parameter
+        else _longest_slot_ticks()
+    )
+    longest = longest_ticks / _ticks_per(sequence, unit)
+    return ScanColumnSpec(
+        name,
+        max(quantum, nominal * 0.5),
+        min(longest, max(2.0 * quantum, nominal * 1.5)),
+        False,
+        unit,
+        limit_lo=quantum,
+        limit_hi=longest,
+        wire_scale=_ticks_per(sequence, unit),
+    )
+
+
 def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
-    """The columns a scan table for this sequence must have, in slot order.
+    """The hardware-scan columns declared by this sequence, in slot order."""
 
-    Read from the sequence's own slots, so a template can never offer a column
-    for a field nobody bound or omit one that is.
-    """
+    return tuple(
+        _column_for_field(
+            sequence,
+            slot.slot_id,
+            slot.field_ref,
+            sequence.field_unit(slot.field_ref),
+            api_parameter=False,
+        )
+        for slot in sequence.slots
+    )
 
-    columns = []
-    for slot in sequence.slots:
-        reference = slot.field_ref
-        if slot.kind == FIELD_DAC:
-            # The SIGNED code, which is what the operator types into that same
-            # DAC's box three tabs away.  The wire holds offset-binary -- the
-            # compiler writes `value - signed_range[0]` -- and that offset is
-            # recorded here rather than demanded of the author.
-            port = sequence.target.by_key.get(reference.port)
-            low, high = (
-                port.signed_range if port is not None and port.signed_range else (-512, 511)
-            )
-            columns.append(
-                ScanColumnSpec(
-                    slot.slot_id,
-                    float(low),
-                    float(high),
-                    True,
-                    "DAC code (0 = 0 V)",
-                    limit_lo=float(low),
-                    limit_hi=float(high),
-                    wire_offset=float(-low),
-                )
-            )
-        else:
-            unit = sequence.field_unit(reference)
-            nominal = abs(float(pulse_field_value(sequence, reference, unit)))
-            quantum = _quantum(sequence, unit)
-            longest = _longest_slot_ticks() / _ticks_per(sequence, unit)
-            columns.append(
-                ScanColumnSpec(
-                    slot.slot_id,
-                    max(quantum, nominal * 0.5),
-                    min(longest, max(2.0 * quantum, nominal * 1.5)),
-                    False,
-                    unit,
-                    limit_lo=quantum,
-                    limit_hi=longest,
-                    wire_scale=_ticks_per(sequence, unit),
-                )
-            )
-    return tuple(columns)
+
+def api_parameter_columns_for(
+    sequence: PulseSequence,
+) -> tuple[ScanColumnSpec, ...]:
+    """The API-value columns declared by this sequence, in parameter order."""
+
+    return tuple(
+        _column_for_field(
+            sequence,
+            parameter.parameter_id,
+            parameter.field_ref,
+            parameter.unit,
+            api_parameter=True,
+        )
+        for parameter in sequence.api_parameters
+    )
 
 
 def resolve_scan_point(

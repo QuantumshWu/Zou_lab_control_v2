@@ -67,11 +67,16 @@ def test_capability_tokens_have_machine_visible_types() -> None:
     assert all(isinstance(value, type) for value in CAPABILITY_TYPES.values())
 
 
-def test_logic_discovery_is_derived_from_three_leaf_modules() -> None:
+def test_logic_discovery_is_derived_from_leaf_modules() -> None:
     descriptors = discover_logic_nodes()
     leaf_count = len(tuple((Path(__file__).parents[1] / "src" / "zlc_atom" / "nodes").rglob("logic_node.py")))
-    assert len(descriptors) == leaf_count == 3
-    assert tuple(item.api_name for item in descriptors) == ("calibration", "camera_measurement", "occupancy")
+    assert len(descriptors) == leaf_count
+    assert tuple(item.api_name for item in descriptors) == (
+        "calibration",
+        "camera_measurement",
+        "occupancy",
+        "pulse_api_scan",
+    )
 
 
 def test_device_requirements_name_build_arguments_and_exclusive_access() -> None:
@@ -242,7 +247,7 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
 
     import typing
 
-    from zlc_atom.nodes._framework.descriptor import DatasetInputSpec
+    from zlc_atom.nodes._framework.descriptor import NodeKind
 
     undriveable = []
     checked = []
@@ -254,10 +259,7 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
         assert isinstance(produced, type), (
             f"{descriptor.api_name}'s build must annotate the node class it returns"
         )
-        consumes_dataset = any(
-            isinstance(spec, DatasetInputSpec) for spec in descriptor.input_specs
-        )
-        wanted = "evaluate" if consumes_dataset else "execute"
+        wanted = "evaluate" if descriptor.kind is NodeKind.PROCESSOR else "execute"
         checked.append(descriptor.api_name)
         if not callable(getattr(produced, wanted, None)):
             undriveable.append(f"{descriptor.api_name} has no {wanted}()")

@@ -1127,6 +1127,24 @@ class SignalDataPlane:
             state = self._state_for_signal_locked(name)
             return None if state is None else state.publication
 
+    def follow_publications(
+        self,
+        signal_name: str,
+    ) -> tuple[SignalPublication, FollowTap[SignalPublication]]:
+        """Return one live signal's exact current event and every future event."""
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
+            state = self._state_for_signal_locked(name)
+            if state is None or state.publication is None:
+                raise LookupError(f"signal {name!r} has no current publication")
+            if state.retired or state.terminal:
+                raise RuntimeError(f"signal {name!r} generation is not live")
+            stream = self._ensure_publication_stream_locked(state)
+            return state.publication, stream.follow()
+
     def follower_edges(self) -> frozenset[tuple[str, str]]:
         """(source signal, follower signal) pairs of live presentation-paced routes.
 

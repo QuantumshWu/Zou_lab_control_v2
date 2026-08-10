@@ -29,12 +29,13 @@ from .model import (
     RepeatRegion,
 )
 from .compile import compile_sequence  # noqa: E402
-from .binding import resolve_api_parameters  # noqa: E402
+from .binding import pulse_field_value, resolve_api_parameters  # noqa: E402
 from .wire import load_streamer_config  # noqa: E402
 from .manifest import pulse_target_from_xdc  # noqa: E402
 from .device import PulseStreamer  # noqa: E402
 from .endpoint import DEFAULT_HOST, DEFAULT_PORT  # noqa: E402
 from .scan import (  # noqa: E402
+    api_parameter_columns_for,
     resolve_scan_point,
     scan_columns_for,
     scan_rows_from_wire,
@@ -85,6 +86,8 @@ __all__ = [
     "cycle_binding_kind",
     "resolve_scan_point",
     "resolve_api_parameters",
+    "pulse_field_value",
+    "api_parameter_columns_for",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",
