@@ -241,7 +241,6 @@ class SurfaceUpdate:
     publication: SignalPublication
     value: SignalValue
     future: Future
-    replacement: bool
 
     def __post_init__(self) -> None:
         if not isinstance(self.panel_id, str) or not self.panel_id.strip():
@@ -257,8 +256,6 @@ class SurfaceUpdate:
             raise ValueError("surface update value is not owned by its publication")
         if not isinstance(self.future, Future):
             raise TypeError("surface update future must be Future")
-        if type(self.replacement) is not bool:
-            raise TypeError("surface update replacement must be bool")
 
 
 @runtime_checkable
@@ -346,7 +343,7 @@ class SurfaceBatchArbiter:
         return self._channels
 
     @property
-    def pending_batches(self) -> int:
+    def pending_cohorts(self) -> int:
         return len(self._cohorts)
 
     @staticmethod
@@ -791,18 +788,18 @@ class BoardScheduler:
         # together; unrelated panels never wait on each other.
         for port in ports:
             signal_name = SurfaceBatchArbiter._signal_name(port)
-            key = ("panel", SurfaceBatchArbiter._panel_id(port))
+            panel_id = SurfaceBatchArbiter._panel_id(port)
             publication = front.publication(signal_name)
             if (
                 publication is not None
                 and self._presented_publication(port) is publication
             ):
-                self._owed.pop(key, None)
+                self._owed.pop(panel_id, None)
                 continue
             due = self._clock.group_due(
                 elapsed, (getattr(port, "display_interval_ms"),)
             )
-            if not due and key not in self._owed:
+            if not due and panel_id not in self._owed:
                 continue
             if self._arbiter.enqueue_group(
                 (port,),
@@ -816,15 +813,15 @@ class BoardScheduler:
                     window_panels if publication is not None else frozenset()
                 ),
             ):
-                self._owed.pop(key, None)
+                self._owed.pop(panel_id, None)
             else:
-                self._owed[key] = True
-        active_keys = {
-            ("panel", SurfaceBatchArbiter._panel_id(port)) for port in ports
+                self._owed[panel_id] = True
+        active_panels = {
+            SurfaceBatchArbiter._panel_id(port) for port in ports
         }
-        for key in tuple(self._owed):
-            if key not in active_keys:
-                self._owed.pop(key, None)
+        for panel_id in tuple(self._owed):
+            if panel_id not in active_panels:
+                self._owed.pop(panel_id, None)
         self._arbiter.tick_boundary()
         return front
 

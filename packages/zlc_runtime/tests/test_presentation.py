@@ -172,7 +172,6 @@ class _Port:
             publication,
             value,
             future,
-            False,
         )
         self.updates.append(update)
         self.pending.append(update)
@@ -215,7 +214,7 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
     second = _Port("two", "camera/frame")
 
     assert arbiter.enqueue_group((first, second), front)
-    assert arbiter.pending_batches == 1
+    assert arbiter.pending_cohorts == 1
     first.futures[0].set_result("first")
     second.futures[0].set_result("second")
     assert sink.calls == 2
@@ -227,7 +226,7 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
     failing_second = _Port("failing-second", "camera/frame", fail_prepare=1)
     assert not arbiter.enqueue_group((failing, failing_second), front)
     assert len(failing.finished) == 1
-    assert arbiter.pending_batches == 0
+    assert arbiter.pending_cohorts == 0
 
 
 def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
@@ -276,7 +275,7 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
     assert not ports[0].updates and not ports[1].updates
     scheduler.on_tick()
     assert len(ports[0].updates) == len(ports[1].updates) == 1
-    assert arbiter.pending_batches == 1  # equal shot roots: one cohort
+    assert arbiter.pending_cohorts == 1  # equal shot roots: one cohort
     ports[0].futures[0].set_result("first")
     ports[1].futures[0].set_result("second")
     scheduler.on_owner_turn(lambda: None)
@@ -325,7 +324,7 @@ def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None
     assert not first.rejected and not second.rejected
     assert not first.accepted and not second.accepted
     assert second.presented is None
-    assert arbiter.pending_batches == 0
+    assert arbiter.pending_cohorts == 0
 
 
 def test_a_render_that_raised_cancellation_is_superseded_not_failed() -> None:
@@ -364,7 +363,7 @@ def test_a_batch_whose_every_member_was_superseded_just_finishes() -> None:
     assert second.finished == [second.updates[0]]
     assert not first.rejected and not second.rejected
     assert not first.accepted and not second.accepted
-    assert arbiter.pending_batches == 0
+    assert arbiter.pending_cohorts == 0
 
 
 def test_a_sibling_error_still_never_marks_the_superseded_member() -> None:
@@ -436,7 +435,7 @@ def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:
 
     scheduler.on_tick()
     assert len(fast.updates) == len(slow.updates) == 1
-    assert arbiter.pending_batches == 1  # equal roots: one cohort of two
+    assert arbiter.pending_cohorts == 1  # equal roots: one cohort of two
 
     # The slow view's render is coalesced away: the whole shot leaves
     # unpresented; the newer shot presents both views together.
@@ -447,7 +446,7 @@ def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:
     assert not fast.rejected and not slow.rejected
     assert fast.finished == [fast.updates[0]]
     assert slow.finished == [slow.updates[0]]
-    assert arbiter.pending_batches == 0
+    assert arbiter.pending_cohorts == 0
 
 
 def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
@@ -510,7 +509,7 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
     plane.front = both
     scheduler.on_tick()
     assert len(trace.updates) == 1
-    assert arbiter.pending_batches == 1
+    assert arbiter.pending_cohorts == 1
     trace.futures[0].set_result("trace")
     arbiter.drain(lambda panel_id: {"camera": camera, "trace": trace}.get(panel_id))
     assert camera.presented is camera_publication

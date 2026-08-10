@@ -85,6 +85,17 @@ class PlotPanelPort:
         #: accepted and so was retried on every tick.
         self._shown_revision = _revision_of(shown)
         self._shown_generation: object | None = None
+        #: The newest revision ever handed to the host, per generation.  The
+        #: port is the host's sole feeder and the host's revisions are
+        #: strictly monotonic, so a revision at or below this mark can never
+        #: be staged again — whether its render presented, was skipped with
+        #: its abandoned cohort, or was rejected.  Re-offering it produced a
+        #: "data revision must increase" refusal on the card once per beat
+        #: until the next shot arrived.
+        self._staged_generation: object | None = None
+        self._staged_revision: int | None = self._revision_value(
+            _revision_of(shown)
+        )
         self._serial = 0
         self._pending: dict[int, _Prepared] = {}
         self.missing: list[str] = []
@@ -222,6 +233,7 @@ class PlotPanelPort:
             # board first saw its publication.  Anchor the generation now so a
             # later Restart with revision=1 cannot be mistaken for this run.
             self._shown_generation = publication_generation
+            self._staged_generation = publication_generation
             self._presented = publication
             self._presented_input = plot_input
             if self._on_presented is not None:
@@ -241,6 +253,8 @@ class PlotPanelPort:
             self._host = replacement
             self._shown_generation = publication_generation
             self._shown_revision = revision
+            self._staged_generation = publication_generation
+            self._staged_revision = self._revision_value(revision)
             self._presented = publication
             self._presented_input = plot_input
             self.last_error = None
@@ -267,6 +281,18 @@ class PlotPanelPort:
             for prepared in self._pending.values()
         ):
             return None
+        staged_revision = self._revision_value(revision)
+        if (
+            staged_revision is not None
+            and self._staged_revision is not None
+            and publication_generation == self._staged_generation
+            and staged_revision <= self._staged_revision
+        ):
+            # The host already holds this revision — its render either
+            # presented, left with an abandoned cohort, or was rejected.
+            # The host's revisions are strictly monotonic, so re-offering it
+            # can only be refused; only a newer revision changes this panel.
+            return None
         self._serial += 1
         serial = self._serial
         self._pending[serial] = _Prepared(publication, plot_input)
@@ -286,7 +312,6 @@ class PlotPanelPort:
             publication=publication,
             value=value,
             future=future,
-            replacement=False,
         )
 
     def observe(self, update: SurfaceUpdate, operation: object) -> None:
@@ -301,6 +326,46 @@ class PlotPanelPort:
 
         return update.host_token == self._host.host_id
 
+    def _advance_staged(self, generation: object, revision: object) -> None:
+        """Record that the host now holds ``revision`` of ``generation``."""
+
+        value = self._revision_value(revision)
+        if value is None:
+            return
+        if self._staged_generation != generation:
+            self._staged_generation = generation
+            self._staged_revision = value
+        elif self._staged_revision is None or value > self._staged_revision:
+            self._staged_revision = value
+
+    def _note_completed_render(
+        self,
+        prepared: _Prepared | None,
+        update: SurfaceUpdate,
+    ) -> None:
+        """Advance the staged mark for a render the host actually committed.
+
+        Only a future that resolved with a promoted front proves the host
+        holds the revision; a cancelled render was coalesced away before the
+        host drew it, and a failed one rolled back — both may legitimately
+        be staged again.
+        """
+
+        if prepared is None:
+            return
+        future = update.future
+        if not future.done() or future.cancelled():
+            return
+        try:
+            if future.exception() is not None:
+                return
+        except CancelledError:
+            return
+        self._advance_staged(
+            _publication_generation(prepared.publication),
+            _revision_of(prepared.plot_input),
+        )
+
     def accept(self, update: SurfaceUpdate, operation: object) -> bool:
         if not self.can_accept(update, operation):
             return False
@@ -314,6 +379,7 @@ class PlotPanelPort:
         )
         self._shown_generation = _publication_generation(publication)
         self._shown_revision = _revision_of(self._presented_input)
+        self._advance_staged(self._shown_generation, self._shown_revision)
         self.last_error = None
         if self._present is not None:
             # The pixels, on the owner thread, inside the batch's one accept
@@ -345,16 +411,23 @@ class PlotPanelPort:
 
         serial = getattr(update, "serial", None)
         if serial is not None:
-            self._pending.pop(serial, None)
+            self._note_completed_render(self._pending.pop(serial, None), update)
         if error is not None and not isinstance(error, CancelledError):
             self.last_error = error
 
     def finish_unpresented(self, update: SurfaceUpdate) -> None:
-        """Release a surface the batch decided not to show."""
+        """Release a surface the batch decided not to show.
+
+        A completed render leaving unpresented (its cohort was abandoned)
+        still advanced the host's revision: the staged mark records that so
+        the scheduler's re-offer of the same publication is declined instead
+        of bouncing off the host as a "revision must increase" refusal once
+        per beat until the next shot.
+        """
 
         serial = getattr(update, "serial", None)
         if serial is not None:
-            self._pending.pop(serial, None)
+            self._note_completed_render(self._pending.pop(serial, None), update)
 
     def report_waiting(self, missing_signal: str) -> None:
         """The signal this panel wants has not arrived on this tick."""

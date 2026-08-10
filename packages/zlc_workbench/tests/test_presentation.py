@@ -255,6 +255,46 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
     assert port.publication_for_revision(revision_number) is publication
 
 
+def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
+    live_bench,
+) -> None:
+    """The host committed the frame even though its shot was abandoned.
+
+    The port is the host's sole feeder and host revisions are strictly
+    monotonic, so re-offering the same publication could only bounce off the
+    host as a "data revision must increase" refusal — which showed on the
+    card once per beat until the next shot arrived.  The staged mark records
+    the host's true holdings; only a NEWER revision changes the panel.  A
+    render that never completed (coalesced away while queued) leaves no
+    mark: the host never drew it, so it may be staged again.
+    """
+
+    from concurrent.futures import Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frame_0")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda snapshot, **_render: Future(),
+    )
+    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
+    update = port.prepare(value, publication)
+    assert update is not None
+
+    # The render completed (the host holds the revision), then the whole
+    # cohort was abandoned: the decision is final for this revision.
+    update.future.set_result(object())
+    port.finish_unpresented(update)
+    assert port.prepare(value, publication) is None
+    assert port.presented_publication() is None  # pixels honestly not shown
+    assert port.last_error is None
+
+
 def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     live_bench,
 ) -> None:
@@ -377,13 +417,13 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
         blocker.result(timeout=10)
 
         deadline = time.monotonic() + 10.0
-        while arbiter.pending_batches and time.monotonic() < deadline:
+        while arbiter.pending_cohorts and time.monotonic() < deadline:
             arbiter.drain(
                 lambda panel_id: port if panel_id == port.panel_id else None
             )
             time.sleep(0.01)
 
-        assert arbiter.pending_batches == 0
+        assert arbiter.pending_cohorts == 0
         assert port.last_error is None, (
             f"a coalesced frame became an error: {port.last_error!r}"
         )

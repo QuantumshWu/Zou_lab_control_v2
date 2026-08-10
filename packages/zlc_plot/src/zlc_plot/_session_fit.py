@@ -1514,6 +1514,9 @@ class FitSessionMixin:
                 self._live_fit_request = None
                 self._fit_context_generation += 1
                 self._accepted_fit = None
+                # Un-arming touches only fit state: an in-flight data-frame
+                # preparation is fit-agnostic under the pair engine and
+                # continues untouched.
             try:
                 self._render_current(
                     RenderEffect.OVERLAY,

@@ -3248,7 +3248,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 )
                 fit_cancel = self._fit_cancel
                 live_fit_cancel = self._live_fit_cancel
-                live_prepare_cancel = self._live_prepare_cancel
                 request = self._live_fit_request
                 bound_request = bool(
                     request is not None and request.selector_kind is state.kind
@@ -3300,8 +3299,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if affects_fit:
                 fit_cancel.set()
                 if bound_request:
+                    # Un-arming cancels only the live pair solve; an in-flight
+                    # data-frame preparation is fit-agnostic and continues.
                     live_fit_cancel.set()
-                    live_prepare_cancel.set()
         if emit_change:
             self._emit_selection(SelectionChange.REMOVED, state)
         if cancelled_fit is not None and not cancelled_fit.done():
