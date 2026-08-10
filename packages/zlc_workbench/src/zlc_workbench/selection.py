@@ -413,7 +413,7 @@ def _fit_value(event: object) -> FitEventValue:
 
 
 def _scalar_fit_value(result: object) -> FitEventValue:
-    names = tuple(str(name) for name in result.model.parameters)
+    names = tuple(result.parameter_names)
     units = dict(result.parameter_units)
     success = bool(result.success)
     values = np.asarray(result.parameter_values, dtype=np.float64).reshape(-1)
@@ -439,7 +439,7 @@ def _scalar_fit_value(result: object) -> FitEventValue:
 
 
 def _batch_fit_value(batch: object) -> FitEventValue:
-    names = tuple(str(name) for name in batch.model.parameters)
+    names = tuple(batch.parameter_names)
     units = dict(batch.parameter_units)
     outcomes = tuple(batch.results)
     success = np.array(

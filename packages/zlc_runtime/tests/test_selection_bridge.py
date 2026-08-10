@@ -346,7 +346,7 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
-        {"camera/frame", "@logic/fit/fit_x0", "@logic/fit/fit_x0_error"}
+        {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
     )
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="fit")
     bridge.start()
@@ -367,14 +367,24 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
             )
         )
         front = plane.freeze()
-        parameter = front.value("@logic/fit/fit_x0")
-        error = front.value("@logic/fit/fit_x0_error")
+        parameter = front.value("@logic/fit/x0")
+        error = front.value("@logic/fit/x0_err")
         assert parameter is not None and error is not None
         assert float(parameter.snapshot.block.values.reshape(-1)[0]) == 2.5
         assert float(error.snapshot.block.values.reshape(-1)[0]) == 0.1
-        publication = front.publication("@logic/fit/fit_x0")
+        publication = front.publication("@logic/fit/x0")
         assert publication is not None
         assert publication.direct_parent_refs[0].sequence == 1
+        events.emit_selection(
+            SelectionChange.REMOVED,
+            SelectionState(
+                "curve",
+                "x_range",
+                (SelectionRange("x", 0.0, 1.0),),
+                revision=1,
+            ),
+        )
+        assert plane.freeze().value("@logic/fit/x0") is not None
         events.emit_fit(
             FitEventValue(
                 parameter_names=("x0",),
@@ -391,8 +401,8 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
             )
         )
         second_front = plane.freeze()
-        second_parameter = second_front.value("@logic/fit/fit_x0")
-        second_publication = second_front.publication("@logic/fit/fit_x0")
+        second_parameter = second_front.value("@logic/fit/x0")
+        second_publication = second_front.publication("@logic/fit/x0")
         assert second_parameter is not None and second_publication is not None
         assert second_publication.event_ref.generation == publication.event_ref.generation
         assert second_publication.event_ref.sequence > publication.event_ref.sequence
@@ -445,10 +455,10 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
     plane.set_front_signals(
         {
             "camera/frame",
-            "@logic/batch/fit_center",
-            "@logic/batch/fit_center_error",
-            "@logic/batch/fit_width",
-            "@logic/batch/fit_width_error",
+            "@logic/batch/center",
+            "@logic/batch/center_err",
+            "@logic/batch/width",
+            "@logic/batch/width_err",
         }
     )
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="batch")
@@ -456,9 +466,9 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
     try:
         events.emit_fit(_batch_fit_event(source_revision=1))
         front = plane.freeze()
-        for name in ("center", "center_error", "width", "width_error"):
-            signal = front.value(f"@logic/batch/fit_{name}")
-            publication = front.publication(f"@logic/batch/fit_{name}")
+        for name in ("center", "center_err", "width", "width_err"):
+            signal = front.value(f"@logic/batch/{name}")
+            publication = front.publication(f"@logic/batch/{name}")
             assert signal is not None and publication is not None
             assert signal.snapshot.block.values.shape == (1, 3, 1)
             assert signal.snapshot.ref.revision.value == 1
@@ -466,9 +476,9 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
                 initial.publication("camera/frame").event_ref,
             )
 
-        center = front.value("@logic/batch/fit_center")
-        center_error = front.value("@logic/batch/fit_center_error")
-        width = front.value("@logic/batch/fit_width")
+        center = front.value("@logic/batch/center")
+        center_error = front.value("@logic/batch/center_err")
+        width = front.value("@logic/batch/width")
         assert center is not None and center_error is not None and width is not None
         np.testing.assert_allclose(
             center.snapshot.block.values.reshape(-1),
@@ -495,8 +505,8 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
         assert column.values == (10.0, 20.0, 35.0)
         assert column.unit == "V"
 
-        for name in ("center", "center_error", "width", "width_error"):
-            signal = front.value(f"@logic/batch/fit_{name}")
+        for name in ("center", "center_err", "width", "width_err"):
+            signal = front.value(f"@logic/batch/{name}")
             assert signal is not None
             values = signal.snapshot.block.values.reshape(1, -1)
             valid = signal.snapshot.block.validity.mask
@@ -511,7 +521,7 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
-        {"camera/frame", "@logic/text/fit_center", "@logic/text/fit_center_error"}
+        {"camera/frame", "@logic/text/center", "@logic/text/center_err"}
     )
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="text")
     bridge.start()
@@ -523,7 +533,7 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
         assert event.sample_labels == ("red", "green", "blue")
         events.emit_fit(event)
         front = plane.freeze()
-        value = front.value("@logic/text/fit_center")
+        value = front.value("@logic/text/center")
         assert value is not None
         column = value.snapshot.block.schema.point_table.columns[0]
         assert column.values == (0.0, 1.0, 2.0)
@@ -558,15 +568,15 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
-        {"camera/frame", "@logic/one/fit_center", "@logic/one/fit_center_error"}
+        {"camera/frame", "@logic/one/center", "@logic/one/center_err"}
     )
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="one")
     bridge.start()
     try:
         events.emit_fit(_single_cell_facet_event(source_revision=1, batch_revision=1))
         front = plane.freeze()
-        value = front.value("@logic/one/fit_center")
-        error = front.value("@logic/one/fit_center_error")
+        value = front.value("@logic/one/center")
+        error = front.value("@logic/one/center_err")
         assert value is not None and error is not None
         assert value.snapshot.block.schema.point_table.columns[0].name == "facet"
         assert value.snapshot.block.schema.point_table.columns[0].values == (42.0,)
@@ -640,7 +650,7 @@ def test_scalar_and_single_cell_facet_use_the_same_vector_materializer(monkeypat
             facet_initial.value("camera/frame").snapshot,
             _single_cell_facet_event(source_revision=1, batch_revision=1),
         )
-        assert calls["sample"] == ["fit_center", "fit_center_error"]
+        assert calls["sample"] == ["center", "center_err"]
         assert calls["sample"] == calls["facet"]
     finally:
         _close(scalar_bridge, scalar_plane, scalar_source)
@@ -652,7 +662,7 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
     values = np.zeros((1, 5, 1), dtype=np.float64)
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/race/fit_center"})
+    plane.set_front_signals({"camera/frame", "@logic/race/center"})
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="race")
     bridge.start()
     gate = Event()
@@ -680,7 +690,7 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
         events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
         bridge._accept_processor_failure(processor, _StaleFit(1))
         front = plane.freeze()
-        newer = front.value("@logic/race/fit_center")
+        newer = front.value("@logic/race/center")
         assert newer is not None
         np.testing.assert_allclose(
             newer.snapshot.block.values.reshape(-1),
@@ -733,13 +743,13 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
     values = np.zeros((1, 5, 1), dtype=np.float64)
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/revision/fit_center"})
+    plane.set_front_signals({"camera/frame", "@logic/revision/center"})
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="revision")
     bridge.start()
     try:
         first_event = _batch_fit_event(source_revision=1, batch_revision=1)
         events.emit_fit(first_event)
-        first = plane.freeze().value("@logic/revision/fit_center")
+        first = plane.freeze().value("@logic/revision/center")
         assert first is not None
 
         state["frame"] = LiveDatasetOutput(
@@ -750,8 +760,8 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         plane.mark_changed(source, slot)
         plane.freeze()
         events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
-        front = _wait_for_signal(plane, bridge, "@logic/revision/fit_center", 2)
-        second = front.value("@logic/revision/fit_center")
+        front = _wait_for_signal(plane, bridge, "@logic/revision/center", 2)
+        second = front.value("@logic/revision/center")
         assert second is not None
         assert second.snapshot.ref.revision.value > first.snapshot.ref.revision.value
     finally:

@@ -566,15 +566,9 @@ class SelectionBridge:
         if change is SelectionChange.REMOVED:
             with self._lock:
                 self._selection = None
-                processors = tuple(
-                    item
-                    for item in (self._selection_processor, self._fit_processor)
-                    if item is not None
-                )
+                processor = self._selection_processor
                 self._selection_processor = None
-                self._fit_processor = None
-                self._fit_event = None
-            for processor in processors:
+            if processor is not None:
                 self._withdraw_processor(processor)
             return
         current = self._selection_data.selector_data(state.selector_kind)
@@ -937,7 +931,7 @@ class SelectionBridge:
     def _contract_id(role: str, name: str) -> str:
         if role == "selection":
             return f"zlc.selection.{name}.v1"
-        if name.endswith("_error"):
+        if name.endswith("_err"):
             return "zlc.selection.fit.error.v2"
         return "zlc.selection.fit.parameter.v2"
 
@@ -950,8 +944,8 @@ class SelectionBridge:
     def _fit_output_names(event: FitEventValue) -> tuple[str, ...]:
         names: list[str] = []
         for parameter in event.parameter_names:
-            names.append(f"fit_{parameter}")
-            names.append(f"fit_{parameter}_error")
+            names.append(str(parameter))
+            names.append(f"{parameter}_err")
         if len(set(names)) != len(names):
             raise ValueError("fit output names must be unique")
         return tuple(names)
@@ -1417,13 +1411,13 @@ class SelectionBridge:
                     value_validity,
                 ),
                 (
-                    "_error",
+                    "_err",
                     event.parameter_errors[parameter],
                     "zlc.selection.fit.error.v2",
                     error_validity[parameter],
                 ),
             ):
-                name = f"fit_{parameter}{suffix}"
+                name = f"{parameter}{suffix}"
                 output[name] = self._materialize_fit_vector(
                     source,
                     fit_source_ref,

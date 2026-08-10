@@ -741,28 +741,24 @@ def test_pausing_is_reversible_and_the_window_is_told(presenter, session) -> Non
     assert presenter.view.paused is False
 
 
-def test_turning_selectors_off_stops_panels_deriving(presenter, session) -> None:
-    """Off must actually stop the work, not merely stop showing it.
-
-    And it must be reversible, which is why off releases the bridge rather than
-    quieting it: closing is final by design, so on builds a new one.
-    """
+def test_selector_interaction_does_not_disconnect_panel_signals(
+    presenter, session
+) -> None:
+    """The UI interaction gate is not the ROI/fit publication lifecycle."""
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)
-    _settle_panel_hosts(presenter, lambda: binding.host is not None)
-    assert binding.bridge is None
-
-    presenter.view.selectors_toggled.emit(True)
     _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
-    assert binding.bridge is not None and binding.bridge.started
-
-    presenter.view.selectors_toggled.emit(False)
-    assert binding.bridge is None, "a panel kept deriving after selectors were turned off"
+    bridge = binding.bridge
+    assert bridge is not None and bridge.started
     assert presenter.view.selectors is False
 
     presenter.view.selectors_toggled.emit(True)
-    assert binding.bridge is not None and binding.bridge.started
+    assert binding.bridge is bridge
+
+    presenter.view.selectors_toggled.emit(False)
+    assert binding.bridge is bridge and bridge.started
+    assert presenter.view.selectors is False
 
 
 def test_committed_selection_outputs_enter_the_real_occupancy_input(
@@ -780,23 +776,13 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     binding = presenter.add_panel(
         node.signal_key("frame_0"), snapshot, kind="image"
     )
-    presenter.set_deriving(True)
     _settle_panel_hosts(
         presenter,
-        lambda: binding.bridge is not None and binding.selections is not None,
+        lambda: binding.bridge is not None
+        and binding.selections is not None
+        and bool(binding.parameter_surface["fit"]),
     )
     consumer_id = presenter.add_logic("occupancy")
-
-    _commit_area(binding.host)
-    roi_signal = f"@logic/{binding.panel_id}/roi_frame"
-    _settle_panel_hosts(
-        presenter,
-        lambda: session.signal_plane.freeze().value(roi_signal) is not None,
-    )
-
-    projection = presenter.view.logic_editors[consumer_id]
-    assert roi_signal in projection["source_options"]
-    assert projection["source_labels"][roi_signal].startswith("roi_frame  [")
 
     fit_model = next(
         value
@@ -809,12 +795,37 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         if row.contract_id == "zlc.selection.fit.parameter.v2"
     )
     assert fit_signals, (binding.bridge.last_error, binding.selections.last_error)
+    assert all(
+        not row.name.rsplit("/", 1)[-1].startswith("fit_")
+        for row in fit_signals
+    )
+    error_signal = next(
+        row
+        for row in session.signal_plane.describe_signals()
+        if row.name.rsplit("/", 1)[-1] == "center_x_err"
+    )
+    assert error_signal.contract_id == "zlc.selection.fit.error.v2"
     projection = presenter.logic_editor_projection(consumer_id)
     assert projection is not None
     assert any(
         name in projection["source_options"]
         for name in (row.name for row in fit_signals)
     )
+    for row in fit_signals:
+        if row.name in projection["source_options"]:
+            assert projection["source_labels"][row.name] == row.name.rsplit("/", 1)[-1]
+
+    presenter.set_deriving(True)
+    _commit_area(binding.host)
+    roi_signal = f"@logic/{binding.panel_id}/roi_frame"
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.freeze().value(roi_signal) is not None,
+    )
+
+    projection = presenter.view.logic_editors[consumer_id]
+    assert roi_signal in projection["source_options"]
+    assert projection["source_labels"][roi_signal] == "roi_frame"
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
@@ -855,12 +866,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
 
 
 def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None:
-    """The control on the card and the bridge behind it must agree.
-
-    Turning selectors off closes every bridge, so a box drawn afterwards
-    derives nothing.  The cards went on showing their selector control live,
-    which is a control that looks like it works and does not.
-    """
+    """The card says whether plot interaction, not publication, is enabled."""
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frame_0"), snapshot)

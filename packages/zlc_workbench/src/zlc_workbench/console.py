@@ -72,6 +72,10 @@ from .topology import format_signal_shape, project_signals
 __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
+def _signal_leaf_label(name: str) -> str:
+    return str(name).rsplit("/", 1)[-1] or str(name)
+
+
 _UNCHANGED = object()
 
 
@@ -638,10 +642,12 @@ class ConsolePresenter:
         """
 
         groups: dict[str, list[tuple[str, str]]] = {}
-        for name, label, _state, producer, _derived in self.offered_signals(
+        for name, _label, _state, producer, _derived in self.offered_signals(
             include_shown=True
         ):
-            groups.setdefault(producer or "signals", []).append((label, name))
+            groups.setdefault(producer or "signals", []).append(
+                (_signal_leaf_label(name), name)
+            )
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
@@ -665,14 +671,16 @@ class ConsolePresenter:
                     output.contract_id
                 )
         groups: dict[str, list[tuple[str, str]]] = {}
-        for name, label, _state, producer, _derived in self.offered_signals(
+        for name, _label, _state, producer, _derived in self.offered_signals(
             include_shown=True
         ):
             if (
                 name in sibling_names
                 and contracts.get(name) == ImagePointOverlay.CONTRACT_ID
             ):
-                groups.setdefault(producer or "signals", []).append((label, name))
+                groups.setdefault(producer or "signals", []).append(
+                    (_signal_leaf_label(name), name)
+                )
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
@@ -1886,12 +1894,7 @@ class ConsolePresenter:
         self._refresh_console_projection()
 
     def set_deriving(self, deriving: bool) -> None:
-        """Whether a box drawn on a panel derives a signal from it.
-
-        Off is not cosmetic: a bridge that is closed publishes nothing and
-        holds no processor, so an operator who is only looking at data stops
-        paying for derivations they did not ask for.
-        """
+        """Whether the operator may edit selectors on plot surfaces."""
 
         self._deriving = bool(deriving)
         self.view.set_selectors(self._deriving)
@@ -1901,7 +1904,7 @@ class ConsolePresenter:
             # while the bridge behind it was closed.
             self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._report(
-            "selections derive signals" if self._deriving else "selections are display only",
+            "selectors enabled" if self._deriving else "selectors disabled",
             severity="task",
         )
 
@@ -2231,45 +2234,31 @@ class ConsolePresenter:
         return str(written)
 
     def _apply_deriving(self, binding: PanelBinding) -> None:
-        """Attach or release one panel's derivation.
+        """Attach the panel's one ROI/fit publication bridge when ready."""
 
-        Off means the bridge is gone, not merely quiet: a closed bridge retires
-        its processors, so an operator who is only looking at data stops paying
-        to re-cut a region on every publication.  Turning it back on builds a
-        new one, because closing is final by design -- a bridge that could be
-        reopened would have to decide what its old generation now means.
-        """
-
-        if self._deriving:
-            if (
-                binding.host is None
-                or binding.bridge is not None
-                or not hasattr(binding.host, "subscribe_selection")
-            ):
-                return
-            metadata, error = binding.host.initial_state
-            if metadata is None and error is None:
-                return
-            if error is not None:
-                raise error
-            binding.bridge, binding.selections = attach_selection_bridge(
-                self.session.signal_plane,
-                binding.host,
-                binding.signal,
-                bridge_id=binding.panel_id,
-                on_committed=lambda selection: self._route_panel_selection(
-                    binding.panel_id, selection
-                ),
-                on_viewport=lambda selection, viewport: self._route_panel_selection(
-                    binding.panel_id, selection, viewport=viewport
-                ),
-            )
+        if (
+            binding.host is None
+            or binding.bridge is not None
+            or not hasattr(binding.host, "subscribe_selection")
+        ):
             return
-        if binding.selections is not None:
-            binding.selections.close()
-        if binding.bridge is not None:
-            binding.bridge.close()
-        binding.bridge = binding.selections = None
+        metadata, error = binding.host.initial_state
+        if metadata is None and error is None:
+            return
+        if error is not None:
+            raise error
+        binding.bridge, binding.selections = attach_selection_bridge(
+            self.session.signal_plane,
+            binding.host,
+            binding.signal,
+            bridge_id=binding.panel_id,
+            on_committed=lambda selection: self._route_panel_selection(
+                binding.panel_id, selection
+            ),
+            on_viewport=lambda selection, viewport: self._route_panel_selection(
+                binding.panel_id, selection, viewport=viewport
+            ),
+        )
 
     def _route_panel_selection(
         self,
@@ -3169,13 +3158,9 @@ class ConsolePresenter:
         descriptor: Any,
         consumer_node_id: str,
     ) -> dict[str, str]:
-        compatible = set(
-            self._source_options(descriptor, consumer_node_id)
-        )
         return {
-            row.name: row.label
-            for row in project_signals(self.session.signal_plane)
-            if row.name in compatible
+            name: _signal_leaf_label(name)
+            for name in self._source_options(descriptor, consumer_node_id)
         }
 
     def _build_logic_candidate(

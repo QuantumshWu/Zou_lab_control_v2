@@ -694,6 +694,8 @@ assert isinstance(card._settings_form.widget_for('signal'), FluentTreeComboBox)
 assert isinstance(card._settings_form.widget_for('overlay_signal'), FluentTreeComboBox)
 assert card._settings_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
 assert card._settings_form.widget_for('overlay_signal').current_choice_key() == '@logic/occ/site_overlay'
+assert card._settings_form.widget_for('signal')._display_text() == 'frames'
+assert card._settings_form.widget_for('overlay_signal')._display_text() == 'sites'
 assert card._settings_form.widget_for('overlay_signal').model().item(0).text() == 'Off'
 replacement_groups = (('camera', (('reference', '@logic/cm/reference'),)),)
 replacement_state = dict(state, signal='@logic/cm/reference')
@@ -783,6 +785,8 @@ assert isinstance(editor.panel_form.widget_for('signal'), FluentTreeComboBox)
 assert isinstance(editor.panel_form.widget_for('overlay_signal'), FluentTreeComboBox)
 assert editor.panel_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
 assert editor.panel_form.widget_for('overlay_signal').current_choice_key() == '@logic/occ/site_overlay'
+assert editor.panel_form.widget_for('signal')._display_text() == 'frames'
+assert editor.panel_form.widget_for('overlay_signal')._display_text() == 'sites'
 class _PlotHost:
     def __init__(self, text):
         self.widget = QtWidgets.QLabel(text)
