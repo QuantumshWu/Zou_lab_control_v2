@@ -12,7 +12,6 @@ from collections.abc import Mapping
 
 from PyQt5 import QtCore, QtWidgets
 
-from zlc_ui.board import DEFAULT_PANEL_SIZE, PANEL_SIZES
 from zlc_ui.fluent import (
     ACCENT,
     CARD_PAD,
@@ -102,13 +101,17 @@ class PanelCardView(FluentGroupBox):
             {
                 "signal": "",
                 "kind": "",
-                "size": DEFAULT_PANEL_SIZE,
-                "interval_ms": 100,
+                # UI-only empty-card geometry.  Product choices/default arrive
+                # from the plotting owner before a card enters the board.
+                "size": "1x1",
+                "interval_ms": 0,
                 "title": str(title),
             }
         )
         self._parameter_surface: Mapping[str, object] = {}
         self._interval_choices: tuple[int, ...] = ()
+        self._size_choices: tuple[str, ...] = ()
+        self._default_size = ""
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
 
@@ -159,14 +162,10 @@ class PanelCardView(FluentGroupBox):
         self.signal_combo.hide()
         self.signal_combo.currentIndexChanged[int].connect(self._signal_changed)
         self.size_combo = FluentComboBox(parent=self)
-        for value in PANEL_SIZES:
-            self.size_combo.addItem(value, value)
-        self.size_combo.setCurrentIndex(self.size_combo.findData(DEFAULT_PANEL_SIZE))
         self.size_combo.hide()
         self.size_combo.currentIndexChanged[int].connect(self._size_changed)
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self._selectors_on = False
-        self._apply_card_size(DEFAULT_PANEL_SIZE)
         self.set_status("", error=False)
         self.set_selectors_enabled(False)
 
@@ -206,13 +205,38 @@ class PanelCardView(FluentGroupBox):
         if remove is not None:
             remove.setVisible(self._live)
 
-    def set_interval_choices(self, intervals: object) -> None:
+    def set_interval_choices(self, intervals: object, default_interval: int) -> None:
         """Receive the scheduler's one finite refresh policy."""
 
         values = tuple(int(value) for value in tuple(intervals or ()))
         # The shared helper validates both the domain and the current state.
-        interval_form_field(values, values[0] if values else 0)
+        default = int(default_interval)
+        interval_form_field(values, default)
         self._interval_choices = values
+        if not self._state_projection.get("kind"):
+            self._state_projection["interval_ms"] = default
+        self._rebuild_settings_form()
+
+    def set_size_choices(self, sizes: object, default_size: str) -> None:
+        """Receive the plotting owner's finite panel-size policy."""
+
+        values = tuple(str(value) for value in tuple(sizes or ()))
+        if not values or len(set(values)) != len(values):
+            raise ValueError("panel size choices must be unique and non-empty")
+        default = str(default_size)
+        if default not in values:
+            raise ValueError("default panel size must be one of the choices")
+        self._size_choices = values
+        self._default_size = default
+        with signals_blocked(self.size_combo):
+            self.size_combo.clear()
+            for value in values:
+                self.size_combo.addItem(value, value)
+            current = str(self._state_projection.get("size") or default)
+            self.size_combo.setCurrentIndex(self.size_combo.findData(current))
+        if not self._state_projection.get("kind"):
+            self._state_projection["size"] = default
+        self._apply_card_size(str(self._state_projection["size"]))
         self._rebuild_settings_form()
 
     def set_panel_state(self, state: object) -> None:
@@ -222,10 +246,12 @@ class PanelCardView(FluentGroupBox):
 
     def _validated_panel_state(self, state: object) -> dict[str, object]:
         incoming = panel_state_document(state)
-        if incoming["size"] not in PANEL_SIZES:
+        if not self._size_choices:
+            raise RuntimeError("panel size choices were not projected")
+        if incoming["size"] not in self._size_choices:
             raise ValueError(
                 f"unknown panel size {incoming['size']!r}; choose from "
-                f"{', '.join(PANEL_SIZES)}"
+                f"{', '.join(self._size_choices)}"
             )
         if (
             self._interval_choices
@@ -514,7 +540,7 @@ class PanelCardView(FluentGroupBox):
                 "choice",
                 "Size",
                 default=state["size"],
-                choices=tuple(FormChoice(value, value) for value in PANEL_SIZES),
+                choices=tuple(FormChoice(value, value) for value in self._size_choices),
             )
         )
         if self._live and self._interval_choices:
@@ -572,7 +598,7 @@ class PanelCardView(FluentGroupBox):
             "kind": str(self._state_projection.get("kind") or "automatic"),
             "title": str(self._state_projection.get("title") or "Panel"),
             "signal": signal,
-            "size": str(self._state_projection.get("size") or DEFAULT_PANEL_SIZE),
+            "size": str(self._state_projection.get("size") or self._default_size),
         }
         if self._state_projection.get("kind") == "image":
             values["overlay_signal"] = str(

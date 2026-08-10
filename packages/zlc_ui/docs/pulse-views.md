@@ -88,5 +88,5 @@ QWidget mount point, not a renderer. It emits `include_off_toggled`,
 `set_title`, `set_summary`, `set_status_color`, `ask_open_path`,
 `ask_save_path`, `confirm`, `show_warning`, `finish_close`, and the
 `close_requested`/`clear_all_requested` signals. It does not know a
-controller. `launch_pulse_editor_window` is the optional Fluent frameless
-wrapper for a human demo or host application.
+controller. A product opens it through the single `open_pulse_editor` handle;
+the view does not provide a parallel raw-window launcher.

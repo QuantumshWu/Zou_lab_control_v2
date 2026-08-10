@@ -181,7 +181,7 @@ def test_direct_monitor_disarms_when_live_detach_fails() -> None:
             ),
             signal_plane=plane,
         )
-        monitor = measurement.monitor(buffer_frames=1)
+        monitor = measurement.monitor()
 
         def fail_detach(_node: object) -> None:
             raise RuntimeError("synthetic detach failure")

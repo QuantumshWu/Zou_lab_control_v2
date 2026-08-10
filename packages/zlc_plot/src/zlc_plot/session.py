@@ -633,15 +633,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             assert self._renderer is not None
             return self._renderer.plan
 
-    def _backend_surface(self) -> tuple[Any, SurfacePlan]:
-        """Hand the private mutable surface only to an in-package canvas host."""
-
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-            assert self._renderer is not None
-            return self._renderer.figure, self._renderer.plan
-
     def _raster_axes_snapshot(
         self,
     ) -> tuple[AxisTransform, ...]:
@@ -3796,9 +3787,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             tuple(display(state) for state in snapshot.committed),
             None if snapshot.candidate is None else display(snapshot.candidate),
         )
-
-    def _display_selector_states(self) -> tuple[SelectorState, ...]:
-        return self._display_selector_snapshot().states
 
     def _raster_pointer_state(
         self,

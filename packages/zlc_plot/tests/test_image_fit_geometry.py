@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, ImagePlot, PlotSession
+from zlc_plot import AxisRef, ImagePlot, PlotSession, Reduction
 
 
 def _image_snapshot(*, x_unit: str = "m", y_unit: str = "m") -> DatasetSnapshot:
@@ -122,12 +122,11 @@ def test_an_axis_named_either_supported_way_takes_the_dense_image_path() -> None
         AxisRef.data(str(axes[0].axis_id)), AxisRef.data(str(axes[1].axis_id))
     )
 
-    from zlc_data import ReductionMethod
     from zlc_plot.data_view import DataView
 
     view = DataView(snapshot)
     dense = [
-        view._dense_data_image(spec.x, spec.y, ReductionMethod.MEAN) is not None
+        view._dense_data_image(spec.x, spec.y, Reduction.MEAN) is not None
         for spec in (by_name, by_id)
     ]
 

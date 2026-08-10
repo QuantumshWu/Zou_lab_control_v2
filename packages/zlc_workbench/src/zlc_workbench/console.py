@@ -55,6 +55,7 @@ from .panel_save import (
 )
 from .panel_catalog import (
     TASK_CONSOLE_PANEL_CATALOG,
+    TASK_CONSOLE_DEFAULT_INTERVAL_MS,
     panel_kind_choices,
     task_console_panel_identity,
     task_console_panel_kind,
@@ -230,7 +231,12 @@ class ConsolePresenter:
         #: How often a new panel redraws.  The board's default, kept so a panel
         #: and the card that reports it cannot state different numbers.
         live_policy = DEFAULTS.live
-        self._default_interval_ms = live_policy.default_refresh_interval_ms
+        layout_policy = DEFAULTS.layout
+        self._default_interval_ms = TASK_CONSOLE_DEFAULT_INTERVAL_MS
+
+        size_setter = getattr(self.view, "set_panel_sizes", None)
+        if callable(size_setter):
+            size_setter(layout_policy.size_names, layout_policy.default_preset)
 
         kinds = panel_kind_choices()
         self._panel_kind_definitions = {
@@ -255,12 +261,11 @@ class ConsolePresenter:
                 if binding.port is not None
             ),
             intervals=live_policy.refresh_intervals_ms,
-            default_interval_ms=live_policy.default_refresh_interval_ms,
         )
         self._intervals = self.board.intervals
         interval_setter = getattr(self.view, "set_panel_intervals", None)
         if callable(interval_setter):
-            interval_setter(self._intervals)
+            interval_setter(self._intervals, self._default_interval_ms)
         self._connect()
         self._project_task_takeover()
 
@@ -1257,25 +1262,6 @@ class ConsolePresenter:
         return True
 
     @staticmethod
-    def _await_panel_operation(operation: object) -> object:
-        return operation.result() if hasattr(operation, "result") else operation
-
-    def _panel_host_size(self, host: object) -> str:
-        describe = getattr(host, "describe_display", None)
-        if not callable(describe):
-            return ""
-        operation = self._await_panel_operation(describe())
-        description = getattr(operation, "value", operation)
-        return str(getattr(description, "size", ""))
-
-    @staticmethod
-    def _plot_operation_value(operation: object) -> object:
-        """Unwrap one public raster operation without knowing its host type."""
-
-        resolved = ConsolePresenter._await_panel_operation(operation)
-        return getattr(resolved, "value", resolved)
-
-    @staticmethod
     def _control_document(control: object) -> dict[str, object]:
         """Project zlc_plot's frontend-neutral control into plain typed data."""
 
@@ -1352,29 +1338,6 @@ class ConsolePresenter:
             semantic_unavailable=data_reason,
             display_unavailable=display_unavailable,
             fit_unavailable=data_reason,
-        )
-
-    def _describe_panel_parameters(
-        self,
-        host: object,
-        state: PanelState,
-    ) -> Mapping[str, object]:
-        """Read the complete parameter surface from zlc_plot's public host API."""
-
-        describe_display = getattr(host, "describe_display", None)
-        describe_semantics = getattr(host, "describe_semantics", None)
-        if not callable(describe_display) or not callable(describe_semantics):
-            return self._unbound_panel_parameters(state)
-        display_description = self._plot_operation_value(describe_display())
-        semantic_description = self._plot_operation_value(describe_semantics())
-        models_member = getattr(host, "fit_models", ())
-        models_operation = models_member() if callable(models_member) else models_member
-        models = tuple(self._plot_operation_value(models_operation) or ())
-        return self._parameter_surface_from_descriptions(
-            state,
-            display_description,
-            semantic_description,
-            models,
         )
 
     def _parameter_surface_from_descriptions(
@@ -1628,14 +1591,14 @@ class ConsolePresenter:
         """Submit the saved panel appearance as one zlc_plot configuration."""
 
         display = dict(state.display)
-        self._await_panel_operation(
-            host.configure(
-                parameters=display,
-                size=state.size,
-                image_overlay=image_overlay if state.kind == "image" else None,
-                fit_model=state.fit.get("model"),
-            )
+        operation = host.configure(
+            parameters=display,
+            size=state.size,
+            image_overlay=image_overlay if state.kind == "image" else None,
+            fit_model=state.fit.get("model"),
         )
+        if hasattr(operation, "result"):
+            operation.result()
 
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():

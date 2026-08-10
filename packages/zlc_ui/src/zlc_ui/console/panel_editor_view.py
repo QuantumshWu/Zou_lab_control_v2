@@ -14,7 +14,6 @@ from typing import Any
 
 from PyQt5 import QtCore, QtWidgets
 
-from zlc_ui.board import PANEL_SIZES
 from zlc_ui.fluent import (
     ACCENT,
     GREEN,
@@ -305,7 +304,9 @@ class PanelEditorView(QtWidgets.QWidget):
                 "choice",
                 "Panel size",
                 default=state["size"],
-                choices=self._size_choices(state["size"]),
+                choices=self._size_choices(
+                    incoming.get("size_choices"), state["size"]
+                ),
             ),
             interval_form_field(
                 incoming.get("interval_choices"),
@@ -444,11 +445,15 @@ class PanelEditorView(QtWidgets.QWidget):
         self._update_save_controls()
 
     @staticmethod
-    def _size_choices(current: str) -> tuple[FormChoice, ...]:
-        values = list(PANEL_SIZES)
-        if current and current not in values:
-            values.insert(0, current)
-        return tuple(FormChoice(value, value) for value in values)
+    def _size_choices(values: object, current: str) -> tuple[FormChoice, ...]:
+        choices = tuple(str(value) for value in tuple(values or ()))
+        if not choices:
+            raise RuntimeError("panel size choices were not projected")
+        if current not in choices:
+            raise ValueError(
+                f"unknown panel size {current!r}; choose from {', '.join(choices)}"
+            )
+        return tuple(FormChoice(value, value) for value in choices)
 
     def _panel_value_changed(self, key: str) -> None:
         try:

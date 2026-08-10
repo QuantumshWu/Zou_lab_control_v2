@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`active — three-commit simulation / Pulse API scan / whole-repository audit Goal`
-- Production HEAD at final verification：`2971f94（Step 1 commit；最终 Goal 证据尚未生成）`
+- Goal status：`complete — three-commit simulation / Pulse API scan / whole-repository audit Goal`
+- Production HEAD at final verification：`Step 3 final tree（parent 7465817；由本次第三个 commit 归档）`
 - Stage set：`Step 1 board-wiring-driven Simulation + MOT/Pylon exposure -> Step 2 Pulse API Scan Measurement -> Step 3 whole-repository responsibility/dead-code audit and fixes；每步独立 commit`
-- Current phase：`Step 2 implementation complete，正在做 scoped diff review 并提交。Pulse API Scan 复用 PulseScanView；Run 把唯一 accepted table 写回 Logic draft；Start 对每个 API point resolve/compile/load/On，原子跟随所选 LIVE generation 的 future publications并保留第二个，最终发布带 API scan topology 的一个 Dataset。`
-- Last completed action：`Step 2 已在现有骨架内完成：SignalDataPlane 只增加一个 baseline + lossless tap 方法；zlc_pulse 由同一 field owner 按真实硬件边界分别投影 hardware slot/API parameter columns；concrete pulse_api_scan plugin 拥有业务和 UI；Workbench/UI 只接通既有 generic ui_contributions，不含 plugin-name 分支。除该 concrete plugin package 的 __init__/logic_node/editor 外未新增 production file/class/framework。`
-- Last verified tests：`Step 2 定向：runtime signal-plane + pulse scan model + Atom descriptor/NodeHost + UI LogicEditor + Workbench console logic 首轮 58 passed/2 stale architecture assertions；修正“Dataset input 等于 Processor”的旧假设后相关组合 45 passed；最终 Pulse scan model + public surface 16 passed。另用真实 SignalDataPlane + NodeHost + fake sequencer 验证两点分别保留第二个 revision [3,5]、每点 safe；真实 offscreen LogicEditor 验证 ScanTab Run 写回 accepted rows。每个 Python 进程均先打印 v2 root 与被测生产 __file__。`
-- Pending acceptance gates：`Step 2 scoped review + commit；Step 3逐文件职责审计、全部修正、最终受影响/full-tree/正式入口验证 + commit。`
-- Next action：`审查 Step 2 exact diff，排除用户的 SLM_FEEDBACK_DESIGN.md 后独立 commit；随后进入 Step 3，优先修复权威冲突与重复 owner，再删除静态可证的单消费者框架/死代码，不新建替代抽象。`
+- Current phase：`Step 3 complete。职责/层级/唯一真相源/死代码审计与修正已经完成；没有为删除项建立替代抽象或兼容层。`
+- Last completed action：`Step 3 修正 Pylon actual working point 与 Repeat=0 单帧free-run/多帧external ordered语义，连续buffer固定4 cycles；TaskConsole panel default=400 ms且size policy只由zlc_plot投影；删除zlc_data transform孤岛、runtime continuous-derived旧owner与5个零消费者模块、Atom provenance/generation单消费者框架、旧plot ingress和UI/Workbench并行历史入口。最终diff为94 files、584 insertions/4754 deletions，无新增production文件或替代framework。`
+- Last verified tests：`最终全树在同一当前仓库进程中 1183 passed in 188.39s；启动前打印root与8个package的真实__file__。正式 python -m zou_lab_control_v2 check确认8个package全部解析到本repo且3个retired names均消失；git diff --check通过；分块定向证据保留在本Goal执行记录。`
+- Pending acceptance gates：`none。Step 1/2已分别提交，Step 3 code、tests、authority更新由本次第三个commit一起归档。`
+- Next action：`none — Goal complete。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon Repeat=0 使用 source-less free-running LatestImageOnly；Repeat>0 才使用 external OneByOne/Line1。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
@@ -153,7 +153,7 @@
 4. Pulse Editor 继续使用 Experiment 中的同一 sequencer，不登记长期 Logic owner，不新建 IPC/session service。
 5. Camera node descriptor 只按 runtime-checkable `CameraAdapter` capability 过滤 named instances，不硬绑实例名 `camera`，也不要求虚构 `BaseCamera` inheritance。
 6. 将 camera instance、exposure、ROI、repeat、frames per cycle 放进 `CameraMeasurementRequest`；frames per cycle 的 common assembler 只存在于 Camera Measurement，不下放给各 adapter。
-7. adapter 负责 exposure/ROI 合法性、increment snapping、SDK 写入和 actual readback，并把真实 frame ordinal/discontinuity/overrun 映射成共同 record/exception；Workbench 和 adapter 都不实现 shot grouping。Pylon free-running LatestImageOnly 不用于 Repeat=0 Camera Measurement。
+7. adapter 负责 exposure/ROI 合法性、increment snapping、SDK 写入和 actual readback，并把真实 frame ordinal/discontinuity/overrun 映射成共同 record/exception；Workbench 和 adapter 都不实现 shot grouping。Pylon 的 `Repeat=0 + Frames per cycle=1` 使用 source-less free-running `LatestImageOnly`；多帧 cycle 和 finite run 使用 external ordered `OneByOne/Line1`。
 8. run 创建时冻结 authored request + actual device snapshot，为 Panel Save Fig 提供真正的调用链状态。
 9. 将 virtual camera/sequencer/world/device types 全部移入 `zlc_atom/devices/simulation`；`VirtualSequencer` nominally 继承 `SequencerDevice`，`VirtualCamera` 通过同一 adapter/binding 验证，真实 camera 文件不寄存 virtual 实现。
 

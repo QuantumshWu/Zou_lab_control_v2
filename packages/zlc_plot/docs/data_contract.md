@@ -63,13 +63,11 @@ not data-schema state.
 
 ## Latest-only transport
 
-Acquisition code can use `zlc_plot._live_channel.LatestIngress` when it needs a
-capacity-one producer handoff.  It accepts real `zlc_data.OwnedSnapshot`
-objects, validates one fixed schema fingerprint, and exposes `replace`,
-`patch`, `rolling`, `take_latest` and `metrics`.  The public
-`LivePlotController` adds the configured 100/200/400/800 ms presentation clock
-(default 400 ms, maximum 10 Hz), presents each latest data front first, and
-then accepts only the matching latest live-fit result.
+Acquisition code publishes immutable revisions directly through
+`LivePlotController`.  The controller validates one fixed payload contract,
+keeps only the latest pending revision, exposes transport metrics, presents
+each latest data front first, and then accepts only its matching live-fit
+result.  Display cadence belongs to the embedding application.
 
 Pulse timelines use the public `LiveDataRevision` envelope because
 `PulseTimelineData` intentionally has no intrinsic revision.  Image point

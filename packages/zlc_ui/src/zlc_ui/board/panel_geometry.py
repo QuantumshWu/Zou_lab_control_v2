@@ -21,20 +21,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 __all__ = [
-    "DEFAULT_PANEL_SIZE",
-    "PANEL_SIZES",
     "panel_display_size",
     "PLACEHOLDER_CELL_PX",
     "panel_size_cells",
     "use_panel_display_sizes",
 ]
 
-
-#: The names only.  A name is this package's own vocabulary -- it is what a
-#: combo box offers and what a saved layout records -- while what each one
-#: MEASURES belongs to the drawing package.
-PANEL_SIZES = ("1x2", "2x2", "4x2", "1x4", "2x4", "4x4", "4x8", "8x4", "8x8")
-DEFAULT_PANEL_SIZE = "2x2"
 
 #: What an EMPTY card measures, in logical pixels per grid cell.  This is
 #: this package's own number and not a copy of anything: a frame with no
@@ -62,18 +54,26 @@ def use_panel_display_sizes(measure: Callable[[str], tuple[int, int]]) -> None:
 
 
 def panel_size_cells(size: str) -> tuple[int, int]:
-    """Parse one ``rows x columns`` panel preset."""
+    """Parse one positive ``rows x columns`` geometry name.
+
+    Which names the product offers is a plotting policy projected by the
+    composition layer.  This UI helper only interprets the chosen geometry.
+    """
 
     key = str(size).strip().lower().replace(" ", "")
-    if key not in PANEL_SIZES:
-        raise ValueError(
-            f"unknown panel size {size!r}; choose from {', '.join(PANEL_SIZES)}"
-        )
-    rows, columns = key.split("x")
-    return int(rows), int(columns)
+    parts = key.split("x")
+    if len(parts) != 2:
+        raise ValueError(f"panel size must be rows x columns, got {size!r}")
+    try:
+        rows, columns = (int(part) for part in parts)
+    except ValueError as error:
+        raise ValueError(f"panel size must be rows x columns, got {size!r}") from error
+    if rows < 1 or columns < 1:
+        raise ValueError("panel size rows and columns must be positive")
+    return rows, columns
 
 
-def panel_display_size(size: str = DEFAULT_PANEL_SIZE) -> tuple[int, int]:
+def panel_display_size(size: str) -> tuple[int, int]:
     """The logical Qt data region for a named panel, as the drawer measured it."""
 
     key = str(size).strip().lower().replace(" ", "")

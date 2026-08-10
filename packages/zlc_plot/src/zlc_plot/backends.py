@@ -109,12 +109,6 @@ _QT_WINDOW_BIND_RETRY_INTERVAL_MS = 16
 _QT_WINDOW_BIND_MAX_ATTEMPTS = 8
 
 
-def _style_points_to_logical_pixels(points: float, logical_dpi: float) -> float:
-    """Convert package style points at one front's logical DPI."""
-
-    return float(points) * float(logical_dpi) / 72.0
-
-
 def _register_qt5_font(qt_gui: object) -> str:
     """Register and verify the package font once after QApplication exists."""
 

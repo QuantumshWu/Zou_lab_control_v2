@@ -29,7 +29,6 @@ validity model, and persistence format are different.
 | `DatasetSnapshot` | `DataBlock` + `OwnedSnapshot` | `values` can become `DataBlock.values`; dense validity can be compacted with `compact_dataset_validity`; revision can become `DatasetRevision`. | New snapshots require `BlockId`, `StreamGenerationId`, schema fingerprint, and typed validity. There is no immutable `(schema, values, revision, validity, metadata)` snapshot constructor. Plot code currently reads `snapshot.validity` as a dense ndarray and `snapshot.generation` as a string. |
 | `DatasetSnapshot.validity` | `VALID`/`INVALID`, `CellValidity`, `DatasetComponentValidity` | `expand_dataset_validity` can materialize a dense mask for a compatible new block. | This is an explicit semantic change and must be threaded through `DataView`, selectors, fit, and live transport; it cannot be solved by aliasing a class. |
 | `LatestRevisionChannel` | none | Could move the plot transport implementation out of the data package. | `zlc-data` does not own a latest-only live ingress/channel. Existing tests and `zlc_plot.live` use the private channel API directly. This is runtime plumbing, not a data-schema alias. |
-| `LatestIngress` | none | No direct replacement. | Its replace/patch/rolling operations and immutable revision state are absent from `zlc-data`; the plot live contract would need a separately specified owner. |
 | `Unit`, `UnitRegistry`, `resolve_unit` | `AxisSpec.unit: str | None`, `ValueSchema.value_unit: str | None` | Only the textual annotation survives. | `zlc_plot` currently performs canonical/display conversion, compatibility checks, inverse-unit lookup, and selector/fit range conversion. Reimplementing those in `zlc_plot` would create the forbidden second unit system. |
 | `save_npz/load_npz(snapshot)` | `save_npz/load_npz(OwnedSnapshot)` | Both are NPZ persistence entry points. | Formats are not compatible. The new format persists role-axis fingerprints/references and typed validity; the old format persists the name-axis schema, units, metadata, and dense snapshot. No migration adapter is supplied by either package. |
 | `SchemaError`, `RevisionError`, `UnitError`, `SerializationError` | mostly `ValueError`/`TypeError` plus `NPZFormatError` | Error translation is possible at a boundary. | Error identity and messages are part of current tests and public behavior; translating them during every projection would be a new compatibility layer. |
@@ -51,9 +50,8 @@ current projection/session/fit paths and examples:
    frames, and all public examples.  The payload is required to retain one
    fixed schema identity and an integer revision while keeping arrays
    immutable.
-4. `LatestRevisionChannel` and `LatestIngress` provide the bounded/latest-only
-   live behavior and patch/rolling helpers used by acquisition examples and
-   channel tests.
+4. `LatestRevisionChannel` provides the bounded/latest-only transport used by
+   `LivePlotController` and its channel tests.
 5. NPZ round-tripping is currently an application-facing snapshot operation,
    not a transform/materialization operation.
 

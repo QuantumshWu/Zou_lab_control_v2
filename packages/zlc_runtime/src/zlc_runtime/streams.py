@@ -763,87 +763,6 @@ class ExactConsumerReadiness:
         for validate_liveness in self._resolved_owner_liveness():
             validate_liveness()
 
-    def _validate_emitter(
-        self,
-        *,
-        stream: "AcquisitionStream",
-        total_events: int,
-    ) -> None:
-        """Cross-bind one producer to this proof's immediate source interval."""
-
-        expected_total = _positive_int(total_events, "total_events")
-        reservation = self._source_reservation
-        if reservation._stream is not stream:
-            raise ReservationStateError(
-                "downstream readiness belongs to another output stream"
-            )
-        with stream._condition:
-            self._require_live_source_locked(reservation, "downstream readiness")
-            if reservation.end_sequence - reservation.start_sequence != expected_total:
-                raise ReservationStateError(
-                    "downstream readiness event interval differs"
-                )
-        self._validate_terminal_sink()
-
-    def _await_source_ack(
-        self,
-        owner: object,
-        event_ref: EventRef,
-        *,
-        deadline_monotonic: float,
-        checkpoint: Callable[[], None],
-    ) -> None:
-        """Wait until the immediate consumer really acknowledges one emitted event."""
-
-        if not isinstance(event_ref, EventRef):
-            raise TypeError("event_ref must be EventRef")
-        if not callable(checkpoint):
-            raise TypeError("checkpoint must be callable")
-        deadline = finite_real(deadline_monotonic, "deadline_monotonic")
-        reservation = self._source_reservation
-        stream = reservation._stream
-        if (
-            event_ref.stream_id != stream.stream_id
-            or event_ref.generation != stream.generation
-            or event_ref.sequence < reservation.start_sequence
-            or event_ref.sequence >= reservation.end_sequence
-        ):
-            raise ReservationStateError(
-                "emitted event is outside downstream readiness source interval"
-            )
-        while True:
-            checkpoint()
-            terminal_before_ack = False
-            with stream._condition:
-                binding_owner = self._binding_owner
-                if binding_owner is None or not binding_owner.matches(owner):
-                    raise PermissionError(
-                        "downstream acknowledgement belongs to another bound owner"
-                    )
-                if reservation._ack_sequence > event_ref.sequence:
-                    return
-                registered = stream._reservations.get(reservation._token) is reservation
-                terminal_before_ack = (
-                    not registered
-                    or reservation._state
-                    not in (ReservationState.ACTIVE, ReservationState.DRAINING)
-                    or stream._terminal_error is not None
-                )
-                if not terminal_before_ack:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(
-                            "downstream processor did not acknowledge output before deadline"
-                        )
-                    stream._condition.wait(min(0.05, remaining))
-            if terminal_before_ack:
-                # The completion callback preserves the downstream worker's real
-                # exception instead of reducing it to a reservation-state symptom.
-                self._await_bound_completion(owner, deadline_monotonic=deadline)
-                raise ReservationStateError(
-                    "downstream processor completed without acknowledging output"
-                )
-
     def _await_bound_completion(
         self,
         owner: object,
@@ -868,25 +787,6 @@ class ExactConsumerReadiness:
             )
         completion = completion_reference.resolve()
         return completion(deadline)
-
-    def _cancel_bound_owner(self, owner: object, reason: str | None) -> bool:
-        """Propagate fail-closed teardown to the immediate downstream processor."""
-
-        reservation = self._source_reservation
-        stream = reservation._stream
-        with stream._condition:
-            binding_owner = self._binding_owner
-            if binding_owner is None or not binding_owner.matches(owner):
-                raise PermissionError(
-                    "downstream cancellation belongs to another bound owner"
-                )
-            cancel_reference = self._owner_cancel
-        if cancel_reference is None:
-            raise ReservationStateError(
-                "terminal readiness has no intermediate processor cancellation"
-            )
-        cancel = cancel_reference.resolve()
-        return cancel(reason)
 
 class AcquisitionCursor(Generic[PayloadT]):
     """Opaque cursor with at most one unacknowledged delivery."""
@@ -1690,21 +1590,6 @@ class AcquisitionStream(Generic[PayloadT]):
                 and self._eos is eos
                 and eos._nonce is self._eos._nonce
             )
-
-    def _await_terminal(self, timeout: float) -> EndOfStream | None:
-        """Observe source EOS/failure without depending on an external finish callback."""
-
-        timeout = max(0.0, float(timeout))
-        with self._condition:
-            if self._terminal_error is not None:
-                raise self._terminal_error
-            if self._eos is not None:
-                return self._eos
-            if timeout:
-                self._condition.wait(timeout)
-            if self._terminal_error is not None:
-                raise self._terminal_error
-            return self._eos
 
     def _consume_exact(
         self,

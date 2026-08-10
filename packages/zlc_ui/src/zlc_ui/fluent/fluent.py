@@ -3003,13 +3003,6 @@ class FluentInputDialog(QtWidgets.QDialog):
                 return None, False
         return None, False
 
-    def getText(self) -> tuple[str, bool]:
-        """Return the unmodified edit buffer and whether the user committed it."""
-        if self.exec_() == QtWidgets.QDialog.Accepted:
-            return self._edit.text(), True
-        return "", False
-
-
 class _PythonHighlighter(QtGui.QSyntaxHighlighter):
     """Python colouring for the code editors this package hands out.
 

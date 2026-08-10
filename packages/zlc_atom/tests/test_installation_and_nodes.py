@@ -182,7 +182,6 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         json.dumps(result.run_record)
         occupancy_node = OccupancyProcessor(
             result.calibration,
-            signal_plane=plane,
         )
         occupancy = occupancy_node.process(
             result.short,

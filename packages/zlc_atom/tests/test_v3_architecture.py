@@ -417,10 +417,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         occupancy_node = descriptors["occupancy"].instantiate(
             calibration=calibration_input.codec.resolve(calibration_path),
             source_signal=camera_node.signal_key("frame_0"),
-            signal_plane=plane,
             model_kind="uniform_psf",
         )
-        assert occupancy_node.signal_plane is plane
+        assert not hasattr(occupancy_node, "signal_plane")
         assert occupancy_node.calibration_path == calibration_path.resolve()
         assert occupancy_node.model.kind is ReadoutModelKind.UNIFORM_PSF
         occupancy_result = occupancy_node.process(
@@ -510,7 +509,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             descriptors["occupancy"].instantiate(
                 calibration=task_result.calibration,
                 source_signal=camera_node.signal_key("frame_0"),
-                signal_plane=plane,
             )
     finally:
         if calibration_host is not None:

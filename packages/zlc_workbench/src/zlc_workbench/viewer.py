@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from zlc_plot import DEFAULTS
+
 from .archive import read_archive, read_dataset
 from .panel_save import (
     restore_panel_plot_annotations,
@@ -279,6 +281,9 @@ class FigureViewerPresenter:
         self.panel_state: PanelState | None = None
         self.plot_annotations = PanelPlotAnnotations()
         self._host: Any = None
+        self.view.set_panel_sizes(
+            DEFAULTS.layout.size_names, DEFAULTS.layout.default_preset
+        )
         self._connect()
 
     def _connect(self) -> None:

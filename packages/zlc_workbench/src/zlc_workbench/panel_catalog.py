@@ -16,6 +16,7 @@ from .panel_spec import fitting_panel_spec
 
 
 __all__ = [
+    "TASK_CONSOLE_DEFAULT_INTERVAL_MS",
     "TASK_CONSOLE_PANEL_CATALOG",
     "TaskConsolePanelKind",
     "panel_kind_choices",
@@ -23,6 +24,9 @@ __all__ = [
     "task_console_panel_identity",
     "task_console_panel_kind",
 ]
+
+
+TASK_CONSOLE_DEFAULT_INTERVAL_MS = 400
 
 
 @dataclass(frozen=True, slots=True)

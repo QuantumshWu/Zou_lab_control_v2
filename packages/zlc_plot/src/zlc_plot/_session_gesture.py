@@ -771,9 +771,6 @@ class GestureSessionMixin:
             return
         self._render_current(RenderEffect.OVERLAY, schedule_fit=False)
 
-    def _on_figure_leave(self, _event: Any) -> None:
-        self._cancel_gesture()
-
     def _on_key_press(self, event: Any) -> None:
         if str(getattr(event, "key", "")).lower() != "escape":
             return

@@ -33,7 +33,6 @@ from zlc_runtime.dataset_output import (
     LiveDatasetOutput,
 )
 from zlc_runtime.plane import (
-    DerivedSignalOutput,
     SignalDataPlane,
     SignalFront,
     SignalPublication,

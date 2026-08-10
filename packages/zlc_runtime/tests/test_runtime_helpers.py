@@ -10,10 +10,6 @@ import pytest
 from zlc_data import BlockId
 
 from zlc_runtime._failure import DetachedFailure, detach_failure
-from zlc_runtime.cancellation import (
-    CancellationRequested,
-    _CancellationSource,
-)
 from zlc_runtime.cleanup import CleanupReport, run_cleanup_steps
 from zlc_runtime.live_dataset import LiveDatasetPort
 from zlc_runtime.owner_mailbox import RunOwnerMailbox
@@ -22,20 +18,6 @@ from zlc_runtime.preview import (
     ExactDatasetPreviewSpec,
     notify_preview_failure,
 )
-
-
-def test_cancellation_source_mints_read_only_monotonic_token() -> None:
-    source = _CancellationSource()
-    token = source.token
-    assert not token.is_cancelled
-    assert source.request("stop")
-    assert not source.request("second stop")
-    assert token.is_cancelled
-    assert token.reason == "stop"
-    with pytest.raises(CancellationRequested) as raised:
-        token.checkpoint()
-    assert raised.value.reason == "stop"
-    assert not hasattr(token, "request")
 
 
 def test_detached_failure_drops_traceback_references() -> None:

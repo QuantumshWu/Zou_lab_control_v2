@@ -21,8 +21,6 @@ from zlc_atom.devices.camera.contract import (
     CameraWorkingPoint,
 )
 from zlc_atom.data import snapshot_from_array
-from zlc_atom.nodes._framework.generation import ProducerRuns
-from zlc_atom.nodes._framework.provenance import ProvenanceRecorder
 
 
 _CAMERA_FRAME_CONTRACT = "camera.frames.v1"
@@ -146,7 +144,7 @@ class _CameraMonitorSlot:
         records = self.latest
         if records is None:
             raise RuntimeError("camera monitor slot has no accepted cycle")
-        revision = self.node.runs.next_revision()
+        generation, revision = self.node._next_publication_stamp()
         coverage = MonitorCoverage(
             written_cells=1,
             total_cells=1,
@@ -159,7 +157,7 @@ class _CameraMonitorSlot:
                     producer=self.node.instance_id,
                     signal=declaration.name,
                     roles=(SPATIAL_Y, SPATIAL_X),
-                    generation=self.node.runs.generation,
+                    generation=generation,
                     revision=revision,
                 ),
                 coverage,
@@ -360,12 +358,10 @@ class CameraMeasurementNode:
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
         self.producer = self.instance_id
-        # One revision line per producer: live frames and the final publication
-        # advance the same counter, so a consumer never sees it go backwards.
-        self.runs = ProducerRuns()
-        # Captured once when a run begins; constant across its shots, because a
-        # parameter that changes during a run IS the scan and is already in the data.
-        self.provenance = ProvenanceRecorder()
+        # Live frames and final publications share one counter, which continues
+        # across runs so a consumer never sees this producer go backwards.
+        self._generation: object | None = None
+        self._revision = 0
 
     @property
     def request(self) -> CameraMeasurementRequest:
@@ -416,8 +412,12 @@ class CameraMeasurementNode:
         )
         if not isinstance(point, CameraWorkingPoint):
             raise TypeError("camera configure_measurement must return CameraWorkingPoint")
-        self._actual_working_point = point
-        self._run_record = {
+        return point
+
+    def _freeze_working_point(self, point: CameraWorkingPoint) -> None:
+        if not isinstance(point, CameraWorkingPoint):
+            raise TypeError("camera capture_working_point must return CameraWorkingPoint")
+        record = {
             "node": self.instance_id,
             "parameters": {
                 "exposure_seconds": self.request.exposure_seconds,
@@ -430,13 +430,21 @@ class CameraMeasurementNode:
                 "camera": _camera_working_point_snapshot(point),
             },
         }
-        return point
+        self._actual_working_point = point
+        self._run_record = record
 
     def _require_run_record(self) -> dict[str, object]:
         record = self._run_record
         if record is None:
-            raise RuntimeError("camera run record was not frozen after configure")
+            raise RuntimeError("camera run record was not frozen after arm")
         return record
+
+    def _next_publication_stamp(self) -> tuple[str, int]:
+        generation = self._generation
+        if generation is None:
+            raise RuntimeError("camera publication requires an active generation")
+        self._revision += 1
+        return str(getattr(generation, "value", generation)), self._revision
 
     def prepare(self, *, owns_generation: bool = True) -> FiniteCapture:
         """Arm the camera for one acquisition.
@@ -449,15 +457,8 @@ class CameraMeasurementNode:
         if self.request.repeat <= 0:
             raise ValueError("finite prepare requires request.repeat greater than zero")
         if owns_generation:
-            # A run boundary is where provenance is re-taken.  It never was:
-            # capture() records only the first time and nothing called reset,
-            # so every archive after the first recorded the FIRST run's
-            # apparatus -- the camera settings, the pulse, all of it -- for a
-            # node that exists to be run again and again.
-            self.runs.begin(self.signal_plane, self)
-            self.provenance.reset()
+            self._generation = self.signal_plane.begin_generation(self)
         self._configure_for_run()
-        self.provenance.capture(self)
         timeout = float(self.camera.timeout)
         total = self.request.repeat * self.request.frames_per_cycle
         groups = (self.request.frames_per_cycle,) * self.request.repeat
@@ -468,6 +469,7 @@ class CameraMeasurementNode:
             timeout=timeout,
         )
         try:
+            self._freeze_working_point(self.camera.capture_working_point())
             return FiniteCapture(
                 self,
                 repeat=self.request.repeat,
@@ -493,8 +495,7 @@ class CameraMeasurementNode:
         bench and a real one start to disagree.
         """
 
-        self.runs.adopt(context.generation)
-        self.provenance.reset()
+        self._generation = context.generation
         if self.repeat == 0:
             capture = self.monitor(
                 owns_generation=False,
@@ -524,40 +525,30 @@ class CameraMeasurementNode:
     def monitor(
         self,
         *,
-        buffer_frames: int | None = None,
         owns_generation: bool = True,
         attach_live_outputs: Callable[[object], None] | None = None,
     ) -> MonitorCapture:
         cycle_size = self.frames_per_cycle
-        minimum_frames = 4 * cycle_size
-        if buffer_frames is None:
-            buffer_frames = minimum_frames
-        else:
-            buffer_frames = int(buffer_frames)
-            if buffer_frames <= 0:
-                raise ValueError("buffer_frames must be positive")
-            buffer_frames = max(buffer_frames, minimum_frames)
-            buffer_frames = ((buffer_frames + cycle_size - 1) // cycle_size) * cycle_size
+        buffer_frames = 4 * cycle_size
         if self.request.repeat != 0:
             raise ValueError("monitor requires request.repeat equal to zero")
         owns_generation = bool(owns_generation)
         if owns_generation:
             if attach_live_outputs is not None:
                 raise ValueError("a direct monitor cannot use a host live-output attachment")
-            self.runs.begin(self.signal_plane, self)
-            self.provenance.reset()
+            self._generation = self.signal_plane.begin_generation(self)
         elif not callable(attach_live_outputs):
             raise TypeError("a hosted monitor requires attach_live_outputs")
         self._configure_for_run()
-        self.provenance.capture(self)
         timeout = float(self.camera.timeout)
         self.camera.arm(
             None,
-            source_group_sizes=None,
+            source_group_sizes=None if cycle_size == 1 else (cycle_size,),
             buffer_frame_count=buffer_frames,
             timeout=timeout,
         )
         try:
+            self._freeze_working_point(self.camera.capture_working_point())
             return MonitorCapture(
                 self.camera,
                 node=self,
@@ -578,7 +569,7 @@ class CameraMeasurementNode:
     ) -> MeasurementResult:
         if not cycles:
             raise ValueError("camera publication requires at least one cycle")
-        revision = self.runs.next_revision()
+        generation, revision = self._next_publication_stamp()
         outputs = {
             declaration.name: FinalDatasetOutput(
                 declaration,
@@ -590,7 +581,7 @@ class CameraMeasurementNode:
                     producer=self.instance_id,
                     signal=declaration.name,
                     roles=(SPATIAL_Y, SPATIAL_X),
-                    generation=self.runs.generation,
+                    generation=generation,
                     revision=revision,
                 ),
                 self._require_run_record(),

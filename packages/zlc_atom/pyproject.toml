@@ -16,6 +16,7 @@ dependencies = [
     "zlc-data",
     "zlc-plot",
     "zlc-pulse",
+    "zlc-ui",
 ]
 
 [project.optional-dependencies]

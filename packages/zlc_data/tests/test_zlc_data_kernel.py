@@ -518,8 +518,8 @@ for forbidden in ('matplotlib', 'PyQt5', 'Zou_lab_control'):
 def test_a_schema_is_not_named_until_someone_asks() -> None:
     """A name costs 23 us and most schemas are never named.
 
-    A three-operation transform builds six intermediates, and nothing ever asks
-    any of them for a fingerprint -- they are compared as objects or not at all.
+    Derived operations build intermediate schemas, and most are compared as
+    objects without ever asking for a persisted fingerprint.
     """
 
     import zlc_data.codec as codec

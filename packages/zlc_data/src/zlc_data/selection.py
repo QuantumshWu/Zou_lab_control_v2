@@ -8,6 +8,8 @@ from math import ceil, floor
 from numbers import Real
 from typing import Any
 
+import numpy as np
+
 from ._diagnostic import exact_integer_text
 from ._tree import encode as _encode
 from .validation import (
@@ -184,6 +186,24 @@ class Selection:
         )
 
 
+def take_indices(
+    array: np.ndarray,
+    indices: range | tuple[int, ...],
+    *,
+    axis: int,
+    drop: bool = False,
+) -> np.ndarray:
+    """Index one axis while retaining a view for a contiguous selection."""
+
+    if drop:
+        return np.take(array, indices[0], axis=axis)
+    if isinstance(indices, range):
+        selection = [slice(None)] * array.ndim
+        selection[axis] = slice(indices.start, indices.stop)
+        return array[tuple(selection)]
+    return np.take(array, indices, axis=axis)
+
+
 def resolve_selection_indices(
     axis: AxisSpec,
     term: SelectionTerm,
@@ -345,4 +365,5 @@ __all__ = [
     "resolve_selection_indices",
     "selection_from_tree",
     "selection_to_tree",
+    "take_indices",
 ]

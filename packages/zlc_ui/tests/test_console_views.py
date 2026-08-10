@@ -40,6 +40,7 @@ print(tested_module.__file__)
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
+card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
 card.set_signal_choices((('source', (('Temperature', 'temperature'),)),))
 state = {
     'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
@@ -152,7 +153,8 @@ from zlc_ui.qt import ensure_qt_app
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
-card.set_interval_choices((100, 200, 400, 800))
+card.set_size_choices(('2x2',), '2x2')
+card.set_interval_choices((100, 200, 400, 800), 400)
 card.set_panel_projection({
     'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 400,
     'title': 'Card', 'semantic': {}, 'display': {}, 'fit': {},
@@ -459,6 +461,7 @@ from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['logic-editor'])
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
+handle.set_panel_sizes(('2x2',), '2x2')
 handle.add_logic_row('camera-1', 'measurement')
 handle.set_panel_publishers((('panel-1', (
     ('center_x', '35', 'held · @logic/panel-1/center_x'),
@@ -635,7 +638,8 @@ temporary = TemporaryDirectory()
 save_directory = temporary.name
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
-handle.set_panel_intervals((100, 200, 400, 800))
+handle.set_panel_sizes(('1x2', '2x2', '1x4'), '2x2')
+handle.set_panel_intervals((100, 200, 400, 800), 400)
 handle.add_panel('panel-1', 'Camera')
 groups = (('camera', (('frames', '@logic/cm/frames'),)),)
 overlay_groups = (('occupancy', (('sites', '@logic/occ/site_overlay'),)),)
@@ -1190,6 +1194,7 @@ from zlc_ui.console import TaskConsoleHandle
 app = ensure_qt_app(['test'])
 view = tested_module.TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
+handle.set_panel_sizes(('2x2',), '2x2')
 view.show(); app.processEvents()
 events = []
 handle.set_panel_kinds((('curve', 'Curve'), ('image', '2D image')), 'image')

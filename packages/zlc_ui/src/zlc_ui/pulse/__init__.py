@@ -1,7 +1,7 @@
 """Pure Qt pulse-editor views and their headless view models."""
 
 from .handle import PulseEditorHandle
-from .editor_view import PulseEditorView, launch_pulse_editor_window
+from .editor_view import PulseEditorView
 from .models import (
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
@@ -33,5 +33,5 @@ __all__ = [
     "PulseEditorView", "PulsePreviewView", "PulseScanView",
     "PulseScheduleView", "PulseTargetView", "PulseDragContainer",
     "RepeatBracket", "RepeatVM", "ScanPageRecord", "ScheduleVM",
-    "TargetPortRecord", "TargetWidthRule", "launch_pulse_editor_window",
+    "TargetPortRecord", "TargetWidthRule",
 ]

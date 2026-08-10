@@ -134,7 +134,6 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         occupancy_node = OccupancyProcessor(
             calibration,
             calibration_path=calibration_path,
-            signal_plane=session.signal_plane,
             producer="occupancy",
             source_signal=frames_signal,
         )

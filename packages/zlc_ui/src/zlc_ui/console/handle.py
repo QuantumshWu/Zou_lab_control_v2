@@ -85,6 +85,9 @@ class TaskConsoleHandle(QtCore.QObject):
         self._logic_editors: dict[str, LogicEditorView] = {}
         self._panel_editors: dict[str, PanelEditorView] = {}
         self._panel_intervals: tuple[int, ...] = ()
+        self._panel_default_interval = 0
+        self._panel_sizes: tuple[str, ...] = ()
+        self._panel_default_size = ""
         self._task_takeover = False
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
@@ -138,15 +141,33 @@ class TaskConsoleHandle(QtCore.QObject):
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
         self._view.set_panel_kinds(kinds, current)
 
-    def set_panel_intervals(self, intervals: object) -> None:
+    def set_panel_intervals(self, intervals: object, default_interval: int) -> None:
         """Project the scheduler's finite refresh policy to every panel view."""
 
         values = tuple(int(value) for value in tuple(intervals or ()))
         if not values:
             raise ValueError("panel interval choices must not be empty")
+        default = int(default_interval)
+        if default not in values:
+            raise ValueError("default panel interval must be one of the choices")
         self._panel_intervals = values
+        self._panel_default_interval = default
         for card in self._cards.values():
-            card.set_interval_choices(values)
+            card.set_interval_choices(values, default)
+
+    def set_panel_sizes(self, sizes: object, default_size: str) -> None:
+        """Project the plotting owner's finite size policy to every panel view."""
+
+        values = tuple(str(value) for value in tuple(sizes or ()))
+        if not values or len(set(values)) != len(values):
+            raise ValueError("panel size choices must be unique and non-empty")
+        default = str(default_size)
+        if default not in values:
+            raise ValueError("default panel size must be one of the choices")
+        self._panel_sizes = values
+        self._panel_default_size = default
+        for card in self._cards.values():
+            card.set_size_choices(values, default)
 
     def set_logic_kinds(
         self, kinds: tuple[tuple[str, str, str, str], ...]
@@ -184,13 +205,6 @@ class TaskConsoleHandle(QtCore.QObject):
         """Ask which signal to show; None when the operator declines."""
 
         return choose_signal(rows, self._view)
-
-    def edit_values(self, spec, values, *, title: str):
-        """Show a modal form over a spec, and return what was set."""
-
-        from ..form import edit_values as _edit_values
-
-        return _edit_values(spec, values, self._view, title=str(title))
 
     def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
         """Ask where to write; "" when the operator declines."""
@@ -254,6 +268,9 @@ class TaskConsoleHandle(QtCore.QObject):
         card = self._cards.get(key)
         if card is None:
             card = PanelCardView(key, str(title))
+            if not self._panel_sizes:
+                raise RuntimeError("panel size choices were not projected")
+            card.set_size_choices(self._panel_sizes, self._panel_default_size)
             card.remove_requested.connect(
                 lambda _=None, pid=key: self.panel_remove_requested.emit(pid)
             )
@@ -265,7 +282,10 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             self._cards[key] = card
             if self._panel_intervals:
-                card.set_interval_choices(self._panel_intervals)
+                card.set_interval_choices(
+                    self._panel_intervals,
+                    self._panel_default_interval,
+                )
             card.set_editing_enabled(not self._task_takeover)
         self._view.set_cards(tuple(self._cards.values()))
 
@@ -364,6 +384,7 @@ class TaskConsoleHandle(QtCore.QObject):
         key = str(panel_id)
         incoming = dict(projection)
         incoming["interval_choices"] = self._panel_intervals
+        incoming["size_choices"] = self._panel_sizes
         editor = self._panel_editors.get(key)
         if editor is None:
             editor = PanelEditorView(key, incoming)
@@ -401,6 +422,7 @@ class TaskConsoleHandle(QtCore.QObject):
             return False
         incoming = dict(projection)
         incoming["interval_choices"] = self._panel_intervals
+        incoming["size_choices"] = self._panel_sizes
         editor.update_projection(incoming)
         return True
 

@@ -1,6 +1,6 @@
 """Finite public facade for the dependency-light runtime primitives."""
 
-MAX_PUBLIC_NAMES = 24
+MAX_PUBLIC_NAMES = 23
 __version__ = "0.1.0"
 
 from .dataset import DatasetCoverage, MonitorCoverage
@@ -10,7 +10,6 @@ from .dataset_output import (
     LiveDatasetOutput,
 )
 from .plane import (
-    DerivedSignalOutput,
     SignalDataPlane,
     SignalDescription,
     SignalPublication,
@@ -40,7 +39,6 @@ __all__ = (
     "BoardScheduler",
     "DatasetCoverage",
     "DatasetOutputDeclaration",
-    "DerivedSignalOutput",
     "FinalDatasetOutput",
     "HarmonicClock",
     "LiveDatasetOutput",

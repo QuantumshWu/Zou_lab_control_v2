@@ -176,20 +176,16 @@ class OwnerChannels:
 class HarmonicClock:
     """Pure arithmetic clock for one harmonic set of panel intervals."""
 
-    __slots__ = ("_allowed", "_base_ms", "_default_ms", "_elapsed_ms")
+    __slots__ = ("_allowed", "_base_ms", "_elapsed_ms")
 
-    def __init__(self, intervals: Sequence[int], default_ms: int) -> None:
+    def __init__(self, intervals: Sequence[int]) -> None:
         normalized = tuple(sorted({_positive_int(value, "display interval") for value in intervals}))
         if not normalized:
             raise ValueError("display interval set must not be empty")
-        default = _positive_int(default_ms, "default_ms")
-        if default not in normalized:
-            raise ValueError("default_ms must belong to the harmonic interval set")
         base = normalized[0]
         if any(value % base for value in normalized):
             raise ValueError("display intervals must be harmonic multiples of the base")
         self._allowed = frozenset(normalized)
-        self._default_ms = default
         self._base_ms = base
         self._elapsed_ms = 0
 
@@ -212,12 +208,6 @@ class HarmonicClock:
                 f"display interval {normalized} is not in {self.intervals}"
             )
         return normalized
-
-    def rebase(self, panel_intervals: Iterable[int]) -> int:
-        values = tuple(self._interval(value) for value in panel_intervals)
-        self._base_ms = min(values, default=self._default_ms)
-        self._elapsed_ms = 0
-        return self._base_ms
 
     def advance(self) -> int:
         self._elapsed_ms += self._base_ms

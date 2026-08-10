@@ -26,11 +26,10 @@ implementation details:
 ## Package map
 
 The implementation is organized around `streams.py` and `dataset.py`, the
-lineage-aware `plane.py` signal surface, `host.py` node lifecycles, and `presentation.py` scheduling.  `live_dataset.py`,
-`owner_mailbox.py`, `dataset_output.py`, and the small helper modules provide
-the ownership seams; `window_runtime.py` contains the dependency-free compute
-and export helpers.  Domain packages own hardware identity, device execution,
-and UI/plot adapters.
+lineage-aware `plane.py` signal surface, `host.py` node lifecycles, and
+`presentation.py` scheduling. `live_dataset.py`, `owner_mailbox.py`, and
+`dataset_output.py` provide the ownership seams. Domain packages own hardware
+identity, device execution, and UI/plot adapters.
 
 `zlc_runtime.host.NodeHost` is deliberately a lifecycle seam.  Domain-side
 descriptors, application contexts, device requirements, and operation binding

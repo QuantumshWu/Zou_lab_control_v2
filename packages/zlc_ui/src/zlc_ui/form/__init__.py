@@ -15,8 +15,6 @@ _EXPORTS = {
     "choice_value_from_tree": ("zlc_ui.form.form", "choice_value_from_tree"),
     "FormRuntimeContext": ("zlc_ui.form.qt_form", "FormRuntimeContext"),
     "FluentParameterForm": ("zlc_ui.form.qt_form", "FluentParameterForm"),
-    "SettingsDialog": ("zlc_ui.form.settings_dialog", "SettingsDialog"),
-    "edit_values": ("zlc_ui.form.settings_dialog", "edit_values"),
 }
 
 __all__ = tuple(sorted(_EXPORTS))

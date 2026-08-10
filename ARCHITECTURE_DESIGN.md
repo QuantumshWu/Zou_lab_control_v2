@@ -271,13 +271,13 @@ Camera Measurement 按本次 authored `Frames per cycle` 声明
 `Repeat=0` 的 latest slot 也只以完整 tuple 为单位覆盖，因此慢 consumer 最多跳过完整
 cycle，不会把不同 shot 的 frame 拼在一起。Virtual/DCAM/Pylon 只负责把各自 driver 的
 frame counter、buffer overrun 和 failed grab 如实投影到该共同契约，不各自实现
-`frames_per_cycle` 业务规则。Pylon 的 `LatestImageOnly` 只可用于真正的自由运行设备
-预览；Camera Measurement 的 `Repeat=0` 必须使用 external-triggered ordered stream。
-连续采集的内部 raw buffer 至少容纳一百二十八个完整 cycle，容量始终向
-`frames_per_cycle` 的整数倍取整；这给短时 worker 调度、绘图和 UI 停顿留出读取
-余量。该容量由 Camera Measurement 一次决定，Virtual deque、DCAM ring 和 Pylon
-`MaxNumBuffer` 必须落实同一个帧数，不得只接收参数却继续使用 driver 默认值。它不是
-用户参数，也不改变 latest-only 的发布语义。
+`frames_per_cycle` 业务规则。`Repeat=0` 且每 cycle 只有一帧时，Pylon 使用真正的
+source-less free-running `LatestImageOnly` 预览；每 cycle 多帧时没有可靠的物理 shot id，
+因此仍使用 external-triggered ordered stream，不能按返回数量伪造 same-shot group。
+连续采集的内部 raw buffer 固定容纳四个完整 cycle，容量始终是
+`4 * frames_per_cycle`。该容量由 Camera Measurement 一次决定，并传给 adapter 的实际
+driver buffer；它不是用户参数，也不改变 latest-only 的完整-cycle发布语义。这个四-cycle
+裁决已经结束，不得在后续修复中继续增大。
 等待/触发超时属于 adapter/session 内部采集策略，不作为普通用户 authoring 字段。
 
 Camera Measurement 不驱动 pulse。它监听外部时序，独占 camera、最多只读 sequencer 状态。Driver/internal buffer 大小不进用户表单。

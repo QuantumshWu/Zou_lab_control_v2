@@ -107,7 +107,6 @@ def test_task_console_display_beat_is_the_display_clock_base() -> None:
         ),
         tuple,
         intervals=DEFAULTS.live.refresh_intervals_ms,
-        default_interval_ms=DEFAULTS.live.default_refresh_interval_ms,
     )
     try:
         presenter = SimpleNamespace(board=board)
@@ -201,7 +200,7 @@ def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
         "result = capture.collect();"
         "signal = node.signal_key('frame_0');"
         "path = session.save_figure('run', arrays={'panel-1': result.publication.value(signal).snapshot},"
-        " nodes=(node,), panel={'panel-1': {'signal': signal, 'title': 'camera'}});"
+        " panel={'panel-1': {'signal': signal, 'title': 'camera'}});"
         "print(path);"
         "session.close()"
     ) % (workspace, PULSE_NAME, CAMERA_WINDOWS)
@@ -374,9 +373,8 @@ view._view.kind_combo.setCurrentIndex(image_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 panel = next(iter(presenter.panels.values()))
-from zlc_plot import DEFAULTS
-assert panel.state.interval_ms == DEFAULTS.live.default_refresh_interval_ms == 100, (
-    'a new panel starts at the live policy default')
+assert panel.state.interval_ms == 400, (
+    'a new TaskConsole panel starts at the product default')
 assert tuple(view._cards[panel.panel_id]._interval_choices) == (100, 200, 400, 800)
 assert len(presenter.panels) == 1
 blank = next(iter(presenter.panels.values()))
@@ -391,9 +389,10 @@ assert catalog == (
     ('Plot: 1D vector', ('plot', 'curve')),
     ('Plot: Rolling trace', ('plot', 'rolling')),
     ('Plot: Distribution', ('plot', 'histogram')),
-    ('Plot: Site grid', ('plot', 'facet_grid')),
-    ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
-    ('Processor: Occupancy', ('logic', 'occupancy')),
+        ('Plot: Site grid', ('plot', 'facet_grid')),
+        ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
+        ('Measurement: Pulse Api Scan', ('logic', 'pulse_api_scan')),
+        ('Processor: Occupancy', ('logic', 'occupancy')),
     ('Task: Calibration', ('logic', 'calibration')),
 )
 facet_index = next(

@@ -180,9 +180,9 @@ snapshot 决定；点层仍有单调 revision，空层也是有 revision 的值�
 携带 producer revision。Controller 展示 payload 时保留该 revision，使 session
 state、selection events、selected data 和 fit inputs 指向同一 producer revision。
 
-`LatestIngress` owns dataset replace/patch/rolling state. Dataset and specialised
-plot transports share `LatestRevisionChannel` for the same cadence-free,
-capacity-one semantics; `LivePlotController` is the public presentation facade.
+`LivePlotController` owns one fixed-contract ingress built on
+`LatestRevisionChannel`, giving dataset and specialised plot payloads the same
+cadence-free, capacity-one semantics.
 Producers may publish faster than display, and a pending item is replaced by the
 newest revision. GUI timers choose a configurable display cadence while ingress
 never builds an unbounded queue.

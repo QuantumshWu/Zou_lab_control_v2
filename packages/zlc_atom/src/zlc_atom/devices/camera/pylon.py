@@ -388,9 +388,8 @@ class PylonCameraAdapter:
         pixel_format = str(camera.PixelFormat.GetValue())
         if pixel_format != "Mono8":
             raise RuntimeError(f"pylon pixel format is {pixel_format!r}, expected 'Mono8'")
-        expected_trigger_mode = (
-            "Off" if self._armed and self._monitor_mode else "On"
-        )
+        free_running = self._armed and self._monitor_mode
+        expected_trigger_mode = "Off" if free_running else "On"
         if str(camera.TriggerMode.GetValue()) != expected_trigger_mode:
             raise RuntimeError("pylon trigger mode changed outside the adapter")
         if expected_trigger_mode == "On" and (
@@ -399,7 +398,11 @@ class PylonCameraAdapter:
             raise RuntimeError("pylon trigger source changed outside the adapter")
         exposure = float(camera.ExposureTime.GetValue()) / 1e6
         return CameraWorkingPoint(
-            acquisition_mode=CameraAcquisitionMode.EXTERNAL_TRIGGERED,
+            acquisition_mode=(
+                CameraAcquisitionMode.FREE_RUNNING
+                if free_running
+                else CameraAcquisitionMode.EXTERNAL_TRIGGERED
+            ),
             frame_shape_yx=(height, width),
             sensor_shape_yx=sensor,
             roi_origin_yx=origin,
@@ -408,11 +411,20 @@ class PylonCameraAdapter:
             dtype=np.dtype("uint8"),
             count_unit="count",
             exposure_seconds=exposure,
-            required_external_trigger_interval_seconds=exposure,
-            external_trigger_integration_start_offset_seconds=0.0,
+            required_external_trigger_interval_seconds=(
+                None if free_running else exposure
+            ),
+            external_trigger_integration_start_offset_seconds=(
+                None if free_running else 0.0
+            ),
             gain=1.0,
             readout_mode=(
-                f"pylon:Mono8;external={self.config.trigger_source};monitor=free-run"
+                "pylon:Mono8;free-running;grab=LatestImageOnly"
+                if free_running
+                else (
+                    f"pylon:Mono8;external={self.config.trigger_source};"
+                    "grab=OneByOne"
+                )
             ),
         )
 

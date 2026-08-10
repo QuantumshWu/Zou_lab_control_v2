@@ -18,7 +18,8 @@ from __future__ import annotations
 from concurrent.futures import Future
 from types import SimpleNamespace
 
-from zlc_runtime.plane import DerivedSignalOutput, SignalDataPlane
+from zlc_runtime import DatasetCoverage, LiveDatasetOutput
+from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.board import LiveBoard
 from zlc_workbench.presentation import PlotPanelPort
 
@@ -27,6 +28,15 @@ from test_signal_front import _output
 
 FRAME = "camera/frame"
 OCCUPANCY = "occupancy/value"
+
+
+def _exact_output(name: str, revision: int) -> LiveDatasetOutput:
+    output = _output(name, revision)
+    return LiveDatasetOutput(
+        output.declaration,
+        output.snapshot,
+        DatasetCoverage(1, 1),
+    )
 
 
 class _RenderHost:
@@ -55,7 +65,7 @@ class _Bench:
     def __init__(self) -> None:
         self.plane = SignalDataPlane()
         self.revision = 0
-        self.outputs = {"frame": _output("frame", 1)}
+        self.outputs = {"frame": _exact_output("frame", 1)}
         self.node = SimpleNamespace(
             instance_id="camera",
             dataset_output_declarations=(self.outputs["frame"].declaration,),
@@ -74,34 +84,35 @@ class _Bench:
         # once passed while the real console presented skewed shots.
         self.publish_shot()  # revision 1 binds the derived route
         root = self.plane.latest_publication(FRAME)
-        self.derived_generation = self.plane.bind_continuous_derived(
-            "occupancy",
+        occupancy = _exact_output("occupancy", 1)
+        self.derived_node = SimpleNamespace(
+            instance_id="occupancy",
+            dataset_output_declarations=(occupancy.declaration,),
+            signal_key=lambda _name: OCCUPANCY,
+        )
+        self.derived_tap = self.plane.reserve_follow_processor(
+            self.derived_node,
             source_name=FRAME,
-            expected_source_generation=root.event_ref.generation,
-            output_names=(OCCUPANCY,),
+            source_publication=root,
         )
         self.publish_derived()
 
     def publish_shot(self) -> None:
         self.revision += 1
-        self.outputs["frame"] = _output("frame", self.revision)
+        self.outputs["frame"] = _exact_output("frame", self.revision)
         self.plane.mark_changed(self.node, self.slot)
         self.plane.freeze()
 
     def publish_derived(self) -> None:
         root = self.plane.latest_publication(FRAME)
-        assert self.plane.publish_continuous_derived(
-            "occupancy",
-            self.derived_generation,
-            (root,),
-            {
-                OCCUPANCY: DerivedSignalOutput(
-                    _output("occupancy", self.revision).snapshot
-                )
-            },
+        self.plane.publish_processor(
+            self.derived_node,
+            {"occupancy": _exact_output("occupancy", self.revision)},
+            source_publication=root,
         )
 
     def close(self) -> None:
+        self.derived_tap.close()
         self.plane.close()
 
 
@@ -142,7 +153,6 @@ def _bench_board(bench: _Bench):
         bench.plane,
         lambda: (frame_port, occupancy_port),
         intervals=(100, 200, 400, 800),
-        default_interval_ms=100,
     )
     return board, frame_host, occupancy_host, frame_port, occupancy_port, presents
 
@@ -157,8 +167,7 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
         _bench_board(bench)
     )
     try:
-        front = board.tick()
-        assert front.continuous_group(FRAME) == frozenset({FRAME, OCCUPANCY})
+        board.tick()
         assert len(frame_host.futures) == len(occupancy_host.futures) == 1
 
         # The derived member lands FIRST; its partner is still rendering, so

@@ -13,7 +13,7 @@ rendering, or about how signals flow -- those have homes, and this is not one.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date as _date
 import json
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from zlc_data import OwnedSnapshot
 from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
 
 from .archive import write_figure
@@ -419,28 +420,17 @@ class ExperimentSession:
         self,
         name: str,
         *,
-        arrays: Mapping[str, np.ndarray],
-        nodes: Sequence[object] = (),
+        arrays: Mapping[str, np.ndarray | OwnedSnapshot],
         panel: Mapping[str, Any] | None = None,
     ) -> Path:
         """Save arrays together with everything needed to explain them.
 
-        Each section comes from whoever owns that subject: the nodes describe the
-        apparatus and what was asked of it, the pulse describes the stimulus.
-        This assembles them; it does not author them.
+        Typed snapshots carry their own dataset identity; the current pulse
+        describes the stimulus.  Panel Edit's dedicated save path additionally
+        records the selected publication's run chain.
         """
 
-        provenance: dict[str, Any] = {}
-        for node in nodes:
-            recorder = getattr(node, "provenance", None)
-            capture = getattr(recorder, "capture", None)
-            if callable(capture):
-                record = capture(node)
-                provenance[str(record.get("node", "node"))] = record
-
         sections: dict[str, Any] = {}
-        if provenance:
-            sections["provenance"] = provenance
         pulse = getattr(self, "_pulse", None)
         if pulse is not None:
             sections["pulse"] = pulse

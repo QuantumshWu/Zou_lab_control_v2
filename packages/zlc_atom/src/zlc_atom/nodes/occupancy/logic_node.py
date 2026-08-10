@@ -44,7 +44,6 @@ def _build(
     *,
     calibration: ResolvedArtifact,
     source_signal: str,
-    signal_plane: object | None = None,
     **values: object,
 ) -> OccupancyProcessor:
     authored = OCCUPANCY_SCHEMA.project_values(values)
@@ -60,7 +59,6 @@ def _build(
     return OccupancyProcessor(
         calibration.value,
         calibration_path=calibration.path,
-        signal_plane=signal_plane,
         source_signal=selected_source,
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
     )

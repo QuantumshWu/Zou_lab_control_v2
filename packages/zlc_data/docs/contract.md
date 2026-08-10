@@ -12,8 +12,8 @@ but they must not create a second data or unit authority.
 `AxisSpec.unit`, `PointColumn.unit`, and `ValueSchema.value_unit` are optional
 strings annotating the **canonical unit** of the stored coordinates or values.
 They do not describe a display unit and they do not carry conversion behavior.
-All physical computation represented by `zlc_data`—validity, selection,
-transform, reduction, histogram, and persistence—operates on canonical values.
+All physical computation represented by `zlc_data`—validity, selection, and
+persistence—operates on canonical values.
 
 `zlc_data` deliberately does not own a unit registry, unit objects, affine
 conversion rules, compatibility checks, inverse-unit lookup, or `arb`/`1`
@@ -29,7 +29,7 @@ canonical units.
 ### Live ownership
 
 `zlc_data` owns immutable schemas, topology, values, typed validity,
-revision references, transforms, codecs, NPZ persistence, and the direct
+revision references, codecs, NPZ persistence, and the direct
 `OwnedSnapshot` construction convenience. It does not own a live channel,
 latest-only replacement policy, ingress queue, patch/rolling state, or any
 other mutable transport state.
@@ -62,17 +62,14 @@ facade.
   "BlockId",
   "COMPONENT",
   "CellValidity",
-  "CommittedTransform",
   "ComponentValidity",
   "CoordinateFrameId",
   "DataBlock",
-  "DataTransformSpec",
   "DatasetComponentValidity",
   "DatasetRevision",
   "DatasetRevisionRef",
   "DatasetSchema",
   "GridTopology",
-  "HistogramSpec",
   "INVALID",
   "IndexSelection",
   "Invalid",
@@ -82,8 +79,6 @@ facade.
   "PointTable",
   "READOUT_EVENT",
   "REPEAT",
-  "ReductionMethod",
-  "ReductionSpec",
   "SCAN_POINT",
   "SITE",
   "SPATIAL_X",
@@ -99,9 +94,7 @@ facade.
   "ValuePayloadContract",
   "ValueSchema",
   "__version__",
-  "apply_transform",
   "canonical_text",
-  "commit_transform",
   "compact_dataset_validity",
   "digest_text",
   "exact_mapping",
@@ -119,20 +112,17 @@ facade.
   "owned_snapshot_from_arrays",
   "positive_integer",
   "resolve_selection_indices",
-  "resolve_transformed_schema",
   "save_npz",
   "snapshot_from_manifest",
-  "snapshot_manifest",
-  "take_indices"
+  "snapshot_manifest"
 ]
 ```
 
 ### Export review note
 
 The adversarial API review deliberately retained `AxisRoleId`, `ValidityMode`,
-`CommittedTransform`, `ValuePayloadContract`, `AxisSourceRef`,
-`ReductionSpec`, `ReductionMethod`, `HistogramSpec`, and `__version__` at the
-facade. They are required by downstream production contracts or by the
-authoritative construction path; the notebook demonstrates their use. The
-withdrawn names are return carriers, policy internals, unused role constants,
-or low-level helpers and remain owned by their original submodules.
+`ValuePayloadContract`, `AxisSourceRef`, and `__version__` at the facade. They
+are required by downstream production contracts or by the authoritative
+construction path; the notebook demonstrates their use. The withdrawn names
+are return carriers, policy internals, unused role constants, or low-level
+helpers and remain owned by their original submodules.

@@ -222,7 +222,7 @@ def test_the_apparatus_form_offers_the_port_a_server_actually_listens_on() -> No
     assert fields["host"] == remote.DEFAULT_HOST
 
 
-def test_the_card_does_not_own_a_second_copy_of_the_figure_geometry() -> None:
+def test_the_card_consumes_the_plot_owners_size_policy() -> None:
     """A card is a frame around a picture; the picture's size is the drawer's.
 
     zlc_ui used to restate the margins, the cell unit and the display scale,
@@ -242,21 +242,23 @@ def test_the_card_does_not_own_a_second_copy_of_the_figure_geometry() -> None:
     from zlc_plot import DEFAULTS
     from zlc_plot.kinds import PlotKind
     from zlc_plot.layout import resolve_surface
-    from zlc_ui.board import PANEL_SIZES, panel_display_size
+    from zlc_ui.board import panel_display_size
 
-    for name in PANEL_SIZES:
+    for name in DEFAULTS.layout.size_names:
         plan = resolve_surface(
             name, PlotKind.CURVE, layout=DEFAULTS.layout, style=DEFAULTS.style
         )
         assert panel_display_size(name) == tuple(plan.logical_size), name
 
-    assert PANEL_SIZES == tuple(
-        preset.name for preset in DEFAULTS.layout.presets
-    ), "the two packages offer different panel sizes"
-
-    # No margins, no cell unit, no scale: the numbers live in one package.
+    # No vocabulary, default, margins, cell unit, or scale: all live in plot.
     source = Path(geometry.__file__).read_text(encoding="utf-8")
-    for copied in ("_PANEL_MARGINS_PX", "_PANEL_UNIT_PX", "_PANEL_DISPLAY_SCALE"):
+    for copied in (
+        "PANEL_SIZES",
+        "DEFAULT_PANEL_SIZE",
+        "_PANEL_MARGINS_PX",
+        "_PANEL_UNIT_PX",
+        "_PANEL_DISPLAY_SCALE",
+    ):
         assert copied not in source, f"{copied} is a second copy of zlc_plot's geometry"
 
 

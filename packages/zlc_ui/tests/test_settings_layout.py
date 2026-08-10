@@ -64,7 +64,8 @@ def parameter_surface(count):
     }
 
 card = PanelCardView('panel-1', 'Camera')
-card.set_interval_choices((100, 200, 400, 800))
+card.set_size_choices(('2x2',), '2x2')
+card.set_interval_choices((100, 200, 400, 800), 400)
 card.set_signal_choices(
     (('camera-1', (('frames  [96x128]', '@logic/camera-1/frames'),)),),
     current='@logic/camera-1/frames',

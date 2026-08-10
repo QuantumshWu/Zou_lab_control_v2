@@ -325,28 +325,6 @@ class _QueuedDataFrame:
     completion: Future["RasterOperation[None]"]
 
 
-_CoalesceResolver = Callable[[tuple[Any, ...], Mapping[str, Any]], object | None]
-
-
-def _parameter_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object:
-    return ("parameter", str(args[0]))
-
-
-def _parameters_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object:
-    return ("parameters", tuple(sorted(args[0])))
-
-
-def _axis_unit_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object:
-    return ("axis-unit", args[0])
-
-
-def _labels_coalesce(
-    _args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> object:
-    return ("labels", tuple(sorted(kwargs)))
-
-
 def _pointer_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object | None:
     action = args[0]
     if action == "move":

@@ -24,10 +24,9 @@ from zlc_data import (
     ValueSchema,
 )
 
-from zlc_runtime.dataset import MonitorCoverage
+from zlc_runtime.dataset import DatasetCoverage
 from zlc_runtime.front import build_front
 from zlc_runtime.plane import (
-    DerivedSignalOutput,
     SignalDataPlane,
     SignalPublication,
     SignalValue,
@@ -70,7 +69,7 @@ def _output(name: str, revision: int) -> LiveDatasetOutput:
     return LiveDatasetOutput(
         DatasetOutputDeclaration(name, f"test.{name}"),
         snapshot,
-        MonitorCoverage(1, 1),
+        DatasetCoverage(1, 1),
     )
 
 
@@ -121,16 +120,12 @@ def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
     parents = {root: (), roi: (root,), fit: (roi,)}
     states = [
         _state("camera", "g1", "producer", ("camera/frame",), root),
-        _state("roi", "g2", "continuous", ("roi/value",), roi, "camera/frame"),
-        _state("fit", "g3", "continuous", ("fit/value",), fit, "roi/value"),
+        _state("roi", "g2", "processor", ("roi/value",), roi, "camera/frame"),
+        _state("fit", "g3", "processor", ("fit/value",), fit, "roi/value"),
     ]
 
     first = build_front(states, {"camera/frame", "roi/value", "fit/value"}, None, parents.__getitem__)
     assert first.names() == ("camera/frame", "roi/value", "fit/value")
-    assert first.continuous_group("fit/value") == frozenset(
-        {"camera/frame", "roi/value", "fit/value"}
-    )
-
     root2 = _publication("camera", "g1", 2, "camera/frame")
     roi2 = _publication("roi", "g2", 2, "roi/value", (root2,))
     states[0].publication = root2
@@ -185,9 +180,6 @@ def test_a_presentation_paced_follower_never_holds_its_source() -> None:
     requested = {"camera/frame", "fit/value"}
 
     first = build_front(states, requested, None, parents.__getitem__)
-    assert first.continuous_group("camera/frame") == frozenset({"camera/frame"})
-    assert first.continuous_group("fit/value") == frozenset({"fit/value"})
-
     # The camera advances two shots; the follower's fit is still for shot 1.
     root3 = _publication("camera", "g1", 3, "camera/frame")
     states[0].publication = root3
@@ -235,6 +227,8 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         close=lambda: None,
         notification_failure=None,
     )
+    roi_tap = None
+    fit_tap = None
     try:
         plane.reserve(node)
         plane.attach(node, slot)
@@ -244,31 +238,37 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         root = first_front.publication("camera/frame")
         assert root is not None
 
-        roi_generation = plane.bind_continuous_derived(
-            "roi",
-            source_name="camera/frame",
-            expected_source_generation=root.event_ref.generation,
-            output_names=("roi/value",),
+        roi_node = SimpleNamespace(
+            instance_id="roi",
+            dataset_output_declarations=(_output("roi", 1).declaration,),
+            signal_key=lambda _name: "roi/value",
         )
-        assert plane.publish_continuous_derived(
-            "roi",
-            roi_generation,
-            (root,),
-            {"roi/value": DerivedSignalOutput(_output("roi", 1).snapshot)},
+        roi_tap = plane.reserve_follow_processor(
+            roi_node,
+            source_name="camera/frame",
+            source_publication=root,
+        )
+        plane.publish_processor(
+            roi_node,
+            {"roi": _output("roi", 1)},
+            source_publication=root,
         )
         roi = plane.latest_publication("roi/value")
         assert roi is not None
-        fit_generation = plane.bind_continuous_derived(
-            "fit",
-            source_name="roi/value",
-            expected_source_generation=roi.event_ref.generation,
-            output_names=("fit/value",),
+        fit_node = SimpleNamespace(
+            instance_id="fit",
+            dataset_output_declarations=(_output("fit", 1).declaration,),
+            signal_key=lambda _name: "fit/value",
         )
-        assert plane.publish_continuous_derived(
-            "fit",
-            fit_generation,
-            (roi,),
-            {"fit/value": DerivedSignalOutput(_output("fit", 1).snapshot)},
+        fit_tap = plane.reserve_follow_processor(
+            fit_node,
+            source_name="roi/value",
+            source_publication=roi,
+        )
+        plane.publish_processor(
+            fit_node,
+            {"fit": _output("fit", 1)},
+            source_publication=roi,
         )
         first_front = plane.freeze()
         first_fit = first_front.publication("fit/value")
@@ -276,29 +276,23 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         root_reference = weakref.ref(root)
         roi_reference = weakref.ref(roi)
         fit_reference = weakref.ref(first_fit)
-        assert first_front.continuous_group("fit/value") == frozenset(
-            {"camera/frame", "roi/value", "fit/value"}
-        )
-
         state["frame"] = _output("frame", 2)
         plane.mark_changed(node, slot)
         held_front = plane.freeze()
         root2 = plane.latest_publication("camera/frame")
         assert root2 is not None
         assert held_front.value("camera/frame").snapshot.ref.revision.value == 1
-        assert plane.publish_continuous_derived(
-            "roi",
-            roi_generation,
-            (root2,),
-            {"roi/value": DerivedSignalOutput(_output("roi", 2).snapshot)},
+        plane.publish_processor(
+            roi_node,
+            {"roi": _output("roi", 2)},
+            source_publication=root2,
         )
         roi2 = plane.latest_publication("roi/value")
         assert roi2 is not None
-        assert plane.publish_continuous_derived(
-            "fit",
-            fit_generation,
-            (roi2,),
-            {"fit/value": DerivedSignalOutput(_output("fit", 2).snapshot)},
+        plane.publish_processor(
+            fit_node,
+            {"fit": _output("fit", 2)},
+            source_publication=roi2,
         )
         second_front = plane.freeze()
         assert [
@@ -330,4 +324,8 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         assert roi_reference() is None
         assert fit_reference() is None
     finally:
+        if fit_tap is not None:
+            fit_tap.close()
+        if roi_tap is not None:
+            roi_tap.close()
         plane.close()

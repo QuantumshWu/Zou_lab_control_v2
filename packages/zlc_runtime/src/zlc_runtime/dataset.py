@@ -829,48 +829,6 @@ class SealedDatasetArtifact:
     def cell_schedule(self) -> DatasetCellSchedule:
         return self._cell_schedule
 
-    def _belongs_to_terminal_reservation(self, reservation: object) -> bool:
-        """Process-local ownership proof used only by PipelineResult minting."""
-
-        return reservation is not None and self._terminal_reservation is reservation
-
-    def _with_direct_parent_span(
-        self,
-        readiness: ExactConsumerReadiness,
-        direct_parent_span: EventSpanRef,
-    ) -> "SealedDatasetArtifact":
-        """Bind a processed result to its exact immediate input interval."""
-
-        if not isinstance(readiness, ExactConsumerReadiness):
-            raise TypeError("readiness must be ExactConsumerReadiness")
-        if not isinstance(direct_parent_span, EventSpanRef):
-            raise TypeError("direct_parent_span must be EventSpanRef")
-        reservation = readiness._source_reservation
-        source = reservation._stream
-        if (
-            direct_parent_span.stream_id != source.stream_id
-            or direct_parent_span.generation != source.generation
-            or direct_parent_span.start_sequence != reservation.start_sequence
-            or direct_parent_span.end_sequence != reservation.end_sequence
-        ):
-            raise DatasetError("direct parent span differs from readiness source interval")
-        if self._terminal_reservation is not readiness._terminal_reservation:
-            raise DatasetError("sealed dataset belongs to another terminal readiness")
-        if readiness._source_reservation is readiness._terminal_reservation:
-            raise DatasetError("direct datasets do not need a root input span")
-        provenance = self._provenance
-        return SealedDatasetArtifact(
-            _SEALED_TOKEN,
-            snapshot=self._snapshot,
-            coverage=self._coverage,
-            output_span=provenance.output_span,
-            cell_schedule=self._cell_schedule,
-            event_metadata=self._event_metadata,
-            terminal_reservation=self._terminal_reservation,
-            direct_parent_span=direct_parent_span,
-        )
-
-
 def _new_validity_storage(schema: DatasetSchema) -> np.ndarray:
     contract = schema.cell_schema.validity_contract
     if contract.mode is ValidityMode.VALUE:

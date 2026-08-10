@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
-from zlc_ui.board import DEFAULT_PANEL_SIZE
 from zlc_ui.form import FormChoice, FormFieldProps, FormRuntimeContext, FormSpec
 
 
@@ -50,8 +49,8 @@ def panel_state_document(state: object) -> dict[str, Any]:
         "signal": str(incoming.get("signal") or ""),
         "kind": str(incoming.get("kind") or ""),
         "cell_kind": str(incoming.get("cell_kind") or ""),
-        "size": str(incoming.get("size") or DEFAULT_PANEL_SIZE),
-        "interval_ms": int(incoming.get("interval_ms") or 100),
+        "size": str(incoming.get("size") or ""),
+        "interval_ms": int(incoming.get("interval_ms") or 0),
         "title": str(incoming.get("title") or incoming.get("signal") or "Panel"),
         "semantic": dict(incoming.get("semantic") or {}),
         "display": dict(incoming.get("display") or {}),

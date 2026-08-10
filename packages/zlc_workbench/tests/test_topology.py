@@ -83,7 +83,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
         signal_plane=session.signal_plane,
         producer="watching",
     )
-    monitor = watching.monitor(buffer_frames=2)
+    monitor = watching.monitor()
     try:
         session.fire(shots=1)
         live_signal = watching.signal_key("frame_0")

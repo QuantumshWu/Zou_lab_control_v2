@@ -6,12 +6,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.board import (
     BoardMetrics,
-    DEFAULT_PANEL_SIZE,
     GeomProxy,
     drop_index,
     min_board_width,
     pack,
-    panel_display_size,
 )
 from zlc_ui.fluent import CARD_PAD, CARD_TITLE_PX, scaled_px
 
@@ -52,7 +50,10 @@ class ConsoleBoardView(QtWidgets.QWidget):
         geometry and drawn to another, overlapping or leaving gaps.
         """
 
-        return PanelCardView.card_size(str(size) if str(size) else DEFAULT_PANEL_SIZE)
+        value = str(size)
+        if not value:
+            raise ValueError("panel size was not projected")
+        return PanelCardView.card_size(value)
 
     def set_cards(self, cards: tuple[PanelCardView, ...]) -> None:
         incoming = tuple(cards)
@@ -96,7 +97,10 @@ class ConsoleBoardView(QtWidgets.QWidget):
             self._pack_current()
 
     def _size_key(self, card: PanelCardView) -> str:
-        return str(card.panel_size or DEFAULT_PANEL_SIZE)
+        value = str(card.panel_size)
+        if not value:
+            raise ValueError("panel size was not projected")
+        return value
 
     def _board_width(self, order: tuple[str, ...]) -> int:
         proxies = [GeomProxy(self._size_key(self._cards[panel_id])) for panel_id in order]
@@ -171,11 +175,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._order = committed
         self._pack_current()
         self.order_committed.emit(self._order)
-
-    def _commit_drop(self) -> None:
-        """Compatibility seam for presenters that explicitly commit a drop."""
-        if self._active_card is not None:
-            self._card_dropped(self._active_card, (0, 0))
 
     def _cancel_drag(self) -> None:
         self._active_card = None

@@ -10,8 +10,6 @@ from .board_layout import (
     pack,
 )
 from .panel_geometry import (
-    DEFAULT_PANEL_SIZE,
-    PANEL_SIZES,
     panel_display_size,
     use_panel_display_sizes,
     panel_size_cells,
@@ -25,8 +23,6 @@ __all__ = [
     "first_free_slot",
     "min_board_width",
     "pack",
-    "DEFAULT_PANEL_SIZE",
-    "PANEL_SIZES",
     "panel_display_size",
     "use_panel_display_sizes",
     "panel_size_cells",

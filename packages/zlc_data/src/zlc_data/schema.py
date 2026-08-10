@@ -408,22 +408,18 @@ def resolve_point_rows(
 
 #: Why a schema has a digest at all, so this is not re-litigated.
 #:
-#: One consumer genuinely needs it: ``CommittedTransform`` stores
-#: ``source_schema_fingerprint`` and is PERSISTED, while the schema it was
-#: committed against is not.  When a saved transform meets data tomorrow, in
-#: another process, the digest is the only thing that can say "this is the
-#: schema I was built for".  Python's ``hash()`` cannot: it is randomised per
-#: process, so it would agree today and disagree after a restart -- silently.
+#: ``DatasetRevisionRef`` carries a schema fingerprint across runtime and file
+#: boundaries.  Comparing it with the decoded schema is what prevents a
+#: revision identity from being paired with a different shape or axis contract.
+#: Python's ``hash()`` cannot do that: it is randomised per process, so it would
+#: agree today and disagree after a restart -- silently.
 #:
 #: Everything else compares two schemas that are both in hand, and for that
 #: ``==`` is exact and fifteen times cheaper.  The digest is for the crossing,
 #: not for the comparison.
 #:
-#: SHA-256 specifically because the format is already the project's: it is
-#: validated by ``sha256_text``, it is written into every archive, and it is
-#: pinned in a cross-repo contract.  A cheaper hash would save microseconds off
-#: a path that no longer runs hot and would make every existing archive
-#: unreadable.
+#: BLAKE2b-128 is the existing persisted format.  Changing it would make
+#: revision references and archives disagree with the schemas they name.
 
 
 @dataclass(frozen=True)
@@ -433,7 +429,7 @@ class ValueSchema:
     dtype: np.dtype
     value_unit: str | None = None
     #: Cached on first request.  Computed eagerly it cost 23 us per schema,
-    #: paid by every intermediate a transform builds and never names.
+    #: paid by every intermediate schema construction that never names it.
     _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
@@ -511,7 +507,7 @@ class DatasetSchema:
     grid_topology: GridTopology | None
     cell_schema: ValueSchema
     #: Cached on first request.  Computed eagerly it cost 23 us per schema,
-    #: paid by every intermediate a transform builds and never names.
+    #: paid by every intermediate schema construction that never names it.
     _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:

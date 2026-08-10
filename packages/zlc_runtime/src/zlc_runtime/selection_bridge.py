@@ -40,7 +40,7 @@ from zlc_data import (
     materialize_scalar_dataset,
 )
 from zlc_data import SelectionChange, resolve_selection_indices
-from zlc_data import take_indices
+from zlc_data.selection import take_indices
 from zlc_data import canonical_text
 
 from .dataset import MonitorCoverage

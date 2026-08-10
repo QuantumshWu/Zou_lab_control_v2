@@ -75,7 +75,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             request=CameraMeasurementRequest("camera", 0.02, None, 0, 1),
             signal_plane=plane,
         )
-        monitor = measurement.monitor(buffer_frames=1)
+        monitor = measurement.monitor()
         assert isinstance(monitor, MonitorCapture)
         sequencer = installation.device("sequencer")
         pulse = resolve_pulse(
@@ -117,7 +117,6 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         assert all(path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for path in report_images)
         occupancy_node = OccupancyProcessor(
             task_result.calibration,
-            signal_plane=plane,
         )
         occupancy = occupancy_node.process(
             task_result.short,

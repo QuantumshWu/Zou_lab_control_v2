@@ -43,7 +43,6 @@ EXPECTED_PUBLIC_API = frozenset(
         "integer",
         "nonnegative_integer",
         "positive_integer",
-        "take_indices",
         "AxisId",
         "AxisRoleId",
         "AxisSourceRef",
@@ -51,17 +50,14 @@ EXPECTED_PUBLIC_API = frozenset(
         "BlockId",
         "COMPONENT",
         "CellValidity",
-        "CommittedTransform",
         "ComponentValidity",
         "CoordinateFrameId",
         "DataBlock",
-        "DataTransformSpec",
         "DatasetComponentValidity",
         "DatasetRevision",
         "DatasetRevisionRef",
         "DatasetSchema",
         "GridTopology",
-        "HistogramSpec",
         "INVALID",
         "Invalid",
         "OwnedSnapshot",
@@ -69,8 +65,6 @@ EXPECTED_PUBLIC_API = frozenset(
         "PointTable",
         "READOUT_EVENT",
         "REPEAT",
-        "ReductionMethod",
-        "ReductionSpec",
         "SCAN_POINT",
         "SITE",
         "SPATIAL_X",
@@ -87,8 +81,6 @@ EXPECTED_PUBLIC_API = frozenset(
         "NPZFormatError",
         "__version__",
         "compact_dataset_validity",
-        "apply_transform",
-        "commit_transform",
         "expand_dataset_validity",
         "expand_snapshot_validity",
         "load_npz",
@@ -97,7 +89,6 @@ EXPECTED_PUBLIC_API = frozenset(
         "materialize_scalar_dataset",
         "owned_snapshot_from_arrays",
         "save_npz",
-        "resolve_transformed_schema",
     }
 )
 
@@ -120,12 +111,6 @@ WITHDRAWN_PUBLIC_API = {
     "zlc_data.selection": {
         "CoordinateRangeSelection",
         "IndexRangeSelection",
-    },
-    "zlc_data.transform": {
-        "HISTOGRAM_BIN_AXIS_ID",
-        "MissingPolicy",
-        "TransformedData",
-        "ValidityPolicy",
     },
     "zlc_data.value": {
         "dataset_cell_value",
@@ -189,10 +174,6 @@ def test_import_is_pure_and_resolves_to_this_distribution():
     assert isinstance(loaded, list)
     loaded_set = set(loaded)
     assert set(discovered) <= loaded_set
-    assert {
-        "zlc_data.output_contract",
-        "zlc_data.transform_codec",
-    } <= set(discovered)
     stdlib = set(sys.stdlib_module_names)
     allowed_roots = stdlib | {"numpy", "zlc_data"}
     unexpected = sorted(

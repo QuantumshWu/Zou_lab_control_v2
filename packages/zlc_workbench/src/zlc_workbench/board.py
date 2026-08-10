@@ -84,14 +84,13 @@ class LiveBoard:
         ports: Callable[[], Sequence[Any]],
         *,
         intervals: Sequence[int],
-        default_interval_ms: int,
         notify: Callable[[], None] | None = None,
     ) -> None:
         self.wake = OwnerWake(notify)
         self._channels = OwnerChannels(self.wake)
         self._arbiter = SurfaceBatchArbiter(self._channels)
         self._ports = ports
-        self._clock = HarmonicClock(tuple(intervals), int(default_interval_ms))
+        self._clock = HarmonicClock(tuple(intervals))
         self._scheduler = BoardScheduler(
             plane,
             self._clock,

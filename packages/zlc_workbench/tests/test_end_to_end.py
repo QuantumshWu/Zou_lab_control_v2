@@ -105,9 +105,9 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     capture = node.prepare()
     session.fire(shots=1)
     result = capture.collect()
-    frames = np.asarray(result.publication.value(node.signal_key("frame_0")).snapshot.block.values)
+    snapshot = result.publication.value(node.signal_key("frame_0")).snapshot
 
-    path = session.save_figure("first light", arrays={"frames": frames}, nodes=[node])
+    path = session.save_figure("first light", arrays={"frames": snapshot})
     assert path.parent.parent == session.workspace.data
     assert path.parent.name.count("_") == 2, "saved work groups by date"
 
@@ -117,12 +117,9 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
         f"archive = np.load(r'{path}')\n"
         "info = json.loads(str(archive['info']))\n"
         "sections = info['sections']\n"
-        "camera = sections['provenance']['cm']['devices']['camera']\n"
         "print(json.dumps({\n"
-        "    'exposure': camera['exposure_seconds'],\n"
-        "    'roi': camera['roi_shape_yx'],\n"
         "    'pulse': sections['pulse']['name'],\n"
-        "    'repeat': sections['provenance']['cm']['acquisition_parameters']['repeat'],\n"
+        "    'dataset': sorted(sections['dataset']),\n"
         "    'frames': list(archive['frames'].shape),\n"
         "}))\n"
     )
@@ -131,9 +128,7 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
 
     reopened = json.loads(completed.stdout)
     assert reopened["pulse"] == PULSE_NAME
-    assert reopened["repeat"] == 1
-    assert reopened["exposure"] > 0
-    assert reopened["roi"] == [96, 128]
+    assert reopened["dataset"] == ["frames"]
     # Each camera-frame signal is an ordinary 2-D image block.  The other
     # windows in the cycle are published as frame_1, frame_2, ... signals.
     assert reopened["frames"] == [1, 1, 96, 128], (
@@ -157,8 +152,8 @@ def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
         capture = node.prepare()
         session.fire(shots=1)
         result = capture.collect()
-        frames = np.asarray(result.publication.value(node.signal_key("frame_0")).snapshot.block.values)
-        saved.append(session.save_figure("shot", arrays={"frames": frames}, nodes=[node]))
+        snapshot = result.publication.value(node.signal_key("frame_0")).snapshot
+        saved.append(session.save_figure("shot", arrays={"frames": snapshot}))
 
     assert len({path.name for path in saved}) == 3, "an afternoon save must not overwrite the morning"
     assert all(path.exists() for path in saved)
@@ -239,7 +234,7 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
             capture.collect().publication.value(node.signal_key("frame_0")).snapshot.block.values
         )
         assert frames.size
-        assert session.save_figure("from-file", arrays={"frames": frames}, nodes=[node]).exists()
+        assert session.save_figure("from-file", arrays={"frames": frames}).exists()
     finally:
         session.close()
 

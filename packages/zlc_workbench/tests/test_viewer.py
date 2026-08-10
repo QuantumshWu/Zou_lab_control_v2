@@ -96,6 +96,11 @@ class _ViewerView:
         self.size = ""
         self.path = ""
         self.status: list[tuple[str, bool]] = []
+        self.panel_sizes: tuple[str, ...] = ()
+
+    def set_panel_sizes(self, sizes, default_size) -> None:
+        self.panel_sizes = tuple(str(value) for value in sizes)
+        self.panel_default_size = str(default_size)
 
     def set_info(self, tabs) -> None:
         self.tabs = tuple(tabs)
@@ -149,7 +154,6 @@ def saved(tmp_path):
         path = session.save_figure(
             "run",
             arrays={"panel-1": snapshot},
-            nodes=(node,),
             panel={"panel-1": {"signal": signal, "title": "camera"}},
         )
         yield path, snapshot
@@ -202,38 +206,32 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
     ]
 
 
-def test_the_description_answers_what_the_apparatus_was_doing(saved) -> None:
+def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     path, _snapshot = saved
     description = describe_archive(*read_archive(path))
     tabs = dict(description.tabs)
     assert tuple(tabs) == ("Plot", "Measurement", "Device", "Flow", "Raw")
 
-    device = dict(tabs["Device"])
-    assert any("exposure_seconds" in label for label in device)
-    assert any(label.endswith("cm.camera") for label in device)
-
     measurement = dict(tabs["Measurement"])
-    assert measurement["cm.repeat"] == "1"
-    assert measurement["cm.frames_per_cycle"] == "3"
-    assert measurement["pulse.name"] == PULSE_NAME
+    assert measurement == {"pulse.name": PULSE_NAME}
+    assert dict(tabs["Device"]) == {}
 
     plot_rows = dict(tabs["Plot"])
     assert "panel-1" in plot_rows and "uint16" in plot_rows["panel-1"]
     assert plot_rows["panel panel-1"].startswith("camera")
 
 
-def test_the_flow_tab_says_where_a_number_came_from(saved) -> None:
-    """The question a saved figure is least able to answer on its own."""
+def test_the_flow_tab_does_not_invent_a_missing_producer_record(saved) -> None:
+    """A typed snapshot names its signal without fabricating node provenance."""
 
     path, _snapshot = saved
     tabs = dict(describe_archive(*read_archive(path)).tabs)
     flow = dict(tabs["Flow"])
-    assert "cm" in flow
-    assert "camera" in flow["cm"]
-    assert "@logic/cm/frame_0" in flow["cm"]
+    assert tuple(flow) == ("camera",)
+    assert flow["camera"] == "@logic/cm/frame_0  (no record of what produced it)"
 
 
-def test_the_raw_tab_hides_nothing(saved) -> None:
+def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     """Every projected tab is a reading; this is the document itself."""
 
     path, _snapshot = saved
@@ -241,7 +239,8 @@ def test_the_raw_tab_hides_nothing(saved) -> None:
     raw = dict(describe_archive(info, arrays).tabs)["Raw"]
     labels = {label for label, _value in raw}
     assert "pulse.name" in labels
-    assert "provenance.cm.devices.camera.exposure_seconds" in labels
+    assert "panel.panel-1.signal" in labels
+    assert not any(label.startswith("provenance.") for label in labels)
     # The dataset manifest is part of the document too, however verbose.
     assert any(label.startswith("dataset.panel-1.") for label in labels)
 

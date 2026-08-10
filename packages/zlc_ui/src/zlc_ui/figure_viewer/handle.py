@@ -89,6 +89,9 @@ class FigureViewerHandle(QtCore.QObject):
     def set_datasets(self, datasets: tuple[tuple[str, str], ...], current: str = "") -> None:
         self._view.set_datasets(datasets, current)
 
+    def set_panel_sizes(self, sizes: object, default_size: str) -> None:
+        self._view.figure_card.set_size_choices(sizes, default_size)
+
     def run_host_dialog(self, opener, host, *, title: str):
         """Run a dialog the DRAWING package owns, centred on this window."""
 

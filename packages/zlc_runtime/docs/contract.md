@@ -2,11 +2,11 @@
 
 > 本文件描述当前 monorepo 中 `zlc_runtime` 的公开边界，用于调用方与实现保持一致；它不是仓库 Goal，也不覆盖根目录 `ARCHITECTURE_DESIGN.md` 与 `IMPLEMENTATION_PLAN.md`。
 
-## 顶层 facade（allow-list，≤24 名）
+## 顶层 facade（allow-list，≤23 名）
 
-`BoardScheduler` `DatasetCoverage` `DatasetOutputDeclaration` `DerivedSignalOutput` `FinalDatasetOutput` `HarmonicClock` `LiveDatasetOutput` `MonitorCoverage` `OwnerChannels` `SurfaceBatchArbiter` `SurfaceUpdate` `SignalDataPlane` `SignalValue` `SignalPublication` `SignalDescription` `AcquisitionStream` `NodeHost` `SelectionBridge` `__version__` `SelectionChange` `SelectionRange` `SelectionState` `FitEventValue`
+`BoardScheduler` `DatasetCoverage` `DatasetOutputDeclaration` `FinalDatasetOutput` `HarmonicClock` `LiveDatasetOutput` `MonitorCoverage` `OwnerChannels` `SurfaceBatchArbiter` `SurfaceUpdate` `SignalDataPlane` `SignalValue` `SignalPublication` `SignalDescription` `AcquisitionStream` `NodeHost` `SelectionBridge` `__version__` `SelectionChange` `SelectionRange` `SelectionState` `FitEventValue`
 
-`MAX_PUBLIC_NAMES = 24` 是真实包级公开命名空间的机械上限；守卫从
+`MAX_PUBLIC_NAMES = 23` 是真实包级公开命名空间的机械上限；守卫从
 `dir(zlc_runtime)` 中排除子模块对象后计数。`__version__` 是 facade 的版本探针，因
 双下划线前缀不计入该公开命名空间计数；`MAX_PUBLIC_NAMES` 本身是守卫元数据，不在
 用户 facade 的 `__all__` 清单中。
@@ -57,9 +57,8 @@ The following narrow lineage and generation seams are also part of the plane
 contract: `direct_parent_publications(publication) ->
 tuple[SignalPublication, ...]` resolves the exact retained parent payloads;
 `follower_edges() -> frozenset[tuple[str, str]]` lists the (source signal,
-follower signal) pairs of live presentation-paced routes;
-`publication_owner(publication) -> object | None` returns an opaque active
-generation token; and `withdraw_processor(control) -> None` removes a
+follower signal) pairs of live presentation-paced routes; and
+`withdraw_processor(control) -> None` removes a
 latest-only processor binding after its lane has acknowledged cancellation or
 failure.  `set_front_signals` declares the signal family requested by the
 consumer; same-shot fallback is enforced for that declared set.  The
@@ -113,40 +112,9 @@ serve as the fallback for a follower that never stages (a not-due slow
 panel must not hold its shot open).  `tick_boundary()` is called by the
 scheduler at the end of every tick and is what advances these windows.
 
-Continuous derived sibling bundles use one stable binding and one explicit
-lineage publication path:
-
-```
-bind_continuous_derived(
-    owner_id: str,
-    *,
-    source_name: str,
-    expected_source_generation: StreamGenerationId,
-    output_names: Sequence[str],
-) -> StreamGenerationId
-publish_continuous_derived(
-    owner_id: str,
-    generation: StreamGenerationId,
-    source_publications: tuple[SignalPublication, ...],
-    values: Mapping[str, DerivedSignalOutput],
-) -> bool
-fail_continuous_derived(
-    owner_id: str,
-    generation: StreamGenerationId,
-    source_publications: tuple[SignalPublication, ...],
-    error: Exception,
-) -> bool
-continuous_needs_publication(
-    owner_id: str,
-    generation: StreamGenerationId,
-    source_publications: tuple[SignalPublication, ...],
-) -> bool
-withdraw_derived(owner_id: str) -> None
-```
-
 **核心不变量(派生族 same-shot,自动,非 API)**:任何 `SignalFront` 内,派生信号(ROI/fit/occupancy…)的值必源自当前 front 中其祖先的同一根 publication(沿 `direct_parent_refs` 追根,根集一致),传递到任意深度;族不齐整族回退上一完整拍,绝不撕裂。跨 producer 不承诺,无全局 shot counter。
 
-值类型：`SignalPublication`（`event_ref`、`direct_parent_refs`、兄弟输出 Mapping）、`SignalValue`（`name`、immutable `snapshot`、`coverage`、`transient`、run-time `run_record`，并从 snapshot 投影 block/schema/values）、`SignalFront`（signals/publication_by_signal/continuous_group）。`EventRef = (stream_id, generation, sequence)` 是 frozen lineage 身份三元组。`direct_parent_refs` 是 lineage 身份，不属于设备回传对账协议。
+值类型：`SignalPublication`（`event_ref`、`direct_parent_refs`、兄弟输出 Mapping）、`SignalValue`（`name`、immutable `snapshot`、`coverage`、`transient`、run-time `run_record`，并从 snapshot 投影 block/schema/values）、`SignalFront`（signals/publication_by_signal）。`EventRef = (stream_id, generation, sequence)` 是 frozen lineage 身份三元组。`direct_parent_refs` 是 lineage 身份，不属于设备回传对账协议。
 
 ## 流与消费口(zlc_runtime.streams)
 
@@ -180,14 +148,13 @@ RunHandleLike 协议:snapshot() / cancel(reason) / result()      # 硬件执行�
 ```
 WakeSink 协议:request_owner_wake()                      # Qt 垫片(QtOwnerWake)在 zlc_ui
 OwnerChannels:notify_lifecycle()/notify_surface()/activate_data(plane)/take()->OwnerTurn/close()
-HarmonicClock:rebase(intervals)->base_ms / advance()->elapsed / group_due(elapsed, intervals)->bool
+HarmonicClock:base_ms(最小允许interval) / advance()->elapsed / group_due(elapsed, intervals)->bool
 SurfacePort 协议:panel_id/signal_name/display_interval_ms/presented_publication()/
   prepare(value, publication)->SurfaceUpdate|None /observe/can_accept/accept/reject/
   finish_unpresented/report_waiting(missing)
 SurfaceBatchArbiter:enqueue_group(ports, front)->bool / drain(resolve) / cancel_all()
   # all-or-nothing 入批;整批 done 才上;任一失格整批弃;组级 owed 位:流拍后每 base tick 重试
 BoardScheduler:on_tick()->SignalFront / on_owner_turn(poll_lifecycle)
-submit_compute(fn, latency_sensitive=) / stage_and_replace_export(...) / cancel_export_commits(...)
 ```
 
 ## SelectionBridge (`zlc_runtime.selection_bridge`；核心类型同时位于顶层 facade)

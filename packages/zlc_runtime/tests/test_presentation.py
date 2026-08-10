@@ -1,10 +1,8 @@
-"""Pure presentation scheduler contracts and window-runtime helpers."""
+"""Pure presentation scheduler contracts."""
 
 from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future
-from pathlib import Path
-import threading
 
 import numpy as np
 import pytest
@@ -34,11 +32,6 @@ from zlc_runtime.presentation import (
     SurfaceUpdate,
 )
 from zlc_runtime.streams import EventRef, StreamId
-from zlc_runtime.window_runtime import (
-    cancel_export_commits,
-    stage_and_replace_export,
-    submit_compute,
-)
 
 
 def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
@@ -65,7 +58,6 @@ def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
         {name: value},
         {},
         {name: publication},
-        {name: frozenset((name,))},
     )
 
 
@@ -113,18 +105,13 @@ def test_owner_channels_coalesce_and_borrow_data_wake() -> None:
 
 
 def test_harmonic_clock_uses_the_global_smallest_tick_and_group_maximum() -> None:
-    clock = HarmonicClock((100, 200, 800), 200)
+    clock = HarmonicClock((100, 200, 800))
     assert clock.base_ms == 100
     assert clock.advance() == 100
     assert not clock.group_due(100, (100, 800))
     assert clock.group_due(800, (100, 800))
-    assert clock.rebase((100, 800)) == 100
-    assert clock.elapsed_ms == 0
-    assert clock.advance() == 100
     with pytest.raises(ValueError):
-        clock.rebase((300,))
-    with pytest.raises(ValueError):
-        HarmonicClock((100, 250), 100)
+        HarmonicClock((100, 250))
 
 
 class _Port:
@@ -255,7 +242,6 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
         dict(publication.signals),
         {},
         {name: publication for name in siblings},
-        {name: siblings for name in siblings},
     )
     ports = (
         _Port("first", "camera/frame_0", interval=400),
@@ -265,7 +251,7 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
     arbiter = SurfaceBatchArbiter(channels)
     scheduler = BoardScheduler(
         _Plane(front),
-        HarmonicClock((100, 200, 400, 800), 400),
+        HarmonicClock((100, 200, 400, 800)),
         arbiter,
         lambda: ports,
     )
@@ -430,7 +416,7 @@ def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:
     arbiter = SurfaceBatchArbiter(channels)
     fast = _Port("fast", "camera/frame", interval=100)
     slow = _Port("slow", "camera/frame", interval=100)
-    clock = HarmonicClock((100, 200, 400, 800), 100)
+    clock = HarmonicClock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (fast, slow))
 
     scheduler.on_tick()
@@ -481,10 +467,6 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
             "camera/frame": camera_publication,
             "@logic/panel/center": fit_publication,
         },
-        {
-            "camera/frame": frozenset(("camera/frame",)),
-            "@logic/panel/center": frozenset(("@logic/panel/center",)),
-        },
     )
 
     plane = _Plane(camera_front)
@@ -494,7 +476,7 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
     arbiter = SurfaceBatchArbiter(channels)
     camera = _Port("camera", "camera/frame", interval=100)
     trace = _Port("trace", "@logic/panel/center", interval=100)
-    clock = HarmonicClock((100, 200, 400, 800), 100)
+    clock = HarmonicClock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (camera, trace))
 
     # Tick 1: the camera's pair is on the plane, the follower is not yet.
@@ -531,7 +513,7 @@ def test_board_scheduler_declares_its_port_signals_on_every_tick() -> None:
     channels = OwnerChannels(_Sink())
     arbiter = SurfaceBatchArbiter(channels)
     ports: list[_Port] = [_Port("panel", "camera/frame", interval=100)]
-    clock = HarmonicClock((100, 200, 400, 800), 100)
+    clock = HarmonicClock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: tuple(ports))
 
     scheduler.on_tick()
@@ -553,8 +535,7 @@ def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None
     channels = OwnerChannels(sink)
     arbiter = SurfaceBatchArbiter(channels)
     port = _Port("panel", "camera/frame", interval=2000, fail_prepare=1)
-    clock = HarmonicClock((100, 2000), 2000)
-    clock.rebase((100, 2000))
+    clock = HarmonicClock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
     for _ in range(19):
@@ -571,7 +552,6 @@ def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None
     scheduler.on_owner_turn(lambda: None)
     assert len(port.accepted) == 1
 
-
 def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     empty = SignalFront({}, {})
     complete = _front()
@@ -579,8 +559,7 @@ def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     channels = OwnerChannels(_Sink())
     arbiter = SurfaceBatchArbiter(channels)
     port = _Port("panel", "camera/frame", interval=2000)
-    clock = HarmonicClock((100, 2000), 2000)
-    clock.rebase((100, 2000))
+    clock = HarmonicClock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
     for _ in range(20):
         scheduler.on_tick()
@@ -593,28 +572,3 @@ def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     port.futures[0].set_result("ready")
     scheduler.on_owner_turn(lambda: None)
     assert len(port.accepted) == 1
-
-
-def test_window_runtime_compute_and_atomic_export(tmp_path: Path) -> None:
-    assert submit_compute(lambda value: value + 1, 4).result(timeout=1.0) == 5
-    assert submit_compute(lambda: "interactive", latency_sensitive=True).result(timeout=1.0) == "interactive"
-
-    destination = tmp_path / "export.txt"
-    cancelled = threading.Event()
-    lock = threading.Lock()
-    result = stage_and_replace_export(
-        destination,
-        write_staged=lambda path: path.write_text("ready", encoding="utf-8"),
-        cancelled=cancelled,
-        commit_lock=lock,
-    )
-    assert result == destination
-    assert destination.read_text(encoding="utf-8") == "ready"
-    cancel_export_commits(cancelled=cancelled, commit_lock=lock)
-    with pytest.raises(Exception):
-        stage_and_replace_export(
-            destination,
-            write_staged=lambda path: path.write_text("late", encoding="utf-8"),
-            cancelled=cancelled,
-            commit_lock=lock,
-        )

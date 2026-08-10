@@ -24,11 +24,7 @@ from zlc_data import (
 from zlc_plot import ImagePointOverlay, PointStatus
 from zlc_runtime import DatasetCoverage
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
-from zlc_runtime import (
-    DerivedSignalOutput,
-    SignalPublication,
-    SignalValue,
-)
+from zlc_runtime import SignalValue
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.data import snapshot_from_array
@@ -53,7 +49,6 @@ class OccupancyResult:
     valid: np.ndarray
     rate: np.ndarray
     frame_judged: np.ndarray
-    source_publication: SignalPublication | None = None
     artifacts: dict[str, OwnedSnapshot] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -217,7 +212,6 @@ class OccupancyProcessor:
         calibration: TrapCalibration,
         *,
         calibration_path: str | Path | None = None,
-        signal_plane: object | None = None,
         producer: str = "occupancy",
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
@@ -235,7 +229,6 @@ class OccupancyProcessor:
             if calibration_path is None
             else Path(calibration_path).expanduser().resolve()
         )
-        self.signal_plane = signal_plane
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
@@ -329,23 +322,6 @@ class OccupancyProcessor:
         if str(output_name) not in names:
             raise KeyError(f"unknown occupancy output {output_name!r}")
         return f"@logic/{self.instance_id}/{output_name}"
-
-    def _source_value(self, publication: SignalPublication) -> SignalValue:
-        selected = self.source_signal
-        if selected is not None:
-            value = publication.value(selected)
-            if value is None:
-                raise ValueError(f"camera publication has no {selected!r} signal")
-            return value
-        candidates = [
-            value
-            for value in publication.signals.values()
-            if value.name.rsplit("/", 1)[-1] == "frames"
-        ]
-        if len(candidates) != 1:
-            raise ValueError("occupancy requires exactly one frames signal")
-        self.source_signal = candidates[0].name
-        return candidates[0]
 
     def process(self, frames: object, *, generation: str, revision: int) -> OccupancyResult:
         """Derive occupancy, stamped with the run its frames came from.
@@ -504,40 +480,5 @@ class OccupancyProcessor:
             result,
             frames_signal=self.source_signal or signal_value.name,
         )
-
-    def process_publication(self, publication: SignalPublication) -> OccupancyResult:
-        if not isinstance(publication, SignalPublication):
-            raise TypeError("publication must be SignalPublication")
-        source = self._source_value(publication)
-        self._validate_source_contract(source)
-        result = self.process(source, **inherited_stamps(source.snapshot))
-        result = OccupancyResult(
-            result.counts,
-            result.occupied,
-            result.valid,
-            result.rate,
-            result.frame_judged,
-            publication,
-            result.artifacts,
-        )
-        if self.signal_plane is not None:
-            bind = getattr(self.signal_plane, "bind_continuous_derived", None)
-            publish = getattr(self.signal_plane, "publish_continuous_derived", None)
-            if not callable(bind) or not callable(publish):
-                raise TypeError("signal_plane must implement the frozen derived-publication contract")
-            generation = bind(
-                self.instance_id,
-                source_name=source.name,
-                expected_source_generation=publication.event_ref.generation,
-                output_names=tuple(self.signal_key(declaration.name) for declaration in _OUTPUT_DECLARATIONS),
-            )
-            values = {
-                self.signal_key(declaration.name): DerivedSignalOutput(result.artifacts[declaration.name])
-                for declaration in _OUTPUT_DECLARATIONS
-            }
-            if not publish(self.instance_id, generation, (publication,), values):
-                raise RuntimeError("signal plane rejected the occupancy lineage publication")
-        return result
-
 
 __all__ = ["OccupancyProcessor", "OccupancyResult"]

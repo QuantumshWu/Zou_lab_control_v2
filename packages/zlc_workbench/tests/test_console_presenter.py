@@ -35,6 +35,11 @@ from zlc_workbench.topology import format_signal_shape
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
+def _operation_value(operation):
+    resolved = operation.result() if hasattr(operation, "result") else operation
+    return getattr(resolved, "value", resolved)
+
+
 class _Signal:
     """A Qt signal's shape, without Qt."""
 
@@ -164,6 +169,7 @@ class _ConsoleView:
         self.panel_state_updates: list[tuple[str, object]] = []
         self.panel_parameter_surfaces: dict[str, object] = {}
         self.panel_intervals: tuple[int, ...] = ()
+        self.panel_sizes: tuple[str, ...] = ()
         self.panel_editors: dict[str, dict] = {}
         self.panel_editor_surfaces: dict[str, object] = {}
         self.focused_panel_editor = ""
@@ -186,8 +192,13 @@ class _ConsoleView:
     def set_panel_kinds(self, kinds, current: str = "") -> None:
         self.kinds = tuple(kinds)
 
-    def set_panel_intervals(self, intervals) -> None:
+    def set_panel_intervals(self, intervals, default_interval) -> None:
         self.panel_intervals = tuple(int(value) for value in intervals)
+        self.panel_default_interval = int(default_interval)
+
+    def set_panel_sizes(self, sizes, default_size) -> None:
+        self.panel_sizes = tuple(str(value) for value in sizes)
+        self.panel_default_size = str(default_size)
 
     def set_logic_kinds(self, kinds) -> None:
         self.logic_kinds = tuple(kinds)
@@ -210,9 +221,6 @@ class _ConsoleView:
     def choose_signal(self, rows) -> str | None:
         self.offered = tuple(rows)
         return self.chooser_answer
-
-    def edit_values(self, spec, values, *, title: str):
-        return dict(values)
 
     def show_warning(self, title: str, text: str) -> None:
         self.status.append(("error", str(text)))
@@ -607,10 +615,12 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     assert binding.port is None
     assert presenter.view.cards
     assert presenter.view.panel_intervals == (100, 200, 400, 800)
-    # A new panel starts at the live policy's default refresh interval.
+    assert presenter.view.panel_default_interval == 400
     from zlc_plot import DEFAULTS
 
-    assert binding.state.interval_ms == DEFAULTS.live.default_refresh_interval_ms == 100
+    assert presenter.view.panel_sizes == DEFAULTS.layout.size_names
+    assert presenter.view.panel_default_size == DEFAULTS.layout.default_preset
+    assert binding.state.interval_ms == 400
     display = {
         str(field["key"]): field
         for field in binding.parameter_surface["display"]
@@ -684,7 +694,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
         raise AssertionError(f"a parameter edit closed the live host ({timeout=})")
 
     monkeypatch.setattr(first_host, "close", unexpected_close)
-    described = presenter._plot_operation_value(binding.host.describe_display())
+    described = _operation_value(binding.host.describe_display())
     assert described.display_state.values["title"] is None
 
     assert presenter.update_panel_state(
@@ -692,16 +702,16 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     )
     assert binding.host is first_host
     assert binding.editor_host is first_editor_host
-    described = presenter._plot_operation_value(binding.host.describe_display())
+    described = _operation_value(binding.host.describe_display())
     assert described.display_state.values["title"] is None
     assert binding.state.title == "Renamed panel"
 
     assert presenter.update_panel_state(
         binding.panel_id, {"display": {"title": "Camera image"}}
     )
-    described = presenter._plot_operation_value(binding.host.describe_display())
+    described = _operation_value(binding.host.describe_display())
     assert described.display_state.values["title"] == "Camera image"
-    editor_description = presenter._plot_operation_value(
+    editor_description = _operation_value(
         binding.editor_host.describe_display()
     )
     assert editor_description.display_state.values["title"] == "Camera image"
@@ -710,7 +720,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert presenter.update_panel_state(
         binding.panel_id, {"display": {"title": None}}
     )
-    described = presenter._plot_operation_value(binding.host.describe_display())
+    described = _operation_value(binding.host.describe_display())
     assert described.display_state.values["title"] is None
     fit_model = next(
         value
@@ -1424,9 +1434,9 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
         lambda: binding.configuration is None,
     )
     assert binding.state.display["colormap"] == colormap
-    description = presenter._plot_operation_value(binding.host.describe_display())
+    description = _operation_value(binding.host.describe_display())
     assert description.display_state.values["colormap"] == colormap
-    editor_description = presenter._plot_operation_value(
+    editor_description = _operation_value(
         binding.editor_host.describe_display()
     )
     assert editor_description.display_state.values["colormap"] == colormap

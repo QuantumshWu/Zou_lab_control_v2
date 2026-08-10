@@ -19,7 +19,6 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentTabWidget,
     fluent_widget_stylesheet,
-    open_fluent_window,
     scaled_px,
     window_pad,
 )
@@ -179,13 +178,4 @@ class PulseEditorView(QtWidgets.QWidget):
         super().closeEvent(event)
 
 
-def launch_pulse_editor_window(view: PulseEditorView | None = None, *, title: str = "Pulse editor") -> PulseEditorView:
-    body = view or PulseEditorView()
-    open_fluent_window(
-        lambda: body,
-        title=str(title),
-    )
-    return body
-
-
-__all__ = ["PulseEditorView", "launch_pulse_editor_window"]
+__all__ = ["PulseEditorView"]

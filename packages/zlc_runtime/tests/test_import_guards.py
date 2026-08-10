@@ -15,6 +15,7 @@ import zlc_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+DATA_SRC = ROOT.parent / "zlc_data" / "src"
 CONTRACT = ROOT / "docs" / "contract.md"
 FORBIDDEN_IMPORTS = (
     "PyQt5",
@@ -95,7 +96,7 @@ print(json.dumps({
 }))
 """
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = os.pathsep.join((str(SRC), str(DATA_SRC)))
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=ROOT,
@@ -125,7 +126,6 @@ def test_facade_names_are_the_concrete_runtime_implementations() -> None:
         FinalDatasetOutput,
         LiveDatasetOutput,
     )
-    from zlc_runtime.plane import DerivedSignalOutput
     from zlc_runtime.presentation import (
         BoardScheduler,
         HarmonicClock,
@@ -166,7 +166,6 @@ def test_facade_names_are_the_concrete_runtime_implementations() -> None:
         "DatasetOutputDeclaration": DatasetOutputDeclaration,
         "FinalDatasetOutput": FinalDatasetOutput,
         "LiveDatasetOutput": LiveDatasetOutput,
-        "DerivedSignalOutput": DerivedSignalOutput,
     }
     assert all(getattr(zlc_runtime, name) is value for name, value in expected.items())
     assert isinstance(zlc_runtime.__version__, str)
@@ -227,7 +226,7 @@ importlib.import_module(sys.argv[1])
 print(json.dumps(sorted(seen)))
 """
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = os.pathsep.join((str(SRC), str(DATA_SRC)))
     stdlib = set(getattr(sys, "stdlib_module_names", ()))
     stdlib.update(sys.builtin_module_names)
     allowed = stdlib | {"numpy", "zlc_data", "zlc_runtime"}
@@ -281,7 +280,7 @@ assert public == {
 assert len(public) <= module.MAX_PUBLIC_NAMES
 """
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = os.pathsep.join((str(SRC), str(DATA_SRC)))
     subprocess.run(
         [sys.executable, "-c", script],
         cwd=ROOT,

@@ -132,7 +132,7 @@ def build_front(
                 adjacency.setdefault(name, set()).update(
                     candidate for candidate in siblings if candidate != name
                 )
-        if getattr(state, "kind") in {"processor", "continuous"} and getattr(
+        if getattr(state, "kind") == "processor" and getattr(
             state, "coherent"
         ):
             # A presentation-paced follower (coherent=False) keeps lineage
@@ -239,13 +239,7 @@ def build_front(
         signals[name] = value
         publications[name] = publication
 
-    groups: dict[str, frozenset[str]] = {}
-    for component in components:
-        members = frozenset(name for name in requested.intersection(component) if name in signals)
-        for name in members:
-            groups[name] = members
-    return SignalFront(signals, failures, publications, groups)
+    return SignalFront(signals, failures, publications)
 
 
 __all__ = ["build_front"]
-

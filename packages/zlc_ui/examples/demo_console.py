@@ -79,10 +79,11 @@ def _surface(text: str, color: str) -> QtWidgets.QWidget:
 
 
 def populate(console, *, wire_intents: bool = True) -> None:
+    demo_sizes = ("1x4", "2x2", "4x2")
+    console.set_panel_sizes(demo_sizes, "2x2")
     console.set_summary("3 fake cards · mixed 1x4 / 2x2 / 4x2 · 2 fake logic rows")
     console.show_status("ready", "idle")
 
-    demo_sizes = ("1x4", "2x2", "4x2")
     for index in range(1, 4):
         panel_id = f"panel-{index}"
         console.add_panel(panel_id, f"Fake card {index}")

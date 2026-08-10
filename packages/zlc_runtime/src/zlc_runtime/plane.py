@@ -30,9 +30,6 @@ import uuid
 from weakref import WeakKeyDictionary
 
 from zlc_data import (
-    BlockId,
-    DataBlock,
-    DatasetRevisionRef,
     DatasetSchema,
     OwnedSnapshot,
     StreamGenerationId,
@@ -58,7 +55,6 @@ from .streams import (
 from zlc_data import canonical_text
 
 __all__ = [
-    "DerivedSignalOutput",
     "LatestProcessorControl",
     "SignalDataPlane",
     "SignalFront",
@@ -117,20 +113,6 @@ class LatestProcessorControl(SignalProducer, Protocol):
     def accept_processor_cancelled(self) -> None: ...
 
     def request_processor_owner_wake(self) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class DerivedSignalOutput:
-    """One consumer-derived immutable value without presentation metadata."""
-
-    snapshot: OwnedSnapshot
-    preserve_source_coverage: bool = False
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.snapshot, OwnedSnapshot):
-            raise TypeError("derived signal snapshot must be OwnedSnapshot")
-        if type(self.preserve_source_coverage) is not bool:
-            raise TypeError("preserve_source_coverage must be bool")
 
 
 @dataclass(frozen=True)
@@ -319,19 +301,11 @@ class SignalFront:
         default_factory=dict,
         repr=False,
     )
-    _continuous_group_by_signal: Mapping[str, frozenset[str]] = field(
-        default_factory=dict,
-        repr=False,
-    )
 
     def __post_init__(self) -> None:
         signals = dict(self.signals)
         failures = dict(self.failures)
         publications = dict(self.publication_by_signal)
-        groups = {
-            str(name): frozenset(members)
-            for name, members in self._continuous_group_by_signal.items()
-        }
         if __debug__:
             assert all(isinstance(value, SignalValue) for value in signals.values()), (
                 "SignalFront signals must contain SignalValue values"
@@ -349,27 +323,12 @@ class SignalFront:
                 assert publication.value(name) is signals[name], (
                     "SignalFront value is not owned by its exact publication"
                 )
-            for name, members in groups.items():
-                assert name in signals and name in members, (
-                    "continuous group must contain its visible signal"
-                )
-                assert members and members.issubset(signals), (
-                    "continuous group contains a non-visible signal"
-                )
-                assert all(groups.get(member) == members for member in members), (
-                    "continuous signal groups must be symmetric"
-                )
         object.__setattr__(self, "signals", MappingProxyType(signals))
         object.__setattr__(self, "failures", MappingProxyType(failures))
         object.__setattr__(
             self,
             "publication_by_signal",
             MappingProxyType(publications),
-        )
-        object.__setattr__(
-            self,
-            "_continuous_group_by_signal",
-            MappingProxyType(groups),
         )
 
     def names(self) -> tuple[str, ...]:
@@ -380,18 +339,6 @@ class SignalFront:
 
     def publication(self, name: str) -> SignalPublication | None:
         return self.publication_by_signal.get(str(name))
-
-    def continuous_group(self, name: str) -> frozenset[str]:
-        """Return the already-resolved visible causal group for one signal."""
-
-        selected = str(name)
-        if selected not in self.signals:
-            return frozenset()
-        return self._continuous_group_by_signal.get(
-            selected,
-            frozenset((selected,)),
-        )
-
 
 def _declared_outputs(declarations) -> dict[str, DatasetOutputDeclaration]:
     """Return one producer's frozen Dataset output declarations."""
@@ -475,7 +422,6 @@ class _GenerationState:
     kind: str
     output_names: tuple[str, ...]
     bare_names: Mapping[str, str]
-    owner_token: object = field(default_factory=object, repr=False)
     node: object | None = None
     slot: object | None = None
     source_name: str | None = None
@@ -1042,7 +988,7 @@ class SignalDataPlane:
                     for candidate in self._states.values()
                     if (
                         not candidate.retired
-                        and candidate.kind in {"processor", "continuous"}
+                        and candidate.kind == "processor"
                     )
                 )
                 else None
@@ -1177,28 +1123,6 @@ class SignalDataPlane:
 
         with self._lock:
             return self._resolved_direct_parents_locked(publication)
-
-    def publication_owner(self, publication: SignalPublication) -> object | None:
-        """Return the exact active generation owner of one issued publication.
-
-        Composition occasionally needs generation-static leaf facts that live
-        on the admitted node (for example Calibration geometry).  Resolving
-        those facts by scanning a current UI row with the same textual owner id
-        can splice an older retained front into a restarted node.  The plane is
-        already the sole generation owner, so it alone may resolve this narrow
-        process-local reference.  No presentation state is stored here.
-        """
-
-        with self._lock:
-            self._require_issued_publication_locked(publication)
-            state = self._states.get(publication.event_ref.stream_id.value)
-            if (
-                state is None
-                or state.retired
-                or state.generation != publication.event_ref.generation
-            ):
-                return None
-            return state.owner_token
 
     def attach_latest_only_processor(
         self,
@@ -1408,26 +1332,6 @@ class SignalDataPlane:
         if source is None:
             raise ValueError("signal parent lacks the frozen route source")
         return source
-
-    def _require_route_parents_locked(
-        self,
-        state: _GenerationState,
-        publications: tuple[SignalPublication, ...],
-    ) -> tuple[SignalValue, ...]:
-        parents = tuple(publications)
-        if not parents or any(
-            not isinstance(parent, SignalPublication) for parent in parents
-        ):
-            raise TypeError("derived result requires exact parent publications")
-        if len({id(parent) for parent in parents}) != len(parents):
-            raise ValueError("derived result parent publications must be unique")
-        sequences = tuple(parent.event_ref.sequence for parent in parents)
-        if sequences != tuple(sorted(sequences)):
-            raise ValueError("derived result parents must follow source event order")
-        values = tuple(
-            self._require_route_parent_locked(state, parent) for parent in parents
-        )
-        return values
 
     def _validate_generation_values_locked(
         self,
@@ -1761,230 +1665,6 @@ class SignalDataPlane:
             )
             state.last_parent_sequence = source_publication.event_ref.sequence
         return publication.signals
-
-    def bind_continuous_derived(
-        self,
-        owner_id: str,
-        *,
-        source_name: str,
-        expected_source_generation: StreamGenerationId,
-        output_names,
-    ) -> StreamGenerationId:
-        """Bind one derived sibling bundle to its direct source generation."""
-
-        identity = canonical_text(owner_id, "derived route owner_id")
-        source_name = canonical_text(source_name, "derived route source name")
-        if not isinstance(expected_source_generation, StreamGenerationId):
-            raise TypeError("expected_source_generation must be StreamGenerationId")
-        names = tuple(
-            canonical_text(name, "derived route output name")
-            for name in output_names
-        )
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
-            source_state = self._state_for_signal_locked(source_name)
-            if source_state is None:
-                raise RuntimeError("derived route source generation is not active")
-            if source_state.generation != expected_source_generation:
-                raise RuntimeError("derived route source generation changed")
-            existing = self._states.get(identity)
-            if existing is not None and not existing.retired:
-                same = (
-                    existing.kind == "continuous"
-                    and existing.source_name == source_name
-                    and existing.source_generation == expected_source_generation
-                    and existing.output_names == names
-                )
-                if same:
-                    return existing.generation
-                raise RuntimeError(
-                    "derived generation changed; withdraw it before rebinding"
-                )
-            state = self._install_state_locked(
-                owner_id=identity,
-                kind="continuous",
-                output_names=names,
-                bare_names={name: name for name in names},
-                source_name=source_name,
-            )
-            return state.generation
-
-    @staticmethod
-    def _route_owned_snapshot(
-        state: _GenerationState,
-        output_name: str,
-        snapshot: OwnedSnapshot,
-    ) -> OwnedSnapshot:
-        """Bind one derived value to the plane-owned route generation.
-
-        Materializers own values and schemas, but not live route identity.
-        Assigning the Dataset ref here prevents frontend transforms, Fits, or
-        payload hashes from becoming a parallel generation authority.  Values
-        already crossed the immutable ownership boundary, so rebuilding the
-        small DataBlock header retains their bytes-backed arrays without a
-        scientific-data copy.
-        """
-
-        block_id = BlockId(f"signal/{state.owner_id}/{output_name}")
-        ref = DatasetRevisionRef(
-            block_id,
-            state.generation,
-            snapshot.block.schema.fingerprint,
-            snapshot.ref.revision,
-        )
-        return OwnedSnapshot(
-            ref,
-            DataBlock(
-                block_id,
-                snapshot.block.revision,
-                snapshot.block.values,
-                snapshot.block.validity,
-                snapshot.block.schema,
-            ),
-        )
-
-    @staticmethod
-    def _derived_values(
-        state: _GenerationState,
-        source_publication: SignalPublication,
-        values: Mapping[str, DerivedSignalOutput],
-        *,
-        transient: bool,
-    ) -> Mapping[str, SignalValue]:
-        source_name = state.source_name
-        if source_name is None:
-            raise RuntimeError("derived generation has no source")
-        source = source_publication.value(source_name)
-        if source is None:
-            raise ValueError("derived parent lacks its selected signal")
-        if set(values) != set(state.output_names):
-            raise ValueError(
-                "derived publication differs from its frozen sibling vocabulary"
-            )
-        result = {}
-        for name in state.output_names:
-            value = values[name]
-            if not isinstance(value, DerivedSignalOutput):
-                raise TypeError("derived values must contain DerivedSignalOutput")
-            result[name] = SignalValue(
-                name=name,
-                snapshot=SignalDataPlane._route_owned_snapshot(
-                    state,
-                    name,
-                    value.snapshot,
-                ),
-                coverage=(
-                    source.coverage if value.preserve_source_coverage else None
-                ),
-                transient=transient,
-            )
-        return MappingProxyType(result)
-
-    def publish_continuous_derived(
-        self,
-        owner_id: str,
-        generation: StreamGenerationId,
-        source_publications: tuple[SignalPublication, ...],
-        values: Mapping[str, DerivedSignalOutput],
-    ) -> bool:
-        identity = canonical_text(owner_id, "derived route owner_id")
-        if not isinstance(generation, StreamGenerationId):
-            raise TypeError("derived generation must be StreamGenerationId")
-        parents = tuple(source_publications)
-        with self._lock:
-            state = self._states.get(identity)
-            if (
-                state is None
-                or state.retired
-                or state.generation != generation
-                or state.kind != "continuous"
-            ):
-                return False
-            self._require_route_parents_locked(state, parents)
-            latest_sequence = parents[-1].event_ref.sequence
-            if latest_sequence <= state.last_parent_sequence:
-                return False
-        frozen = self._derived_values(
-            state,
-            parents[-1],
-            values,
-            transient=True,
-        )
-        with self._lock:
-            if (
-                self._states.get(identity) is not state
-                or state.retired
-                or state.generation != generation
-            ):
-                return False
-            self._require_route_parents_locked(state, parents)
-            latest_sequence = parents[-1].event_ref.sequence
-            if latest_sequence <= state.last_parent_sequence:
-                return False
-            self._publish_locked(
-                state,
-                frozen,
-                parents=parents,
-            )
-            state.last_parent_sequence = latest_sequence
-            return True
-
-    def fail_continuous_derived(
-        self,
-        owner_id: str,
-        generation: StreamGenerationId,
-        source_publications: tuple[SignalPublication, ...],
-        error: Exception,
-    ) -> bool:
-        identity = canonical_text(owner_id, "derived route owner_id")
-        parents = tuple(source_publications)
-        if not isinstance(error, Exception):
-            raise TypeError("derived failure must be an Exception")
-        with self._lock:
-            state = self._states.get(identity)
-            if (
-                state is None
-                or state.retired
-                or state.generation != generation
-                or state.kind != "continuous"
-            ):
-                return False
-            self._require_route_parents_locked(state, parents)
-            latest_sequence = parents[-1].event_ref.sequence
-            if latest_sequence <= state.last_parent_sequence:
-                return False
-            state.last_parent_sequence = latest_sequence
-            state.failure = f"{type(error).__name__}: {error}"
-            self._membership_changed = True
-            return True
-
-    def continuous_needs_publication(
-        self,
-        owner_id: str,
-        generation: StreamGenerationId,
-        source_publications: tuple[SignalPublication, ...],
-    ) -> bool:
-        """Whether one active route has not published this exact parent yet."""
-
-        identity = canonical_text(owner_id, "derived route owner_id")
-        parents = tuple(source_publications)
-        with self._lock:
-            state = self._states.get(identity)
-            if (
-                state is None
-                or state.retired
-                or state.kind != "continuous"
-                or state.generation != generation
-            ):
-                return False
-            self._require_route_parents_locked(state, parents)
-            return parents[-1].event_ref.sequence > state.last_parent_sequence
-
-    def withdraw_derived(self, owner_id: str) -> None:
-        self._withdraw_owner(
-            canonical_text(owner_id, "derived signal owner_id")
-        )
 
     def _retirement_closure_locked(
         self,

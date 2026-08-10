@@ -75,7 +75,7 @@ def live_bench(tmp_path):
             signal_plane=plane,
             producer="cm",
         )
-        monitor = node.monitor(buffer_frames=4)
+        monitor = node.monitor()
         sequencer.fire()
         sequencer.wait_done(1.0)
         deadline = time.monotonic() + 5.0
@@ -120,7 +120,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
         wake = _Wake()
         channels = OwnerChannels(wake)
         arbiter = SurfaceBatchArbiter(channels)
-        clock = HarmonicClock((100, 200, 400, 800), 100)
+        clock = HarmonicClock((100, 200, 400, 800))
         scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
         presented = None
@@ -401,7 +401,6 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
                 {signal: stepped_value},
                 {},
                 {signal: stepped},
-                {signal: frozenset((signal,))},
             )
 
         # Anchor the identity of the snapshot the host was built from.
@@ -695,7 +694,6 @@ def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None
             plane,
             lambda: (port,),
             intervals=(100, 200, 400, 800),
-            default_interval_ms=100,
             notify=lambda: woken.append(1),
         )
         try:

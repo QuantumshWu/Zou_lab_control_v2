@@ -119,7 +119,6 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     processor = OCCUPANCY_LOGIC_NODE.instantiate(
         calibration=CALIBRATION_ARTIFACT_CODEC.resolve(calibration_path),
         source_signal=source_name,
-        signal_plane=plane,
     )
     assert isinstance(processor, OccupancyProcessor)
     assert processor.calibration_path == calibration_path.resolve()
@@ -143,7 +142,6 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     different_context_processor = OCCUPANCY_LOGIC_NODE.instantiate(
         calibration=CALIBRATION_ARTIFACT_CODEC.resolve(different_context_path),
         source_signal=source_name,
-        signal_plane=plane,
     )
     different_outputs = different_context_processor.evaluate(source)
     assert different_outputs["counts"].snapshot.block.values.shape[-1] == 1
@@ -163,7 +161,6 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     structural_processor = OCCUPANCY_LOGIC_NODE.instantiate(
         calibration=CALIBRATION_ARTIFACT_CODEC.resolve(structural_path),
         source_signal=source_name,
-        signal_plane=plane,
     )
     with pytest.raises(ValueError, match="ROI origin"):
         structural_processor.evaluate(source)
@@ -263,7 +260,7 @@ def test_a_live_monitor_signal_does_carry_coverage(bench) -> None:
         signal_plane=plane,
         producer="cm",
     )
-    monitor = node.monitor(buffer_frames=2)
+    monitor = node.monitor()
     try:
         sequencer.fire()
         sequencer.wait_done(1.0)

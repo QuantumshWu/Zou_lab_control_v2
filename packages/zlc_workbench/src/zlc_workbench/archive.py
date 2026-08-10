@@ -80,7 +80,7 @@ def _jsonable(value: Any) -> Any:
 def _figure_bytes(
     name: str,
     *,
-    arrays: Mapping[str, np.ndarray],
+    arrays: Mapping[str, np.ndarray | OwnedSnapshot],
     sections: Mapping[str, Any],
 ) -> bytes:
     """Encode one portable figure without deciding where it lives.
@@ -148,7 +148,7 @@ def _figure_bytes(
 def write_figure_file(
     path: str | os.PathLike[str],
     *,
-    arrays: Mapping[str, np.ndarray],
+    arrays: Mapping[str, np.ndarray | OwnedSnapshot],
     sections: Mapping[str, Any],
     name: str | None = None,
 ) -> Path:
@@ -173,7 +173,7 @@ def write_figure(
     save_root: str | os.PathLike[str],
     name: str,
     *,
-    arrays: Mapping[str, np.ndarray],
+    arrays: Mapping[str, np.ndarray | OwnedSnapshot],
     sections: Mapping[str, Any],
     when: _date | None = None,
 ) -> Path:
@@ -211,7 +211,7 @@ def read_archive(path: str | os.PathLike[str]) -> tuple[dict[str, Any], dict[str
 
 def read_dataset(
     info: Mapping[str, Any],
-    arrays: Mapping[str, np.ndarray],
+    arrays: Mapping[str, np.ndarray | OwnedSnapshot],
     name: str,
 ) -> OwnedSnapshot:
     """Rebuild one saved dataset, axes and all.

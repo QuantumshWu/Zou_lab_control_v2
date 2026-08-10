@@ -30,14 +30,12 @@ class RunOwnerMailbox:
             max_workers=max_workers,
             thread_name_prefix=thread_name_prefix,
         )
-        self._worker_thread_affine = max_workers == 1
         self._lock = threading.Lock()
         self._tracked: set[Future] = set()
         self._completions: list[OwnerCompletion] = []
         self._generation = 0
         self._handle: RunHandleLike | None = None
         self._owner_reaped = True
-        self._terminal_job_inflight = False
 
     @property
     def generation(self) -> int:
@@ -57,12 +55,6 @@ class RunOwnerMailbox:
             return not self._tracked and not self._completions
 
     @property
-    def worker_thread_affine(self) -> bool:
-        """Whether every submitted job is guaranteed one stable OS thread."""
-
-        return self._worker_thread_affine
-
-    @property
     def has_pending_owner_work(self) -> bool:
         with self._lock:
             return bool(self._tracked or self._completions)
@@ -71,7 +63,6 @@ class RunOwnerMailbox:
         self._generation += 1
         self._handle = None
         self._owner_reaped = False
-        self._terminal_job_inflight = False
         return self._generation
 
     def set_handle(self, handle: RunHandleLike) -> None:
@@ -108,32 +99,6 @@ class RunOwnerMailbox:
             pending = tuple(self._completions)
             self._completions.clear()
         return pending
-
-    def begin_terminal_job(
-        self,
-        kind: str,
-        work: Callable[[], object],
-    ) -> bool:
-        if self._terminal_job_inflight or self._owner_reaped:
-            return False
-        self._terminal_job_inflight = True
-        try:
-            self.submit(kind, work)
-        except BaseException:
-            self._terminal_job_inflight = False
-            raise
-        return True
-
-    def finish_terminal_job(
-        self,
-        generation: int,
-        *,
-        owner_reaped: bool,
-    ) -> None:
-        if generation != self._generation:
-            return
-        self._terminal_job_inflight = False
-        self._owner_reaped = self._owner_reaped or owner_reaped
 
     def shutdown(self) -> None:
         if self.has_pending_owner_work:

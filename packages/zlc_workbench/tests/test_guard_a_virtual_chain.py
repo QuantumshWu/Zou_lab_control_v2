@@ -330,7 +330,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert set(occupancy_arguments) == {
             "calibration",
             "source_signal",
-            "signal_plane",
             "model_kind",
         }
         assert isinstance(occupancy_arguments["calibration"], ResolvedArtifact)

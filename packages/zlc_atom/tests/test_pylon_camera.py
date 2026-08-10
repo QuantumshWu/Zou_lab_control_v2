@@ -12,9 +12,9 @@ rediscover them:
 * the ROI goes in offsets-first, and every value is snapped to the CAMERA'S own
   min/max/increment.  Writing a width while a stale offset is live violates
   ``offset + width <= sensor`` and the camera rejects it outright.
-* finite acquisition is always external-triggered while a monitor arm is a
-  temporary free-running session.  One authored trigger setting must not turn
-  the whole camera into one mode or the other.
+* finite acquisition is always external-triggered.  A source-less one-frame
+  monitor cycle is temporarily free-running; a multi-frame cycle remains an
+  ordered external stream so one shot cannot be assembled from different shots.
 * Mono8 is the fixed payload contract, checked from SDK readback rather than
   inferred from whatever operator-authored string happened to be supplied.
 """
@@ -27,8 +27,13 @@ import types
 import numpy as np
 import pytest
 
-from zlc_atom.devices.camera import CameraAdapter
+from tests.fakes import FakePlane
+from zlc_atom.devices.camera import CameraAcquisitionMode, CameraAdapter
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
+from zlc_atom.nodes.camera_measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 
 
 class _Node:
@@ -258,11 +263,86 @@ def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
     assert camera.TriggerMode.GetValue() == "Off"
+    armed_point = adapter.capture_working_point()
+    assert armed_point.acquisition_mode is CameraAcquisitionMode.FREE_RUNNING
+    assert armed_point.required_external_trigger_interval_seconds is None
+    assert armed_point.external_trigger_integration_start_offset_seconds is None
+    assert armed_point.readout_mode == "pylon:Mono8;free-running;grab=LatestImageOnly"
     adapter.read_frame_records(1, timeout=0.5, exact=False)
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
     assert camera.TriggerMode.GetValue() == "On"
     assert camera.TriggerSource.GetValue() == "Line1"
+
+
+@pytest.mark.parametrize(
+    ("frames_per_cycle", "grab_call", "mode", "readout_mode"),
+    (
+        (
+            1,
+            "StartGrabbing(latest)",
+            CameraAcquisitionMode.FREE_RUNNING,
+            "pylon:Mono8;free-running;grab=LatestImageOnly",
+        ),
+        (
+            3,
+            "StartGrabbing(one)",
+            CameraAcquisitionMode.EXTERNAL_TRIGGERED,
+            "pylon:Mono8;external=Line1;grab=OneByOne",
+        ),
+    ),
+)
+def test_camera_measurement_monitor_arms_the_pylon_mode_for_a_whole_cycle(
+    fake_pypylon,
+    frames_per_cycle: int,
+    grab_call: str,
+    mode: CameraAcquisitionMode,
+    readout_mode: str,
+) -> None:
+    camera = _FakeCamera(
+        frames=[np.zeros((16, 16), np.uint8)] * frames_per_cycle
+    )
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    plane = FakePlane()
+    monitor = None
+    try:
+        node = CameraMeasurementNode(
+            camera=adapter,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.01,
+                roi_xywh=(0, 0, 16, 16),
+                repeat=0,
+                frames_per_cycle=frames_per_cycle,
+            ),
+            signal_plane=plane,
+        )
+        monitor = node.monitor()
+
+        assert camera.grab_calls[-1] == grab_call
+        assert camera.MaxNumBuffer.GetValue() == 4 * frames_per_cycle
+        actual = node.actual_working_point
+        assert actual is not None
+        assert actual.acquisition_mode is mode
+        assert actual.readout_mode == readout_mode
+        if frames_per_cycle == 1:
+            assert actual.required_external_trigger_interval_seconds is None
+        else:
+            assert actual.required_external_trigger_interval_seconds == pytest.approx(
+                0.01
+            )
+
+        for _ in range(frames_per_cycle):
+            assert monitor.poll() is not None
+        value = plane.freeze().value(node.signal_key("frame_0"))
+        assert value is not None
+        archived = value.run_record["device_snapshots"]["camera"]
+        assert archived["acquisition_mode"] == mode.value
+        assert archived["readout_mode"] == readout_mode
+    finally:
+        if monitor is not None:
+            monitor.close()
+        plane.close()
 
 
 def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
@@ -290,6 +370,12 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     assert camera.TriggerSource.GetValue() == "Line1"
     assert camera.grab_calls[-1] == "StartGrabbing(one)"
     assert camera.MaxNumBuffer.writes[-1] == 3
+    continuous_point = adapter.capture_working_point()
+    assert continuous_point.acquisition_mode is CameraAcquisitionMode.EXTERNAL_TRIGGERED
+    assert continuous_point.required_external_trigger_interval_seconds == pytest.approx(
+        adapter.config.exposure_seconds
+    )
+    assert continuous_point.readout_mode == "pylon:Mono8;external=Line1;grab=OneByOne"
     assert len(adapter.read_frame_records(3, timeout=0.5, exact=False)) == 3
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
