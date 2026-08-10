@@ -577,7 +577,7 @@ print(zou_lab_control_v2.__file__)
 print(tested_module.__file__)
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
 from zlc_ui.fluent import FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -650,6 +650,24 @@ surface = {
 handle.set_panel_projection('panel-1', state, surface)
 card = handle._cards['panel-1']
 card._open_settings()
+title_widget = card._settings_form.widget_for('title')
+natural_title_width = title_widget.minimumWidth()
+title_widget.setMinimumWidth(520)
+card._settings_popup.hide()
+QtTest.QTest.qWait(300)
+card._open_settings()
+card._settings_body.layout().activate()
+editor_right = title_widget.mapTo(
+    card._settings_scroll.viewport(),
+    QtCore.QPoint(title_widget.width() - 1, 0),
+).x()
+assert editor_right < card._settings_scroll.viewport().width(), (
+    'Setting cut off the editor: '
+    f'popup={card._settings_popup.width()} '
+    f'viewport={card._settings_scroll.viewport().width()} '
+    f'editor-right={editor_right}'
+)
+title_widget.setMinimumWidth(natural_title_width)
 assert isinstance(card._settings_form.widget_for('signal'), FluentTreeComboBox)
 assert isinstance(card._settings_form.widget_for('overlay_signal'), FluentTreeComboBox)
 assert card._settings_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
@@ -776,13 +794,13 @@ assert editor.parameter_forms['fit'].spec.keys == ('model',)
 title_auto = editor.parameter_forms['display'].auto_switch_for('title')
 title_edit = editor.parameter_forms['display'].widget_for('title')
 assert title_auto.isChecked()
-assert title_auto.text() == 'Title · Auto'
+assert title_auto.text() == 'Auto Title'
 title_row = editor.parameter_forms['display']._rows['title']
 assert title_row.layout().itemAt(0).widget() is title_auto
 assert title_row.layout().itemAt(1).widget() is title_edit
 assert not title_edit.isEnabled()
 title_auto.setChecked(False)
-assert title_auto.text() == 'Title · Manual'
+assert title_auto.text() == 'Manual Title'
 assert title_edit.isEnabled()
 title_edit.setText('Camera image')
 title_edit.editingFinished.emit()

@@ -746,7 +746,7 @@ def _widget_family(field: FormFieldProps) -> str:
 
 
 def _automatic_label(field: FormFieldProps, checked: bool) -> str:
-    return f"{field.row_label} · {'Auto' if checked else 'Manual'}"
+    return f"{'Auto' if checked else 'Manual'} {field.row_label}"
 
 
 def _form_label_width(fields) -> int:
@@ -904,6 +904,14 @@ class FluentParameterForm(QtWidgets.QWidget):
     @property
     def keys(self) -> tuple[str, ...]:
         return self._spec.keys
+
+    def minimum_content_width(self) -> int:
+        """Width required by the widest current label/editor row."""
+
+        return max(
+            (row.layout().minimumSize().width() for row in self._rows.values()),
+            default=0,
+        )
 
     def widget_for(self, key: str) -> QtWidgets.QWidget:
         try:

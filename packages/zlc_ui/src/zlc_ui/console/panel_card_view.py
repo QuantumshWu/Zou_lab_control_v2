@@ -479,9 +479,9 @@ class PanelCardView(FluentGroupBox):
                 )
             )
         section_labels = {
-            "semantic": "Semantic parameters",
-            "display": "Display / interaction parameters",
-            "fit": "Fit parameters / result",
+            "semantic": "Semantic",
+            "display": "Display",
+            "fit": "Fit",
         }
         for section in ("semantic", "display", "fit"):
             declared_fields = tuple(
@@ -566,14 +566,21 @@ class PanelCardView(FluentGroupBox):
                 key = f"{section}_unavailable"
                 if key in self._settings_form.spec.keys:
                     self._settings_form.widget_for(key).setEnabled(False)
-            self._sync_settings_body_height()
+            self._sync_settings_body_size()
 
-    def _sync_settings_body_height(self) -> None:
+    def _sync_settings_body_size(self) -> None:
         body = self._settings_body
         if body is None or body.layout() is None:
             return
         body.setMinimumHeight(0)
+        body.setMinimumWidth(0)
         body.layout().activate()
+        margins = body.layout().contentsMargins()
+        body.setMinimumWidth(
+            self._settings_form.minimum_content_width()
+            + margins.left()
+            + margins.right()
+        )
         body.setMinimumHeight(body.layout().sizeHint().height())
 
     def _open_settings(self) -> None:
@@ -634,14 +641,13 @@ class PanelCardView(FluentGroupBox):
             self._settings_drag_handle = drag_handle
             self._settings_scroll = scroll
             self._settings_body = body
-            self._sync_settings_body_height()
+            self._sync_settings_body_size()
             popup.hide()
         anchor = self._settings_anchor
-        scroll = self._settings_scroll
         anchor.toggle(
-            scroll,
+            self._settings_body,
             prepare=self._rebuild_settings_form,
-            minimum_width=280,
+            minimum_width=1,
             minimum_height=320,
             maximum_height=max(1, self.height()),
         )

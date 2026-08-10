@@ -125,9 +125,9 @@ class PanelEditorView(QtWidgets.QWidget):
         self.parameter_forms: dict[str, FluentParameterForm] = {}
         self.parameter_unavailable: dict[str, FluentLabel] = {}
         for section, title in (
-            ("semantic", "Semantic parameters"),
-            ("display", "Display / interaction parameters"),
-            ("fit", "Fit parameters / result"),
+            ("semantic", "Semantic"),
+            ("display", "Display"),
+            ("fit", "Fit"),
         ):
             group = FluentGroupBox(title)
             layout = QtWidgets.QVBoxLayout(group)
