@@ -33,11 +33,11 @@
 - Goal status：`active — 最新科学/UI/性能裁决尚未完成最终复验`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`52b075a已关闭重大阶段package验证发现的最后三条回归；进入本Goal最终全树验证。`
+- Current phase：`5e7233c后的最终全树已通过；只余轻量detached导入隔离、残留核对和用户亲自进行的正式可见按钮验收。`
 - Last completed action：`52b075a：source-neutral Occupancy首次暴露Console source catalog会把consumer自己的声明输出及上一generation publication列回自己的输入候选。现有catalog现在只按SignalDescription.owner_id/binding.node_id排除consumer自身，不猜signal key前缀；同时把两条旧测试同步到既定语义：Occupancy input contract显式为None、layout持久化完整zlc_plot accepted display state。未新增文件、类、状态或抽象。`
-- Last verified tests：`四个受影响package重大阶段运行结果为767 passed/3 failed；三个失败中一条为上述真实self-loop、两条为旧断言。52b075a前的精确同三测试现为3 passed in 7.94s，所有ROOT/ATOM/WORKBENCH路径均指向当前v2树；不为该小修重复package full。`
-- Pending acceptance gates：`只在最终HEAD运行一次全树与必要detached验证、确认无项目Python/GUI残留；正式可见按钮的人类验收由用户亲自执行。`
-- Next action：`确认52b075a+本Checkpoint工作树clean且无项目进程，然后按Phase D只跑一次最终全树；失败只处理新出现的真实产品回归，不重开Checkpoint已关闭事项。`
+- Last verified tests：`最终HEAD单次全树为1162 passed in 184.86s；同一进程首句import并打印ROOT与ATOM/DURABLE/PLOT/PULSE/RUNTIME/UI/WORKBENCH，全部绝对路径指向当前v2树。此前四package 767 passed/3 failed中的三条已由52b075a精确3 passed闭合，不再重复full。`
+- Pending acceptance gates：`只做不重复测试的detached导入隔离与项目进程残留核对；正式可见按钮的人类验收由用户亲自执行。`
+- Next action：`在临时detached worktree只import并打印同一组package路径，立即删除临时树；随后确认主树clean、项目Python/GUI零残留并写最终Checkpoint，不再运行full。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
