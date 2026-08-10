@@ -495,6 +495,7 @@ class RenderFrame:
     effects: RenderEffect
     data_revision: int | None = None
     fit_overlays: tuple[FitOverlay, ...] = ()
+    fit_model_id: str | None = None
     classifier_overlays: tuple[FitOverlay, ...] = ()
     classifier_thresholds: tuple[float | None, ...] = ()
     classifier_labels: tuple[str, ...] = ()
@@ -548,6 +549,10 @@ class MatplotlibRenderer:
         self._last_selectors = SelectorSnapshot(())
         self._fit_artists: list[Any] = []
         self._fit_slots: dict[str, Any] = {}
+        self._facet_fit_topologies: dict[
+            int,
+            tuple[Any, str, str | None, dict[str, Any], tuple[Any, ...]],
+        ] = {}
         self._last_fit_overlay: FitOverlay | None = None
         self._last_fit_overlays: tuple[FitOverlay, ...] = ()
         self._classifier_artists: dict[int, tuple[tuple[Any, ...], Any, Any]] = {}
@@ -556,6 +561,7 @@ class MatplotlibRenderer:
         self._fit_hidden_source_lines: tuple[tuple[Any, bool], ...] = ()
         self._fit_axis: Any | None = None
         self._fit_family: str | None = None
+        self._fit_model_id: str | None = None
         self._image_overlay: ImagePointOverlay | None = None
         self._image_overlay_signature: tuple[object, ...] | None = None
         self._data_revision: int | None = None
@@ -747,6 +753,7 @@ class MatplotlibRenderer:
         self._last_selectors = SelectorSnapshot(())
         self._fit_artists.clear()
         self._fit_slots.clear()
+        self._facet_fit_topologies.clear()
         self._last_fit_overlay = None
         self._last_fit_overlays = ()
         self._classifier_artists.clear()
@@ -755,6 +762,7 @@ class MatplotlibRenderer:
         self._fit_hidden_source_lines = ()
         self._fit_axis = None
         self._fit_family = None
+        self._fit_model_id = None
         self._image_overlay = None
         self._image_overlay_signature = None
         self._data_revision = None
@@ -851,7 +859,11 @@ class MatplotlibRenderer:
             self._last_selectors = painted_selectors
             self._update_selectors(self._last_selectors)
             self._set_fit_mode(bool(painted_fit_overlays) and not overview)
-            self._update_fit(painted_fit_overlays, overview=overview)
+            self._update_fit(
+                painted_fit_overlays,
+                overview=overview,
+                model_id=frame.fit_model_id,
+            )
             self._update_image_point_overlay(payload, frame.image_overlay, state)
             image_blitted = (
                 base_changed
@@ -3271,8 +3283,10 @@ class MatplotlibRenderer:
         self._remove_artists(self._fit_artists)
         self._fit_artists.clear()
         self._fit_slots.clear()
+        self._facet_fit_topologies.clear()
         self._fit_axis = None
         self._fit_family = None
+        self._fit_model_id = None
 
     def _fit_polyline_token(self, semantic: PlotSpec, polyline: FitPolyline) -> Any:
         if polyline.role == "component":
@@ -3424,15 +3438,24 @@ class MatplotlibRenderer:
         if family in {"histogram", "curve"}:
             self._set_fit_line(self._fit_slots["line"], overlay.polylines[0])
 
-    def _update_single_fit(self, overlay: FitOverlay | None) -> None:
+    def _update_single_fit(
+        self,
+        overlay: FitOverlay | None,
+        model_id: str | None,
+    ) -> None:
         if overlay is None:
             self._clear_fit_topology()
             return
         axis, semantic = self._fit_target(overlay)
         family = self._fit_family_for(semantic, overlay)
-        if self._fit_axis is not axis or self._fit_family != family:
+        if (
+            self._fit_axis is not axis
+            or self._fit_family != family
+            or self._fit_model_id != model_id
+        ):
             self._clear_fit_topology()
             self._build_fit_topology(axis, family, semantic, overlay)
+            self._fit_model_id = model_id
         if not overlay.success:
             diagnostic_text = overlay.diagnostic.strip() or "fit failed"
             diagnostic_text = _truncate_fit_diagnostic(
@@ -3450,27 +3473,73 @@ class MatplotlibRenderer:
     def _update_facet_fit_overview(
         self,
         overlays: tuple[FitOverlay, ...],
+        model_id: str | None,
     ) -> None:
         """Paint all cell fit curves without per-cell parameter annotations."""
 
         if not isinstance(self.spec, FacetGridPlot):
             raise TypeError("facet fit overview requires FacetGridPlot")
-        self._clear_fit_topology()
+        if self._fit_axis is not None:
+            self._clear_fit_topology()
         axes = self._axes.get("facet_cell", ())
         semantic = self.spec.cell
+        active_indices = {
+            overlay.facet_index
+            for overlay in overlays
+            if overlay.facet_index is not None
+            and 0 <= overlay.facet_index < self._visible_facet_count
+        }
+        for index in tuple(self._facet_fit_topologies):
+            if index in active_indices:
+                continue
+            _axis, _family, _model, _slots, artists = (
+                self._facet_fit_topologies.pop(index)
+            )
+            self._remove_artists(artists)
+            self._fit_artists[:] = [
+                artist
+                for artist in self._fit_artists
+                if all(artist is not removed for removed in artists)
+            ]
         for overlay in overlays:
             index = overlay.facet_index
             if index is None or index < 0 or index >= self._visible_facet_count:
                 continue
             family = self._fit_family_for(semantic, overlay)
             axis = axes[index]
-            self._build_fit_topology(
-                axis,
-                family,
-                semantic,
-                overlay,
-                annotation=_FitAnnotationDetail.HEADLINE,
-            )
+            topology = self._facet_fit_topologies.get(index)
+            if (
+                topology is None
+                or topology[0] is not axis
+                or topology[1] != family
+                or topology[2] != model_id
+            ):
+                if topology is not None:
+                    old_artists = topology[4]
+                    self._remove_artists(old_artists)
+                    self._fit_artists[:] = [
+                        artist
+                        for artist in self._fit_artists
+                        if all(artist is not removed for removed in old_artists)
+                    ]
+                self._fit_slots = {}
+                first = len(self._fit_artists)
+                self._build_fit_topology(
+                    axis,
+                    family,
+                    semantic,
+                    overlay,
+                    annotation=_FitAnnotationDetail.HEADLINE,
+                )
+                topology = (
+                    axis,
+                    family,
+                    model_id,
+                    dict(self._fit_slots),
+                    tuple(self._fit_artists[first:]),
+                )
+                self._facet_fit_topologies[index] = topology
+            self._fit_slots = topology[3]
             if family == "failure":
                 diagnostic = self._fit_slots["diagnostic"]
                 diagnostic.set_text(
@@ -3483,17 +3552,22 @@ class MatplotlibRenderer:
             else:
                 self._update_fit_primitives(family, overlay)
                 self._update_fit_headline_annotation(overlay)
+        self._fit_slots = {}
+        self._fit_axis = None
+        self._fit_family = None
+        self._fit_model_id = None
 
     def _update_fit(
         self,
         overlays: tuple[FitOverlay, ...],
         *,
         overview: bool,
+        model_id: str | None,
     ) -> None:
         if overview:
-            self._update_facet_fit_overview(overlays)
+            self._update_facet_fit_overview(overlays, model_id)
             return
-        self._update_single_fit(overlays[0] if overlays else None)
+        self._update_single_fit(overlays[0] if overlays else None, model_id)
 
     def _update_classifier(
         self,

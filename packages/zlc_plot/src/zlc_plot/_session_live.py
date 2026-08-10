@@ -188,10 +188,15 @@ class LiveSessionMixin:
                     if prepared.image_overlay is None
                     else prepared.image_overlay
                 )
+                accepted_fit = (
+                    self._accepted_fit
+                    if self._live_fit_request is not None
+                    else None
+                )
             presentation = self._present_projection_transaction(
                 prepared.projection,
                 image_overlay=accepted_image_overlay,
-                accepted_fit=None,
+                accepted_fit=accepted_fit,
             )
         return _LiveFrameFinalization(
             self._session_identity,

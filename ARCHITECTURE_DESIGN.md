@@ -338,11 +338,11 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 - title/labels、limits 和当前 kind 声明的全部 data-independent display/interaction 参数；
 - Edit / Remove。
 
-Panel frame name 与图内 title 是两个事实：frame name 默认包含所选 signal 以便在 Monitor 中辨认，也可单独重命名；图内 title、axis labels、units 和 limits 仍是 `zlc_plot` 的 display 参数。凡 plot schema 声明 `None` 为 automatic 的字段，Setting 与 Panel Edit 都在编辑器右侧显示 `Auto` switch；开启时禁用手工 editor并使用 PlotSpec/data 默认，关闭时提交手工值。不得再由 Workbench 用 frame name 覆盖 plot title。
+Panel frame name 与图内 title 是两个事实：frame name 默认包含所选 signal 以便在 Monitor 中辨认，也可单独重命名；图内 title、axis labels、units 和 limits 仍是 `zlc_plot` 的 display 参数。凡 plot schema 声明 `None` 为 automatic 的字段，Setting 与 Panel Edit 都用一个带短名称的 switch 直接占据该行的 label 位置，不再另放一条冗长 label；switch 自身显示 `Auto …` 或 `Manual …`，开启 Auto 时禁用手工 editor并使用 PlotSpec/data 默认，关闭时提交手工值。不得再由 Workbench 用 frame name 覆盖 plot title。
 
 依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。Camera cycle 的各个 frame 已经是普通独立 signals，plot 参数层不再增加 camera-specific frame choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
 
-Setting 使用现有 `FluentPopup` 和 `FluentSettingsPopupAnchor` 锚在所属 panel 的 Setting 按钮旁，宽度约为 `2x2` panel 的一半；`Qt.Popup` 负责点击外部关闭，标题条允许拖动，内容放不下时在 popup 内滚动，外间距复用 Fluent popup gap。popup 从创建时就以 card 为 parent，form/button/control 从创建时就以 Setting body/popup 为 parent；只允许这个有身份的预期 popup 收到 top-level Show，禁止先显示无 parent 临时窗口再 reparent。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
+Setting 使用现有 `FluentPopup` 和 `FluentSettingsPopupAnchor` 锚在所属 panel 的 Setting 按钮旁；宽度不与 panel preset 绑定，而由当前完整 form 的控件 `sizeHint`、必要 label/switch 文本和 popup margin 得出能完整显示所有 widget 的最窄宽度，再受可用屏幕宽度约束，绝不能截断 editor。`Qt.Popup` 负责点击外部关闭，标题条允许拖动，内容放不下时在 popup 内滚动，外间距复用 Fluent popup gap。popup 从创建时就以 card 为 parent，form/button/control 从创建时就以 Setting body/popup 为 parent；只允许这个有身份的预期 popup 收到 top-level Show，禁止先显示无 parent 临时窗口再 reparent。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
 
 Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不消费 wheel，Panel Card 把 wheel 明确路由到外层 board scroll；打开后 wheel 才属于 plot 的 zoom/selection interaction。这个开关直接调用同一 plot widget 的 interaction gate，不重建 panel。
 
@@ -368,7 +368,7 @@ Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `Pa
 
 Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc_plot`：semantic mapping、整张 display parameter mapping、size、Image overlay 和 fit choice。Workbench 不判断哪一个字段能原位更新，也不循环调用单字段 setter；`zlc_plot` 用当前 `PlotSpec`、`ParameterSchema`、layout、overlay 和 fit 状态比较差异，合并需要的 render effects，并在同一个 worker job 中最多发布一张同步 front。只要 signal/schema 兼容，就保留同一个 host 和 Figure；只有 signal 改变、generation 改变或 schema 不兼容才替换 host。Fit 求解本身继续是异步科学计算，完成后再发布 fit overlay。owner thread 不调用 `.result()` 等待，旧的完整配置 job 由同一 coalescing key 淘汰。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
 
-Live fit 不改变外部 data API：有无 fit 都只调用同一个 `RasterPlotHost.update_data()`。每个新 revision 先投影并发布 data front，立即撤下不再对应当前数据的旧 fit overlay；随后取消前一 solver，只在 `zlc_plot` 的既有 analysis worker 中拟合当前最新 revision。fit 完成后仍须通过当前 data revision/request generation 校验才可发布 overlay 和 `FitEvent`，所以晚到结果不能覆盖新图。`LivePlotController` 只提供 capacity-one/latest ingress 与 cadence，不拥有第二套 fit 状态机，也不要求 data 等 fit 完成后才显示。
+Live fit 不改变外部 data API：有无 fit 都只调用同一个 `RasterPlotHost.update_data()`。每个新 revision 先投影并发布 data front，取消前一 solver，只在 `zlc_plot` 的既有 analysis worker 中重新求出当前最新数据的参数；这一步科学计算不可用旧参数代替。显示层在同一 fit model 和同一 artist topology 下保留既有 artists，在新结果到达前把它们视为 lagging，新结果通过 revision/request-generation 校验后只更新 line data、glyph geometry 和 annotation；只有 fit model 或 artist topology 改变才移除并重建 artists。最终 raster 仍由现有 renderer 一次同步 draw，不新增第二条 blit/lifecycle。`LivePlotController` 只提供 capacity-one/latest ingress 与 cadence，不拥有第二套 fit 状态机，也不要求 data 等 fit 完成后才显示。
 
 Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display 参数，和通用 fit 完全独立。打开后由 `zlc_plot` 自己执行 bimodal Gaussian classification fit，显示左右 Gaussian、总和、可拖动 threshold，以及当前 threshold 对应的 fitted population 左/右占比（两者严格合计 100%）和 balanced fidelity；初值是 equal-prior 最优 threshold。普通 fit 的启停、model、结果和状态不得创建、移动或清除 classifier，classifier 也不得写普通 `fit_status`。FacetGrid[Histogram] 对每个 cell 使用同一 classifier，overview 中保留三条曲线、threshold 和较小字号的三项数值；focus 后只把该 cell 的 threshold 变成可交互 selector。外部若已有模型 threshold，就把 toggle 与整组 canonical thresholds 放进同一次 `configure()`，不先画静态线再另跑普通 fit。
 

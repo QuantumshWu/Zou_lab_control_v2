@@ -1230,6 +1230,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if self._accepted_fit is None
                     else self._accepted_fit.overlays
                 ),
+                fit_model_id=(
+                    None
+                    if self._accepted_fit is None
+                    else str(self._accepted_fit.result.model.model_id)
+                ),
                 classifier_overlays=self._classifier_overlays,
                 classifier_thresholds=display_classifier_thresholds,
                 classifier_labels=classifier_labels,
@@ -2597,10 +2602,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if image_overlay is _UNSET
                     else image_overlay
                 )
+                accepted_fit = (
+                    self._accepted_fit
+                    if self._live_fit_request is not None
+                    else None
+                )
             presentation = self._present_projection_transaction(
                 projection,
                 image_overlay=accepted_overlay,
-                accepted_fit=None,
+                accepted_fit=accepted_fit,
             )
             self._restart_live_fit_for_current_data()
 

@@ -111,7 +111,10 @@ def test_facet_fit_overview_keeps_failure_diagnostic_inside_cell() -> None:
             diagnostic="this diagnostic is intentionally much longer than one cell",
             facet_index=0,
         )
-        session._renderer._update_facet_fit_overview((failure, *result.overlays[1:]))
+        session._renderer._update_facet_fit_overview(
+            (failure, *result.overlays[1:]),
+            "gaussian_offset",
+        )
         axis = session._renderer.axes["facet_cell"][0]
         assert axis.texts
         assert len(axis.texts[0].get_text()) <= 24
@@ -160,16 +163,23 @@ def test_facet_live_fit_replaces_the_whole_batch_on_new_revision() -> None:
     session = PlotSession(initial, _spec())
     try:
         session.fit("gaussian_offset", live=True)
+        original_artists = tuple(session._renderer._fit_artists)
+        assert original_artists
         prepared = session.prepare_live_frame(
             _facet_snapshot(revision=1, scale=1.1)
         ).result(timeout=10.0)
         finalization = session.commit_live_frame(prepared)
         assert finalization is not None
+        assert tuple(session._renderer._fit_artists) == original_artists
         session.finalize_live_frame(finalization)
 
         accepted = _wait_for_fit_revision(session, 1)
         assert len(accepted.overlays) == 2
         assert all(overlay.polylines for overlay in accepted.overlays)
+        assert tuple(session._renderer._fit_artists) == original_artists
         assert session.fit_status == "current"
+
+        session.fit("lorentzian", live=True)
+        assert tuple(session._renderer._fit_artists) != original_artists
     finally:
         session.close()
