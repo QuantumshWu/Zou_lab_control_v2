@@ -332,15 +332,8 @@ class PanelEditorView(QtWidgets.QWidget):
                 str(field["key"]): field for field in declared
             }
             if declared:
-                automatic_none = section == "display"
-                spec = parameter_form_spec(
-                    declared,
-                    automatic_none=automatic_none,
-                )
-                form_values = parameter_form_values(
-                    declared,
-                    automatic_none=automatic_none,
-                )
+                spec = parameter_form_spec(declared)
+                form_values = parameter_form_values(declared)
             else:
                 spec = FormSpec(())
                 form_values = {}

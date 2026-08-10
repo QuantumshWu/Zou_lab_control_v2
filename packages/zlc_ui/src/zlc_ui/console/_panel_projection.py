@@ -77,11 +77,7 @@ def _parameter_choice(value: object) -> object:
     return _ParameterChoice.NONE if value is None else value
 
 
-def parameter_form_spec(
-    fields: object,
-    *,
-    automatic_none: bool = False,
-) -> FormSpec:
+def parameter_form_spec(fields: object) -> FormSpec:
     """Turn Workbench's UI-neutral plot controls into a zlc_ui form."""
 
     projected: list[FormFieldProps] = []
@@ -98,7 +94,7 @@ def parameter_form_spec(
         }.get(owner_kind, owner_kind)
         value = field.get("value")
         allow_none = bool(field.get("allow_none"))
-        automatic = automatic_none and allow_none
+        automatic = bool(field.get("automatic"))
         choices: tuple[FormChoice, ...] = ()
         if kind == "choice":
             choice_rows = [
@@ -129,21 +125,18 @@ def parameter_form_spec(
                 maximum=maximum,
                 choices=choices,
                 allow_blank=allow_none if kind in {"int", "number", "float"} else None,
+                unavailable_reason=str(field.get("unavailable_reason") or ""),
                 automatic=automatic,
             )
         )
     return FormSpec(tuple(projected))
 
 
-def parameter_form_values(
-    fields: object,
-    *,
-    automatic_none: bool = False,
-) -> dict[str, object]:
+def parameter_form_values(fields: object) -> dict[str, object]:
     return {
         str(field["key"]): (
             field.get("value")
-            if automatic_none and bool(field.get("allow_none"))
+            if bool(field.get("automatic"))
             else _parameter_choice(field.get("value"))
             if str(field.get("kind")) == "choice"
             else ""

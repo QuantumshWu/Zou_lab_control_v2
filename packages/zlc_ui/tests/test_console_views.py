@@ -181,8 +181,9 @@ assert {
     widget for widget in app.topLevelWidgets() if widget.isVisible()
 } == top_levels | {popup}
 assert 240 <= popup.width() <= 320
+assert popup.height() <= card.height()
+assert card._settings_scroll.geometry().right() == popup.rect().right()
 assert not hasattr(card, 'apply_button')
-popup.resize(popup.width(), 180)
 app.processEvents()
 assert card._settings_scroll.verticalScrollBar().maximum() > 0
 title = card._settings_form.widget_for('title')
@@ -572,6 +573,7 @@ def test_panel_editor_and_setting_are_views_of_the_same_projection() -> None:
         """
 import zou_lab_control_v2
 import zlc_ui.console.panel_editor_view as tested_module
+print(zou_lab_control_v2.__file__)
 print(tested_module.__file__)
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -610,17 +612,22 @@ surface = {
     'display': (
         {'key': 'title', 'label': 'Title', 'kind': 'text',
          'value': None, 'allow_none': True, 'choices': (),
-         'minimum': None, 'maximum': None, 'step': None},
+         'minimum': None, 'maximum': None, 'step': None,
+         'automatic': True, 'unavailable_reason': ''},
         {'key': 'x_label', 'label': 'X label', 'kind': 'text',
          'value': None, 'allow_none': True, 'choices': (),
-         'minimum': None, 'maximum': None, 'step': None},
+         'minimum': None, 'maximum': None, 'step': None,
+         'automatic': True, 'unavailable_reason': ''},
         {'key': 'x_display_unit', 'label': 'X unit', 'kind': 'choice',
          'value': None, 'allow_none': True,
          'choices': (('Pixel', 'pixel'), ('Millimetre', 'mm')),
-         'minimum': None, 'maximum': None, 'step': None},
+         'minimum': None, 'maximum': None, 'step': None,
+         'automatic': True, 'unavailable_reason': ''},
         {'key': 'color_min', 'label': 'Color minimum', 'kind': 'number',
          'value': None, 'allow_none': True, 'choices': (),
-         'minimum': None, 'maximum': None, 'step': None},
+         'minimum': None, 'maximum': None, 'step': None,
+         'automatic': False,
+         'unavailable_reason': 'Choose Fixed color limits to edit.'},
         {'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
          'value': 'viridis', 'allow_none': False,
          'choices': (('Viridis', 'viridis'), ('Magma', 'magma')),
@@ -769,8 +776,13 @@ assert editor.parameter_forms['fit'].spec.keys == ('model',)
 title_auto = editor.parameter_forms['display'].auto_switch_for('title')
 title_edit = editor.parameter_forms['display'].widget_for('title')
 assert title_auto.isChecked()
+assert title_auto.text() == 'Title · Auto'
+title_row = editor.parameter_forms['display']._rows['title']
+assert title_row.layout().itemAt(0).widget() is title_auto
+assert title_row.layout().itemAt(1).widget() is title_edit
 assert not title_edit.isEnabled()
 title_auto.setChecked(False)
+assert title_auto.text() == 'Title · Manual'
 assert title_edit.isEnabled()
 title_edit.setText('Camera image')
 title_edit.editingFinished.emit()
@@ -783,12 +795,26 @@ assert not x_unit_edit.isEnabled()
 x_unit_auto.setChecked(False)
 assert x_unit_edit.isEnabled() and x_unit_edit.currentData() == 'pixel'
 x_unit_auto.setChecked(True)
-color_min_auto = editor.parameter_forms['display'].auto_switch_for('color_min')
 color_min_edit = editor.parameter_forms['display'].widget_for('color_min')
-assert color_min_auto.isChecked() and not color_min_edit.isEnabled()
-color_min_auto.setChecked(False)
+try:
+    editor.parameter_forms['display'].auto_switch_for('color_min')
+except KeyError:
+    pass
+else:
+    raise AssertionError('fixed color limits must not have independent Auto switches')
+assert not color_min_edit.isEnabled()
+fixed_display = tuple(
+    dict(field, value=0, unavailable_reason='')
+    if field['key'] == 'color_min' else field
+    for field in surface['display']
+)
+fixed_surface = dict(surface, display=fixed_display)
+handle.set_panel_projection('panel-1', state, fixed_surface)
+handle.update_panel_editor(
+    'panel-1', dict(projection, parameter_surface=fixed_surface)
+)
+color_min_edit = editor.parameter_forms['display'].widget_for('color_min')
 assert color_min_edit.isEnabled() and color_min_edit.text() == '0'
-color_min_auto.setChecked(True)
 semantic_combo = editor.parameter_forms['semantic'].widget_for('x')
 semantic_combo.setCurrentIndex(1)
 semantic_combo.activated.emit(1)
@@ -827,8 +853,6 @@ assert ('state', 'panel-1', {'display': {'title': 'Camera image'}}) in events
 assert ('state', 'panel-1', {'display': {'title': None}}) in events
 assert ('state', 'panel-1', {'display': {'x_display_unit': 'pixel'}}) in events
 assert ('state', 'panel-1', {'display': {'x_display_unit': None}}) in events
-assert ('state', 'panel-1', {'display': {'color_min': 0}}) in events
-assert ('state', 'panel-1', {'display': {'color_min': None}}) in events
 assert ('state', 'panel-1', {
     'fit': {'model': 'anisotropic_gaussian_center'}
 }) in events

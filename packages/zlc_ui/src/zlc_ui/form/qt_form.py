@@ -503,7 +503,7 @@ class _ChoiceHandler(FormWidgetHandler):
         widget = FluentComboBox()
         self._fill(widget, field.choices)
         self.write(field, widget, value)
-        widget.setEnabled(not field.required_choice_unavailable)
+        widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
         _connect_change(widget.activated, on_change)
         return widget
@@ -532,7 +532,7 @@ class _ChoiceHandler(FormWidgetHandler):
         current = self.read(field, widget)
         self._fill(widget, field.choices)
         self.write(field, widget, current)
-        widget.setEnabled(not field.required_choice_unavailable)
+        widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
 
 
@@ -745,6 +745,24 @@ def _widget_family(field: FormFieldProps) -> str:
     raise ValueError(f"unsupported form field kind: {field.kind!r}")
 
 
+def _automatic_label(field: FormFieldProps, checked: bool) -> str:
+    return f"{field.row_label} · {'Auto' if checked else 'Manual'}"
+
+
+def _form_label_width(fields) -> int:
+    fields = tuple(fields)
+    width = setting_label_width(field.row_label for field in fields)
+    automatic = tuple(field for field in fields if field.automatic)
+    if automatic:
+        width = max(
+            width,
+            setting_label_width(
+                _automatic_label(field, False) for field in automatic
+            ) + scaled_px(68),
+        )
+    return width
+
+
 def _same_typed_value(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
@@ -770,6 +788,7 @@ def _reconfigure_widget(
     """Apply changed presentation constraints to one compatible control."""
 
     widget.setToolTip(field.unavailable_reason or field.description)
+    widget.setEnabled(not field.unavailable)
     if isinstance(widget, FluentLineEdit):
         if field.kind == "text":
             widget.setPlaceholderText(field.description[:48])
@@ -781,7 +800,7 @@ def _reconfigure_widget(
         _FloatHandler._configure_spin(field, widget)
     elif isinstance(widget, FluentComboBox) and old_field.choices != field.choices:
         _ChoiceHandler._fill(widget, field.choices)
-        widget.setEnabled(not field.required_choice_unavailable)
+        widget.setEnabled(not field.unavailable)
 
 
 class FluentParameterForm(QtWidgets.QWidget):
@@ -819,9 +838,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(scaled_px(6, minimum=4))
-        label_width = self._label_width or setting_label_width(
-            field.row_label for field in spec.fields
-        )
+        label_width = self._label_width or _form_label_width(spec.fields)
         for field in spec.fields:
             handler = FORM_WIDGET_HANDLERS[field.kind]
             widget = handler.build(
@@ -830,6 +847,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 lambda key=field.key: self.changed.emit(key),
                 self._runtime,
             )
+            widget.setEnabled(not field.unavailable)
             self._widgets[field.key] = widget
             self._handlers[field.key] = handler
             row, automatic = self._make_row(field, widget, label_width)
@@ -843,27 +861,23 @@ class FluentParameterForm(QtWidgets.QWidget):
 
     def _make_row(self, field, widget, label_width):
         automatic = None
-        content = widget
+        label = field.row_label
         if field.automatic:
-            content = QtWidgets.QWidget(self)
-            layout = QtWidgets.QHBoxLayout(content)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(scaled_px(6, minimum=4))
-            widget.setParent(content)
-            automatic = FluentSwitch("Auto", content)
+            automatic = FluentSwitch("", self)
             with signals_blocked(automatic):
                 automatic.setChecked(field.default is None)
-            widget.setEnabled(field.default is not None)
+            automatic.setText(_automatic_label(field, automatic.isChecked()))
+            automatic.setEnabled(not field.unavailable)
+            widget.setEnabled(not automatic.isChecked() and not field.unavailable)
             automatic.toggled.connect(
                 lambda checked, key=field.key: self._automatic_toggled(
                     key, checked
                 )
             )
-            layout.addWidget(widget, 1)
-            layout.addWidget(automatic)
+            label = automatic
         row = FluentSettingRow(
-            field.row_label,
-            content,
+            label,
+            widget,
             label_width=label_width,
             parent=self,
         )
@@ -872,7 +886,9 @@ class FluentParameterForm(QtWidgets.QWidget):
     def _automatic_toggled(self, key: str, automatic: bool) -> None:
         field = self._fields[key]
         widget = self._widgets[key]
-        widget.setEnabled(not automatic)
+        switch = self._auto_switches[key]
+        switch.setText(_automatic_label(field, automatic))
+        widget.setEnabled(not automatic and not field.unavailable)
         if not automatic and self._handlers[key].is_empty(field, widget):
             if field.kind == "choice" and field.choices:
                 self._handlers[key].write(field, widget, field.choices[0].value)
@@ -951,7 +967,13 @@ class FluentParameterForm(QtWidgets.QWidget):
                     )
                 if switch is not None:
                     switch.setChecked(selected)
-                    self._widgets[field.key].setEnabled(not selected)
+                    switch.setText(_automatic_label(field, selected))
+                    switch.setEnabled(not field.unavailable)
+                    self._widgets[field.key].setEnabled(
+                        not selected and not field.unavailable
+                    )
+                else:
+                    self._widgets[field.key].setEnabled(not field.unavailable)
 
     def validate_population(self, values: Mapping[str, object]) -> None:
         """Validate one exact owner projection without mutating any widget."""
@@ -1016,9 +1038,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             str,
             tuple[QtWidgets.QWidget, QtWidgets.QWidget, FluentSwitch | None],
         ] = {}
-        label_width = self._label_width or setting_label_width(
-            field.row_label for field in spec.fields
-        )
+        label_width = self._label_width or _form_label_width(spec.fields)
         for field in spec.fields:
             old_field = old_fields.get(field.key)
             if (
@@ -1033,6 +1053,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 lambda key=field.key: self.changed.emit(key),
                 self._runtime,
             )
+            widget.setEnabled(not field.unavailable)
             row, automatic = self._make_row(field, widget, label_width)
             replacements[field.key] = widget, row, automatic
 
@@ -1067,7 +1088,11 @@ class FluentParameterForm(QtWidgets.QWidget):
                     automatic = self._auto_switches.get(field.key)
                     if automatic is not None:
                         automatic.setChecked(selected)
-                        widget.setEnabled(not selected)
+                        automatic.setText(_automatic_label(field, selected))
+                        automatic.setEnabled(not field.unavailable)
+                        widget.setEnabled(not selected and not field.unavailable)
+                    else:
+                        widget.setEnabled(not field.unavailable)
 
             desired_keys = set(spec.keys)
             replaced_keys = set(replacements)
@@ -1086,6 +1111,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._auto_switches.pop(key, None)
 
             for key, (widget, row, automatic) in replacements.items():
+                field = next(field for field in spec.fields if field.key == key)
                 self._widgets[key] = widget
                 self._rows[key] = row
                 if automatic is not None:
@@ -1093,12 +1119,20 @@ class FluentParameterForm(QtWidgets.QWidget):
                     selected = incoming[key] is None
                     with signals_blocked(automatic):
                         automatic.setChecked(selected)
-                    widget.setEnabled(not selected)
+                    automatic.setText(_automatic_label(field, selected))
+                    automatic.setEnabled(not field.unavailable)
+                    widget.setEnabled(not selected and not field.unavailable)
 
             for index, field in enumerate(spec.fields):
                 row = self._rows[field.key]
                 if isinstance(row, FluentSettingRow):
-                    row.set_label(field.row_label, width=label_width)
+                    automatic = self._auto_switches.get(field.key)
+                    row.set_label(
+                        _automatic_label(field, automatic.isChecked())
+                        if automatic is not None
+                        else field.row_label,
+                        width=label_width,
+                    )
                 self._layout.removeWidget(row)
                 self._layout.insertWidget(index, row)
 
@@ -1120,8 +1154,15 @@ class FluentParameterForm(QtWidgets.QWidget):
                     self._runtime,
                 )
                 automatic = self._auto_switches.get(field.key)
-                if automatic is not None and automatic.isChecked():
-                    self._widgets[field.key].setEnabled(False)
+                if automatic is not None:
+                    automatic.setEnabled(not field.unavailable)
+                    automatic.setText(
+                        _automatic_label(field, automatic.isChecked())
+                    )
+                self._widgets[field.key].setEnabled(
+                    not field.unavailable
+                    and not (automatic is not None and automatic.isChecked())
+                )
 
     def _field_for(self, key: str) -> FormFieldProps:
         try:

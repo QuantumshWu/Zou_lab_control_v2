@@ -1127,6 +1127,10 @@ class ConsolePresenter:
             "minimum": getattr(control, "minimum", None),
             "maximum": getattr(control, "maximum", None),
             "step": getattr(control, "step", None),
+            "automatic": bool(getattr(control, "automatic", False)),
+            "unavailable_reason": str(
+                getattr(control, "unavailable_reason", "")
+            ),
         }
 
     def _parameter_surface(

@@ -38,6 +38,8 @@ class ParameterControl:
     effects: RenderEffect
     rebuild: bool = False
     semantic: bool = False
+    automatic: bool = False
+    unavailable_reason: str = ""
 
 
 def parameter_controls(
@@ -66,11 +68,14 @@ def parameter_controls(
         joined = ", ".join(repr(name) for name in unknown)
         raise KeyError(f"choice override refers to unknown parameter(s): {joined}")
     result = []
+    fixed_limits = values.get("relim_mode") == "fixed"
+    limit_names = {"color_min", "color_max", "y_min", "y_max"}
     for name, spec in schema.items():
         if name not in values:
             raise KeyError(f"display state is missing parameter {name!r}")
         choices = tuple(overrides.get(name, spec.choices))
         kind = _control_kind(spec.value_type, choices)
+        limit_field = name in limit_names and "relim_mode" in values
         result.append(
             ParameterControl(
                 name=name,
@@ -83,6 +88,12 @@ def parameter_controls(
                 maximum=spec.maximum,
                 step=spec.step,
                 effects=spec.effects,
+                automatic=spec.allow_none and not limit_field,
+                unavailable_reason=(
+                    "Choose Fixed limits to edit."
+                    if limit_field and not fixed_limits
+                    else ""
+                ),
             )
         )
     return tuple(result)

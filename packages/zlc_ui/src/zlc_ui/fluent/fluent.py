@@ -565,6 +565,7 @@ def show_fluent_popup_for_anchor(
     *,
     minimum_width: int = 360,
     minimum_height: int = 300,
+    maximum_height: int | None = None,
 ) -> None:
     """Size and place one Fluent popup beside its anchor on the active screen.
 
@@ -586,6 +587,12 @@ def show_fluent_popup_for_anchor(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
+    if maximum_height is not None and (
+        isinstance(maximum_height, bool)
+        or not isinstance(maximum_height, int)
+        or maximum_height <= 0
+    ):
+        raise ValueError("maximum_height must be a positive integer or None")
 
     popup.adjustSize()
     hint = content.sizeHint()
@@ -611,6 +618,8 @@ def show_fluent_popup_for_anchor(
         scaled_px(minimum_height, minimum=260),
         hint.height() + scaled_px(120, minimum=96),
     )
+    if maximum_height is not None:
+        desired_height = min(desired_height, maximum_height)
     gap = popup_gap()
     if available is not None:
         desired_width = min(
@@ -696,6 +705,7 @@ class FluentSettingsPopupAnchor:
         present=None,
         minimum_width: int = 360,
         minimum_height: int = 300,
+        maximum_height: int | None = None,
     ) -> None:
         """Close a visible popup, otherwise prepare and show it beside the anchor."""
 
@@ -720,6 +730,7 @@ class FluentSettingsPopupAnchor:
                 content,
                 minimum_width=minimum_width,
                 minimum_height=minimum_height,
+                maximum_height=maximum_height,
             )
         else:
             present()
@@ -1366,7 +1377,7 @@ class FluentSettingRow(QtWidgets.QWidget):
 
     def __init__(
         self,
-        label: str,
+        label: str | QtWidgets.QWidget,
         control: QtWidgets.QWidget,
         *,
         label_width: int | None = None,
@@ -1384,10 +1395,15 @@ class FluentSettingRow(QtWidgets.QWidget):
         h = QtWidgets.QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(scaled_px(6, minimum=4))
-        lbl = QtWidgets.QLabel(label)
+        if isinstance(label, QtWidgets.QWidget):
+            lbl = label
+            lbl.setParent(self)
+        else:
+            lbl = QtWidgets.QLabel(str(label), self)
         lbl.setFixedWidth(int(label_width) if label_width is not None else scaled_px(60, minimum=48))
-        lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        lbl.setStyleSheet(MUTED_LABEL_STYLE)
+        if isinstance(lbl, QtWidgets.QLabel):
+            lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            lbl.setStyleSheet(MUTED_LABEL_STYLE)
         self._label = lbl                       # introspected by the layout-uniformity contract test
         h.addWidget(lbl)
         # A control that FILLS the cell (a combo / line-edit / spin / switch -- Expanding/Preferred
@@ -1406,7 +1422,8 @@ class FluentSettingRow(QtWidgets.QWidget):
     def set_label(self, text: str, *, width: int | None = None) -> None:
         """Update this stable row's label without replacing either control."""
 
-        self._label.setText(str(text))
+        if hasattr(self._label, "setText"):
+            self._label.setText(str(text))
         if width is not None:
             self._label.setFixedWidth(int(width))
 

@@ -490,7 +490,6 @@ class PanelCardView(FluentGroupBox):
             for declared in declared_fields:
                 field = parameter_form_spec(
                     (declared,),
-                    automatic_none=section == "display",
                 ).fields[0]
                 fields.append(
                     FormFieldProps(
@@ -503,6 +502,7 @@ class PanelCardView(FluentGroupBox):
                         maximum=field.maximum,
                         choices=field.choices,
                         allow_blank=field.allow_blank,
+                        unavailable_reason=field.unavailable_reason,
                         automatic=field.automatic,
                     )
                 )
@@ -543,7 +543,6 @@ class PanelCardView(FluentGroupBox):
             )
             declared_values = parameter_form_values(
                 declared_fields,
-                automatic_none=section == "display",
             )
             for key, value in declared_values.items():
                 values[f"{section}__{key}"] = value
@@ -567,17 +566,22 @@ class PanelCardView(FluentGroupBox):
                 key = f"{section}_unavailable"
                 if key in self._settings_form.spec.keys:
                     self._settings_form.widget_for(key).setEnabled(False)
-            if self._settings_body is not None:
-                self._settings_body.setMinimumHeight(
-                    self._settings_body.sizeHint().height()
-                )
+            self._sync_settings_body_height()
+
+    def _sync_settings_body_height(self) -> None:
+        body = self._settings_body
+        if body is None or body.layout() is None:
+            return
+        body.setMinimumHeight(0)
+        body.layout().activate()
+        body.setMinimumHeight(body.layout().sizeHint().height())
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
             popup = FluentPopup(self)
             layout = QtWidgets.QVBoxLayout(popup)
             pad = max(1, scaled_px(10))
-            layout.setContentsMargins(pad, pad, pad, pad)
+            layout.setContentsMargins(pad, pad, 0, pad)
             layout.setSpacing(0)
             drag_handle = FluentLabel("Setting", popup)
             drag_handle.setCursor(QtCore.Qt.SizeAllCursor)
@@ -587,7 +591,7 @@ class PanelCardView(FluentGroupBox):
             body = QtWidgets.QWidget()
             body.setStyleSheet("background: transparent;")
             body_layout = QtWidgets.QVBoxLayout(body)
-            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setContentsMargins(0, 0, pad, 0)
             body_layout.setSpacing(max(1, scaled_px(5)))
             self._settings_form = FluentParameterForm(
                 self._form_spec(),
@@ -621,7 +625,6 @@ class PanelCardView(FluentGroupBox):
             buttons.addStretch(1)
             buttons.addWidget(self.remove_button)
             body_layout.addLayout(buttons)
-            body.setMinimumHeight(body.sizeHint().height())
             scroll.set_width_bounded_widget(body)
             layout.addWidget(scroll)
             self._settings_popup = popup
@@ -631,6 +634,7 @@ class PanelCardView(FluentGroupBox):
             self._settings_drag_handle = drag_handle
             self._settings_scroll = scroll
             self._settings_body = body
+            self._sync_settings_body_height()
             popup.hide()
         anchor = self._settings_anchor
         scroll = self._settings_scroll
@@ -639,6 +643,7 @@ class PanelCardView(FluentGroupBox):
             prepare=self._rebuild_settings_form,
             minimum_width=280,
             minimum_height=320,
+            maximum_height=max(1, self.height()),
         )
 
     def _request_edit(self) -> None:

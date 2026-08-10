@@ -561,6 +561,10 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
         "interpolation",
         "show_colorbar",
     }.issubset(display)
+    assert display["title"]["automatic"] is True
+    for key in ("color_min", "color_max"):
+        assert display[key]["automatic"] is False
+        assert display[key]["unavailable_reason"]
     assert binding.state.overlay_signal == ""
     original_state = binding.state
     assert presenter.set_panel_interval(binding.panel_id, 500) is False

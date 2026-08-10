@@ -218,11 +218,6 @@ class FormFieldProps:
                         f"empty choice field {self.key!r} needs an "
                         "unavailable_reason"
                     )
-            elif self.unavailable_reason:
-                raise ValueError(
-                    f"available choice field {self.key!r} cannot declare an "
-                    "unavailable_reason"
-                )
             if self.minimum is not None or self.maximum is not None:
                 raise ValueError(f"choice field {self.key!r} cannot declare numeric bounds")
             if self.default is not None and not any(
@@ -231,12 +226,6 @@ class FormFieldProps:
                 raise ValueError(f"field {self.key!r} default is not a typed choice value")
         elif choices:
             raise ValueError(f"non-choice field {self.key!r} cannot declare choices")
-        elif self.unavailable_reason:
-            raise ValueError(
-                f"non-choice field {self.key!r} cannot declare an "
-                "unavailable_reason"
-            )
-
         if self.kind not in {"int", "float", "number", "axis_range"} and (
             self.minimum is not None or self.maximum is not None
         ):
@@ -375,6 +364,12 @@ class FormFieldProps:
         """
 
         return self.kind == "choice" and self.required and not self.choices
+
+    @property
+    def unavailable(self) -> bool:
+        """Whether the declared owner says this visible field is not editable."""
+
+        return bool(self.unavailable_reason.strip())
 
     @property
     def row_label(self) -> str:
