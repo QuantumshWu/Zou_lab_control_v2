@@ -35,6 +35,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from zlc_plot import NumericRange
 
 from zlc_runtime import (
     FitEventValue,
@@ -64,6 +65,21 @@ _PLOT_KINDS = {
 #: Selector kinds that describe a region.  A threshold or a crosshair is a
 #: point, not a range, and has nothing to slice with.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
+
+
+def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
+    """Project one panel-owned canonical selection onto a plot surface."""
+
+    ranges = selection.ranges
+    if selection.selector_kind == "area":
+        x, y = ranges
+        return host.set_area_selector(
+            NumericRange(x.lower, x.upper),
+            NumericRange(y.lower, y.upper),
+            display=False,
+        )
+    value = ranges[0]
+    return host.set_x_selector(value.lower, value.upper, display=False)
 
 
 class _Unbridgeable(Exception):

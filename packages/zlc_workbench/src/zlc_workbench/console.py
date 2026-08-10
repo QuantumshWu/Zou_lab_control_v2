@@ -60,7 +60,11 @@ from .panel_catalog import (
 )
 from .panel_state import PanelFrozenData, PanelState
 from .presentation import PlotPanelPort
-from .selection import attach_selection_bridge, subscribe_committed_selection
+from .selection import (
+    _apply_panel_selection,
+    attach_selection_bridge,
+    subscribe_committed_selection,
+)
 from .topology import format_signal_shape, project_signals
 
 
@@ -90,6 +94,8 @@ class PanelBinding:
     #: Live derivation from selections drawn on this panel, if it has one.
     bridge: Any = None
     selections: Any = None
+    #: Canonical selector shared by the live and frozen views of this panel.
+    interaction_selection: Any = None
     #: The last failure already shown, so one refusal is reported once.
     reported_error: Any = None
     #: Exact publication used to construct a not-yet-board-anchored host.
@@ -573,6 +579,8 @@ class ConsolePresenter:
             binding.bridge.close()
         binding.bridge = binding.selections = None
         binding.host = host
+        if binding.interaction_selection is not None:
+            _apply_panel_selection(host, binding.interaction_selection)
         binding.display_publication = publication
         self.view.show_panel(binding.panel_id, host)
         if old_host is not None:
@@ -936,6 +944,8 @@ class ConsolePresenter:
                 return False
             self._release_panel(binding)
             binding.host = host
+            if binding.interaction_selection is not None:
+                _apply_panel_selection(host, binding.interaction_selection)
             binding.port = PlotPanelPort(
                 panel_id,
                 candidate.signal,
@@ -1380,6 +1390,8 @@ class ConsolePresenter:
                         raise error
                     assert metadata is not None
                     _display, models = metadata
+                    if binding.interaction_selection is not None:
+                        _apply_panel_selection(editor, binding.interaction_selection)
                     binding.editor_selections = subscribe_committed_selection(
                         editor,
                         lambda selection, expected=frozen, expected_host=editor: (
@@ -2207,6 +2219,9 @@ class ConsolePresenter:
             return
         if binding.port is None:
             return
+        binding.interaction_selection = selection
+        if binding.editor_host is not None:
+            _apply_panel_selection(binding.editor_host, selection)
         publication = binding.port.presented_publication()
         if publication is None:
             # A newly-created host already displays ``shown`` before the first
@@ -2238,6 +2253,9 @@ class ConsolePresenter:
             or binding.frozen_stale
         ):
             return
+        binding.interaction_selection = selection
+        if binding.host is not None:
+            _apply_panel_selection(binding.host, selection)
         self._route_exact_panel_selection(
             panel_id,
             frozen.signal,

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from zlc_plot import SelectorKind
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -955,6 +956,9 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     first_selected = dict(presenter.logic[first_id].draft.values)
     assert first_selected != first_before
     assert presenter.logic[second_id].draft.values == second_before
+    editor_selector = first_editor_host.selector_state(SelectorKind.AREA).result().value
+    live_selector = panel.host.selector_state(SelectorKind.AREA).result().value
+    assert live_selector.value == editor_selector.value
 
     assert presenter.retarget_panel(
         panel.panel_id, second_node.signal_key("frame_0")
@@ -970,6 +974,10 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     _settle_panel_hosts(
         presenter, lambda: panel.editor_selections is not None
     )
+    refreshed_selector = second_editor_host.selector_state(SelectorKind.AREA).result().value
+    live_selector = panel.host.selector_state(SelectorKind.AREA).result().value
+    assert refreshed_selector.value == live_selector.value
+    second_editor_host.remove_selector(SelectorKind.AREA).result()
     _commit_area(second_editor_host)
     assert presenter.logic[first_id].draft.values == first_selected
     assert presenter.logic[second_id].draft.values != second_before
