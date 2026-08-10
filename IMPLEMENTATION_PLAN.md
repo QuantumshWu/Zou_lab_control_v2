@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`active — four reopened panel defects are implemented in 3a2ebb2 and directly relevant automated guards are green; formal visible-button acceptance remains pending`
+- Goal status：`active — user visible-button acceptance directly disproved two claims in 3a2ebb2: panel ROI/Fit disappeared from the Logic tab, and Edit frozen-snapshot wheel zoom does not update producer ROI`
 - Production HEAD at final verification：`pending；只能在全部验证门通过后填写`
 - Stage set：`A Authority docs -> B Simulation + Calibration scientific/runtime contracts -> C Task preview + takeover + Panel schema/performance -> D affected/full/detached tests + 正式真实按钮验收 + 文档收尾`
-- Current phase：`commit 3a2ebb2 已在三个既有 owner 内完成最小根修：(1) Logic 行只投 descriptor/host direct outputs，Panel ROI/Fit 继续只归 signal_groups 的 panel bridge_id；(2) source revision 先到而下一批 Fit 尚未完成时，SelectionBridge 保留最后 accepted Fit publication 和固定 signal membership，不把 _StaleFit 当失败或 withdraw；(3) 已打开的 Setting 在 schema keys 改变后于下一 Qt layout turn完成一次尺寸收敛并复用既有 popup placement，value-only interval commit 不再改变 rows geometry；(4) Panel Edit frozen snapshot 的真实 QWheelEvent 链在全局 Selectors 关闭时仍工作，Area 存在时 Area 优先，移除 Area 后 viewport 才更新 direct producer ROI，并同步 live/frozen viewport。没有新增文件、类、registry、transaction 或兼容路径。`
-- Last completed action：`阶段实现与既有测试已提交为 3a2ebb2 Stabilize panel-derived signals and editor interaction；此前 482c2ce 的 no-echo 投影语义保留。`
-- Last verified tests：`每个验证进程先 import zou_lab_control_v2 并打印 root/被测模块绝对 __file__。直接相关组合为 5 passed：SelectionBridge Fit publication/membership retention、late stale Fit race、Logic direct-vs-panel ownership、默认 Selectors=False 下 frozen Edit 的真实 Qt Area/zoom ROI 优先级、Setting blank→bound 右缘完整且 interval value update geometry不变。未在此局部阶段机械运行 package/full tests。`
-- Pending acceptance gates：`只剩用户在正式可见按钮路径复验：Logic 行无 panel ROI/Fit、Panel signal Combo 的 Fit 不闪烁、已打开 Setting 首次绑定不裁切且 interval 不跳宽、Edit frozen snapshot 的 Area > zoom/pan viewport 更新 producer ROI。若出现直接反证再重新打开对应缺陷；否则不得因上下文压缩重做。`
-- Next action：`停止生产修改和自动测试，清理本轮进程后交给用户正式手动验收。`
+- Current phase：`3a2ebb2 把“Panel 是 ROI/Fit 的 publisher owner”错误等同成“从 Logic tab 删除”，而产品要求是 Logic tab 仍可见、但以 Panel 自己分组，不能冒充 Camera Measurement direct outputs。其 frozen zoom 测试也把 QWheelEvent 直接发送到 Raster host 根 QWidget，没有经过 Panel Edit 中鼠标实际命中的嵌入 canvas/child，因此是假绿。SelectionBridge 保留上一批 Fit membership 的修改与 Setting schema/value layout 分离仍保留，除非新的直接证据推翻。`
+- Last completed action：`已完整重读两份权威并按用户直接证据重新打开本阶段；尚未改本轮生产代码。`
+- Last verified tests：`3a2ebb2 的 5 passed 中，Fit retention 与 Setting geometry 仍是有效直接证据；Logic ownership 断言写错产品语义，frozen wheel 测试事件目标写错真实 UI 层级，这两条不得继续作为验收证据。`
+- Pending acceptance gates：`Logic tab 同时显示 Logic direct outputs 与按 Panel publisher 分组的 ROI/Fit，且 Fit membership稳定；在真实 PanelEditorView 内对 frozen plot canvas 滚轮 zoom/pan 后 producer ROI 必须变化，Area selector 存在时仍优先。`
+- Next action：`只读追 Logic tab projection 与 PanelEditorView->embedded canvas 的真实 Qt 事件目标；扩写既有测试在当前生产上得到两个精确旧红，再只改现有 owner 中最短接线，不新增文件、类或防御抽象。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon 的 source-less preview 可用 free-running LatestImageOnly，但 Repeat=0 Camera Measurement 使用 external OneByOne。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；只把产品beat和HarmonicClock最小谐波统一为100 ms。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类。`
 
 ## 1. 执行纪律
