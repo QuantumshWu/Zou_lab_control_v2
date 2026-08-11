@@ -391,7 +391,7 @@ assert catalog == (
     ('Plot: Distribution', ('plot', 'histogram')),
         ('Plot: Site grid', ('plot', 'facet_grid')),
         ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
-        ('Measurement: Pulse Api Scan', ('logic', 'pulse_api_scan')),
+        ('Measurement: Scan', ('logic', 'scan')),
         ('Processor: Occupancy', ('logic', 'occupancy')),
     ('Task: Calibration', ('logic', 'calibration')),
 )

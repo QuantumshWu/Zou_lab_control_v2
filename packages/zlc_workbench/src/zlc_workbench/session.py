@@ -61,17 +61,15 @@ def _same_json_value(left: object, right: object) -> bool:
     return left == right
 
 
-def _seed_default_pulse(template: Path) -> None:
-    """Create or canonicalize only the packaged default pulse.
+def _seed_default_pulse(template: Path, packaged: bytes) -> None:
+    """Create or canonicalize only a packaged default pulse.
 
     A differently authored or unreadable file is operator content and remains
     untouched.  An equivalent old rendering is not a second pulse: write it
     back through the one readable JSON serializer and durable file owner.
     """
 
-    from zlc_atom.nodes import calibration_pulse_template_bytes
-
-    packaged_tree = json.loads(calibration_pulse_template_bytes().decode("utf-8"))
+    packaged_tree = json.loads(packaged.decode("utf-8"))
     canonical = readable_json_bytes(packaged_tree)
     if not template.exists():
         atomic_write_bytes(template, canonical)
@@ -182,8 +180,17 @@ class Workspace:
         )
         pulses = home / "pulses"
         pulses.mkdir(parents=True, exist_ok=True)
-        template = pulses / cls.IMAGING_TEMPLATE
-        _seed_default_pulse(template)
+        from zlc_atom.nodes import (
+            calibration_pulse_template_bytes,
+            scan_pulse_template_bytes,
+        )
+
+        _seed_default_pulse(
+            pulses / cls.IMAGING_TEMPLATE, calibration_pulse_template_bytes()
+        )
+        _seed_default_pulse(
+            pulses / "mot_field_template.json", scan_pulse_template_bytes()
+        )
         return cls(home)
 
     @classmethod

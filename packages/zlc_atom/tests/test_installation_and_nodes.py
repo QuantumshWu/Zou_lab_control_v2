@@ -75,7 +75,7 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "calibration",
         "camera_measurement",
         "occupancy",
-        "pulse_api_scan",
+        "scan",
     )
 
 

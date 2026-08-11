@@ -31,6 +31,16 @@ def calibration_pulse_template_bytes() -> bytes:
     )
 
 
+def scan_pulse_template_bytes() -> bytes:
+    """Return the shipped MOT field-scan template exactly as packaged."""
+
+    return (
+        files("zlc_atom.nodes.scan")
+        .joinpath("mot_field_template.json")
+        .read_bytes()
+    )
+
+
 __all__ = [
     "ArtifactCodec",
     "ArtifactInputSpec",
@@ -47,5 +57,6 @@ __all__ = [
     "TaskPreviewSpec",
     "WorkspaceResourceSpec",
     "calibration_pulse_template_bytes",
+    "scan_pulse_template_bytes",
     "discover_logic_nodes",
 ]
