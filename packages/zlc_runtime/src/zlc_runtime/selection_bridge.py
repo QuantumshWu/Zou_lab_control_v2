@@ -37,7 +37,6 @@ from zlc_data import (
     compact_dataset_validity,
     expand_dataset_validity,
     materialize_derived_dataset,
-    materialize_scalar_dataset,
 )
 from zlc_data import SelectionChange, resolve_selection_indices
 from zlc_data.selection import IndexRangeSelection, take_indices
@@ -1122,6 +1121,27 @@ class SelectionBridge:
             )
         return next(iter(matches))
 
+    def _faceted_axis(
+        self,
+        schema: DatasetSchema,
+        sample_axis_name: str,
+    ) -> tuple[AxisSpec, str] | None:
+        """The parent axis a fit was faceted over, when the parent declares it.
+
+        A fit names its sample axis by the same label the parent schema gives
+        that axis, so the fit's samples inherit their meaning -- their role --
+        from the axis they were cut along.  A scalar fit names no axis, and a
+        facet over the bare point ordinal names no parent axis either.
+        """
+
+        if not sample_axis_name:
+            return None
+        try:
+            _axis_id, axis, kind = self._resolve_axis(schema, sample_axis_name)
+        except ValueError:
+            return None
+        return axis, kind
+
     def _build_selection(
         self,
         schema: DatasetSchema,
@@ -1402,6 +1422,18 @@ class SelectionBridge:
         source: OwnedSnapshot,
         state: SelectionState,
     ) -> Mapping[str, LiveDatasetOutput]:
+        """Cut one committed selection into signals that keep the parent's axes.
+
+        A derivation SUBSETS its parent's axes: the repeat axis and the point
+        axis of the derived signal are the parent's, and only the axes the
+        reduction actually CONSUMES disappear.  A box on an image consumes the
+        two image DATA axes and nothing else, so ``roi_mean`` is one value per
+        (repeat, point) on the same derived schema ``roi_frame`` carries, the
+        parent's point columns intact.  Pooling the point axis into a single
+        scalar instead would silently average a cycle's physically distinct
+        frames, which are different POINTS -- different moments of the pulse.
+        """
+
         source_schema = source.block.schema
         selection = self._build_selection(source_schema, state)
         repeat_indices, point_indices, data_indices = self._selection_indices(
@@ -1456,24 +1488,54 @@ class SelectionBridge:
         # The MEAN, and the signal is named for it: a mean is comparable
         # across ROI sizes, which a raw sum is not, and for anything like a
         # brightness optimisation the two differ only by the fixed ROI area.
-        scalar_value = float(np.mean(values[finite])) if np.any(finite) else 0.0
-        scalar = materialize_scalar_dataset(
+        # It reduces the CELL -- every data axis of the cut, and only those.
+        cell_positions = tuple(
+            2 + position
+            for position in range(len(derived_schema.cell_schema.data_axes))
+        )
+        counts = np.count_nonzero(finite, axis=cell_positions)
+        # ``where=`` reduces in place over the finite entries; masking into a
+        # temporary first would allocate a second full copy of the ROI on
+        # every published frame.
+        totals = np.sum(values, axis=cell_positions, dtype=np.float64, where=finite)
+        cell_valid = counts > 0
+        mean_values = np.divide(
+            totals,
+            counts,
+            out=np.zeros(counts.shape, dtype=np.float64),
+            where=cell_valid,
+        )
+        mean_schema = DatasetSchema(
+            derived_schema.repeat_axis,
+            derived_schema.point_table,
+            derived_schema.grid_topology,
+            ValueSchema.scalar(
+                np.dtype("float64"),
+                source_schema.cell_schema.value_unit,
+            ),
+        )
+        physical = mean_schema.physical_shape
+        roi_mean = materialize_derived_dataset(
             source.ref,
-            scalar_value,
-            valid=bool(np.any(finite)),
-            unit=source_schema.cell_schema.value_unit,
+            mean_values.reshape(physical),
+            schema=mean_schema,
+            validity=compact_dataset_validity(
+                cell_valid.reshape(physical),
+                mean_schema,
+            ),
             reference_for=lambda schema: self._next_reference(
                 source,
                 "roi_mean",
                 schema,
             ),
         )
+        mean_total = mean_schema.repeat_axis.size * mean_schema.point_table.row_count
         output["roi_mean"] = LiveDatasetOutput(
             DatasetOutputDeclaration(
                 "roi_mean", self._contract_id("selection", "roi_mean")
             ),
-            scalar,
-            MonitorCoverage(1, 1),
+            roi_mean,
+            MonitorCoverage(mean_total, mean_total),
         )
         return output
 
@@ -1483,42 +1545,69 @@ class SelectionBridge:
         event: FitEventValue,
     ) -> Mapping[str, LiveDatasetOutput]:
         output: dict[str, LiveDatasetOutput] = {}
+        source_schema = source.block.schema
         sample_count = int(event.success.size)
-        sample_name = event.sample_axis_name or "sample"
-        sample_column = PointColumn(
-            AxisId(sample_name),
-            sample_name,
-            SCAN_POINT,
-            PointColumn.NUMERIC,
-            tuple(float(value) for value in event.sample_coordinates),
-            event.sample_unit or None,
-        )
-        point_columns = [sample_column]
-        if event.sample_labels is not None:
-            label_name = f"{sample_name}_label"
-            point_columns.append(
-                PointColumn(
-                    AxisId(label_name),
-                    label_name,
-                    SCAN_POINT,
-                    PointColumn.TEXT,
-                    tuple(event.sample_labels),
-                )
+        faceted = self._faceted_axis(source_schema, event.sample_axis_name)
+        if faceted is not None and faceted[1] == "repeat":
+            # The fit was faceted over the REPEAT axis, so its samples ARE
+            # repeats: same conditions measured again.  They keep the parent's
+            # repeat identity instead of being restated as point rows -- a
+            # point row is an independent variable, which a repeat is not.
+            schema_repeat = replace(
+                faceted[0],
+                size=sample_count,
+                coordinates=tuple(
+                    float(value) for value in event.sample_coordinates
+                ),
+                unit=event.sample_unit or None,
+                index_origin=0,
+                coordinate_labels=event.sample_labels,
             )
-        schema_repeat = AxisSpec(
-            AxisId("fit.repeat"),
-            "repeat",
-            REPEAT,
-            1,
-            (0,),
-        )
-        schema_point_table = PointTable(sample_count, tuple(point_columns))
-        value_validity = CellValidity(event.success.reshape(1, sample_count))
+            schema_point_table = PointTable(1)
+        else:
+            # Every other faceted axis is a point axis on the fit's own table,
+            # and it carries the ROLE of the axis it was faceted over: a
+            # frame-faceted fit is a READOUT_EVENT column, a scan-faceted fit
+            # a SCAN_POINT one.  An axis the parent does not declare (the
+            # scalar fit, a point-row ordinal facet) has no role to inherit
+            # and takes the point ordinal's own role.
+            sample_name = event.sample_axis_name or "sample"
+            sample_role = SCAN_POINT if faceted is None else faceted[0].role
+            point_columns = [
+                PointColumn(
+                    AxisId(sample_name),
+                    sample_name,
+                    sample_role,
+                    PointColumn.NUMERIC,
+                    tuple(float(value) for value in event.sample_coordinates),
+                    event.sample_unit or None,
+                )
+            ]
+            if event.sample_labels is not None:
+                label_name = f"{sample_name}_label"
+                point_columns.append(
+                    PointColumn(
+                        AxisId(label_name),
+                        label_name,
+                        sample_role,
+                        PointColumn.TEXT,
+                        tuple(event.sample_labels),
+                    )
+                )
+            schema_repeat = AxisSpec(
+                AxisId("fit.repeat"),
+                "repeat",
+                REPEAT,
+                1,
+                (0,),
+            )
+            schema_point_table = PointTable(sample_count, tuple(point_columns))
+        cell_shape = (schema_repeat.size, schema_point_table.row_count)
+        value_validity = CellValidity(event.success.reshape(cell_shape))
         error_validity = {
             parameter: CellValidity(
                 (event.success & np.isfinite(event.parameter_errors[parameter])).reshape(
-                    1,
-                    sample_count,
+                    cell_shape
                 )
             )
             for parameter in event.parameter_names
@@ -1577,10 +1666,9 @@ class SelectionBridge:
         contract_id: str,
         coverage: MonitorCoverage,
     ) -> LiveDatasetOutput:
-        sample_count = schema.point_table.row_count
         derived = materialize_derived_dataset(
             fit_source_ref,
-            values.reshape(1, sample_count, 1),
+            values.reshape(schema.physical_shape),
             schema=schema,
             validity=validity,
             reference_for=lambda derived_schema: self._next_reference(

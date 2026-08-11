@@ -6,10 +6,70 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
+from zlc_data import (
+    AxisId,
+    OwnedSnapshot,
+    PointColumn,
+    READOUT_EVENT,
+    SPATIAL_X,
+    SPATIAL_Y,
+)
 from zlc_runtime import SignalDataPlane as RuntimeSignalDataPlane
 from zlc_runtime.plane import SignalPublication
 from zlc_pulse.device import DoneReport, SafeReadback
 from zlc_pulse.wire import CtrlWords, build_fingerprint
+
+from zlc_atom.data import snapshot_from_array
+
+
+def camera_cycle_snapshot(
+    cycles: Sequence[Sequence[Any]],
+    *,
+    producer: str = "camera",
+    signal: str = "frames",
+    generation: str = "test",
+    revision: int = 1,
+) -> OwnedSnapshot:
+    """Author one camera-shaped publication: (cycles) x (frames) x (y, x).
+
+    The same structure ``camera_measurement`` publishes: a cycle's frames are
+    POINTS of the acquisition, because each fires at a different place in the
+    pulse.  Offline tests hold raw arrays or adapter records, and a raw array
+    cannot say which of its axes is the point axis -- so a test that wants to
+    hand frames to a consumer has to say it here, once, the way the producer
+    would.
+    """
+
+    images = np.stack(
+        [
+            np.stack(
+                [
+                    np.asarray(getattr(frame, "image", frame))
+                    for frame in cycle
+                ],
+                axis=0,
+            )
+            for cycle in cycles
+        ],
+        axis=0,
+    )
+    return snapshot_from_array(
+        images,
+        producer=producer,
+        signal=signal,
+        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+        point_columns={
+            READOUT_EVENT: PointColumn(
+                AxisId(f"{producer}.{signal}.frame"),
+                "frame",
+                READOUT_EVENT,
+                PointColumn.NUMERIC,
+                tuple(range(int(images.shape[1]))),
+            )
+        },
+        generation=generation,
+        revision=revision,
+    )
 
 
 class FakePlane(RuntimeSignalDataPlane):

@@ -33,7 +33,7 @@ from zlc_atom.nodes.calibration import (
     ReadoutModelKind,
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from tests.fakes import FakePlane
+from tests.fakes import FakePlane, camera_cycle_snapshot
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 
@@ -371,8 +371,11 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         task_result = calibration_node.result
         assert task_result is not None
         task_camera_events = camera.events[camera_events_before_task:]
-        assert plane.calibration_coverages == [(1, 1)] * 30
-        assert plane.calibration_preview_shapes == [(1, 1, 96, 128)] * 30
+        # One publication is one whole three-window cycle: the long, readout
+        # and long frames are three POINTS of the acquisition, and the preview
+        # used to publish only the last of them.
+        assert plane.calibration_coverages == [(3, 3)] * 30
+        assert plane.calibration_preview_shapes == [(1, 3, 96, 128)] * 30
         assert len(set(plane.calibration_schema_fingerprints)) == 1
         report_images = tuple(
             sorted(
@@ -423,13 +426,13 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert occupancy_node.calibration_path == calibration_path.resolve()
         assert occupancy_node.model.kind is ReadoutModelKind.UNIFORM_PSF
         occupancy_result = occupancy_node.process(
-            task_result.short,
+            camera_cycle_snapshot([(record,) for record in task_result.short]),
             generation="calibration-task",
             revision=1,
         )
-        assert occupancy_result.counts.shape == (30, 35)
+        assert occupancy_result.counts.shape == (30, 1, 35)
         assert occupancy_result.valid.shape == occupancy_result.counts.shape
-        assert occupancy_result.frame_judged.shape == (30, 96, 128)
+        assert occupancy_result.frame_judged.shape == (30, 1, 96, 128)
 
         assert tuple(value.argument_name for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
         assert tuple(value.argument_name for value in descriptors["calibration"].device_requirements) == ("camera", "sequencer")
@@ -495,10 +498,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "occupied",
             "valid",
             "rate",
-            "survival",
-            "survival_rate",
             "frame_judged",
-            "site_overlay",
         )
         with pytest.raises((TypeError, ValueError)):
             descriptors["camera_measurement"].instantiate(

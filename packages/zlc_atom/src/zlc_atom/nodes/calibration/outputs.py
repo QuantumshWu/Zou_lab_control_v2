@@ -12,11 +12,15 @@ from zlc_data import (
     AxisSpec,
     CoordinateFrameId,
     PointColumn,
+    READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
-    CellValidity,
     DataBlock,
+    DatasetComponentValidity,
+    DatasetSchema,
     OwnedSnapshot,
+    ValidityContract,
+    ValueSchema,
 )
 from zlc_runtime import (
     DatasetCoverage,
@@ -30,6 +34,13 @@ from zlc_atom.devices.camera.contract import CameraFrameRecord
 CAPTURE_PREVIEW_DECLARATION = DatasetOutputDeclaration(
     "capture_preview", "calibration.capture-preview.v1"
 )
+
+#: One calibration acquisition fires three camera windows -- long, readout,
+#: long -- and they are three POINTS of the cycle, not three looks at the same
+#: thing: each is exposed at a different place in the pulse, so their physics
+#: differs.  The preview used to keep ``images[-1]`` and drop the other two,
+#: which threw away the readout frame the whole calibration is about.
+_PREVIEW_FRAMES = 3
 
 
 def _image_axis_specs(
@@ -71,17 +82,50 @@ def _generation_text(value: object) -> str:
     return text
 
 
-def _with_cell_validity(
+def _frame_point_column(frames: int) -> PointColumn:
+    """The frame-index point column one calibration cycle publishes."""
+
+    return PointColumn(
+        AxisId("calibration.capture_preview.frame"),
+        "frame",
+        READOUT_EVENT,
+        PointColumn.NUMERIC,
+        tuple(range(int(frames))),
+    )
+
+
+def _with_component_validity(
     snapshot: OwnedSnapshot,
+    axis_ids: tuple[AxisId, ...],
     mask: object,
 ) -> OwnedSnapshot:
-    validity = CellValidity(np.asarray(mask, dtype=bool))
+    """Restate one snapshot's validity over named CELL axes.
+
+    Whether a site is usable is a per-site fact.  Once SITE is a cell data
+    axis, ``CellValidity`` cannot carry it: that mask is one flag per
+    ``(repeat, point)`` cell, i.e. one flag covering every site at once.  The
+    dataset already has the contract for this; it only has to be declared.
+    """
+
+    source = snapshot.block
+    cell = source.schema.cell_schema
+    schema = DatasetSchema(
+        source.schema.repeat_axis,
+        source.schema.point_table,
+        source.schema.grid_topology,
+        ValueSchema(
+            cell.data_axes,
+            ValidityContract.components(*axis_ids),
+            cell.dtype,
+            cell.value_unit,
+        ),
+    )
     block = DataBlock(
-        snapshot.block.block_id,
-        snapshot.block.revision,
-        snapshot.block.values,
-        validity,
-        snapshot.block.schema,
+        source.block_id,
+        source.revision,
+        source.values,
+        DatasetComponentValidity(axis_ids, np.asarray(mask, dtype=bool)),
+        schema,
     )
     return OwnedSnapshot(block.ref(snapshot.ref.stream_generation), block)
 
@@ -93,7 +137,8 @@ def _snapshot(
     roles: Sequence[AxisRoleId],
     generation: object,
     revision: int,
-    cell_validity: object | None = None,
+    validity_axis_ids: tuple[AxisId, ...] | None = None,
+    validity_mask: object | None = None,
     axis_specs: Mapping[AxisRoleId, AxisSpec] | None = None,
     point_columns: Mapping[AxisRoleId, PointColumn] | None = None,
     value_unit: str | None = None,
@@ -109,8 +154,12 @@ def _snapshot(
         generation=_generation_text(generation),
         revision=revision,
     )
-    if cell_validity is not None:
-        snapshot = _with_cell_validity(snapshot, cell_validity)
+    if (validity_axis_ids is None) != (validity_mask is None):
+        raise ValueError("component validity needs both its axes and its mask")
+    if validity_axis_ids is not None:
+        snapshot = _with_component_validity(
+            snapshot, validity_axis_ids, validity_mask
+        )
     return snapshot
 
 
@@ -120,12 +169,12 @@ def _cycle_array(
     dtype: np.dtype,
 ) -> np.ndarray:
     records = tuple(cycle)
-    if len(records) != 3 or any(
+    if len(records) != _PREVIEW_FRAMES or any(
         not isinstance(record, CameraFrameRecord) for record in records
     ):
         raise ValueError("calibration preview cycle must contain three frame records")
     images = np.stack([np.asarray(record.image) for record in records], axis=0)
-    if images.shape != (3, *frame_shape):
+    if images.shape != (_PREVIEW_FRAMES, *frame_shape):
         raise ValueError("calibration preview frame shape changed during capture")
     return images.astype(dtype, copy=False)
 
@@ -177,9 +226,8 @@ class CalibrationCapturePreviewSlot:
             raise RuntimeError("calibration preview slot is not attached")
         if self._written >= self.repeats:
             raise RuntimeError("calibration preview received too many cycles")
-        images = _cycle_array(cycle, self.frame_shape, self.dtype)
         self._latest = np.array(
-            images[-1],
+            _cycle_array(cycle, self.frame_shape, self.dtype),
             dtype=self.dtype,
             copy=True,
         )
@@ -193,16 +241,19 @@ class CalibrationCapturePreviewSlot:
         snapshot = _snapshot(
             self._latest[None, ...],
             signal=CAPTURE_PREVIEW_DECLARATION.name,
-            roles=(SPATIAL_Y, SPATIAL_X),
+            roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
             axis_specs=_image_axis_specs(self.frame_shape, "image_pixel_xy"),
+            point_columns={READOUT_EVENT: _frame_point_column(_PREVIEW_FRAMES)},
             generation=self.generation,
             revision=self._revision,
         )
+        # One publication is one COMPLETE cycle, and a cycle's frames are its
+        # point rows -- the same accounting the camera monitor keeps.
         return {
             CAPTURE_PREVIEW_DECLARATION.name: LiveDatasetOutput(
                 CAPTURE_PREVIEW_DECLARATION,
                 snapshot,
-                DatasetCoverage(1, 1),
+                DatasetCoverage(_PREVIEW_FRAMES, _PREVIEW_FRAMES),
                 self.run_record,
             )
         }

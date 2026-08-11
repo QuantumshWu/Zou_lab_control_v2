@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cached_property
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import numpy as np
 
+from zlc_data import SITE, AxisId, AxisSpec
 from zlc_durable import write_readable_json
 
 from .bimodal import fit_bimodal, finite_mean, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity
@@ -280,6 +282,36 @@ class SiteMap:
     @property
     def n_sites(self) -> int:
         return len(self.site_ids)
+
+    @cached_property
+    def site_axis(self) -> AxisSpec:
+        """THE declaration of site identity, built where the fact lives.
+
+        Every site-axed signal in the tree -- occupancy's counts, the
+        calibration report's fidelity, samples and PSF kernels -- names its
+        sites through this one object, so two of them cannot disagree about
+        which site is which.
+
+        A site array is CELL data: it is one image resampled onto the trap
+        lattice, and nobody scanned over sites.  So this is an ``AxisSpec``,
+        not a point column.
+
+        The coordinates are the ordinals 1..n and the site ids are their
+        LABELS.  Every projection in zlc_plot plots a coordinate as a number,
+        so a text coordinate is refused at build time -- which is exactly why
+        every site-axed signal used to raise ``DataViewError`` the moment
+        anyone tried to draw it, and why a parallel "site ordinal" axis had to
+        be invented to dodge the wall.
+        """
+
+        return AxisSpec(
+            AxisId("calibration.site"),
+            "Site",
+            SITE,
+            self.n_sites,
+            coordinates=tuple(range(1, self.n_sites + 1)),
+            coordinate_labels=self.site_ids,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from zlc_data import OwnedSnapshot, REPEAT, SITE
+from zlc_data import OwnedSnapshot, READOUT_EVENT, REPEAT, SITE
 
 from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_catalog
 from zlc_atom.nodes import discover_logic_nodes
@@ -16,7 +16,7 @@ from zlc_atom.nodes.calibration import (
 )
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
-from tests.fakes import FakePlane
+from tests.fakes import FakePlane, camera_cycle_snapshot
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 #: The repository this test belongs to.  Anchored to the file rather than to
@@ -190,15 +190,16 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         occupancy_node = OccupancyProcessor(
             result.calibration,
         )
+        # 30 cycles, each holding the one readout frame this task judged.
         occupancy = occupancy_node.process(
-            result.short,
+            camera_cycle_snapshot([(record,) for record in result.short]),
             generation="calibration-task",
             revision=1,
         )
         np.testing.assert_array_equal(occupancy.rate, np.mean(occupancy.occupied, axis=-1))
-        assert occupancy.counts.shape == (30, 35)
-        assert occupancy.rate.shape == (30,)
-        np.testing.assert_array_equal(occupancy.artifacts["counts"].block.values[:, :, 0], occupancy.counts)
+        assert occupancy.counts.shape == (30, 1, 35)
+        assert occupancy.rate.shape == (30, 1)
+        np.testing.assert_array_equal(occupancy.artifacts["counts"].block.values, occupancy.counts)
         assert len(result.capture.frames) == 90
         assert sum(len(group) for group in result.reference) == 60
         assert len(result.short) == 30
@@ -221,20 +222,32 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             artifact_directory=tmp_path,
         ).run()
+        frames = camera_cycle_snapshot([(record,) for record in result.short])
         occupancy = OccupancyProcessor(result.calibration).process(
-            result.short,
+            frames,
             generation="calibration-task",
             revision=1,
         )
-        assert occupancy.counts.shape == (30, 35)
-        assert occupancy.rate.shape == (30,)
+        assert occupancy.counts.shape == (30, 1, 35)
+        assert occupancy.rate.shape == (30, 1)
         counts_artifact = occupancy.artifacts["counts"]
         rate_artifact = occupancy.artifacts["rate"]
         assert isinstance(counts_artifact, OwnedSnapshot)
         assert counts_artifact.block.schema.repeat_axis.role is REPEAT
-        assert counts_artifact.block.schema.point_table.column(counts_artifact.block.schema.point_table.columns[0].coordinate_id).role is SITE
-        assert counts_artifact.block.values.shape == (30, 35, 1)
+        # The point axis is the parent's, verbatim -- not rebuilt, not guessed
+        # from the shape.  A one-frame cycle keeps its frame point axis.
+        parent_column = frames.block.schema.point_table.columns[0]
+        assert counts_artifact.block.schema.point_table.columns == (parent_column,)
+        assert parent_column.role is READOUT_EVENT
+        # Sites are CELL data: one image resampled onto the trap lattice.
+        (site_axis,) = counts_artifact.block.schema.cell_schema.data_axes
+        assert site_axis is result.calibration.site_map.site_axis
+        assert site_axis.role is SITE
+        assert site_axis.coordinates == tuple(range(1, 36))
+        assert site_axis.coordinate_labels == result.calibration.site_map.site_ids
+        assert counts_artifact.block.values.shape == (30, 1, 35)
         assert rate_artifact.block.schema.cell_schema.is_scalar
+        assert rate_artifact.block.schema.point_table.columns == (parent_column,)
         assert rate_artifact.block.values.shape == (30, 1, 1)
     finally:
         plane.close()

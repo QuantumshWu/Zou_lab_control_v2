@@ -337,7 +337,18 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
         front = plane.freeze()
         value = front.value("@logic/curve/roi_mean")
         assert value is not None
-        assert float(value.snapshot.block.values.reshape(-1)[0]) == 15.0
+        # The range and the facet cut POINT ROWS, and a cut of the point axis
+        # is not a pooling of it: rows 2 and 3 survive as two points.
+        np.testing.assert_array_equal(
+            value.snapshot.block.values,
+            np.asarray([[[10.0], [20.0]]]),
+        )
+        derived = value.snapshot.block.schema
+        assert derived.point_table.row_count == 2
+        assert {column.name: column.values for column in derived.point_table.columns} == {
+            "x": (2.0, 3.0),
+            "facet": (1.0, 1.0),
+        }
     finally:
         _close(bridge, plane, source)
 
@@ -1244,9 +1255,12 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
         assert derived_schema.point_table.row_count == 2
         assert derived_schema.grid_topology is not None
         assert len(derived_schema.grid_topology.row_to_cell) == 2
-        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == float(
-            np.mean(values[:, (4, 7)])
+        # The sub-grid keeps both surviving scan points and both repeats; a
+        # cell here is already scalar, so the mean consumes nothing.
+        np.testing.assert_array_equal(
+            roi_mean.snapshot.block.values, values[:, (4, 7)]
         )
+        assert roi_mean.snapshot.block.schema.point_table == derived_schema.point_table
     finally:
         _close(bridge, plane, source)
 
@@ -1337,8 +1351,8 @@ def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
         )
         roi_mean = plane.freeze().value("@logic/bare/roi_mean")
         assert roi_mean is not None, bridge.last_error
-        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == float(
-            np.mean(values[:, (4, 7)])
+        np.testing.assert_array_equal(
+            roi_mean.snapshot.block.values, values[:, (4, 7)]
         )
     finally:
         _close(bridge, plane, source)
@@ -1425,6 +1439,220 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
         column = focused.snapshot.block.schema.point_table.columns[0]
         assert column.name == "frame"
         assert column.values == (1.0,)
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_roi_mean_keeps_one_value_per_frame_point() -> None:
+    """A box consumes the IMAGE axes; it does not pool a cycle's frames.
+
+    The frames of one acquisition cycle are POINTS -- they fire at different
+    moments of the pulse, so their physics differs.  ``roi_mean`` used to
+    average the whole point axis into a single scalar, so a scan watching it
+    silently mixed physically distinct frames into one number.
+    """
+
+    schema = _frames_on_point_axis_schema()
+    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/mean/roi_frame", "@logic/mean/roi_mean"}
+    )
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="mean")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 1.0, 3.0),
+                    SelectionRange("y", 1.0, 2.0),
+                ),
+                revision=1,
+            ),
+        )
+        front = plane.freeze()
+        roi_frame = front.value("@logic/mean/roi_frame")
+        roi_mean = front.value("@logic/mean/roi_mean")
+        assert roi_frame is not None, bridge.last_error
+        assert roi_mean is not None
+
+        # One value per (cycle, frame): the two repeats and the three frame
+        # points survive; only the two image data axes are consumed.
+        assert roi_mean.snapshot.block.values.shape == (2, 3, 1)
+        np.testing.assert_allclose(
+            roi_mean.snapshot.block.values.reshape(2, 3),
+            values[:, :, 1:3, 1:4].mean(axis=(2, 3)),
+        )
+
+        mean_schema = roi_mean.snapshot.block.schema
+        frame_schema = roi_frame.snapshot.block.schema
+        # The point column is the PARENT's frame column, not a fresh axis.
+        assert mean_schema.point_table == frame_schema.point_table
+        (column,) = mean_schema.point_table.columns
+        assert column.name == "frame"
+        assert column.role == READOUT_EVENT
+        assert column.values == (0.0, 1.0, 2.0)
+        assert mean_schema.repeat_axis == frame_schema.repeat_axis
+        assert mean_schema.cell_schema.is_scalar
+        assert mean_schema.cell_schema.value_unit == "counts"
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
+    """One unusable frame invalidates its own point, not the whole answer."""
+
+    schema = _frames_on_point_axis_schema(cycles=1, frames=2)
+    values = np.arange(40, dtype=np.float64).reshape(1, 2, 4, 5)
+    values[0, 1] = np.nan
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/partial/roi_mean"})
+    bridge = SelectionBridge(
+        plane, "camera/frame", events, events, bridge_id="partial"
+    )
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 1.0, 3.0),
+                    SelectionRange("y", 1.0, 2.0),
+                ),
+                revision=1,
+            ),
+        )
+        roi_mean = plane.freeze().value("@logic/partial/roi_mean")
+        assert roi_mean is not None, bridge.last_error
+        block = roi_mean.snapshot.block
+        assert block.values.shape == (1, 2, 1)
+        assert float(block.values[0, 0, 0]) == float(values[0, 0, 1:3, 1:4].mean())
+        np.testing.assert_array_equal(
+            block.validity.mask, np.asarray([[True, False]])
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
+def _frame_faceted_fit(
+    sample_axis_name: str,
+    sample_coordinates: np.ndarray,
+    *,
+    source_revision: int = 1,
+    batch_revision: int = 1,
+) -> FitEventValue:
+    count = int(sample_coordinates.size)
+    return FitEventValue(
+        parameter_names=("center",),
+        parameter_units={"center": "pixel"},
+        parameter_values={"center": np.arange(count, dtype=np.float64)},
+        parameter_errors={"center": np.full(count, 0.5)},
+        success=np.ones(count, dtype=np.bool_),
+        sample_axis_name=sample_axis_name,
+        sample_coordinates=sample_coordinates,
+        sample_unit="",
+        sample_labels=None,
+        source_revision=source_revision,
+        batch_revision=batch_revision,
+    )
+
+
+def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() -> None:
+    """A fit's samples mean whatever the axis they were faceted over means.
+
+    Every fit used to publish SCAN_POINT, so a fit over a camera cycle's
+    frames claimed the experiment had scanned over them.
+    """
+
+    schema = _frames_on_point_axis_schema()
+    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/perframe/center", "@logic/perframe/center_err"}
+    )
+    bridge = SelectionBridge(
+        plane, "camera/frame", events, events, bridge_id="perframe"
+    )
+    bridge.start()
+    try:
+        events.emit_fit(
+            _frame_faceted_fit("frame", np.asarray([0.0, 1.0, 2.0]))
+        )
+        value = plane.freeze().value("@logic/perframe/center")
+        assert value is not None, bridge.last_error
+        (column,) = value.snapshot.block.schema.point_table.columns
+        assert column.name == "frame"
+        assert column.role == READOUT_EVENT
+        assert value.snapshot.block.values.shape == (1, 3, 1)
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_a_scan_faceted_fit_still_publishes_a_scan_point_column() -> None:
+    """The scan case is inherited from the parent column, not hardcoded."""
+
+    schema = _curve_schema()
+    values = np.zeros((1, 5, 1), dtype=np.float64)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/perscan/center", "@logic/perscan/center_err"}
+    )
+    bridge = SelectionBridge(
+        plane, "camera/frame", events, events, bridge_id="perscan"
+    )
+    bridge.start()
+    try:
+        events.emit_fit(_frame_faceted_fit("x", np.asarray([0.0, 1.0, 2.0])))
+        value = plane.freeze().value("@logic/perscan/center")
+        assert value is not None, bridge.last_error
+        (column,) = value.snapshot.block.schema.point_table.columns
+        assert column.name == "x"
+        assert column.role == SCAN_POINT
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
+    """Samples that ARE repeats stay on the repeat axis.
+
+    A repeat is the same conditions measured again, so restating it as a
+    point row would claim the experiment varied it.
+    """
+
+    schema = _frames_on_point_axis_schema()
+    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/percycle/center", "@logic/percycle/center_err"}
+    )
+    bridge = SelectionBridge(
+        plane, "camera/frame", events, events, bridge_id="percycle"
+    )
+    bridge.start()
+    try:
+        events.emit_fit(_frame_faceted_fit("cycle", np.asarray([0.0, 1.0])))
+        value = plane.freeze().value("@logic/percycle/center")
+        assert value is not None, bridge.last_error
+        fit_schema = value.snapshot.block.schema
+        assert fit_schema.repeat_axis.axis_id == AxisId("cycle")
+        assert fit_schema.repeat_axis.size == 2
+        assert fit_schema.repeat_axis.coordinates == (0, 1)
+        assert fit_schema.point_table.row_count == 1
+        assert fit_schema.point_table.columns == ()
+        assert value.snapshot.block.values.shape == (2, 1, 1)
+        np.testing.assert_array_equal(
+            value.snapshot.block.values.reshape(-1), np.asarray([0.0, 1.0])
+        )
     finally:
         _close(bridge, plane, source)
 

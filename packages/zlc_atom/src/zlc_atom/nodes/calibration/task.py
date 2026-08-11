@@ -15,7 +15,6 @@ from zlc_data import (
     SPATIAL_Y,
     AxisId,
     AxisSpec,
-    PointColumn,
 )
 from zlc_durable import unique_path
 from zlc_pulse import PulseSequence
@@ -279,10 +278,12 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
         site_map.centers_xy,
         point_ids=site_map.site_ids,
         labels=tuple(str(index + 1) for index in range(site_map.n_sites)),
-        statuses=tuple(
-            PointStatus.UNKNOWN if valid else PointStatus.INVALID
-            for valid in site_map.valid_sites
-        ),
+        statuses={
+            None: tuple(
+                PointStatus.UNKNOWN if valid else PointStatus.INVALID
+                for valid in site_map.valid_sites
+            )
+        },
     )
     with image(
         site_map_snapshot,
@@ -294,29 +295,22 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
     ) as plot:
         plot.save(report_root / "site_map.png")
 
-    site_column = PointColumn(
-        AxisId("calibration.site"),
-        "Site",
-        SITE,
-        PointColumn.TEXT,
-        site_map.site_ids,
-        coordinate_labels=tuple(
-            str(index) for index in range(1, site_map.n_sites + 1)
-        ),
-    )
+    # ONE declaration of site identity, owned by the SiteMap that measured it.
+    # A site array is one image resampled onto the trap lattice: cell data, not
+    # a scan.  This replaces both a TEXT site point column (unplottable) and the
+    # numeric "site ordinal" point column invented to work around it.
+    site_axis = site_map.site_axis
+    site_axis_id = site_axis.axis_id
     labels_valid = np.asarray(result.report["labels_valid"], dtype=bool)
     model_reports = result.report["models"]
 
     model_names = tuple(model.kind.value for model in calibration.models)
-    site_ordinal_column = PointColumn(
-        AxisId("calibration.site_ordinal"),
-        "Site",
-        SITE,
-        PointColumn.NUMERIC,
-        tuple(range(1, site_map.n_sites + 1)),
-        coordinate_labels=tuple(
-            str(index) for index in range(1, site_map.n_sites + 1)
-        ),
+    model_axis = AxisSpec(
+        AxisId("calibration.model"),
+        "readout model",
+        COMPONENT,
+        len(model_names),
+        coordinate_labels=tuple(name.replace("_", " ") for name in model_names),
     )
     fidelity_values = np.stack(
         [
@@ -334,27 +328,22 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
         ],
         axis=-1,
     )[np.newaxis, ...]
+    # Nothing was scanned to make this: one number per (site, model) out of one
+    # capture.  Both are cell axes, the point axis is empty, and per-site
+    # usability now rides the axis it actually varies over.
     fidelity_snapshot = _snapshot(
         fidelity_values,
         signal="readout_fidelity",
         roles=(SITE, COMPONENT),
-        point_columns={SITE: site_ordinal_column},
-        axis_specs={
-            COMPONENT: AxisSpec(
-                AxisId("calibration.model"),
-                "readout model",
-                COMPONENT,
-                len(model_names),
-                coordinate_labels=tuple(name.replace("_", " ") for name in model_names),
-            )
-        },
+        axis_specs={SITE: site_axis, COMPONENT: model_axis},
         generation=generation,
         revision=revision,
-        cell_validity=np.all(fidelity_valid, axis=-1),
+        validity_axis_ids=(site_axis_id, model_axis.axis_id),
+        validity_mask=fidelity_valid[:, np.newaxis, ...],
     )
     with curve(
         fidelity_snapshot,
-        AxisRef.point("calibration.site_ordinal"),
+        AxisRef.data("calibration.site"),
         group=AxisRef.data("calibration.model"),
         labels=PlotLabels(
             title="Held-out fidelity by readout model",
@@ -373,18 +362,22 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
             & model.usable_sites
             & np.isfinite(model.thresholds)
         )
+        # The repeats ARE the repeat axis -- same conditions, measured again --
+        # and the sites are the cell.  No independent variable was swept, so
+        # there is no point axis to invent one on.
         samples = _snapshot(
             short_signals,
             signal=f"{model.kind.value}_readout_samples",
             roles=(SITE,),
-            point_columns={SITE: site_column},
+            axis_specs={SITE: site_axis},
             generation=generation,
             revision=revision,
-            cell_validity=(
+            validity_axis_ids=(site_axis_id,),
+            validity_mask=(
                 labels_valid
                 & np.isfinite(short_signals)
                 & site_valid[np.newaxis, :]
-            ),
+            )[:, np.newaxis, :],
         )
         thresholds = tuple(
             float(value) if valid else None
@@ -393,7 +386,7 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
         title = f"{model.kind.value.replace('_', ' ')} readout"
         with facet_grid(
             samples,
-            AxisRef.point("calibration.site"),
+            AxisRef.data("calibration.site"),
             HistogramPlot(PlotLabels(x="Readout signal", y="Count")),
             labels=PlotLabels(title=title),
             size="4x4",
@@ -416,8 +409,8 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
         psf_kernels[np.newaxis, ...],
         signal="psf_kernels",
         roles=(SITE, SPATIAL_Y, SPATIAL_X),
-        point_columns={SITE: site_column},
         axis_specs={
+            SITE: site_axis,
             SPATIAL_Y: AxisSpec(
                 AxisId("calibration.psf.y"),
                 "y",
@@ -441,11 +434,12 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
         },
         generation=generation,
         revision=revision,
-        cell_validity=kernel_valid,
+        validity_axis_ids=(site_axis_id,),
+        validity_mask=kernel_valid[:, np.newaxis, :],
     )
     with facet_grid(
         psf_snapshot,
-        AxisRef.point("calibration.site"),
+        AxisRef.data("calibration.site"),
         ImagePlot(
             AxisRef.data("calibration.psf.x"),
             AxisRef.data("calibration.psf.y"),

@@ -17,9 +17,8 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
     readout_model_kind_from_choice,
 )
-from zlc_plot import ImagePointOverlay
 
-from .processor import OccupancyProcessor
+from .processor import SITE_STATUS_CONTRACT, OccupancyProcessor
 
 
 OCCUPANCY_SCHEMA = AuthoringSchema(
@@ -79,13 +78,10 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     outputs=(
         OutputSpec("counts", "occupancy.counts.v1"),
-        OutputSpec("occupied", "occupancy.occupied.v1"),
+        OutputSpec("occupied", SITE_STATUS_CONTRACT),
         OutputSpec("valid", "occupancy.valid.v1"),
         OutputSpec("rate", "occupancy.rate.v1"),
-        OutputSpec("survival", "occupancy.survival.v1"),
-        OutputSpec("survival_rate", "occupancy.survival_rate.v1"),
         OutputSpec("frame_judged", "occupancy.frame_judged.v1"),
-        OutputSpec("site_overlay", ImagePointOverlay.CONTRACT_ID),
     ),
     build=_build,
 )

@@ -144,8 +144,9 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         source_signal=source_name,
     )
     different_outputs = different_context_processor.evaluate(source)
-    # (repeat, site, event): one site column, one repeat, `windows` readout events.
-    assert different_outputs["counts"].snapshot.block.values.shape == (1, 1, windows)
+    # (repeat, point, site): one cycle, `windows` frame POINTS inherited from
+    # the camera publication, one site of CELL data per frame.
+    assert different_outputs["counts"].snapshot.block.values.shape == (1, windows, 1)
     x, y, width, height = frame_contract.roi_xywh
     structurally_incompatible = TrapCalibration(
         calibration.site_map,
@@ -187,44 +188,37 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             "@logic/occupancy/occupied",
             "@logic/occupancy/valid",
             "@logic/occupancy/rate",
-            "@logic/occupancy/survival",
-            "@logic/occupancy/survival_rate",
             "@logic/occupancy/frame_judged",
-            "@logic/occupancy/site_overlay",
         }
         np.testing.assert_array_equal(
             publication.value("@logic/occupancy/frame_judged").values,
             source.values,
         )
         assert np.all(publication.value("@logic/occupancy/valid").values)
-        overlay_value = publication.value("@logic/occupancy/site_overlay")
-        assert overlay_value is not None
-        columns = {
-            column.role: column
-            for column in overlay_value.schema.point_table.columns
-        }
-        from zlc_data import SITE, SPATIAL_X, SPATIAL_Y
-        from zlc_plot import ImagePointOverlay, PointStatus
 
-        assert columns[SITE].values == site_ids
-        assert columns[SITE].coordinate_labels == ("1",)
-        assert columns[SPATIAL_X].unit == columns[SPATIAL_Y].unit == "pixel"
-        assert columns[SPATIAL_X].coordinate_frame == (
-            columns[SPATIAL_Y].coordinate_frame
-        )
-        overlay = ImagePointOverlay.from_snapshot(
-            overlay_value.snapshot,
-            revision=7,
-        )
-        assert overlay.point_ids == site_ids
-        assert overlay.labels == ("1",)
-        # The frames signal carries the whole three-event cycle, so the status
-        # stack has three rows per site; zlc_plot's projection rule says a
-        # multi-row stack does not collapse to one marker and reads UNKNOWN.
-        assert overlay.statuses == (PointStatus.UNKNOWN,)
-        np.testing.assert_allclose(
-            overlay.coordinates,
-            calibration.site_map.centers_xy,
+        from zlc_data import READOUT_EVENT, SITE
+
+        # Every derived signal INHERITS the camera's point column, object for
+        # object: the frames it judged are the points it reports over.
+        (parent_column,) = source.schema.point_table.columns
+        assert parent_column.role is READOUT_EVENT
+        for name in ("counts", "occupied", "valid", "rate", "frame_judged"):
+            value = publication.value(f"@logic/occupancy/{name}")
+            assert value.schema.point_table.columns == (parent_column,), name
+        # SITE is CELL data, carried by the calibration's one site axis.
+        for name in ("counts", "occupied", "valid"):
+            value = publication.value(f"@logic/occupancy/{name}")
+            (site_axis,) = value.schema.cell_schema.data_axes
+            assert site_axis == calibration.site_map.site_axis, name
+            assert site_axis.role is SITE
+            assert site_axis.coordinates == (1,)
+            assert site_axis.coordinate_labels == site_ids
+            assert value.values.shape == (1, windows, 1), name
+        assert publication.value("@logic/occupancy/rate").schema.cell_schema.is_scalar
+        assert publication.value("@logic/occupancy/rate").values.shape == (
+            1,
+            windows,
+            1,
         )
         assert all(
             value.coverage is None and value.transient is False

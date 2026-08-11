@@ -23,6 +23,7 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
+from tests.fakes import camera_cycle_snapshot
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 #: The repository this test belongs to.  Anchored to the file rather than to
@@ -119,12 +120,12 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             task_result.calibration,
         )
         occupancy = occupancy_node.process(
-            task_result.short,
+            camera_cycle_snapshot([(record,) for record in task_result.short]),
             generation="calibration-task",
             revision=1,
         )
-        assert occupancy.counts.shape == (30, 35)
-        np.testing.assert_allclose(occupancy.artifacts["rate"].block.values[:, 0, 0], occupancy.rate)
+        assert occupancy.counts.shape == (30, 1, 35)
+        np.testing.assert_allclose(occupancy.artifacts["rate"].block.values[:, :, 0], occupancy.rate)
 
         oracle = _oracle()
         result = calibrate(
