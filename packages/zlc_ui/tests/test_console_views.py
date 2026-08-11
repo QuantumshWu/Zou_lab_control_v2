@@ -1327,18 +1327,18 @@ from zlc_ui.console import SignalChooser
 app = ensure_qt_app(['chooser'])
 rows = (
     ('@logic/cm/frames', 'frames', 'live', 'cm', ''),
-    ('@logic/panel-1/roi_value', 'roi_value', 'finished', 'panel-1', '@logic/cm/frames'),
+    ('@logic/panel-1/roi_mean', 'roi_mean', 'finished', 'panel-1', '@logic/cm/frames'),
 )
 dialog = SignalChooser(rows)
 texts = [dialog.list.item(i).text() for i in range(dialog.list.count())]
-assert texts == ['cm', '    frames', 'panel-1', '    roi_value  (finished)'], texts
+assert texts == ['cm', '    frames', 'panel-1', '    roi_mean  (finished)'], texts
 
 # A producer heading is a heading, not a choice.
 assert not dialog.list.item(0).flags() & QtCore.Qt.ItemIsSelectable
 assert dialog.chosen() == '@logic/cm/frames', dialog.chosen()
 
 dialog.list.setCurrentRow(3)
-assert dialog.chosen() == '@logic/panel-1/roi_value'
+assert dialog.chosen() == '@logic/panel-1/roi_mean'
 assert 'cut from @logic/cm/frames' in dialog.list.item(3).toolTip()
 assert dialog.accept_button.isEnabled()
 """

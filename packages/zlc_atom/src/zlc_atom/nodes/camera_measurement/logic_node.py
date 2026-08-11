@@ -182,13 +182,13 @@ def _build(
     **values: object,
 ) -> CameraMeasurementNode:
     authored = CAMERA_MEASUREMENT_SCHEMA.project_values(values)
-    roi_values = tuple(
+    roi_means = tuple(
         authored[name] for name in _ROI_FIELDS
     )
     roi = (
         None
-        if all(value is None for value in roi_values)
-        else tuple(int(value) for value in roi_values)
+        if all(value is None for value in roi_means)
+        else tuple(int(value) for value in roi_means)
     )
     return CameraMeasurementNode(
         camera=camera,  # type: ignore[arg-type]

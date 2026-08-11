@@ -229,7 +229,7 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         {
             "camera/frame",
             "@logic/image/roi_frame",
-            "@logic/image/roi_value",
+            "@logic/image/roi_mean",
         }
     )
     bridge = SelectionBridge(
@@ -253,13 +253,13 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         events.emit_selection(SelectionChange.COMMITTED, state)
         front = plane.freeze()
         roi_frame = front.value("@logic/image/roi_frame")
-        roi_value = front.value("@logic/image/roi_value")
-        assert roi_frame is not None and roi_value is not None
+        roi_mean = front.value("@logic/image/roi_mean")
+        assert roi_frame is not None and roi_mean is not None
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values,
             values[:, :, 1:3, 1:3],
         )
-        assert float(roi_value.snapshot.block.values.reshape(-1)[0]) == 6.0
+        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == 6.0
         roi_publication = front.publication("@logic/image/roi_frame")
         assert roi_publication is not None
         assert roi_publication.direct_parent_refs == (initial.publication("camera/frame").event_ref,)
@@ -272,7 +272,7 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/image/roi_value"})
+    plane.set_front_signals({"camera/frame", "@logic/image/roi_mean"})
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="image")
     bridge.start()
     first_state = SelectionState(
@@ -289,16 +289,16 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
     )
     try:
         events.emit_selection(SelectionChange.COMMITTED, first_state)
-        first = plane.freeze().publication("@logic/image/roi_value")
+        first = plane.freeze().publication("@logic/image/roi_mean")
         assert first is not None
         events.emit_selection(SelectionChange.COMMITTED, second_state)
         second_front = plane.freeze()
-        second = second_front.publication("@logic/image/roi_value")
+        second = second_front.publication("@logic/image/roi_mean")
         assert second is not None
         assert second.event_ref.generation != first.event_ref.generation
         assert second.event_ref.sequence == 1
         assert second.direct_parent_refs == first.direct_parent_refs
-        assert float(second_front.value("@logic/image/roi_value").snapshot.block.values.reshape(-1)[0]) == 9.0
+        assert float(second_front.value("@logic/image/roi_mean").snapshot.block.values.reshape(-1)[0]) == 9.0
 
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
@@ -306,11 +306,11 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
             MonitorCoverage(1, 1),
         )
         plane.mark_changed(source, slot)
-        front = _wait_for_signal(plane, bridge, "@logic/image/roi_value", 2)
-        publication = front.publication("@logic/image/roi_value")
+        front = _wait_for_signal(plane, bridge, "@logic/image/roi_mean", 2)
+        publication = front.publication("@logic/image/roi_mean")
         assert publication is not None
         assert publication.direct_parent_refs[0].sequence == 2
-        assert float(front.value("@logic/image/roi_value").snapshot.block.values.reshape(-1)[0]) == 109.0
+        assert float(front.value("@logic/image/roi_mean").snapshot.block.values.reshape(-1)[0]) == 109.0
     finally:
         _close(bridge, plane, source)
 
@@ -320,7 +320,7 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     values = np.asarray([[[1.0], [2.0], [10.0], [20.0], [30.0]]])
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/curve/roi_value"})
+    plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
@@ -333,7 +333,7 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     try:
         events.emit_selection(SelectionChange.COMMITTED, selection)
         front = plane.freeze()
-        value = front.value("@logic/curve/roi_value")
+        value = front.value("@logic/curve/roi_mean")
         assert value is not None
         assert float(value.snapshot.block.values.reshape(-1)[0]) == 15.0
     finally:
@@ -907,7 +907,7 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
     values = np.asarray([[[1.0], [2.0], [3.0], [4.0], [5.0]]])
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/curve/roi_value"})
+    plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
     bridge.start()
     state = SelectionState(
@@ -928,7 +928,7 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
             ),
         )
         assert bridge.selection is None
-        assert plane.latest_publication("@logic/curve/roi_value") is None
+        assert plane.latest_publication("@logic/curve/roi_mean") is None
     finally:
         _close(bridge, plane, source)
 
@@ -938,7 +938,7 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
     values = np.asarray([[[1.0], [2.0], [3.0], [4.0], [5.0]]])
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/curve/roi_value"})
+    plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
@@ -949,10 +949,10 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
     )
     try:
         events.emit_selection(SelectionChange.COMMITTED, selection)
-        assert plane.latest_publication("@logic/curve/roi_value") is not None
+        assert plane.latest_publication("@logic/curve/roi_mean") is not None
         events.emit_selection(SelectionChange.REMOVED, selection)
         plane.freeze()
-        assert plane.latest_publication("@logic/curve/roi_value") is None
+        assert plane.latest_publication("@logic/curve/roi_mean") is None
         with pytest.raises(ValueError, match="not uniquely present"):
             events.emit_selection(
                 SelectionChange.COMMITTED,
@@ -981,7 +981,7 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, slot, state_map, _initial = _source_setup(schema, values)
     plane.set_front_signals(
-        {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_value"}
+        {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_mean"}
     )
     plane.publish_final(
         source,
@@ -1009,12 +1009,12 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
         )
         front = plane.freeze()
         roi_frame = front.value("@logic/frozen/roi_frame")
-        roi_value = front.value("@logic/frozen/roi_value")
+        roi_mean = front.value("@logic/frozen/roi_mean")
         assert roi_frame is not None, bridge.last_error
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values, values[:, :, 1:3, 1:3]
         )
-        assert float(roi_value.snapshot.block.values.reshape(-1)[0]) == 6.0
+        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == 6.0
         # The answer is the same cut the live path makes; only its lifetime
         # differs, and claiming to be live would be a lie about a run that is
         # over.
@@ -1032,7 +1032,7 @@ def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, _slot, state_map, _initial = _source_setup(schema, values)
     plane.set_front_signals(
-        {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_value"}
+        {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_mean"}
     )
     plane.publish_final(
         source,

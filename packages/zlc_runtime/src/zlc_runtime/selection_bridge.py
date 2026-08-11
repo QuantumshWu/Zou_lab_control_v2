@@ -991,15 +991,18 @@ class SelectionBridge:
     @staticmethod
     def _contract_id(role: str, name: str) -> str:
         if role == "selection":
-            return f"zlc.selection.{name}.v1"
+            # No version suffix: nothing anywhere parses one, and the single
+            # fabricated ".v2" this file once held proved the numbers were
+            # already fiction.  The id is an identity, not a version.
+            return f"zlc.selection.{name}"
         if name.endswith("_err"):
             return "zlc.selection.fit.error.v2"
         return "zlc.selection.fit.parameter.v2"
 
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
         if state.plot_kind == "image":
-            return ("roi_frame", "roi_value")
-        return ("roi_value",)
+            return ("roi_frame", "roi_mean")
+        return ("roi_mean",)
 
     @staticmethod
     def _fit_output_names(event: FitEventValue) -> tuple[str, ...]:
@@ -1374,7 +1377,7 @@ class SelectionBridge:
             )
             declaration = DatasetOutputDeclaration(
                 "roi_frame",
-                "zlc.selection.roi_frame.v1",
+                self._contract_id("selection", "roi_frame"),
             )
             total = derived_schema.repeat_axis.size * derived_schema.point_table.row_count
             output["roi_frame"] = LiveDatasetOutput(
@@ -1383,6 +1386,9 @@ class SelectionBridge:
                 MonitorCoverage(total, total),
             )
         finite = valid_values & np.isfinite(values)
+        # The MEAN, and the signal is named for it: a mean is comparable
+        # across ROI sizes, which a raw sum is not, and for anything like a
+        # brightness optimisation the two differ only by the fixed ROI area.
         scalar_value = float(np.mean(values[finite])) if np.any(finite) else 0.0
         scalar = materialize_scalar_dataset(
             source.ref,
@@ -1391,12 +1397,14 @@ class SelectionBridge:
             unit=source_schema.cell_schema.value_unit,
             reference_for=lambda schema: self._next_reference(
                 source,
-                "roi_value",
+                "roi_mean",
                 schema,
             ),
         )
-        output["roi_value"] = LiveDatasetOutput(
-            DatasetOutputDeclaration("roi_value", "zlc.selection.roi_value.v1"),
+        output["roi_mean"] = LiveDatasetOutput(
+            DatasetOutputDeclaration(
+                "roi_mean", self._contract_id("selection", "roi_mean")
+            ),
             scalar,
             MonitorCoverage(1, 1),
         )

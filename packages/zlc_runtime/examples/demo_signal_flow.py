@@ -9,8 +9,12 @@ from threading import Event
 import time
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    # The whole TREE, not one package's src: inserting only zlc_runtime left
+    # zlc_data resolving from whichever standalone repo pip had wired up, so
+    # this acceptance fixture quietly exercised a sibling nobody was editing.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+import zou_lab_control_v2  # noqa: F401  (puts all eight packages first)
 import numpy as np
 
 from zlc_data import (
