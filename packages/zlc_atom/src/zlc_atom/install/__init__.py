@@ -11,7 +11,7 @@ from .discovery import (
     UnavailableDeviceTypes,
     discover_device_catalog,
 )
-from .graph import DeviceSpec, Installation, create_installation
+from .graph import DeviceSpec, Installation, create_installation, tunable_devices
 from .templates import installation_config_from_template, installation_template_names
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "InstalledLeaf",
     "UnavailableDeviceTypes",
     "create_installation",
+    "tunable_devices",
     "discover_device_catalog",
     "installation_config_from_template",
     "installation_template_names",

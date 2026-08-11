@@ -2,6 +2,7 @@
 
 from .logic_node import LOGIC_NODE, SCAN_SCHEMA
 from .measurement import (
+    ADVANCE_MODES,
     CAPTURE_MODES,
     SCAN_OUTPUT,
     ScanDatasetWriter,
@@ -9,16 +10,20 @@ from .measurement import (
     scan_dataset_schema,
 )
 from .plan import (
+    DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     ScanAxis,
     ScanPlan,
     ScanPort,
     bind_plan,
     scan_ports_for,
+    scan_ports_for_devices,
 )
 
 __all__ = [
+    "ADVANCE_MODES",
     "CAPTURE_MODES",
+    "DEVICE_PARAM_FAMILY",
     "LOGIC_NODE",
     "PULSE_PARAM_FAMILY",
     "SCAN_OUTPUT",
@@ -31,4 +36,5 @@ __all__ = [
     "bind_plan",
     "scan_dataset_schema",
     "scan_ports_for",
+    "scan_ports_for_devices",
 ]

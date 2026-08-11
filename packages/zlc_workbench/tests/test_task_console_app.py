@@ -198,7 +198,7 @@ def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
         "capture = node.prepare();"
         "session.fire(shots=1);"
         "result = capture.collect();"
-        "signal = node.signal_key('frame_0');"
+        "signal = node.signal_key('frames');"
         "path = session.save_figure('run', arrays={'panel-1': result.publication.value(signal).snapshot},"
         " panel={'panel-1': {'signal': signal, 'title': 'camera'}});"
         "print(path);"

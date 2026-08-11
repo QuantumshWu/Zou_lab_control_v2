@@ -295,19 +295,20 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         _wait_terminal(finite_host, phase="done")
         assert finite_host.final_result == {
             "cycles": 3,
-            "signals": (stable_signal_key("camera_measurement", "frame_0"),),
+            "signals": (stable_signal_key("camera_measurement", "frames"),),
         }
         assert camera.capture_state() is False
 
-        frames_signal = finite_host.signal_key("frame_0")
-        assert frames_signal == stable_signal_key("camera_measurement", "frame_0")
+        frames_signal = finite_host.signal_key("frames")
+        assert frames_signal == stable_signal_key("camera_measurement", "frames")
         finite_front = plane.freeze()
         frames_publication = finite_front.publication(frames_signal)
         frames_value = finite_front.value(frames_signal)
         assert frames_publication is not None and frames_value is not None
         assert frames_value.coverage is None
         assert frames_value.transient is False
-        assert frames_value.shape[:2] == (3, 1)
+        # (repeat, point, event): three cycles of one frame each.
+        assert frames_value.shape[:3] == (3, 1, 1)
         assert not plane.is_generation_live(frames_signal)
 
         occupancy_descriptor = catalog.get("occupancy")
@@ -368,6 +369,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             stable_signal_key("occupancy", "occupied"),
             stable_signal_key("occupancy", "valid"),
             stable_signal_key("occupancy", "rate"),
+            stable_signal_key("occupancy", "survival"),
+            stable_signal_key("occupancy", "survival_rate"),
             stable_signal_key("occupancy", "frame_judged"),
             stable_signal_key("occupancy", "site_overlay"),
         }
@@ -397,9 +400,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         n_sites = first_calibration.calibration.site_map.n_sites
         assert counts.shape == occupied.shape == valid.shape == (3, n_sites, 1)
         assert rate.shape == (3, 1, 1)
+        # frame_judged is (repeat, point, y, x); the camera's frames block is
+        # (repeat, point, event, y, x) with a one-event cycle.
         np.testing.assert_array_equal(
             frame_judged.values,
-            frames_value.values,
+            frames_value.values[:, :, 0],
         )
         assert all(
             value.coverage is None and value.transient is False
@@ -466,7 +471,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         infinite_host.start()
         _wait_armed(infinite_host, camera)
 
-        live_signal = infinite_host.signal_key("frame_0")
+        live_signal = infinite_host.signal_key("frames")
         previous_revision = 0
         live_generation = None
         for _ in range(2):

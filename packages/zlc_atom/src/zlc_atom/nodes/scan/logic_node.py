@@ -29,7 +29,7 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 
 from .measurement import SCAN_OUTPUT, ScanMeasurement
-from .plan import ScanPlan, bind_plan, scan_ports_for
+from .plan import ScanPlan, bind_plan, scan_ports_for, scan_ports_for_devices
 
 
 _PULSE_CONTRACT = "zlc.pulse/scan-template"
@@ -77,6 +77,17 @@ SCAN_SCHEMA = AuthoringSchema(
             "",
             required=True,
         ),
+        # Repeats and samples both land on the dataset's repeat axis (size
+        # repeats x samples): consecutive looks while the point stays applied
+        # versus whole-plan sweeps.  Physically different, structurally the
+        # same fact -- the same conditions, again.
+        AuthoringField(
+            "repeats",
+            "int",
+            "Repeats (full sweeps)",
+            1,
+            minimum=1,
+        ),
         AuthoringField(
             "samples_per_point",
             "int",
@@ -99,6 +110,21 @@ SCAN_SCHEMA = AuthoringSchema(
                 ),
                 AuthoringChoice(
                     "direct", "Keep every publication (pulse-driven source)"
+                ),
+            ),
+        ),
+        # Who moves the plan: the host, one compiled pulse per point, or the
+        # BOARD, playing the whole plan from its hardware scan table --
+        # seamless, frame order equal to point order by construction.
+        AuthoringField(
+            "advance",
+            "choice",
+            "Advance",
+            "stepped",
+            choices=(
+                AuthoringChoice("stepped", "Stepped (host reloads per point)"),
+                AuthoringChoice(
+                    "streamed", "Streamed (board scan table, seamless)"
                 ),
             ),
         ),
@@ -127,8 +153,11 @@ def _build(
     source_signal: str,
     pulse_resource: ResolvedWorkspaceResource,
     plan: object,
+    repeats: int = 1,
     samples_per_point: int = 1,
     capture: str = "skip_one",
+    advance: str = "stepped",
+    tunable_devices: Mapping | None = None,
 ) -> ScanMeasurement:
     if (
         not isinstance(pulse_resource, ResolvedWorkspaceResource)
@@ -138,7 +167,13 @@ def _build(
         raise TypeError("pulse_resource must be a resolved scan template")
     sequence = pulse_resource.value
     parsed = _parse_plan(plan)
-    ports = bind_plan(parsed, scan_ports_for(sequence))
+    # One vocabulary, two projectors: the pulse offers its API parameters,
+    # the bench's tunable devices offer their runtime knobs.  Binding sees
+    # the union, so an axis is refused by name against everything offered.
+    ports = bind_plan(
+        parsed,
+        scan_ports_for(sequence) + scan_ports_for_devices(tunable_devices),
+    )
     publication = signal_plane.latest_publication(source_signal)
     if publication is None or not signal_plane.is_generation_live(source_signal):
         raise ValueError(
@@ -153,8 +188,11 @@ def _build(
         sequence=sequence,
         plan=parsed,
         ports=ports,
+        repeats=int(repeats),
         samples_per_point=int(samples_per_point),
         capture=str(capture),
+        advance=str(advance),
+        tunables=dict(tunable_devices or {}),
     )
 
 

@@ -334,7 +334,7 @@ def test_camera_measurement_monitor_arms_the_pylon_mode_for_a_whole_cycle(
 
         for _ in range(frames_per_cycle):
             assert monitor.poll() is not None
-        value = plane.freeze().value(node.signal_key("frame_0"))
+        value = plane.freeze().value(node.signal_key("frames"))
         assert value is not None
         archived = value.run_record["device_snapshots"]["camera"]
         assert archived["acquisition_mode"] == mode.value

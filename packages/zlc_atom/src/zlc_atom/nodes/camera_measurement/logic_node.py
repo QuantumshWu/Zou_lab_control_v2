@@ -20,9 +20,9 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 
 from .measurement import (
+    CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
-    camera_frame_output_declarations,
 )
 
 
@@ -203,20 +203,14 @@ def _build(
     )
 
 
-def _outputs(values: Mapping[str, object]) -> tuple[OutputSpec, ...]:
-    return tuple(
-        OutputSpec(value.name, value.contract_id)
-        for value in camera_frame_output_declarations(
-            int(values["frames_per_cycle"])
-        )
-    )
-
-
 LOGIC_NODE = LogicNodeDescriptor(
     "camera_measurement",
     NodeKind.MEASUREMENT,
     CAMERA_MEASUREMENT_SCHEMA,
-    resolve_outputs=_outputs,
+    # One output whatever the cycle size: the frames live on the dataset's
+    # READOUT_EVENT axis, so the signal vocabulary no longer changes with
+    # the acquisition configuration.
+    outputs=(OutputSpec(CAMERA_FRAMES_OUTPUT.name, CAMERA_FRAMES_OUTPUT.contract_id),),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
     ),

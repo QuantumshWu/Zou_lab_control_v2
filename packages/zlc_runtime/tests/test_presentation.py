@@ -217,35 +217,40 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
 
 
 def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
-    """Sibling signals of one publication present as one atomic cohort."""
+    """Sibling signals of one publication present as one atomic cohort.
 
-    first = _front("camera/frame_0")
-    first_value = first.value("camera/frame_0")
+    The camera now publishes ONE frames signal, so the sibling family this
+    exercises is the occupancy processor's: one publication carrying several
+    derived signals that must land on screen together.
+    """
+
+    first = _front("occupancy/rate")
+    first_value = first.value("occupancy/rate")
     assert first_value is not None
     second_value = SignalValue(
-        "camera/frame_1",
+        "occupancy/counts",
         first_value.snapshot,
         None,
         transient=True,
         run_record=first_value.run_record,
     )
     publication = SignalPublication(
-        first.publication("camera/frame_0").event_ref,
+        first.publication("occupancy/rate").event_ref,
         {
-            "camera/frame_0": first_value,
-            "camera/frame_1": second_value,
+            "occupancy/rate": first_value,
+            "occupancy/counts": second_value,
         },
         object(),
     )
-    siblings = frozenset(("camera/frame_0", "camera/frame_1"))
+    siblings = frozenset(("occupancy/rate", "occupancy/counts"))
     front = SignalFront(
         dict(publication.signals),
         {},
         {name: publication for name in siblings},
     )
     ports = (
-        _Port("first", "camera/frame_0", interval=400),
-        _Port("second", "camera/frame_1", interval=400),
+        _Port("first", "occupancy/rate", interval=400),
+        _Port("second", "occupancy/counts", interval=400),
     )
     channels = OwnerChannels(_Sink())
     arbiter = SurfaceBatchArbiter(channels)

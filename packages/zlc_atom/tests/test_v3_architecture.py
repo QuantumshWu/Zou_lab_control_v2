@@ -416,7 +416,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert isinstance(calibration_input, ArtifactInputSpec)
         occupancy_node = descriptors["occupancy"].instantiate(
             calibration=calibration_input.codec.resolve(calibration_path),
-            source_signal=camera_node.signal_key("frame_0"),
+            source_signal=camera_node.signal_key("frames"),
             model_kind="uniform_psf",
         )
         assert not hasattr(occupancy_node, "signal_plane")
@@ -495,6 +495,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "occupied",
             "valid",
             "rate",
+            "survival",
+            "survival_rate",
             "frame_judged",
             "site_overlay",
         )
@@ -508,7 +510,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         with pytest.raises(TypeError):
             descriptors["occupancy"].instantiate(
                 calibration=task_result.calibration,
-                source_signal=camera_node.signal_key("frame_0"),
+                source_signal=camera_node.signal_key("frames"),
             )
     finally:
         if calibration_host is not None:

@@ -95,6 +95,7 @@ def seed_packaged_pulses(pulses: Path) -> None:
     from zlc_atom.nodes import (
         calibration_pulse_template_bytes,
         scan_pulse_template_bytes,
+        temperature_pulse_template_bytes,
     )
 
     pulses.mkdir(parents=True, exist_ok=True)
@@ -103,6 +104,9 @@ def seed_packaged_pulses(pulses: Path) -> None:
     )
     _seed_default_pulse(
         pulses / "mot_field_template.json", scan_pulse_template_bytes()
+    )
+    _seed_default_pulse(
+        pulses / "temperature_template.json", temperature_pulse_template_bytes()
     )
 
 

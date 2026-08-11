@@ -145,7 +145,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert presenter.start_logic(node_id) is True
         old_host = presenter.logic[node_id].host
         assert old_host is not None and old_host.running
-        signal_key = stable_signal_key(node_id, "frame_0")
+        signal_key = stable_signal_key(node_id, "frames")
         old_generation = old_host.generation
 
         _wait_until(lambda: session.camera.capture_state(), presenter)
@@ -210,7 +210,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         _wait_until(lambda: presenter.logic[node_id].host is not old_host, presenter)
         replacement = presenter.logic[node_id].host
         assert replacement is not None and replacement.running
-        assert replacement.signal_key("frame_0") == signal_key
+        assert replacement.signal_key("frames") == signal_key
         assert replacement.generation != old_generation
         assert replacement.node.request.roi_xywh == viewport_roi
     finally:

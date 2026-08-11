@@ -93,7 +93,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         sequencer.wait_done(1.0)
         assert monitor.poll() is not None
         monitor_front = plane.freeze()
-        assert measurement.signal_key("frame_0") in monitor_front.signals
+        assert measurement.signal_key("frames") in monitor_front.signals
         monitor.close()
 
         task_result = CalibrationTask(

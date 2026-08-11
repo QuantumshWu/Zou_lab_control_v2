@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import numpy as np
-from zlc_data import SPATIAL_X, SPATIAL_Y
+from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
 from zlc_runtime import MonitorCoverage
 from zlc_runtime import (
     DatasetOutputDeclaration,
@@ -25,16 +25,13 @@ from zlc_atom.data import snapshot_from_array
 
 _CAMERA_FRAME_CONTRACT = "camera.frames.v1"
 
-
-def camera_frame_output_declarations(
-    frames_per_cycle: int,
-) -> tuple[DatasetOutputDeclaration, ...]:
-    """Declare one ordinary 2-D signal for each frame in a camera cycle."""
-
-    return tuple(
-        DatasetOutputDeclaration(f"frame_{index}", _CAMERA_FRAME_CONTRACT)
-        for index in range(int(frames_per_cycle))
-    )
+#: The camera's ONE output: a cycle of frames on the READOUT_EVENT axis.
+#: A cycle is one acquisition event; publishing its frames as N sibling
+#: signals leaked the acquisition configuration into the signal vocabulary
+#: (a panel bound to "frame_1" broke the moment frames_per_cycle changed),
+#: and no consumer could see the whole cycle at once.  The event axis is the
+#: role the data model already reserves for exactly this.
+CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT)
 
 
 def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
@@ -150,21 +147,21 @@ class _CameraMonitorSlot:
             total_cells=1,
         )
         return {
-            declaration.name: LiveDatasetOutput(
-                declaration,
+            CAMERA_FRAMES_OUTPUT.name: LiveDatasetOutput(
+                CAMERA_FRAMES_OUTPUT,
                 snapshot_from_array(
-                    np.asarray(records[index].image)[None, ...],
+                    np.stack(
+                        [np.asarray(record.image) for record in records],
+                        axis=0,
+                    )[None, ...],
                     producer=self.node.instance_id,
-                    signal=declaration.name,
-                    roles=(SPATIAL_Y, SPATIAL_X),
+                    signal=CAMERA_FRAMES_OUTPUT.name,
+                    roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
                     generation=generation,
                     revision=revision,
                 ),
                 coverage,
                 self.node._require_run_record(),
-            )
-            for index, declaration in enumerate(
-                self.node.dataset_output_declarations
             )
         }
 
@@ -393,7 +390,7 @@ class CameraMeasurementNode:
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
-        return camera_frame_output_declarations(self.frames_per_cycle)
+        return (CAMERA_FRAMES_OUTPUT,)
 
     def signal_key(self, output_name: str) -> str:
         name = str(output_name)
@@ -571,37 +568,44 @@ class CameraMeasurementNode:
             raise ValueError("camera publication requires at least one cycle")
         generation, revision = self._next_publication_stamp()
         outputs = {
-            declaration.name: FinalDatasetOutput(
-                declaration,
+            CAMERA_FRAMES_OUTPUT.name: FinalDatasetOutput(
+                CAMERA_FRAMES_OUTPUT,
                 snapshot_from_array(
                     np.stack(
-                        [np.asarray(cycle[index].image) for cycle in cycles],
+                        [
+                            np.stack(
+                                [np.asarray(frame.image) for frame in cycle],
+                                axis=0,
+                            )
+                            for cycle in cycles
+                        ],
                         axis=0,
                     ),
                     producer=self.instance_id,
-                    signal=declaration.name,
-                    roles=(SPATIAL_Y, SPATIAL_X),
+                    signal=CAMERA_FRAMES_OUTPUT.name,
+                    roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
                     generation=generation,
                     revision=revision,
                 ),
                 self._require_run_record(),
             )
-            for index, declaration in enumerate(self.dataset_output_declarations)
         }
         published = publish(outputs) if publish is not None else self.signal_plane.publish_final(self, outputs)
         if not isinstance(published, dict) and not hasattr(published, "keys"):
             raise TypeError("signal_plane.publish_final must return a signal mapping")
-        publication = self.signal_plane.latest_publication(self.signal_key("frame_0"))
+        publication = self.signal_plane.latest_publication(
+            self.signal_key(CAMERA_FRAMES_OUTPUT.name)
+        )
         if not isinstance(publication, SignalPublication):
             raise RuntimeError("signal plane did not expose the final camera publication")
         return MeasurementResult(cycles, publication, terminal)
 
 
 __all__ = [
+    "CAMERA_FRAMES_OUTPUT",
     "CameraMeasurementNode",
     "CameraMeasurementRequest",
     "FiniteCapture",
     "MeasurementResult",
     "MonitorCapture",
-    "camera_frame_output_declarations",
 ]

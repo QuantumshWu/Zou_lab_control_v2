@@ -50,6 +50,7 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
     assert tuple(item.type_id for item in descriptors) == (
         "camera.dcam",
         "camera.pylon",
+        "camera.remote",
         "camera.virtual",
         "camera.virtual_mot",
         "sequencer.hardware",

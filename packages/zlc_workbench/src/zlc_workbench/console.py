@@ -1026,6 +1026,13 @@ class ConsolePresenter:
             bool(candidate.signal)
             and (
                 candidate.signal != current.signal
+                # The cell kind is SPEC-level identity: the plot host draws
+                # the spec it was built with and only reconfigures display
+                # parameters after that.  A changed cell must rebuild the
+                # host through the same path a changed signal takes --
+                # accepting the state and keeping the old picture is a
+                # control that looks live and does nothing.
+                or candidate.cell_kind != current.cell_kind
                 or binding.host is None
                 or binding.port is None
             )
@@ -3096,6 +3103,9 @@ class ConsolePresenter:
             "issues": finalization.issues,
             "error": status if state == "error" else "",
             "status": status,
+            # The offer-relevant subset of what a start would bind: editors
+            # project from these without the start-time side effects.
+            "bench_extras": self._bench_offer_extras(),
         }
 
     def _open_logic_editor(self, binding: LogicBinding) -> bool:
@@ -3684,10 +3694,21 @@ class ConsolePresenter:
         except Exception:
             return None
 
-    def _logic_extras(self) -> dict[str, Any]:
-        """Facts this bench can supply beyond its devices and the signal plane."""
+    def _bench_offer_extras(self) -> dict[str, Any]:
+        """Bench facts an EDITOR may offer from: side-effect free by contract.
 
-        extras: dict[str, Any] = {}
+        artifact_directory is deliberately absent -- computing it CREATES the
+        day folder, and opening an editor must not touch the filesystem.
+        """
+
+        from zlc_atom.install import tunable_devices
+
+        return {"tunable_devices": tunable_devices(self.session.installation)}
+
+    def _logic_extras(self) -> dict[str, Any]:
+        """Facts a START can bind beyond its devices and the signal plane."""
+
+        extras = self._bench_offer_extras()
         extras["artifact_directory"] = self.session.day_folder()
         return extras
 

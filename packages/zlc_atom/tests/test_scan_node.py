@@ -18,16 +18,18 @@ from zlc_pulse import resolve_api_parameters, sequence_from_tree
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
-from zlc_atom.install import create_installation
+from zlc_atom.install import create_installation, tunable_devices
 from zlc_atom.nodes import ResolvedWorkspaceResource, discover_logic_nodes
 from zlc_atom.nodes.scan import (
     CAPTURE_MODES,
+    DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_SCHEMA,
     ScanAxis,
     ScanPlan,
     bind_plan,
     scan_ports_for,
+    scan_ports_for_devices,
 )
 
 
@@ -102,6 +104,135 @@ def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
         ScanPlan((ScanAxis(BIAS_PORTS[2], (-256.0, 0.0, 256.0)),)), ports
     )
     assert bound[0].label == "da_bias_z"
+
+
+def test_tunable_devices_project_device_ports() -> None:
+    """A device volunteers its runtime knobs as ``device:<key>:<field>`` ports.
+
+    The aggregation is duck-typed off the installation, and only fields with
+    BOTH bounds declared become ports -- a plan must be refusable against a
+    finite range before anything touches hardware.
+    """
+
+    installation = create_installation("virtual")
+    try:
+        tunables = tunable_devices(installation)
+        assert "mot_camera" in tunables and "camera" in tunables
+        ports = scan_ports_for_devices(tunables)
+        by_name = {port.port: port for port in ports}
+        key = DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds"
+        assert key in by_name
+        port = by_name[key]
+        assert port.label == "mot_camera.exposure_seconds"
+        assert 0 < port.lo < port.hi
+    finally:
+        installation.close()
+
+
+def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
+    """End to end: a ``device:`` axis tunes the camera and the frames show it.
+
+    The plan scans the MOT camera's exposure over a 4x range; the spot's
+    photon count is proportional to exposure in the simulated world (the
+    read-noise floor is not), so pooled above-floor brightness at the long
+    exposure must clearly exceed the short one.  Red if the device family is
+    never dispatched -- the exposure then never moves and the two points
+    look alike.
+    """
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {d.api_name: d for d in discover_logic_nodes()}
+    sequencer = installation.device("sequencer")
+    monitor = None
+    host = None
+    try:
+        monitor_node = descriptors["camera_measurement"].instantiate(
+            camera=installation.device("mot_camera"),
+            camera_key="mot_camera",
+            signal_plane=plane,
+            repeat=0,
+        )
+        monitor = monitor_node.monitor()
+
+        sequence = _template_sequence()
+        board = sequencer.describe()
+        from zlc_pulse import compile_sequence
+
+        seeded = resolve_api_parameters(sequence)
+        sequencer.load(
+            compile_sequence(seeded, board.geometry, board.clock_hz),
+            source=seeded,
+        )
+        sequencer.fire()
+        sequencer.wait_done(5.0)
+        deadline = time.monotonic() + 10.0
+        signal_name = ""
+        while time.monotonic() < deadline and not signal_name:
+            monitor.poll()
+            plane.freeze()
+            for name in plane.describe_signals():
+                text = str(getattr(name, "name", name))
+                if "/frame" in text:
+                    signal_name = text
+            time.sleep(0.02)
+        assert signal_name, "the MOT monitor never published a frame"
+
+        exposures = (0.02, 0.08)
+        plan = ScanPlan(
+            (
+                ScanAxis(
+                    DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds",
+                    exposures,
+                ),
+            )
+        )
+        scan_node = descriptors["scan"].instantiate(
+            sequencer=sequencer,
+            signal_plane=plane,
+            source_signal=signal_name,
+            pulse_resource=ResolvedWorkspaceResource(
+                Path(TEMPLATE_NAME), "zlc.pulse/scan-template", sequence
+            ),
+            plan=plan.to_tree(),
+            samples_per_point=1,
+            tunable_devices=tunable_devices(installation),
+        )
+        host = NodeHost(scan_node, plane)
+        host.start()
+        deadline = time.monotonic() + 240.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            monitor.poll()
+            plane.freeze()
+            host.poll()
+        observed = host.observation
+        assert observed.error is None, observed.error
+        assert observed.terminal
+
+        frozen = plane.freeze()
+        value = frozen.value(host.signal_key("scan"))
+        assert value is not None, "the scan published nothing"
+        frames = np.asarray(value.block.values, dtype=float)
+        assert frames.shape[1] == len(exposures)
+        pooled = np.clip(frames - 12.0, 0.0, None)
+        brightness = pooled.sum(
+            axis=tuple(axis for axis in range(pooled.ndim) if axis != 1)
+        )
+        assert brightness[1] > 2.0 * brightness[0], (
+            "a 4x exposure did not brighten the spot; the device port was "
+            f"never applied (brightness={brightness.round(1).tolist()})"
+        )
+    finally:
+        if host is not None and not host.observation.terminal:
+            host.cancel("test cleanup")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not host.observation.terminal:
+                host.poll()
+        if host is not None:
+            host.shutdown()
+        if monitor is not None:
+            monitor.close()
+        installation.close()
 
 
 def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
@@ -200,11 +331,15 @@ def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
         assert value is not None, "the scan published nothing"
 
         frames = np.asarray(value.block.values, dtype=float)
-        # (repeat, scan points, y, x): one MOT frame per grid point.
+        # (repeat, scan points, event, y, x): one MOT cycle per grid point,
+        # its frames on the READOUT_EVENT axis.
         assert frames.shape[1] == plan.point_count
         # Brightness above the read-noise floor; position-independent, so the
         # spot moving with the field cannot fool the metric.
-        brightness = np.clip(frames - 12.0, 0.0, None).sum(axis=(0, 2, 3))
+        pooled = np.clip(frames - 12.0, 0.0, None)
+        brightness = pooled.sum(
+            axis=tuple(axis for axis in range(pooled.ndim) if axis != 1)
+        )
         best = plan.rows()[int(np.argmax(brightness))]
 
         expected = tuple(

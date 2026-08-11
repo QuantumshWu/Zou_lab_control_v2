@@ -31,6 +31,11 @@ from zlc_pulse import PulseSequence, api_parameter_columns_for
 
 PULSE_PARAM_FAMILY = "pulse:param:"
 
+#: ``device:<key>:<field>`` -- a runtime knob on an installed device.  Its
+#: stepped advance is a ``tune(field, value)`` call before the point fires;
+#: the board cannot advance it itself, so a streamed plan refuses it.
+DEVICE_PARAM_FAMILY = "device:"
+
 
 @dataclass(frozen=True)
 class ScanPort:
@@ -77,6 +82,37 @@ def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
                 hi,
             )
         )
+    return tuple(ports)
+
+
+def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
+    """Every port the bench's tunable devices offer, from their own words.
+
+    A device volunteers through ``tunable_fields()``; only fields with BOTH
+    bounds declared become ports, because a plan must be refusable against a
+    finite range before anything touches hardware.  Authoring fields carry
+    no unit vocabulary, so the port's unit is empty and its label names the
+    device and the knob.
+    """
+
+    ports: list[ScanPort] = []
+    for key in sorted(dict(tunables or {})):
+        device = tunables[key]
+        fields = getattr(device, "tunable_fields", None)
+        if not callable(fields):
+            continue
+        for field in fields():
+            if field.minimum is None or field.maximum is None:
+                continue
+            ports.append(
+                ScanPort(
+                    f"{DEVICE_PARAM_FAMILY}{key}:{field.name}",
+                    f"{key}.{field.name}",
+                    "",
+                    float(field.minimum),
+                    float(field.maximum),
+                )
+            )
     return tuple(ports)
 
 
@@ -182,10 +218,12 @@ def bind_plan(
 
 
 __all__ = [
+    "DEVICE_PARAM_FAMILY",
     "PULSE_PARAM_FAMILY",
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
     "bind_plan",
     "scan_ports_for",
+    "scan_ports_for_devices",
 ]

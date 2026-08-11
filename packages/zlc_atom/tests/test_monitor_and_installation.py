@@ -87,11 +87,9 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
             monitor.poll()
         assert monitor.latest_record is not None
         assert monitor.latest_record.source_ordinal == 3
-        signal_keys = tuple(
-            measurement.signal_key(f"frame_{index}") for index in range(3)
-        )
+        signal_key = measurement.signal_key("frames")
         plane.freeze()
-        assert plane.latest_publication(signal_keys[0]) is None
+        assert plane.latest_publication(signal_key) is None
 
         # Physical ordinals 4/5 complete the already retained 3/4/5 shot.
         publication = None
@@ -99,27 +97,26 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         while publication is None and time.monotonic() < deadline:
             monitor.poll()
             plane.freeze()
-            publication = plane.latest_publication(signal_keys[0])
+            publication = plane.latest_publication(signal_key)
         assert publication is not None
-        assert set(publication.signals) == set(signal_keys)
-        assert all(plane.latest_publication(key) is publication for key in signal_keys)
-        for key in signal_keys:
-            value = publication.value(key)
-            assert value is not None
-            assert value.snapshot.block.values.shape[-2:] == (16, 20)
-            assert value.snapshot.block.values.dtype.str == "<u2"
+        assert set(publication.signals) == {signal_key}
+        value = publication.value(signal_key)
+        assert value is not None
+        # One monitor snapshot: (repeat=1, point=1, event=cycle, y, x).
+        assert value.snapshot.block.values.shape == (1, 1, 3, 16, 20)
+        assert value.snapshot.block.values.dtype.str == "<u2"
         assert measurement.request.roi_xywh == (2, 3, 20, 16)
         assert measurement.actual_working_point is not None
         assert measurement.actual_working_point.roi_origin_yx == (3, 2)
         assert any(call[0] == "reserve" for call in plane.calls)
         assert any(call[0] == "mark_changed" for call in plane.calls)
         front = plane.freeze()
-        assert all(key in front.signals for key in signal_keys)
+        assert signal_key in front.signals
         terminal = monitor.close()
         assert terminal.source_stopped and terminal.joined
         assert monitor.slot.closed
         assert measurement.camera.capture_state() is False
-        assert all(plane.latest_publication(key) is None for key in signal_keys)
+        assert plane.latest_publication(signal_key) is None
     finally:
         plane.close()
         installation.close()
@@ -142,11 +139,11 @@ def test_repeated_freezes_share_one_schema_and_retain_the_frame_bytes() -> None:
     )
     view = np.asarray(record.image)[None, ...]
     first = snapshot_from_array(
-        view, producer="cam", signal="frame_0",
+        view, producer="cam", signal="frames",
         roles=(SPATIAL_Y, SPATIAL_X), generation="g", revision=1,
     )
     second = snapshot_from_array(
-        view, producer="cam", signal="frame_0",
+        view, producer="cam", signal="frames",
         roles=(SPATIAL_Y, SPATIAL_X), generation="g", revision=2,
     )
     assert first.block.schema is second.block.schema
@@ -158,7 +155,7 @@ def test_repeated_freezes_share_one_schema_and_retain_the_frame_bytes() -> None:
 
     # Another shape (a reconfigure) is another configuration: another schema.
     other = snapshot_from_array(
-        np.zeros((1, 6, 9), dtype="<u2"), producer="cam", signal="frame_0",
+        np.zeros((1, 6, 9), dtype="<u2"), producer="cam", signal="frames",
         roles=(SPATIAL_Y, SPATIAL_X), generation="g", revision=3,
     )
     assert other.block.schema is not first.block.schema

@@ -388,3 +388,121 @@ Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本�
 - calibration 表单隐藏 grid shape 不等于算法已自动发现 N；不允许 session 底层继续偷偷注入；
 - `allow_saved_reference` 声明存在不等于 Occupancy path resolver 已接通；
 - Monitor/stream/dataset 类存在不等于 Camera Measurement 正式 infinite 产品路径已接通。
+
+## 附:scan→grid 显示链验收发现(2026-08-11,实测)
+
+用户报:扫描数据载入 gridplot 非常卡、selector 有问题、双击 cell 放大不对。
+
+已复现(离屏,3×3 扫,cell=1200×1920 MOT 帧,探针 scratchpad/grid_probe2.py):
+facet grid 面板 retarget 到 `@logic/scan/scan` 后**整卡空白**,无 panel error,
+离屏 beat 中位 0.2ms(不卡——卡在真屏光栅,离屏量不到)。
+
+最可疑根因:`panel_catalog.py:62` —— console 唯一网格 kind `Site grid` 的
+cell 固定 CURVE;Image-cell FacetGrid spec 被注释明确排除在 console 之外。
+扫描 cell 是图像 → 唯一可选网格画不了它 → 空白。
+下一轮:① 按「只呈现可行项」把图像格网格投影给图像 cell 数据;② 真屏量
+paint;③ 双击放大/selector 在扫描数据上逐条驱动验收。
+
+另:「MOT 相机某区域 sum」不需要新节点——框选派生信号(roi_value,带同发
+溯源)就是为此造的,scan 的 Signal 可直接选它;仅当需要不依赖手势的固化
+定义时,才补 roi_sum 小 processor(已记录的通用变换节点缺口)。
+
+### 追加(2026-08-11):空白网格的精确机制已确认
+
+retarget 到 scan 信号时走 console.py:1060 `_spec_for(snapshot, kind, cell_kind)`;
+facet_grid+cell=curve 对图像 cell 数据返回 None → 落入 1050-1058 的
+「fixed kind 等待兼容数据集」分支 → **卡片留空、retarget 仍返回 True、只发
+warning 级 report**——这就是「空白无报错」的机制。
+可用的既有杠杆:`PanelState.cell_kind` 本就可变(console.py:938/963 有整条
+changes 路径),zlc_plot 的 Image FacetGrid spec 存在只是不在 console Add 清单。
+修法(最小、循「只呈现可行项」):数据到达时若声明的 cell_kind 画不了,按数据
+集 cell 形状推导 cell_kind(图像 cell→image)并 report 一句;Add 清单不动。
+
+## 附:六项 /goal 落地(2026-08-11,c74105d..)
+
+1. **scan 途中 live 发布**(c74105d):ScanDatasetWriter 首点整体分配、逐点填
+   充,经 run 的 live slot 每点发布(DatasetCoverage 增长);final=同一数组。
+   端到端测试断言途中必见部分填充 live 发布(旧只发 final 的实现下必红)。
+2. **时效性=实测而非假设**(同 commit):扫描起点在 safe 板上观察源——静默=
+   板驱动(且管线已排空),持续前进=自由运行(mot_camera 即此,真 Basler 同)。
+   板驱动源:每样本有限发射一拍,publication 与拍一一对应,零废帧、任意管线
+   深度精确;自由运行源:每点只弃一张跨 apply 曝光的帧(无逐帧曝光时戳时的
+   下界)。27 点端到端从分钟级降到 ~7s。
+3. **cell kind 全开 + 单一命名**(4bcb70e):Add 菜单=plot kind 标准名;
+   facet 三 cell 显式项(facet_grid (image) 等);cell_kind=""=数据决定(规则
+   唯一住在 fitting/facet 默认),非空=作者选择,不再回写推导值;update_panel_state
+   的 cell_kind 补丁曾"校验后静默丢弃"(又一例中间层没人写),已并入 merged。
+4. **gridplot 性能根修**(8113dac):22.5s 空白等待的根因=_aggregate_by_codes
+   每组一个 Python np.mean 调用(每像素一组,690 万次)。向量化(reduceat/单成员
+   恒等/bincount 域重映射)后:in-process 39.7→3.3s,console 首帧 22.5→3.0s,
+   beat 0.1ms;三 cell 同数据 1.7/1.4/3.0s。守卫 test_aggregate_by_codes.py
+   逐分支对照朴素循环(含 uint8 不回绕)。仍开:剩余 ~3s 是 position 投影机器
+   本身,稠密快道(x/y=data axes→reshape+mean)可到几十 ms,须证等价,未做。
+5. **cell title 贴合独占空间**(eb0ef25):SurfacePlan 声明每格独占标题宽
+   (cell 宽+列 gap)与最小字号;渲染端真测文本宽(TextToPath),超宽缩、到底截
+   断加省略号;focused 恢复全文。
+6. **单轴扫描 facet 修通**(待提交):facet_grid.default_spec 曾要求网格维≥2
+   (假设 cell=curve 要走一维)——单轴帧扫全灭。cell 改为格内数据决定(≥2 data
+   axes=image cell,image_axes 按角色),image cell 下单网格维即可 facet;
+   image.default_spec 去掉"多行即拒"(行随 reduction 归约)。中途验收:扫描
+   1/9 填充时 retarget 网格面板→3.5s 出图,扫毕面板继续前进。
+
+未验收残项:双击 cell 放大视图、selector 在扫描数据上的逐条手势验收(用户
+早前点名,本轮未覆盖);稠密快道(上文 4)。
+
+## 附:五项纠偏(2026-08-11 晚,用户指正违反准则后返工,c730cdf..647dcb8)
+
+1. **facet 复用 dense 投影**(c730cdf):此前对 generic 聚合器做向量化=在错误层打补丁。
+   正解=facet 按 repeat/点域分格是**行切片**,保持 dense 规则性→每格走
+   `_masked_leading_reduce`(同时消灭 dense curve/image 里重复两份的归约链)。
+   session 构建 3.3→0.87s(投影 0.39s);等价守卫先证 dense 真生效再逐格对拍。
+   dtype 答复:数据面全程保 dtype;单样本捷径零转换;mean/sum 升 float=归约数学
+   语义;min/max 的 float64 输入拷贝为既有行为,记为已知改进点。
+2. **采样模式=作者选择**(956813f):撤自动探板。scan 节点 `capture` choice 字段
+   (skip_one 默认/direct),编辑表单自动渲染,run_record 记录。
+3. **cell kind=面板参数**(da02d83):撤 Add 组合项;facet 面板 Setting 弹窗出
+   Cell kind 选择(automatic+三 cell,经 set_grid_cell_kinds 缝投放),发既有
+   cell_kind 补丁。附:guard-A 10s 预算是运气不是契约(同 commit 同日先绿后红,
+   实测报告 ~18s),升 60s 并注明实测依据。
+4. **撤未授权 group legend**(647dcb8):分组曲线只靠色环区分,线 label 保留。
+5. **双击放大残影根因**(647dcb8+0da1d17):blit compose 重绘 dynamic artist 只看
+   artist 自身 visible,不看其 axes 可见性;focus 是唯一隐藏 axes 的布局。第一刀
+   修在合成循环被用户指出残留 y 轴刻度——tick 子线在 matplotlib 里 `.axes=None`,
+   下游守卫看不见。终修上移到 `_dynamic_artists` 收集权威一处:不可见 axes 连同
+   其 artist 与 tick/spine 一律不收(镜像 figure.draw),撤下游补丁。
+   compose 与全量重绘**逐像素相等(0 差异)**,守卫=严格相等——任何容差都是下一个
+   残影的藏身处("反锯齿尾巴"实为隐藏格刻度)。
+
+教训:等价守卫必须"先证快路真生效"且**零容差**;二分前先确认基线在当前机器状态
+下仍绿(guard-A 的 10s 预算=同日同 commit 先绿后红)。
+
+## 附:W 轮大 goal 落地(2026-08-11,单一大 commit)
+
+W0 面板 cell kind 换挡即重建 host;W1a repeats(整计划重扫 R)与 samples(S)分设、
+同住数据集 repeat 轴(R×S×源 repeat,sweep 最外层);W1b 相机每周期发**一个**
+`frames` 信号(帧在 READOUT_EVENT 轴,monitor=(1,event,y,x)、finite=(cycles,
+event,y,x)),`frame_0/frame_1` 词汇全仓清除(21 个测试文件迁移),occupancy 新
+增 survival/(repeat,pairs,sites) 与 survival_rate/(repeat,pairs) 输出(配对=
+连续事件 k→k+1,前帧占据才计入,NaN=非事实,事件<2 发 1 对全 NaN);W1c
+`device:<key>:<field>` 端口族——设备 duck-typed `tunable_fields()/tune()` 自愿
+投影(install.tunable_devices 聚合、plan.scan_ports_for_devices 投影、绑定=
+pulse∪device 端口并集,stepped 执行器 `_split_row` 按族分发,streamed 明拒
+device 族;VirtualCamera 曝光为首个真实 tunable,e2e=4x 曝光→亮度>2x);
+W1d streamed advance——plan 轴编译为 PulseSlot+scan table,一次
+load+write_scan_table(sweeps=repeats)+fire 板自推进,按 played 序归属 capture;
+W2 温度链——temperature_template(load/probe_a/release(t_off API)/probe_b/rest,
+probe 期驱动 probe+trap+emCCD)、端到端守卫=标定→双帧监视→occupancy live
+processor→**streamed** t_off 扫→survival_rate 指数衰减斜率对上世界种的
+trap_off_lifetime(从 ground truth 推导非硬编码);W3 远程相机全流程——
+camera/remote.py(控制面 length-prefixed JSON TCP 照 zlc_pulse 样板+帧走同连接
+二进制块道,native dtype 端到端)、camera/endpoint.py 端口单源、`camera.remote`
+设备类型、`python -m zou_lab_control_v2 camera_server` CLI、回环测试含夺占语义。
+带宽结论(写进 remote.py docstring):2048²·uint8@10Hz=336Mbps 需千兆有线,
+100Hz 需 10GbE 或 ROI/binning,WiFi 不支持全幅。
+
+过程根因两条:①温度模板首版 probe 期误驱 cooling——虚拟世界只把 probe 通道
+算成像光,且 cooling 连高会把 load_tick(首段 cooling 窗末端)推迟到 frame0 之后
+→帧全暗;模板通道结构必须对照标定模板(权威)逐通道核。②编辑器投影带上
+bench_extras 后两测红:投影必须免副作用(day_folder 会**创建**当日目录)——拆
+`_bench_offer_extras`(投影,只含 tunable_devices)与 `_logic_extras`(启动,
++artifact_directory);`_Bare` double 补齐 devices 表面。

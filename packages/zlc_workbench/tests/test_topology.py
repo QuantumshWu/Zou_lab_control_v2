@@ -62,10 +62,10 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(session) ->
     node = _measure(session)
     rows = project_signals(session.signal_plane)
     assert rows, "a run that produced data offered nothing to look at"
-    row = next(row for row in rows if row.name == node.signal_key("frame_0"))
+    row = next(row for row in rows if row.name == node.signal_key("frames"))
     value = session.signal_plane.freeze().value(row.name)
     assert value is not None
-    assert row.label == f"frame_0  [{format_signal_shape(value.shape)}]"
+    assert row.label == f"frames  [{format_signal_shape(value.shape)}]"
     assert row.producer == "cm"
     assert row.state == "finished"
     assert row.derived_from == ""
@@ -86,7 +86,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
     monitor = watching.monitor()
     try:
         session.fire(shots=1)
-        live_signal = watching.signal_key("frame_0")
+        live_signal = watching.signal_key("frames")
         seen = 0
         deadline = time.monotonic() + 10.0
         while seen < CAMERA_WINDOWS and time.monotonic() < deadline:
@@ -106,7 +106,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
 
 def test_a_panel_already_showing_a_signal_says_so(session) -> None:
     node = _measure(session)
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     rows = project_signals(session.signal_plane, shown={signal})
     assert next(row for row in rows if row.name == signal).shown
 

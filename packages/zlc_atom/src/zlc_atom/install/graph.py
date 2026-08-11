@@ -81,6 +81,24 @@ class Installation:
         self.close()
 
 
+def tunable_devices(installation: Installation) -> dict[str, object]:
+    """Every installed device that volunteers scan-tunable fields, by key.
+
+    A device volunteers by exposing ``tunable_fields()`` -- authoring fields
+    whose bounds are BOTH declared, because an unbounded knob is not
+    scannable -- and ``tune(name, value)`` to move one of them at runtime.
+    Duck-typed like the optional ``close``: a device without runtime knobs
+    simply does not appear, which is an honest absence rather than a stub.
+    """
+
+    return {
+        key: leaf.device
+        for key, leaf in installation.devices.items()
+        if callable(getattr(leaf.device, "tunable_fields", None))
+        and callable(getattr(leaf.device, "tune", None))
+    }
+
+
 def _topological(specs: tuple[DeviceSpec, ...], descriptors: Mapping[str, DeviceTypeDescriptor]) -> tuple[DeviceSpec, ...]:
     by_type = {spec.type_id: spec for spec in specs}
     missing = {

@@ -105,7 +105,7 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     capture = node.prepare()
     session.fire(shots=1)
     result = capture.collect()
-    snapshot = result.publication.value(node.signal_key("frame_0")).snapshot
+    snapshot = result.publication.value(node.signal_key("frames")).snapshot
 
     path = session.save_figure("first light", arrays={"frames": snapshot})
     assert path.parent.parent == session.workspace.data
@@ -129,9 +129,9 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     reopened = json.loads(completed.stdout)
     assert reopened["pulse"] == PULSE_NAME
     assert reopened["dataset"] == ["frames"]
-    # Each camera-frame signal is an ordinary 2-D image block.  The other
-    # windows in the cycle are published as frame_1, frame_2, ... signals.
-    assert reopened["frames"] == [1, 1, 96, 128], (
+    # ONE frames signal: the whole cycle sits on the event axis of one block,
+    # (repeat, point, event, y, x).
+    assert reopened["frames"] == [1, 1, CAMERA_WINDOWS, 96, 128], (
         f"unexpected block shape {reopened['frames']}"
     )
 
@@ -152,7 +152,7 @@ def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
         capture = node.prepare()
         session.fire(shots=1)
         result = capture.collect()
-        snapshot = result.publication.value(node.signal_key("frame_0")).snapshot
+        snapshot = result.publication.value(node.signal_key("frames")).snapshot
         saved.append(session.save_figure("shot", arrays={"frames": snapshot}))
 
     assert len({path.name for path in saved}) == 3, "an afternoon save must not overwrite the morning"
@@ -231,7 +231,7 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
         capture = node.prepare()
         session.fire(shots=1)
         frames = np.asarray(
-            capture.collect().publication.value(node.signal_key("frame_0")).snapshot.block.values
+            capture.collect().publication.value(node.signal_key("frames")).snapshot.block.values
         )
         assert frames.size
         assert session.save_figure("from-file", arrays={"frames": frames}).exists()

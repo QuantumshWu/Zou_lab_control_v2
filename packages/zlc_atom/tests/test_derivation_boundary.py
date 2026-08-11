@@ -79,14 +79,14 @@ def _finished_shot(plane, camera, sequencer, windows):
 def test_a_finished_measurement_carries_no_coverage_and_that_is_correct(bench) -> None:
     plane, camera, sequencer, windows = bench
     node, result = _finished_shot(plane, camera, sequencer, windows)
-    value = result.publication.value(node.signal_key("frame_0"))
+    value = result.publication.value(node.signal_key("frames"))
     assert value.coverage is None, "a finished dataset has nothing left to keep up with"
 
 
 def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: Path) -> None:
     plane, camera, sequencer, windows = bench
     node, result = _finished_shot(plane, camera, sequencer, windows)
-    source_name = node.signal_key("frame_0")
+    source_name = node.signal_key("frames")
     source = result.publication.value(source_name)
     assert source is not None
     height, width = source.values.shape[-2:]
@@ -144,7 +144,8 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         source_signal=source_name,
     )
     different_outputs = different_context_processor.evaluate(source)
-    assert different_outputs["counts"].snapshot.block.values.shape[-1] == 1
+    # (repeat, site, event): one site column, one repeat, `windows` readout events.
+    assert different_outputs["counts"].snapshot.block.values.shape == (1, 1, windows)
     x, y, width, height = frame_contract.roi_xywh
     structurally_incompatible = TrapCalibration(
         calibration.site_map,
@@ -186,6 +187,8 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             "@logic/occupancy/occupied",
             "@logic/occupancy/valid",
             "@logic/occupancy/rate",
+            "@logic/occupancy/survival",
+            "@logic/occupancy/survival_rate",
             "@logic/occupancy/frame_judged",
             "@logic/occupancy/site_overlay",
         }
@@ -215,7 +218,10 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         )
         assert overlay.point_ids == site_ids
         assert overlay.labels == ("1",)
-        assert overlay.statuses == (PointStatus.OCCUPIED,)
+        # The frames signal carries the whole three-event cycle, so the status
+        # stack has three rows per site; zlc_plot's projection rule says a
+        # multi-row stack does not collapse to one marker and reads UNKNOWN.
+        assert overlay.statuses == (PointStatus.UNKNOWN,)
         np.testing.assert_allclose(
             overlay.coordinates,
             calibration.site_map.centers_xy,
@@ -267,7 +273,7 @@ def test_a_live_monitor_signal_does_carry_coverage(bench) -> None:
         deadline = time.monotonic() + 5.0
         while monitor.poll() is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        value = plane.freeze().value(node.signal_key("frame_0"))
+        value = plane.freeze().value(node.signal_key("frames"))
         assert value is not None, "the monitor published nothing"
         assert value.coverage is not None, "a live signal reports its current window"
     finally:

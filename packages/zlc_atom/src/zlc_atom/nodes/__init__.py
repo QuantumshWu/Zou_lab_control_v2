@@ -41,6 +41,21 @@ def scan_pulse_template_bytes() -> bytes:
     )
 
 
+def temperature_pulse_template_bytes() -> bytes:
+    """Return the shipped release-recapture (temperature) template.
+
+    Two probe windows around a variable trap-off release period whose
+    duration is the ``t_off`` API parameter -- the knob a temperature scan
+    turns while it watches occupancy survival.
+    """
+
+    return (
+        files("zlc_atom.nodes.scan")
+        .joinpath("temperature_template.json")
+        .read_bytes()
+    )
+
+
 __all__ = [
     "ArtifactCodec",
     "ArtifactInputSpec",
@@ -58,5 +73,6 @@ __all__ = [
     "WorkspaceResourceSpec",
     "calibration_pulse_template_bytes",
     "scan_pulse_template_bytes",
+    "temperature_pulse_template_bytes",
     "discover_logic_nodes",
 ]

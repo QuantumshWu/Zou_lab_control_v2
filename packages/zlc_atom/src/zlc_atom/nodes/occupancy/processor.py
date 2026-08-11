@@ -37,6 +37,13 @@ _OUTPUT_DECLARATIONS = (
     DatasetOutputDeclaration("occupied", "occupancy.occupied.v1"),
     DatasetOutputDeclaration("valid", "occupancy.valid.v1"),
     DatasetOutputDeclaration("rate", "occupancy.rate.v1"),
+    # Consecutive readout events within one repeat, paired: a site survives
+    # event k -> k+1 when it was occupied at k and still occupied at k+1.
+    # This is what a release-recapture (temperature) scan watches.  The
+    # vocabulary is frozen, so with fewer than two events both publish as
+    # one all-NaN pair -- NaN is this family's spelling of "not a fact".
+    DatasetOutputDeclaration("survival", "occupancy.survival.v1"),
+    DatasetOutputDeclaration("survival_rate", "occupancy.survival_rate.v1"),
     DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged.v1"),
     DatasetOutputDeclaration("site_overlay", ImagePointOverlay.CONTRACT_ID),
 )
@@ -48,6 +55,11 @@ class OccupancyResult:
     occupied: np.ndarray
     valid: np.ndarray
     rate: np.ndarray
+    #: Event-pair survival: ``(repeat, pairs, sites)`` where pairs is one
+    #: fewer than the readout events (floored at one all-NaN pair).  Its
+    #: leading dimensions deliberately differ from the per-event outputs.
+    survival: np.ndarray
+    survival_rate: np.ndarray
     frame_judged: np.ndarray
     artifacts: dict[str, OwnedSnapshot] = field(default_factory=dict)
 
@@ -56,6 +68,8 @@ class OccupancyResult:
         occupied = np.asarray(self.occupied, dtype=bool)
         valid = np.asarray(self.valid, dtype=bool)
         rate = np.asarray(self.rate, dtype="<f8")
+        survival = np.asarray(self.survival, dtype="<f8")
+        survival_rate = np.asarray(self.survival_rate, dtype="<f8")
         frame_judged = np.asarray(self.frame_judged)
         if (
             counts.shape != occupied.shape
@@ -66,12 +80,32 @@ class OccupancyResult:
             or frame_judged.shape[:-2] != counts.shape[:-1]
         ):
             raise ValueError("occupancy outputs must share leading dimensions")
-        for value in (counts, occupied, valid, rate, frame_judged):
+        if (
+            survival.ndim != 3
+            or survival.shape[-1] != counts.shape[-1]
+            or survival.shape[0] != counts.shape[0]
+            or survival_rate.shape != survival.shape[:-1]
+        ):
+            raise ValueError(
+                "survival outputs must be (repeat, pairs, sites) beside "
+                "(repeat, pairs)"
+            )
+        for value in (
+            counts,
+            occupied,
+            valid,
+            rate,
+            survival,
+            survival_rate,
+            frame_judged,
+        ):
             value.setflags(write=False)
         object.__setattr__(self, "counts", counts)
         object.__setattr__(self, "occupied", occupied)
         object.__setattr__(self, "valid", valid)
         object.__setattr__(self, "rate", rate)
+        object.__setattr__(self, "survival", survival)
+        object.__setattr__(self, "survival_rate", survival_rate)
         object.__setattr__(self, "frame_judged", frame_judged)
         object.__setattr__(self, "artifacts", dict(self.artifacts))
 
@@ -373,6 +407,29 @@ class OccupancyProcessor:
             out=np.full(valid_count.shape, np.nan, dtype="<f8"),
             where=valid_count > 0,
         )
+        # Survival pairs consecutive readout events within one repeat: a
+        # site survives k -> k+1 when it was occupied at k and is still
+        # occupied at k+1; sites empty at k state nothing and stay NaN,
+        # this family's spelling of "not a fact".
+        n_sites = self.calibration.n_sites
+        if occupied.ndim == 3 and occupied.shape[1] >= 2:
+            before_occupied = occupied[:, :-1]
+            after_occupied = occupied[:, 1:]
+            pair_valid = valid[:, :-1] & valid[:, 1:] & before_occupied
+            survival = np.where(
+                pair_valid, after_occupied.astype("<f8"), np.nan
+            )
+            pair_count = np.sum(pair_valid, axis=-1)
+            survival_rate = np.divide(
+                np.sum(after_occupied & pair_valid, axis=-1, dtype=float),
+                pair_count,
+                out=np.full(pair_count.shape, np.nan, dtype="<f8"),
+                where=pair_count > 0,
+            )
+        else:
+            repeats_dim = int(occupied.shape[0])
+            survival = np.full((repeats_dim, 1, n_sites), np.nan, dtype="<f8")
+            survival_rate = np.full((repeats_dim, 1), np.nan, dtype="<f8")
         frame_judged = np.stack(images, axis=0).reshape(
             (*leading, *self.calibration.frame_contract.image_shape)
         )
@@ -415,6 +472,22 @@ class OccupancyProcessor:
                 generation=generation,
                 revision=revision,
             ),
+            "survival": snapshot_from_array(
+                survival,
+                producer=self.producer,
+                signal="survival",
+                roles=(READOUT_EVENT, SITE),
+                generation=generation,
+                revision=revision,
+            ),
+            "survival_rate": snapshot_from_array(
+                survival_rate,
+                producer=self.producer,
+                signal="survival_rate",
+                roles=(READOUT_EVENT,),
+                generation=generation,
+                revision=revision,
+            ),
             "frame_judged": snapshot_from_array(
                 frame_judged,
                 producer=self.producer,
@@ -437,6 +510,8 @@ class OccupancyProcessor:
             occupied,
             valid,
             rate,
+            survival,
+            survival_rate,
             frame_judged,
             artifacts=artifacts,
         )

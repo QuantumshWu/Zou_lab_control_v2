@@ -93,7 +93,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
     plot = pytest.importorskip("zlc_plot")
     plane, node, sequencer, monitor = live_bench
 
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     assert value is not None, "the monitor published nothing to present"
@@ -185,7 +185,7 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     plot = pytest.importorskip("zlc_plot")
     plane, node, _sequencer, _monitor = live_bench
 
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     value = plane.freeze().value(signal)
     assert value is not None
     publication = plane.latest_publication(signal)
@@ -228,7 +228,7 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
     from concurrent.futures import Future
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -272,7 +272,7 @@ def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
     from concurrent.futures import Future
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -303,7 +303,7 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     from concurrent.futures import Future
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -355,7 +355,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
 
     plot = pytest.importorskip("zlc_plot")
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -439,7 +439,7 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
     from concurrent.futures import CancelledError, Future
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -471,7 +471,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
     from zlc_data import owned_snapshot_from_arrays
 
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -545,7 +545,7 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
 
     plot = pytest.importorskip("zlc_plot")
     plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     front = plane.freeze()
     value = front.value(signal)
     publication = front.publication(signal)
@@ -600,7 +600,7 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
     from zlc_workbench.logic import stable_signal_key
 
     plane, node, _sequencer, _monitor = live_bench
-    source = plane.freeze().value(node.signal_key("frame_0"))
+    source = plane.freeze().value(node.signal_key("frames"))
     assert source is not None
     shape = tuple(int(value) for value in source.snapshot.block.values.shape[-2:])
     site_ids = ("a", "b", "c")
@@ -675,7 +675,7 @@ def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None
     from zlc_workbench.board import LiveBoard
 
     plane, node, sequencer, monitor = live_bench
-    signal = node.signal_key("frame_0")
+    signal = node.signal_key("frames")
     value = plane.freeze().value(signal)
     assert value is not None
 

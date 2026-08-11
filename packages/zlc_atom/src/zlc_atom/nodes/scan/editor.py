@@ -6,8 +6,8 @@ editor owns exactly one authored field -- ``plan`` -- and says so through
 ``managed_fields``, so the auto-generated form does not render the raw JSON
 beside it.
 
-Ports are read from the resolved pulse template in the projection: the table
-can only offer what the pulse declares, which is the same rule the plan's own
+Ports are read from the projection -- the resolved pulse template's API
+parameters plus the bench's tunable devices -- the same union the plan's own
 binding enforces.  An axis whose values are not a uniform grid (authored in a
 notebook, say) is shown as "custom" and left untouched until a spin is edited,
 at which point it becomes the uniform grid the spins describe.
@@ -29,7 +29,7 @@ from zlc_ui.fluent import (
     FluentSpinBox,
 )
 
-from .plan import ScanAxis, ScanPlan, scan_ports_for
+from .plan import ScanAxis, ScanPlan, scan_ports_for, scan_ports_for_devices
 
 
 def _uniform(values: tuple[float, ...]) -> bool:
@@ -170,7 +170,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
         resources = projection.get("workspace_resources") or {}
         resource = resources.get("pulse_template") if isinstance(resources, Mapping) else None
         sequence = getattr(resource, "value", None)
-        ports = scan_ports_for(sequence) if sequence is not None else ()
+        # The editor offers the same union the build binds against: the
+        # pulse's parameters plus the bench's tunable devices.
+        extras = projection.get("bench_extras") or {}
+        tunables = extras.get("tunable_devices") if isinstance(extras, Mapping) else None
+        ports = (
+            scan_ports_for(sequence) if sequence is not None else ()
+        ) + scan_ports_for_devices(tunables)
         values = projection.get("form_values") or {}
         plan_text = str(values.get("plan") or "") if isinstance(values, Mapping) else ""
 

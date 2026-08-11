@@ -10,6 +10,7 @@ from typing import Callable
 
 import numpy as np
 
+from zlc_atom.authoring import AuthoringField
 from zlc_atom.devices.camera.contract import (
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
@@ -141,6 +142,41 @@ class VirtualCamera:
             self._exposure_seconds = exposure
             self._roi_xywh = roi
         return self.capture_working_point()
+
+    def tunable_fields(self) -> tuple[AuthoringField, ...]:
+        """The runtime knobs this camera volunteers to a scan (duck-typed).
+
+        Both bounds are declared because a scan plan must be refusable
+        against a finite range; the worker reads the live value per frame,
+        so tuning works while armed -- which is exactly when a scan needs it.
+        """
+
+        return (
+            AuthoringField(
+                "exposure_seconds",
+                "float",
+                "Exposure (s)",
+                float(self.config.exposure_seconds),
+                minimum=1e-6,
+                maximum=10.0,
+            ),
+        )
+
+    def tune(self, name: str, value: float) -> None:
+        (field,) = self.tunable_fields()
+        if str(name) != field.name:
+            raise ValueError(
+                f"virtual camera has no tunable field {name!r}; "
+                f"it offers {field.name!r}"
+            )
+        exposure = float(value)
+        if not np.isfinite(exposure) or not (field.minimum <= exposure <= field.maximum):
+            raise ValueError(
+                f"exposure_seconds must lie in [{field.minimum:g}, {field.maximum:g}]"
+            )
+        with self._condition:
+            self._exposure_seconds = exposure
+            self._condition.notify_all()
 
     def arm(
         self,
