@@ -77,10 +77,12 @@ def test_layout_rejected_replace_rolls_back_completely() -> None:
 def test_projection_rejected_replace_is_untouched_precommit(logical_shape) -> None:
     session = _grid_session()
     try:
-        # x=repeat leaves the authored 100-row point domain unreferenced;
-        # the projection layer rejects before any state is touched.
+        # x names a coordinate the point table does not declare; the
+        # projection layer rejects before any state is touched.  (x=repeat
+        # is NOT a rejection any more: an axis this spec does not name pools
+        # under the declared reduction, point axis included.)
         with pytest.raises(Exception):
-            session.replace_spec(CurvePlot(AxisRef.repeat()))
+            session.replace_spec(CurvePlot(AxisRef.point("undeclared")))
         description = session.describe_display()
         assert description.semantics.kind is PlotKind.CURVE
         assert description.semantics.x == AxisRef.point("x")

@@ -10,8 +10,8 @@ from ..specs import CurvePlot, Reduction
 from .base import KindHandler
 
 
-def render(renderer: Any, payload: Any, state: Any) -> None:
-    renderer._update_curve(renderer.primary_axes, payload, state, "curve")
+def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **pooled: Any) -> None:
+    renderer._update_curve(axes, payload, state, key, **pooled)
 
 
 def build_payload(projection: Any, view: Any, _state: Any) -> None:

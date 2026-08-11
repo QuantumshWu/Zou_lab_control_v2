@@ -58,6 +58,7 @@ from .specs import (
     PlotSpec,
     PulseTimelinePlot,
     RollingPlot,
+    semantic_spec,
 )
 from .state import DisplayState
 from .style import PlotStyleConfig, style_context
@@ -563,8 +564,6 @@ class MatplotlibRenderer:
         self._fit_axis: Any | None = None
         self._fit_family: str | None = None
         self._fit_model_id: str | None = None
-        self._image_overlay: ImagePointOverlay | None = None
-        self._image_overlay_signature: tuple[object, ...] | None = None
         self._data_revision: int | None = None
         #: Cached Agg chrome region (everything except renderer-owned dynamic
         #: artists) and the canvas signature it was captured for.  Payload-only
@@ -574,15 +573,16 @@ class MatplotlibRenderer:
         #: published.
         self._background_region: Any = None
         self._background_signature: tuple[object, ...] | None = None
-        #: The finite range of the image currently drawn, and the arrays it was
-        #: measured from.  The range is a function of the data alone -- it
-        #: cannot change when the viewport does -- yet it was rescanned on every
-        #: pan step and every wheel tick: 0.85 ms over a 1920x1200 frame, at the
-        #: pointer-motion rate.  Keyed on the array objects rather than their
-        #: ids, so a freed array cannot have its id recycled into a stale hit.
-        self._image_range_key: tuple[int, int, int | None] | None = None
-        self._image_range: tuple[float, float] | None = None
-        self._image_range_held: tuple[object, object] | None = None
+        #: Per painted surface: the finite range of the image drawn on it, and
+        #: the arrays it was measured from.  The range is a function of the
+        #: data alone -- it cannot change when the viewport does -- yet it was
+        #: rescanned on every pan step and every wheel tick: 0.85 ms over a
+        #: 1920x1200 frame, at the pointer-motion rate.  The source arrays are
+        #: held so a freed array cannot have its id recycled into a stale hit.
+        self._image_ranges: dict[
+            str,
+            tuple[tuple[int, int, int | None], tuple[float, float] | None, tuple[object, object]],
+        ] = {}
         self._last_payload: Any = None
         self._last_state: DisplayState | None = None
         self._home_limits: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
@@ -610,17 +610,70 @@ class MatplotlibRenderer:
         return MappingProxyType({key: tuple(value) for key, value in self._axes.items()})
 
     @property
-    def primary_axes(self) -> Any:
-        if isinstance(self.spec, FacetGridPlot):
-            values = self._axes.get("facet_cell", [])
-            if values:
-                index = self._focused_facet_index or 0
-                return values[min(index, len(values) - 1)]
+    def semantic_spec(self) -> PlotSpec:
+        """The spec that decides what this renderer DRAWS on one surface.
+
+        A FacetGrid is a layout; each of its cells draws the cell spec.  Every
+        per-plot facility gates on this, never on the outer spec: re-typing it
+        by hand is what left colour-limit dragging, the point overlay and the
+        crosshair value rail working for a standalone image and dead inside a
+        facet cell of the very same picture.
+        """
+
+        return semantic_spec(self.spec)
+
+    @property
+    def painted_surfaces(self) -> tuple[tuple[str, Any, int | None], ...]:
+        """Every data surface this presentation paints: (artist key, axes, cell).
+
+        One plot paints ONE surface under its kind's name; a FacetGrid paints
+        its visible cells under ``facet:<i>``, or only the focused cell.  This
+        is the single answer to "what is on screen right now": the render
+        dispatch, the requested view, the home limits, the point overlay and
+        every image gesture read it instead of re-deriving their own.
+        """
+
+        if self.semantic_spec is self.spec:
+            return (self._whole_surface(),)
+        cells = self._axes.get("facet_cell", ())
+        if self._facet_focus_index is not None:
+            index = self._facet_focus_index
+            return ((f"facet:{index}", cells[index], index),)
+        return tuple(
+            (f"facet:{index}", cells[index], index)
+            for index in range(min(self._visible_facet_count, len(cells)))
+        )
+
+    def _whole_surface(self) -> tuple[str, Any, None]:
+        """The single-surface answer: this kind's artist key and its axes."""
+
+        key = handler_for(self.spec).kind.value
         for role in ("main", "history", "image", "facet_cell"):
             values = self._axes.get(role)
             if values:
-                return values[0]
-        return next(iter(self._axes.values()))[0]
+                return (key, values[0], None)
+        return (key, next(iter(self._axes.values()))[0], None)
+
+    @property
+    def primary_surface(self) -> tuple[str, Any, int | None]:
+        """The one painted surface a pointer gesture and its chrome act on.
+
+        The ONE spelling of "which cell is active".  Two spellings is how the
+        colour-limit preview edited a different artist than the one the rail
+        was measured from.
+        """
+
+        surfaces = self.painted_surfaces
+        if not surfaces:
+            # A grid with no cells paints nothing, yet the pointer and chrome
+            # questions still need an axes to resolve against.
+            return self._whole_surface()
+        index = self._focused_facet_index or 0
+        return surfaces[min(index, len(surfaces) - 1)]
+
+    @property
+    def primary_axes(self) -> Any:
+        return self.primary_surface[1]
 
     def facet_index_for_axes(self, axes: Any) -> int | None:
         if not isinstance(self.spec, FacetGridPlot):
@@ -777,8 +830,7 @@ class MatplotlibRenderer:
         self._fit_axis = None
         self._fit_family = None
         self._fit_model_id = None
-        self._image_overlay = None
-        self._image_overlay_signature = None
+        self._image_ranges.clear()
         self._data_revision = None
         self._last_payload = None
         self._last_state = None
@@ -828,10 +880,9 @@ class MatplotlibRenderer:
             and selected_effects & RenderEffect.AXIS_TRANSFORM
         ):
             base_changed = True
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
         if (
             selected_effects & RenderEffect.AXIS_TRANSFORM
-            and isinstance(semantic, ImagePlot)
+            and isinstance(self.semantic_spec, ImagePlot)
         ):
             # The display front is viewport-sized, so a view edit changes its
             # crop even though the immutable source payload is unchanged.
@@ -855,16 +906,22 @@ class MatplotlibRenderer:
             self._last_fit_overlay = (
                 painted_fit_overlays[0] if len(painted_fit_overlays) == 1 else None
             )
+            painted = self.painted_surfaces
             if base_changed:
                 self._update_plot(payload, state)
-                self._capture_home_limits(self.primary_axes)
+                for _key, axes, _index in painted:
+                    self._capture_home_limits(axes)
             elif style_only:
                 self._update_base_style(state)
             if state_changed and selected_effects & RenderEffect.TEXT:
                 self._update_text_artists(payload, state)
             if state_changed and selected_effects & RenderEffect.CHROME:
                 self._update_chrome_artists(state)
-            self._apply_requested_view(self.primary_axes, frame.view_limits)
+            # Every painted surface honours the requested view, not just the
+            # selected one: a FacetGrid overview shows N cells of the same
+            # picture, and zooming one of them alone is not a view of anything.
+            for _key, axes, _index in painted:
+                self._apply_requested_view(axes, frame.view_limits)
             self._classifier_labels = frame.classifier_labels
             self._update_classifier(
                 frame.classifier_overlays,
@@ -879,7 +936,19 @@ class MatplotlibRenderer:
                 overview=overview,
                 model_id=frame.fit_model_id,
             )
-            self._update_image_point_overlay(payload, frame.image_overlay, state)
+            cells = tuple(getattr(payload, "cells", ()))
+            for key, axes, index in painted:
+                cell = None if index is None else cells[index]
+                self._update_image_point_overlay(
+                    axes,
+                    payload if cell is None else getattr(cell, "payload", cell),
+                    frame.image_overlay,
+                    state,
+                    key,
+                    None
+                    if cell is None
+                    else getattr(cell, "facet_value_canonical", None),
+                )
             self._compose_frame(
                 chrome_stable=not bool(
                     selected_effects
@@ -892,10 +961,7 @@ class MatplotlibRenderer:
             )
 
     def _capture_home_limits(self, axis: Any) -> None:
-        semantic = (
-            self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
-        )
-        if isinstance(semantic, ImagePlot) and id(axis) in self._home_limits:
+        if isinstance(self.semantic_spec, ImagePlot) and id(axis) in self._home_limits:
             # Image mutation registers the full source extent before applying
             # the frame viewport.  Never replace it with a zoomed front.
             return
@@ -922,7 +988,8 @@ class MatplotlibRenderer:
         # Plot-specific mapping edits are still in-place artist mutations; the
         # plot updater owns their one canonical implementation.
         self._update_plot(self._last_payload, state)
-        self._capture_home_limits(self.primary_axes)
+        for _key, axes, _index in self.painted_surfaces:
+            self._capture_home_limits(axes)
 
     def _set_xlim(self, axis: Any, low: float, high: float) -> None:
         previous = np.asarray(axis.get_xlim(), dtype=float)
@@ -1232,7 +1299,8 @@ class MatplotlibRenderer:
 
     def _update_plot(self, payload: Any, state: DisplayState) -> None:
         """Update semantic data artists in place for one complete frame."""
-        handler_for(self.spec).render(self, payload, state)
+        key, axes, _index = self.primary_surface
+        handler_for(self.spec).render(self, payload, state, axes=axes, key=key)
         self._apply_common_axes(state)
 
     def end_selector_gesture(self) -> None:
@@ -1283,7 +1351,7 @@ class MatplotlibRenderer:
         payload: Any,
         state: DisplayState,
     ) -> tuple[str, str, str | None]:
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
+        semantic = self.semantic_spec
         if isinstance(self.spec, FacetGridPlot):
             cells = tuple(getattr(payload, "cells", ()))
             if cells:
@@ -1383,14 +1451,8 @@ class MatplotlibRenderer:
                 axis.set_xlabel(x_label, fontsize=self.style.fonts.axis_label_pt)
                 axis.set_ylabel(y_label, fontsize=self.style.fonts.axis_label_pt)
         else:
-            if isinstance(self.spec, ImagePlot):
-                axis = self._axes.get("image", [self.primary_axes])[0]
-            elif isinstance(self.spec, RollingPlot):
-                axis = self._axes.get("history", [self.primary_axes])[0]
-            else:
-                axis = self.primary_axes
-            axis.set_xlabel(x_label)
-            axis.set_ylabel(y_label)
+            self.primary_axes.set_xlabel(x_label)
+            self.primary_axes.set_ylabel(y_label)
         if value_label is not None:
             for key, value in self._artists.items():
                 if key.endswith(":colorbar") and hasattr(value, "set_label"):
@@ -1470,8 +1532,7 @@ class MatplotlibRenderer:
             if prepared_series is None
             else prepared_series
         )
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
-        x_label, y_label = self._curve_labels(semantic, source, state)
+        x_label, y_label = self._curve_labels(self.semantic_spec, source, state)
         self._mutate_series_artists(
             axes,
             series,
@@ -1637,8 +1698,7 @@ class MatplotlibRenderer:
             if selected_x is not None:
                 self._set_xlim(axes, *selected_x)
             self._set_ylim(axes, *selected_y)
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
-        labels = getattr(semantic, "labels", None)
+        labels = getattr(self.semantic_spec, "labels", None)
         explicit_x = _state_label(state, "x_label", None)
         if explicit_x is None:
             explicit_x = _state_label(
@@ -1753,26 +1813,30 @@ class MatplotlibRenderer:
 
     def _cached_image_range(
         self,
+        key: str,
         source_values: object,
         source_valid: object,
         values: np.ndarray,
         valid: np.ndarray,
     ) -> tuple[float, float] | None:
-        """The finite range of this image, measured once per image.
+        """The finite range of one image surface, measured once per revision.
 
         Keyed on the arrays the caller was handed rather than the normalised
         pair: normalisation rebuilds a broadcast view every call, so a key made
-        of those is a fresh object each time and never matches.
+        of those is a fresh object each time and never matches.  Cached per
+        surface ``key``, so a FacetGrid overview measures each cell once even
+        though the pooled colour scale asks for every cell's range before any
+        cell is drawn.
         """
 
-        key = (id(source_values), id(source_valid), self._data_revision)
-        if self._image_range_key == key:
-            return self._image_range
-        self._image_range = _image_data_range(values, valid)
-        self._image_range_key = key
-        #: Held so the ids above cannot be recycled by a freed array.
-        self._image_range_held = (source_values, source_valid)
-        return self._image_range
+        revision_key = (id(source_values), id(source_valid), self._data_revision)
+        cached = self._image_ranges.get(key)
+        if cached is not None and cached[0] == revision_key:
+            return cached[1]
+        measured = _image_data_range(values, valid)
+        #: The source arrays are held so their ids cannot be recycled.
+        self._image_ranges[key] = (revision_key, measured, (source_values, source_valid))
+        return measured
 
     def _resolve_image_limits(
         self,
@@ -1905,7 +1969,7 @@ class MatplotlibRenderer:
         )
         requested = (
             self._requested_view_limits
-            if axes is self.primary_axes
+            if any(axes is item for _key, item, _index in self.painted_surfaces)
             else None
         )
         if requested is None:
@@ -2182,11 +2246,14 @@ class MatplotlibRenderer:
 
     def _update_image(
         self,
+        axes: Any,
         payload: Any,
         state: DisplayState,
         key: str,
+        *,
+        color_limits: tuple[float, float] | None = None,
     ) -> None:
-        labels = getattr(self.spec, "labels", None)
+        labels = getattr(self.semantic_spec, "labels", None)
         explicit_x = _state_label(
             state,
             "x_label",
@@ -2203,6 +2270,7 @@ class MatplotlibRenderer:
             labels.value if labels and labels.value else None,
         )
         self._mutate_image_artists(
+            axes,
             np.asarray(_display_array(payload.x)),
             np.asarray(_display_array(payload.y)),
             np.asarray(_display_array(payload.z)),
@@ -2217,10 +2285,12 @@ class MatplotlibRenderer:
                 else _quantity_label(payload.z, "value", explicit_value)
             ),
             coordinate_aspect=_image_coordinate_aspect(payload.x, payload.y),
+            color_limits=color_limits,
         )
 
     def _mutate_image_artists(
         self,
+        axes: Any,
         x: np.ndarray,
         y: np.ndarray,
         z: np.ndarray,
@@ -2232,16 +2302,25 @@ class MatplotlibRenderer:
         y_label: str,
         value_label: str,
         coordinate_aspect: float | None,
+        color_limits: tuple[float, float] | None = None,
     ) -> None:
-        axes = self._axes["image"][0] if "image" in self._axes else self.primary_axes
         source_values, source_valid = z, valid
         z, valid, extent = _image_arrays(x, y, z, valid)
         # Keyed on the arrays the CALLER was handed.  _image_arrays rebuilds
         # its broadcast view on every call, so keying on what it returns meant
         # the key was a fresh object each time and the cache never hit -- the
         # whole point of it being a function of the data alone.
-        data_range = self._cached_image_range(source_values, source_valid, z, valid)
-        vmin, vmax = self._resolve_image_limits(key, data_range, state)
+        data_range = self._cached_image_range(
+            key, source_values, source_valid, z, valid
+        )
+        # ``color_limits`` is the GRID's pooled scale when a FacetGrid overview
+        # paints this cell: every cell of one grid must be comparable, so the
+        # scale is a fact about the grid and this surface is told it.
+        vmin, vmax = (
+            self._resolve_image_limits(key, data_range, state)
+            if color_limits is None
+            else color_limits
+        )
         if self._color_limit_candidate is not None:
             vmin = self._color_limit_candidate.value.low
             vmax = self._color_limit_candidate.value.high
@@ -2413,13 +2492,30 @@ class MatplotlibRenderer:
                 self._artists[state_key] = colorbar_state
                 self._mark_axes_chrome_dirty(colorbar_axes[0])
         self._apply_colorbar_visibility(state)
-        apply_smart_ticks(
-            axes,
-            max_ticks_x=policy.image_spatial_max_ticks,
-            max_ticks_y=policy.image_spatial_max_ticks,
-        )
+        # A tick configuration has ONE owner per axes: it writes the axis'
+        # ``_zlc_tick_signature`` and installs its locator only when that
+        # signature changes.  In a FacetGrid OVERVIEW the grid owns cell ticks
+        # (one shared 3-tick locator, boundary-gated labels, applied below the
+        # cell loop); the image kind's own spatial budget owns them whenever
+        # this surface is the whole plot -- standalone, or a focused cell.
+        # With both writing, each frame reinstalled two locators per cell and
+        # reset their tick artists, undoing the "install once" guarantee.
+        if self._facet_focus_index is not None or self.semantic_spec is self.spec:
+            apply_smart_ticks(
+                axes,
+                max_ticks_x=policy.image_spatial_max_ticks,
+                max_ticks_y=policy.image_spatial_max_ticks,
+            )
 
-    def _update_rolling(self, payload: Any, state: DisplayState) -> None:
+    def _update_rolling(
+        self,
+        axes: Any,
+        payload: Any,
+        state: DisplayState,
+        key: str,
+    ) -> None:
+        # A rolling plot's one surface IS its history axes.
+        history = axes
         series = self._series(payload)
         sliced: list[_PreparedSeries] = []
         for item in series:
@@ -2453,12 +2549,11 @@ class MatplotlibRenderer:
             if series
             else ("value" if explicit_y is None else explicit_y)
         )
-        history = self._axes.get("history", [self.primary_axes])[0]
         self._mutate_series_artists(
             history,
             tuple(sliced),
             state,
-            "rolling:history",
+            f"{key}:history",
             x_label=payload_x if explicit_x is None else explicit_x,
             y_label=y_label,
         )
@@ -2481,7 +2576,7 @@ class MatplotlibRenderer:
             usable = sliced[0].y[sliced[0].valid]
             if usable.size:
                 latest = float(usable[-1])
-        latest_text = self._artists.get("rolling:latest")
+        latest_text = self._artists.get(f"{key}:latest")
         if latest_text is None:
             latest_text = history.text(
                 0.97,
@@ -2493,7 +2588,7 @@ class MatplotlibRenderer:
                 va="top",
                 fontsize=self.style.fonts.annotation_pt,
             )
-            self._artists["rolling:latest"] = latest_text
+            self._artists[f"{key}:latest"] = latest_text
         latest_text.set_text("" if latest is None else f"{latest:.6g}")
 
         distribution_axes = self._axes.get("distribution", [])
@@ -2523,7 +2618,7 @@ class MatplotlibRenderer:
             side = distribution_axes[0]
             self._update_horizontal_histogram(
                 side,
-                "rolling:distribution",
+                f"{key}:distribution",
                 edges,
                 counts,
                 y_limits,
@@ -2532,7 +2627,7 @@ class MatplotlibRenderer:
             )
 
     #: Side-chrome artist keys the focused image cell creates under its
-    #: ``facet:<i>:image`` namespace.  Purged together with the side axes so
+    #: ``facet:<i>`` surface namespace.  Purged together with the side axes so
     #: a later focus rebuilds them on the new axes instead of ghosting.
     _FACET_FOCUS_CHROME_SUFFIXES = (
         "distribution",
@@ -2558,7 +2653,7 @@ class MatplotlibRenderer:
         if previous == index:
             return
         if previous is not None:
-            key = f"facet:{previous}:image"
+            key = f"facet:{previous}"
             for suffix in self._FACET_FOCUS_CHROME_SUFFIXES:
                 self._artists.pop(f"{key}:{suffix}", None)
             removed: list[Any] = []
@@ -2598,7 +2693,7 @@ class MatplotlibRenderer:
         focus_plans = (
             self.plan.facet_focus_axes
             if self._facet_focus_index is not None
-            and isinstance(self.spec.cell, ImagePlot)
+            and isinstance(self.semantic_spec, ImagePlot)
             else None
         )
         self._sync_facet_focus_chrome(
@@ -2635,18 +2730,26 @@ class MatplotlibRenderer:
         axes = self._axes.get("facet_cell", [])
         if self._visible_facet_count != len(cells):
             raise RuntimeError("FacetGrid payload and rendered topology are inconsistent")
-        curve_series: tuple[tuple[_PreparedSeries, ...], ...] = ()
-        curve_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
-        histogram_arrays: tuple[tuple[np.ndarray, np.ndarray], ...] = ()
-        histogram_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
-        image_arrays: tuple[Any, ...] = ()
-        image_limits: tuple[float, float] | None = None
+        semantic = self.semantic_spec
+        handler = handler_for(semantic)
         focused = self._facet_focus_index is not None
         # Facet focus changes the physical cell box.  Establish the complete
         # frame geometry before an image cell chooses its display raster.
         self._position_facet_axes_for_frame(axes)
 
-        if isinstance(self.spec.cell, CurvePlot) and not focused:
+        # Everything resolved below the loop is a fact about the GRID, not
+        # about any cell: one colour scale, one x span, one histogram binning,
+        # so that N cells of one measurement are comparable at a glance.  Each
+        # is handed to the cell renders as the SAME keyword argument a
+        # standalone plot of that kind already accepts.  It stays an explicit
+        # three-branch on purpose: a per-kind hook would hide that the pooling
+        # is the grid's decision, not the cell's.
+        cell_options: tuple[dict[str, Any], ...] = tuple({} for _ in cells)
+        curve_series: tuple[tuple[_PreparedSeries, ...], ...] = ()
+        curve_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
+        histogram_arrays: tuple[tuple[np.ndarray, np.ndarray], ...] = ()
+        histogram_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
+        if isinstance(semantic, CurvePlot) and not focused:
             curve_series = tuple(
                 self._prepare_curve_series(
                     self._series(getattr(cell, "payload", cell))
@@ -2672,7 +2775,11 @@ class MatplotlibRenderer:
                         state,
                     ),
                 )
-        elif isinstance(self.spec.cell, HistogramPlot):
+            cell_options = tuple(
+                {"limits": curve_limits, "prepared_series": series}
+                for series in curve_series
+            )
+        elif isinstance(semantic, HistogramPlot):
             histogram_arrays = tuple(
                 self._histogram_arrays(getattr(cell, "payload", cell), state)
                 if not focused or index == self._facet_focus_index
@@ -2709,171 +2816,75 @@ class MatplotlibRenderer:
                         state,
                     ),
                 )
-        elif isinstance(self.spec.cell, ImagePlot):
-            prepared_images = []
+            cell_options = tuple(
+                {"arrays": arrays, "limits": histogram_limits}
+                for arrays in histogram_arrays
+            )
+        elif isinstance(semantic, ImagePlot) and not focused:
+            pooled_low: float | None = None
+            pooled_high: float | None = None
             for index, cell in enumerate(cells):
-                if focused and index != self._facet_focus_index:
-                    prepared_images.append(None)
-                    continue
                 cell_payload = getattr(cell, "payload", cell)
-                prepared_images.append(
-                    _image_arrays(
-                        np.asarray(_display_array(cell_payload.x)),
-                        np.asarray(_display_array(cell_payload.y)),
-                        np.asarray(_display_array(cell_payload.z)),
-                        getattr(cell_payload, "valid", None),
+                source_values = np.asarray(_display_array(cell_payload.z))
+                source_valid = getattr(cell_payload, "valid", None)
+                values, valid, _extent = _image_arrays(
+                    np.asarray(_display_array(cell_payload.x)),
+                    np.asarray(_display_array(cell_payload.y)),
+                    source_values,
+                    source_valid,
+                )
+                # Measured under the cell surface's OWN key, so the render
+                # below reads this exact answer back out of the cache instead
+                # of rescanning every cell a second time.
+                cell_range = self._cached_image_range(
+                    f"facet:{index}", source_values, source_valid, values, valid
+                )
+                if cell_range is not None:
+                    pooled_low = (
+                        cell_range[0]
+                        if pooled_low is None
+                        else min(pooled_low, cell_range[0])
                     )
-                )
-            image_arrays = tuple(prepared_images)
-            if not focused:
-                pooled_low: float | None = None
-                pooled_high: float | None = None
-                for prepared in image_arrays:
-                    if prepared is None:
-                        continue
-                    values, valid, _extent = prepared
-                    cell_range = _image_data_range(values, valid)
-                    if cell_range is not None:
-                        pooled_low = (
-                            cell_range[0]
-                            if pooled_low is None
-                            else min(pooled_low, cell_range[0])
-                        )
-                        pooled_high = (
-                            cell_range[1]
-                            if pooled_high is None
-                            else max(pooled_high, cell_range[1])
-                        )
-                pooled_range = (
-                    None
-                    if pooled_low is None or pooled_high is None
-                    else (pooled_low, pooled_high)
-                )
-                image_limits = self._resolve_image_limits(
-                    "facet:image", pooled_range, state
-                )
+                    pooled_high = (
+                        cell_range[1]
+                        if pooled_high is None
+                        else max(pooled_high, cell_range[1])
+                    )
+            pooled_range = (
+                None
+                if pooled_low is None or pooled_high is None
+                else (pooled_low, pooled_high)
+            )
+            image_limits = self._resolve_image_limits(
+                "facet:image", pooled_range, state
+            )
+            cell_options = tuple({"color_limits": image_limits} for _cell in cells)
 
         outer_x = ""
         outer_y = ""
         visible_axes: list[tuple[int, Any]] = []
-        for index, axis in enumerate(axes):
-            visible = index < len(cells) and (
-                not focused or index == self._facet_focus_index
-            )
-            axis.set_visible(visible)
-            if not visible:
-                continue
+        # ONE call draws a cell, and it is the same call that draws the
+        # standalone plot of that kind.  The hand-copied per-kind chain that
+        # used to live here re-implemented the render half and never migrated
+        # the interaction half, so every facility a cell should inherit had to
+        # REMEMBER to delegate -- and the ones that forgot (colour-limit
+        # dragging, square cells, the point overlay, the crosshair value rail)
+        # were user-visible bugs.
+        for key, axis, index in self.painted_surfaces:
             cell = cells[index]
-            cell_payload = getattr(cell, "payload", cell)
-            if isinstance(self.spec.cell, CurvePlot):
-                self._update_curve(
-                    axis,
-                    cell_payload,
-                    state,
-                    f"facet:{index}:curve",
-                    limits=curve_limits,
-                    prepared_series=(
-                        curve_series[index] if curve_series else None
-                    ),
-                )
-                outer_x = outer_x or axis.get_xlabel()
-                outer_y = outer_y or axis.get_ylabel()
-            elif isinstance(self.spec.cell, HistogramPlot):
-                arrays = histogram_arrays[index] if index < len(histogram_arrays) else None
-                self._update_histogram(
-                    axis,
-                    cell_payload,
-                    state,
-                    f"facet:{index}:histogram",
-                    arrays=arrays,
-                    limits=histogram_limits,
-                )
-                outer_x = outer_x or axis.get_xlabel()
-                outer_y = outer_y or axis.get_ylabel()
-            elif isinstance(self.spec.cell, ImagePlot):
-                prepared_image = image_arrays[index]
-                if prepared_image is None:
-                    raise RuntimeError("focused facet image was not prepared")
-                values, valid, extent = prepared_image
-                key = f"facet:{index}:image"
-                cell_data_range = _image_data_range(values, valid)
-                cell_image_limits = (
-                    self._resolve_image_limits(
-                        key,
-                        cell_data_range,
-                        state,
-                    )
-                    if focused
-                    else image_limits
-                )
-                if focused and self._color_limit_candidate is not None:
-                    cell_image_limits = (
-                        self._color_limit_candidate.value.low,
-                        self._color_limit_candidate.value.high,
-                    )
-                _cell_image, cell_cmap = self._update_image_artist(
-                    axis,
-                    values,
-                    valid,
-                    extent,
-                    state,
-                    key,
-                    cell_image_limits,
-                    square_view=False,
-                    coordinate_aspect=_image_coordinate_aspect(
-                        cell_payload.x,
-                        cell_payload.y,
-                    ),
-                )
-                if focused:
-                    # The focused cell IS the standalone Image surface: one
-                    # chrome authority paints its distribution, colorbar and
-                    # value label under the cell's key namespace.
-                    labels = self.spec.labels
-                    explicit_value = _state_label(
-                        state,
-                        "value_label",
-                        labels.value if labels and labels.value else None,
-                    )
-                    self._update_image_chrome(
-                        axis,
-                        key,
-                        values,
-                        valid,
-                        state,
-                        cell_data_range,
-                        cell_image_limits,
-                        cell_cmap,
-                        (
-                            explicit_value
-                            if explicit_value
-                            and _EXPLICIT_UNIT_SUFFIX.search(explicit_value)
-                            else _quantity_label(
-                                cell_payload.z, "value", explicit_value
-                            )
-                        ),
-                    )
-                cell_labels = getattr(self.spec.cell, "labels", None)
-                explicit_x = _state_label(
-                    state,
-                    "x_label",
-                    cell_labels.x if cell_labels and cell_labels.x else None,
-                )
-                explicit_y = _state_label(
-                    state,
-                    "y_label",
-                    cell_labels.y if cell_labels and cell_labels.y else None,
-                )
-                outer_x = outer_x or _quantity_label(
-                    cell_payload.x,
-                    "x",
-                    explicit_x,
-                )
-                outer_y = outer_y or _quantity_label(
-                    cell_payload.y,
-                    "y",
-                    explicit_y,
-                )
+            handler.render(
+                self,
+                getattr(cell, "payload", cell),
+                state,
+                axes=axis,
+                key=key,
+                **cell_options[index],
+            )
+            # The cell just labelled its own axes exactly as the standalone
+            # plot does; the grid lifts the first one out to its shared outer
+            # label and leaves the cells clean.
+            outer_x = outer_x or axis.get_xlabel()
+            outer_y = outer_y or axis.get_ylabel()
             axis.set_xlabel("")
             axis.set_ylabel("")
             visible_axes.append((index, axis))
@@ -2971,7 +2982,7 @@ class MatplotlibRenderer:
             fontsize=self.style.fonts.figure_title_pt,
             pad=self.style.render.compact_axes_title_pad_pt,
         )
-        if isinstance(self.spec.cell, ImagePlot):
+        if isinstance(semantic, ImagePlot):
             # The chrome authority already applied the standalone image
             # kind's spatial tick budget; restating it keeps the signature
             # stable instead of re-installing default-budget locators.
@@ -2991,13 +3002,25 @@ class MatplotlibRenderer:
 
     def _update_image_point_overlay(
         self,
+        axis: Any,
         payload: Any,
         overlay: ImagePointOverlay | None,
         state: DisplayState,
+        key: str,
+        facet_value: float | None,
     ) -> None:
-        """Mutate the optional Image point layer independently of its raster."""
+        """Mutate ONE image surface's point layer, independently of its raster.
 
-        if not isinstance(self.spec, ImagePlot):
+        Takes the surface it paints on, like every other per-plot painter, and
+        gates on the SEMANTIC spec, so a FacetGrid of image cells carries the
+        site overlay on each cell instead of dropping it at the outer spec.
+
+        ``facet_value`` is the coordinate THIS surface shows: the geometry is
+        one fact for the whole grid, and the statuses are the ones that cell's
+        frame judged.
+        """
+
+        if not isinstance(self.semantic_spec, ImagePlot):
             return
         x_quantity = getattr(payload, "x", None)
         y_quantity = getattr(payload, "y", None)
@@ -3006,17 +3029,17 @@ class MatplotlibRenderer:
         signature = (
             None if overlay is None else overlay.revision,
             None if overlay is None else id(overlay),
+            None if facet_value is None else float(facet_value),
             bool(state["show_point_labels"]),
             str(getattr(x_quantity, "display_unit", "")),
             str(getattr(y_quantity, "display_unit", "")),
         )
-        if signature == self._image_overlay_signature:
+        signature_key = f"{key}:points-signature"
+        if signature == self._artists.get(signature_key):
             return
-        self._image_overlay = overlay
-        self._image_overlay_signature = signature
-        axis = self._axes.get("image", [self.primary_axes])[0]
-        collection = self._artists.get("image:points")
-        labels: list[Any] = self._artists.setdefault("image:point-labels", [])
+        self._artists[signature_key] = signature
+        collection = self._artists.get(f"{key}:points")
+        labels: list[Any] = self._artists.setdefault(f"{key}:point-labels", [])
         if overlay is None or overlay.count == 0:
             if collection is not None:
                 collection.set_visible(False)
@@ -3071,7 +3094,9 @@ class MatplotlibRenderer:
 
         radius_x = display_radius(x_quantity)
         radius_y = display_radius(y_quantity)
-        statuses = overlay.statuses or (PointStatus.UNKNOWN,) * overlay.count
+        statuses = overlay.statuses_for(facet_value) or (
+            PointStatus.UNKNOWN,
+        ) * overlay.count
         tokens = {
             PointStatus.UNKNOWN: self.style.artists.point_unknown,
             PointStatus.EMPTY: self.style.artists.point_empty,
@@ -3104,7 +3129,7 @@ class MatplotlibRenderer:
                 clip_on=True,
             )
             axis.add_collection(collection)
-            self._artists["image:points"] = collection
+            self._artists[f"{key}:points"] = collection
         else:
             collection.set_offsets(points)
             collection.set_widths(np.full(overlay.count, 2.0 * radius_x))
@@ -3148,9 +3173,15 @@ class MatplotlibRenderer:
             point_id = None if point_ids is None else point_ids[index]
             label.set_text(explicit or point_id or "")
 
-    def _update_pulse_timeline(self, payload: Any, state: DisplayState) -> None:
+    def _update_pulse_timeline(
+        self,
+        axes: Any,
+        payload: Any,
+        state: DisplayState,
+        key: str,
+    ) -> None:
         update_pulse_timeline(
-            self.primary_axes,
+            axes,
             payload,
             state,
             self.style,
@@ -3165,23 +3196,24 @@ class MatplotlibRenderer:
                 )
                 if not _EXPLICIT_UNIT_SUFFIX.search(x_label):
                     x_label = f"{x_label} ({unit})"
-            self.primary_axes.set_xlabel(x_label)
+            axes.set_xlabel(x_label)
         y_label = _state_label(state, "y_label", None)
         if y_label is not None:
-            self.primary_axes.set_ylabel(y_label)
+            axes.set_ylabel(y_label)
         signature = (
             payload.time_unit,
             state["x_display_unit"],
             bool(state["show_grid"]),
             tuple((channel.channel_id, channel.label) for channel in payload.channels),
             tuple((trace.name, trace.label) for trace in payload.analog_traces),
-            tuple(self.primary_axes.get_xlim()),
-            tuple(self.primary_axes.get_ylim()),
+            tuple(axes.get_xlim()),
+            tuple(axes.get_ylim()),
         )
-        previous = self._artists.get("pulse:chrome_signature")
-        self._artists["pulse:chrome_signature"] = signature
+        signature_key = f"{key}:chrome_signature"
+        previous = self._artists.get(signature_key)
+        self._artists[signature_key] = signature
         if previous != signature:
-            self._mark_axes_chrome_dirty(self.primary_axes)
+            self._mark_axes_chrome_dirty(axes)
 
     def _update_title_artist(self, state: DisplayState) -> None:
         title = _state_label(state, "title", self.spec.labels.title) or ""
@@ -3253,21 +3285,25 @@ class MatplotlibRenderer:
         return self.primary_axes
 
     def _image_selector_artist(self, state: SelectorState) -> Any | None:
-        if isinstance(self.spec, ImagePlot):
-            return self._artists.get("image")
-        if isinstance(self.spec, FacetGridPlot) and isinstance(self.spec.cell, ImagePlot):
-            index = self._focused_facet_index if state.facet_index is None else state.facet_index
-            return self._artists.get(f"facet:{index}:image")
+        if not isinstance(self.semantic_spec, ImagePlot):
+            return None
+        axes = self._selector_axis(state)
+        for key, candidate, _index in self.painted_surfaces:
+            if candidate is axes:
+                return self._artists.get(key)
         return None
 
     def _active_image_artist(self) -> Any | None:
-        image = self._artists.get("image")
-        if image is None and isinstance(self.spec, FacetGridPlot) and isinstance(
-            self.spec.cell, ImagePlot
-        ):
-            index = 0 if self._focused_facet_index is None else self._focused_facet_index
-            image = self._artists.get(f"facet:{index}:image")
-        return image
+        """The image artist of the surface a gesture acts on, or None.
+
+        One spelling of "which cell is active" -- ``primary_surface`` -- so a
+        colour-limit preview can never edit a different artist than the rail
+        it was measured from.
+        """
+
+        if not isinstance(self.semantic_spec, ImagePlot):
+            return None
+        return self._artists.get(self.primary_surface[0])
 
     def resolved_color_limits(self) -> tuple[float, float]:
         """Return the clim painted by the active image artist."""
@@ -3278,13 +3314,14 @@ class MatplotlibRenderer:
         return tuple(map(float, image.get_clim()))
 
     def _image_selector_payload(self, state: SelectorState) -> Any | None:
-        if isinstance(self.spec, ImagePlot):
+        if not isinstance(self.semantic_spec, ImagePlot):
+            return None
+        if self.semantic_spec is self.spec:
             return self._last_payload
-        if isinstance(self.spec, FacetGridPlot) and isinstance(self.spec.cell, ImagePlot):
-            cells = tuple(getattr(self._last_payload, "cells", ()))
-            index = self._focused_facet_index if state.facet_index is None else state.facet_index
-            if index is not None and 0 <= index < len(cells):
-                return getattr(cells[index], "payload", cells[index])
+        cells = tuple(getattr(self._last_payload, "cells", ()))
+        index = self._focused_facet_index if state.facet_index is None else state.facet_index
+        if index is not None and 0 <= index < len(cells):
+            return getattr(cells[index], "payload", cells[index])
         return None
 
     def _image_cross_value(self, state: SelectorState) -> float | str | None:
@@ -3314,8 +3351,7 @@ class MatplotlibRenderer:
 
         if state.kind is not SelectorKind.THRESHOLD:
             return ""
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
-        if not isinstance(semantic, HistogramPlot):
+        if not isinstance(self.semantic_spec, HistogramPlot):
             return ""
         if self._classifier_labels:
             index = 0 if state.facet_index is None else state.facet_index
@@ -3367,8 +3403,7 @@ class MatplotlibRenderer:
         )
 
     def _threshold_uses_x_axis(self) -> bool:
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
-        return isinstance(semantic, HistogramPlot)
+        return isinstance(self.semantic_spec, HistogramPlot)
 
     def preview_color_limits(self, low: float, high: float) -> None:
         """Preview image normalization without committing display state.
@@ -3386,8 +3421,8 @@ class MatplotlibRenderer:
         selected = np.asarray((low, high), dtype=float)
         if not np.all(np.isfinite(selected)) or selected[0] >= selected[1]:
             raise ValueError("preview color limits must be finite and increasing")
-        key = "image" if isinstance(self.spec, ImagePlot) else None
-        image = None if key is None else self._artists.get(key)
+        key = self.primary_surface[0]
+        image = self._active_image_artist()
         if image is None:
             raise TypeError("color-limit preview requires an Image")
         with style_context(self.style):
@@ -3471,7 +3506,7 @@ class MatplotlibRenderer:
             sample_value = self._image_cross_value(state) if image is not None else None
             sample_axis = (
                 self._axes["distribution"][0]
-                if isinstance(self.spec, ImagePlot)
+                if isinstance(self.semantic_spec, ImagePlot)
                 and state.kind is SelectorKind.CROSSHAIR
                 and self._axes.get("distribution")
                 else None
@@ -3520,7 +3555,7 @@ class MatplotlibRenderer:
                     cmap(policy.colormap_high_fraction),
                 )
             )
-            label_axis = self._axes.get("image", [self.primary_axes])[0]
+            label_axis = self.primary_axes
             color_context = SelectorItemContext(
                 kind=SelectorSceneKind.COLOR_LIMITS,
                 target=self._selector_target_for_axis(color_axis),
@@ -3740,8 +3775,7 @@ class MatplotlibRenderer:
         if not active:
             self._restore_fit_source_lines()
             return
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
-        if not isinstance(semantic, (CurvePlot, RollingPlot)):
+        if not isinstance(self.semantic_spec, (CurvePlot, RollingPlot)):
             self._restore_fit_source_lines()
             return
         if isinstance(self.spec, FacetGridPlot):
@@ -3793,8 +3827,8 @@ class MatplotlibRenderer:
             )
             if index is None or index < 0 or index >= self._visible_facet_count:
                 raise IndexError("fit facet index is outside the current grid")
-            return self._axes["facet_cell"][index], self.spec.cell
-        return self.primary_axes, self.spec
+            return self._axes["facet_cell"][index], self.semantic_spec
+        return self.primary_axes, self.semantic_spec
 
     @staticmethod
     def _fit_family_for(semantic: PlotSpec, overlay: FitOverlay) -> str:
@@ -4011,7 +4045,7 @@ class MatplotlibRenderer:
         if self._fit_axis is not None:
             self._clear_fit_topology()
         axes = self._axes.get("facet_cell", ())
-        semantic = self.spec.cell
+        semantic = self.semantic_spec
         active_indices = {
             overlay.facet_index
             for overlay in overlays
@@ -4108,9 +4142,8 @@ class MatplotlibRenderer:
     ) -> None:
         """Paint Distribution classifier curves separately from ordinary fits."""
 
-        semantic = self.spec.cell if isinstance(self.spec, FacetGridPlot) else self.spec
         active: dict[int, tuple[FitOverlay, float, str]] = {}
-        if isinstance(semantic, HistogramPlot):
+        if isinstance(self.semantic_spec, HistogramPlot):
             for fallback, (overlay, threshold, label) in enumerate(
                 zip(overlays, thresholds, labels, strict=True)
             ):

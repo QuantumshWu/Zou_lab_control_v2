@@ -26,7 +26,7 @@ from zlc_plot import AxisRef, FacetGridPlot, ImagePlot
 from zlc_plot.session import PlotSession
 
 
-def _frames_snapshot(points: int = 9) -> DatasetSnapshot:
+def _frames_snapshot(points: int = 9, *, revision: int = 1) -> DatasetSnapshot:
     """(repeat=1, points, y, x) camera frames faceted over a scan dimension."""
 
     bias = Axis.create("bias", values=[float(v) for v in range(points)])
@@ -51,7 +51,7 @@ def _frames_snapshot(points: int = 9) -> DatasetSnapshot:
         .integers(0, 255, (1, points, 30, 40))
         .astype(np.uint8)
     )
-    return DatasetSnapshot(schema, values, revision=1)
+    return DatasetSnapshot(schema, values, revision=revision)
 
 
 _FRAMES_SPEC = FacetGridPlot(
@@ -161,6 +161,41 @@ def test_scan_heatmap_facet_cells_share_tick_marks_and_gate_labels() -> None:
     spec, snapshot = _scalar_scan_snapshot()
     session = PlotSession(snapshot, spec, size="8x8")
     try:
+        _assert_shared_marks_boundary_labels(session)
+    finally:
+        session.close()
+
+
+def test_overview_cell_ticks_have_one_owner_across_frames() -> None:
+    """A cell's tick configuration is installed ONCE, not once per authority.
+
+    Routing facet cells through the standalone image render brought the image
+    kind's own spatial tick budget with it, and the grid's shared 3-tick
+    locator is applied right after -- two authorities writing the same
+    ``_zlc_tick_signature``.  Each then saw the other's value and reinstalled
+    its locator on every frame, resetting every cell's tick artists twice per
+    revision, which is exactly what the signature guard exists to prevent.
+    """
+
+    session = PlotSession(_frames_snapshot(), _FRAMES_SPEC, size="8x8")
+    try:
+        cells = [
+            axis
+            for axis in session._renderer.axes["facet_cell"]
+            if axis.get_visible()
+        ]
+        assert cells
+        before = [
+            (id(axis.xaxis.get_major_locator()), id(axis.yaxis.get_major_locator()))
+            for axis in cells
+        ]
+        session.update_data(_frames_snapshot(revision=2))
+        after = [
+            (id(axis.xaxis.get_major_locator()), id(axis.yaxis.get_major_locator()))
+            for axis in cells
+        ]
+        assert after == before
+        # ...and the owner is still the grid: shared marks, gated labels.
         _assert_shared_marks_boundary_labels(session)
     finally:
         session.close()

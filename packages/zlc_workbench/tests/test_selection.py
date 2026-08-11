@@ -651,8 +651,13 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
         roi_mean = _wait_published(plane, "@logic/panel-1/roi_mean")
         np.testing.assert_array_equal(roi_frame.snapshot.block.values, expected)
         assert roi_frame.snapshot.block.schema.repeat_axis.size == 1
-        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == float(
-            np.mean(expected)
+        # roi_mean is ONE value per (repeat, point): the reduction consumes the
+        # image axes and nothing else.  A square cell makes the same fractional
+        # drag cover several scan points, so the comparison must be per point --
+        # collapsing it to a single number only ever held for a one-point ROI.
+        np.testing.assert_array_equal(
+            roi_mean.snapshot.block.values.reshape(-1),
+            np.mean(expected, axis=-1).reshape(-1),
         )
     finally:
         if bridge is not None:

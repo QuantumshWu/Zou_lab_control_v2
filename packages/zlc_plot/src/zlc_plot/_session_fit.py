@@ -922,13 +922,8 @@ class FitSessionMixin:
         )
 
     def _threshold_classifier_enabled(self) -> bool:
-        semantic = (
-            self._spec.cell
-            if isinstance(self._spec, FacetGridPlot)
-            else self._spec
-        )
         return bool(
-            isinstance(semantic, HistogramPlot)
+            isinstance(self._semantic_spec, HistogramPlot)
             and self.display_state.values.get("threshold_classifier", False)
         )
 

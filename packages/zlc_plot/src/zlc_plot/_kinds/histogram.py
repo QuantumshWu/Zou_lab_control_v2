@@ -10,8 +10,8 @@ from ..specs import HistogramPlot
 from .base import KindHandler
 
 
-def render(renderer: Any, payload: Any, state: Any) -> None:
-    renderer._update_histogram(renderer.primary_axes, payload, state, "histogram")
+def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **pooled: Any) -> None:
+    renderer._update_histogram(axes, payload, state, key, **pooled)
 
 
 def build_payload(projection: Any, view: Any, state: Any) -> None:

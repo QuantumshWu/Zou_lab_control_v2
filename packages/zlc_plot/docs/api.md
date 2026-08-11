@@ -160,7 +160,9 @@ overlay = ImagePointOverlay(
     ),
     point_ids=("point-01", "point-02", "point-03"),
     labels=("A", "B", "C"),
-    statuses=(PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID),
+    statuses={
+        None: (PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID)
+    },
 )
 image_session.update_image_overlay(overlay)
 image_session.set_parameter("show_point_labels", True)
@@ -173,8 +175,13 @@ image_session.update_data(next_frame)
 image_session.update_image_overlay(ImagePointOverlay.empty(revision=1))
 ```
 
-`coordinates` always contain canonical x then y. IDs, labels and statuses are
-optional parallel metadata. An overlay-only update must have a strictly newer
+`coordinates` always contain canonical x then y. IDs and labels are optional
+parallel metadata. `statuses` maps the facet coordinate a painted surface
+shows to that surface's statuses; the key `None` names the surface that shows
+no single coordinate -- a standalone image, or a facet over an axis this
+overlay does not describe -- and is the fallback for any other coordinate. A
+grid faceted over a camera cycle therefore draws one geometry with each
+cell's own frame states. An overlay-only update must have a strictly newer
 revision; it updates the point artists without changing or reprojecting the
 image snapshot. Point ring size is derived from canonical coordinate spacing
 and the immutable package style. Occupied rings are the primary annotation;

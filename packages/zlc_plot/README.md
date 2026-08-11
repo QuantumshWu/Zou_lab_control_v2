@@ -346,14 +346,14 @@ python examples/pyqt5_embed.py
 `facet_row_display_unit` 和 `facet_col_display_unit`，因此两个 facet 轴不会被错误地
 强制共用单位。
 
-坐标标记不是单独的 plot kind。普通 Image 可叠加独立、可动态更新的 `ImagePointOverlay`；`coordinates` 是 canonical x/y 的 `N×2` 数组，ID、label 与 `PointStatus` 都可选。仅修改点层时可独立推进 overlay revision，不重投影 background：
+坐标标记不是单独的 plot kind。普通 Image 可叠加独立、可动态更新的 `ImagePointOverlay`；`coordinates` 是 canonical x/y 的 `N×2` 数组，ID、label 可选；`statuses` 以 facet 坐标为键（`None` 表示不显示单一坐标的那个 surface，同时作为兜底），因此按 frame facet 的 grid 每个 cell 画出自己那一帧的状态。仅修改点层时可独立推进 overlay revision，不重投影 background：
 
 ```python
 overlay = ImagePointOverlay(
     revision=0,
     coordinates=np.array([[-2.0e-3, 1.0e-3], [0.0, -1.0e-3]]),
     point_ids=("a", "b"),
-    statuses=(PointStatus.EMPTY, PointStatus.OCCUPIED),
+    statuses={None: (PointStatus.EMPTY, PointStatus.OCCUPIED)},
 )
 image_session.update_image_overlay(overlay)
 image_session.set_parameter("show_point_labels", True)

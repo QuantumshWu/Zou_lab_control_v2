@@ -21,6 +21,7 @@ from .specs import (
     FacetGridPlot,
     PlotSpec,
     Reduction,
+    semantic_spec,
 )
 
 
@@ -314,7 +315,7 @@ def _field_names(spec: PlotSpec) -> tuple[str, ...]:
     handler = handler_for(spec)
     names = list(handler.semantic_fields)
     if isinstance(spec, FacetGridPlot):
-        cell_names = handler_for(spec.cell).semantic_fields
+        cell_names = handler_for(semantic_spec(spec)).semantic_fields
         names = [
             "kind",
             *[name for name in cell_names if name != "kind"],
@@ -355,7 +356,9 @@ def updated_spec(
     elif name not in _field_names(spec):
         raise KeyError(name)
     elif isinstance(spec, FacetGridPlot) and name != "facet":
-        candidate = replace(spec, cell=replace(spec.cell, **{name: value}))
+        candidate = replace(
+            spec, cell=replace(semantic_spec(spec), **{name: value})
+        )
     else:
         candidate = replace(spec, **{name: value})
     return replace(candidate, labels=merge_labels(spec, candidate))
@@ -463,7 +466,7 @@ def describe_semantics(
         )
 
     kind_choices = _choice_pairs(kinds, _kind_label)
-    semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
+    semantic = semantic_spec(spec)
     x = getattr(semantic, "x", None)
     y = getattr(semantic, "y", None)
     group = getattr(semantic, "group", None)

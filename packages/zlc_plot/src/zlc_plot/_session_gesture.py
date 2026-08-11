@@ -273,12 +273,7 @@ class GestureSessionMixin:
         # The SEMANTIC spec decides: a focused FacetGrid image cell shows
         # the standalone image's distribution, and its guides must drag the
         # same way.  Gating on the outer spec left that surface inert.
-        semantic = (
-            self._spec.cell
-            if isinstance(self._spec, FacetGridPlot)
-            else self._spec
-        )
-        if not isinstance(semantic, ImagePlot):
+        if not isinstance(self._semantic_spec, ImagePlot):
             return False
         distribution = self._renderer.axes.get("distribution", ())
         if event_axes not in distribution:

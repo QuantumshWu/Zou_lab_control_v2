@@ -65,6 +65,7 @@ from .specs import (
     PlotSpec,
     PulseTimelinePlot,
     RollingPlot,
+    semantic_spec,
 )
 from .state import DisplayState
 from ._validation import integer, readonly_copy
@@ -463,11 +464,9 @@ class FitProjection:
 
         values = self.display_state.values
         overrides: dict[AxisRef, object] = {}
-        x_ref = getattr(self._spec, "x", None)
-        y_ref = getattr(self._spec, "y", None)
+        x_ref = getattr(self._semantic_spec(), "x", None)
+        y_ref = getattr(self._semantic_spec(), "y", None)
         if isinstance(self._spec, FacetGridPlot):
-            x_ref = getattr(self._spec.cell, "x", None)
-            y_ref = getattr(self._spec.cell, "y", None)
             facet_unit = values.get("facet_display_unit")
             if facet_unit is not None:
                 overrides[self._spec.facet] = facet_unit
@@ -1611,7 +1610,7 @@ class FitProjection:
         return converted, unit
 
     def _semantic_spec(self) -> Any:
-        return self._spec.cell if isinstance(self._spec, FacetGridPlot) else self._spec
+        return semantic_spec(self._spec)
 
     def _is_histogram_plot(self) -> bool:
         return isinstance(self._semantic_spec(), HistogramPlot)

@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..kinds import PlotKind
-RenderHandler = Callable[[Any, Any, Any], None]
+# render(renderer, payload, state, *, axes, key, **pooled) paints ONE surface.
+# The surface is supplied, never assumed: the same call draws a standalone
+# plot and one FacetGrid cell, which is why a cell can no longer silently
+# miss a facility the standalone plot has.  ``pooled`` carries the facts the
+# GRID resolved for every cell at once (a shared colour scale, one x span,
+# one histogram binning) and is empty for a standalone plot.
+RenderHandler = Callable[..., None]
 PayloadHandler = Callable[[Any, Any, Any], None]
 AdmitsHandler = Callable[[Any], bool]
 DefaultSpecHandler = Callable[[Any], Any]

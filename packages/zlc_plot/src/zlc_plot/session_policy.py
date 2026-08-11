@@ -24,6 +24,7 @@ from .specs import (
     PlotSpec,
     PulseTimelinePlot,
     RollingPlot,
+    semantic_spec,
 )
 
 _PLOT_SPEC_TYPES = (
@@ -57,7 +58,7 @@ class ReplaceSpecInitialState:
 def _viewport_signature(spec: PlotSpec) -> tuple[object, ...]:
     """Return only coordinate roles that define viewport units/geometry."""
 
-    semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
+    semantic = semantic_spec(spec)
     result: list[object] = [spec.kind]
     for name in ("x", "y"):
         result.append(getattr(semantic, name, None))

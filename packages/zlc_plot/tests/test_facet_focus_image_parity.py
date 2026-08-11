@@ -15,6 +15,8 @@ including the frames-on-point-axis camera-cycle shape ``(1, F, y, x)``.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from data_factory import (
@@ -129,7 +131,7 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
 
         # Colorbar artist and value label, from the one chrome authority.
         alone_colorbar = alone._artists["image:colorbar"]
-        focused_colorbar = focused._artists["facet:1:image:colorbar"]
+        focused_colorbar = focused._artists["facet:1:colorbar"]
         assert focused_colorbar.ax.get_ylabel() == alone_colorbar.ax.get_ylabel()
 
         # The standalone image's spatial tick budget applies to the cell.
@@ -153,9 +155,181 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         assert title_artist.get_visible()
         assert title_artist.get_text() == "authored title"
         assert focused.primary_axes.get_title() == "bias=0"
+
+        # SAME GEOMETRY, not merely the same chrome.  The cell used to be
+        # drawn with the squaring carved out (``square_view=False``), so a
+        # 60x40 frame filled a 3:2 box in the facet and a square one alone --
+        # the same picture in two shapes, and the overview slots were shaped
+        # by a THIRD rule that agreed with neither.
+        assert tuple(focused.primary_axes.get_window_extent().bounds) == tuple(
+            alone.primary_axes.get_window_extent().bounds
+        )
+        assert focused.primary_axes.get_xlim() == alone.primary_axes.get_xlim()
+        assert focused.primary_axes.get_ylim() == alone.primary_axes.get_ylim()
     finally:
         standalone.close()
         facet.close()
+
+
+def test_focused_cell_colour_limit_drag_moves_the_cell_clim() -> None:
+    """A driven press/move/release on the focused cell's rail must land.
+
+    The preview path looked up a hardcoded ``"image"`` artist key and an
+    outer-spec branch, so the very first motion event of a facet-cell drag
+    raised ``color-limit preview requires an Image`` out of a pointer slot.
+    """
+
+    session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
+    try:
+        session.focus_facet(1)
+        renderer = session._renderer
+        distribution = renderer.axes["distribution"][0]
+        transform = session._axis_transform_for_axis(distribution)
+        low, high = renderer.resolved_color_limits()
+        left, top, right, bottom = transform.bounds
+        y_low, y_high = transform.y_limits
+        middle_x = (left + right) / 2.0
+
+        def pointer_y(value: float) -> float:
+            # The rail is vertical: a value maps down the distribution box,
+            # and the raster pointer contract is bottom-origin normalized.
+            return 1.0 - (top + (value - y_high) / (y_low - y_high) * (bottom - top))
+
+        target = high - 0.25 * (high - low)
+        session._raster_pointer_event(
+            "press", middle_x, pointer_y(high), button=1, axes_snapshot=transform
+        )
+        session._raster_pointer_event("move", middle_x, pointer_y(target), button=1)
+        session._raster_pointer_event("release", middle_x, pointer_y(target), button=1)
+
+        moved_low, moved_high = renderer.resolved_color_limits()
+        assert (moved_low, moved_high) != (low, high)
+        assert moved_high < high or moved_low > low
+    finally:
+        session.close()
+
+
+def test_focused_cell_crosshair_keeps_its_value_rail() -> None:
+    """The crosshair's sample rail is a fact of the IMAGE, so a cell has it."""
+
+    from zlc_plot.selectors import SelectorKind, SelectorState
+
+    session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
+    try:
+        session.focus_facet(1)
+        renderer = session._renderer
+        snapshot = type(renderer._last_selectors)(
+            (
+                SelectorState(
+                    SelectorKind.CROSSHAIR, CrosshairPoint(30.0, 20.0), facet_index=1
+                ),
+            )
+        )
+        context = renderer._make_selector_scene_owner(snapshot).contexts[0]
+        assert context.sample_target is not None
+        assert context.sample_target.role == "distribution"
+        assert context.sample_x_limits is not None
+        assert context.sample_rgba is not None
+    finally:
+        session.close()
+
+
+def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
+    """The layout's declared cell aspect IS the aspect the cell is drawn at.
+
+    The layout used to answer "what shape is an image" from the pixel counts
+    (60x40 -> 1.5) while the renderer squared the same cell, so every slot
+    kept a third of its width as dead space around the drawn cell.
+    """
+
+    session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
+    try:
+        session._renderer.figure.canvas.draw()
+        declared = session.surface_plan.facet_topology.cell_aspect
+        drawn = [
+            axis.get_window_extent().bounds
+            for axis in session._renderer.axes["facet_cell"]
+            if axis.get_visible()
+        ]
+        assert len(drawn) == 3
+        for _x, _y, width, height in drawn:
+            assert math.isclose(
+                declared, float(width) / float(height), rel_tol=1e-9
+            ), (declared, width, height)
+    finally:
+        session.close()
+
+
+def test_overview_view_limits_apply_to_every_visible_cell() -> None:
+    """An overview shows N views of ONE picture; zooming one is not a view."""
+
+    session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
+    try:
+        session.set_view_limits(x=(10.0, 30.0), y=(5.0, 25.0))
+        cells = session._renderer.axes["facet_cell"]
+        visible = [axis for axis in cells if axis.get_visible()]
+        assert len(visible) == 3
+        for axis in visible:
+            assert tuple(map(float, axis.get_xlim())) == (10.0, 30.0)
+            assert tuple(map(float, sorted(axis.get_ylim()))) == (5.0, 25.0)
+        # ...and every cell prepares its RASTER for the view it shows, which
+        # is what the standalone image does.  Honouring the request on the
+        # selected cell only left the rest showing a full-extent front cropped
+        # to a zoom: the same pixels, at a fraction of the resolution.
+        for index in range(len(visible)):
+            prepared = session._renderer._artists[f"facet:{index}:prepared_current"]
+            assert tuple(map(float, prepared.extent)) == (9.5, 30.5, 25.5, 4.5)
+    finally:
+        session.close()
+
+    # A curve cell reaches the same limits through the render frame alone --
+    # it has no image artist to also honour the request, which is what kept
+    # the image half of this passing while the general rule was still broken.
+    curves = PlotSession(
+        _frames_scan_snapshot(repeats=3),
+        FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.point_dimension("bias"))),
+        size="4x4",
+    )
+    try:
+        curves.set_view_limits(x=(-0.5, 0.5), y=(10.0, 40.0))
+        visible = [
+            axis
+            for axis in curves._renderer.axes["facet_cell"]
+            if axis.get_visible()
+        ]
+        assert len(visible) == 3
+        for axis in visible:
+            assert tuple(map(float, axis.get_xlim())) == (-0.5, 0.5)
+            assert tuple(map(float, axis.get_ylim())) == (10.0, 40.0)
+    finally:
+        curves.close()
+
+
+def test_facet_image_cells_carry_the_point_overlay() -> None:
+    """The site overlay is a fact of the IMAGE, so a grid of images shows it.
+
+    The painter gated on the outer spec and namespaced its artists as the
+    bare ``image:points``, so a FacetGrid of frames could not carry one at
+    all -- the session refused the overlay before the renderer ever saw it.
+    """
+
+    from zlc_plot.primitives import ImagePointOverlay
+
+    session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
+    try:
+        overlay = ImagePointOverlay(
+            coordinates=((10.0, 12.0), (30.0, 24.0)),
+            revision=1,
+            point_ids=("s0", "s1"),
+        )
+        session.update_image_overlay(overlay)
+        artists = session._renderer._artists
+        for index in range(3):
+            assert f"facet:{index}:points" in artists, sorted(artists)
+            assert artists[f"facet:{index}:points"].get_visible()
+        assert "image:points" not in artists
+    finally:
+        session.close()
 
 
 def test_overview_destroys_the_focused_chrome_again() -> None:
@@ -171,7 +345,7 @@ def test_overview_destroys_the_focused_chrome_again() -> None:
         assert not session._renderer.axes.get("distribution")
         assert not session._renderer.axes.get("colorbar")
         assert not any(
-            key.startswith("facet:1:image:colorbar")
+            key.startswith("facet:1:colorbar")
             for key in session._renderer._artists
         )
         np.testing.assert_array_equal(session.rgba(), before)
@@ -195,7 +369,7 @@ def test_direct_focus_switch_leaves_no_chrome_ghost() -> None:
         renderer = session._renderer
         for index in (0, 2, 1):
             session.focus_facet(index)
-            assert f"facet:{index}:image:colorbar" in renderer._artists
+            assert f"facet:{index}:colorbar" in renderer._artists
             other_keys = [
                 key
                 for key in renderer._artists

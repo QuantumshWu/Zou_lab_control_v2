@@ -495,14 +495,6 @@ def facet_shape_for_aspect(
     return best
 
 
-def facet_image_cell_aspect(x_count: int, y_count: int) -> float:
-    """Return an image-cell aspect from x/y coordinate cardinalities."""
-
-    x_size = integer(x_count, "image facet x_count", minimum=1)
-    y_size = integer(y_count, "image facet y_count", minimum=1)
-    return x_size / y_size
-
-
 def _facet_cells_union(axes: tuple[AxesPlan, ...]) -> NormalizedBox:
     """The full data region occupied by a FacetGrid overview's cells."""
 
@@ -923,7 +915,6 @@ __all__ = [
     "facet_shape",
     "recommended_pulse_preset",
     "facet_shape_for_aspect",
-    "facet_image_cell_aspect",
     "facet_focus_box",
     "recommended_facet_preset",
     "resolve_surface",

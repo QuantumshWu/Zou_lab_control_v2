@@ -6,13 +6,14 @@ records.  The plotting package never imports those domain layers.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import ClassVar, TypeAlias
 
 import numpy as np
-from zlc_data import OwnedSnapshot, SITE, SPATIAL_X, SPATIAL_Y
+from zlc_data import OwnedSnapshot
 
 from .data_contract import snapshot_revision
 
@@ -48,29 +49,6 @@ class PointStatus(str, Enum):
     OCCUPIED = "occupied"
     INVALID = "invalid"
 
-    @property
-    def code(self) -> int:
-        return {
-            PointStatus.UNKNOWN: 0,
-            PointStatus.EMPTY: 1,
-            PointStatus.OCCUPIED: 2,
-            PointStatus.INVALID: 3,
-        }[self]
-
-    @classmethod
-    def from_code(cls, value: object) -> "PointStatus":
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-            raise TypeError("point status code must be an integer")
-        try:
-            return {
-                0: cls.UNKNOWN,
-                1: cls.EMPTY,
-                2: cls.OCCUPIED,
-                3: cls.INVALID,
-            }[int(value)]
-        except KeyError as exc:
-            raise ValueError("point status code must be 0, 1, 2, or 3") from exc
-
 
 @dataclass(frozen=True, slots=True)
 class PointMarker:
@@ -99,13 +77,20 @@ class ImagePointOverlay:
     Ordering is stable within a revision; ``point_ids`` provide identity
     across revisions when an application needs it.  Monotonicity is enforced
     by the receiving plot session.
+
+    The geometry is ONE fact and the status is one per PICTURE: a grid
+    faceted over a camera cycle draws the same rings in every cell, and each
+    cell's rings say what that FRAME judged.  ``statuses`` therefore maps the
+    facet coordinate a surface shows to that surface's statuses, with the key
+    ``None`` naming the surface that shows no single coordinate -- a
+    standalone image, or a facet over an axis this overlay does not describe.
     """
 
     revision: int
     coordinates: np.ndarray
     point_ids: tuple[str, ...] | None = None
     labels: tuple[str | None, ...] | None = None
-    statuses: tuple[PointStatus, ...] | None = None
+    statuses: Mapping[float | None, tuple[PointStatus, ...]] | None = None
 
     CONTRACT_ID: ClassVar[str] = "zlc_plot.image-point-overlay.v1"
 
@@ -147,11 +132,29 @@ class ImagePointOverlay:
 
         statuses = self.statuses
         if statuses is not None:
-            statuses = tuple(statuses)
-            if len(statuses) != count:
-                raise ValueError("statuses must have one item per coordinate")
-            if any(not isinstance(status, PointStatus) for status in statuses):
-                raise TypeError("statuses must contain PointStatus values")
+            if not isinstance(statuses, Mapping):
+                raise TypeError(
+                    "statuses must map a facet coordinate (or None) to statuses"
+                )
+            resolved: dict[float | None, tuple[PointStatus, ...]] = {}
+            for facet_value, row in statuses.items():
+                if facet_value is not None:
+                    if isinstance(facet_value, bool) or not isinstance(
+                        facet_value, (int, float, np.integer, np.floating)
+                    ):
+                        raise TypeError(
+                            "status keys must be a real facet coordinate or None"
+                        )
+                    facet_value = float(facet_value)
+                    if not np.isfinite(facet_value):
+                        raise ValueError("status keys must be finite")
+                row = tuple(row)
+                if len(row) != count:
+                    raise ValueError("statuses must have one item per coordinate")
+                if any(not isinstance(status, PointStatus) for status in row):
+                    raise TypeError("statuses must contain PointStatus values")
+                resolved[facet_value] = row
+            statuses = MappingProxyType(resolved)
 
         object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "coordinates", frozen)
@@ -162,6 +165,22 @@ class ImagePointOverlay:
     @property
     def count(self) -> int:
         return int(self.coordinates.shape[0])
+
+    def statuses_for(
+        self,
+        facet_value: float | None,
+    ) -> tuple[PointStatus, ...] | None:
+        """The statuses one painted surface draws, or None when there are none.
+
+        THE resolution rule, in one place: a surface showing a facet
+        coordinate draws that coordinate's statuses, and falls back to the
+        whole-picture row when this overlay says nothing about it.
+        """
+
+        if self.statuses is None:
+            return None
+        key = None if facet_value is None else float(facet_value)
+        return self.statuses.get(key, self.statuses.get(None))
 
     @classmethod
     def empty(cls, revision: int) -> "ImagePointOverlay":
@@ -189,58 +208,7 @@ class ImagePointOverlay:
             coordinates=coordinates,
             point_ids=tuple(marker.point_id for marker in values),
             labels=tuple(marker.label for marker in values),
-            statuses=tuple(marker.status for marker in values),
-        )
-
-    @classmethod
-    def from_snapshot(
-        cls,
-        snapshot: OwnedSnapshot,
-        *,
-        revision: int,
-    ) -> "ImagePointOverlay":
-        """Project one typed point-overlay Dataset without domain guessing."""
-
-        if not isinstance(snapshot, OwnedSnapshot):
-            raise TypeError("point overlay requires zlc_data.OwnedSnapshot")
-        columns = tuple(snapshot.block.schema.point_table.columns)
-
-        def one(role: object):
-            matches = tuple(column for column in columns if column.role == role)
-            if len(matches) != 1:
-                raise ValueError(
-                    f"point overlay requires exactly one {getattr(role, 'value', role)} column"
-                )
-            return matches[0]
-
-        site = one(SITE)
-        x = one(SPATIAL_X)
-        y = one(SPATIAL_Y)
-        if x.unit != y.unit or x.coordinate_frame != y.coordinate_frame:
-            raise ValueError("point overlay x/y columns must share one coordinate frame")
-        point_ids = tuple(str(value) for value in site.values)
-        labels = (
-            tuple(site.coordinate_labels)
-            if site.coordinate_labels is not None
-            else point_ids
-        )
-        coordinates = np.column_stack((x.values, y.values))
-        count = len(point_ids)
-        array = np.asarray(snapshot.block.values)
-        if array.ndim < 2 or array.shape[1] != count:
-            raise ValueError("point overlay values do not match the point table")
-        rows = np.moveaxis(array, 1, -1).reshape((-1, count))
-        statuses = (
-            tuple(PointStatus.from_code(value) for value in rows[0])
-            if rows.shape[0] == 1
-            else (PointStatus.UNKNOWN,) * count
-        )
-        return cls(
-            revision=revision,
-            coordinates=coordinates,
-            point_ids=point_ids,
-            labels=labels,
-            statuses=statuses,
+            statuses={None: tuple(marker.status for marker in values)},
         )
 
 

@@ -82,7 +82,7 @@ from .fit import (
 )
 from .kinds import AxisRef, PlotKind
 from ._kinds import handler_for
-from .layout import FacetTopology, SurfacePlan, facet_image_cell_aspect, resolve_surface
+from .layout import FacetTopology, SurfacePlan, resolve_surface
 from .parameters import ParameterSchema, RenderEffect
 from .primitives import (
     ImageFrame,
@@ -96,7 +96,7 @@ from .primitives import (
     PulseScanRegion,
     PulseTimelineData,
 )
-from .rendering import MatplotlibRenderer, RenderFrame
+from .rendering import MatplotlibRenderer, RenderFrame, _image_coordinate_aspect
 from .selectors import (
     CrosshairPoint,
     NumericRange,
@@ -116,6 +116,7 @@ from .specs import (
     PulseTimelinePlot,
     RollingPlot,
     parameter_schema_for,
+    semantic_spec,
 )
 from .state import DisplayState, DisplayStateStore
 from .semantics import SemanticDescription, describe_semantics, updated_spec
@@ -521,7 +522,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     ) -> tuple[_ProjectionInput, ImageFrame | None]:
         if not isinstance(data, ImageFrame):
             return data, None
-        if not isinstance(spec, ImagePlot):
+        if not isinstance(semantic_spec(spec), ImagePlot):
             raise TypeError("ImageFrame requires ImagePlot")
         return data.snapshot, data
 
@@ -597,6 +598,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     @property
     def spec(self) -> PlotSpec:
         return self._spec
+
+    @property
+    def _semantic_spec(self) -> PlotSpec:
+        """The spec that decides what this session DRAWS.
+
+        A FacetGrid delegates to its cell, so every per-plot facility -- the
+        point overlay, the colour surface, the selector sources -- gates on
+        this and never on the outer layout spec.
+        """
+
+        return semantic_spec(self._spec)
 
     @property
     def defaults(self) -> PlotLibraryDefaults:
@@ -1132,7 +1144,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 cell_count=max(cell_count, 1),
                 cell_aspect=(
                     self._facet_image_aspect(payload)
-                    if isinstance(spec.cell, ImagePlot)
+                    if isinstance(semantic_spec(spec), ImagePlot)
                     else None
                 ),
             )
@@ -1149,18 +1161,29 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             style=self._defaults.style,
         )
 
-    def _facet_image_aspect(self, payload: Any) -> float:
-        """Return the first IMAGE cell's authored x/y domain aspect."""
+    def _facet_image_aspect(self, payload: Any) -> float | None:
+        """Return the shape the renderer will actually DRAW an image cell.
+
+        ``_image_coordinate_aspect`` is the one rule: when the two axes
+        measure the same physical dimension the renderer pads the shorter
+        span and the drawn box is square; when they do not it leaves
+        Matplotlib in ``auto`` and the cell fills whatever slot it is given
+        (``None`` here, which is what the layout reads as "no preference").
+
+        Asking a different question -- the pixel counts -- shaped the
+        overview slots for a ratio nothing draws, leaving dead space around
+        every cell.
+        """
 
         cells = tuple(getattr(payload, "cells", ()))
-        if not cells:
+        cell_payload = getattr(cells[0], "payload", None) if cells else None
+        if cell_payload is None:
             return 1.0
-        cell_payload = getattr(cells[0], "payload", None)
-        x = np.asarray(getattr(getattr(cell_payload, "x", None), "display", ())).reshape(-1)
-        y = np.asarray(getattr(getattr(cell_payload, "y", None), "display", ())).reshape(-1)
-        if x.size == 0 or y.size == 0:
-            return 1.0
-        return facet_image_cell_aspect(int(x.size), int(y.size))
+        return (
+            1.0
+            if _image_coordinate_aspect(cell_payload.x, cell_payload.y) is not None
+            else None
+        )
 
     def _update_renderer(
         self,
@@ -1403,16 +1426,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
-        fit_model: str | None | object = _UNSET,
         classifier_thresholds: Sequence[float | None] | object = _UNSET,
     ) -> DisplayDescription:
         """Apply one complete desired plot configuration.
 
         The caller supplies state, not a render strategy.  Semantic choices are
         composed in memory, display values are differenced as one mapping, and
-        size/overlay effects join the same renderer update.  A fit remains an
-        asynchronous analysis and is only restarted when its selected model
-        actually changes.
+        size/overlay effects join the same renderer update.
+
+        A fit is NOT configuration.  It is an analysis with its own completion,
+        result and failure diagnostic, and ``fit``/``fit_async``/``clear_fit``
+        already model that.  This door used to accept ``fit_model``, start the
+        analysis, and return a completion that described only the configure --
+        so every caller that awaited it believed the fit had landed while it
+        was still in flight, and any caller that did not auto-present the next
+        front simply lost it.
         """
 
         if semantic is not None and not isinstance(semantic, Mapping):
@@ -1452,24 +1480,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
             description = self.describe_display()
 
-        if fit_model is not _UNSET:
-            if fit_model is not None:
-                if not isinstance(fit_model, str) or not fit_model.strip():
-                    raise ValueError("fit_model must be a non-empty string or None")
-                selected_fit = fit_model.strip()
-            else:
-                selected_fit = None
-            with self._lock:
-                request = self._live_fit_request
-                current_fit = (
-                    None if request is None else str(request.model.model_id)
-                )
-                has_fit = request is not None or self._accepted_fit is not None
-            if selected_fit is None:
-                if has_fit:
-                    self.clear_fit()
-            elif selected_fit != current_fit:
-                self.fit_async(selected_fit, live=True)
         return description
 
     def set_labels(
@@ -1721,7 +1731,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         )
                     selected_overlay = image_overlay
                     if selected_overlay is not None:
-                        if not isinstance(self._spec, ImagePlot):
+                        if not isinstance(self._semantic_spec, ImagePlot):
                             raise TypeError("image overlay requires ImagePlot")
                         self._validate_image_frame_overlay(
                             previous_overlay,
@@ -2041,7 +2051,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         raise TypeError(
                             "image_overlay must be ImagePointOverlay or None"
                         )
-                    if image_overlay is not None and not isinstance(spec, ImagePlot):
+                    if image_overlay is not None and not isinstance(
+                        semantic_spec(spec), ImagePlot
+                    ):
                         raise TypeError("image overlay requires ImagePlot")
                     if image_overlay is not None:
                         self._validate_image_frame_overlay(
@@ -2088,7 +2100,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         if image_overlay is _UNSET
                         else image_overlay
                     )
-                    if isinstance(spec, ImagePlot)
+                    if isinstance(semantic_spec(spec), ImagePlot)
                     else None
                 )
                 self._size = selected_size
@@ -2371,7 +2383,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if not isinstance(axis, AxisRef):
             raise TypeError("axis must be AxisRef")
         target_name: str | None = None
-        semantic = self._spec.cell if isinstance(self._spec, FacetGridPlot) else self._spec
+        semantic = self._semantic_spec
         if getattr(semantic, "x", None) == axis:
             target_name = "x_display_unit"
         elif getattr(semantic, "y", None) == axis:
@@ -2622,7 +2634,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         if not isinstance(frame, ImageFrame):
             raise TypeError("frame must be ImageFrame")
-        if not isinstance(self._spec, ImagePlot):
+        if not isinstance(self._semantic_spec, ImagePlot):
             raise TypeError("ImageFrame requires ImagePlot")
         self.update_data(frame)
         return frame
@@ -2645,7 +2657,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         if not isinstance(overlay, ImagePointOverlay):
             raise TypeError("overlay must be ImagePointOverlay")
-        if not isinstance(self._spec, ImagePlot):
+        if not isinstance(self._semantic_spec, ImagePlot):
             raise TypeError("image point overlays require ImagePlot")
         with self._render_lock:
             with self._lock:
@@ -3350,8 +3362,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         here keeps one answer rather than a second copy that can disagree.
         """
 
-        spec = self._spec
-        semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
+        semantic = self._semantic_spec
         if self._view is None:
             return SelectionSubject(semantic.kind, None, None)
         x = self._projected._x_selector_source() if self._has_x_selector_source() else None
@@ -3370,7 +3381,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         exception raised inside an event emission.
         """
 
-        semantic = self._spec.cell if isinstance(self._spec, FacetGridPlot) else self._spec
+        semantic = self._semantic_spec
         if isinstance(semantic, HistogramPlot):
             return True  # resolves to the value quantity, which is not an AxisRef
         if isinstance(semantic, RollingPlot):
@@ -3505,7 +3516,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
 
     def _semantic_refs(self) -> tuple[AxisRef, ...]:
-        semantic = self._spec.cell if isinstance(self._spec, FacetGridPlot) else self._spec
+        semantic = self._semantic_spec
         result = []
         for ref in (
             getattr(semantic, "x", None),

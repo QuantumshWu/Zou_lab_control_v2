@@ -1406,10 +1406,13 @@ class RasterPlotHost:
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: "ImagePointOverlay | None | object" = _UNSET,
-        fit_model: str | None | object = _UNSET,
         classifier_thresholds: Sequence[float | None] | object = _UNSET,
     ) -> Future[RasterOperation["DisplayDescription"]]:
-        """Submit the complete desired state as one coalesced worker job."""
+        """Submit the complete desired state as one coalesced worker job.
+
+        A fit is not part of it: ``fit``/``clear_fit`` own that, and their
+        futures resolve with the promoted front.
+        """
 
         configuration = {
             "semantic": None if semantic is None else dict(semantic),
@@ -1418,8 +1421,6 @@ class RasterPlotHost:
         }
         if image_overlay is not _UNSET:
             configuration["image_overlay"] = image_overlay
-        if fit_model is not _UNSET:
-            configuration["fit_model"] = fit_model
         if classifier_thresholds is not _UNSET:
             configuration["classifier_thresholds"] = tuple(classifier_thresholds)
         return self._dispatch_session(

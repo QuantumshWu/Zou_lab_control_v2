@@ -17,8 +17,8 @@ from .base import KindHandler
 RETAINED_HISTORY_LIMIT = 100_000
 
 
-def render(renderer: Any, payload: Any, state: Any) -> None:
-    renderer._update_rolling(payload, state)
+def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> None:
+    renderer._update_rolling(axes, payload, state, key)
 
 
 def build_payload(projection: Any, view: Any, state: Any) -> None:

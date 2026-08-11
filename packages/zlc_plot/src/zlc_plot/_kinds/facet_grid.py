@@ -12,7 +12,11 @@ from .base import KindHandler
 from .curve import default_spec as curve_default_spec
 
 
-def render(renderer: Any, payload: Any, state: Any) -> None:
+def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> None:
+    # A grid is not one surface: it resolves its cells' axes and keys from
+    # the renderer's painted surfaces and calls the CELL kind's own render
+    # once per cell.  The selected cell arrives here as ``axes``/``key``.
+    del axes, key
     renderer._update_facets(payload, state)
 
 

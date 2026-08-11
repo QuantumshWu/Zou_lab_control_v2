@@ -89,7 +89,9 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
         np.asarray(((0.5, 0.5), (1.5, 0.5), (2.5, 1.5))),
         point_ids=("trap-a", "trap-b", "trap-c"),
         labels=("1", "2", "3"),
-        statuses=(PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID),
+        statuses={
+            None: (PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID)
+        },
     )
     session = PlotSession(
         ImageFrame(snapshot, overlay),

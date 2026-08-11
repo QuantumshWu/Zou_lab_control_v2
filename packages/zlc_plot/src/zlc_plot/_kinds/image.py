@@ -11,8 +11,8 @@ from ..specs import ImagePlot, Reduction
 from .base import KindHandler
 
 
-def render(renderer: Any, payload: Any, state: Any) -> None:
-    renderer._update_image(payload, state, "image")
+def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **pooled: Any) -> None:
+    renderer._update_image(axes, payload, state, key, **pooled)
 
 
 def build_payload(projection: Any, view: Any, _state: Any) -> None:

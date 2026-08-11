@@ -9,8 +9,8 @@ from ..specs import PulseTimelinePlot
 from .base import KindHandler
 
 
-def render(renderer: Any, payload: Any, state: Any) -> None:
-    renderer._update_pulse_timeline(payload, state)
+def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> None:
+    renderer._update_pulse_timeline(axes, payload, state, key)
 
 
 def build_payload(_projection: Any, _view: Any, _state: Any) -> None:

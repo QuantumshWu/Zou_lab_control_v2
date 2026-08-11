@@ -72,6 +72,7 @@ class PointTable:
         *,
         units: Mapping[str, str] | None = None,
         ids: Mapping[str, str] | None = None,
+        roles: Mapping[str, Any] | None = None,
         **_: object,
     ) -> RolePointTable:
         """Build a point table; ``ids`` gives a column an id unlike its name.
@@ -81,26 +82,54 @@ class PointTable:
         equal, which made every "looked it up by the wrong one" bug untestable
         here -- and one shipped: a kind's default spec named its x axis by
         display name while the resolver looks up by coordinate id.
+
+        A column of strings becomes a real TEXT column, because
+        ``PointColumn`` has always had that kind and a projection asked to
+        plot one must refuse -- which is untestable while the factory can
+        only build numbers.
+
+        ``roles`` declares what a column IS: a camera cycle's frame index is
+        a ``READOUT_EVENT`` point, not a scan point, and a test that cannot
+        say so cannot stand in for the producer it claims to model.
         """
-        values = {str(name): tuple(np.asarray(column).tolist()) for name, column in columns.items()}
+        values = {
+            str(name): _column_values(column) for name, column in columns.items()
+        }
         if not values:
             raise ValueError("tests require at least one point column")
         row_count = len(next(iter(values.values())))
         unit_map = {} if units is None else dict(units)
+        role_map = {} if roles is None else dict(roles)
         return RolePointTable(
             row_count,
             tuple(
                 PointColumn(
                     AxisId((ids or {}).get(name, name)),
                     name,
-                    SITE if (ids or {}).get(name, name) == "site" else SCAN_POINT,
-                    PointColumn.NUMERIC,
+                    role_map.get(
+                        name,
+                        SITE
+                        if (ids or {}).get(name, name) == "site"
+                        else SCAN_POINT,
+                    ),
+                    PointColumn.TEXT
+                    if all(isinstance(item, str) for item in column)
+                    else PointColumn.NUMERIC,
                     tuple(column),
-                    unit_map.get(name),
+                    None
+                    if all(isinstance(item, str) for item in column)
+                    else unit_map.get(name),
                 )
                 for name, column in values.items()
             ),
         )
+
+
+def _column_values(column: Any) -> tuple[Any, ...]:
+    items = tuple(column)
+    if items and all(isinstance(item, str) for item in items):
+        return items
+    return tuple(np.asarray(column).tolist())
 
 
 class PointTopology(GridTopology):

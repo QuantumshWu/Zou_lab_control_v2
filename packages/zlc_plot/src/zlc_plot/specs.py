@@ -275,6 +275,24 @@ PlotSpec: TypeAlias = (
 )
 
 
+def semantic_spec(spec: PlotSpec) -> PlotSpec:
+    """Return the spec that decides what a drawn surface IS.
+
+    A FacetGrid is a layout: every cell draws the cell spec, so every
+    question about the plotted thing -- its kind, its axes, its labels, the
+    gestures its surface accepts -- is a question about the cell.  This is
+    the ONE place that unwraps it.
+
+    Re-typing it inline is how a per-plot facility ends up honouring the
+    cell in one half of the renderer and the grid in the other: colour-limit
+    dragging, cell squareness, the point overlay and the crosshair value
+    rail were each half-migrated that way, and each was a user-visible bug.
+    ``test_semantic_spec_has_one_authority`` holds the line mechanically.
+    """
+
+    return spec.cell if isinstance(spec, FacetGridPlot) else spec
+
+
 def _title_parameter(default: str | None) -> ParameterSpec[object]:
     del default
     return ParameterSpec(
@@ -586,8 +604,9 @@ def _parameter_schema_context(spec: PlotSpec) -> _ParameterSchemaContext:
         ),
     ):
         raise TypeError("unsupported plot specification")
-    semantic = spec.cell if isinstance(spec, FacetGridPlot) else spec
-    return _ParameterSchemaContext(spec.kind, semantic.kind, spec.labels)
+    return _ParameterSchemaContext(
+        spec.kind, semantic_spec(spec).kind, spec.labels
+    )
 
 
 def _parameter_schema_for_context(
@@ -767,4 +786,5 @@ __all__ = [
     "RollingPlot",
     "parameter_schema_for",
     "parameter_schema_for_kind",
+    "semantic_spec",
 ]

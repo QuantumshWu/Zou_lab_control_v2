@@ -259,7 +259,9 @@ def _image_point_overlay(revision: int) -> ImagePointOverlay:
         coordinates=_IMAGE_POINT_COORDINATES + offset,
         point_ids=("point-01", "point-02", "point-03"),
         labels=("A", "B", "C"),
-        statuses=(PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID),
+        statuses={
+            None: (PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID)
+        },
     )
 
 
