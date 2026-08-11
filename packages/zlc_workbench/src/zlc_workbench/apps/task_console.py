@@ -86,6 +86,49 @@ def open_experiment(workspace=None, template=None):
     return space, session
 
 
+def build_panel_host(plot_input, state):
+    """One panel host from one panel state: THE mount path for every card.
+
+    Module-level on purpose -- the presenter tests mount through this exact
+    function, so a divergence between what the app builds and what the tests
+    build cannot exist.
+
+    The panel's stored appearance (``state.display``) is the COMPLETE
+    configuration of whatever vocabulary the panel last settled under --
+    ``_state_with_described_parameters`` rewrites it wholesale so a saved
+    panel reproduces its exact look.  A changed kind or cell kind mounts a
+    spec with a DIFFERENT vocabulary, and the plot schema refuses unknown
+    names by design (a misspelling must never silently run defaults).  The
+    mount therefore takes the intersection: shared names keep their authored
+    values, foreign names stay behind in the bag until the next settle
+    rewrites it in the new vocabulary.
+    """
+
+    import zlc_plot as plot
+    from zlc_plot.specs import parameter_schema_for
+
+    from ..panel_catalog import task_console_fitting_spec
+    from ..panel_state import compose_panel_spec
+
+    snapshot = getattr(plot_input, "snapshot", plot_input)
+    spec = task_console_fitting_spec(
+        snapshot.block.schema, state.kind, state.cell_kind
+    )
+    if spec is None:
+        raise ValueError(
+            f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
+        )
+    spec = compose_panel_spec(snapshot.block.schema, spec, state)
+    schema = parameter_schema_for(spec, style=plot.DEFAULTS.style)
+    parameters = schema.declared_subset(dict(state.display))
+    return plot.RasterPlotHost.from_plot(
+        plot_input,
+        spec,
+        size=state.size,
+        parameters=parameters,
+    )
+
+
 def build_console(session, *, window_ratio=None):
     """One console presenter over one session, with the view it drives."""
 
@@ -96,7 +139,6 @@ def build_console(session, *, window_ratio=None):
     from ..board import attach_qt_owner_turn
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
-    from ..panel_state import compose_panel_spec
 
     def _panel_surface(host):
         """A board panel's widget STAGES its fronts; the board presents them.
@@ -124,26 +166,10 @@ def build_console(session, *, window_ratio=None):
             snapshot.block.schema, kind, cell_kind
         )
 
-    def _make_host(plot_input, state):
-        snapshot = getattr(plot_input, "snapshot", plot_input)
-        spec = _spec_for(snapshot, state.kind, state.cell_kind)
-        if spec is None:
-            raise ValueError(
-                f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
-            )
-        spec = compose_panel_spec(snapshot.block.schema, spec, state)
-        parameters = dict(state.display)
-        return plot.RasterPlotHost.from_plot(
-            plot_input,
-            spec,
-            size=state.size,
-            parameters=parameters,
-        )
-
     presenter = ConsolePresenter(
         session,
         view,
-        make_host=_make_host,
+        make_host=build_panel_host,
         spec_for=_spec_for,
         open_saved=lambda start: _open_saved_figure(view, start),
     )

@@ -120,7 +120,11 @@ def parameter_controls_for_kind(
         style=DEFAULTS.style,
         facet_cell_kind=facet_cell_kind,
     )
-    state = schema.initial_values(values)
+    # ``values`` is a persisted panel appearance, possibly authored under a
+    # different kind's vocabulary; describing takes the declared subset.
+    state = schema.initial_values(
+        None if values is None else schema.declared_subset(values)
+    )
     return parameter_controls(schema, state)
 
 

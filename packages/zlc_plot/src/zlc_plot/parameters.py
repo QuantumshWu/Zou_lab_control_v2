@@ -203,6 +203,24 @@ class ParameterSchema(Mapping[str, ParameterSpec[Any]]):
     def names(self) -> tuple[str, ...]:
         return tuple(self.__specs)
 
+    def declared_subset(self, values: Mapping[str, object]) -> dict[str, Any]:
+        """The subset of a persisted appearance this schema declares.
+
+        A panel's saved appearance is the COMPLETE configuration of whatever
+        vocabulary it last settled under; crossing vocabularies (a changed
+        kind or facet cell kind) is legal, and names the new vocabulary does
+        not declare simply do not apply to it.  Strictness against
+        misspellings lives in :meth:`prepare_updates`, which guards what
+        actually configures a session -- this projection is only for reading
+        an appearance authored under another schema.
+        """
+
+        if not isinstance(values, Mapping):
+            raise TypeError("display parameter values must be a mapping")
+        return {
+            name: value for name, value in values.items() if name in self.__specs
+        }
+
     def prepare_updates(self, updates: Mapping[str, object]) -> dict[str, Any]:
         if not isinstance(updates, Mapping):
             raise TypeError("display parameter updates must be a mapping")

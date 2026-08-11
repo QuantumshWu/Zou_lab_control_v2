@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -396,29 +397,19 @@ def session(tmp_path):
 
 @pytest.fixture
 def presenter(session):
-    plot = pytest.importorskip("zlc_plot")
+    pytest.importorskip("zlc_plot")
+    # The REAL mount path, not a copy of it.  The copy this fixture used to
+    # carry drifted from the app exactly once -- and that once was a shipped
+    # bug the suite could not see.
+    from zlc_workbench.apps.task_console import build_panel_host
 
     def spec_for(snapshot, kind="", cell_kind=""):
         return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def make_host(plot_input, state):
-        # The same rule the real composition root uses.  A double that builds
-        # its hosts a different way is a double that stops being evidence.
-        initial = getattr(plot_input, "snapshot", plot_input)
-        spec = spec_for(initial, state.kind, state.cell_kind)
-        spec = compose_panel_spec(initial.block.schema, spec, state)
-        parameters = dict(state.display)
-        return plot.RasterPlotHost.from_plot(
-            plot_input,
-            spec,
-            size=state.size,
-            parameters=parameters,
-        )
-
     presenter = ConsolePresenter(
         session,
         _ConsoleView(),
-        make_host=make_host,
+        make_host=build_panel_host,
         spec_for=spec_for,
     )
     try:
@@ -705,14 +696,52 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
     assert presenter.retarget_panel(binding.panel_id, signal) is True
     assert binding.host is not None
     first_host = binding.host
-    assert presenter.update_panel_state(
-        binding.panel_id, {"cell_kind": "histogram"}
-    ) is True
-    assert binding.state.cell_kind == "histogram"
-    assert binding.host is not None
-    assert binding.host is not first_host, (
-        "the plot host must be rebuilt for the new cell kind"
-    )
+
+    # Settle: the described FULL vocabulary of the current cells is written
+    # back into state.display.  This is what the running app always does, and
+    # it is what makes the next switch dangerous -- the bag now carries names
+    # the next vocabulary does not declare.
+    _settle_panel_hosts(presenter, lambda: bool(binding.state.display))
+    assert binding.state.display, "the settle never described the panel"
+
+    from zlc_plot import DEFAULTS
+    from zlc_plot.specs import parameter_schema_for_kind
+
+    def _switch(cell_kind: str, previous_host) -> None:
+        # Non-vacuous: the bag being carried INTO this switch must hold at
+        # least one name the target vocabulary does not declare, or the
+        # switch proves nothing about crossing vocabularies.
+        target_names = set(
+            parameter_schema_for_kind(
+                "facet_grid", style=DEFAULTS.style, facet_cell_kind=cell_kind
+            ).names
+        )
+        assert set(binding.state.display) - target_names, (
+            f"the stored appearance is a subset of {cell_kind} cells'; "
+            "this switch cannot turn red"
+        )
+        assert presenter.update_panel_state(
+            binding.panel_id, {"cell_kind": cell_kind}
+        ) is True
+        assert binding.state.cell_kind == cell_kind
+        assert binding.host is not None
+        assert binding.host is not previous_host, (
+            "the plot host must be rebuilt for the new cell kind"
+        )
+        # The rebuilt host must actually COME UP: a lazy startup failure
+        # ("unknown display parameter(s) ...") surfaces at the settle, as a
+        # reported error and a panel that never describes itself.
+        binding.state = replace(binding.state, display={})
+        _settle_panel_hosts(presenter, lambda: bool(binding.state.display))
+        assert binding.reported_error is None, binding.reported_error
+        assert binding.state.display, (
+            f"the {cell_kind} host never settled; it likely failed to start"
+        )
+
+    # Both directions of the vocabulary change: whatever the data decided
+    # first, each switch crosses into names the other cells do not declare.
+    _switch("histogram", first_host)
+    _switch("image", binding.host)
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
