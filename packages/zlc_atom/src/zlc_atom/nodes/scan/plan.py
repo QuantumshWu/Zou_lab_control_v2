@@ -1,4 +1,5 @@
-"""What a scan IS: ordered axes over parameter ports, as pure data.
+"""What a scan IS: ordered axes over parameter ports, as pure data, and the
+template that offers them.
 
 A scan is not a kind of measurement logic.  It is a declaration -- which
 knobs, which values, in which nesting order -- and everything else derives
@@ -7,34 +8,41 @@ vocabulary for "which knob" is a PORT, projected from whatever owns the knob;
 nothing here invents one, so a plan can never name a parameter its pulse does
 not declare.
 
-Port families are open.  Today the bench projects one:
+The port family says WHO can advance the knob, and that is what decides which
+node runs the plan:
 
-* ``pulse:param:<parameter_id>`` -- a pulse API parameter.  Advancing it is
-  stepped: resolve the template with this point's values and load the result,
-  so the board only ever plays an ordinary pulse.  This is how v1 held and
-  scanned points, and it is the path the board is good at.
-
-A knob the board can advance BY ITSELF between cycles (a hardware slot) would
-join as its own family with a streamed advance; the plan's shape does not
-change for it, which is the point of declaring the family in the port name.
+* ``pulse:param:<parameter_id>`` -- a pulse API parameter.  Either node takes
+  it: the board can advance it from its own scan table (``seamless_scan``),
+  and the host can resolve and reload the template per point
+  (``stepped_scan``).
+* ``device:<key>:<field>`` -- a runtime knob on an installed device.  Only the
+  host can move it, with a ``tune(field, value)`` call before the point fires,
+  so only ``stepped_scan`` accepts it.
 """
 
 from __future__ import annotations
 
 import itertools
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
-from zlc_pulse import PulseSequence, api_parameter_columns_for
+from zlc_pulse import PulseSequence, api_parameter_columns_for, sequence_from_tree
+
+from zlc_atom.nodes._framework.descriptor import WorkspaceResourceSpec
 
 
 PULSE_PARAM_FAMILY = "pulse:param:"
 
 #: ``device:<key>:<field>`` -- a runtime knob on an installed device.  Its
-#: stepped advance is a ``tune(field, value)`` call before the point fires;
-#: the board cannot advance it itself, so a streamed plan refuses it.
+#: advance is a ``tune(field, value)`` call before the point fires; the board
+#: cannot advance it itself, so a board-advanced plan refuses it.
 DEVICE_PARAM_FAMILY = "device:"
+
+#: What a file must be to be a scan's pulse template.
+SCAN_PULSE_CONTRACT = "zlc.pulse/scan-template"
 
 
 @dataclass(frozen=True)
@@ -217,13 +225,62 @@ def bind_plan(
     return tuple(bound)
 
 
+def load_scan_template(path: str | Path) -> PulseSequence:
+    """One workspace pulse file, admitted only if it offers something to scan."""
+
+    source = Path(path).expanduser().resolve()
+    sequence = sequence_from_tree(json.loads(source.read_text(encoding="utf-8")))
+    if not sequence.api_parameters:
+        raise ValueError(
+            "a scan template declares API parameters; this pulse declares none, "
+            "so it offers nothing to scan"
+        )
+    if sequence.slots:
+        raise ValueError(
+            "a scan template cannot carry hardware scan slots; the plan is the "
+            "only thing that says what varies"
+        )
+    return sequence
+
+
+#: The pulse template both scan nodes select from the workspace's ``pulses``.
+SCAN_PULSE_RESOURCE = WorkspaceResourceSpec(
+    "pulse_template",
+    SCAN_PULSE_CONTRACT,
+    "pulses",
+    (".json",),
+    load_scan_template,
+    argument_name="pulse_resource",
+)
+
+
+def plan_from_authored(payload: object) -> ScanPlan:
+    """The plan behind one authored value: a document, a tree, or its JSON."""
+
+    if isinstance(payload, ScanPlan):
+        return payload
+    if isinstance(payload, Mapping):
+        return ScanPlan.from_tree(payload)
+    text = str(payload or "").strip()
+    if not text:
+        raise ValueError(
+            'the scan plan is empty; it reads like '
+            '{"axes": [{"port": "pulse:param:da_bias_x", "values": [-256, 0, 256]}]}'
+        )
+    return ScanPlan.from_tree(json.loads(text))
+
+
 __all__ = [
     "DEVICE_PARAM_FAMILY",
     "PULSE_PARAM_FAMILY",
+    "SCAN_PULSE_CONTRACT",
+    "SCAN_PULSE_RESOURCE",
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
     "bind_plan",
+    "load_scan_template",
+    "plan_from_authored",
     "scan_ports_for",
     "scan_ports_for_devices",
 ]

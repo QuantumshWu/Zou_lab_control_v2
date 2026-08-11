@@ -389,10 +389,11 @@ assert catalog == (
     ('Plot: curve', ('plot', 'curve')),
     ('Plot: rolling', ('plot', 'rolling')),
     ('Plot: histogram', ('plot', 'histogram')),
-        ('Plot: facet_grid', ('plot', 'facet_grid')),
-        ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
-        ('Measurement: Scan', ('logic', 'scan')),
-        ('Processor: Occupancy', ('logic', 'occupancy')),
+    ('Plot: facet_grid', ('plot', 'facet_grid')),
+    ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
+    ('Measurement: Seamless Scan', ('logic', 'seamless_scan')),
+    ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
+    ('Processor: Occupancy', ('logic', 'occupancy')),
     ('Task: Calibration', ('logic', 'calibration')),
 )
 facet_index = next(

@@ -76,7 +76,8 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "calibration",
         "camera_measurement",
         "occupancy",
-        "scan",
+        "seamless_scan",
+        "stepped_scan",
     )
 
 

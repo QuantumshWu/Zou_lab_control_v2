@@ -1,0 +1,404 @@
+"""The stepped scan node: the HOST applies each point, then takes its shots.
+
+The end-to-end test IS the goal this engine was built for: scan the three
+bias DACs on the virtual bench and find the MOT optimum the simulation
+planted, watching a free-running monitor.  Nothing here reads the world's
+ground truth except to say where the answer should have landed.
+
+The gating tests ask the other question this node owns -- which publications
+it KEPT -- against a source whose every publication is named.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
+from zlc_runtime import NodeHost, SignalDataPlane
+
+from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
+from zlc_atom.install import create_installation, tunable_devices
+from zlc_atom.nodes import (
+    ResolvedWorkspaceResource,
+    discover_logic_nodes,
+    scan_pulse_template_bytes,
+)
+from zlc_atom.nodes.scan import (
+    DEVICE_PARAM_FAMILY,
+    PULSE_PARAM_FAMILY,
+    SCAN_PULSE_CONTRACT,
+    ScanAxis,
+    ScanPlan,
+)
+from zlc_atom.nodes.stepped_scan import GATING_MODES, STEPPED_SCAN_SCHEMA
+
+from tests.fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench
+
+
+TEMPLATE_NAME = "mot_field_template.json"
+BIAS_PORTS = tuple(
+    PULSE_PARAM_FAMILY + name
+    for name in ("da_bias_x", "da_bias_y", "da_bias_z")
+)
+#: Long enough that no scheduling jitter could produce it, short enough to pay.
+AUTHORED_SETTLE_SECONDS = 0.37
+
+
+def _template_sequence():
+    return sequence_from_tree(json.loads(scan_pulse_template_bytes().decode("utf-8")))
+
+
+def _pulse_resource(sequence):
+    return ResolvedWorkspaceResource(
+        Path(TEMPLATE_NAME), SCAN_PULSE_CONTRACT, sequence
+    )
+
+
+def _seed_the_mot_monitor(sequencer, monitor, plane) -> str:
+    """One fire at the authored zeros, then wait for the monitor's first frame."""
+
+    sequence = _template_sequence()
+    board = sequencer.describe()
+    seeded = resolve_api_parameters(sequence)
+    sequencer.load(
+        compile_sequence(seeded, board.geometry, board.clock_hz), source=seeded
+    )
+    sequencer.fire()
+    sequencer.wait_done(5.0)
+    deadline = time.monotonic() + 10.0
+    signal_name = ""
+    while time.monotonic() < deadline and not signal_name:
+        monitor.poll()
+        # Publications materialise when the plane FREEZES -- in the product
+        # that is the console beat's act; here the test plays it.
+        plane.freeze()
+        for name in plane.describe_signals():
+            text = str(getattr(name, "name", name))
+            if "/frame" in text:
+                signal_name = text
+        time.sleep(0.02)
+    assert signal_name, "the MOT monitor never published a frame"
+    return signal_name
+
+
+def _scripted_run(
+    *,
+    gating: str,
+    shots: int,
+    settle: float,
+    values: tuple[float, ...] = (-256.0, 256.0),
+) -> tuple[np.ndarray, ScriptedScanBench]:
+    """Run the node over a source whose every publication is named.
+
+    Returns the kept shots as (visit, plan row) values -- each cell is the
+    index of the publication that landed in it -- and the bench that scripted
+    them.
+    """
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    bench = None
+    host = None
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"),
+            plane,
+            # A free-running source hands over the straddling shot as well;
+            # a pulse-driven one publishes exactly one cycle per fire.
+            publications_per_fire=shots + 1 if gating == "sw_gated" else 1,
+        )
+        bench.publish(SCRIPTED_SEED_VALUE)
+        plan = ScanPlan((ScanAxis(BIAS_PORTS[0], values),))
+        node = descriptors["stepped_scan"].instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(_template_sequence()),
+            plan=plan.to_tree(),
+            shots_per_point=shots,
+            settle_seconds=settle,
+            gating=gating,
+        )
+        host = NodeHost(node, plane)
+        host.start()
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+        observed = host.observation
+        assert observed.error is None, observed.error
+        assert observed.terminal, (
+            "the stepped scan never finished; it published "
+            f"{bench.published} and kept waiting"
+        )
+        value = plane.freeze().value(host.signal_key("scan"))
+        assert value is not None, "the scan published nothing"
+        block = np.asarray(value.block.values, dtype=float)
+        # (visit, plan row, y, x): every pixel of a scripted frame carries the
+        # publication's index, so the cell mean IS the shot that landed there.
+        return block.mean(axis=(2, 3)), bench
+    finally:
+        if host is not None and not host.observation.terminal:
+            host.cancel("test cleanup")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not host.observation.terminal:
+                host.poll()
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+
+def test_gating_is_the_operators_declaration_and_the_old_fields_are_gone() -> None:
+    """How freshness is taken is DECLARED on the node, never probed.
+
+    The safe default skips the straddler (right for a free-running monitor
+    like the MOT camera); a pulse-driven source keeps every publication.
+    """
+
+    field = next(f for f in STEPPED_SCAN_SCHEMA.fields if f.name == "gating")
+    assert field.value_type == "choice"
+    assert field.default == "sw_gated"
+    assert {choice.value for choice in field.choices} == set(GATING_MODES)
+    with pytest.raises(ValueError, match="must be one of"):
+        STEPPED_SCAN_SCHEMA.project_values(
+            {"pulse_template": "t.json", "plan": "{}", "gating": "guess"}
+        )
+    # The node that modelled two measurements through one field is gone, and
+    # so are the words it used.
+    assert "capture" not in STEPPED_SCAN_SCHEMA.field_names
+    assert "advance" not in STEPPED_SCAN_SCHEMA.field_names
+
+
+def test_sw_gated_discards_the_shot_that_straddled_the_change() -> None:
+    """A free-running source pays exactly one publication per point.
+
+    Each point publishes three named shots; the first was exposed across the
+    apply, so the kept two are the SECOND and THIRD -- asserted by value, not
+    by count, because a count survives keeping the wrong ones.
+    """
+
+    kept, bench = _scripted_run(gating="sw_gated", shots=2, settle=0.0)
+    assert kept.tolist() == [[1.0, 4.0], [2.0, 5.0]]
+    assert SCRIPTED_SEED_VALUE not in kept.reshape(-1).tolist()
+    assert bench.published == [SCRIPTED_SEED_VALUE, 0, 1, 2, 3, 4, 5]
+
+
+def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:
+    """A pulse-driven source is silent between cycles: nothing is discarded."""
+
+    kept, bench = _scripted_run(gating="pulse_gated", shots=2, settle=0.0)
+    assert kept.tolist() == [[0.0, 2.0], [1.0, 3.0]]
+    assert bench.published == [SCRIPTED_SEED_VALUE, 0, 1, 2, 3]
+
+
+def test_the_authored_settle_time_stops_the_board_before_every_point() -> None:
+    """The pulse is stopped, and stays stopped for the AUTHORED time."""
+
+    _kept, bench = _scripted_run(
+        gating="sw_gated", shots=1, settle=AUTHORED_SETTLE_SECONDS
+    )
+    intervals = bench.stop_intervals()
+    assert len(intervals) == 2, (
+        f"one stop per plan point was expected, got {intervals}"
+    )
+    for interval in intervals:
+        assert interval >= AUTHORED_SETTLE_SECONDS, (
+            f"the board was stopped for only {interval:.3f}s, less than the "
+            f"authored {AUTHORED_SETTLE_SECONDS}s"
+        )
+        assert interval < AUTHORED_SETTLE_SECONDS + 1.0, (
+            f"the stop of {interval:.3f}s is not the authored "
+            f"{AUTHORED_SETTLE_SECONDS}s"
+        )
+
+
+def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
+    """End to end: a ``device:`` axis tunes the camera and the frames show it.
+
+    The plan scans the MOT camera's exposure over a 4x range; the spot's
+    photon count is proportional to exposure in the simulated world (the
+    read-noise floor is not), so pooled above-floor brightness at the long
+    exposure must clearly exceed the short one.  Red if the device family is
+    never dispatched -- the exposure then never moves and the two points
+    look alike.
+    """
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {d.api_name: d for d in discover_logic_nodes()}
+    sequencer = installation.device("sequencer")
+    monitor = None
+    host = None
+    try:
+        monitor_node = descriptors["camera_measurement"].instantiate(
+            camera=installation.device("mot_camera"),
+            camera_key="mot_camera",
+            signal_plane=plane,
+            repeat=0,
+        )
+        monitor = monitor_node.monitor()
+        signal_name = _seed_the_mot_monitor(sequencer, monitor, plane)
+
+        exposures = (0.02, 0.08)
+        plan = ScanPlan(
+            (
+                ScanAxis(
+                    DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds",
+                    exposures,
+                ),
+            )
+        )
+        scan_node = descriptors["stepped_scan"].instantiate(
+            sequencer=sequencer,
+            signal_plane=plane,
+            source_signal=signal_name,
+            pulse_resource=_pulse_resource(_template_sequence()),
+            plan=plan.to_tree(),
+            shots_per_point=1,
+            settle_seconds=0.02,
+            tunable_devices=tunable_devices(installation),
+        )
+        host = NodeHost(scan_node, plane)
+        host.start()
+        deadline = time.monotonic() + 240.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            monitor.poll()
+            plane.freeze()
+            host.poll()
+        observed = host.observation
+        assert observed.error is None, observed.error
+        assert observed.terminal
+
+        frozen = plane.freeze()
+        value = frozen.value(host.signal_key("scan"))
+        assert value is not None, "the scan published nothing"
+        frames = np.asarray(value.block.values, dtype=float)
+        assert frames.shape[1] == len(exposures)
+        pooled = np.clip(frames - 12.0, 0.0, None)
+        brightness = pooled.sum(
+            axis=tuple(axis for axis in range(pooled.ndim) if axis != 1)
+        )
+        assert brightness[1] > 2.0 * brightness[0], (
+            "a 4x exposure did not brighten the spot; the device port was "
+            f"never applied (brightness={brightness.round(1).tolist()})"
+        )
+    finally:
+        if host is not None and not host.observation.terminal:
+            host.cancel("test cleanup")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not host.observation.terminal:
+                host.poll()
+        if host is not None:
+            host.shutdown()
+        if monitor is not None:
+            monitor.close()
+        installation.close()
+
+
+def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
+    """The goal, end to end: a 3x3x3 field scan lands on the world's optimum.
+
+    The grid is coarse on purpose -- the assertion is that the brightest scan
+    point is the grid point NEAREST the planted optimum, computed from the
+    ground truth rather than hard-coded, so re-planting the optimum moves the
+    expectation with it.
+    """
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {d.api_name: d for d in discover_logic_nodes()}
+    sequencer = installation.device("sequencer")
+    monitor = None
+    host = None
+    try:
+        monitor_node = descriptors["camera_measurement"].instantiate(
+            camera=installation.device("mot_camera"),
+            camera_key="mot_camera",
+            signal_plane=plane,
+            repeat=0,
+        )
+        monitor = monitor_node.monitor()
+        signal_name = _seed_the_mot_monitor(sequencer, monitor, plane)
+
+        values = (-256.0, 0.0, 256.0)
+        plan = ScanPlan(tuple(ScanAxis(port, values) for port in BIAS_PORTS))
+        scan_node = descriptors["stepped_scan"].instantiate(
+            sequencer=sequencer,
+            signal_plane=plane,
+            source_signal=signal_name,
+            pulse_resource=_pulse_resource(_template_sequence()),
+            plan=plan.to_tree(),
+            shots_per_point=1,
+            settle_seconds=0.02,
+        )
+        host = NodeHost(scan_node, plane)
+        host.start()
+        scan_signal = host.signal_key("scan")
+        live_fill_levels: set[int] = set()
+        deadline = time.monotonic() + 240.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            monitor.poll()
+            front = plane.freeze()
+            # A measurement publishes LIVE while it runs: a panel attaching
+            # mid-scan must see the growing dataset, not silence until the
+            # end.  This guard is red under an implementation that only
+            # publishes a FINAL result.
+            live = front.value(scan_signal)
+            if live is not None and live.coverage is not None:
+                live_fill_levels.add(live.coverage.written_cells)
+            host.poll()
+        observed = host.observation
+        assert observed.error is None, observed.error
+        assert observed.terminal
+        partial = {
+            level
+            for level in live_fill_levels
+            if 0 < level < plan.point_count
+        }
+        assert partial, (
+            "the scan never published a partially filled live dataset; "
+            f"observed fill levels: {sorted(live_fill_levels)}"
+        )
+
+        frozen = plane.freeze()
+        value = frozen.value(scan_signal)
+        assert value is not None, "the scan published nothing"
+
+        frames = np.asarray(value.block.values, dtype=float)
+        # (repeat, scan points, event, y, x): one MOT cycle per grid point,
+        # its frames on the READOUT_EVENT axis.
+        assert frames.shape[1] == plan.point_count
+        # Brightness above the read-noise floor; position-independent, so the
+        # spot moving with the field cannot fool the metric.
+        pooled = np.clip(frames - 12.0, 0.0, None)
+        brightness = pooled.sum(
+            axis=tuple(axis for axis in range(pooled.ndim) if axis != 1)
+        )
+        best = plan.rows()[int(np.argmax(brightness))]
+
+        expected = tuple(
+            min(values, key=lambda value: abs(value - optimum))
+            for optimum in DEFAULT_MOT_FIELD_OPTIMUM_DAC
+        )
+        assert best == expected, (
+            f"the scan says {best} but the planted optimum {DEFAULT_MOT_FIELD_OPTIMUM_DAC} "
+            f"is nearest {expected}; brightness={brightness.round(1).tolist()}"
+        )
+    finally:
+        if host is not None and not host.observation.terminal:
+            host.cancel("test cleanup")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not host.observation.terminal:
+                host.poll()
+        if host is not None:
+            host.shutdown()
+        if monitor is not None:
+            monitor.close()
+        installation.close()

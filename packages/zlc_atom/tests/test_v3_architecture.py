@@ -180,9 +180,20 @@ def test_measurement_leaf_has_no_sequencer_dependency_or_operation() -> None:
 
 
 def test_node_cross_imports_have_only_owner_edges() -> None:
+    """A node may reach another PACKAGE only as an owner, or as a library.
+
+    ``nodes/scan`` carries no ``logic_node.py``: it is not a node, it is what
+    the two scan nodes stand on -- the plan, the ports, the dataset, the
+    editor.  An edge into it is reuse.  An edge into another NODE is one node
+    reaching into another's science, and only one such edge exists: occupancy
+    consumes the calibration a calibration run saved.
+    """
+
     nodes_root = ROOT / "src" / "zlc_atom" / "nodes"
     files = tuple(nodes_root.rglob("*.py"))
     assert files
+    node_owners = {path.parent.name for path in nodes_root.rglob("logic_node.py")}
+    assert "scan" not in node_owners, "the scan package must not be a node"
     edges: set[tuple[str, str]] = set()
     for path in files:
         relative = path.relative_to(nodes_root)
@@ -201,7 +212,13 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
             target_owner = module.split(".")[2]
             if target_owner != source_owner and target_owner != "_framework":
                 edges.add((source_owner, target_owner))
-    assert edges == {("occupancy", "calibration")}
+    assert {edge for edge in edges if edge[1] in node_owners} == {
+        ("occupancy", "calibration")
+    }
+    assert {edge for edge in edges if edge[1] not in node_owners} == {
+        ("seamless_scan", "scan"),
+        ("stepped_scan", "scan"),
+    }
 
 
 def test_pulse_resolver_uses_the_project_json_document(

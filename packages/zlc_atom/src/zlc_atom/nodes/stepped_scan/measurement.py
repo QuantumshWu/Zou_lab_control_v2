@@ -1,0 +1,288 @@
+"""The stepped scan engine: the HOST advances the points, one applied at a time.
+
+Per point the host stops the pulse, lets the bench settle, moves every device
+knob the plan names, resolves the template with this point's parameters,
+loads it and fires.  That is slower than a board-advanced table and it is the
+only way to scan a knob the board does not own -- a camera exposure, a laser
+driver, anything whose value is a call rather than a slot.  A plan with no
+pulse parameters at all is still a scan here.
+
+HOW A FRESH VALUE IS TAKEN IS THE OPERATOR'S DECLARATION.  Between two points
+the world changes, and whether the publication that straddles the change must
+be thrown away depends on the SOURCE, not on the board:
+
+* ``pulse_gated``: the source is driven by the fired cycle (an externally
+  triggered camera), so it is silent between finite cycles and every
+  publication after a fire is that fire's.  One fire per shot, nothing
+  discarded, exact at any pipeline depth.
+* ``sw_gated``: the source free-runs at its own pace (the Basler MOT
+  monitor).  One fire applies the point and the board's end state holds it;
+  the next publication may have been exposed partly at the OLD point, so
+  exactly it is discarded and the ``shots_per_point`` after it are kept.
+
+Neither is guessed from the publisher and neither probes the board.  The two
+are different apparatus, and only the operator knows which one is wired up.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Mapping, Sequence
+
+from zlc_pulse import (
+    PulseSequence,
+    compile_sequence,
+    pulse_field_value,
+    resolve_api_parameters,
+)
+from zlc_runtime import FinalDatasetOutput
+
+from zlc_atom.nodes.scan import (
+    DEVICE_PARAM_FAMILY,
+    PULSE_PARAM_FAMILY,
+    SCAN_OUTPUT,
+    ScanDatasetWriter,
+    ScanLiveSlot,
+    ScanPlan,
+    ScanPort,
+    drain_backlog,
+    follow_source,
+    next_source_value,
+)
+
+
+#: What gates one publication: the fired cycle, or the source's own clock.
+GATING_MODES = ("pulse_gated", "sw_gated")
+
+
+class SteppedScanMeasurement:
+    """Apply a point, take its shots, move on -- the whole plan, ``repeats`` times."""
+
+    def __init__(
+        self,
+        *,
+        sequencer: object,
+        signal_plane: object,
+        signal_name: str,
+        source_generation: object,
+        sequence: PulseSequence,
+        plan: ScanPlan,
+        ports: tuple[ScanPort, ...],
+        repeats: int,
+        shots_per_point: int,
+        settle_seconds: float,
+        gating: str,
+        tunables: object | None = None,
+        producer: str = "stepped_scan",
+    ) -> None:
+        self.instance_id = str(producer).strip() or "stepped_scan"
+        self.producer = self.instance_id
+        self.sequencer = sequencer
+        self.signal_plane = signal_plane
+        self._signal_name = str(signal_name)
+        self._source_generation = source_generation
+        self.sequence = sequence
+        self.plan = plan
+        self.ports = ports
+        self.repeats = int(repeats)
+        if self.repeats < 1:
+            raise ValueError("repeats must be at least 1")
+        self.shots_per_point = int(shots_per_point)
+        if self.shots_per_point < 1:
+            raise ValueError("shots_per_point must be at least 1")
+        self.settle_seconds = float(settle_seconds)
+        if not self.settle_seconds >= 0.0:
+            raise ValueError("settle_seconds must be zero or more")
+        self.gating = str(gating)
+        if self.gating not in GATING_MODES:
+            raise ValueError(
+                f"gating must be one of {GATING_MODES}, not {gating!r}"
+            )
+        self._tunables = dict(tunables or {})
+
+    @property
+    def dataset_output_declarations(self):
+        return (SCAN_OUTPUT,)
+
+    def _check_cancelled(self, context: object) -> None:
+        if context.cancel_requested():
+            raise RuntimeError("the scan was cancelled")
+
+    def _split_row(
+        self, row: Sequence[float]
+    ) -> tuple[dict[str, float], tuple[tuple[object, str, float], ...]]:
+        """One plan row, split by port family: what a step DOES per axis.
+
+        A ``pulse:param:`` axis lands in the parameter mapping the template
+        resolves with; a ``device:`` axis becomes a ``tune`` call on its
+        installed device before the point fires.  An unknown family is a
+        loud refusal, never a silent no-op.
+        """
+
+        pulse_values: dict[str, float] = {}
+        device_moves: list[tuple[object, str, float]] = []
+        for port, value in zip(self.ports, row, strict=True):
+            if port.port.startswith(PULSE_PARAM_FAMILY):
+                pulse_values[port.port[len(PULSE_PARAM_FAMILY):]] = float(value)
+            elif port.port.startswith(DEVICE_PARAM_FAMILY):
+                key, _, field = port.port[len(DEVICE_PARAM_FAMILY):].partition(":")
+                device = self._tunables.get(key)
+                if device is None:
+                    raise ValueError(
+                        f"this bench offers no tunable device {key!r} for "
+                        f"port {port.port!r}"
+                    )
+                device_moves.append((device, field, float(value)))
+            else:
+                raise ValueError(
+                    f"no executor advances ports of {port.port!r}'s family yet"
+                )
+        return pulse_values, tuple(device_moves)
+
+    def _api_values(self, scanned: Mapping[str, float]) -> dict[str, float]:
+        """The COMPLETE parameter mapping this row means.
+
+        A plan may scan a subset of what the pulse declares; everything it
+        does not name holds its AUTHORED value.  The mapping handed to
+        resolve_api_parameters is always complete, so its strictness -- the
+        rule that keeps a misspelling from silently running nominals -- is
+        never loosened.
+        """
+
+        values: dict[str, float] = {
+            parameter.parameter_id: float(
+                pulse_field_value(self.sequence, parameter.field_ref, parameter.unit)
+            )
+            for parameter in self.sequence.api_parameters
+        }
+        values.update(scanned)
+        return values
+
+    def execute(self, context: object):
+        board = self.sequencer.describe()
+        rows = self.plan.rows()
+        shots = self.shots_per_point
+        writer = ScanDatasetWriter(
+            rows,
+            [(port.label, port.unit) for port in self.ports],
+            visits=self.repeats * shots,
+            generation=context.generation,
+        )
+        slot = ScanLiveSlot()
+        context.attach_live_outputs(slot)
+        tap = follow_source(
+            self.signal_plane, self._signal_name, self._source_generation
+        )
+        try:
+            # Sweeps are the OUTERMOST loop: every plan point is revisited
+            # after the whole plan has played, so the R looks at one point
+            # straddle whatever drifts between sweeps -- which is the
+            # physical difference between repeats and shots.
+            for sweep in range(self.repeats):
+                for index, row in enumerate(rows):
+                    self._check_cancelled(context)
+                    self._apply(row, board)
+                    # Everything published before the apply is the old world.
+                    drain_backlog(self.signal_plane, tap)
+                    self._collect(context, tap, writer, slot, index, sweep)
+                    context.report_progress(
+                        "Scanning",
+                        current=sweep * len(rows) + index + 1,
+                        total=self.repeats * len(rows),
+                    )
+        finally:
+            tap.close()
+            self.sequencer.safe()
+        self._check_cancelled(context)
+        snapshot = writer.snapshot()
+        context.publish_final(
+            {
+                SCAN_OUTPUT.name: FinalDatasetOutput(
+                    SCAN_OUTPUT,
+                    snapshot,
+                    {
+                        "source_signal": self._signal_name,
+                        "pulse": self.sequence.name,
+                        "plan": self.plan.to_tree(),
+                        "scan_shape": self.plan.shape,
+                        "repeats": self.repeats,
+                        "shots_per_point": shots,
+                        "settle_seconds": self.settle_seconds,
+                        "gating": self.gating,
+                    },
+                )
+            }
+        )
+        return snapshot
+
+    def _apply(self, row: Sequence[float], board: object) -> None:
+        """Stop the pulse, settle, move the knobs, load this point's program."""
+
+        pulse_values, device_moves = self._split_row(row)
+        self.sequencer.safe()
+        time.sleep(self.settle_seconds)
+        for device, field, value in device_moves:
+            device.tune(field, value)
+        resolved = resolve_api_parameters(
+            self.sequence, self._api_values(pulse_values)
+        )
+        if resolved.target != board.target:
+            raise ValueError("pulse target differs from the connected board")
+        self.sequencer.load(
+            compile_sequence(resolved, board.geometry, board.clock_hz),
+            source=resolved,
+        )
+
+    def _collect(
+        self,
+        context: object,
+        tap: object,
+        writer: ScanDatasetWriter,
+        slot: ScanLiveSlot,
+        index: int,
+        sweep: int,
+    ) -> None:
+        """Take this point's shots the way the operator says they are gated."""
+
+        shots = self.shots_per_point
+        if self.gating == "sw_gated":
+            # One cycle applies the point; the board's end state holds it
+            # while the source keeps sampling the world at its own pace.
+            self.sequencer.fire()
+            # The straddler: exposed partly at the old point.  Skip exactly it.
+            next_source_value(
+                self.signal_plane, tap, self._signal_name, context
+            )
+            for shot in range(shots):
+                self._check_cancelled(context)
+                self._capture(context, tap, writer, slot, index, sweep * shots + shot)
+            self.sequencer.wait_done(None)
+            return
+        for shot in range(shots):
+            self._check_cancelled(context)
+            # One finite cycle per shot.  The operator declared the source
+            # pulse-driven, so the board's silence between cycles means the
+            # next publication is THIS cycle's -- exact, zero frames lost.
+            self.sequencer.fire()
+            self._capture(context, tap, writer, slot, index, sweep * shots + shot)
+            # The frame can land before the program's tail finishes playing;
+            # wait the tail out so the next fire meets an idle board.
+            self.sequencer.wait_done(None)
+
+    def _capture(
+        self,
+        context: object,
+        tap: object,
+        writer: ScanDatasetWriter,
+        slot: ScanLiveSlot,
+        index: int,
+        visit: int,
+    ) -> None:
+        value = next_source_value(
+            self.signal_plane, tap, self._signal_name, context
+        )
+        writer.write(value, row=index, visit=visit)
+        slot.publish({SCAN_OUTPUT.name: writer.live_output()})
+
+
+__all__ = ["GATING_MODES", "SteppedScanMeasurement"]
