@@ -171,6 +171,12 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             "psf",
             "uniform_psf",
         )
+        assert set(artifact["report"]) == {"models", "run_record"}
+        assert all(
+            set(model_report)
+            == {"site_n_test", "site_n_train_dark", "site_n_train_bright"}
+            for model_report in artifact["report"]["models"].values()
+        )
         assert result.calibration.n_sites == len(
             installation.world.geometry.site_centers_xy
         )

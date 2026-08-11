@@ -16,6 +16,7 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_pulse import PulseSequence
 
+from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import ReadoutModelKind
 from .outputs import CAPTURE_PREVIEW_DECLARATION
 from .pulse import load_calibration_pulse_template
@@ -226,7 +227,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     task_previews=(TaskPreviewSpec("capture_preview", "image"),),
     artifact_outputs=(
-        ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
+        ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),

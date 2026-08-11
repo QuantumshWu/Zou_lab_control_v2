@@ -886,7 +886,6 @@ def _train_readout_model(
     *,
     kind: ReadoutModelKind,
     site_map: SiteMap,
-    reference_signals: np.ndarray,
     short_signals: np.ndarray,
     labels_occupied: np.ndarray,
     labels_valid: np.ndarray,
@@ -976,11 +975,9 @@ def _train_readout_model(
     )
     report = {
         "kind": kind.value,
-        "reference_signals": reference_signals,
         "short_signals": short_signals,
         "thresholds": thresholds,
         "gaussian_thresholds": gaussian_thresholds,
-        "threshold_method": threshold_method,
         "predictions": predictions,
         "site_usable": usable_sites,
         "site_fidelity": site_fidelity,
@@ -1177,21 +1174,12 @@ def calibrate(
     models: list[ReadoutModel] = []
     model_reports: dict[str, dict[str, Any]] = {}
     for kind, extractor, parameters, diagnostics in feature_specs:
-        reference_signals = (
-            reference_label_signals
-            if kind is ReadoutModelKind.BOX
-            else np.asarray(
-                [[extractor(frame) for frame in group] for group in references],
-                dtype=float,
-            )
-        )
         short_signals = np.asarray(
             [extractor(frame) for frame in shorts], dtype=float
         )
         model, model_report = _train_readout_model(
             kind=kind,
             site_map=site_map,
-            reference_signals=reference_signals,
             short_signals=short_signals,
             labels_occupied=labels_occupied,
             labels_valid=labels_valid,
@@ -1206,13 +1194,8 @@ def calibrate(
         model_reports[kind.value] = model_report
 
     calibration_report = {
-        "detected_sites": site_map.n_sites,
-        "default_model_kind": default_model_kind.value,
-        "site_detection_quality": _nullable_floats(site_map.quality),
         "models": {
             model.kind.value: {
-                "threshold_method": model.threshold_method,
-                "site_readout_quality": _nullable_floats(model.quality),
                 "site_n_test": [
                     int(value)
                     for value in model_reports[model.kind.value]["site_n_test"]
@@ -1239,7 +1222,6 @@ def calibrate(
     report = {
         "site_ids": site_map.site_ids,
         "site_centers_xy": site_map.centers_xy,
-        "site_detection_quality": site_map.quality,
         "site_valid": site_map.valid_sites,
         "reference_average": reference_average,
         "reference_label_model_kind": ReadoutModelKind.BOX.value,

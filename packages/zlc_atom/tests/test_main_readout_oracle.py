@@ -241,7 +241,7 @@ def test_main_oracle_grouped_calibration_end_to_end() -> None:
     box_model = result.calibration.select_model(ReadoutModelKind.BOX)
     box_report = report["models"]["box"]
     assert box_model.threshold_method == "empirical"
-    assert box_report["threshold_method"] == "empirical"
+    assert "reference_signals" not in box_report
     _assert_close(report["reference_average"], oracle["reference_average"])
     _assert_close(report["reference_label_signals"], oracle["reference_box_signals"])
     np.testing.assert_array_equal(report["labels_occupied"], oracle["labels_occupied"])
@@ -282,7 +282,6 @@ def test_main_oracle_grouped_calibration_end_to_end() -> None:
     gaussian_model = gaussian.calibration.select_model(ReadoutModelKind.BOX)
     gaussian_report = gaussian.report["models"]["box"]
     assert gaussian_model.threshold_method == "gaussian"
-    assert gaussian_report["threshold_method"] == "gaussian"
     np.testing.assert_allclose(
         gaussian_model.thresholds,
         gaussian_report["gaussian_thresholds"],
