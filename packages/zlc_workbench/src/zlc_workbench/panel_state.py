@@ -10,7 +10,13 @@ from typing import Any
 from zlc_plot import PlotKind, describe_semantics, updated_spec
 
 
-__all__ = ["PanelFrozenData", "PanelState", "compose_panel_spec"]
+__all__ = [
+    "PanelFrozenData",
+    "PanelState",
+    "apply_panel_fit",
+    "compose_panel_spec",
+    "draws_image_surfaces",
+]
 
 
 def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -55,6 +61,47 @@ def compose_panel_spec(schema: object, spec: object, state: "PanelState") -> obj
         value = restore_semantic_choice(description, str(name), saved)
         candidate = updated_spec(schema, candidate, str(name), value)
     return candidate
+
+
+def apply_panel_fit(host: object, state: "PanelState | None", *, live: bool) -> object:
+    """Arm or clear this panel's authored fit on one host; return the operation.
+
+    THE decision of what a panel's ``fit`` record means, in one place.  What
+    each caller does with the returned operation legitimately differs -- the
+    console presents it when it lands, a save awaits it before writing the
+    file -- but "which model, or none" must not be re-derived per caller.
+
+    Returns ``None`` only when there is no host operation to perform.
+    """
+
+    fit = {} if state is None else dict(state.fit)
+    model = fit.pop("model", None)
+    # ``live`` is the caller's fact about its host, not an archived value.
+    fit.pop("live", None)
+    if not model:
+        clear = getattr(host, "clear_fit", None)
+        return clear() if callable(clear) else None
+    run = getattr(host, "fit", None)
+    if not callable(run):
+        return None
+    return run(str(model), live=live, **fit)
+
+
+def draws_image_surfaces(kind: str, cell_kind: str) -> bool:
+    """Whether the surfaces this declaration paints are images.
+
+    A FacetGrid is a layout: its CELLS are the pictures, so a grid of image
+    cells paints images and may carry the site overlay.  An empty cell kind
+    means the data decides, and a camera cycle decides image -- offering the
+    overlay there is what lets an operator annotate frame_0 | frame_1 at all.
+    """
+
+    if kind == PlotKind.IMAGE.value:
+        return True
+    return kind == PlotKind.FACET_GRID.value and cell_kind in {
+        "",
+        PlotKind.IMAGE.value,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +149,10 @@ class PanelState:
         object.__setattr__(self, "display", _plain_state(self.display))
         object.__setattr__(self, "fit", _plain_state(self.fit))
         overlay_signal = str(self.overlay_signal).strip()
-        if overlay_signal and resolved_kind is not PlotKind.IMAGE:
-            raise ValueError("only an Image panel can select an overlay signal")
+        if overlay_signal and not draws_image_surfaces(kind, cell_kind):
+            raise ValueError(
+                "only a panel that paints image surfaces can select an overlay"
+            )
         object.__setattr__(self, "overlay_signal", overlay_signal)
 
     def document(self) -> dict[str, Any]:

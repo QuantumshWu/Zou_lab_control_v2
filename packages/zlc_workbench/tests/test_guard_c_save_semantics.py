@@ -19,7 +19,6 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
 )
-from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_runtime import NodeHost
 from zlc_workbench.archive import read_archive, read_dataset
 from zlc_workbench.console import ConsolePresenter
@@ -123,29 +122,13 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         make_host=make_host,
         spec_for=spec_for,
     )
-    occupancy_host = None
     try:
         camera_node, camera_snapshot = _one_shot(
             session, producer="camera_measurement"
         )
         frames_signal = camera_node.signal_key("frames")
         calibration_path = tmp_path / "calibration.json"
-        calibration = _calibration(calibration_path)
-        occupancy_node = OccupancyProcessor(
-            calibration,
-            calibration_path=calibration_path,
-            producer="occupancy",
-            source_signal=frames_signal,
-        )
-        occupancy_host = NodeHost(occupancy_node, session.signal_plane)
-        occupancy_host.start()
-        _wait_terminal(occupancy_host)
-        judged_signal = stable_signal_key("occupancy", "frame_judged")
-        front = session.signal_plane.freeze()
-        judged = front.value(judged_signal)
-        judged_publication = front.publication(judged_signal)
-        assert judged is not None and judged_publication is not None
-        assert session.signal_plane.direct_parent_publications(judged_publication)
+        _calibration(calibration_path)
 
         camera_id = presenter.add_logic(
             "camera_measurement",
@@ -165,19 +148,34 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             source_signal=frames_signal,
             open_editor=False,
         )
+        # Occupancy runs THROUGH the console: the overlay is assembled by the
+        # node that judged these sites, and a console that is not running it
+        # has no calibration to speak for.
+        assert presenter.start_logic(occupancy_id) is True
+        _wait_terminal(presenter.logic[occupancy_id].host)
+        presenter.poll_logic()
+        judged_signal = stable_signal_key("occupancy", "frame_judged")
+        status_signal = stable_signal_key("occupancy", "occupied")
+        front = session.signal_plane.freeze()
+        judged = front.value(judged_signal)
+        judged_publication = front.publication(judged_signal)
+        assert judged is not None and judged_publication is not None
+        assert session.signal_plane.direct_parent_publications(judged_publication)
+
         target = presenter.add_panel(
             judged_signal,
             judged.snapshot,
             title="occupancy image",
             kind="image",
             fit={"model": "anisotropic_gaussian_center"},
-            overlay_signal=occupancy_host.signal_key("site_overlay"),
+            overlay_signal=status_signal,
+            initial_publication=judged_publication,
         )
         assert {
             key
             for _producer, leaves in view._cards[target.panel_id].overlay_choices
             for _label, key in leaves
-        } == {occupancy_host.signal_key("site_overlay")}
+        } == {status_signal}
         other = presenter.add_panel(
             frames_signal,
             camera_snapshot,
@@ -272,13 +270,16 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         panel_state = panel_section.get("state", panel_section)
         assert panel_state["kind"] == "image"
         assert panel_state["fit"] == {"model": "anisotropic_gaussian_center"}
-        assert panel_state["overlay_signal"] == occupancy_host.signal_key(
-            "site_overlay"
-        )
-        assert sections["overlay"]["overlay_signal"] == (
-            occupancy_host.signal_key("site_overlay")
-        )
+        assert panel_state["overlay_signal"] == status_signal
+        assert sections["overlay"]["overlay_signal"] == status_signal
         assert "calibration_path" not in sections["overlay"]
+        # The rings themselves are IN the archive: geometry once, and one
+        # status row per picture the overlay described.
+        assert set(arrays) >= {
+            "overlay.coordinates",
+            "overlay.statuses",
+            "overlay.status_facets",
+        }
 
         records = {record["node"]: record for record in _records(sections["run_chain"])}
         assert set(records) >= {"camera_measurement", "occupancy"}
@@ -295,6 +296,4 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         assert images[0].stat().st_size > 0
     finally:
         presenter.close()
-        if occupancy_host is not None:
-            occupancy_host.shutdown()
         session.close()

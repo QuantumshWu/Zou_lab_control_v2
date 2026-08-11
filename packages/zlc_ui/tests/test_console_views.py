@@ -1543,3 +1543,79 @@ for _ in range(5): app.processEvents()
 assert all(bar.value() <= bar.maximum() for bar in bars)
 """
     )
+
+
+def test_every_panel_kind_opens_its_setting_form_with_exact_keys() -> None:
+    """The Setting form's SPEC and its VALUES are one decision, not two lists.
+
+    ``FluentParameterForm`` demands exact keys, and it is built inside a Qt
+    slot -- so a spec that declares a row the values do not supply does not
+    raise, it ABORTS the process the moment an operator presses Setting.  The
+    only test that can catch it is one that compares the two key sets for
+    every panel kind a card can be put in.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import panel_card_view as tested_module
+from zlc_ui.console import panel_editor_view as editor_module
+print(tested_module.__file__)
+print(editor_module.__file__)
+
+app = ensure_qt_app(['test'])
+surface = {'semantic': (), 'display': (), 'fit': ()}
+groups = (('camera', (('frames', '@logic/cm/frames'),)),)
+overlays = (('occupancy', (('sites', '@logic/occ/occupied'),)),)
+
+for kind, cell_kind, overlay_signal in (
+    ('image', '', '@logic/occ/occupied'),
+    ('image', '', ''),
+    ('facet_grid', '', '@logic/occ/occupied'),
+    ('facet_grid', 'image', '@logic/occ/occupied'),
+    ('facet_grid', 'curve', ''),
+    ('facet_grid', 'histogram', ''),
+    ('curve', '', ''),
+    ('histogram', '', ''),
+):
+    state = {
+        'signal': '@logic/cm/frames', 'kind': kind, 'cell_kind': cell_kind,
+        'size': '2x2', 'interval_ms': 100, 'title': 'Card',
+        'semantic': {}, 'display': {}, 'fit': {},
+        'overlay_signal': overlay_signal,
+    }
+    card = tested_module.PanelCardView('panel-1', 'Card')
+    card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
+    card.set_cell_kind_choices(('curve', 'image', 'histogram'))
+    card.set_signal_choices(
+        groups, current=state['signal'],
+        overlay_groups=overlays, overlay_current=overlay_signal,
+    )
+    card.set_panel_projection(state, surface)
+    spec_keys = set(card._form_spec().keys)
+    value_keys = set(card._form_values())
+    assert spec_keys == value_keys, (
+        kind, cell_kind, sorted(spec_keys ^ value_keys)
+    )
+    # The real crash path: this is what pressing Setting runs.
+    card._open_settings()
+    assert card._settings_form is not None
+    assert set(card._settings_form.spec.keys) == value_keys
+
+    editor = editor_module.PanelEditorView('panel-1', {
+        'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
+        'overlay_signal_options': overlays,
+        'interval_choices': (100, 200, 400, 800),
+        'size_choices': ('1x2', '2x2', '1x4'),
+        'parameter_surface': surface, 'save_directory': '.',
+        'kind_read_only': True, 'frozen_signal': state['signal'],
+        'frozen_publication': None, 'frozen_snapshot': None,
+        'stale': False, 'producer_node_id': '', 'producer_logic': None,
+    })
+    assert ('overlay_signal' in editor.panel_form.spec.keys) == (
+        'overlay_signal' in spec_keys
+    )
+"""
+    )

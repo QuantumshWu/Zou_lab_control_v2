@@ -20,8 +20,9 @@ from queue import Empty, SimpleQueue
 import time
 from typing import Any
 
+from zlc_atom.nodes.occupancy import SITE_STATUS_CONTRACT, site_overlay
 from zlc_plot import DEFAULTS, PlotKind
-from zlc_plot.primitives import ImageFrame, ImagePointOverlay
+from zlc_plot.primitives import ImageFrame
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 
 from .board import LiveBoard
@@ -48,7 +49,6 @@ from .logic import (
     make_host,
     stable_signal_key,
 )
-from .image_overlay import image_frame_from_publication
 from .panel_save import (
     capture_run_chain,
     save_panel_figure as _save_panel_figure,
@@ -60,7 +60,12 @@ from .panel_catalog import (
     task_console_panel_identity,
     task_console_panel_kind,
 )
-from .panel_state import PanelFrozenData, PanelState
+from .panel_state import (
+    PanelFrozenData,
+    PanelState,
+    apply_panel_fit,
+    draws_image_surfaces,
+)
 from .presentation import PlotPanelPort
 from .selection import (
     _apply_panel_selection,
@@ -564,17 +569,77 @@ class ConsolePresenter:
         snapshot = getattr(value, "snapshot", None)
         if snapshot is None:
             raise TypeError("a panel signal value must carry an OwnedSnapshot")
-        if selected.kind != "image" or not selected.overlay_signal:
+        if not selected.overlay_signal:
             return snapshot
-        revision = binding.overlay_revision + 1
-        frame = image_frame_from_publication(
+        # The SEMANTIC surface, not the outer kind: a FacetGrid of image cells
+        # paints images, and the overlay is a fact of the image.  A grid over
+        # curve cells has nowhere to put a ring.
+        painted = selected.kind
+        if painted == PlotKind.FACET_GRID.value:
+            painted = (
+                self._fitting_cell_kind(snapshot, painted, selected.cell_kind) or ""
+            )
+        if painted != PlotKind.IMAGE.value:
+            return snapshot
+        overlay = self._site_overlay(
             value,
             publication,
-            overlay_signal=selected.overlay_signal,
-            overlay_revision=revision,
+            selected.overlay_signal,
+            binding.overlay_revision + 1,
         )
-        binding.overlay_revision = revision
-        return frame
+        if overlay is None:
+            return snapshot
+        binding.overlay_revision += 1
+        return ImageFrame(snapshot, overlay)
+
+    def _site_overlay(
+        self,
+        value: object,
+        publication: object,
+        overlay_signal: str,
+        revision: int,
+    ) -> object | None:
+        """Ask the node that judged these sites for the layer to draw.
+
+        The console holds no physics: it hands over the node that publishes
+        the selected signal together with everything that node published in
+        THIS exact event, and the owning package assembles the rings.  A node
+        this console is not running has no calibration to speak for, so there
+        is nothing to draw rather than something invented.
+        """
+
+        node_id = self._direct_producer_node_id(overlay_signal)
+        binding = None if node_id is None else self.logic.get(node_id)
+        if binding is None or binding.node is None:
+            # Not a judgement about shots: a node this console does not run
+            # holds no calibration, so there is no site map to draw rings
+            # from.  Refusing beats inventing them.
+            raise ValueError(
+                f"no running node publishes {overlay_signal!r}, so its sites "
+                "are unknown"
+            )
+        # Whether these rings describe the frame on screen is the PRESENTATION
+        # layer's guarantee -- the same-shot batch presents a publication and
+        # its derived siblings together -- not something to re-decide here.
+        # This reads the judgement's own publication and hands it over.
+        judgement = publication
+        if getattr(publication, "value", lambda _name: None)(
+            str(overlay_signal)
+        ) is None:
+            judgement = self.session.signal_plane.latest_publication(
+                str(overlay_signal)
+            )
+            if judgement is None:
+                return None
+        outputs: dict[str, object] = {}
+        for output in self._logic_outputs(binding):
+            sibling = judgement.value(
+                stable_signal_key(binding.node_id, output.name)
+            )
+            snapshot = getattr(sibling, "snapshot", None)
+            if snapshot is not None:
+                outputs[str(output.name)] = snapshot
+        return site_overlay(binding.node, outputs, revision=int(revision))
 
     @staticmethod
     def _initial_plot_input(plot_input: object, state: PanelState) -> object:
@@ -806,12 +871,18 @@ class ConsolePresenter:
         signal: str,
         publication: object | None,
     ) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
-        """Typed overlay siblings of one selected image publication."""
+        """Site-status judgements describing the SAME SHOT as this image.
+
+        Chosen by CONTRACT, so the console never learns a signal name.  Same
+        shot, not same publication: occupancy reads the camera and publishes
+        its own event, so requiring one publication hid the only pairing an
+        operator ever wants -- a frame annotated with the judgement of that
+        frame.
+        """
 
         selected = str(signal).strip()
         if not selected or publication is None:
             return ()
-        sibling_names = set(publication.signals)
 
         contracts = dict(self._external_signal_contracts())
         for binding in self.logic.values():
@@ -823,10 +894,7 @@ class ConsolePresenter:
         for name, label, _state, producer, _derived in self.offered_signals(
             include_shown=True
         ):
-            if (
-                name in sibling_names
-                and contracts.get(name) == ImagePointOverlay.CONTRACT_ID
-            ):
+            if contracts.get(name) == SITE_STATUS_CONTRACT:
                 groups.setdefault(producer or "signals", []).append((label, name))
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
@@ -1255,11 +1323,10 @@ class ConsolePresenter:
                 "semantic": dict(candidate.semantic),
                 "parameters": parameters,
                 "size": candidate.size,
-                "fit_model": candidate.fit.get("model"),
             }
             editor_configuration = dict(configuration)
             if (
-                candidate.kind == "image"
+                draws_image_surfaces(candidate.kind, candidate.cell_kind)
                 and candidate.overlay_signal != current.overlay_signal
             ):
                 configuration["image_overlay"] = None
@@ -1316,6 +1383,15 @@ class ConsolePresenter:
                 binding.editor_configuration = binding.editor_host.configure(
                     **editor_configuration
                 )
+            if candidate.fit != current.fit:
+                # A fit is an analysis, not a display parameter: it has its own
+                # completion, and the front it produces reaches this panel's
+                # staged widget only because the operation is presented.
+                self._present_when_done(
+                    binding, apply_panel_fit(binding.host, candidate, live=True)
+                )
+                if binding.editor_host is not None:
+                    apply_panel_fit(binding.editor_host, candidate, live=True)
             binding.state = candidate
 
         self._publish_panel_state(binding)
@@ -1584,7 +1660,10 @@ class ConsolePresenter:
                             }
                             if selected is not None and str(selected) in compatible:
                                 self._present_when_done(
-                                    binding, host.fit(str(selected), live=True)
+                                    binding,
+                                    apply_panel_fit(
+                                        host, binding.state, live=True
+                                    ),
                                 )
                             self._publish_panel_state(binding)
                             # Clearing the de-dup memory belongs to THIS
@@ -1669,14 +1748,23 @@ class ConsolePresenter:
         """Submit the saved panel appearance as one zlc_plot configuration."""
 
         display = dict(state.display)
+        # The overlay arrives from the frozen plot input, which is an
+        # ImageFrame only when the panel actually painted image surfaces --
+        # re-deciding that here from the outer kind is what dropped the rings
+        # off every FacetGrid of frames.
         operation = host.configure(
             parameters=display,
             size=state.size,
-            image_overlay=image_overlay if state.kind == "image" else None,
-            fit_model=state.fit.get("model"),
+            image_overlay=image_overlay,
         )
         if hasattr(operation, "result"):
             operation.result()
+        # This host exists to be SAVED, so the fit must have landed before the
+        # file is written -- the analysis is part of the picture, not a later
+        # arrival somebody else will present.
+        fit_operation = apply_panel_fit(host, state, live=False)
+        if hasattr(fit_operation, "result"):
+            fit_operation.result()
 
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
@@ -1990,10 +2078,35 @@ class ConsolePresenter:
             return False
         return self.start_logic(producer_node_id)
 
+    def _paints_image_surfaces(self, binding: PanelBinding) -> bool:
+        """Whether this panel's surfaces ARE images, as the data decided.
+
+        The authored cell kind cannot answer it: an empty one means the data
+        decides, and answering "probably image" there offered an Overlay row
+        on a panel that then painted curves.  A grid is a layout -- its CELLS
+        are the pictures -- so the question is about the resolved cell, which
+        only the bound snapshot can settle.  Views read this; they do not
+        re-derive it.
+        """
+
+        state = binding.state
+        if state.kind != PlotKind.FACET_GRID.value:
+            return state.kind == PlotKind.IMAGE.value
+        value = self._publication_value(binding.display_publication, state.signal)
+        snapshot = getattr(value, "snapshot", None)
+        if snapshot is None and binding.frozen_data is not None:
+            snapshot = binding.frozen_data.snapshot
+        if snapshot is None:
+            # No data yet: the authored choice is all there is to go on.
+            return state.cell_kind in {"", PlotKind.IMAGE.value}
+        fitting = self._fitting_cell_kind(snapshot, state.kind, state.cell_kind)
+        return fitting == PlotKind.IMAGE.value
+
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
 
         surface = dict(binding.parameter_surface)
+        surface["paints_images"] = self._paints_image_surfaces(binding)
         for section in ("semantic", "display", "fit"):
             authored = dict(getattr(binding.state, section))
             surface[section] = tuple(

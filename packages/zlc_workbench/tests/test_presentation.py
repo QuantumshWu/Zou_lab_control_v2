@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
@@ -46,9 +47,8 @@ from zlc_runtime.presentation import (
     SurfaceBatchArbiter,
 )
 from zlc_workbench.presentation import PlotPanelPort
-from zlc_workbench.image_overlay import image_frame_from_publication
 from zlc_workbench.session import read_pulse
-from pulse_fixtures import write_ordinary_pulse
+from pulse_fixtures import ordinary_imaging_sequence, write_ordinary_pulse
 
 
 @pytest.fixture
@@ -590,14 +590,21 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
             host.close()
 
 
-def test_image_overlay_resolves_one_exact_occupancy_status_row(
+def test_a_notebook_assembles_the_same_site_overlay_the_console_draws(
     live_bench,
 ) -> None:
-    """The image consumes one explicit typed overlay sibling, not an artifact."""
+    """The overlay API is reachable with no console, no presenter, no Qt.
 
-    from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
+    Its owner is the package that owns the FACTS: the site positions are a
+    calibration fact and the per-site judgement is the occupancy result, so
+    one call over a processor and its published outputs is the whole API.
+    The statuses are the exact row of the frame that was judged -- resolving
+    a multi-row cycle to UNKNOWN everywhere is how the old projection stayed
+    dead in plain sight.
+    """
+
+    from zlc_atom.nodes.occupancy import OccupancyProcessor, site_overlay
     from zlc_plot.primitives import PointStatus
-    from zlc_workbench.logic import stable_signal_key
 
     plane, node, _sequencer, _monitor = live_bench
     source = plane.freeze().value(node.signal_key("frames"))
@@ -622,45 +629,204 @@ def test_image_overlay_resolves_one_exact_occupancy_status_row(
         ReadoutModelKind.BOX,
         FrameContract(shape),
     )
-    node_id = "occupancy-test"
-    frame_key = stable_signal_key(node_id, "frame_judged")
-    overlay_key = stable_signal_key(node_id, "site_overlay")
-    processor = OccupancyProcessor(calibration, producer=node_id)
+    processor = OccupancyProcessor(calibration, producer="occupancy-test")
     result = processor.process(
-        np.asarray(source.values).reshape((-1, *shape))[:1],
+        source.snapshot,
         generation="one-frame",
         revision=1,
     )
-    frame_value = SimpleNamespace(name=frame_key, snapshot=source.snapshot)
-    overlay_value = SimpleNamespace(
-        name=overlay_key,
-        snapshot=result.artifacts["site_overlay"],
-    )
-    values = {
-        frame_key: frame_value,
-        overlay_key: overlay_value,
-    }
-    publication = SimpleNamespace(value=values.get)
 
-    resolved = image_frame_from_publication(
-        frame_value,
-        publication,
-        overlay_signal=overlay_key,
-        overlay_revision=7,
-    )
+    overlay = site_overlay(processor, result.artifacts, revision=7)
 
-    assert resolved.overlay.point_ids == site_ids
-    assert resolved.overlay.labels == ("1", "2", "3")
-    assert resolved.overlay.statuses == (
-        PointStatus.EMPTY,
-        PointStatus.OCCUPIED,
-        PointStatus.INVALID,
-    )
+    judged = (PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID)
+    assert overlay.revision == 7
+    assert overlay.point_ids == site_ids
+    assert overlay.labels == ("1", "2", "3")
+    assert overlay.statuses_for(0.0) == judged
+    # One frame, so the picture as a whole says exactly what that frame said.
+    assert overlay.statuses_for(None) == judged
     np.testing.assert_array_equal(
-        resolved.overlay.coordinates,
+        overlay.coordinates,
         calibration.site_map.centers_xy,
     )
-    assert resolved.snapshot is source.snapshot
+
+
+def _two_camera_window_pulse(workspace) -> str:
+    """One load, a long image and a short readout: two frames, two truths."""
+
+    from zlc_pulse import PulseSequence
+
+    ordinary = ordinary_imaging_sequence()
+    two_window = PulseSequence(
+        name="two_window_imaging",
+        target=ordinary.target,
+        time_step_ns=ordinary.time_step_ns,
+        periods=ordinary.periods[:4],
+    )
+    write_ordinary_pulse(
+        workspace,
+        file_stem=two_window.name,
+        sequence=two_window,
+    )
+    return two_window.name
+
+
+def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
+    """THE picture: frame_0 | frame_1, each cell carrying its OWN judgement.
+
+    A camera cycle's frames are point rows, and a grid faceted over them is
+    the same picture twice.  The overlay is one geometry with one status row
+    per frame, so cell 0 shows the sites the long exposure found loaded and
+    cell 1 shows the short readout finding none of them -- which is what the
+    two exposures physically produced.  Asserting coordinates and ids here
+    would have passed all along while every ring said UNKNOWN.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+    from zlc_atom.nodes.occupancy import OccupancyProcessor, site_overlay
+    from zlc_plot._kinds.facet_grid import default_spec
+    from zlc_plot.primitives import ImageFrame, PointStatus
+    from zlc_pulse import compile_sequence, load_streamer_config
+    from zlc_workbench.session import read_pulse
+
+    plane = SignalDataPlane()
+    installation = create_installation("virtual")
+    session = None
+    try:
+        world = installation.world
+        centers = np.asarray(world.geometry.site_centers_xy, dtype=float)
+        sites = len(centers)
+        loaded = np.zeros(sites, dtype=bool)
+        loaded[::2] = True
+        world.set_occupancy(loaded)
+
+        name = _two_camera_window_pulse(tmp_path)
+        sequence = read_pulse(tmp_path / "pulses" / f"{name}.json").sequence
+        config = load_streamer_config()
+        sequencer = installation.device("sequencer")
+        sequencer.camera_trigger_channel = "emCCD"
+        sequencer.load(
+            compile_sequence(sequence, config["params"], config["clock_hz"]),
+            source=sequence,
+        )
+
+        node = CameraMeasurementNode(
+            camera=installation.capability("camera.adapter"),
+            request=CameraMeasurementRequest("camera", 0.02, None, 1, 2),
+            signal_plane=plane,
+            producer="cm",
+        )
+        capture = node.prepare()
+        sequencer.fire()
+        sequencer.wait_done(2.0)
+        frames = capture.collect().publication.value(node.signal_key("frames"))
+        assert frames is not None
+        cycle = np.asarray(frames.snapshot.block.values)
+        assert cycle.shape[:2] == (1, 2), cycle.shape
+
+        site_ids = tuple(f"site-{index}" for index in range(sites))
+        readable = np.ones(sites, dtype=bool)
+        readable[2] = False
+        calibration = TrapCalibration(
+            SiteMap(site_ids, centers, readable, np.ones(sites)),
+            (
+                ReadoutModel(
+                    site_ids,
+                    np.full(sites, 280.0),
+                    np.ones(sites, dtype=bool),
+                    np.ones(sites),
+                ),
+            ),
+            ReadoutModelKind.BOX,
+            FrameContract(tuple(int(size) for size in cycle.shape[-2:])),
+        )
+        processor = OccupancyProcessor(calibration, producer="occ")
+        result = processor.process(
+            frames.snapshot,
+            generation="two-frames",
+            revision=1,
+        )
+        overlay = site_overlay(processor, result.artifacts, revision=1)
+
+        # What an operator reads off the two cells, site by site.
+        long_exposure = tuple(
+            PointStatus.INVALID
+            if not readable[index]
+            else PointStatus.OCCUPIED
+            if loaded[index]
+            else PointStatus.EMPTY
+            for index in range(sites)
+        )
+        short_readout = tuple(
+            PointStatus.INVALID if not readable[index] else PointStatus.EMPTY
+            for index in range(sites)
+        )
+        # A standalone image is the MEAN of both frames, so it may only claim
+        # what both frames claimed: UNKNOWN wherever they disagree.
+        whole_picture = tuple(
+            PointStatus.INVALID
+            if not readable[index]
+            else PointStatus.UNKNOWN
+            if loaded[index]
+            else PointStatus.EMPTY
+            for index in range(sites)
+        )
+        assert long_exposure != short_readout
+        assert overlay.statuses_for(0.0) == long_exposure
+        assert overlay.statuses_for(1.0) == short_readout
+        assert overlay.statuses_for(None) == whole_picture
+
+        judged = result.artifacts["frame_judged"]
+        spec = default_spec(judged.block.schema)
+        assert isinstance(spec, plot.FacetGridPlot), spec
+        session = plot.PlotSession(ImageFrame(judged, overlay), spec, size="4x4")
+        cells = tuple(
+            getattr(session._renderer._last_payload, "cells", ())
+        )
+        assert tuple(cell.facet_value_canonical for cell in cells) == (0, 1)
+
+        # The rings PAINTED on each cell, read back as their status tokens.
+        from matplotlib.colors import to_rgba
+
+        def painted(renderer, key: str) -> tuple[PointStatus, ...]:
+            by_colour = {
+                to_rgba(token.color, token.alpha): status
+                for status, token in (
+                    (
+                        status,
+                        getattr(
+                            renderer.style.artists, f"point_{status.value}"
+                        ),
+                    )
+                    for status in PointStatus
+                )
+            }
+            return tuple(
+                by_colour[tuple(float(value) for value in colour)]
+                for colour in renderer._artists[key].get_edgecolors()
+            )
+
+        assert painted(session._renderer, "facet:0:points") == long_exposure
+        assert painted(session._renderer, "facet:1:points") == short_readout
+        assert "image:points" not in session._renderer._artists
+
+        standalone = plot.PlotSession(
+            ImageFrame(judged, overlay),
+            plot.ImagePlot(
+                plot.AxisRef.data(str(spec.cell.x.axis_id)),
+                plot.AxisRef.data(str(spec.cell.y.axis_id)),
+            ),
+            size="4x4",
+        )
+        try:
+            assert painted(standalone._renderer, "image:points") == whole_picture
+        finally:
+            standalone.close()
+    finally:
+        if session is not None:
+            session.close()
+        installation.close()
+        plane.close()
 
 
 def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None:
@@ -734,3 +900,30 @@ def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
 
     wake.request_owner_wake()
     assert len(notifications) == 2, "a wake after a turn must notify again"
+
+
+def test_only_zlc_atom_knows_where_the_trap_sites_are() -> None:
+    """Site geometry is a CALIBRATION fact and is never re-derived elsewhere.
+
+    The console, the plotting package and the widgets receive the positions
+    already assembled.  The moment a second layer learns to read a site map
+    there are two answers to "which site is which", and the one on screen is
+    whichever ran last.
+    """
+
+    import zlc_plot
+    import zlc_runtime
+    import zlc_ui
+    import zlc_workbench
+
+    owned = ("centers_xy", "site_map", "SiteMap")
+    hits = tuple(
+        (path.name, number, line.strip())
+        for package in (zlc_plot, zlc_runtime, zlc_ui, zlc_workbench)
+        for path in Path(package.__file__).resolve().parent.rglob("*.py")
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        )
+        if any(word in line for word in owned)
+    )
+    assert hits == (), hits

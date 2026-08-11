@@ -27,8 +27,7 @@ from zlc_workbench.logic import (
     make_host,
     stable_signal_key,
 )
-import zlc_workbench.image_overlay as image_overlay_module
-from zlc_workbench.image_overlay import image_frame_from_publication
+import zlc_atom.nodes.occupancy.overlay as occupancy_overlay_module
 from zlc_workbench.session import Workspace
 
 
@@ -129,7 +128,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
     print(camera_logic_node.__file__)
     print(occupancy_logic_node.__file__)
     print(runtime_host.__file__)
-    print(image_overlay_module.__file__)
+    print(occupancy_overlay_module.__file__)
 
     catalog = LogicCatalog()
     installation = create_installation("virtual")
@@ -369,10 +368,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             stable_signal_key("occupancy", "occupied"),
             stable_signal_key("occupancy", "valid"),
             stable_signal_key("occupancy", "rate"),
-            stable_signal_key("occupancy", "survival"),
-            stable_signal_key("occupancy", "survival_rate"),
             stable_signal_key("occupancy", "frame_judged"),
-            stable_signal_key("occupancy", "site_overlay"),
         }
         counts = occupancy_publication.value(counts_signal)
         occupied = occupancy_publication.value(
@@ -383,22 +379,16 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         frame_judged = occupancy_publication.value(
             occupancy_host.signal_key("frame_judged")
         )
-        site_overlay = occupancy_publication.value(
-            occupancy_host.signal_key("site_overlay")
-        )
         assert all(
             value is not None
-            for value in (
-                counts,
-                occupied,
-                valid,
-                rate,
-                frame_judged,
-                site_overlay,
-            )
+            for value in (counts, occupied, valid, rate, frame_judged)
         )
         n_sites = first_calibration.calibration.site_map.n_sites
-        assert counts.shape == occupied.shape == valid.shape == (3, n_sites, 1)
+        # (repeat cycles, frame points, sites): the classifier inherits the
+        # camera's point axis and returns a site-shaped datum per frame.
+        assert counts.shape == occupied.shape == valid.shape == (3, 1, n_sites)
+        # The same (repeat, frame) pair over a SCALAR cell -- one occupied
+        # fraction per frame, not a site-shaped datum.
         assert rate.shape == (3, 1, 1)
         # frame_judged mirrors its input: both blocks are (repeat, frame, y, x),
         # so a one-frame cycle's judged block equals the camera block directly.
@@ -418,21 +408,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "calibration_path": str(first_calibration.artifact_path),
             "model_kind": "box",
         }
-        overlay = image_frame_from_publication(
-            frame_judged,
-            occupancy_publication,
-            overlay_signal=occupancy_host.signal_key("site_overlay"),
-            overlay_revision=1,
-        )
-        np.testing.assert_allclose(
-            overlay.overlay.coordinates,
-            first_calibration.calibration.site_map.centers_xy,
-        )
-        assert overlay.overlay.point_ids == (
-            first_calibration.calibration.site_map.site_ids
-        )
-        assert overlay.snapshot is frame_judged.snapshot
-
         occupancy_host.shutdown()
         finite_host.shutdown()
         plane.retire(finite_host)

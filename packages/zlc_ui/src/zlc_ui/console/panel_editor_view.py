@@ -42,6 +42,7 @@ from zlc_ui.form import (
 
 from ._panel_projection import (
     decode_parameter_value,
+    draws_image_surfaces,
     interval_form_field,
     panel_state_document,
     parameter_fields,
@@ -291,7 +292,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 required=True,
             ),
         ]
-        if state["kind"] == "image":
+        if draws_image_surfaces(state):
             fields.append(FormFieldProps(
                 "overlay_signal",
                 "keyed_choice",
@@ -319,7 +320,7 @@ class PanelEditorView(QtWidgets.QWidget):
             "size": state["size"],
             "interval_ms": state["interval_ms"],
         }
-        if state["kind"] == "image":
+        if draws_image_surfaces(state):
             values["overlay_signal"] = state["overlay_signal"]
         surface = incoming.get("parameter_surface")
         self.panel_form.refresh()

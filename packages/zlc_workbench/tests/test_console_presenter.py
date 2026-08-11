@@ -822,13 +822,94 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert presenter.update_panel_state(
         binding.panel_id, {"fit": {"model": fit_model}}
     )
+    # A fit is not part of the configuration: it is an analysis with its own
+    # completion, armed through the host's own fit API.
     assert configurations[-1] == {
         "semantic": dict(binding.state.semantic),
         "parameters": dict(binding.state.display),
         "size": binding.state.size,
-        "fit_model": fit_model,
     }
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
+
+
+def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
+    presenter, session
+) -> None:
+    """A fit is an analysis with a completion, not a display parameter.
+
+    It used to ride ``configure(fit_model=...)``, whose completion describes
+    only the configure.  The panel's widget stages its fronts (same-shot
+    batching) rather than auto-presenting them, so the fit was computed,
+    painted on the worker canvas and dropped.  Live data hid it -- the next
+    data front carried the fit along -- and a fully published dataset, which
+    has no next front, showed nothing at all.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit"))
+        and bool(presenter.view.presented_fronts),
+    )
+    fit_model = next(
+        value for _label, value in binding.parameter_surface["fit"][0]["choices"]
+    )
+
+    before = np.array(presenter.view.presented_fronts[-1][1].buffer.as_rgba(), copy=True)
+    assert presenter.update_panel_state(
+        binding.panel_id, {"fit": {"model": fit_model}}
+    )
+
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        latest = presenter.view.presented_fronts[-1][1].buffer.as_rgba()
+        if latest.shape != before.shape or not np.array_equal(latest, before):
+            return
+        time.sleep(0.005)
+    raise AssertionError(
+        "the fit never reached the panel's presented pixels"
+    )
+
+
+def test_a_saved_figure_contains_the_fit_it_was_saved_with(
+    presenter, session, tmp_path
+) -> None:
+    """Save Fig writes the analysis, not the picture that preceded it.
+
+    The saved host used to receive its fit through ``configure(fit_model=)``
+    and the file was written immediately after that call returned -- so the
+    PNG was whatever had been drawn BEFORE the fit landed.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter, lambda: bool(binding.parameter_surface.get("fit"))
+    )
+    fit_model = next(
+        value for _label, value in binding.parameter_surface["fit"][0]["choices"]
+    )
+
+    plain = tmp_path / "plain.png"
+    assert presenter.save_panel_figure(binding.panel_id, str(plain)) is not None
+    plain_bytes = plain.read_bytes()
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"fit": {"model": fit_model}}
+    )
+    fitted = tmp_path / "fitted.png"
+    assert presenter.save_panel_figure(binding.panel_id, str(fitted)) is not None
+
+    assert fitted.read_bytes() != plain_bytes, (
+        "the saved figure is identical with and without a fit"
+    )
 
 
 def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
@@ -846,7 +927,7 @@ def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
     ) is False
     assert binding.state is original
     assert any(
-        "not a sibling" in text
+        "no running node publishes" in text
         for severity, text in presenter.view.status
         if severity == "error"
     )
@@ -2023,3 +2104,92 @@ def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
     assert presenter.view.task_takeover is False
     assert presenter.view.status[-1] == ("error", "calibration: camera fault")
     assert presenter.logic_editor_projection(task_id)["error"] == "camera fault"
+
+
+def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
+    presenter, session, tmp_path
+) -> None:
+    """The kind gates test the SEMANTIC surface, not the outer plot kind.
+
+    A FacetGrid is a layout whose CELLS are the images, so a grid of a
+    camera cycle's frames must be able to select and draw the site overlay.
+    Gating on ``kind == "image"`` is what made the only picture the overlay
+    exists for -- frame_0 | frame_1 side by side -- the one that could not
+    have it.
+    """
+
+    import numpy as np
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+    from zlc_plot.primitives import ImageFrame
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
+    frames_signal = camera_node.signal_key("frames")
+    site_ids = ("site-0", "site-1")
+    calibration_path = tmp_path / "facet-calibration.json"
+    TrapCalibration(
+        SiteMap(
+            site_ids,
+            np.asarray(((12.0, 10.0), (30.0, 20.0))),
+            np.asarray((True, False)),
+            np.asarray((1.0, 0.0)),
+        ),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((-1.0e20, 0.0)),
+                np.asarray((True, True)),
+                np.asarray((1.0, 1.0)),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract((96, 128)),
+    ).save(calibration_path)
+
+    occupancy_id = presenter.add_logic(
+        "occupancy",
+        node_id="occupancy",
+        artifact_inputs={"calibration_path": str(calibration_path)},
+        source_signal=frames_signal,
+        open_editor=False,
+    )
+    assert presenter.start_logic(occupancy_id) is True
+    deadline = time.monotonic() + 10.0
+    while presenter.logic[occupancy_id].host.running and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(0.005)
+    presenter.poll_logic()
+
+    judged_signal = stable_signal_key("occupancy", "frame_judged")
+    status_signal = stable_signal_key("occupancy", "occupied")
+    front = session.signal_plane.freeze()
+    judged = front.value(judged_signal)
+    publication = front.publication(judged_signal)
+    assert judged is not None and publication is not None
+
+    binding = presenter.add_panel(
+        judged_signal,
+        judged.snapshot,
+        title="frames side by side",
+        kind="facet_grid",
+        overlay_signal=status_signal,
+        initial_publication=publication,
+    )
+
+    assert binding.state.kind == "facet_grid"
+    assert binding.state.overlay_signal == status_signal
+    frame = binding.frozen_data.plot_input
+    assert isinstance(frame, ImageFrame), frame
+    # One row per frame of the cycle, plus the whole-picture row.
+    assert set(frame.overlay.statuses) == {
+        None,
+        *(float(value) for value in range(CAMERA_WINDOWS)),
+    }
+    assert frame.overlay.point_ids == site_ids
+    assert binding.frozen_data.overlay == {"overlay_signal": status_signal}

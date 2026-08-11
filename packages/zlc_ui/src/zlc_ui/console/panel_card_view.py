@@ -38,6 +38,7 @@ from zlc_ui.form.qt_form import FluentParameterForm
 
 from ._panel_projection import (
     decode_parameter_value,
+    draws_image_surfaces,
     interval_form_field,
     panel_state_document,
     parameter_fields,
@@ -604,7 +605,7 @@ class PanelCardView(FluentGroupBox):
                 required=True,
             ),
         ])
-        if state.get("kind") == "image":
+        if draws_image_surfaces(state):
             fields.append(FormFieldProps(
                 "overlay_signal",
                 "keyed_choice",
@@ -677,7 +678,7 @@ class PanelCardView(FluentGroupBox):
             "signal": signal,
             "size": str(self._state_projection.get("size") or self._default_size),
         }
-        if self._state_projection.get("kind") == "image":
+        if draws_image_surfaces(self._state_projection):
             values["overlay_signal"] = str(
                 self._state_projection.get("overlay_signal") or ""
             )

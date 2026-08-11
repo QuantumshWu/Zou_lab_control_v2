@@ -105,10 +105,23 @@ def overlay_payload(
         section["labels"] = "overlay.labels"
         section["blank_label_is_none"] = True
     if overlay.statuses is not None:
-        arrays["overlay.statuses"] = np.asarray(
-            tuple(status.value for status in overlay.statuses),
-            dtype="U",
+        # One row per picture the overlay describes: the facet coordinates it
+        # names, then NaN for the whole-picture row.  Rings that differ from
+        # cell to cell are the record; one flattened row would keep the
+        # geometry and throw the measurement away.
+        keys = tuple(overlay.statuses)
+        arrays["overlay.status_facets"] = np.asarray(
+            tuple(np.nan if key is None else float(key) for key in keys),
+            dtype="<f8",
         )
+        arrays["overlay.statuses"] = np.asarray(
+            tuple(
+                tuple(status.value for status in overlay.statuses[key])
+                for key in keys
+            ),
+            dtype="U",
+        ).reshape((len(keys), overlay.count))
+        section["status_facets"] = "overlay.status_facets"
         section["statuses"] = "overlay.statuses"
     return arrays, section
 
@@ -235,9 +248,14 @@ def restore_panel_plot_input(
         )
     statuses = None
     if "statuses" in section:
-        statuses = tuple(
-            PointStatus(str(value)) for value in arrays[str(section["statuses"])]
-        )
+        rows = np.atleast_2d(arrays[str(section["statuses"])])
+        facets = np.asarray(arrays[str(section["status_facets"])], dtype="<f8")
+        statuses = {
+            (None if not np.isfinite(facet) else float(facet)): tuple(
+                PointStatus(str(value)) for value in row
+            )
+            for facet, row in zip(facets, rows, strict=True)
+        }
     overlay = ImagePointOverlay(
         int(section.get("revision", 0)),
         coordinates,

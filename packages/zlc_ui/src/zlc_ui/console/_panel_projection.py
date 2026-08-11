@@ -27,6 +27,21 @@ class _ParameterChoice(Enum):
     NONE = "zlc-ui-panel-parameter-none"
 
 
+def draws_image_surfaces(state: Mapping[str, Any]) -> bool:
+    """Whether this panel paints image surfaces, so an Overlay may be picked.
+
+    A FacetGrid is a layout and its CELLS are the pictures; an empty cell kind
+    means the data decides, and a camera cycle decides image.  Mirrors the
+    Workbench rule of the same name -- this layer never imports its owner, and
+    a card that hid the field on a grid of frames made the choice unreachable.
+    """
+
+    kind = str(state.get("kind") or "")
+    if kind == "image":
+        return True
+    return kind == "facet_grid" and str(state.get("cell_kind") or "") in {"", "image"}
+
+
 def panel_state_document(state: object) -> dict[str, Any]:
     """Return a plain view projection without importing its Workbench owner."""
 
@@ -212,6 +227,7 @@ def interval_form_field(intervals: object, current: object) -> FormFieldProps:
 
 __all__ = [
     "decode_parameter_value",
+    "draws_image_surfaces",
     "interval_form_field",
     "panel_state_document",
     "parameter_fields",

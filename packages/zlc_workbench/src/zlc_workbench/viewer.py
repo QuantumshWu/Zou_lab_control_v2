@@ -33,7 +33,7 @@ from .panel_save import (
     restore_panel_plot_annotations,
     restore_panel_plot_input,
 )
-from .panel_state import PanelState
+from .panel_state import PanelState, apply_panel_fit
 from .plot_annotations import (
     PanelPlotAnnotations,
 )
@@ -427,12 +427,12 @@ class FigureViewerPresenter:
         if state is None:
             return None
 
-        fit = dict(state.fit)
-        model = fit.pop("model", None)
-        run_fit = getattr(host, "fit", None)
-        if model and callable(run_fit):
+        # One authority decides what this panel's fit record means; a viewer
+        # host is static, so it AWAITS the analysis rather than presenting it.
+        operation = apply_panel_fit(host, state, live=False)
+        if operation is not None:
             try:
-                cls._await(run_fit(model, **fit))
+                cls._await(operation)
             except Exception as error:
                 # The dataset and authored plot state remain useful when a fit
                 # model is no longer available or this archived fit was never

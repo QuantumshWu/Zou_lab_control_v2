@@ -461,14 +461,17 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         semantic={"reduction": "mean"},
         display={"show_colorbar": False},
         fit={"model": "anisotropic_gaussian_center", "live": False},
-        overlay_signal="@logic/occupancy/site_overlay",
+        overlay_signal="@logic/occupancy/occupied",
     )
     overlay = ImagePointOverlay(
         7,
         np.asarray(((2.5, 3.5), (7.5, 9.5))),
         ("site-0", "site-1"),
         ("0", "1"),
-        (PointStatus.EMPTY, PointStatus.OCCUPIED),
+        {
+            None: (PointStatus.EMPTY, PointStatus.OCCUPIED),
+            0.0: (PointStatus.OCCUPIED, PointStatus.INVALID),
+        },
     )
     frozen = PanelFrozenData(
         signal=state.signal,
