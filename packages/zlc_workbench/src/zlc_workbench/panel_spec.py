@@ -70,9 +70,17 @@ def fitting_panel_spec(
         spec = fitting_spec(schema, resolved)
         return None if spec is None else _dense_series_x(schema, spec)
 
-    cell = PlotKind(cell_text)
-    if cell not in _FACET_CELL_KINDS:
-        raise ValueError("FacetGrid cell kind must be curve, image, or histogram")
+    if cell_text:
+        cell = PlotKind(cell_text)
+        if cell not in _FACET_CELL_KINDS:
+            raise ValueError("FacetGrid cell kind must be curve, image, or histogram")
+    else:
+        # An empty cell kind means the DATA decides, here and only here.  Two
+        # data axes inside one point make an image cell; anything less is a
+        # curve.  Probing "whichever does not raise" is not enough -- a curve
+        # cell ACCEPTS an image and draws it as a 2.3-million-point polyline.
+        data_axes = tuple(getattr(schema.cell_schema, "data_axes", ()))
+        cell = PlotKind.IMAGE if len(data_axes) >= 2 else PlotKind.CURVE
     outer_spec = fitting_spec(schema, PlotKind.FACET_GRID)
     cell_spec = fitting_spec(schema, cell)
     if outer_spec is None or cell_spec is None:

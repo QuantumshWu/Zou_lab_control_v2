@@ -599,12 +599,17 @@ def test_the_presenter_never_imports_qt() -> None:
 def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None:
     """Panel authoring is independent of whether a producer has run yet."""
 
+    # ONE naming scheme: the plot kind's own name, nothing invented beside it.
+    # A facet entry with a chosen cell composes the two standard names.
     assert presenter.view.kinds == (
-        ("image", "2D image"),
-        ("curve", "1D vector"),
-        ("rolling", "Rolling trace"),
-        ("histogram", "Distribution"),
-        ("facet_grid", "Site grid"),
+        ("image", "image"),
+        ("curve", "curve"),
+        ("rolling", "rolling"),
+        ("histogram", "histogram"),
+        ("facet_grid", "facet_grid"),
+        ("facet_grid:curve", "facet_grid (curve)"),
+        ("facet_grid:image", "facet_grid (image)"),
+        ("facet_grid:histogram", "facet_grid (histogram)"),
     )
     presenter.view.add_panel_requested.emit("image")
     assert len(presenter.panels) == 1
@@ -642,20 +647,33 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     assert binding.state is original_state
 
 
-def test_site_grid_add_fixes_curve_cells_before_a_signal_exists(presenter) -> None:
-    binding = presenter.add_selected_panel("facet_grid")
+def test_facet_grid_cell_kind_is_data_decided_or_operator_chosen(presenter) -> None:
+    """A bare facet_grid lets the DATA decide its cell; a named cell is a choice."""
 
+    binding = presenter.add_selected_panel("facet_grid")
     assert binding is not None
     assert binding.state.kind == "facet_grid"
-    assert binding.state.cell_kind == "curve"
-    assert binding.parameter_surface["display_unavailable"] == ""
-    assert binding.parameter_surface["display"]
+    assert binding.state.cell_kind == ""
+    # No cell yet means no display contract yet -- an authored state, not an
+    # error: the surface says a signal will resolve it.
+    assert "signal" in binding.parameter_surface["display_unavailable"]
+    assert binding.parameter_surface["display"] == ()
 
-    original = binding.state
+    # The operator may fix any legal grid cell, before or after a signal.
     assert presenter.update_panel_state(
         binding.panel_id, {"cell_kind": "image"}
+    ) is True
+    assert binding.state.cell_kind == "image"
+    assert presenter.update_panel_state(
+        binding.panel_id, {"cell_kind": "rolling"}
     ) is False
-    assert binding.state is original
+    assert binding.state.cell_kind == "image"
+
+    # A composite menu key decomposes into the two standard names.
+    chosen = presenter.add_selected_panel("facet_grid:histogram")
+    assert chosen is not None
+    assert chosen.state.kind == "facet_grid"
+    assert chosen.state.cell_kind == "histogram"
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(

@@ -20,7 +20,7 @@ from queue import Empty, SimpleQueue
 import time
 from typing import Any
 
-from zlc_plot import DEFAULTS
+from zlc_plot import DEFAULTS, PlotKind
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 
@@ -382,7 +382,9 @@ class ConsolePresenter:
             suffix += 1
         state = PanelState(
             signal=str(signal).strip(),
-            kind=wanted,
+            # The menu key may compose kind and cell ("facet_grid:image");
+            # the state stores the two standard names separately.
+            kind=definition.kind.value,
             cell_kind=definition.cell_key,
             size=str(size or "2x2"),
             interval_ms=selected_interval,
@@ -451,7 +453,7 @@ class ConsolePresenter:
         panel_id = f"panel-{self._panel_serial}"
         state = PanelState(
             signal=str(signal),
-            kind=definition.key,
+            kind=definition.kind.value,
             cell_kind=definition.cell_key,
             size=str(size).strip() or DEFAULTS.layout.default_preset,
             interval_ms=selected_interval,
@@ -993,6 +995,10 @@ class ConsolePresenter:
         )
         merged: dict[str, Any] = {
             "signal": signal,
+            # Validated above; without this line the patch was checked and
+            # then silently dropped -- legal only while the old policy made
+            # the current value the single legal one.
+            "cell_kind": str(changes.get("cell_kind", current.cell_kind)),
             "size": str(changes.get("size", current.size)),
             "interval_ms": int(changes.get("interval_ms", current.interval_ms)),
             "title": title,
@@ -1063,8 +1069,11 @@ class ConsolePresenter:
                 if candidate.kind
                 else candidate.cell_kind
             )
+            # An empty cell kind stays empty: the data decided this time and
+            # keeps deciding on every later retarget.  Writing the derived
+            # value back would turn one dataset's answer into an authored
+            # choice the next dataset gets refused against.
             if candidate.kind and fitting is not None and fitting != candidate.cell_kind:
-                candidate = replace(candidate, cell_kind=fitting)
                 self._report(
                     f"{panel_id} draws {fitting} cells for {candidate.signal}",
                     severity="task",
@@ -1330,6 +1339,18 @@ class ConsolePresenter:
         """Describe a fixed kind before a compatible dataset is connected."""
 
         values = dict(state.display)
+        data_reason = "Choose a compatible signal to resolve dataset-dependent choices."
+        if state.kind == PlotKind.FACET_GRID.value and not state.cell_kind:
+            # An empty cell kind means the DATA decides; until a signal binds
+            # there is no cell, so there is no display contract to show yet.
+            # That is this panel's authored state, not a configuration error.
+            return self._parameter_surface(
+                (),
+                state,
+                semantic_unavailable=data_reason,
+                display_unavailable=data_reason,
+                fit_unavailable=data_reason,
+            )
         try:
             controls = parameter_controls_for_kind(
                 state.kind,
@@ -1341,7 +1362,6 @@ class ConsolePresenter:
             display_unavailable = _error_text(error)
         else:
             display_unavailable = ""
-        data_reason = "Choose a compatible signal to resolve dataset-dependent choices."
         return self._parameter_surface(
             controls,
             state,
@@ -2208,8 +2228,6 @@ class ConsolePresenter:
                 if fitting is None:
                     incompatible.append((state.signal, state.kind))
                     continue
-                if fitting != state.cell_kind:
-                    state = replace(state, cell_kind=fitting)
                 publication = front.publication(state.signal)
                 plot_input = self._project_panel_input(
                     binding,
@@ -3630,31 +3648,21 @@ class ConsolePresenter:
         return True
 
     def _fitting_cell_kind(self, snapshot: object, kind: str, declared: str) -> str | None:
-        """The cell kind this data can actually be drawn with, declared first.
+        """The cell kind this panel will draw with, or None as an honest refusal.
 
-        A Site grid is authored with curve cells, but a dataset whose cells
-        are images is drawn with image cells.  Keeping the authored kind and
-        going quiet left the card BLANK with only a status-line warning --
-        the operator saw an empty panel and nothing on it saying why.  Only
-        offer what fits: probe the declared cell kind, then the others.
+        An empty declaration means the DATA decides -- the resolver
+        (``fitting_panel_spec``) owns that rule and keeps applying it on every
+        later retarget.  A named cell kind is the operator's choice: probe it,
+        never swap it.  Refusing loudly beats the blank card this replaces.
         """
 
+        spec = self._spec_for(snapshot, kind, declared)
+        if spec is None:
+            return None
         if kind != "facet_grid":
-            return declared if self._spec_for(snapshot, kind, declared) is not None else None
-        schema = getattr(getattr(snapshot, "block", None), "schema", None)
-        data_axes = getattr(getattr(schema, "cell_schema", None), "data_axes", ())
-        # The data says what its cells are: two data axes is an image cell.
-        # Probing "whichever does not raise" is not enough -- a curve cell
-        # ACCEPTS an image and draws it as a 2.3-million-point polyline.
-        preferred = "image" if len(tuple(data_axes)) >= 2 else (declared or "curve")
-        candidates = [preferred]
-        for name in (declared, "curve", "image", "histogram"):
-            if name and name not in candidates:
-                candidates.append(name)
-        for name in candidates:
-            if self._spec_for(snapshot, kind, name) is not None:
-                return name
-        return None
+            return declared
+        actual = getattr(getattr(spec, "cell", None), "kind", None)
+        return str(getattr(actual, "value", actual or ""))
 
     def _spec_for(self, snapshot: object, kind: str, cell_kind: str = "") -> Any:
         """Whether this data can be drawn as ``kind``, as the plotting package sees it.

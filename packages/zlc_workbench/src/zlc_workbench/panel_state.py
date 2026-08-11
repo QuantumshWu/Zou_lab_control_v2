@@ -80,7 +80,9 @@ class PanelState:
         cell_kind = str(self.cell_kind)
         resolved_kind = PlotKind(kind)
         if resolved_kind is PlotKind.FACET_GRID:
-            if cell_kind not in {
+            # Empty means the DATA decides the cell, at every bind; a named
+            # cell is the operator's fixed choice.
+            if cell_kind and cell_kind not in {
                 PlotKind.CURVE.value,
                 PlotKind.IMAGE.value,
                 PlotKind.HISTOGRAM.value,
