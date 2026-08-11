@@ -187,6 +187,8 @@ def test_mot_position_is_seed_deterministic_and_follows_the_bias_dacs() -> None:
         columns = np.arange(frame.shape[1], dtype=float)
         return float(np.sum(columns * np.sum(weights, axis=0)) / np.sum(weights))
 
+    assert centroid_x(first_a) == pytest.approx((first_a.shape[1] - 1) * 0.5, abs=0.3)
+    assert centroid_y(first_a) == pytest.approx((first_a.shape[0] - 1) * 0.5, abs=0.3)
     assert abs(centroid_y(first_a) - centroid_y(first_b)) < 1.0
     shifted, _ = frames(5, da_y=256)
     assert centroid_y(shifted) - centroid_y(first_a) > 10.0

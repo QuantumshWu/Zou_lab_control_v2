@@ -623,7 +623,7 @@ pulse_live.close()
 
 The contract fixes the specialised payload class. `LivePlotController` owns the public
 capacity-one handoff and display cadence. Refresh presets are centralized at
-100/200/400/800 ms (default 400 ms,
+100/200/400/800 ms (default 100 ms,
 maximum 10 Hz). `LivePlotController` exposes coalescing/drop/error metrics and
 supports an injected UI-thread dispatcher.
 When no dispatcher is supplied for a `PlotSession`, the controller retains the

@@ -161,7 +161,7 @@ _IMAGE_AREA_TO_ROI = SelectionMapping(
 CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
-            "exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9
+            "exposure_seconds", "float", "Exposure seconds", 0.1, minimum=1e-9
         ),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),

@@ -373,7 +373,7 @@ view._view.kind_combo.setCurrentIndex(image_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 panel = next(iter(presenter.panels.values()))
-assert panel.state.interval_ms == 400, (
+assert panel.state.interval_ms == 100, (
     'a new TaskConsole panel starts at the product default')
 assert tuple(view._cards[panel.panel_id]._interval_choices) == (100, 200, 400, 800)
 assert len(presenter.panels) == 1

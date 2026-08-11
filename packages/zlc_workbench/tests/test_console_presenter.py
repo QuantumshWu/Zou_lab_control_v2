@@ -615,12 +615,12 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     assert binding.port is None
     assert presenter.view.cards
     assert presenter.view.panel_intervals == (100, 200, 400, 800)
-    assert presenter.view.panel_default_interval == 400
+    assert presenter.view.panel_default_interval == 100
     from zlc_plot import DEFAULTS
 
     assert presenter.view.panel_sizes == DEFAULTS.layout.size_names
     assert presenter.view.panel_default_size == DEFAULTS.layout.default_preset
-    assert binding.state.interval_ms == 400
+    assert binding.state.interval_ms == 100
     display = {
         str(field["key"]): field
         for field in binding.parameter_surface["display"]

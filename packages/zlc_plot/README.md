@@ -267,7 +267,7 @@ assert pulse_session.data_revision == 1
 pulse_live.close()
 ```
 
-Pending capacity 固定为 1。Producer 不等待 render；当生产速度高于显示刷新时，只保留最新 revision。Envelope revision 会原样成为 session、selection event 与 selected data 的 data revision；PulseTimeline 直接调用 `update_data(pulse)` 时从当前 revision 自动加一。有无 automatic live fit 都使用同一个 `update_data()`；`LivePlotController.publish()` 只增加 capacity-one ingress 和 100/200/400/800 ms cadence（默认 400 ms，最高 10 Hz），不增加另一套 fit 状态机。
+Pending capacity 固定为 1。Producer 不等待 render；当生产速度高于显示刷新时，只保留最新 revision。Envelope revision 会原样成为 session、selection event 与 selected data 的 data revision；PulseTimeline 直接调用 `update_data(pulse)` 时从当前 revision 自动加一。有无 automatic live fit 都使用同一个 `update_data()`；`LivePlotController.publish()` 只增加 capacity-one ingress 和 100/200/400/800 ms cadence（默认 100 ms，最高 10 Hz），不增加另一套 fit 状态机。
 
 `stop()` 停止 consumer 但不关闭 controller，可用 `start()` 恢复；`close()` 是终止并释放 ingress 的操作。Notebook 的持续 producer 与完整 cleanup 写法见唯一的 `notebooks/usage.ipynb`。
 

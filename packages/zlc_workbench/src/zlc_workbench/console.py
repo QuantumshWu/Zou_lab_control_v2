@@ -55,7 +55,6 @@ from .panel_save import (
 )
 from .panel_catalog import (
     TASK_CONSOLE_PANEL_CATALOG,
-    TASK_CONSOLE_DEFAULT_INTERVAL_MS,
     panel_kind_choices,
     task_console_panel_identity,
     task_console_panel_kind,
@@ -232,7 +231,7 @@ class ConsolePresenter:
         #: and the card that reports it cannot state different numbers.
         live_policy = DEFAULTS.live
         layout_policy = DEFAULTS.layout
-        self._default_interval_ms = TASK_CONSOLE_DEFAULT_INTERVAL_MS
+        self._default_interval_ms = live_policy.default_refresh_interval_ms
 
         size_setter = getattr(self.view, "set_panel_sizes", None)
         if callable(size_setter):

@@ -296,8 +296,8 @@ class SimulationWorld:
             field_x = self._dac_values["da_bias_x"] * scale
             field_y = self._dac_values["da_bias_y"] * scale
             field_z = self._dac_values["da_bias_z"] * scale
-            center_x = width * (0.5 + 0.2 * field_x)
-            center_y = height * (0.5 + 0.2 * field_y)
+            center_x = 0.5 * (width - 1) + 0.2 * width * field_x
+            center_y = 0.5 * (height - 1) + 0.2 * height * field_y
             sigma_x = 40.0 / 2.354820045
             sigma_y = 20.0 / 2.354820045
             x_axis, y_axis = self._mot_axes(height, width)

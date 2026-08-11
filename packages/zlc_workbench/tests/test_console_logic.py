@@ -106,6 +106,7 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(presenter) ->
         field.name for field in presenter.logic[node_id].descriptor.authoring_schema.fields
     )
     assert projection["form_values"]["repeat"] == 0
+    assert projection["form_values"]["exposure_seconds"] == 0.1
     assert projection["device_keys"]["camera"] == "camera"
 
 

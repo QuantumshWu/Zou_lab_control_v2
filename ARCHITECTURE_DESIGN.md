@@ -97,7 +97,7 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 4. `SimulationWorld` 是 virtual 成像物理、site geometry、seed 和 trigger routing 的唯一所有者。默认 virtual apparatus 是 `5 x 7 = 35` sites 和 `96 x 128` image；这是模拟装置的可测真值，不能倒流成 Calibration request 的 grid/count 输入。
 5. Virtual sequencer 的 finite `fire -> wait_done` 必须尊重 compiled pulse 的 logical duration；不能因为 memory transport 已立即给出 DONE 就把几十到几百次采集压进一个 Monitor refresh interval。`forever` 与 finite 都复用同一个 compiled duration，只是前者持续按 cadence 触发、后者到 logical terminal 才交付一次完成报告。
 6. Virtual 物理只消费真实 sequencer 已 applied 的 `CompiledProgram`。logical output key、lane、DAC bus、delay、repeat 和 scan row 全部来自与真板相同的 `board.xdc -> PulseTarget -> compile` 路径；Simulation 不保存另一份 virtual target、pin map 或 pulse-name 分支。
-7. `cooling` 才能装载/冷却原子；`trap` 关闭的实际时长按寿命丢失原子；`emCCD` 的窗口触发 qCMOS，而原子荧光只积分该相机窗口、camera working exposure 与 `probe` 窗口的交集。`da_bias_x/y/z` 分别表示 MOT 图像 x、y 和光轴磁场，x/y 移动 MOT，三轴离零场的距离共同降低亮度；不得再按 frame ordinal 人为漂移。
+7. `cooling` 才能装载/冷却原子；`trap` 关闭的实际时长按寿命丢失原子；`emCCD` 的窗口触发 qCMOS，而原子荧光只积分该相机窗口、camera working exposure 与 `probe` 窗口的交集。`da_bias_x/y/z` 分别表示 MOT 图像 x、y 和光轴磁场：signed `(0,0,0)` 是唯一期望亮度最优点，亮斑位于像素几何中心 `((width-1)/2, (height-1)/2)`；x/y 移动 MOT，三轴离零场的距离共同降低亮度，不得再按 frame ordinal 人为漂移。
 8. 创建 world、Pulse 尚未 On、`safe()` 和 close 后都是同一个物理安全态：全部 TTL low、全部 DAC authored value 为 0、无已装载原子。finite、forever 和 scan 只复用现有 VirtualPulseStreamer/world worker，不新增另一套 simulation scheduler。
 
 ## 4. Package 责任边界
@@ -362,7 +362,7 @@ Setting 是 monitor board 上的完整初始配置面，而不是第一次修改
 - Plot kind（只读）；
 - Signal；
 - Panel size；
-- Display interval：只用有限值 `100 / 200 / 400 / 800 ms` 的 ComboBox，默认 `400 ms`，不能用可输入非法值的 SpinBox；
+- Display interval：只用有限值 `100 / 200 / 400 / 800 ms` 的 ComboBox，默认 `100 ms`，不能用可输入非法值的 SpinBox；
 - title/labels、limits 和当前 kind 声明的全部 data-independent display/interaction 参数；
 - Edit / Remove。
 
