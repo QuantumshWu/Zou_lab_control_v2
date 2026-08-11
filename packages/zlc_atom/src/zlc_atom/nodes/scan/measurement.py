@@ -27,7 +27,12 @@ from zlc_data import (
     SCAN_POINT,
     owned_snapshot_from_arrays,
 )
-from zlc_pulse import PulseSequence, compile_sequence, resolve_api_parameters
+from zlc_pulse import (
+    PulseSequence,
+    compile_sequence,
+    pulse_field_value,
+    resolve_api_parameters,
+)
 from zlc_runtime import DatasetOutputDeclaration, FinalDatasetOutput, SignalValue
 
 from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
@@ -222,17 +227,37 @@ class ScanMeasurement:
         if context.cancel_requested():
             raise RuntimeError("the scan was cancelled")
 
-    @staticmethod
-    def _next_publication(tap: object, context: object):
+    def _next_publication(self, tap: object, context: object):
         while True:
             ScanMeasurement._check_cancelled(context)
+            # A consumer runs its own cycle.  Publications materialise when
+            # the plane FREEZES, and waiting for the display to do it would
+            # couple acquisition to whether a panel happens to be open --
+            # a scan on a panel-less bench would simply never advance.
+            # Freezing with nothing staged is cheap by the plane's own
+            # design; unchanged slots reuse their immutable fronts.
+            self.signal_plane.freeze()
             try:
                 return tap.next(0.1).payload
             except TimeoutError:
                 continue
 
     def _api_values(self, row: Sequence[float]) -> dict[str, float]:
-        values: dict[str, float] = {}
+        """The COMPLETE parameter mapping this row means.
+
+        A plan may scan a subset of what the pulse declares; everything it
+        does not name holds its AUTHORED value.  The mapping handed to
+        resolve_api_parameters is always complete, so its strictness -- the
+        rule that keeps a misspelling from silently running nominals -- is
+        never loosened.
+        """
+
+        values: dict[str, float] = {
+            parameter.parameter_id: float(
+                pulse_field_value(self.sequence, parameter.field_ref, parameter.unit)
+            )
+            for parameter in self.sequence.api_parameters
+        }
         for port, value in zip(self.ports, row, strict=True):
             if not port.port.startswith(PULSE_PARAM_FAMILY):
                 raise ValueError(

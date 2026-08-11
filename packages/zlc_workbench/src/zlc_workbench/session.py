@@ -343,10 +343,14 @@ class ExperimentSession:
         path = self.workspace.pulse(name)
         if not path.is_file():
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
-        from zlc_pulse import compile_sequence
+        from zlc_pulse import compile_sequence, resolve_api_parameters
 
         state = read_pulse(path)
-        sequence = state.sequence
+        # API parameters resolve at their AUTHORED values -- the same thing
+        # On Pulse means in the editor.  Without this, any template declaring
+        # API parameters (the scan and imaging templates both do) could not be
+        # loaded by name at all.
+        sequence = resolve_api_parameters(state.sequence)
         board = self.sequencer.describe()
         if sequence.target != board.target:
             raise ValueError(
