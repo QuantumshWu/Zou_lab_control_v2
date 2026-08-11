@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "zlc-runtime",
+    "zlc-ui",
     "zlc-durable",
     "numpy==2.4.2",
     "scipy==1.17.1",

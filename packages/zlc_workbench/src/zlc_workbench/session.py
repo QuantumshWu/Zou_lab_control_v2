@@ -83,6 +83,29 @@ def _seed_default_pulse(template: Path, packaged: bytes) -> None:
         atomic_write_bytes(template, canonical)
 
 
+def seed_packaged_pulses(pulses: Path) -> None:
+    """Every packaged default pulse, present and canonical, in one place.
+
+    Called from every session entry, not only the checkout's own home: a
+    fresh experiment folder gets working calibration and scan templates, and
+    the seeder never touches operator content -- it creates what is absent
+    and canonicalizes only files that are byte-for-byte equivalent trees.
+    """
+
+    from zlc_atom.nodes import (
+        calibration_pulse_template_bytes,
+        scan_pulse_template_bytes,
+    )
+
+    pulses.mkdir(parents=True, exist_ok=True)
+    _seed_default_pulse(
+        pulses / Workspace.IMAGING_TEMPLATE, calibration_pulse_template_bytes()
+    )
+    _seed_default_pulse(
+        pulses / "mot_field_template.json", scan_pulse_template_bytes()
+    )
+
+
 @dataclass(frozen=True)
 class Workspace:
     """Where an experiment's own files live: its pulses and its saved data.
@@ -178,19 +201,7 @@ class Workspace:
             if root
             else Path(__file__).resolve().parents[4] / cls.DEFAULT_HOME
         )
-        pulses = home / "pulses"
-        pulses.mkdir(parents=True, exist_ok=True)
-        from zlc_atom.nodes import (
-            calibration_pulse_template_bytes,
-            scan_pulse_template_bytes,
-        )
-
-        _seed_default_pulse(
-            pulses / cls.IMAGING_TEMPLATE, calibration_pulse_template_bytes()
-        )
-        _seed_default_pulse(
-            pulses / "mot_field_template.json", scan_pulse_template_bytes()
-        )
+        seed_packaged_pulses(home / "pulses")
         return cls(home)
 
     @classmethod
@@ -265,6 +276,10 @@ class ExperimentSession:
         if not isinstance(config, InstallationConfig):
             raise TypeError("config must be InstallationConfig")
         space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
+        # Every experiment gets the packaged default pulses, not only the
+        # checkout's home: calibration and the scan work out of the box in a
+        # fresh folder, and the seeder never touches operator content.
+        seed_packaged_pulses(space.pulses)
         snapshot = catalog if catalog is not None else discover_device_catalog()
         return cls._from_config(space, config, snapshot)
 

@@ -138,6 +138,12 @@ def _build(
     )
 
 
+def _editor_factory(parent=None):
+    from .editor import scan_plan_editor_factory
+
+    return scan_plan_editor_factory(parent)
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "scan",
     NodeKind.MEASUREMENT,
@@ -152,6 +158,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         ),
     ),
     build=_build,
+    ui_contributions=(_editor_factory,),
     workspace_resources=(_PULSE_RESOURCE,),
 )
 
