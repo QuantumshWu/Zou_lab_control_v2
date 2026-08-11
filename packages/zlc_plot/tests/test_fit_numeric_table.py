@@ -82,7 +82,7 @@ def test_text_facet_coordinates_use_ordinals_and_labels() -> None:
         session.close()
 
 
-def test_coordinate_display_labels_drive_facets_fit_rows_and_legends() -> None:
+def test_coordinate_display_labels_drive_facets_and_fit_rows() -> None:
     x = np.tile(np.linspace(-3.0, 3.0, 20), 2)
     site_ids = ("site_0001",) * 20 + ("site_0002",) * 20
     site_labels = ("1",) * 20 + ("2",) * 20
@@ -138,11 +138,13 @@ def test_coordinate_display_labels_drive_facets_fit_rows_and_legends() -> None:
         ),
     )
     try:
-        legend = grouped._renderer.primary_axes.get_legend()
-        assert legend is not None
-        assert tuple(text.get_text() for text in legend.get_texts()) == (
-            "Site=1",
-            "Site=2",
+        # Grouping draws one line per group and NO legend: never an authored
+        # behaviour, and on a panel-sized plot it covers the data it names.
+        assert grouped._renderer.primary_axes.get_legend() is None
+        labels = tuple(
+            line.get_label()
+            for line in grouped._renderer.primary_axes.get_lines()
         )
+        assert "Site=1" in labels and "Site=2" in labels
     finally:
         grouped.close()

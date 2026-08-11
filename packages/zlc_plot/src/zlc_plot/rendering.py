@@ -1079,6 +1079,16 @@ class MatplotlibRenderer:
             restore(self._background_region)
             renderer = get_renderer()
             for _key, artist in sorted(dynamics, key=lambda entry: entry[0]):
+                # Mirror the full-draw contract exactly: a full figure draw
+                # skips an INVISIBLE AXES together with everything on it, and
+                # an artist's own flag says nothing about that.  A focused
+                # FacetGrid is the one layout that hides axes -- and their
+                # image artists kept repainting into the front at the old
+                # cell boxes, which is the "ghost cells" a focused grid
+                # showed.
+                owner = getattr(artist, "axes", None)
+                if owner is not None and not owner.get_visible():
+                    continue
                 if artist.get_visible():
                     if not self._blit_exact_rgba_image(artist, canvas):
                         artist.draw(renderer)
@@ -1511,10 +1521,11 @@ class MatplotlibRenderer:
                 axes,
                 *self._resolve_curve_y_limits(key, y_range, state),
             )
+        # Grouped series are told apart by the palette cycle; no legend is
+        # drawn for them -- it was never an authored behaviour, and on a
+        # panel-sized plot it covers the data it names.
         if axes.get_legend() is not None:
             axes.get_legend().remove()
-        if len(series) > 1:
-            axes.legend()
         axes.set_xlabel(x_label)
         axes.set_ylabel(y_label)
         apply_smart_ticks(axes)
