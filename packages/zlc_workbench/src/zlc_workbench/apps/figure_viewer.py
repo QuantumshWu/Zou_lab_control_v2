@@ -34,8 +34,6 @@ def _parser() -> argparse.ArgumentParser:
 def build(view: object) -> object:
     """Wire one viewer window, so a host embedding it does not repeat this."""
 
-    from dataclasses import replace
-
     import zlc_plot as plot
     from zlc_plot.primitives import ImageFrame
 
@@ -61,12 +59,7 @@ def build(view: object) -> object:
             )
         if state is not None:
             spec = compose_panel_spec(snapshot.block.schema, spec, state)
-        # Only the title: axis names come from the payload's own schema when a
-        # label is left unset, and the signal's name is the one thing the data
-        # does not know about itself.
-        return plot.RasterPlotHost.from_plot(
-            plot_input, replace(spec, labels=replace(spec.labels, title=name))
-        )
+        return plot.RasterPlotHost.from_plot(plot_input, spec)
 
     return FigureViewerPresenter(
         view,

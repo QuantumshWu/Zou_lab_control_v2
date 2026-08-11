@@ -560,6 +560,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert real_presenter.open(str(written.archive)) is not None
         assert real_presenter._host is not None, real_view.status
         assert real_presenter.panel_state == state
+        real_presenter._host.wait_for_front(timeout=5.0)
+        assert real_presenter._host._session._renderer.primary_axes.get_title() == ""
     finally:
         real_presenter.close()
 
