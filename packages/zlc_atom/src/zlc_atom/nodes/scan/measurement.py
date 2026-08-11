@@ -2,23 +2,20 @@
 
 Three facts shape this engine.
 
-THE SOURCE'S CADENCE IS MEASURED, NOT ASSUMED.  A watched signal is either
-board-driven (an externally triggered camera: no fire, no frames) or
-free-running (the Basler MOT monitor: it samples the world at its own pace,
-triggers or not).  Which one it is decides what "fresh" can even mean, and
-the scan finds out by OBSERVATION at its start: on a safe board a signal
-that keeps advancing free-runs, and one that falls silent is board-driven --
-that same silence also proves its pipeline has drained.
+THE OPERATOR DECLARES HOW A FRESH VALUE IS TAKEN.  A watched signal is
+either driven by the fired pulse (an externally triggered camera: no fire,
+no frames) or free-running (the Basler MOT monitor samples the world at its
+own pace).  Which one it is decides what "fresh" means, and it is an
+authored choice on the node -- ``capture``:
 
-FRESHNESS IS BOOKKEEPING WHERE THE BOARD DRIVES.  For a board-driven source
-each finitely fired cycle advances the watched signal exactly once and the
-board is silent in between, so the publication after a fire IS that fire's --
-exact for any pipeline depth, zero discarded frames, and immune to
-latest-only coalescing because the silence leaves nothing to coalesce.  For a
-free-running source no causal link exists; the honest gate is to skip the one
-publication that may straddle the apply (exposed partly at the old point) and
-take the next -- one frame period per point, the minimum any gate can pay
-without per-frame exposure timestamps.
+* ``"skip_one"`` (default): after applying a point, discard one publication
+  and keep the next -- the discarded one may have been exposed partly at
+  the OLD point.  Right for free-running sources; costs one source period
+  per point, the minimum any gate pays without per-frame exposure stamps.
+* ``"direct"``: every publication after a fire is that fire's, because a
+  pulse-driven source is silent between finite cycles.  Zero discarded
+  frames, exact for any pipeline depth -- and wrong for a free-running
+  source, which is why it is a choice and not a guess.
 
 THE DATASET IS THE SAME OBJECT LIVE AND FINAL.  The plan's coordinates are
 known before any data, so the whole dataset is allocated at the first capture
@@ -36,7 +33,6 @@ everything later hangs from: a box drawn on the plot's x axis is a range of
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -70,16 +66,8 @@ from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
 
 SCAN_OUTPUT = DatasetOutputDeclaration("scan", "scan.result")
 
-# The scan's one temporal assumption, spent once at its start: a source that
-# stays silent this long on a SAFE board is board-driven (and its pipeline has
-# drained); one that keeps arriving free-runs.  A free-running source slower
-# than this window would be misread as board-driven, so the window must exceed
-# the slowest monitor cadence on the bench.
-SOURCE_QUIET_SECONDS = 1.0
-
-# How long the scan is willing to watch a chattering source before declaring
-# it free-running.  Bounds the observation; it is not a correctness knob.
-SOURCE_OBSERVE_SECONDS = 2.5
+# The authored capture modes: how a fresh value is taken after an apply.
+CAPTURE_MODES = ("skip_one", "direct")
 
 
 def _unique_domain(values: Sequence[float]) -> tuple[tuple[float, ...], tuple[int, ...]]:
@@ -365,6 +353,7 @@ class ScanMeasurement:
         plan: ScanPlan,
         ports: tuple[ScanPort, ...],
         samples_per_point: int = 1,
+        capture: str = "skip_one",
         producer: str = "scan",
     ) -> None:
         self.instance_id = str(producer).strip() or "scan"
@@ -379,6 +368,11 @@ class ScanMeasurement:
         self.samples_per_point = int(samples_per_point)
         if self.samples_per_point < 1:
             raise ValueError("samples_per_point must be at least 1")
+        self.capture = str(capture)
+        if self.capture not in CAPTURE_MODES:
+            raise ValueError(
+                f"capture must be one of {CAPTURE_MODES}, not {capture!r}"
+            )
 
     @property
     def dataset_output_declarations(self):
@@ -407,32 +401,6 @@ class ScanMeasurement:
                 raise RuntimeError(
                     "the source signal restarted during the scan"
                 ) from None
-
-    def _source_free_runs(self, tap: object, context: object) -> bool:
-        """Measure, on a safe board, whether the watched signal drives itself.
-
-        The plane must keep being frozen while watching: a frame can STAGE
-        during the wait with nobody else freezing, and an unfrozen frame is
-        silence the tap cannot hear.
-        """
-
-        observe_until = time.monotonic() + SOURCE_OBSERVE_SECONDS
-        quiet_until = time.monotonic() + SOURCE_QUIET_SECONDS
-        while time.monotonic() < quiet_until:
-            ScanMeasurement._check_cancelled(context)
-            self.signal_plane.freeze()
-            try:
-                tap.next(0.05)
-            except TimeoutError:
-                continue
-            except StreamEndedEarly:
-                raise RuntimeError(
-                    "the source signal restarted during the scan"
-                ) from None
-            if time.monotonic() >= observe_until:
-                return True
-            quiet_until = time.monotonic() + SOURCE_QUIET_SECONDS
-        return False
 
     def _drain_backlog(self, tap: object) -> None:
         """Discard everything already published; the caller knows it is stale."""
@@ -493,8 +461,6 @@ class ScanMeasurement:
         if baseline.event_ref.generation != self._source_generation:
             raise RuntimeError("the source signal restarted before the scan began")
         try:
-            free_running = self._source_free_runs(tap, context)
-
             def capture() -> None:
                 publication = self._next_publication(tap, context)
                 value = publication.value(self._signal_name)
@@ -512,9 +478,9 @@ class ScanMeasurement:
                     raise ValueError("pulse target differs from the connected board")
                 program = compile_sequence(resolved, board.geometry, board.clock_hz)
                 self.sequencer.load(program, source=resolved)
-                if free_running:
-                    # Everything published before the apply is the old world.
-                    self._drain_backlog(tap)
+                # Everything published before the apply is the old world.
+                self._drain_backlog(tap)
+                if self.capture == "skip_one":
                     # One cycle applies the point; the board's end state holds
                     # it while the source keeps sampling the world.
                     self.sequencer.fire()
@@ -528,11 +494,10 @@ class ScanMeasurement:
                 else:
                     for _sample in range(samples):
                         self._check_cancelled(context)
-                        # One finite cycle per sample.  The pipeline is empty
-                        # here (silence proved at the start, and every earlier
-                        # cycle's publication was already consumed), so the
-                        # next publication is THIS cycle's -- exact, with zero
-                        # discarded frames.
+                        # One finite cycle per sample.  The operator declared
+                        # the source pulse-driven, so the board's silence
+                        # between cycles means the next publication is THIS
+                        # cycle's -- exact, with zero discarded frames.
                         self.sequencer.fire()
                         capture()
                         # The frame can land before the program's tail
@@ -560,6 +525,7 @@ class ScanMeasurement:
                         "plan": self.plan.to_tree(),
                         "scan_shape": self.plan.shape,
                         "samples_per_point": samples,
+                        "capture": self.capture,
                     },
                 )
             }
@@ -568,6 +534,7 @@ class ScanMeasurement:
 
 
 __all__ = [
+    "CAPTURE_MODES",
     "SCAN_OUTPUT",
     "ScanDatasetWriter",
     "ScanMeasurement",

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from zlc_pulse import PulseSequence, sequence_from_tree
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
     DeviceAccess,
@@ -84,6 +84,24 @@ SCAN_SCHEMA = AuthoringSchema(
             1,
             minimum=1,
         ),
+        # How a fresh value is taken after a point is applied.  This is the
+        # operator's declaration about the SOURCE, not something the scan
+        # guesses: a free-running monitor needs the straddler skipped, a
+        # pulse-driven camera pays nothing.
+        AuthoringField(
+            "capture",
+            "choice",
+            "Capture",
+            "skip_one",
+            choices=(
+                AuthoringChoice(
+                    "skip_one", "Skip one, keep the next (free-running source)"
+                ),
+                AuthoringChoice(
+                    "direct", "Keep every publication (pulse-driven source)"
+                ),
+            ),
+        ),
     )
 )
 
@@ -110,6 +128,7 @@ def _build(
     pulse_resource: ResolvedWorkspaceResource,
     plan: object,
     samples_per_point: int = 1,
+    capture: str = "skip_one",
 ) -> ScanMeasurement:
     if (
         not isinstance(pulse_resource, ResolvedWorkspaceResource)
@@ -135,6 +154,7 @@ def _build(
         plan=parsed,
         ports=ports,
         samples_per_point=int(samples_per_point),
+        capture=str(capture),
     )
 
 

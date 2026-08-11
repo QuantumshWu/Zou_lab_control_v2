@@ -21,7 +21,9 @@ from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import ResolvedWorkspaceResource, discover_logic_nodes
 from zlc_atom.nodes.scan import (
+    CAPTURE_MODES,
     PULSE_PARAM_FAMILY,
+    SCAN_SCHEMA,
     ScanAxis,
     ScanPlan,
     bind_plan,
@@ -50,6 +52,23 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
     for port in ports:
         assert port.unit == "", "a DAC code is dimensionless; the unit is empty"
         assert port.lo < 0 < port.hi, "the signed range brackets zero"
+
+
+def test_the_capture_mode_is_the_operators_authored_choice() -> None:
+    """How freshness is taken is DECLARED on the node, never probed.
+
+    The safe default skips the straddler (right for a free-running monitor
+    like the MOT camera); a pulse-driven source may keep every publication.
+    """
+
+    field = next(f for f in SCAN_SCHEMA.fields if f.name == "capture")
+    assert field.value_type == "choice"
+    assert field.default == "skip_one"
+    assert tuple(choice.value for choice in field.choices) == CAPTURE_MODES
+    with pytest.raises(ValueError, match="must be one of"):
+        SCAN_SCHEMA.project_values(
+            {"pulse_template": "t.json", "plan": "{}", "capture": "guess"}
+        )
 
 
 def test_plan_rows_nest_outer_first_and_round_trip() -> None:

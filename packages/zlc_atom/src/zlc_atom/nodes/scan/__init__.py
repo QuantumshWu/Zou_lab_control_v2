@@ -2,6 +2,7 @@
 
 from .logic_node import LOGIC_NODE, SCAN_SCHEMA
 from .measurement import (
+    CAPTURE_MODES,
     SCAN_OUTPUT,
     ScanDatasetWriter,
     ScanMeasurement,
@@ -17,6 +18,7 @@ from .plan import (
 )
 
 __all__ = [
+    "CAPTURE_MODES",
     "LOGIC_NODE",
     "PULSE_PARAM_FAMILY",
     "SCAN_OUTPUT",
