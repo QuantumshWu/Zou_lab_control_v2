@@ -10,6 +10,7 @@ import pytest
 import zlc_runtime.selection_bridge as selection_bridge_module
 
 from zlc_data import (
+    READOUT_EVENT,
     REPEAT,
     SCAN_POINT,
     SPATIAL_X,
@@ -21,6 +22,7 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    GridTopology,
     OwnedSnapshot,
     PointColumn,
     PointTable,
@@ -1159,6 +1161,300 @@ def test_a_contiguous_roi_is_a_view_not_four_gathers() -> None:
 
     assert taken.base is not None, "a contiguous selection copied the frame"
     assert taken.shape == (1, 1, 120, 160)
+
+
+def _heatmap_schema(repeats: int = 2, *, with_columns: bool = True) -> DatasetSchema:
+    """A 3x3 scan grid: 9 point rows over dimensions (bias_x, grad)."""
+
+    repeat = AxisSpec(
+        AxisId("repeat"), "repeat", REPEAT, repeats, tuple(range(repeats))
+    )
+    columns: tuple[PointColumn, ...] = ()
+    if with_columns:
+        columns = (
+            PointColumn(
+                AxisId("bias_x"),
+                "bias_x",
+                SCAN_POINT,
+                PointColumn.NUMERIC,
+                (-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+            ),
+            PointColumn(
+                AxisId("grad"),
+                "grad",
+                SCAN_POINT,
+                PointColumn.NUMERIC,
+                (10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0),
+            ),
+        )
+    topology = GridTopology(
+        (AxisId("bias_x"), AxisId("grad")),
+        ((-1.0, 0.0, 1.0), (10.0, 20.0, 30.0)),
+        tuple((i, j) for i in range(3) for j in range(3)),
+    )
+    return DatasetSchema(
+        repeat,
+        PointTable(9, columns),
+        topology,
+        ValueSchema.scalar(np.dtype("float64"), None),
+    )
+
+
+def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
+    """A box on a scan heatmap selects the sub-grid, not an exception.
+
+    The heatmap cell's axes are grid-topology DIMENSIONS -- point-row
+    quantities -- and the bridge used to refuse them with 'image area axes
+    must be source data axes', so every committed box on a scan heatmap
+    silently derived nothing.
+    """
+
+    schema = _heatmap_schema()
+    values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/grid/roi_frame", "@logic/grid/roi_mean"}
+    )
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="grid")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("grad", 15.0, 25.0),
+                    SelectionRange("bias_x", -0.5, 1.5),
+                ),
+                revision=1,
+            ),
+        )
+        front = plane.freeze()
+        roi_frame = front.value("@logic/grid/roi_frame")
+        roi_mean = front.value("@logic/grid/roi_mean")
+        assert roi_frame is not None, bridge.last_error
+        assert roi_mean is not None
+        # Rows inside BOTH ranges: grad == 20 and bias_x in {0, 1} -> rows 4, 7.
+        np.testing.assert_array_equal(
+            roi_frame.snapshot.block.values, values[:, (4, 7)]
+        )
+        derived_schema = roi_frame.snapshot.block.schema
+        assert derived_schema.point_table.row_count == 2
+        assert derived_schema.grid_topology is not None
+        assert len(derived_schema.grid_topology.row_to_cell) == 2
+        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == float(
+            np.mean(values[:, (4, 7)])
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
+    """The repeat restriction is structural: row k of dimension 0, no name.
+
+    The repeat axis is never name-addressed anywhere -- it is identified by
+    its role and position -- so a focused repeat facet crosses the bridge as
+    ``repeat_index`` and the derived data is exactly the k-th repeat slice.
+    """
+
+    schema = _heatmap_schema()
+    values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/focus/roi_frame", "@logic/focus/roi_mean"}
+    )
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="focus")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("grad", 15.0, 25.0),
+                    SelectionRange("bias_x", -0.5, 0.5),
+                ),
+                repeat_index=1,
+                revision=1,
+            ),
+        )
+        front = plane.freeze()
+        roi_frame = front.value("@logic/focus/roi_frame")
+        roi_mean = front.value("@logic/focus/roi_mean")
+        assert roi_frame is not None, bridge.last_error
+        # The focused slice only: repeat 1, row 4 (grad 20, bias_x 0).
+        np.testing.assert_array_equal(
+            roi_frame.snapshot.block.values, values[1:2, 4:5]
+        )
+        assert roi_frame.snapshot.block.schema.repeat_axis.size == 1
+        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == 13.0
+
+        # A row the source does not have fails loudly, not as an empty cut.
+        with pytest.raises(IndexError):
+            events.emit_selection(
+                SelectionChange.COMMITTED,
+                SelectionState(
+                    "image",
+                    "area",
+                    (
+                        SelectionRange("grad", 15.0, 25.0),
+                        SelectionRange("bias_x", -0.5, 0.5),
+                    ),
+                    repeat_index=7,
+                    revision=2,
+                ),
+            )
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
+    """The topology itself declares the dimensions; columns are optional."""
+
+    schema = _heatmap_schema(with_columns=False)
+    values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/bare/roi_mean"})
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="bare")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("grad", 15.0, 25.0),
+                    SelectionRange("bias_x", -0.5, 1.5),
+                ),
+                revision=1,
+            ),
+        )
+        roi_mean = plane.freeze().value("@logic/bare/roi_mean")
+        assert roi_mean is not None, bridge.last_error
+        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == float(
+            np.mean(values[:, (4, 7)])
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
+def _frames_on_point_axis_schema(cycles: int = 2, frames: int = 3) -> DatasetSchema:
+    """Camera frames after the migration: (cycles, frame POINTS, y, x)."""
+
+    repeat = AxisSpec(
+        AxisId("cycle"), "cycle", REPEAT, cycles, tuple(range(cycles))
+    )
+    frame = PointColumn(
+        AxisId("frame"),
+        "frame",
+        READOUT_EVENT,
+        PointColumn.NUMERIC,
+        tuple(float(index) for index in range(frames)),
+    )
+    y = AxisSpec(AxisId("y"), "y", SPATIAL_Y, 4, (0.0, 1.0, 2.0, 3.0))
+    x = AxisSpec(AxisId("x"), "x", SPATIAL_X, 5, (0.0, 1.0, 2.0, 3.0, 4.0))
+    return DatasetSchema(
+        repeat,
+        PointTable(frames, (frame,)),
+        None,
+        ValueSchema((y, x), ValidityContract.value(), np.dtype("float64"), "counts"),
+    )
+
+
+def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
+    """The uncommitted frames migration: point rows are frames now.
+
+    An image cell over the DATA spatial axes must still cut spatially, keep
+    every frame row, and a facet condition on the 'frame' point column must
+    select exactly one frame's rows.
+    """
+
+    schema = _frames_on_point_axis_schema()
+    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/frames/roi_frame", "@logic/frames/roi_mean"}
+    )
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frames")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 1.0, 3.0),
+                    SelectionRange("y", 1.0, 2.0),
+                ),
+                revision=1,
+            ),
+        )
+        roi_frame = plane.freeze().value("@logic/frames/roi_frame")
+        assert roi_frame is not None, bridge.last_error
+        np.testing.assert_array_equal(
+            roi_frame.snapshot.block.values, values[:, :, 1:3, 1:4]
+        )
+        assert roi_frame.snapshot.block.schema.point_table.row_count == 3
+
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 1.0, 3.0),
+                    SelectionRange("y", 1.0, 2.0),
+                ),
+                (FacetCondition("frame", 1.0),),
+                revision=2,
+            ),
+        )
+        focused = plane.freeze().value("@logic/frames/roi_frame")
+        assert focused is not None, bridge.last_error
+        np.testing.assert_array_equal(
+            focused.snapshot.block.values, values[:, 1:2, 1:3, 1:4]
+        )
+        column = focused.snapshot.block.schema.point_table.columns[0]
+        assert column.name == "frame"
+        assert column.values == (1.0,)
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_a_mixed_kind_image_area_is_refused_loudly() -> None:
+    """One data axis plus one point axis is no image surface anywhere."""
+
+    schema = _frames_on_point_axis_schema()
+    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/mixed/roi_mean"})
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="mixed")
+    bridge.start()
+    try:
+        with pytest.raises(ValueError, match="both be"):
+            events.emit_selection(
+                SelectionChange.COMMITTED,
+                SelectionState(
+                    "image",
+                    "area",
+                    (
+                        SelectionRange("x", 1.0, 3.0),
+                        SelectionRange("frame", 0.0, 1.0),
+                    ),
+                    revision=1,
+                ),
+            )
+    finally:
+        _close(bridge, plane, source)
 
 
 def test_an_implicit_axis_cropped_to_a_run_stays_implicit() -> None:

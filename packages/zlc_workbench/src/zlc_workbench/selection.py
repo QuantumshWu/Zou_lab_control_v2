@@ -44,6 +44,7 @@ from zlc_runtime import (
     SelectionRange,
     SelectionState,
 )
+from zlc_runtime.selection_bridge import FacetCondition
 
 
 __all__ = [
@@ -62,9 +63,14 @@ _PLOT_KINDS = {
     "rolling": "curve",
 }
 
-#: Selector kinds that describe a region.  A threshold or a crosshair is a
-#: point, not a range, and has nothing to slice with.
+#: Selector kinds that describe a region.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
+
+#: Selector kinds that mark a point or a level.  A crosshair or threshold is a
+#: READOUT the panel itself shows, not a region derivation, so its events are
+#: ignored here entirely -- recording them into ``last_error`` painted every
+#: crosshair click as a panel failure.
+_POINT_SELECTOR_KINDS = {"crosshair", "threshold"}
 
 
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
@@ -151,6 +157,9 @@ class PlotSelectionSource:
         """
 
         def _on_selection(event: object) -> None:
+            if _selector_kind_of(event) in _POINT_SELECTOR_KINDS:
+                # A readout, not a region: derive nothing, record nothing.
+                return
             change = _change_of(event)
             try:
                 state = self._translate(event)
@@ -285,18 +294,130 @@ class PlotSelectionSource:
                 f"a {_name_of(selector.kind)} selector marks a point, not a region"
             )
         if selector_kind == "area":
-            ranges = (
-                _range(subject.x, selector.value.x, "x"),
-                _range(subject.y, selector.value.y, "y"),
+            # A bound axis resolves to None when it cuts the measured VALUE
+            # rather than a named upstream axis -- a curve's y, a histogram's
+            # x.  That is a description, not a failure: the region the
+            # operator can select is the interval on whichever axis IS named,
+            # so one named axis translates as a single-range selection.  Only
+            # a box naming nothing has nothing to select on.
+            named = tuple(
+                (axis, bounds, role)
+                for axis, bounds, role in (
+                    (subject.x, selector.value.x, "x"),
+                    (subject.y, selector.value.y, "y"),
+                )
+                if axis is not None
             )
+            if not named:
+                raise _Unbridgeable(
+                    "this plot's bounds cut no named upstream axis, so there "
+                    "is nothing to select on"
+                )
+            ranges = tuple(
+                _range(axis, bounds, role) for axis, bounds, role in named
+            )
+            if len(ranges) == 1:
+                selector_kind = "x_range"
         else:
             ranges = (_range(subject.x, selector.value, "x"),)
+        facets, repeat_index = self._facet_scope(selector)
         return SelectionState(
             plot_kind=plot_kind,
             selector_kind=selector_kind,
             ranges=ranges,
+            facets=facets,
+            repeat_index=repeat_index,
             revision=int(selector.revision),
         )
+
+    def _facet_scope(
+        self,
+        selector: object,
+    ) -> tuple[tuple[FacetCondition, ...], int | None]:
+        """The focused cell's identity, as the runtime's facet restriction.
+
+        A selector drawn inside a focused facet cell carries the cell index,
+        and dropping it meant a box in ONE cell derived a region cut from ALL
+        cells.  A repeat facet is structural -- cell k IS repeat row k, the
+        repeat axis has no name anywhere -- so it crosses as ``repeat_index``.
+        A named facet axis needs its cell's coordinate, which is not in the
+        event, so it is read from the owning session's current facet
+        projection: plain state reads on the thread that owns them, never a
+        host dispatch, which from inside this callback would re-enter the
+        worker's own state machine.
+        """
+
+        index = getattr(selector, "facet_index", None)
+        if index is None:
+            return (), None
+        session = self._session_view()
+        if session is None:
+            raise _Unbridgeable(
+                "the focused facet cell's identity is unreachable from this "
+                "plot host, so a cell-scoped selection cannot be carried"
+            )
+        facet = getattr(session.spec, "facet", None)
+        if facet is None:
+            # A focused index without a facet spec: nothing narrower than the
+            # whole surface exists, so there is no restriction to add.
+            return (), None
+        domain = _name_of(getattr(facet, "domain", None))
+        if domain == "repeat":
+            return (), int(index)
+        axis_name = getattr(facet, "axis_id", None)
+        if not isinstance(axis_name, str) or not axis_name:
+            raise _Unbridgeable(
+                f"a {domain} facet has no named upstream axis, so the focused "
+                "cell cannot be carried"
+            )
+        return (FacetCondition(axis_name, self._facet_value(session, index)),), None
+
+    def _session_view(self) -> Any | None:
+        """The owning session, reachable only where its state may be read.
+
+        A raster host's selection callbacks run on its worker thread -- the
+        one thread allowed to touch the session directly, which its adapter
+        enforces.  An unattached session dispatches callbacks inline, so the
+        host IS the session there.
+        """
+
+        host = self._host
+        adapter = getattr(host, "_worker_adapter", None)
+        if adapter is not None:
+            try:
+                return adapter._session()
+            except RuntimeError:
+                return None
+        return host if hasattr(host, "spec") else None
+
+    @staticmethod
+    def _facet_value(session: Any, index: int) -> int | float | str:
+        """The canonical facet coordinate of one cell of the current grid."""
+
+        payload = getattr(
+            getattr(session, "_projection", None), "_payload", None
+        )
+        cells = getattr(payload, "cells", None)
+        if cells is None:
+            raise _Unbridgeable(
+                "the focused facet cell has no facet projection to identify it"
+            )
+        cell = next(
+            (item for item in cells if item.facet_index == index),
+            None,
+        )
+        if cell is None:
+            raise _Unbridgeable(
+                f"facet cell {index} is not present in the current projection"
+            )
+        value = cell.facet_value_canonical
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise _Unbridgeable(
+                f"facet cell {index} has a non-scalar facet coordinate"
+            )
+        return value
 
 
 def attach_selection_bridge(

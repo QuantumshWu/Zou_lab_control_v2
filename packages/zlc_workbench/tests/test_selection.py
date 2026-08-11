@@ -19,8 +19,11 @@ What is asserted:
 from __future__ import annotations
 
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -30,6 +33,26 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
+from zlc_data import (
+    REPEAT,
+    SCAN_POINT,
+    AxisId,
+    AxisSpec,
+    BlockId,
+    CellValidity,
+    DataBlock,
+    DatasetRevision,
+    DatasetSchema as RawSchema,
+    GridTopology,
+    OwnedSnapshot,
+    PointColumn,
+    PointTable as RawPointTable,
+    StreamGenerationId,
+    ValueSchema,
+)
+from zlc_runtime.dataset import MonitorCoverage
+from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.selection import (
     PlotSelectionSource,
     attach_selection_bridge,
@@ -247,16 +270,23 @@ def test_a_gesture_that_cannot_be_carried_says_why(frames) -> None:
         host.close()
 
 
-def test_a_point_selector_reports_rather_than_deriving_nonsense(image_panel) -> None:
-    """A threshold marks a value, not a region.  It has nothing to slice with."""
+def test_a_point_selector_is_a_readout_not_an_error(image_panel) -> None:
+    """A crosshair or threshold marks a point: it derives nothing AND is no
+    failure.
+
+    These used to be recorded into ``last_error`` on every click, so the
+    console painted a panel error each time an operator read a value off the
+    plot -- the user-visible "crosshair has no data".
+    """
 
     source = PlotSelectionSource(image_panel)
     derived: list = []
     source.subscribe_selection(lambda _change, state: derived.append(state))
     try:
         image_panel.set_threshold_selector(2.0).result()
+        image_panel.set_crosshair_selector(2.0, 3.0).result()
         assert derived == []
-        assert "point" in str(source.last_error)
+        assert source.last_error is None
     finally:
         source.close()
 
@@ -380,3 +410,400 @@ def test_frozen_editor_subscription_reports_commits_without_a_runtime_bridge(
         assert seen[0].selector_kind == "area"
     finally:
         source.close()
+
+
+# --------------------------------------------------------- facet cell gestures
+#
+# Everything below drives REAL pointer gestures on facet-grid hosts over raw
+# runtime snapshots -- the scan-heatmap chain that used to die silently with
+# "image area axes must be source data axes", and the curve cells whose every
+# box was refused because a curve's y is the measured value, not an axis.
+
+
+@dataclass
+class _Source:
+    declaration: DatasetOutputDeclaration
+
+    instance_id = "camera"
+
+    @property
+    def dataset_output_declarations(self):
+        return (self.declaration,)
+
+    def signal_key(self, name: str) -> str:
+        return f"camera/{name}"
+
+
+class _Slot:
+    notification_failure = None
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+
+    def freeze_live_outputs(self):
+        return dict(self.state)
+
+    def close(self) -> None:
+        return None
+
+
+def _heatmap_snapshot(repeats: int = 2) -> OwnedSnapshot:
+    """A 3x3 scan grid: scalar cells over dimensions (bias_x, grad)."""
+
+    repeat = AxisSpec(
+        AxisId("repeat"), "repeat", REPEAT, repeats, tuple(range(repeats))
+    )
+    bias = PointColumn(
+        AxisId("bias_x"),
+        "bias_x",
+        SCAN_POINT,
+        PointColumn.NUMERIC,
+        (-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+    )
+    grad = PointColumn(
+        AxisId("grad"),
+        "grad",
+        SCAN_POINT,
+        PointColumn.NUMERIC,
+        (10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0),
+    )
+    topology = GridTopology(
+        (AxisId("bias_x"), AxisId("grad")),
+        ((-1.0, 0.0, 1.0), (10.0, 20.0, 30.0)),
+        tuple((i, j) for i in range(3) for j in range(3)),
+    )
+    schema = RawSchema(
+        repeat,
+        RawPointTable(9, (bias, grad)),
+        topology,
+        ValueSchema.scalar(np.dtype("float64"), None),
+    )
+    values = np.arange(repeats * 9, dtype=np.float64).reshape(repeats, 9, 1)
+    block = DataBlock(
+        BlockId("scan-1"),
+        DatasetRevision(1),
+        values,
+        CellValidity(np.ones((repeats, 9), dtype=np.bool_)),
+        schema,
+    )
+    return OwnedSnapshot(block.ref(StreamGenerationId("scan-generation")), block)
+
+
+def _curve_scan_snapshot(repeats: int = 2) -> OwnedSnapshot:
+    """A 1D scan: scalar cells over one point coordinate, repeats stacked."""
+
+    repeat = AxisSpec(
+        AxisId("repeat"), "repeat", REPEAT, repeats, tuple(range(repeats))
+    )
+    detuning = PointColumn(
+        AxisId("detuning"),
+        "detuning",
+        SCAN_POINT,
+        PointColumn.NUMERIC,
+        (0.0, 1.0, 2.0, 3.0, 4.0),
+    )
+    schema = RawSchema(
+        repeat,
+        RawPointTable(5, (detuning,)),
+        None,
+        ValueSchema.scalar(np.dtype("float64"), None),
+    )
+    values = np.arange(repeats * 5, dtype=np.float64).reshape(repeats, 5, 1)
+    block = DataBlock(
+        BlockId("curve-1"),
+        DatasetRevision(1),
+        values,
+        CellValidity(np.ones((repeats, 5), dtype=np.bool_)),
+        schema,
+    )
+    return OwnedSnapshot(block.ref(StreamGenerationId("curve-generation")), block)
+
+
+def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
+    declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
+    total = (
+        snapshot.block.schema.repeat_axis.size
+        * snapshot.block.schema.point_table.row_count
+    )
+    source_node = _Source(declaration)
+    slot = _Slot(
+        {"frame": LiveDatasetOutput(declaration, snapshot, MonitorCoverage(total, total))}
+    )
+    plane = SignalDataPlane()
+    plane.reserve(source_node)
+    plane.attach(source_node, slot)
+    plane.mark_changed(source_node, slot)
+    plane.freeze()
+    plane.set_front_signals({"camera/frame", *front_signals})
+    return plane, source_node
+
+
+def _gesture_area(host, front, transform, *, span=(0.25, 0.25, 0.75, 0.75)) -> None:
+    """Press, move, release across a fraction of one painted transform."""
+
+    left, top, right, bottom = transform.bounds
+
+    def _at(fraction_x: float, fraction_y: float) -> tuple[float, float]:
+        return (
+            left + fraction_x * (right - left),
+            top + fraction_y * (bottom - top),
+        )
+
+    start = _at(span[0], span[1])
+    end = _at(span[2], span[3])
+    for action, point in (("press", start), ("move", end), ("release", end)):
+        host._pointer_event(
+            action,
+            point[0],
+            point[1],
+            button=1,
+            identity=front.identity,
+            axes=transform,
+            interaction=front.interaction,
+        ).result(timeout=15)
+
+
+def _focused_cell_front(host, cell_index: int):
+    """Focus one facet cell the way a double-click does, on the real front."""
+
+    front = host.wait_for_front(20.0)
+    target = next(
+        item
+        for item in front.interaction.axes
+        if item.role == "facet_cell" and item.cell_index == cell_index
+    )
+    host.focus_facet(front.identity, target).result(timeout=15)
+    front = host.wait_for_front(20.0)
+    transform = next(
+        item for item in front.interaction.axes if item.role == "facet_cell"
+    )
+    return front, transform
+
+
+def _wait_published(plane, name: str, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        value = plane.freeze().value(name)
+        if value is not None:
+            return value
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{name} was never published")
+        time.sleep(0.02)
+
+
+def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() -> None:
+    """The headline chain: heatmap facet cell -> gesture -> derived signal.
+
+    The auto default for a repeated 2D scalar scan is a facet grid of
+    scan-heatmap image cells whose axes are grid-topology DIMENSIONS.  Every
+    committed box on one used to die silently in the bridge with 'image area
+    axes must be source data axes' -- nothing published, nothing said.  And
+    the focused cell's identity used to be dropped, so the cut spanned every
+    repeat instead of the one on screen.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+    from zlc_plot._kinds.facet_grid import default_spec as facet_default_spec
+
+    snapshot = _heatmap_snapshot()
+    schema = snapshot.block.schema
+    values = snapshot.block.values
+    spec = facet_default_spec(schema)
+    assert spec is not None and isinstance(spec.cell, plot.ImagePlot), spec
+
+    plane, source_node = _plane_for(
+        snapshot, {"@logic/panel-1/roi_frame", "@logic/panel-1/roi_mean"}
+    )
+    host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
+    bridge = source = None
+    try:
+        bridge, source = attach_selection_bridge(
+            plane, host, "camera/frame", bridge_id="panel-1"
+        )
+        front, transform = _focused_cell_front(host, 1)
+        _gesture_area(host, front, transform)
+
+        assert source.last_error is None, source.last_error
+        assert bridge.last_error is None, bridge.last_error
+        selection = bridge.selection
+        assert selection is not None
+        # The focused cell crosses structurally: repeat row 1, no named axis.
+        assert selection.repeat_index == 1
+        assert selection.facets == ()
+
+        # The derived data equals the slice the committed ranges + focused
+        # repeat select from the source, computed independently here.
+        columns = {
+            column.name: column.values for column in schema.point_table.columns
+        }
+        rows = [
+            row
+            for row in range(schema.point_table.row_count)
+            if all(
+                entry.lower <= columns[entry.axis][row] <= entry.upper
+                for entry in selection.ranges
+            )
+        ]
+        assert 1 <= len(rows) < schema.point_table.row_count, rows
+        expected = values[1:2][:, rows]
+
+        roi_frame = _wait_published(plane, "@logic/panel-1/roi_frame")
+        roi_mean = _wait_published(plane, "@logic/panel-1/roi_mean")
+        np.testing.assert_array_equal(roi_frame.snapshot.block.values, expected)
+        assert roi_frame.snapshot.block.schema.repeat_axis.size == 1
+        assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == float(
+            np.mean(expected)
+        )
+    finally:
+        if bridge is not None:
+            bridge.close()
+        if source is not None:
+            source.close()
+        host.close()
+        plane.retire(source_node)
+        plane.close()
+
+
+def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
+    """A box on a curve translates to the interval on its one named axis.
+
+    The y of a curve is the measured VALUE, not an axis; building a y range
+    anyway made every box unbridgeable.  One named axis is a description,
+    not a failure.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+
+    snapshot = _curve_scan_snapshot()
+    host = plot.RasterPlotHost.from_plot(
+        snapshot, plot.CurvePlot(x=plot.AxisRef.point("detuning"))
+    )
+    source = PlotSelectionSource(host)
+    committed: list = []
+    source.subscribe_selection(lambda _change, state: committed.append(state))
+    try:
+        front = host.wait_for_front(20.0)
+        transform = next(
+            item for item in front.interaction.axes if item.role in ("main", "image")
+        )
+        _gesture_area(host, front, transform)
+        assert source.last_error is None, source.last_error
+        assert committed, "a committed box reported nothing"
+        state = committed[-1]
+        assert state.plot_kind == "curve"
+        assert state.selector_kind == "x_range"
+        assert [entry.axis for entry in state.ranges] == ["detuning"]
+        assert state.facets == () and state.repeat_index is None
+    finally:
+        source.close()
+        host.close()
+
+
+def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
+    """The same translation inside a focused facet cell keeps the cell."""
+
+    plot = pytest.importorskip("zlc_plot")
+
+    snapshot = _curve_scan_snapshot()
+    spec = plot.FacetGridPlot(
+        plot.AxisRef.repeat(), plot.CurvePlot(x=plot.AxisRef.point("detuning"))
+    )
+    host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
+    source = PlotSelectionSource(host)
+    committed: list = []
+    source.subscribe_selection(lambda _change, state: committed.append(state))
+    try:
+        front, transform = _focused_cell_front(host, 1)
+        _gesture_area(host, front, transform)
+        assert source.last_error is None, source.last_error
+        assert committed, "a committed box reported nothing"
+        state = committed[-1]
+        assert state.selector_kind == "x_range"
+        assert [entry.axis for entry in state.ranges] == ["detuning"]
+        assert state.repeat_index == 1
+        assert state.facets == ()
+    finally:
+        source.close()
+        host.close()
+
+
+def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
+    session, frames
+) -> None:
+    """Frames on the point axis: the focused frame's identity crosses.
+
+    A camera cycle publishes its frames as POINT rows with a 'frame' column,
+    and its auto default facets those frames side by side.  A box drawn on
+    one focused frame must derive that frame's region only -- the frame is a
+    named point coordinate, so unlike a repeat facet it crosses as a facet
+    condition on its own axis.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+    from zlc_plot._kinds.facet_grid import default_spec as facet_default_spec
+
+    signal, snapshot = frames
+    schema = snapshot.block.schema
+    assert schema.point_table.row_count == CAMERA_WINDOWS
+    frame_column = schema.point_table.columns[0]
+    assert frame_column.name == "frame"
+    spec = facet_default_spec(schema)
+    assert spec is not None and isinstance(spec.cell, plot.ImagePlot), spec
+
+    host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
+    bridge = source = None
+    try:
+        bridge, source = attach_selection_bridge(
+            session.signal_plane, host, signal, bridge_id="panel-1"
+        )
+        front, transform = _focused_cell_front(host, 1)
+        _gesture_area(host, front, transform)
+
+        assert source.last_error is None, source.last_error
+        assert bridge.last_error is None, bridge.last_error
+        selection = bridge.selection
+        assert selection is not None
+        assert selection.repeat_index is None
+        assert [facet.axis for facet in selection.facets] == [
+            frame_column.coordinate_id.value
+        ]
+        assert selection.facets[0].value == 1.0
+
+        roi_frame = _wait_published(
+            session.signal_plane, "@logic/panel-1/roi_frame"
+        )
+        derived = roi_frame.snapshot.block
+        assert derived.schema.point_table.row_count == 1
+        derived_column = derived.schema.point_table.column(
+            frame_column.coordinate_id
+        )
+        assert tuple(derived_column.values) == (frame_column.values[1],)
+
+        # The derived pixels are the same crop of frame 1, located through
+        # the derived axes' own origins.
+        starts = tuple(
+            axis.index_origin
+            if axis.coordinates is None
+            else int(axis.coordinates[0])
+            for axis in derived.schema.cell_schema.data_axes
+        )
+        sizes = tuple(
+            axis.size for axis in derived.schema.cell_schema.data_axes
+        )
+        assert all(
+            0 < size < full.size
+            for size, full in zip(sizes, schema.cell_schema.data_axes)
+        )
+        window = tuple(
+            slice(start, start + size) for start, size in zip(starts, sizes)
+        )
+        np.testing.assert_array_equal(
+            derived.values,
+            snapshot.block.values[(slice(None), slice(1, 2), *window)],
+        )
+    finally:
+        if bridge is not None:
+            bridge.close()
+        if source is not None:
+            source.close()
+        host.close()

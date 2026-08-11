@@ -174,6 +174,7 @@ SelectionState(
     selector_kind: "area" | "x_range",
     ranges: tuple[SelectionRange, ...],
     facets: tuple[FacetCondition, ...] = (),
+    repeat_index: int | None = None,  # 结构性限定 repeat 轴到第 k 行：repeat 轴从不按名寻址
     revision: int = 0,
 )
 FitEventValue(

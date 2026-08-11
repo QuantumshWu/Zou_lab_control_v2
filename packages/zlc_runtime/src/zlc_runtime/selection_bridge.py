@@ -40,7 +40,7 @@ from zlc_data import (
     materialize_scalar_dataset,
 )
 from zlc_data import SelectionChange, resolve_selection_indices
-from zlc_data.selection import take_indices
+from zlc_data.selection import IndexRangeSelection, take_indices
 from zlc_data import canonical_text
 
 from .dataset import MonitorCoverage
@@ -127,12 +127,20 @@ class FacetCondition:
 
 @dataclass(frozen=True, slots=True)
 class SelectionState:
-    """Pure numeric selector state supplied by a plot adapter."""
+    """Pure numeric selector state supplied by a plot adapter.
+
+    ``repeat_index`` restricts the repeat axis STRUCTURALLY: the repeat axis
+    is never name-addressed anywhere -- it is the first tensor dimension,
+    identified by its role, deliberately anonymous on the plot side -- so a
+    focused repeat facet crosses the bridge as a plain row index rather than
+    as a named-axis condition.
+    """
 
     plot_kind: str
     selector_kind: str
     ranges: tuple[SelectionRange, ...]
     facets: tuple[FacetCondition, ...] = ()
+    repeat_index: int | None = None
     revision: int = 0
 
     def __post_init__(self) -> None:
@@ -150,10 +158,16 @@ class SelectionState:
             raise TypeError("selection facets must contain FacetCondition values")
         if len({item.axis for item in facets}) != len(facets):
             raise ValueError("selection facet axes must be unique")
+        repeat_index = self.repeat_index
+        if repeat_index is not None:
+            repeat_index = _nonnegative_integer(
+                repeat_index, "selection repeat_index"
+            )
         object.__setattr__(self, "plot_kind", plot_kind)
         object.__setattr__(self, "selector_kind", selector_kind)
         object.__setattr__(self, "ranges", ranges)
         object.__setattr__(self, "facets", facets)
+        object.__setattr__(self, "repeat_index", repeat_index)
         object.__setattr__(
             self,
             "revision",
@@ -590,6 +604,7 @@ class SelectionBridge:
                 or current.selector_kind != state.selector_kind
                 or current.ranges != state.ranges
                 or current.facets != state.facets
+                or current.repeat_index != state.repeat_index
                 or current.revision != state.revision
             ):
                 raise ValueError("selector_data disagrees with committed selection state")
@@ -1057,6 +1072,31 @@ class SelectionBridge:
                     (column.coordinate_id.value, column.coordinate_id, axis, "point"),
                 )
             )
+        # A grid-topology dimension is a point-row quantity whether or not a
+        # matching PointColumn spells its per-row values out: the topology
+        # itself is the declaration ("a matching PointColumn is optional
+        # metadata").  A scan-heatmap cell plots exactly these dimensions, so
+        # a box drawn on it names them -- and before they were catalogued
+        # here, every such box died as "not uniquely present".
+        topology = schema.grid_topology
+        if topology is not None:
+            column_ids = {
+                column.coordinate_id for column in schema.point_table.columns
+            }
+            for position, dimension_id in enumerate(topology.dimension_ids):
+                if dimension_id in column_ids:
+                    continue  # the matching column above already catalogs it
+                domain = topology.coordinate_domains[position]
+                axis = AxisSpec(
+                    dimension_id,
+                    dimension_id.value,
+                    SCAN_POINT,
+                    schema.point_table.row_count,
+                    tuple(
+                        domain[cell[position]] for cell in topology.row_to_cell
+                    ),
+                )
+                catalog.append((dimension_id.value, dimension_id, axis, "point"))
         for axis in schema.cell_schema.data_axes:
             catalog.extend(
                 (
@@ -1093,8 +1133,16 @@ class SelectionBridge:
             first, second = state.ranges
             first_id, _first_axis, first_kind = self._resolve_axis(schema, first.axis)
             second_id, _second_axis, second_kind = self._resolve_axis(schema, second.axis)
-            if first_kind != "data" or second_kind != "data":
-                raise ValueError("image area axes must be source data axes")
+            # Two image vocabularies exist: a camera frame's cell axes (kind
+            # "data") and a scan heatmap's grid dimensions (kind "point",
+            # point-row columns or topology dimensions).  A box over point
+            # axes masks the point ROWS whose column values fall inside both
+            # ranges -- the sub-grid -- through exactly the machinery below.
+            if first_kind != second_kind or first_kind not in {"data", "point"}:
+                raise ValueError(
+                    "image area axes must both be source data axes or both be "
+                    "point-dimension axes"
+                )
             if first.coordinate_frame != second.coordinate_frame:
                 raise ValueError("image area axes must use one coordinate frame")
             frame = (
@@ -1157,6 +1205,17 @@ class SelectionBridge:
                         coordinate_frame=frame,
                     ).terms[0]
                 )
+        if state.repeat_index is not None:
+            # Structural, not named: the repeat axis is identified by its
+            # role and position in the schema, so the restriction is a plain
+            # logical row interval on that axis.
+            terms.append(
+                IndexRangeSelection(
+                    schema.repeat_axis.axis_id,
+                    state.repeat_index,
+                    state.repeat_index + 1,
+                )
+            )
         return Selection(tuple(terms))
 
     def _selection_indices(
@@ -1195,7 +1254,15 @@ class SelectionBridge:
 
         repeat = indices_for(schema.repeat_axis.axis_id, schema.repeat_axis.size)
         points_set = set(range(schema.point_table.row_count))
-        point_ids = {column.coordinate_id for column in schema.point_table.columns}
+        # Every "point"-kind catalog axis masks point ROWS: the table's own
+        # columns and the grid-topology dimensions the catalog materializes
+        # for them.  Restricting this to declared columns silently ignored a
+        # term on a column-less topology dimension.
+        point_ids = {
+            axis_id
+            for axis_id, (_axis, kind) in catalog.items()
+            if kind == "point"
+        }
         for axis_id in point_ids:
             if axis_id in terms:
                 axis, _kind = catalog[axis_id]
