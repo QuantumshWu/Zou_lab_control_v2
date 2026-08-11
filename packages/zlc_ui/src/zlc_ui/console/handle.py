@@ -50,6 +50,11 @@ class TaskConsoleHandle(QtCore.QObject):
     # -- one named panel -------------------------------------------------
     panel_remove_requested = QtCore.pyqtSignal(str)
     panel_edit_requested = QtCore.pyqtSignal(str)
+    #: A refusal the panel's mounted plot surface reported.  The widget's
+    #: ``errorOccurred`` was connected by nothing in the console, so pointer
+    #: currency-guard refusals vanished; the card relays it here with the
+    #: panel's name attached.
+    panel_plot_error = QtCore.pyqtSignal(str, str)
     panel_state_changed = QtCore.pyqtSignal(str, object)
     panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
     panel_producer_restart_requested = QtCore.pyqtSignal(str)
@@ -290,6 +295,11 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             card.state_changed.connect(
                 lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
+            )
+            card.plot_error.connect(
+                lambda message, pid=key: self.panel_plot_error.emit(
+                    pid, str(message)
+                )
             )
             self._cards[key] = card
             if self._panel_intervals:

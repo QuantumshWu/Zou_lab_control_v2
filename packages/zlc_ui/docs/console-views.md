@@ -15,12 +15,18 @@ title_committed = pyqtSignal(str)
 remove_requested = pyqtSignal()
 edit_requested = pyqtSignal()
 dropped = pyqtSignal(tuple)  # (x: int, y: int), card-local drop point
+plot_error = pyqtSignal(str)  # relayed from the mounted surface's errorOccurred
 
 set_surface(widget: QWidget | None) -> None
 set_signal_choices(groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...]) -> None
 set_status(text: str, *, error: bool) -> None
 set_selectors_enabled(enabled: bool) -> None
 ```
+
+`set_selectors_enabled` gates selector CREATION only: with it off the card
+swallows the selector-starting presses (left/right button) on the mounted
+surface, while the plot's input transport stays open so double-click focus,
+middle-button pan, and wheel zoom keep working.
 
 `groups` is `(producer_label, ((display_label, key), ...))`.  The key is an
 opaque string; the view does not interpret it.

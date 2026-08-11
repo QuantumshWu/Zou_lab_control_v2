@@ -140,7 +140,8 @@ class _ConsoleView:
         "stop_task_requested",
         "panel_order_committed",
         "panel_remove_requested",
-        "panel_edit_requested", "logic_start_requested", "logic_stop_requested",
+        "panel_edit_requested", "panel_plot_error",
+        "logic_start_requested", "logic_stop_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
         "panel_producer_restart_requested", "panel_editor_closed",
@@ -177,6 +178,8 @@ class _ConsoleView:
         self.task_takeover = False
         self.panel_mutation_enabled: dict[str, bool] = {}
         self.panel_publishers: dict[str, tuple] = {}
+        #: Every front the presenter put on a staged panel widget, in order.
+        self.presented_fronts: list[tuple[str, object]] = []
 
     # -- what a test reads ------------------------------------------------
 
@@ -270,6 +273,10 @@ class _ConsoleView:
 
     def show_panel(self, panel_id: str, host) -> None:
         self._cards[str(panel_id)].set_surface(host)
+
+    def present_panel_front(self, panel_id: str, front) -> bool:
+        self.presented_fronts.append((str(panel_id), front))
+        return True
 
     def set_panel_signal_choices(self, panel_id: str, *args, **kwargs) -> None:
         self._cards[str(panel_id)].set_signal_choices(*args, **kwargs)
@@ -1052,6 +1059,114 @@ def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None
 
     presenter.set_deriving(False)
     assert card.selectors_enabled is False, "the card must say the bridge is gone"
+
+
+def test_a_mounted_plot_widgets_error_lands_one_warning_on_the_status_strip(
+    presenter, session
+) -> None:
+    """The plot widget's errorOccurred channel reaches the operator.
+
+    Pointer currency-guard refusals ("the painted pointer front is no longer
+    layout-compatible") arrive only on that channel, and nothing in the
+    console connected it -- so a panel whose gestures were being refused was
+    indistinguishable from a panel that works.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, title="camera"
+    )
+    presenter.view.status.clear()
+    presenter.view.panel_plot_error.emit(
+        binding.panel_id,
+        "the painted pointer front is no longer layout-compatible",
+    )
+    assert presenter.view.status == [
+        (
+            "warning",
+            "camera: the painted pointer front is no longer layout-compatible",
+        )
+    ]
+
+
+def test_a_bridge_side_derivation_failure_is_reported_once(
+    presenter, session
+) -> None:
+    """The selection bridge's own recorded refusal reaches the operator.
+
+    ``_report_panel_errors`` read the selection sources and the port but
+    never ``binding.bridge.last_error``, so a bridge-side derivation failure
+    left the derived signal silently absent.  Same de-dup discipline as the
+    other panel errors: one refusal is reported once.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
+
+    class _FailedBridge:
+        last_error = RuntimeError("the derivation refused this selection")
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _FailedBridge()
+    presenter.view.status.clear()
+    presenter.beat()
+    reported = [item for item in presenter.view.status if item[0] == "error"]
+    assert reported == [
+        ("error", f"{binding.title}: the derivation refused this selection")
+    ]
+    assert presenter.view.cards[0].status == (
+        "the derivation refused this selection",
+        True,
+    )
+
+    presenter.view.status.clear()
+    presenter.beat()
+    assert not [item for item in presenter.view.status if item[0] == "error"]
+
+
+def test_show_panel_fills_the_staged_widget_when_the_host_already_has_a_front(
+    session,
+) -> None:
+    """A mounted host's existing front reaches pixels without waiting a beat.
+
+    Console panel widgets stage their fronts, so between mount and the next
+    beat the widget had NO front at all: pointer events resolved no axes and
+    were silently ignored.  When the host already rendered, the mount itself
+    must fill the staged widget.
+    """
+
+    pytest.importorskip("zlc_plot")
+    from zlc_workbench.apps.task_console import build_panel_host
+
+    def spec_for(snapshot, kind="", cell_kind=""):
+        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
+
+    def ready_host(plot_input, state):
+        host = build_panel_host(plot_input, state)
+        host.wait_for_front(10.0)
+        return host
+
+    presenter = ConsolePresenter(
+        session, _ConsoleView(), make_host=ready_host, spec_for=spec_for
+    )
+    try:
+        node, snapshot = _one_shot(session)
+        binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+        # Deliberately NO presenter.beat(): the mount itself must present.
+        assert binding.initial_presented is True
+        presented = [
+            front
+            for panel_id, front in presenter.view.presented_fronts
+            if panel_id == binding.panel_id
+        ]
+        assert presented, "show_panel left the staged widget empty until a beat"
+        assert presented[0] is not None
+    finally:
+        presenter.close()
+
 
 def test_header_save_screenshot_writes_one_plain_gui_image(
     presenter, session, tmp_path

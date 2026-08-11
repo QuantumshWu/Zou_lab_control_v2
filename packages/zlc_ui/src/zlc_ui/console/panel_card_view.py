@@ -48,11 +48,14 @@ from ._panel_projection import (
 
 
 def _set_interaction(surface: object | None, enabled: bool) -> None:
-    """Let the operator drag on a surface, when the surface has dragging.
+    """Keep a plot surface's input transport alive, when it has one.
 
     Duck-typed on purpose: a plot widget owns an interaction gate, and a label
-    standing in for one in a demo does not.  Asking is how one switch can drive
-    both without either knowing about the other.
+    standing in for one in a demo does not.  The card always enables the
+    transport at mount -- navigation (double-click focus, pan, zoom, scroll)
+    must survive the Selectors switch, so the switch gates only the
+    selector-STARTING pointer gestures in the card's own event filter and
+    never closes this transport.
     """
 
     gate = getattr(surface, "set_interaction_enabled", None)
@@ -73,6 +76,9 @@ class PanelCardView(FluentGroupBox):
     drag_started = QtCore.pyqtSignal(tuple)
     drag_moved = QtCore.pyqtSignal(tuple)
     geometry_changed = QtCore.pyqtSignal()
+    #: A refusal the mounted plot surface reported (``errorOccurred``).  The
+    #: card only relays it: unconnected, those refusals were fully silent.
+    plot_error = QtCore.pyqtSignal(str)
 
     def __init__(self, panel_id: str, title: str = "Panel", parent=None) -> None:
         super().__init__(str(title), parent)
@@ -167,6 +173,11 @@ class PanelCardView(FluentGroupBox):
         self.size_combo.currentIndexChanged[int].connect(self._size_changed)
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self._selectors_on = False
+        #: Buttons whose press this card swallowed while Selectors is off, so
+        #: the matching move/release stream is swallowed with it and the plot
+        #: never sees half a gesture.
+        self._gated_buttons: set[int] = set()
+        self._surface_error_connected = False
         self.set_status("", error=False)
         self.set_selectors_enabled(False)
 
@@ -348,13 +359,23 @@ class PanelCardView(FluentGroupBox):
             widget.show()
             return
         if widget is not None:
-            # The switch may have been thrown while this card was empty.
-            _set_interaction(widget, self._selectors_on)
+            # The transport stays OPEN regardless of the Selectors switch:
+            # navigation (double-click focus, pan, zoom) is never the
+            # switch's to drop.  Selector-starting gestures are gated in
+            # this card's event filter instead.
+            _set_interaction(widget, True)
         if self._surface is not None:
             self._surface.removeEventFilter(self)
+            if self._surface_error_connected:
+                try:
+                    self._surface.errorOccurred.disconnect(self.plot_error)
+                except (AttributeError, RuntimeError, TypeError):
+                    pass
+            self._surface_error_connected = False
             self._surface_layout.removeWidget(self._surface)
             self._surface.hide()
             self._surface.setParent(None)
+        self._gated_buttons.clear()
         self._surface = widget
         if widget is None:
             self._placeholder.show()
@@ -362,6 +383,12 @@ class PanelCardView(FluentGroupBox):
         self._placeholder.hide()
         widget.setParent(self)
         widget.installEventFilter(self)
+        relay = getattr(widget, "errorOccurred", None)
+        if hasattr(relay, "connect"):
+            # A plot surface says what a gesture could not do through this
+            # one signal; the card relays it so the console can report it.
+            relay.connect(self.plot_error)
+            self._surface_error_connected = True
         self._surface_layout.addWidget(widget)
         widget.show()
         self._place_settings_button()
@@ -406,14 +433,43 @@ class PanelCardView(FluentGroupBox):
         if (
             watched is self._surface
             and event.type() == QtCore.QEvent.Wheel
-            and not self._selectors_on
+            and not bool(getattr(self._surface, "interaction_enabled", False))
         ):
+            # A surface with an OPEN plot transport owns its wheel (zoom).
+            # Anything else -- a demo label, a surface whose transport a host
+            # closed -- would drop the wheel dead, so it goes to the board
+            # scroll instead.  Qt does not propagate the ignored wheel up
+            # through this parent chain by itself.
             ancestor = self.parentWidget()
             while ancestor is not None:
                 if isinstance(ancestor, QtWidgets.QAbstractScrollArea):
                     QtWidgets.QApplication.sendEvent(ancestor.viewport(), event)
                     return True
                 ancestor = ancestor.parentWidget()
+        if watched is self._surface and not self._selectors_on:
+            # The Selectors switch gates SELECTOR CREATION only, never
+            # navigation.  A left press starts (or drags) a selector and a
+            # right press installs a crosshair, so those presses -- and the
+            # rest of their own gesture stream -- are swallowed here.
+            # Everything else stays routed: double-click (facet focus),
+            # middle-button pan/zoom-reset, wheel zoom, hover, Escape.
+            kind = event.type()
+            if kind == QtCore.QEvent.MouseButtonPress and event.button() in (
+                QtCore.Qt.LeftButton,
+                QtCore.Qt.RightButton,
+            ):
+                self._gated_buttons.add(int(event.button()))
+                return True
+            if kind == QtCore.QEvent.MouseMove and any(
+                int(event.buttons()) & button for button in self._gated_buttons
+            ):
+                return True
+            if (
+                kind == QtCore.QEvent.MouseButtonRelease
+                and int(event.button()) in self._gated_buttons
+            ):
+                self._gated_buttons.discard(int(event.button()))
+                return True
         return super().eventFilter(watched, event)
 
     def set_signal_choices(
@@ -474,16 +530,17 @@ class PanelCardView(FluentGroupBox):
             self._place_settings_button()
 
     def set_selectors_enabled(self, enabled: bool) -> None:
-        """Allow or suspend dragging on this panel's plot.
+        """Allow or suspend STARTING selectors on this panel's plot.
 
-        On the PLOT.  This disabled the card's own dropdowns and settings
-        button instead -- a different question that happens to have a similar
-        name -- so the switch appeared to work, greyed out some controls, and
-        never reached the one thing it is named after.
+        Only that.  This used to close the plot widget's whole interaction
+        transport, which silently dropped every pointer event -- including
+        the double-click that is the only way to focus a facet cell, and
+        pan/zoom -- until the operator flipped Selectors on.  Navigation is
+        not the switch's to gate: the card's event filter swallows only the
+        selector-starting presses while this flag is off.
         """
 
         self._selectors_on = bool(enabled)
-        _set_interaction(self._surface, self._selectors_on)
 
     def set_editing_enabled(self, enabled: bool) -> None:
         """Gate persisted panel edits without disabling plot interaction."""

@@ -96,13 +96,14 @@ QtTest.QTest.mouseClick(
 )
 assert {'signal': 'temperature'} in picked
 assert surface.parentWidget() is not None
-# The switch is about dragging on the PLOT, not about the card's own controls:
-# turning it off used to grey out this combo and never reach the plot at all.
-assert surface.interaction is False
+# The switch gates SELECTOR CREATION only.  The plot's input transport stays
+# open regardless: double-click focus, pan and zoom are navigation, and the
+# old wiring dropped every pointer event until Selectors was flipped on.
+assert surface.interaction is True
 card.set_selectors_enabled(True)
 assert surface.interaction is True
 card.set_selectors_enabled(False)
-assert surface.interaction is False
+assert surface.interaction is True
 body = QtWidgets.QWidget()
 body.setMinimumSize(420, 1200)
 card.setParent(body)
@@ -125,7 +126,7 @@ wheel = QtGui.QWheelEvent(
     False,
 )
 QtWidgets.QApplication.sendEvent(surface, wheel)
-assert bar.value() > 0, 'Selectors OFF did not hand wheel ownership to the board scroll'
+assert bar.value() > 0, 'a wheel the surface ignores must still reach the board scroll'
 card.set_surface(None)
 assert not card._placeholder.isHidden()
 card.set_panel_projection(dict(state, size='1x4'), surface_projection)

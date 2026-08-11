@@ -300,6 +300,13 @@ class ConsolePresenter:
         self.view.logic_edit_requested.connect(self.edit_logic)
         self.view.logic_remove_requested.connect(self.remove_logic)
         self.view.stop_task_requested.connect(self.stop_active_task)
+        plot_error = getattr(self.view, "panel_plot_error", None)
+        if plot_error is not None:
+            # The plot widget's own refusal channel (errorOccurred, relayed by
+            # the card).  Unconnected, a pointer currency-guard refusal --
+            # "the painted pointer front is no longer layout-compatible" --
+            # was fully silent and the panel just stopped answering gestures.
+            plot_error.connect(self._panel_plot_error)
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
             draft_changed.connect(self._logic_draft_changed)
@@ -532,6 +539,7 @@ class ConsolePresenter:
         # was captioned "Panel" and knew its own id as its title.
         self.view.add_panel(panel_id, binding.state.title)
         self.view.show_panel(panel_id, host)
+        self._present_mounted_front(binding)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
         self._refresh_console_projection()
@@ -657,6 +665,25 @@ class ConsolePresenter:
 
         self._present_panel_front(binding, getattr(operation, "front", None))
 
+    def _present_mounted_front(self, binding: PanelBinding) -> None:
+        """Fill a just-mounted staged widget from the host's current front.
+
+        Console panel widgets stage their fronts, so a freshly shown panel
+        whose host has already rendered would otherwise stay blank -- and
+        silently ignore pointer events, which resolve no axes against an
+        empty front -- until the next beat noticed it.  This is only the
+        initial fill: live updates keep the board's same-shot batching.
+        """
+
+        host = binding.host
+        if host is None or binding.initial_presented:
+            return
+        front = getattr(host, "front", None)
+        if front is None:
+            return
+        self._present_panel_front(binding, front)
+        binding.initial_presented = True
+
     def _present_when_done(self, binding: PanelBinding, operation: object) -> object:
         """Present a host operation's front once its worker completes.
 
@@ -716,6 +743,7 @@ class ConsolePresenter:
             )
         binding.display_publication = publication
         self.view.show_panel(binding.panel_id, host)
+        self._present_mounted_front(binding)
         if old_host is not None:
             self._retire_plot_host(old_host)
         return host
@@ -1197,6 +1225,7 @@ class ConsolePresenter:
                 binding.frozen_stale = True
             binding.reported_error = None
             self.view.show_panel(panel_id, host)
+            self._present_mounted_front(binding)
             if (
                 binding.editor_open
                 and not binding.frozen_stale
@@ -1558,7 +1587,13 @@ class ConsolePresenter:
                                     binding, host.fit(str(selected), live=True)
                                 )
                             self._publish_panel_state(binding)
-                        binding.reported_error = None
+                            # Clearing the de-dup memory belongs to THIS
+                            # one-time first projection.  ``initial_state``
+                            # keeps answering on every later beat, and an
+                            # unconditional reset here re-armed the already
+                            # reported ``last_error`` each beat -- a
+                            # persistent refusal flooded the status strip.
+                            binding.reported_error = None
                         self._apply_deriving(binding)
 
             editor = binding.editor_host
@@ -2084,14 +2119,20 @@ class ConsolePresenter:
         self._refresh_console_projection()
 
     def set_deriving(self, deriving: bool) -> None:
-        """Whether the operator may edit selectors on plot surfaces."""
+        """Whether the operator may START selectors on plot surfaces.
+
+        Selector CREATION only.  The view keeps every panel's pointer routing
+        alive either way -- double-click facet focus, pan, zoom and hover are
+        navigation, not derivation, and gating them behind this switch made
+        "double-click does nothing" the console's default state.
+        """
 
         self._deriving = bool(deriving)
         self.view.set_selectors(self._deriving)
         for panel_id, binding in self.panels.items():
             self._apply_deriving(binding)
-            # And the card, which was left showing its selector control live
-            # while the bridge behind it was closed.
+            # And the card, whose switch gates only selector-starting
+            # gestures on the mounted plot surface.
             self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._report(
             "selectors enabled" if self._deriving else "selectors disabled",
@@ -2340,6 +2381,7 @@ class ConsolePresenter:
             self.panels[binding.panel_id] = binding
             self.view.add_panel(binding.panel_id, binding.state.title)
             self.view.show_panel(binding.panel_id, binding.host)
+            self._present_mounted_front(binding)
             self.view.set_panel_selectors_enabled(binding.panel_id, self._deriving)
             self._publish_panel_state(binding)
             self._apply_deriving(binding)
@@ -2727,6 +2769,10 @@ class ConsolePresenter:
             error = (
                 getattr(binding.editor_selections, "last_error", None)
                 or getattr(binding.selections, "last_error", None)
+                # The derivation bridge records its own refusals (a failed
+                # ROI/fit publication); nothing read them, so a bridge-side
+                # failure left the derived signal silently absent.
+                or getattr(binding.bridge, "last_error", None)
                 or getattr(binding.port, "last_error", None)
             )
             if error is None or error is binding.reported_error:
@@ -2739,6 +2785,13 @@ class ConsolePresenter:
             # A board-wide line says which panel; the panel says it is the one.
             if panel_id in self.view.panel_ids():
                 self.view.set_panel_status(panel_id, _error_text(error), error=True)
+
+    def _panel_plot_error(self, panel_id: str, message: str) -> None:
+        """Report one refusal a mounted plot widget raised through its card."""
+
+        binding = self.panels.get(str(panel_id))
+        title = binding.title if binding is not None else str(panel_id)
+        self._report(f"{title}: {message}", severity="warning")
 
     def _report(self, text: str, *, severity: str) -> None:
         show = getattr(self.view, "show_status", None)
