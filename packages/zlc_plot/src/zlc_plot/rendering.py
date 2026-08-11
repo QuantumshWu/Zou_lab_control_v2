@@ -992,9 +992,16 @@ class MatplotlibRenderer:
                 for item in value:
                     add(item)
                 return
+            # Mirror the full-draw contract at the one collection point: a
+            # full figure draw skips an INVISIBLE AXES together with
+            # everything on it.  A focused FacetGrid is the layout that
+            # hides axes -- collecting their artists here made every hidden
+            # cell (and, through the tick loop below, its tick marks) ghost
+            # into the focused frame at the old cell boxes.
             if (
                 isinstance(value, Artist)
                 and getattr(value, "axes", None) is not None
+                and value.axes.get_visible()
             ):
                 keyed(value, value.axes, value.get_zorder())
 
@@ -1017,6 +1024,8 @@ class MatplotlibRenderer:
         # position are supplied here.  Outside-the-box text (tick labels,
         # titles) stays in the background and is painted exactly once.
         for axes in {entry[1].axes for entry in tuple(collected)}:
+            if not axes.get_visible():
+                continue
             for axis in (axes.xaxis, axes.yaxis):
                 axis_z = float(axis.get_zorder())
                 # The same ticks a full Axis.draw would paint: positions
@@ -1079,16 +1088,6 @@ class MatplotlibRenderer:
             restore(self._background_region)
             renderer = get_renderer()
             for _key, artist in sorted(dynamics, key=lambda entry: entry[0]):
-                # Mirror the full-draw contract exactly: a full figure draw
-                # skips an INVISIBLE AXES together with everything on it, and
-                # an artist's own flag says nothing about that.  A focused
-                # FacetGrid is the one layout that hides axes -- and their
-                # image artists kept repainting into the front at the old
-                # cell boxes, which is the "ghost cells" a focused grid
-                # showed.
-                owner = getattr(artist, "axes", None)
-                if owner is not None and not owner.get_visible():
-                    continue
                 if artist.get_visible():
                     if not self._blit_exact_rgba_image(artist, canvas):
                         artist.draw(renderer)

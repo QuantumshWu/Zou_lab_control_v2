@@ -66,18 +66,13 @@ def test_focused_compose_equals_a_full_draw() -> None:
         session.focus_facet(1)
         composed = _frame(session)
         # The ground truth: a plain full figure draw, which skips hidden
-        # axes together with everything on them.
+        # axes together with everything on them.  EXACT equality: any
+        # tolerance here is a place for the next ghost to hide -- the first
+        # fix stopped at the images and a "sparse antialias tail" that was
+        # in fact the hidden cells' tick marks.
         session._renderer.draw()
         reference = _frame(session)
-        delta = np.abs(composed.astype(int) - reference.astype(int)).sum(axis=2)
-        differing = int((delta > 8).sum())
-        # Text antialiasing leaves a sparse two-digit tail of edge pixels
-        # between the two paths (96 measured); a ghosted hidden cell is
-        # tens of THOUSANDS of solid pixels.
-        assert differing < 500, (
-            f"{differing} pixels differ from a full draw -- a hidden facet "
-            "cell is ghosting into the focused frame"
-        )
+        np.testing.assert_array_equal(composed, reference)
     finally:
         session.close()
 
