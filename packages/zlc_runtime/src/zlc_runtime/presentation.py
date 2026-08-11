@@ -623,11 +623,13 @@ class SurfaceBatchArbiter:
                     blamed = update
                     break
                 if not accepted:
-                    batch_error = RuntimeError(
-                        f"surface update {update.panel_id!r} is no longer acceptable"
-                    )
-                    blamed = update
-                    break
+                    # Nobody failed.  This port's host was replaced after the
+                    # update was staged -- a cell kind changed, a panel was
+                    # rebuilt -- so the cohort cannot flip and the next shot
+                    # renders against the new host.  Told as an error, it put
+                    # a red mark on a panel that was about to draw perfectly.
+                    self._abandon(records, None, None)
+                    return
 
         if batch_error is not None:
             self._abandon(records, batch_error, blamed)
@@ -655,24 +657,24 @@ class SurfaceBatchArbiter:
     def _abandon(
         cls,
         records: Sequence[tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]],
-        error: BaseException,
+        error: BaseException | None,
         blamed: SurfaceUpdate | None,
     ) -> None:
         """Drop the cohort, telling only the member that could not go.
 
-        The group flips together or not at all, so ONE member's refusal ends
-        the shot for every member -- but it is not a FAILURE of the others.
-        Handing them all the same error is how a single panel rebuilt under a
-        staged render (a cell kind changed, a host replaced) painted "no
-        longer acceptable" on every card on the board, each of which was
-        about to redraw perfectly on the next shot.  They leave unpresented
-        instead, which is what an abandoned cohort already does.
+        The group flips together or not at all, so ONE member's failure ends
+        the shot for every member -- but it is not a failure OF the others.
+        Handing them all the same error is how one panel's trouble painted
+        itself on every card on the board, each of which was about to redraw
+        perfectly on the next shot.  They leave unpresented instead, which is
+        what an abandoned cohort already does.  With no member at fault
+        (``blamed`` is None) that is the whole story: nobody is told.
         """
 
         for port, update, _outcome, _successful in records:
             if port is None:
                 continue
-            if update is blamed:
+            if error is not None and update is blamed:
                 cls._reject(port, update, error)
             else:
                 cls._finish_unpresented(((port, update),))

@@ -303,10 +303,11 @@ def test_a_failed_member_sinks_the_batch_and_is_the_only_one_blamed() -> None:
     assert not first.rejected and len(first.finished) == 1
 
 
-def test_a_rebuilt_panel_does_not_mark_the_panel_beside_it() -> None:
-    """A panel whose host was replaced refuses the update prepared for the old
-    one.  That is the currency guard doing its job -- and it says nothing at
-    all about the sibling, which is why only the rebuilt panel hears about it.
+def test_a_rebuilt_panel_marks_nobody_at_all() -> None:
+    """A panel whose host was replaced refuses the update staged for the old
+    one.  That is the currency guard doing its job, on a panel that is about
+    to draw against its new host -- so the shot leaves unpresented and no
+    card, not even the rebuilt one's, is marked with anything.
     """
 
     channels = OwnerChannels(_Sink())
@@ -322,8 +323,7 @@ def test_a_rebuilt_panel_does_not_mark_the_panel_beside_it() -> None:
         lambda panel_id: {"healthy": healthy, "rebuilt": rebuilt}.get(panel_id)
     )
     assert not healthy.accepted and not rebuilt.accepted
-    assert len(rebuilt.rejected) == 1
-    assert "no longer acceptable" in str(rebuilt.rejected[0][1])
+    assert not rebuilt.rejected and len(rebuilt.finished) == 1
     assert not healthy.rejected and len(healthy.finished) == 1
 
 
