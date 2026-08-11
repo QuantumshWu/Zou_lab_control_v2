@@ -1316,16 +1316,39 @@ class DataView:
             )
             self._flat_cache[ref] = cached_flat
         canonical, indices_flat = cached_flat
-        selected = canonical[positions]
-        coordinate_valid = _finite_coordinate(selected)
-        valid_local = np.flatnonzero(coordinate_valid)
-        codes = np.full(positions.shape, -1, dtype=np.int64)
-        if valid_local.size == 0:
-            codes.setflags(write=False)
-            return _Domain((), codes)
-        if resolved.declared_domain:
-            declared = indices_flat[positions[valid_local]]
-            used_indices, inverse = np.unique(declared, return_inverse=True)
+        # A declared, all-finite domain (checked once, at domain size) makes
+        # every element's coordinate valid by construction, so the
+        # per-element canonical gather and isfinite pass -- two full-size
+        # temporaries per axis, millions of elements on a camera facet --
+        # carry no information.  Codes then come straight off the index plane.
+        valid_local: NDArray[np.int64] | None = None
+        if resolved.declared_domain and bool(
+            _finite_coordinate(resolved.domain_canonical).all()
+        ):
+            declared = indices_flat[positions]
+        else:
+            selected = canonical[positions]
+            coordinate_valid = _finite_coordinate(selected)
+            valid_local = np.flatnonzero(coordinate_valid)
+            if valid_local.size == 0:
+                codes = np.full(positions.shape, -1, dtype=np.int64)
+                codes.setflags(write=False)
+                return _Domain((), codes)
+            declared = (
+                indices_flat[positions[valid_local]]
+                if resolved.declared_domain
+                else None
+            )
+        if declared is not None:
+            # The domain is DECLARED, so its size is known and small; a
+            # bincount + remap finds the used indices in one O(N) pass where
+            # np.unique paid a full sort of one value per element.
+            used_indices = np.flatnonzero(
+                np.bincount(declared, minlength=resolved.domain_canonical.size)
+            )
+            remap = np.full(resolved.domain_canonical.size, -1, dtype=np.int64)
+            remap[used_indices] = np.arange(used_indices.size, dtype=np.int64)
+            inverse = remap[declared]
             canonical_values = resolved.domain_canonical[used_indices]
             display_values = resolved.domain_display[used_indices]
             indices: tuple[int | None, ...] = tuple(int(index) for index in used_indices)
@@ -1356,7 +1379,11 @@ class DataView:
                     label_by_coordinate[_python_scalar(value)]
                     for value in canonical_values
                 )
-        codes[valid_local] = inverse
+        if valid_local is None:
+            codes = inverse
+        else:
+            codes = np.full(positions.shape, -1, dtype=np.int64)
+            codes[valid_local] = inverse
         codes.setflags(write=False)
         values = tuple(
             AxisValue(
@@ -1587,19 +1614,45 @@ def _require_real_numeric(values: NDArray[Any], ref: AxisRef | None) -> None:
         raise DataViewError(f"{target} must be real numeric for this projection")
 
 
-def _reduce_group(group: NDArray[Any], aggregation: Reduction) -> Any:
-    if aggregation is Reduction.MEAN:
-        return np.mean(group)
-    if aggregation is Reduction.MEDIAN:
-        return np.median(group)
-    if aggregation is Reduction.SUM:
-        return np.sum(group)
-    if aggregation is Reduction.MIN:
-        return np.min(group)
-    if aggregation is Reduction.MAX:
-        return np.max(group)
+def _reduce_segments(
+    ordered: NDArray[Any],
+    starts: NDArray[np.int64],
+    stops: NDArray[np.int64],
+    aggregation: Reduction,
+    output_dtype: np.dtype,
+) -> NDArray[Any]:
+    """Reduce every code-sorted segment in one vectorised pass.
+
+    ``reduceat`` over the segment starts is what keeps a camera-sized facet
+    usable: a scan of frames reduces one group PER PIXEL, and looping those
+    2.3 million groups through Python took ~10 s per cell where one ufunc
+    pass takes milliseconds.  Sums accumulate in the output dtype because the
+    values may arrive as uint8, which wraps at 256 under its own arithmetic.
+    """
+
     if aggregation is Reduction.FIRST:
-        return group[0]
+        return ordered[starts]
+    if aggregation in (Reduction.SUM, Reduction.MEAN):
+        sums = np.add.reduceat(ordered.astype(output_dtype, copy=False), starts)
+        if aggregation is Reduction.SUM:
+            return sums
+        return sums / (stops - starts)
+    if aggregation is Reduction.MIN:
+        return np.minimum.reduceat(ordered, starts)
+    if aggregation is Reduction.MAX:
+        return np.maximum.reduceat(ordered, starts)
+    if aggregation is Reduction.MEDIAN:
+        # No reduceat for a median: sort values WITHIN each segment (the
+        # segment index is the primary key, so segments stay in place) and
+        # take each segment's middle by position -- still one pass.
+        sizes = stops - starts
+        segment_of = np.repeat(np.arange(starts.size), sizes)
+        within = ordered[np.lexsort((ordered, segment_of))]
+        low = starts + (sizes - 1) // 2
+        high = starts + sizes // 2
+        return (
+            within[low].astype(np.float64) + within[high].astype(np.float64)
+        ) / 2.0
     raise AssertionError(f"unsupported reduction: {aggregation!r}")
 
 
@@ -1621,20 +1674,34 @@ def _aggregate_by_codes(
             # paying a full stable argsort of millions of identical codes.
             group = values[positions]
             counts[0] = group.size
-            output[0] = _reduce_group(group, aggregation)
+            output[0] = _reduce_segments(
+                group,
+                np.array([0], dtype=np.int64),
+                np.array([group.size], dtype=np.int64),
+                aggregation,
+                output_dtype,
+            )[0]
         else:
             selected_codes = codes[positions]
-            order = np.argsort(selected_codes, kind="stable")
-            ordered_codes = selected_codes[order]
-            ordered_values = values[positions[order]]
-            boundaries = np.flatnonzero(np.diff(ordered_codes)) + 1
-            starts = np.concatenate(([0], boundaries))
-            stops = np.concatenate((boundaries, [ordered_codes.size]))
-            for start, stop in zip(starts, stops):
-                code = int(ordered_codes[start])
-                group = ordered_values[start:stop]
-                counts[code] = group.size
-                output[code] = _reduce_group(group, aggregation)
+            counts = np.bincount(selected_codes, minlength=bucket_count)
+            if int(counts.max(initial=0)) <= 1:
+                # At most one member per group: every Reduction is identity,
+                # and the sort below is pure overhead.  This is the dense
+                # image case -- one sample per pixel -- so it is also the
+                # case where the overhead is millions of elements large.
+                output[selected_codes] = values[positions].astype(
+                    output_dtype, copy=False
+                )
+            else:
+                order = np.argsort(selected_codes, kind="stable")
+                ordered_codes = selected_codes[order]
+                ordered_values = values[positions[order]]
+                boundaries = np.flatnonzero(np.diff(ordered_codes)) + 1
+                starts = np.concatenate(([0], boundaries))
+                stops = np.concatenate((boundaries, [ordered_codes.size]))
+                output[ordered_codes[starts]] = _reduce_segments(
+                    ordered_values, starts, stops, aggregation, output_dtype
+                )
     output.setflags(write=False)
     counts.setflags(write=False)
     return output, counts

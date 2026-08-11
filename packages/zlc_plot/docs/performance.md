@@ -410,3 +410,38 @@ python examples/camera_live_profile.py --resolution 1024 --geometry point-topolo
 
 The command prints machine-readable JSON.  `--output report.json` writes the
 same report for later comparisons.
+
+## Grouped reduction is vectorised (2026-08-11)
+
+A FacetGrid over a scan of camera frames reduces one group PER PIXEL: a
+`(1, 9, 1200, 1920)` scan faceted on one axis with image cells reduces
+2.3 million single-pixel groups per cell.  `_aggregate_by_codes` looped
+those groups through Python, one `np.mean` call each -- 6.9 million calls
+and ~30 s of a 39.7 s session build; the whole facet-image path measured
+22.5 s through the console's raster host.
+
+Three fixes, all in `data_view.py` and all measured on that same scan:
+
+* `_reduce_segments` reduces every code-sorted segment in one ufunc pass
+  (`add/minimum/maximum.reduceat`, segment-start gather for FIRST, one
+  in-segment lexsort for MEDIAN).  Sums accumulate in the output dtype
+  because camera bytes wrap at 256 under their own arithmetic.
+* Groups with at most one member (the dense image case) skip the sort
+  entirely: `bincount` proves the multiplicity and the reduction is
+  identity for every `Reduction`.
+* `_domain` on a declared, all-finite domain takes codes straight off the
+  index plane (bincount + remap) instead of `np.unique` over one value per
+  element, and skips the per-element canonical gather + isfinite pass.
+
+Session construct for the facet-image case: 39.7 s -> 3.3 s in-process;
+the console acceptance probe's first rendered front: 22.5 s -> 3.0 s.
+Curve and histogram cells on the same dataset build in 1.7 s / 1.4 s.
+`tests/test_aggregate_by_codes.py` pins every vectorised branch against
+the plain per-group loop, including the uint8 non-wrapping sums.
+
+Still open: the remaining ~3 s is the position-projection machinery
+itself (per-cell domain derivation and several full-size passes over the
+20.7 M-element expansion); a dense fast lane that recognises "x/y are the
+data axes, reduce the rest" as a reshape+mean would take it to tens of
+milliseconds, at the cost of a second projection path that must prove
+equivalence.
