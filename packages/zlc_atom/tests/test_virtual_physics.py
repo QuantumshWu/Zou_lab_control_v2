@@ -117,15 +117,21 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
 def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
     """The MOT monitor renders like the Basler it stands in for: Mono8.
 
-    The spot is separable and Poisson samples are drawn only inside the
-    +/-8 sigma window, so everything outside that window must be pure
-    offset-plus-read-noise -- and the loaded spot must still rise far above
-    it at the field-controlled center.
+    Fired AT the planted optimum, because that is what a compensated MOT looks
+    like: the net field is zero, so the spot sits at frame centre and at full
+    brightness.  The spot is separable and Poisson samples are drawn only
+    inside the +/-8 sigma window, so everything outside it must be pure
+    offset-plus-read-noise.
     """
 
+    from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
+
+    opt_x, opt_y, opt_z = DEFAULT_MOT_FIELD_OPTIMUM_DAC
     world = SimulationWorld(seed=7)
-    site_count = len(world.geometry.site_centers_xy)
-    _fire_world(world, _world_pulse(cooling=True, trap=True))
+    _fire_world(
+        world,
+        _world_pulse(cooling=True, trap=True, da_x=opt_x, da_y=opt_y, da_z=opt_z),
+    )
     frame = world.render_mot_frame(0, frame_shape_yx=(400, 640))
     assert frame.dtype == np.dtype("|u1")
     assert frame.shape == (400, 640)
@@ -148,34 +154,34 @@ def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
     assert int(np.max(empty)) < 20
 
 
-def test_mot_position_is_seed_deterministic_and_follows_the_bias_dacs() -> None:
-    def frames(
-        seed: int,
-        *,
-        da_x: int = 0,
-        da_y: int = 0,
-        da_z: int = 0,
-    ) -> tuple[np.ndarray, np.ndarray]:
+def test_mot_follows_the_net_field_and_is_best_at_the_planted_optimum() -> None:
+    """Position and brightness both follow (dac - optimum), the NET field.
+
+    The world plants a non-zero optimum -- the ambient field the bias coils
+    exist to cancel -- so an optimiser that starts from zero has somewhere real
+    to go.  At the optimum the spot is centred and brightest; away from it the
+    spot moves AND dims; at dac zero (nothing compensated) it is measurably
+    both off-centre and dimmer.  That gradient is what a field scan climbs.
+    """
+
+    from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
+
+    opt_x, opt_y, opt_z = DEFAULT_MOT_FIELD_OPTIMUM_DAC
+    assert (opt_x, opt_y, opt_z) != (0, 0, 0), (
+        "a zero optimum makes every optimiser pass trivially"
+    )
+
+    def frames(seed: int, *, da_x: int, da_y: int, da_z: int) -> np.ndarray:
         world = SimulationWorld(seed=seed)
         _fire_world(
             world,
-            _world_pulse(
-                cooling=True,
-                trap=True,
-                da_x=da_x,
-                da_y=da_y,
-                da_z=da_z,
-            ),
+            _world_pulse(cooling=True, trap=True, da_x=da_x, da_y=da_y, da_z=da_z),
         )
-        return (
-            world.render_mot_frame(0, frame_shape_yx=(200, 320)),
-            world.render_mot_frame(9, frame_shape_yx=(200, 320)),
-        )
+        return world.render_mot_frame(0, frame_shape_yx=(200, 320))
 
-    first_a, first_b = frames(5)
-    second_a, second_b = frames(5)
-    np.testing.assert_array_equal(first_a, second_a)
-    np.testing.assert_array_equal(first_b, second_b)
+    at_optimum = frames(5, da_x=opt_x, da_y=opt_y, da_z=opt_z)
+    again = frames(5, da_x=opt_x, da_y=opt_y, da_z=opt_z)
+    np.testing.assert_array_equal(at_optimum, again)
 
     def centroid_y(frame: np.ndarray) -> float:
         weights = np.clip(frame.astype(float) - 12.0, 0.0, None)
@@ -187,15 +193,24 @@ def test_mot_position_is_seed_deterministic_and_follows_the_bias_dacs() -> None:
         columns = np.arange(frame.shape[1], dtype=float)
         return float(np.sum(columns * np.sum(weights, axis=0)) / np.sum(weights))
 
-    assert centroid_x(first_a) == pytest.approx((first_a.shape[1] - 1) * 0.5, abs=0.3)
-    assert centroid_y(first_a) == pytest.approx((first_a.shape[0] - 1) * 0.5, abs=0.3)
-    assert abs(centroid_y(first_a) - centroid_y(first_b)) < 1.0
-    shifted, _ = frames(5, da_y=256)
-    assert centroid_y(shifted) - centroid_y(first_a) > 10.0
-    shifted, _ = frames(5, da_x=256)
-    assert centroid_x(shifted) - centroid_x(first_a) > 20.0
-    defocused, _ = frames(5, da_z=256)
-    assert float(np.sum(defocused)) < float(np.sum(first_a))
+    assert centroid_x(at_optimum) == pytest.approx((320 - 1) * 0.5, abs=0.5)
+    assert centroid_y(at_optimum) == pytest.approx((200 - 1) * 0.5, abs=0.5)
+
+    shifted = frames(5, da_x=opt_x, da_y=opt_y + 256, da_z=opt_z)
+    assert centroid_y(shifted) - centroid_y(at_optimum) > 10.0
+    assert float(np.sum(shifted)) < float(np.sum(at_optimum))
+
+    shifted = frames(5, da_x=opt_x + 256, da_y=opt_y, da_z=opt_z)
+    assert centroid_x(shifted) - centroid_x(at_optimum) > 20.0
+
+    defocused = frames(5, da_x=opt_x, da_y=opt_y, da_z=opt_z + 256)
+    assert float(np.sum(defocused)) < float(np.sum(at_optimum))
+
+    # Nothing compensated: the state an optimisation starts from.
+    uncompensated = frames(5, da_x=0, da_y=0, da_z=0)
+    assert float(np.sum(uncompensated)) < float(np.sum(at_optimum))
+    assert abs(centroid_x(uncompensated) - centroid_x(at_optimum)) > 5.0
+
 
 
 def test_virtual_sites_have_repeatable_efficiency_and_psf_diversity() -> None:

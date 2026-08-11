@@ -133,7 +133,11 @@ def _world_from_apparatus(
     if len(unique) != 1:
         raise ValueError("devices in one installation declared different simulation worlds")
     config = next(iter(unique))
-    return SimulationWorld(config.geometry, seed=config.seed)
+    return SimulationWorld(
+        config.geometry,
+        seed=config.seed,
+        mot_field_optimum_dac=config.mot_field_optimum_dac,
+    )
 
 
 def create_installation(

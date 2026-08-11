@@ -15,6 +15,12 @@ from zlc_pulse.schedule import run_duration_seconds, trigger_windows
 DEFAULT_SIMULATION_GRID_SHAPE_YX = (5, 7)
 DEFAULT_SIMULATION_IMAGE_SHAPE_YX = (96, 128)
 DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
+#: Where the MOT is actually best, in DAC codes -- the ground truth a field
+#: optimisation is supposed to FIND.  Non-zero on purpose: a real bench has a
+#: stray ambient field and the bias coils exist to cancel it, so an optimiser
+#: that starts at zero must genuinely move.  The world models the ambient as
+#: exactly -optimum, making the net field (dac - optimum) / 512 per axis.
+DEFAULT_MOT_FIELD_OPTIMUM_DAC = (96, -144, 48)
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
 
 
@@ -64,18 +70,39 @@ class SimulationWorldConfig:
 
     geometry: SimulationGeometry
     seed: int = 0
+    mot_field_optimum_dac: tuple[int, int, int] = DEFAULT_MOT_FIELD_OPTIMUM_DAC
 
     def __post_init__(self) -> None:
         if not isinstance(self.geometry, SimulationGeometry):
             raise TypeError("geometry must be SimulationGeometry")
         object.__setattr__(self, "seed", int(self.seed))
+        optimum = tuple(int(value) for value in self.mot_field_optimum_dac)
+        if len(optimum) != 3 or any(abs(value) > 511 for value in optimum):
+            raise ValueError(
+                "mot_field_optimum_dac must be three DAC codes within the bus range"
+            )
+        object.__setattr__(self, "mot_field_optimum_dac", optimum)
 
 
 class SimulationWorld:
     """Explicit state and trigger routing for all virtual devices."""
 
-    def __init__(self, geometry: SimulationGeometry | None = None, *, seed: int = 0) -> None:
+    def __init__(
+        self,
+        geometry: SimulationGeometry | None = None,
+        *,
+        seed: int = 0,
+        mot_field_optimum_dac: tuple[int, int, int] = DEFAULT_MOT_FIELD_OPTIMUM_DAC,
+    ) -> None:
         self.geometry = SimulationGeometry() if geometry is None else geometry
+        optimum = tuple(int(value) for value in mot_field_optimum_dac)
+        if len(optimum) != 3 or any(abs(value) > 511 for value in optimum):
+            raise ValueError(
+                "mot_field_optimum_dac must be three DAC codes within the bus range"
+            )
+        self._mot_field_optimum = dict(
+            zip(("da_bias_x", "da_bias_y", "da_bias_z"), optimum)
+        )
         self.rng = np.random.default_rng(int(seed))
         self._lock = threading.RLock()
         self._cameras: list[tuple[Any, Callable[..., np.ndarray] | None]] = []
@@ -292,10 +319,15 @@ class SimulationWorld:
                 loading = self._mot_population
             else:
                 loading = float(np.mean(np.asarray(occupancy, dtype=bool)))
+            # The NET field: what the coils add minus the ambient they exist
+            # to cancel.  Position and brightness both follow it -- at the
+            # optimum the spot is centred AND brightest, which is what a
+            # compensated MOT looks like on the monitor.
             scale = 1.0 / 512.0
-            field_x = self._dac_values["da_bias_x"] * scale
-            field_y = self._dac_values["da_bias_y"] * scale
-            field_z = self._dac_values["da_bias_z"] * scale
+            optimum = self._mot_field_optimum
+            field_x = (self._dac_values["da_bias_x"] - optimum["da_bias_x"]) * scale
+            field_y = (self._dac_values["da_bias_y"] - optimum["da_bias_y"]) * scale
+            field_z = (self._dac_values["da_bias_z"] - optimum["da_bias_z"]) * scale
             center_x = 0.5 * (width - 1) + 0.2 * width * field_x
             center_y = 0.5 * (height - 1) + 0.2 * height * field_y
             sigma_x = 40.0 / 2.354820045
@@ -305,7 +337,10 @@ class SimulationWorld:
             counts *= 1.5
             counts += 7.0
             field_distance_sq = field_x * field_x + field_y * field_y + field_z * field_z
-            peak = 93.0 * loading * np.exp(-1.5 * field_distance_sq) * (exposure / 0.1)
+            # -6, not -1.5: atom number falls fast with net field, which is the
+            # physics AND what makes a coarse scan able to tell neighbouring
+            # grid points apart above the frame's read noise.
+            peak = 93.0 * loading * np.exp(-6.0 * field_distance_sq) * (exposure / 0.1)
             if peak > 0.0:
                 x_low = max(0, int(np.floor(center_x - 8.0 * sigma_x)))
                 x_high = min(width, int(np.ceil(center_x + 8.0 * sigma_x)) + 1)

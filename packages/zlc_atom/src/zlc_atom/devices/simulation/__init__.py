@@ -3,6 +3,7 @@
 from .camera import VirtualCamera, VirtualCameraConfig
 from .sequencer import CAMERA_TRIGGER_CHANNEL, VirtualPulseStreamer, VirtualSequencer
 from .world import (
+    DEFAULT_MOT_FIELD_OPTIMUM_DAC,
     DEFAULT_SIMULATION_GRID_SHAPE_YX,
     DEFAULT_SIMULATION_IMAGE_SHAPE_YX,
     DEFAULT_SIMULATION_SITE_SPACING_PIXELS,
@@ -13,6 +14,7 @@ from .world import (
 
 __all__ = [
     "CAMERA_TRIGGER_CHANNEL",
+    "DEFAULT_MOT_FIELD_OPTIMUM_DAC",
     "DEFAULT_SIMULATION_GRID_SHAPE_YX",
     "DEFAULT_SIMULATION_IMAGE_SHAPE_YX",
     "DEFAULT_SIMULATION_SITE_SPACING_PIXELS",
