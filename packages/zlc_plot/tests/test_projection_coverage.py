@@ -77,10 +77,57 @@ def test_image_collapses_an_unassigned_data_axis_under_the_declared_reduction() 
     np.testing.assert_allclose(grid, expected.T)
 
 
-def test_curve_still_requires_a_point_domain_reference() -> None:
-    """The scan itself is never pooled away implicitly: a projection that
-    references no point coordinate is a kind mismatch, not a reduction."""
+def test_curve_pools_the_point_domain_like_every_other_unassigned_axis() -> None:
+    """Pooling is ONE rule with no exceptions.
 
-    snapshot = _snapshot()
-    with pytest.raises(DataViewError, match="point-row domain"):
-        DataView(snapshot).curve(AxisRef.repeat())
+    The point axis used to be privileged: a curve that named no point
+    coordinate was refused outright while every other unassigned axis
+    pooled under the declared reduction.  R, P and D now meet the same
+    fate, and "you are averaging your whole scan into one number" is a hint
+    the editor gives, not a construction-time error.
+    """
+
+    snapshot = _snapshot()  # (R=2, P=2)
+    payload = DataView(snapshot).curve(AxisRef.repeat())
+    values = np.asarray(snapshot.block.values)
+    series = payload.series[0]
+    np.testing.assert_allclose(
+        np.asarray(series.y.canonical),
+        [values[0, :].mean(), values[1, :].mean()],
+    )
+    # Each plotted repeat pooled the whole 2-row point domain.
+    assert tuple(series.counts) == (2, 2)
+
+
+def test_facet_curve_cell_pools_the_point_domain_too() -> None:
+    """The same rule inside a facet cell: kinds do not each get a policy."""
+
+    from zlc_plot.specs import CurvePlot, FacetGridPlot
+
+    scan = Axis.create("scan", values=[0.0, 1.0])
+    snapshot = _snapshot(data_axes=(scan,))  # (R=2, P=2, scan=2)
+    spec = FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.data("scan")))
+    payload = DataView(snapshot).facet(spec)
+    values = np.asarray(snapshot.block.values)
+    assert len(payload.cells) == 2
+    for repeat, cell in enumerate(payload.cells):
+        np.testing.assert_allclose(
+            np.asarray(cell.payload.series[0].y.canonical),
+            values[repeat].mean(axis=0),
+        )
+
+
+def test_validate_curve_refuses_a_text_x_that_cannot_be_plotted() -> None:
+    """Whatever passes validate_curve projects, and whatever projects passed.
+
+    The real-numeric requirement used to live at the two BUILD sites only,
+    so a text coordinate passed validation (and the feasibility probe) and
+    then raised on the first draw.
+    """
+
+    snapshot = _snapshot(points={"label": ["a", "b"]})
+    view = DataView(snapshot)
+    with pytest.raises(DataViewError, match="real numeric"):
+        view.validate_curve(AxisRef.point("label"))
+    with pytest.raises(DataViewError, match="real numeric"):
+        view.curve(AxisRef.point("label"))

@@ -474,10 +474,15 @@ class DataView:
         This is the single validation authority shared by :meth:`curve` and
         the semantic feasibility probe: whatever passes here projects, and
         whatever projects passed here.
+
+        An axis this projection does not name -- repeat, an unplotted scan
+        dimension, a dense data axis -- is not a defect: it pools under the
+        spec's authored ``reduction``, which is the one rule R, P and D all
+        obey.  "You are averaging your whole scan into one number" is a hint
+        for the editor to give, not a construction-time refusal.
         """
 
-        groups = self._validate_curve_shape(x, tuple(group_by))
-        self._validate_axis_coverage((x, *groups), kind="curve")
+        self._validate_curve_shape(x, tuple(group_by))
 
     def _validate_curve_shape(
         self,
@@ -491,7 +496,11 @@ class DataView:
             raise DataViewError("group_by axes must be unique")
         if x in groups:
             raise DataViewError("curve x axis cannot also be a group axis")
-        self._resolve(x)
+        # Both projection kernels plot x as a number, so a text coordinate is
+        # a REFUSAL, not a build-time surprise: this used to live at the two
+        # build sites only, which made ``validate_curve`` accept specs that
+        # then raised on their first draw.
+        _require_real_numeric(self._resolve(x).coordinate.canonical, x)
         for ref in groups:
             self._resolve(ref)
         return groups
@@ -537,7 +546,6 @@ class DataView:
         except AxisResolutionError:
             # Let the normal resolver produce the public missing-axis error.
             return None
-        _require_real_numeric(x_resolved.coordinate.canonical, x)
         x_canonical = np.asarray(x_resolved.domain_canonical)
         if not np.all(_finite_coordinate(x_canonical)):
             return None
@@ -617,7 +625,6 @@ class DataView:
         flat_values = self._samples.value.canonical.reshape(-1)
         flat_valid = self._samples.valid_mask.reshape(-1)
         x_resolved = self._resolve(x)
-        _require_real_numeric(x_resolved.coordinate.canonical, x)
         for key, group_positions in self._groups(groups, positions):
             x_domain = self._domain(x, group_positions)
             usable = flat_valid[group_positions] & (x_domain.codes >= 0)
@@ -670,13 +677,12 @@ class DataView:
     def validate_image(self, x: AxisRef, y: AxisRef) -> None:
         """Check an image projection without computing it (see validate_curve).
 
-        Unlike curve, an image does NOT require point coverage: point rows
-        beyond the two image axes pool under the declared reduction, the
-        same fate every unassigned axis has (both image kernels already
-        reduce every non-image dimension).  ``image.default_spec`` admits a
-        camera cycle's ``(repeat, frame-points, y, x)`` box on exactly that
-        promise, so the build honours it -- admits and buildable are one
-        decision, owned here.
+        Point rows beyond the two image axes pool under the declared
+        reduction, the same fate every unassigned axis has (both image
+        kernels already reduce every non-image dimension).
+        ``image.default_spec`` admits a camera cycle's ``(repeat,
+        frame-points, y, x)`` box on exactly that promise, so the build
+        honours it -- admits and buildable are one decision, owned here.
         """
 
         self._validate_image_shape(x, y)
@@ -686,8 +692,10 @@ class DataView:
             raise TypeError("image x and y must be AxisRef objects")
         if x == y:
             raise DataViewError("image x and y axes must differ")
-        self._resolve(x)
-        self._resolve(y)
+        # Same reason as the curve x check: both image kernels need numeric
+        # coordinates, so that requirement belongs to the admission decision.
+        _require_real_numeric(self._resolve(x).coordinate.canonical, x)
+        _require_real_numeric(self._resolve(y).coordinate.canonical, y)
         point_domains = {x.domain, y.domain}
         if point_domains <= {
             AxisDomain.POINT_ROW,
@@ -746,8 +754,6 @@ class DataView:
             return None
         x_dimension = x_resolved.dimension
         y_dimension = y_resolved.dimension
-        _require_real_numeric(x_resolved.coordinate.canonical, x)
-        _require_real_numeric(y_resolved.coordinate.canonical, y)
         x_canonical = np.asarray(x_resolved.domain_canonical)
         y_canonical = np.asarray(y_resolved.domain_canonical)
         if not (
@@ -850,8 +856,6 @@ class DataView:
         y_domain = self._domain(y, positions)
         x_canonical = _domain_canonical(x_domain)
         y_canonical = _domain_canonical(y_domain)
-        _require_real_numeric(self._resolve(x).coordinate.canonical, x)
-        _require_real_numeric(self._resolve(y).coordinate.canonical, y)
         nx = len(x_domain.values)
         ny = len(y_domain.values)
         usable = (
@@ -1084,9 +1088,9 @@ class DataView:
 
         The cell used to bypass projection validation entirely because the
         facet path builds cells positionally; the shared checks here close
-        that hole for probe and build alike.  Axis coverage is judged over
-        the union of cell and facet references — the facet axis is a
-        consumed axis.
+        that hole for probe and build alike.  A cell is validated by exactly
+        the rules its standalone kind is validated by -- a faceted curve and
+        a curve are the same projection, one slice at a time.
         """
 
         if not isinstance(spec, FacetGridPlot):
@@ -1094,16 +1098,11 @@ class DataView:
         self._resolve(spec.facet)
         cell = spec.cell
         if isinstance(cell, CurvePlot):
-            groups = () if cell.group is None else (cell.group,)
-            self._validate_curve_shape(cell.x, groups)
-            self._validate_axis_coverage(
-                (cell.x, *groups, spec.facet), kind="facet curve cell"
+            self._validate_curve_shape(
+                cell.x, () if cell.group is None else (cell.group,)
             )
         elif isinstance(cell, ImagePlot):
             self._validate_image_shape(cell.x, cell.y)
-            self._validate_axis_coverage(
-                (cell.x, cell.y, spec.facet), kind="facet image cell"
-            )
         elif not isinstance(cell, HistogramPlot):
             raise TypeError(
                 "facet cell must be CurvePlot, ImagePlot, or HistogramPlot"
@@ -1259,7 +1258,6 @@ class DataView:
                 x_resolved = self._resolve(cell.x)
             except AxisResolutionError:
                 return None
-            _require_real_numeric(x_resolved.coordinate.canonical, cell.x)
             x_domain = np.asarray(x_resolved.domain_canonical)
             if not np.all(_finite_coordinate(x_domain)):
                 return None
@@ -1276,8 +1274,6 @@ class DataView:
                 y_resolved = self._resolve(cell.y)
             except AxisResolutionError:
                 return None
-            _require_real_numeric(x_resolved.coordinate.canonical, cell.x)
-            _require_real_numeric(y_resolved.coordinate.canonical, cell.y)
             if not (
                 np.all(_finite_coordinate(np.asarray(x_resolved.domain_canonical)))
                 and np.all(_finite_coordinate(np.asarray(y_resolved.domain_canonical)))
@@ -1348,48 +1344,6 @@ class DataView:
 
     def _all_positions(self) -> NDArray[np.int64]:
         return np.arange(self._samples.value.canonical.size, dtype=np.int64)
-
-    def _validate_axis_coverage(
-        self,
-        refs: tuple[AxisRef, ...],
-        *,
-        kind: str,
-    ) -> None:
-        """Validate that a projection's axis assignments are well posed.
-
-        Every axis has exactly one fate: plotted (x/y), grouped, faceted,
-        sampled — or collapsed by the projection's declared reduction.  An
-        axis absent from ``refs`` (repeat, an unplotted scan dimension, a
-        dense data axis) is therefore pooled into the aggregation, exactly
-        as the spec's explicit ``reduction`` field authorizes.  This is not
-        v1's silent coercion: the reduction is an authored, visible part of
-        the specification.
-
-        The point-row domain is the one exception: it is the scan itself,
-        and a curve or facet projection that references no point coordinate
-        at all is a kind mismatch (rolling and histogram collapse the whole
-        scan; image pools it under its declared reduction and skips this
-        check), so here it stays an error rather than a pool.
-        """
-
-        schema = self._schema
-        references = tuple(refs)
-        for ref in references:
-            self._resolve(ref)
-        point_covered = any(
-            ref.domain
-            in {
-                AxisDomain.POINT_ROW,
-                AxisDomain.POINT_COORDINATE,
-                AxisDomain.POINT_DIMENSION,
-            }
-            for ref in references
-        )
-        if schema_point_count(schema) > 1 and not point_covered:
-            raise DataViewError(
-                f"{kind} leaves the authored point-row domain unreferenced; "
-                "select a point row/coordinate or group it explicitly"
-            )
 
     def _groups(
         self,
