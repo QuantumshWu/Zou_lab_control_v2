@@ -58,7 +58,8 @@ class PlotPanelPort:
         *,
         display_interval_ms: int,
         shown: object | None = None,
-        project_input: Callable[[object, object], object] | None = None,
+        companion_signals: Callable[[], tuple[str, ...]] | None = None,
+        project_input: Callable[[object, object, object], object] | None = None,
         replace_host: Callable[[object, object, object], Any] | None = None,
         on_presented: Callable[[object, object], None] | None = None,
         present: Callable[[object], None] | None = None,
@@ -70,6 +71,11 @@ class PlotPanelPort:
         self._presented: object | None = None
         self._presented_input: object | None = shown
         self._project_input = project_input
+        #: Signals this panel READS besides the one it shows -- an image's
+        #: annotation.  Asked per tick because the operator can change it;
+        #: the scheduler unions them into the plane's coherent front set, so
+        #: an annotation is frozen at the shot its picture came from.
+        self._companion_signals = companion_signals
         self._replace_host = replace_host
         self._on_presented = on_presented
         #: Puts the accepted render's pixels on screen.  The batch is the
@@ -189,7 +195,19 @@ class PlotPanelPort:
 
     # -------------------------------------------------------------- the tick
 
-    def prepare(self, value: object, publication: object) -> SurfaceUpdate | None:
+    @property
+    def front_signals(self) -> tuple[str, ...]:
+        """Every signal this panel reads from one front, shown one first."""
+
+        companions = () if self._companion_signals is None else self._companion_signals()
+        return (self._signal_name, *(str(name) for name in companions if name))
+
+    def prepare(
+        self,
+        value: object,
+        publication: object,
+        front: object,
+    ) -> SurfaceUpdate | None:
         """Hand one frozen value to the host and return the batch's handle.
 
         The host owns its own drawing worker, so the work happens off the GUI
@@ -208,7 +226,7 @@ class PlotPanelPort:
         plot_input = (
             value.snapshot
             if self._project_input is None
-            else self._project_input(value, publication)
+            else self._project_input(value, publication, front)
         )
         revision = _revision_of(plot_input)
         for serial, prepared in tuple(self._pending.items()):

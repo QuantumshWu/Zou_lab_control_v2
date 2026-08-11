@@ -265,6 +265,7 @@ class SurfacePort(Protocol):
         self,
         value: SignalValue,
         publication: SignalPublication,
+        front: SignalFront,
     ) -> SurfaceUpdate | None: ...
 
     def observe(self, update: SurfaceUpdate, operation: object) -> None: ...
@@ -351,6 +352,25 @@ class SurfaceBatchArbiter:
         return signal_name
 
     @staticmethod
+    def _front_signals(port: SurfacePort) -> tuple[str, ...]:
+        """Every signal this port must read from ONE front.
+
+        A panel shows one signal but may READ more of the same shot -- an
+        image and the judgement annotating it.  Naming them here is what
+        puts them in the plane's coherent set; a companion left out of it
+        floats at its own latest publication, which is one shot ahead of the
+        picture it is drawn on.
+        """
+
+        declared = getattr(port, "front_signals", None)
+        names = (
+            (SurfaceBatchArbiter._signal_name(port),)
+            if declared is None
+            else tuple(str(name) for name in declared if str(name))
+        )
+        return tuple(dict.fromkeys(names))
+
+    @staticmethod
     def _finish_unpresented(
         submitted: Sequence[tuple[SurfacePort, SurfaceUpdate]],
     ) -> None:
@@ -392,7 +412,7 @@ class SurfaceBatchArbiter:
         submitted: list[tuple[SurfacePort, SurfaceUpdate]] = []
         try:
             for port, value, publication in inputs:
-                update = port.prepare(value, publication)
+                update = port.prepare(value, publication, front)
                 if update is None:
                     continue
                 if not isinstance(update, SurfaceUpdate):
@@ -747,7 +767,11 @@ class BoardScheduler:
         # ahead of the panel derived from it.  The plane no-ops on an
         # unchanged set, so this scheduler is the sole declaration authority.
         ports = tuple(self._ports())
-        displayed = {SurfaceBatchArbiter._signal_name(port) for port in ports}
+        displayed = {
+            name
+            for port in ports
+            for name in SurfaceBatchArbiter._front_signals(port)
+        }
         self._plane.set_front_signals(displayed)
         front = self._plane.freeze()
         if not isinstance(front, SignalFront):

@@ -2186,10 +2186,11 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     assert binding.state.overlay_signal == status_signal
     frame = binding.frozen_data.plot_input
     assert isinstance(frame, ImageFrame), frame
-    # One row per frame of the cycle, plus the whole-picture row.
+    # One row per frame of the cycle, and NO pooled row: several frames
+    # averaged into one picture have no per-frame judgement, and inventing
+    # one would be a measurement claim nobody made.
     assert set(frame.overlay.statuses) == {
-        None,
-        *(float(value) for value in range(CAMERA_WINDOWS)),
+        float(value) for value in range(CAMERA_WINDOWS)
     }
     assert frame.overlay.point_ids == site_ids
     assert binding.frozen_data.overlay == {"overlay_signal": status_signal}

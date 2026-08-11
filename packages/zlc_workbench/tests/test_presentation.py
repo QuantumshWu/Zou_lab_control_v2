@@ -186,7 +186,8 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     plane, node, _sequencer, _monitor = live_bench
 
     signal = node.signal_key("frames")
-    value = plane.freeze().value(signal)
+    front = plane.freeze()
+    value = front.value(signal)
     assert value is not None
     publication = plane.latest_publication(signal)
     assert publication is not None
@@ -200,7 +201,7 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     other = plot.RasterPlotHost.from_plot(value.snapshot, spec)
     try:
         port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-        update = port.prepare(value, publication)
+        update = port.prepare(value, publication, front)
         assert port.can_accept(update, None)
 
         import dataclasses
@@ -242,7 +243,7 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
         update_data=lambda snapshot, **_render: Future(),
     )
     port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    update = port.prepare(value, publication)
+    update = port.prepare(value, publication, front)
     assert update is not None
 
     # Pending: the bare integer the fit event carries must resolve.
@@ -283,14 +284,14 @@ def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
         update_data=lambda snapshot, **_render: Future(),
     )
     port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    update = port.prepare(value, publication)
+    update = port.prepare(value, publication, front)
     assert update is not None
 
     # The render completed (the host holds the revision), then the whole
     # cohort was abandoned: the decision is final for this revision.
     update.future.set_result(object())
     port.finish_unpresented(update)
-    assert port.prepare(value, publication) is None
+    assert port.prepare(value, publication, front) is None
     assert port.presented_publication() is None  # pixels honestly not shown
     assert port.last_error is None
 
@@ -315,13 +316,13 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
         update_data=lambda snapshot, **_render: calls.append(snapshot) or Future(),
     )
     port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    first = port.prepare(value, publication)
+    first = port.prepare(value, publication, front)
     assert first is not None
-    assert port.prepare(value, publication) is None
+    assert port.prepare(value, publication, front) is None
     assert len(calls) == 1
 
     port.finish_unpresented(first)
-    retry = port.prepare(value, publication)
+    retry = port.prepare(value, publication, front)
     assert retry is not None
     assert len(calls) == 2
     port.finish_unpresented(retry)
@@ -330,9 +331,9 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
         RuntimeError("synchronous render rejection")
     )
     with pytest.raises(RuntimeError, match="synchronous render rejection"):
-        port.prepare(value, publication)
+        port.prepare(value, publication, front)
     host.update_data = lambda snapshot, **_render: calls.append(snapshot) or Future()
-    recovered = port.prepare(value, publication)
+    recovered = port.prepare(value, publication, front)
     assert recovered is not None
     port.finish_unpresented(recovered)
 
@@ -450,13 +451,13 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
         update_data=lambda _snapshot, **_render: Future(),
     )
     port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    update = port.prepare(value, publication)
+    update = port.prepare(value, publication, front)
     assert update is not None
 
     port.reject(update, CancelledError())
     assert port.last_error is None
 
-    retry = port.prepare(value, publication)
+    retry = port.prepare(value, publication, front)
     assert retry is not None, "the superseded update did not release its slot"
     port.reject(retry, RuntimeError("a real render failure"))
     assert isinstance(port.last_error, RuntimeError)
@@ -492,7 +493,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
         shown=value.snapshot,
         on_presented=lambda selected, _input: presented.append(selected),
     )
-    assert port.prepare(value, publication) is None
+    assert port.prepare(value, publication, front) is None
 
     snapshot = owned_snapshot_from_arrays(
         schema=value.snapshot.block.schema,
@@ -511,7 +512,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
         ),
         signals={**publication.signals, signal: live_value},
     )
-    update = port.prepare(live_value, live)
+    update = port.prepare(live_value, live, front)
     assert update is not None
 
     final_value = replace(live_value, transient=False)
@@ -520,7 +521,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
         event_ref=replace(live.event_ref, sequence=live.event_ref.sequence + 1),
         signals={**live.signals, signal: final_value},
     )
-    assert port.prepare(final_value, final) is None
+    assert port.prepare(final_value, final, front) is None
     assert calls == [snapshot], "FINAL must coalesce with the identical pending render"
 
     completion.set_result(object())
@@ -533,7 +534,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
         final,
         event_ref=replace(final.event_ref, sequence=final.event_ref.sequence + 1),
     )
-    assert port.prepare(final_value, terminal_record) is None
+    assert port.prepare(final_value, terminal_record, front) is None
     assert port.presented_publication() is terminal_record
     assert calls == [snapshot], "identity-only reanchor must not redraw pixels"
 
@@ -571,7 +572,7 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
             shown=value.snapshot,
             replace_host=replace_host,
         )
-        assert port.prepare(value, publication) is None
+        assert port.prepare(value, publication, front) is None
         restarted = replace(
             publication,
             event_ref=EventRef(
@@ -580,7 +581,7 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
                 publication.event_ref.sequence,
             ),
         )
-        assert port.prepare(value, restarted) is None
+        assert port.prepare(value, restarted, front) is None
         assert len(replacements) == 1
         assert port.host is replacements[0]
         assert port.presented_publication() is restarted
@@ -761,20 +762,15 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
             PointStatus.INVALID if not readable[index] else PointStatus.EMPTY
             for index in range(sites)
         )
-        # A standalone image is the MEAN of both frames, so it may only claim
-        # what both frames claimed: UNKNOWN wherever they disagree.
-        whole_picture = tuple(
-            PointStatus.INVALID
-            if not readable[index]
-            else PointStatus.UNKNOWN
-            if loaded[index]
-            else PointStatus.EMPTY
-            for index in range(sites)
-        )
         assert long_exposure != short_readout
         assert overlay.statuses_for(0.0) == long_exposure
         assert overlay.statuses_for(1.0) == short_readout
-        assert overlay.statuses_for(None) == whole_picture
+        # A standalone image POOLS both frames, and a pooled picture has no
+        # per-frame judgement to show.  There is deliberately no row for it:
+        # claiming one would be a measurement nobody made, and the honest
+        # "UNKNOWN wherever the frames differ" is most sites of a survival
+        # pair -- which reads as a broken readout rather than as physics.
+        assert overlay.statuses_for(None) is None
 
         judged = result.artifacts["frame_judged"]
         spec = default_spec(judged.block.schema)
@@ -819,7 +815,11 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
             size="4x4",
         )
         try:
-            assert painted(standalone._renderer, "image:points") == whole_picture
+            # The pooled picture has no frame to speak for, so every ring is
+            # drawn UNKNOWN -- the vocabulary's "no claim", not a judgement.
+            assert painted(standalone._renderer, "image:points") == (
+                (PointStatus.UNKNOWN,) * sites
+            )
         finally:
             standalone.close()
     finally:

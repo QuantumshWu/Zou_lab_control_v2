@@ -182,3 +182,8 @@ class PanelFrozenData:
     plot_input: object | None = None
     run_chain: tuple[Mapping[str, Any], ...] = ()
     overlay: Mapping[str, Any] = field(default_factory=dict)
+    #: The coherent freeze this panel was frozen FROM.  Edit shows one exact
+    #: moment, and a panel may read more than one signal of it (an image and
+    #: the judgement annotating it), so the moment -- not one publication of
+    #: it -- is what has to be kept.
+    front: object | None = None

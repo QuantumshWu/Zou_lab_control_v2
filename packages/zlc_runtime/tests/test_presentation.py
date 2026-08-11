@@ -131,6 +131,7 @@ class _Port:
         self.acceptable = True
         self.updates = []
         self.pending = []
+        self.fronts = []
         self.observed = []
         self.accepted = []
         self.rejected = []
@@ -141,7 +142,11 @@ class _Port:
     def presented_publication(self):
         return self.presented
 
-    def prepare(self, value, publication):
+    def prepare(self, value, publication, front):
+        # The front is the coherent freeze this update is drawn from; a port
+        # that reads a companion signal reads it from HERE, never from the
+        # plane's latest.
+        self.fronts.append(front)
         if self.fail_prepare:
             self.fail_prepare -= 1
             raise ValueError("synthetic prepare failure")

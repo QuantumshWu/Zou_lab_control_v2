@@ -46,13 +46,14 @@ def _site_axed(snapshot: object, name: str, sites: int) -> np.ndarray:
     return np.asarray(snapshot.block.values, dtype=bool)
 
 
-def _agreed(codes: np.ndarray) -> tuple[PointStatus, ...]:
-    """Reduce several judgements of one site to the one they all make.
+def _repeats_of(codes: np.ndarray) -> tuple[PointStatus, ...]:
+    """One frame's judgement, taken across the repeats of that same frame.
 
-    Repeats of a shot are several answers to the same question and a picture
-    that averages them can only claim what every one of them claimed;
-    UNKNOWN is this vocabulary's spelling of "the frames disagree", which is
-    exactly what a mean image of two different frames shows.
+    Repeats ARE the same question asked again, so a site they disagree about
+    has no single answer and stays UNKNOWN.  Frames are not: they are
+    different points of the pulse, and a picture that pooled them has no
+    per-frame judgement to show at all -- which is why there is no row for
+    the pooled case rather than an invented one.
     """
 
     flat = codes.reshape((-1, codes.shape[-1]))
@@ -101,10 +102,14 @@ def site_overlay(
     codes = np.where(~valid, 3, np.where(occupied, 2, 1))
     frames = tuple(outputs[_OCCUPIED].block.schema.point_table.columns[0].values)
     statuses: dict[float | None, tuple[PointStatus, ...]] = {
-        float(value): _agreed(codes[:, index])
+        float(value): _repeats_of(codes[:, index])
         for index, value in enumerate(frames)
     }
-    statuses[None] = _agreed(codes)
+    # A single frame IS the whole picture, so it also answers for a plot that
+    # shows no facet.  Several frames pooled into one image have no per-frame
+    # judgement, and claiming one would be a measurement nobody made.
+    if len(frames) == 1:
+        statuses[None] = statuses[float(frames[0])]
     return ImagePointOverlay(
         revision=revision,
         coordinates=np.asarray(site_map.centers_xy, dtype=float),
