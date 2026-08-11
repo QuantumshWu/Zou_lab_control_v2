@@ -88,6 +88,7 @@ class TaskConsoleHandle(QtCore.QObject):
         self._panel_default_interval = 0
         self._panel_sizes: tuple[str, ...] = ()
         self._panel_default_size = ""
+        self._grid_cell_kinds: tuple[str, ...] = ()
         self._task_takeover = False
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
@@ -168,6 +169,16 @@ class TaskConsoleHandle(QtCore.QObject):
         self._panel_default_size = default
         for card in self._cards.values():
             card.set_size_choices(values, default)
+
+    def set_grid_cell_kinds(self, kinds: object) -> None:
+        """Project the grid cell vocabulary to every panel's settings control."""
+
+        values = tuple(str(value) for value in tuple(kinds or ()))
+        if not values or len(set(values)) != len(values):
+            raise ValueError("grid cell kinds must be unique and non-empty")
+        self._grid_cell_kinds = values
+        for card in self._cards.values():
+            card.set_cell_kind_choices(values)
 
     def set_logic_kinds(
         self, kinds: tuple[tuple[str, str, str, str], ...]
@@ -286,6 +297,8 @@ class TaskConsoleHandle(QtCore.QObject):
                     self._panel_intervals,
                     self._panel_default_interval,
                 )
+            if self._grid_cell_kinds:
+                card.set_cell_kind_choices(self._grid_cell_kinds)
             card.set_editing_enabled(not self._task_takeover)
         self._view.set_cards(tuple(self._cards.values()))
 

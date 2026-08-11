@@ -111,6 +111,7 @@ class PanelCardView(FluentGroupBox):
         self._parameter_surface: Mapping[str, object] = {}
         self._interval_choices: tuple[int, ...] = ()
         self._size_choices: tuple[str, ...] = ()
+        self._cell_kind_choices: tuple[str, ...] = ()
         self._default_size = ""
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
@@ -237,6 +238,15 @@ class PanelCardView(FluentGroupBox):
         if not self._state_projection.get("kind"):
             self._state_projection["size"] = default
         self._apply_card_size(str(self._state_projection["size"]))
+        self._rebuild_settings_form()
+
+    def set_cell_kind_choices(self, kinds: object) -> None:
+        """Receive the grid cell vocabulary for the settings choice control."""
+
+        values = tuple(str(value) for value in tuple(kinds or ()))
+        if not values or len(set(values)) != len(values):
+            raise ValueError("grid cell kinds must be unique and non-empty")
+        self._cell_kind_choices = values
         self._rebuild_settings_form()
 
     def set_panel_state(self, state: object) -> None:
@@ -508,13 +518,23 @@ class PanelCardView(FluentGroupBox):
                 default=str(state.get("kind") or "automatic"),
             ),
         ]
-        if state.get("cell_kind"):
+        if state.get("kind") == "facet_grid" and self._cell_kind_choices:
+            # A grid's cell kind is a panel PARAMETER, not a second plot
+            # kind: empty means the data decides, a name is the operator's
+            # explicit choice.
             fields.append(
                 FormFieldProps(
                     "cell_kind",
-                    "text",
+                    "choice",
                     "Cell kind",
-                    default=str(state["cell_kind"]),
+                    default=str(state.get("cell_kind") or ""),
+                    choices=(
+                        FormChoice("automatic (from data)", ""),
+                        *(
+                            FormChoice(value, value)
+                            for value in self._cell_kind_choices
+                        ),
+                    ),
                 )
             )
         fields.extend([
@@ -604,8 +624,13 @@ class PanelCardView(FluentGroupBox):
             values["overlay_signal"] = str(
                 self._state_projection.get("overlay_signal") or ""
             )
-        if self._state_projection.get("cell_kind"):
-            values["cell_kind"] = str(self._state_projection["cell_kind"])
+        if (
+            self._state_projection.get("kind") == "facet_grid"
+            and self._cell_kind_choices
+        ):
+            values["cell_kind"] = str(
+                self._state_projection.get("cell_kind") or ""
+            )
         if self._live and self._interval_choices:
             values["interval_ms"] = int(self._state_projection["interval_ms"])
         form_keys = self._form_spec().keys
@@ -632,8 +657,6 @@ class PanelCardView(FluentGroupBox):
             self._settings_form.refresh()
             self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
             self._settings_form.widget_for("kind").setEnabled(False)
-            if "cell_kind" in self._settings_form.spec.keys:
-                self._settings_form.widget_for("cell_kind").setEnabled(False)
             for section in ("semantic", "display", "fit"):
                 key = f"{section}_unavailable"
                 if key in self._settings_form.spec.keys:
@@ -777,7 +800,6 @@ class PanelCardView(FluentGroupBox):
         name = str(key)
         if name in {
             "kind",
-            "cell_kind",
             "semantic_unavailable",
             "display_unavailable",
             "fit_unavailable",
@@ -800,7 +822,7 @@ class PanelCardView(FluentGroupBox):
                 }
             elif name == "interval_ms":
                 patch = {name: int(value)}
-            elif name in {"title", "signal", "overlay_signal", "size"}:
+            elif name in {"title", "signal", "overlay_signal", "size", "cell_kind"}:
                 patch = {name: str(value or "")}
             else:
                 return

@@ -6,9 +6,10 @@ renderers the live board offers.  Keeping that policy here prevents a
 renderer registry from silently becoming a menu definition.
 
 There is ONE naming scheme: the plot kind's own name.  A menu row is
-``image``, ``curve``, ``facet_grid (image)`` -- the standard vocabulary and
-nothing invented beside it, so what the operator picks and what the state
-stores can never be two spellings of the same thing.
+``image``, ``curve``, ``facet_grid`` -- the standard vocabulary and nothing
+invented beside it.  A FacetGrid's CELL kind is not a menu row at all: it is
+a parameter of the grid panel, chosen in the panel's settings, where empty
+means the data decides.
 """
 
 from __future__ import annotations
@@ -31,53 +32,30 @@ __all__ = [
 ]
 
 
-# What a grid cell may be.  The identity gate and the spec resolver both
-# enforce this same set; the catalog is where the vocabulary is stated.
+# What a grid cell may be.  The identity gate, the spec resolver, and the
+# panel settings control all speak this one vocabulary.
 GRID_CELL_KINDS = (PlotKind.CURVE, PlotKind.IMAGE, PlotKind.HISTOGRAM)
 
 
 @dataclass(frozen=True, slots=True)
 class TaskConsolePanelKind:
-    """One immutable panel identity selected by the combined Add control.
-
-    ``cell_kind`` is None for a FacetGrid entry whose cell the DATA decides
-    (two data axes make an image cell, one makes a curve); a named cell kind
-    is the operator's explicit choice.
-    """
+    """One immutable panel identity selected by the combined Add control."""
 
     kind: PlotKind
-    cell_kind: PlotKind | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PlotKind):
             raise TypeError("panel kind must be PlotKind")
-        if self.cell_kind is not None:
-            if self.kind is not PlotKind.FACET_GRID:
-                raise ValueError("only a FacetGrid panel has a cell kind")
-            if self.cell_kind not in GRID_CELL_KINDS:
-                raise ValueError(
-                    "a grid cell kind must be curve, image, or histogram"
-                )
 
     @property
     def key(self) -> str:
-        """The menu row's key; a chosen cell composes the two standard names."""
-
-        if self.cell_kind is None:
-            return self.kind.value
-        return f"{self.kind.value}:{self.cell_kind.value}"
+        return self.kind.value
 
     @property
     def label(self) -> str:
         """The plot kind's own name; there is no second naming scheme."""
 
-        if self.cell_kind is None:
-            return self.kind.value
-        return f"{self.kind.value} ({self.cell_kind.value})"
-
-    @property
-    def cell_key(self) -> str:
-        return "" if self.cell_kind is None else self.cell_kind.value
+        return self.kind.value
 
 
 TASK_CONSOLE_PANEL_CATALOG: tuple[TaskConsolePanelKind, ...] = (
@@ -86,10 +64,6 @@ TASK_CONSOLE_PANEL_CATALOG: tuple[TaskConsolePanelKind, ...] = (
     TaskConsolePanelKind(PlotKind.ROLLING),
     TaskConsolePanelKind(PlotKind.HISTOGRAM),
     TaskConsolePanelKind(PlotKind.FACET_GRID),
-    *(
-        TaskConsolePanelKind(PlotKind.FACET_GRID, cell)
-        for cell in GRID_CELL_KINDS
-    ),
 )
 
 _BY_KEY = {entry.key: entry for entry in TASK_CONSOLE_PANEL_CATALOG}
@@ -119,7 +93,7 @@ def task_console_panel_identity(
 
     An empty cell kind on a FacetGrid means the data decides; a named one
     must be a legal grid cell.  What a grid cell can BE is a fact of the
-    data in it, so nothing here pins a cell to the catalog entry's default.
+    data in it, so nothing here pins a cell to a catalog default.
     """
 
     definition = task_console_panel_kind(kind)
@@ -153,14 +127,13 @@ def task_console_fitting_spec(
         cell_kind.value if isinstance(cell_kind, PlotKind) else str(cell_kind)
     )
     task_console_panel_identity(definition.kind, requested_cell)
-    effective = requested_cell or definition.cell_key
     spec = fitting_panel_spec(
         schema,
         definition.kind,
-        effective if definition.kind is PlotKind.FACET_GRID else "",
+        requested_cell if definition.kind is PlotKind.FACET_GRID else "",
     )
-    if spec is not None and effective:
+    if spec is not None and requested_cell:
         actual = getattr(getattr(spec, "cell", None), "kind", None)
-        if str(getattr(actual, "value", actual)) != effective:
+        if str(getattr(actual, "value", actual)) != requested_cell:
             raise ValueError("FacetGrid resolver returned another cell kind")
     return spec

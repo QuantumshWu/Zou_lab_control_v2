@@ -866,11 +866,29 @@ assert isinstance(interval_combo, QtWidgets.QComboBox)
 assert tuple(interval_combo.itemData(index) for index in range(interval_combo.count())) == (
     100, 200, 400, 800,
 )
+# The cell kind is a grid panel PARAMETER: an enabled choice whose empty
+# entry means the data decides, emitting the same cell_kind state patch the
+# presenter accepts.
+handle.set_grid_cell_kinds(('curve', 'image', 'histogram'))
 facet_state = dict(state, kind='facet_grid', cell_kind='curve', title='Site grid')
 handle.set_panel_projection('panel-1', facet_state, surface)
+cell_combo = card._settings_form.widget_for('cell_kind')
+assert isinstance(cell_combo, QtWidgets.QComboBox)
+assert cell_combo.isEnabled()
+assert tuple(cell_combo.itemData(index) for index in range(cell_combo.count())) == (
+    '', 'curve', 'image', 'histogram',
+)
 assert card._settings_form.read_all()['cell_kind'] == 'curve'
-assert not card._settings_form.widget_for('cell_kind').isEnabled()
+cell_patches = []
+capture_cell_patch = lambda patch: cell_patches.append(dict(patch))
+card.state_changed.connect(capture_cell_patch)
+cell_combo.setCurrentIndex(cell_combo.findData('image'))
+cell_combo.activated.emit(cell_combo.currentIndex())
+card.state_changed.disconnect(capture_cell_patch)
+assert {'cell_kind': 'image'} in cell_patches
 handle.set_panel_projection('panel-1', state, surface)
+assert 'cell_kind' not in card._settings_form.spec.keys, (
+    'only a facet grid offers a cell kind')
 
 producer = {
     'node_id': 'cm', 'api_name': 'camera_measurement', 'kind': 'measurement',

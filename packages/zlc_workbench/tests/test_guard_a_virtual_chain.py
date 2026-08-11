@@ -63,7 +63,11 @@ def _one_camera_window_program():
     return compile_sequence(sequence, config["params"], config["clock_hz"])
 
 
-def _wait_terminal(host: object, *, phase: str, timeout: float = 10.0) -> object:
+def _wait_terminal(host: object, *, phase: str, timeout: float = 60.0) -> object:
+    # 60 s, not 10: the calibration report legitimately draws five multi-cell
+    # Matplotlib figures.  Measured 2026-08-11 at 4bcb70e (identical code that
+    # had passed the 10 s budget earlier the same day): the report ran ~18 s
+    # under host load, so the old budget was timing luck, not a contract.
     deadline = time.monotonic() + timeout
     observation = host.poll()
     while not observation.terminal and time.monotonic() < deadline:

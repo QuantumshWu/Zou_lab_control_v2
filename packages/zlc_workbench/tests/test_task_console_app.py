@@ -390,9 +390,6 @@ assert catalog == (
     ('Plot: rolling', ('plot', 'rolling')),
     ('Plot: histogram', ('plot', 'histogram')),
         ('Plot: facet_grid', ('plot', 'facet_grid')),
-        ('Plot: facet_grid (curve)', ('plot', 'facet_grid:curve')),
-        ('Plot: facet_grid (image)', ('plot', 'facet_grid:image')),
-        ('Plot: facet_grid (histogram)', ('plot', 'facet_grid:histogram')),
         ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
         ('Measurement: Scan', ('logic', 'scan')),
         ('Processor: Occupancy', ('logic', 'occupancy')),
@@ -400,14 +397,16 @@ assert catalog == (
 )
 facet_index = next(
     index for index in range(view._view.kind_combo.count())
-    if view._view.kind_combo.itemData(index) == ('plot', 'facet_grid:image')
+    if view._view.kind_combo.itemData(index) == ('plot', 'facet_grid')
 )
 view._view.kind_combo.setCurrentIndex(facet_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 site_grid = tuple(presenter.panels.values())[-1]
-assert site_grid.state.kind == 'facet_grid', (
-    'the composite menu key decomposes into the two standard names')
+assert site_grid.state.kind == 'facet_grid'
+assert site_grid.state.cell_kind == '', 'empty cell kind: the data decides'
+# The cell kind is a panel parameter: the settings control emits this patch.
+assert presenter.update_panel_state(site_grid.panel_id, {'cell_kind': 'image'})
 assert site_grid.state.cell_kind == 'image'
 assert site_grid.parameter_surface['display_unavailable'] == ''
 print('STOPPED_DRAFT')

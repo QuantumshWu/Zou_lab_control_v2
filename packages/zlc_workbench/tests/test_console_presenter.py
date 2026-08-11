@@ -192,6 +192,9 @@ class _ConsoleView:
     def set_panel_kinds(self, kinds, current: str = "") -> None:
         self.kinds = tuple(kinds)
 
+    def set_grid_cell_kinds(self, kinds) -> None:
+        self.grid_cell_kinds = tuple(str(value) for value in kinds)
+
     def set_panel_intervals(self, intervals, default_interval) -> None:
         self.panel_intervals = tuple(int(value) for value in intervals)
         self.panel_default_interval = int(default_interval)
@@ -599,17 +602,14 @@ def test_the_presenter_never_imports_qt() -> None:
 def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None:
     """Panel authoring is independent of whether a producer has run yet."""
 
-    # ONE naming scheme: the plot kind's own name, nothing invented beside it.
-    # A facet entry with a chosen cell composes the two standard names.
+    # ONE naming scheme: the plot kind's own name, nothing invented beside
+    # it.  The cell kind is NOT a menu row -- it is a panel parameter.
     assert presenter.view.kinds == (
         ("image", "image"),
         ("curve", "curve"),
         ("rolling", "rolling"),
         ("histogram", "histogram"),
         ("facet_grid", "facet_grid"),
-        ("facet_grid:curve", "facet_grid (curve)"),
-        ("facet_grid:image", "facet_grid (image)"),
-        ("facet_grid:histogram", "facet_grid (histogram)"),
     )
     presenter.view.add_panel_requested.emit("image")
     assert len(presenter.panels) == 1
@@ -647,8 +647,11 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     assert binding.state is original_state
 
 
-def test_facet_grid_cell_kind_is_data_decided_or_operator_chosen(presenter) -> None:
-    """A bare facet_grid lets the DATA decide its cell; a named cell is a choice."""
+def test_facet_grid_cell_kind_is_a_panel_parameter(presenter) -> None:
+    """The cell kind is chosen in panel settings; empty means the data decides."""
+
+    # The presenter projects the one cell vocabulary to the view seam.
+    assert presenter.view.grid_cell_kinds == ("curve", "image", "histogram")
 
     binding = presenter.add_selected_panel("facet_grid")
     assert binding is not None
@@ -659,7 +662,8 @@ def test_facet_grid_cell_kind_is_data_decided_or_operator_chosen(presenter) -> N
     assert "signal" in binding.parameter_surface["display_unavailable"]
     assert binding.parameter_surface["display"] == ()
 
-    # The operator may fix any legal grid cell, before or after a signal.
+    # The operator may fix any legal grid cell, before or after a signal --
+    # this is the exact patch the settings control emits.
     assert presenter.update_panel_state(
         binding.panel_id, {"cell_kind": "image"}
     ) is True
@@ -668,12 +672,11 @@ def test_facet_grid_cell_kind_is_data_decided_or_operator_chosen(presenter) -> N
         binding.panel_id, {"cell_kind": "rolling"}
     ) is False
     assert binding.state.cell_kind == "image"
-
-    # A composite menu key decomposes into the two standard names.
-    chosen = presenter.add_selected_panel("facet_grid:histogram")
-    assert chosen is not None
-    assert chosen.state.kind == "facet_grid"
-    assert chosen.state.cell_kind == "histogram"
+    # And back to automatic: the data decides again.
+    assert presenter.update_panel_state(
+        binding.panel_id, {"cell_kind": ""}
+    ) is True
+    assert binding.state.cell_kind == ""
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(

@@ -54,6 +54,7 @@ from .panel_save import (
     save_panel_figure as _save_panel_figure,
 )
 from .panel_catalog import (
+    GRID_CELL_KINDS,
     TASK_CONSOLE_PANEL_CATALOG,
     panel_kind_choices,
     task_console_panel_identity,
@@ -248,6 +249,11 @@ class ConsolePresenter:
         setter = getattr(self.view, "set_panel_kinds", None)
         if setter is not None:
             setter(kinds, self._default_panel_kind)
+        cell_setter = getattr(self.view, "set_grid_cell_kinds", None)
+        if callable(cell_setter):
+            # A FacetGrid's cell kind is a panel PARAMETER: the settings
+            # control offers this vocabulary, with empty = the data decides.
+            cell_setter(tuple(kind.value for kind in GRID_CELL_KINDS))
         logic_setter = getattr(self.view, "set_logic_kinds", None)
         if logic_setter is not None:
             logic_setter(self.logic_offer())
@@ -382,10 +388,10 @@ class ConsolePresenter:
             suffix += 1
         state = PanelState(
             signal=str(signal).strip(),
-            # The menu key may compose kind and cell ("facet_grid:image");
-            # the state stores the two standard names separately.
             kind=definition.kind.value,
-            cell_kind=definition.cell_key,
+            # Empty cell kind: the DATA decides.  The panel's settings offer
+            # the explicit choice; the Add menu never composes one.
+            cell_kind="",
             size=str(size or "2x2"),
             interval_ms=selected_interval,
             title=str(title).strip() or generated_title,
@@ -454,7 +460,7 @@ class ConsolePresenter:
         state = PanelState(
             signal=str(signal),
             kind=definition.kind.value,
-            cell_kind=definition.cell_key,
+            cell_kind="",
             size=str(size).strip() or DEFAULTS.layout.default_preset,
             interval_ms=selected_interval,
             title=str(title).strip() or str(signal),
