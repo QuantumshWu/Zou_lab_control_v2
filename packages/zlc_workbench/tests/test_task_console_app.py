@@ -395,6 +395,7 @@ assert catalog == (
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
     ('Processor: Occupancy', ('logic', 'occupancy')),
     ('Task: Calibration', ('logic', 'calibration')),
+    ('Task: Temperature', ('logic', 'temperature')),
 )
 facet_index = next(
     index for index in range(view._view.kind_combo.count())
