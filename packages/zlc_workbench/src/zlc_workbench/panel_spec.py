@@ -70,21 +70,20 @@ def fitting_panel_spec(
         spec = fitting_spec(schema, resolved)
         return None if spec is None else _dense_series_x(schema, spec)
 
+    outer_spec = fitting_spec(schema, PlotKind.FACET_GRID)
+    if outer_spec is None:
+        return None
     if cell_text:
         cell = PlotKind(cell_text)
         if cell not in _FACET_CELL_KINDS:
             raise ValueError("FacetGrid cell kind must be curve, image, or histogram")
+        cell_spec = fitting_spec(schema, cell)
+        if cell_spec is None:
+            return None
     else:
-        # An empty cell kind means the DATA decides, here and only here.  Two
-        # data axes inside one point make an image cell; anything less is a
-        # curve.  Probing "whichever does not raise" is not enough -- a curve
-        # cell ACCEPTS an image and draws it as a 2.3-million-point polyline.
-        data_axes = tuple(getattr(schema.cell_schema, "data_axes", ()))
-        cell = PlotKind.IMAGE if len(data_axes) >= 2 else PlotKind.CURVE
-    outer_spec = fitting_spec(schema, PlotKind.FACET_GRID)
-    cell_spec = fitting_spec(schema, cell)
-    if outer_spec is None or cell_spec is None:
-        return None
+        # An empty cell kind means the DATA decides -- and the facet
+        # default's own cell IS that decision, made once, in zlc_plot.
+        cell_spec = outer_spec.cell
     cell_spec = _cell_inside_one_point(schema, cell_spec)
     cell_spec = _cell_clear_of_facet(schema, outer_spec.facet, cell_spec)
     if cell_spec is None:

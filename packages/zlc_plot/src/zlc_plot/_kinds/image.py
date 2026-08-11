@@ -61,12 +61,13 @@ def default_spec(schema: Any) -> ImagePlot | None:
             AxisRef.point_dimension(str(dimensions[-2])),
             reduction=Reduction.MEAN,
         )
-    if schema.point_table.row_count > 1:
-        return None
     # By role, through the one place that decides which axes are the image.
     # This used to pick by size and position, which refused a two-window
     # bracket outright and a one-pixel-tall ROI strip from the other side --
-    # for datasets whose schema names their two spatial axes.
+    # for datasets whose schema names their two spatial axes.  Point rows
+    # beyond the image collapse under the declared reduction, the same fate
+    # every unassigned axis has: a single-axis scan of frames averages its
+    # scan points here, and shows them apart as a facet grid instead.
     pair = image_axes(schema)
     if pair is None:
         return None
