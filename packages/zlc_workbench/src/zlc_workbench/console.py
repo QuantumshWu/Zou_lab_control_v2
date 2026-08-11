@@ -963,11 +963,11 @@ class ConsolePresenter:
             "cell_kind" in changes
             and str(changes["cell_kind"]) != current.cell_kind
         ):
-            self._report(
-                f"{panel_id}: FacetGrid cell kind is fixed at Add Panel",
-                severity="warning",
-            )
-            return False
+            try:
+                task_console_panel_identity(current.kind, str(changes["cell_kind"]))
+            except ValueError as error:
+                self._report(f"{panel_id}: {error}", severity="warning")
+                return False
         if "interval_ms" in changes:
             try:
                 changes["interval_ms"] = self._panel_interval(
@@ -1056,9 +1056,20 @@ class ConsolePresenter:
                     severity="warning",
                 )
                 return True
-            if candidate.kind and self._spec_for(
-                value.snapshot, candidate.kind, candidate.cell_kind
-            ) is None:
+            fitting = (
+                self._fitting_cell_kind(
+                    value.snapshot, candidate.kind, candidate.cell_kind
+                )
+                if candidate.kind
+                else candidate.cell_kind
+            )
+            if candidate.kind and fitting is not None and fitting != candidate.cell_kind:
+                candidate = replace(candidate, cell_kind=fitting)
+                self._report(
+                    f"{panel_id} draws {fitting} cells for {candidate.signal}",
+                    severity="task",
+                )
+            if candidate.kind and fitting is None:
                 if candidate.signal != current.signal and binding.host is not None:
                     self._report(
                         f"{candidate.signal} cannot be drawn as a "
@@ -2191,11 +2202,14 @@ class ConsolePresenter:
                 if value is None:
                     missing.append(state.signal)
                     continue
-                if self._spec_for(
+                fitting = self._fitting_cell_kind(
                     value.snapshot, state.kind, state.cell_kind
-                ) is None:
+                )
+                if fitting is None:
                     incompatible.append((state.signal, state.kind))
                     continue
+                if fitting != state.cell_kind:
+                    state = replace(state, cell_kind=fitting)
                 publication = front.publication(state.signal)
                 plot_input = self._project_panel_input(
                     binding,
@@ -3614,6 +3628,33 @@ class ConsolePresenter:
         self._refresh_console_projection()
         self._report(f"{binding.node_id} started", severity="task")
         return True
+
+    def _fitting_cell_kind(self, snapshot: object, kind: str, declared: str) -> str | None:
+        """The cell kind this data can actually be drawn with, declared first.
+
+        A Site grid is authored with curve cells, but a dataset whose cells
+        are images is drawn with image cells.  Keeping the authored kind and
+        going quiet left the card BLANK with only a status-line warning --
+        the operator saw an empty panel and nothing on it saying why.  Only
+        offer what fits: probe the declared cell kind, then the others.
+        """
+
+        if kind != "facet_grid":
+            return declared if self._spec_for(snapshot, kind, declared) is not None else None
+        schema = getattr(getattr(snapshot, "block", None), "schema", None)
+        data_axes = getattr(getattr(schema, "cell_schema", None), "data_axes", ())
+        # The data says what its cells are: two data axes is an image cell.
+        # Probing "whichever does not raise" is not enough -- a curve cell
+        # ACCEPTS an image and draws it as a 2.3-million-point polyline.
+        preferred = "image" if len(tuple(data_axes)) >= 2 else (declared or "curve")
+        candidates = [preferred]
+        for name in (declared, "curve", "image", "histogram"):
+            if name and name not in candidates:
+                candidates.append(name)
+        for name in candidates:
+            if self._spec_for(snapshot, kind, name) is not None:
+                return name
+        return None
 
     def _spec_for(self, snapshot: object, kind: str, cell_kind: str = "") -> Any:
         """Whether this data can be drawn as ``kind``, as the plotting package sees it.

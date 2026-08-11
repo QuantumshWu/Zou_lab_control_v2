@@ -1628,13 +1628,20 @@ def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
 
 
 def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None:
+    """A cell kind must be something a grid cell CAN be; image now is.
+
+    The catalog's curve is a default, not a constraint -- pinning it drew a
+    scan of camera frames as million-point polylines -- so a saved board may
+    carry image cells.  What stays refused is a kind no grid cell can host.
+    """
+
     document = presenter.layout()
     document["panels"].append(
         {
             "signal": "",
             "title": "Report-only image facets",
             "kind": "facet_grid",
-            "cell_kind": "image",
+            "cell_kind": "rolling",
             "size": "4x4",
             "interval_ms": 400,
             "semantic": {},
@@ -1646,7 +1653,10 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
 
     assert presenter.apply_layout(document) is False
     assert presenter.panels == {}
-    assert any("fixed as curve" in text for _severity, text in presenter.view.status)
+    assert any(
+        "cell kind must be curve, image, or histogram" in text
+        for _severity, text in presenter.view.status
+    )
 
 
 def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(

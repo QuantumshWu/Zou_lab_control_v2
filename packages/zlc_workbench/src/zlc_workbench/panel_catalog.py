@@ -93,9 +93,19 @@ def task_console_panel_identity(
 
     definition = task_console_panel_kind(kind)
     cell_key = cell_kind.value if isinstance(cell_kind, PlotKind) else str(cell_kind)
-    if cell_key != definition.cell_key:
-        expected = definition.cell_key or "none"
-        raise ValueError(f"{definition.label} cell kind is fixed as {expected}")
+    if definition.cell_kind is None:
+        if cell_key:
+            raise ValueError(f"{definition.label} does not take a cell kind")
+        return definition
+    if not cell_key:
+        return definition
+    # The catalog's cell kind is the DEFAULT, not a constraint: what a grid
+    # cell can be is a fact of the DATA in it.  Pinning it to curve drew a
+    # scan of camera frames as nine 2.3-million-point polylines -- the blank,
+    # lagging card this replaces.
+    parsed = PlotKind(cell_key)
+    if parsed in (PlotKind.FACET_GRID, PlotKind.PULSE_TIMELINE, PlotKind.ROLLING):
+        raise ValueError(f"a grid cell cannot be a {parsed.value}")
     return definition
 
 
@@ -110,18 +120,21 @@ def task_console_fitting_spec(
         spec = fitting_panel_spec(schema)
         if spec is None:
             return None
-        definition = task_console_panel_kind(spec.kind)
-    else:
-        definition = task_console_panel_kind(kind)
-        spec = fitting_panel_spec(
-            schema, definition.kind, definition.cell_kind or ""
-        )
+        task_console_panel_kind(spec.kind)
+        return spec
+    definition = task_console_panel_kind(kind)
     requested_cell = (
         cell_kind.value if isinstance(cell_kind, PlotKind) else str(cell_kind)
     )
     task_console_panel_identity(definition.kind, requested_cell)
-    if spec is not None and definition.cell_kind is not None:
+    effective = requested_cell or definition.cell_key
+    spec = fitting_panel_spec(
+        schema,
+        definition.kind,
+        effective if definition.cell_kind is not None else "",
+    )
+    if spec is not None and definition.cell_kind is not None and effective:
         actual = getattr(getattr(spec, "cell", None), "kind", None)
-        if actual is not definition.cell_kind:
+        if str(getattr(actual, "value", actual)) != effective:
             raise ValueError("FacetGrid resolver returned another cell kind")
     return spec
