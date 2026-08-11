@@ -1,10 +1,31 @@
-"""The stepped scan engine: an ordinary pulse per point, a dataset per plan.
+"""The stepped scan engine: apply a point, capture fresh values, one dataset.
 
-Each point resolves the template with that row's values and loads a PLAIN
-pulse -- no scan table, no one-point corner -- then holds it running until the
-watched live signal has advanced past the load, and captures.  The board only
-ever does the thing it is best at; the scan lives entirely in the host and in
-the dataset's declared axes.
+Three facts shape this engine.
+
+THE SOURCE'S CADENCE IS MEASURED, NOT ASSUMED.  A watched signal is either
+board-driven (an externally triggered camera: no fire, no frames) or
+free-running (the Basler MOT monitor: it samples the world at its own pace,
+triggers or not).  Which one it is decides what "fresh" can even mean, and
+the scan finds out by OBSERVATION at its start: on a safe board a signal
+that keeps advancing free-runs, and one that falls silent is board-driven --
+that same silence also proves its pipeline has drained.
+
+FRESHNESS IS BOOKKEEPING WHERE THE BOARD DRIVES.  For a board-driven source
+each finitely fired cycle advances the watched signal exactly once and the
+board is silent in between, so the publication after a fire IS that fire's --
+exact for any pipeline depth, zero discarded frames, and immune to
+latest-only coalescing because the silence leaves nothing to coalesce.  For a
+free-running source no causal link exists; the honest gate is to skip the one
+publication that may straddle the apply (exposed partly at the old point) and
+take the next -- one frame period per point, the minimum any gate can pay
+without per-frame exposure timestamps.
+
+THE DATASET IS THE SAME OBJECT LIVE AND FINAL.  The plan's coordinates are
+known before any data, so the whole dataset is allocated at the first capture
+and every point fills its slice; unfilled cells are simply invalid.  Each
+capture publishes the growing dataset through the run's live slot -- a panel
+attaching mid-scan sees every point so far -- and the finished run publishes
+the very same arrays as the FINAL result.
 
 The dataset's axes ARE the plan's axes, carrying each port's name and unit.
 That identity is what makes a saved scan self-describing, and it is the hook
@@ -14,6 +35,8 @@ everything later hangs from: a box drawn on the plot's x axis is a range of
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -33,12 +56,30 @@ from zlc_pulse import (
     pulse_field_value,
     resolve_api_parameters,
 )
-from zlc_runtime import DatasetOutputDeclaration, FinalDatasetOutput, SignalValue
+from zlc_runtime import (
+    DatasetCoverage,
+    DatasetOutputDeclaration,
+    FinalDatasetOutput,
+    LiveDatasetOutput,
+    SignalValue,
+)
+from zlc_runtime.streams import StreamEndedEarly
 
 from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
 
 
 SCAN_OUTPUT = DatasetOutputDeclaration("scan", "scan.result")
+
+# The scan's one temporal assumption, spent once at its start: a source that
+# stays silent this long on a SAFE board is board-driven (and its pipeline has
+# drained); one that keeps arriving free-runs.  A free-running source slower
+# than this window would be misread as board-driven, so the window must exceed
+# the slowest monitor cadence on the bench.
+SOURCE_QUIET_SECONDS = 1.0
+
+# How long the scan is willing to watch a chattering source before declaring
+# it free-running.  Bounds the observation; it is not a correctness knob.
+SOURCE_OBSERVE_SECONDS = 2.5
 
 
 def _unique_domain(values: Sequence[float]) -> tuple[tuple[float, ...], tuple[int, ...]]:
@@ -54,30 +95,22 @@ def _unique_domain(values: Sequence[float]) -> tuple[tuple[float, ...], tuple[in
     return tuple(domain), tuple(indices)
 
 
-def stack_scan_result(
-    values: Sequence[SignalValue],
-    coordinates: Sequence[Sequence[float]],
+def scan_dataset_schema(
+    source_schema: DatasetSchema,
+    rows: Sequence[Sequence[float]],
     axes: Sequence[tuple[str, str]],
-    *,
-    generation: object,
-):
-    """One dataset out of the per-point captures, its axes being the plan's.
+) -> DatasetSchema:
+    """The scan dataset's schema: the plan's axes layered over the source's.
 
-    ``coordinates`` carries one row per captured value; ``axes`` carries one
-    ``(name, unit)`` per column of those rows.  The captured values' own axes
-    (repeat, source points, data axes) are preserved underneath, so a capture
-    that was itself an image stays an image at every scan point.
+    ``rows`` carries one coordinate row per capture; ``axes`` carries one
+    ``(name, unit)`` per column of those rows.  The source's own axes (repeat,
+    source points, data axes) are preserved underneath, so a capture that was
+    itself an image stays an image at every scan point.
     """
 
-    captured = tuple(values)
-    if not captured:
-        raise ValueError("the scan captured no signal values")
-    source_schema = captured[0].schema
-    if any(value.schema != source_schema for value in captured[1:]):
-        raise ValueError("the source dataset schema changed during the scan")
-    rows = tuple(tuple(float(value) for value in row) for row in coordinates)
-    if len(rows) != len(captured):
-        raise ValueError("scan coordinates and captured values differ")
+    rows = tuple(tuple(float(value) for value in row) for row in rows)
+    if not rows:
+        raise ValueError("a scan dataset needs at least one point")
     if any(len(row) != len(axes) for row in rows):
         raise ValueError("every coordinate row carries one value per axis")
 
@@ -171,24 +204,151 @@ def stack_scan_result(
         (*source_domains, *axis_domains),
         row_to_cell,
     )
-    schema = DatasetSchema(
+    return DatasetSchema(
         source_schema.repeat_axis,
         PointTable(len(rows) * source_points, tuple(point_columns)),
         topology,
         source_schema.cell_schema,
     )
-    array = np.concatenate(tuple(value.block.values for value in captured), axis=1)
-    validity = np.concatenate(
-        tuple(value.snapshot.expanded_validity() for value in captured), axis=1
-    )
-    return owned_snapshot_from_arrays(
-        schema,
-        array,
-        1,
-        validity=validity,
-        block_id="scan",
-        stream_generation=generation,
-    )
+
+
+class ScanDatasetWriter:
+    """The scan's dataset, allocated whole at the first capture, filled per point.
+
+    The plan's coordinates are the writer's from birth; the SOURCE schema
+    belongs to the watched signal and is only knowable from its first captured
+    value, so allocation happens then and every later capture must match it.
+    ``snapshot()`` freezes the current fill level -- the live front mid-scan
+    and the FINAL result at the end are this same dataset.
+    """
+
+    def __init__(
+        self,
+        rows: Sequence[Sequence[float]],
+        axes: Sequence[tuple[str, str]],
+        *,
+        generation: object,
+    ) -> None:
+        self._rows = tuple(tuple(float(value) for value in row) for row in rows)
+        if not self._rows:
+            raise ValueError("a scan writes at least one point")
+        self._axes = tuple((str(name), str(unit)) for name, unit in axes)
+        self._generation = generation
+        self._source_schema: DatasetSchema | None = None
+        self._schema: DatasetSchema | None = None
+        self._values: np.ndarray | None = None
+        self._validity: np.ndarray | None = None
+        self._source_points = 0
+        self._written = 0
+
+    @property
+    def written(self) -> int:
+        return self._written
+
+    @property
+    def total(self) -> int:
+        return len(self._rows)
+
+    def write(self, value: SignalValue) -> None:
+        if self._written >= len(self._rows):
+            raise ValueError("the scan plan is already fully written")
+        if self._schema is None:
+            self._allocate(value)
+        elif value.schema != self._source_schema:
+            raise ValueError("the source dataset schema changed during the scan")
+        start = self._written * self._source_points
+        stop = start + self._source_points
+        self._values[:, start:stop] = value.block.values
+        self._validity[:, start:stop] = value.snapshot.expanded_validity()
+        self._written += 1
+
+    def _allocate(self, value: SignalValue) -> None:
+        source_schema = value.schema
+        self._source_schema = source_schema
+        self._schema = scan_dataset_schema(source_schema, self._rows, self._axes)
+        self._source_points = source_schema.point_table.row_count
+        block_values = value.block.values
+        validity = value.snapshot.expanded_validity()
+        points = len(self._rows) * self._source_points
+        self._values = np.zeros(
+            (block_values.shape[0], points, *block_values.shape[2:]),
+            dtype=block_values.dtype,
+        )
+        self._validity = np.zeros(
+            (validity.shape[0], points, *validity.shape[2:]),
+            dtype=bool,
+        )
+
+    def snapshot(self):
+        if self._schema is None:
+            raise RuntimeError("the scan has not captured a point yet")
+        return owned_snapshot_from_arrays(
+            self._schema,
+            self._values,
+            self._written,
+            validity=self._validity,
+            block_id="scan",
+            stream_generation=self._generation,
+        )
+
+    def live_output(self) -> LiveDatasetOutput:
+        snapshot = self.snapshot()
+        repeats = snapshot.block.schema.repeat_axis.size
+        return LiveDatasetOutput(
+            SCAN_OUTPUT,
+            snapshot,
+            DatasetCoverage(
+                repeats * self._written * self._source_points,
+                repeats * len(self._rows) * self._source_points,
+            ),
+        )
+
+
+class _ScanLiveSlot:
+    """Application-owned live slot: one immutable front, replaced per capture.
+
+    The worker builds each front after a point lands; the plane freezes it
+    from whichever thread freezes.  The handoff is one reference under one
+    lock -- the front itself is immutable.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._listener = None
+        self._front: dict[str, LiveDatasetOutput] | None = None
+        self._closed = False
+
+    def set_change_listener(self, listener) -> None:
+        if not callable(listener):
+            raise TypeError("scan live slot listener must be callable")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("scan live slot is closed")
+            if self._listener is not None:
+                raise RuntimeError("scan live slot already has a change listener")
+            self._listener = listener
+
+    def publish(self, front: dict[str, LiveDatasetOutput]) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._front = dict(front)
+            listener = self._listener
+        if listener is not None:
+            listener()
+
+    def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("scan live slot is closed")
+            if self._front is None:
+                raise RuntimeError("scan live slot has no captured point")
+            return dict(self._front)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._listener = None
 
 
 class ScanMeasurement:
@@ -243,6 +403,50 @@ class ScanMeasurement:
                 return tap.next(0.1).payload
             except TimeoutError:
                 continue
+            except StreamEndedEarly:
+                raise RuntimeError(
+                    "the source signal restarted during the scan"
+                ) from None
+
+    def _source_free_runs(self, tap: object, context: object) -> bool:
+        """Measure, on a safe board, whether the watched signal drives itself.
+
+        The plane must keep being frozen while watching: a frame can STAGE
+        during the wait with nobody else freezing, and an unfrozen frame is
+        silence the tap cannot hear.
+        """
+
+        observe_until = time.monotonic() + SOURCE_OBSERVE_SECONDS
+        quiet_until = time.monotonic() + SOURCE_QUIET_SECONDS
+        while time.monotonic() < quiet_until:
+            ScanMeasurement._check_cancelled(context)
+            self.signal_plane.freeze()
+            try:
+                tap.next(0.05)
+            except TimeoutError:
+                continue
+            except StreamEndedEarly:
+                raise RuntimeError(
+                    "the source signal restarted during the scan"
+                ) from None
+            if time.monotonic() >= observe_until:
+                return True
+            quiet_until = time.monotonic() + SOURCE_QUIET_SECONDS
+        return False
+
+    def _drain_backlog(self, tap: object) -> None:
+        """Discard everything already published; the caller knows it is stale."""
+
+        while True:
+            self.signal_plane.freeze()
+            try:
+                tap.next(0.0)
+            except TimeoutError:
+                return
+            except StreamEndedEarly:
+                raise RuntimeError(
+                    "the source signal restarted during the scan"
+                ) from None
 
     def _api_values(self, row: Sequence[float]) -> dict[str, float]:
         """The COMPLETE parameter mapping this row means.
@@ -270,65 +474,84 @@ class ScanMeasurement:
 
     def execute(self, context: object):
         board = self.sequencer.describe()
-        captured: list[SignalValue] = []
-        coordinates: list[tuple[float, ...]] = []
         rows = self.plan.rows()
         samples = self.samples_per_point
-        self.sequencer.safe()
-        for index, row in enumerate(rows):
-            self._check_cancelled(context)
-            resolved = resolve_api_parameters(self.sequence, self._api_values(row))
-            if resolved.target != board.target:
-                raise ValueError("pulse target differs from the connected board")
-            program = compile_sequence(resolved, board.geometry, board.clock_hz)
-            tap = None
-            try:
-                self.sequencer.load(program, source=resolved)
-                self.sequencer.fire(forever=True)
-                baseline, tap = self.signal_plane.follow_publications(
-                    self._signal_name
-                )
-                if baseline.event_ref.generation != self._source_generation:
-                    raise RuntimeError("the source signal restarted during the scan")
-                # The first fresh value needs TWO advances: a frame already in
-                # flight when the new point loaded was rendered at the old
-                # values, and one advance only proves that stale frame landed.
-                publication = self._next_publication(tap, context)
-                for sample in range(samples):
-                    publication = self._next_publication(tap, context)
-                    value = publication.value(self._signal_name)
-                    if not isinstance(value, SignalValue):
-                        raise RuntimeError(
-                            "the source publication lost the selected signal"
-                        )
-                    captured.append(value)
-                    coordinates.append(
-                        tuple(row) + ((float(sample),) if samples > 1 else ())
-                    )
-            finally:
-                if tap is not None:
-                    tap.close()
-                self.sequencer.safe()
-            context.report_progress(
-                "Scanning",
-                current=index + 1,
-                total=len(rows),
-            )
-        self._check_cancelled(context)
+        coordinates = tuple(
+            tuple(row) + ((float(sample),) if samples > 1 else ())
+            for row in rows
+            for sample in range(samples)
+        )
         axes = [(port.label, port.unit) for port in self.ports]
         if samples > 1:
             # The sample index is the innermost axis: same point, next look.
             axes.append(("sample", ""))
-        snapshot = stack_scan_result(
-            captured,
-            coordinates,
-            axes,
-            generation=context.generation,
-        )
+        writer = ScanDatasetWriter(coordinates, axes, generation=context.generation)
+        slot = _ScanLiveSlot()
+        context.attach_live_outputs(slot)
+        self.sequencer.safe()
+        baseline, tap = self.signal_plane.follow_publications(self._signal_name)
+        if baseline.event_ref.generation != self._source_generation:
+            raise RuntimeError("the source signal restarted before the scan began")
+        try:
+            free_running = self._source_free_runs(tap, context)
+
+            def capture() -> None:
+                publication = self._next_publication(tap, context)
+                value = publication.value(self._signal_name)
+                if not isinstance(value, SignalValue):
+                    raise RuntimeError(
+                        "the source publication lost the selected signal"
+                    )
+                writer.write(value)
+                slot.publish({SCAN_OUTPUT.name: writer.live_output()})
+
+            for index, row in enumerate(rows):
+                self._check_cancelled(context)
+                resolved = resolve_api_parameters(self.sequence, self._api_values(row))
+                if resolved.target != board.target:
+                    raise ValueError("pulse target differs from the connected board")
+                program = compile_sequence(resolved, board.geometry, board.clock_hz)
+                self.sequencer.load(program, source=resolved)
+                if free_running:
+                    # Everything published before the apply is the old world.
+                    self._drain_backlog(tap)
+                    # One cycle applies the point; the board's end state holds
+                    # it while the source keeps sampling the world.
+                    self.sequencer.fire()
+                    # The straddler: the next publication may have been
+                    # exposed partly at the old point.  Skip exactly it.
+                    self._next_publication(tap, context)
+                    for _sample in range(samples):
+                        self._check_cancelled(context)
+                        capture()
+                    self.sequencer.wait_done(None)
+                else:
+                    for _sample in range(samples):
+                        self._check_cancelled(context)
+                        # One finite cycle per sample.  The pipeline is empty
+                        # here (silence proved at the start, and every earlier
+                        # cycle's publication was already consumed), so the
+                        # next publication is THIS cycle's -- exact, with zero
+                        # discarded frames.
+                        self.sequencer.fire()
+                        capture()
+                        # The frame can land before the program's tail
+                        # finishes playing; wait the tail out so the next
+                        # fire meets an idle board.
+                        self.sequencer.wait_done(None)
+                context.report_progress(
+                    "Scanning",
+                    current=index + 1,
+                    total=len(rows),
+                )
+        finally:
+            tap.close()
+            self.sequencer.safe()
         self._check_cancelled(context)
+        snapshot = writer.snapshot()
         context.publish_final(
             {
-                "scan": FinalDatasetOutput(
+                SCAN_OUTPUT.name: FinalDatasetOutput(
                     SCAN_OUTPUT,
                     snapshot,
                     {
@@ -344,4 +567,9 @@ class ScanMeasurement:
         return snapshot
 
 
-__all__ = ["SCAN_OUTPUT", "ScanMeasurement", "stack_scan_result"]
+__all__ = [
+    "SCAN_OUTPUT",
+    "ScanDatasetWriter",
+    "ScanMeasurement",
+    "scan_dataset_schema",
+]

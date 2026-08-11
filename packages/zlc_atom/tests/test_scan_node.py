@@ -149,14 +149,32 @@ def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
         )
         host = NodeHost(scan_node, plane)
         host.start()
+        scan_signal = host.signal_key("scan")
+        live_fill_levels: set[int] = set()
         deadline = time.monotonic() + 240.0
         while time.monotonic() < deadline and not host.observation.terminal:
             monitor.poll()
-            plane.freeze()
+            front = plane.freeze()
+            # A measurement publishes LIVE while it runs: a panel attaching
+            # mid-scan must see the growing dataset, not silence until the
+            # end.  This guard is red under an implementation that only
+            # publishes a FINAL result.
+            live = front.value(scan_signal)
+            if live is not None and live.coverage is not None:
+                live_fill_levels.add(live.coverage.written_cells)
             host.poll()
         observed = host.observation
         assert observed.error is None, observed.error
         assert observed.terminal
+        partial = {
+            level
+            for level in live_fill_levels
+            if 0 < level < plan.point_count
+        }
+        assert partial, (
+            "the scan never published a partially filled live dataset; "
+            f"observed fill levels: {sorted(live_fill_levels)}"
+        )
 
         frozen = plane.freeze()
         value = frozen.value(host.signal_key("scan"))
