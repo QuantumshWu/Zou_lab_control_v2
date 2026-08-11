@@ -183,10 +183,14 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     """A node may reach another PACKAGE only as an owner, or as a library.
 
     ``nodes/scan`` carries no ``logic_node.py``: it is not a node, it is what
-    the two scan nodes stand on -- the plan, the ports, the dataset, the
-    editor.  An edge into it is reuse.  An edge into another NODE is one node
-    reaching into another's science, and only one such edge exists: occupancy
-    consumes the calibration a calibration run saved.
+    the scan nodes stand on -- the plan, the ports, the dataset, the editor,
+    and the board-advanced loop, which moved there the day a second consumer
+    appeared.  An edge into it is reuse.
+
+    An edge into another NODE is one node reaching into another's science, and
+    the only kind allowed is consuming what that node SAVED: occupancy and the
+    temperature Task both read a calibration artifact through the codec
+    calibration published it under.  Neither imports its analysis.
     """
 
     nodes_root = ROOT / "src" / "zlc_atom" / "nodes"
@@ -213,11 +217,13 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
             if target_owner != source_owner and target_owner != "_framework":
                 edges.add((source_owner, target_owner))
     assert {edge for edge in edges if edge[1] in node_owners} == {
-        ("occupancy", "calibration")
+        ("occupancy", "calibration"),
+        ("temperature", "calibration"),
     }
     assert {edge for edge in edges if edge[1] not in node_owners} == {
         ("seamless_scan", "scan"),
         ("stepped_scan", "scan"),
+        ("temperature", "scan"),
     }
 
 

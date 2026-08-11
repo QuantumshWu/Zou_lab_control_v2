@@ -78,6 +78,7 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "occupancy",
         "seamless_scan",
         "stepped_scan",
+        "temperature",
     )
 
 
