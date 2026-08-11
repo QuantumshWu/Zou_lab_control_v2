@@ -668,10 +668,18 @@ class DataView:
         )
 
     def validate_image(self, x: AxisRef, y: AxisRef) -> None:
-        """Check an image projection without computing it (see validate_curve)."""
+        """Check an image projection without computing it (see validate_curve).
+
+        Unlike curve, an image does NOT require point coverage: point rows
+        beyond the two image axes pool under the declared reduction, the
+        same fate every unassigned axis has (both image kernels already
+        reduce every non-image dimension).  ``image.default_spec`` admits a
+        camera cycle's ``(repeat, frame-points, y, x)`` box on exactly that
+        promise, so the build honours it -- admits and buildable are one
+        decision, owned here.
+        """
 
         self._validate_image_shape(x, y)
-        self._validate_axis_coverage((x, y), kind="image")
 
     def _validate_image_shape(self, x: AxisRef, y: AxisRef) -> None:
         if not isinstance(x, AxisRef) or not isinstance(y, AxisRef):
@@ -1102,8 +1110,31 @@ class DataView:
             )
 
     def facet_cell_count(self, spec: FacetGridPlot) -> int:
-        """Return the facet domain size without building any cell."""
+        """Return the facet domain size without building any cell.
 
+        A DECLARED all-finite facet domain has a known size from axis-sized
+        arrays alone: repeat, point-row and data domains use every declared
+        index by construction, and a grid dimension's used indices come off
+        the topology's row-to-cell map.  Counting used to materialize
+        ``np.arange`` over every ELEMENT (~20M on a camera facet) plus full
+        flat coordinate copies just to size a declared domain; the element
+        pass remains only for the undeclared/non-finite fallback (point
+        coordinates, NaN declared coordinates).
+        """
+
+        resolved = self._resolve(spec.facet)
+        if (
+            self._samples.value.canonical.size
+            and resolved.declared_domain
+            and bool(_finite_coordinate(resolved.domain_canonical).all())
+        ):
+            if spec.facet.domain is AxisDomain.POINT_DIMENSION:
+                topology = self._schema.grid_topology
+                assert topology is not None  # _resolve proved the topology
+                assert spec.facet.axis_id is not None
+                position = topology_position(topology, spec.facet.axis_id)
+                return len({cell[position] for cell in topology.row_to_cell})
+            return int(resolved.domain_canonical.size)
         positions = self._all_positions()
         return len(self._domain(spec.facet, positions).values)
 
@@ -1335,9 +1366,10 @@ class DataView:
         the specification.
 
         The point-row domain is the one exception: it is the scan itself,
-        and a projection that references no point coordinate at all is a
-        kind mismatch (rolling and histogram are the kinds that collapse
-        the whole scan), so it stays an error rather than a pool.
+        and a curve or facet projection that references no point coordinate
+        at all is a kind mismatch (rolling and histogram collapse the whole
+        scan; image pools it under its declared reduction and skips this
+        check), so here it stays an error rather than a pool.
         """
 
         schema = self._schema

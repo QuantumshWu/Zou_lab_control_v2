@@ -594,6 +594,11 @@ class MatplotlibRenderer:
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
         self._visible_facet_count = 0
+        #: Which cell currently owns the focused image side chrome (the
+        #: distribution/colorbar axes over ``plan.facet_focus_axes``), or
+        #: None while no cell does.  A per-presentation fact, never stored
+        #: on the axes: the chrome is destroyed with its axes on unfocus.
+        self._facet_focus_chrome_index: int | None = None
         self._compose_figure()
 
     @property
@@ -780,6 +785,7 @@ class MatplotlibRenderer:
         self._home_limits.clear()
         self._requested_view_limits = None
         self._chrome_dirty_axes.clear()
+        self._facet_focus_chrome_index = None
         self._consume_facet_presentation(
             facet_index=facet_index,
             facet_focus_index=facet_focus_index,
@@ -994,13 +1000,17 @@ class MatplotlibRenderer:
                 return
             # Mirror the full-draw contract at the one collection point: a
             # full figure draw skips an INVISIBLE AXES together with
-            # everything on it.  A focused FacetGrid is the layout that
+            # everything on it, and never draws an axes that is no longer in
+            # the figure at all.  A focused FacetGrid is the layout that
             # hides axes -- collecting their artists here made every hidden
             # cell (and, through the tick loop below, its tick marks) ghost
-            # into the focused frame at the old cell boxes.
+            # into the focused frame at the old cell boxes; a REMOVED axes
+            # (the focused image side chrome dies with its focus) reports
+            # visible forever, so figure membership is part of the mirror.
             if (
                 isinstance(value, Artist)
                 and getattr(value, "axes", None) is not None
+                and id(value.axes) in axes_order
                 and value.axes.get_visible()
             ):
                 keyed(value, value.axes, value.get_zorder())
@@ -1397,6 +1407,10 @@ class MatplotlibRenderer:
         if "show_colorbar" not in state.values:
             return
         visible = bool(state["show_colorbar"])
+        if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
+            # The overview owns no colorbar surface; the parameter applies
+            # again the moment a cell is focused.
+            visible = False
         for axis in self._axes.get("colorbar", ()):
             if bool(axis.get_visible()) != visible:
                 axis.set_visible(visible)
@@ -2219,7 +2233,6 @@ class MatplotlibRenderer:
         value_label: str,
         coordinate_aspect: float | None,
     ) -> None:
-        policy = self.style.render
         axes = self._axes["image"][0] if "image" in self._axes else self.primary_axes
         source_values, source_valid = z, valid
         z, valid, extent = _image_arrays(x, y, z, valid)
@@ -2232,11 +2245,6 @@ class MatplotlibRenderer:
         if self._color_limit_candidate is not None:
             vmin = self._color_limit_candidate.value.low
             vmax = self._color_limit_candidate.value.high
-        histogram_limits, distribution_limits = self._resolve_distribution_limits(
-            key,
-            data_range,
-            (vmin, vmax),
-        )
         image, cmap = self._update_image_artist(
             axes,
             z,
@@ -2248,9 +2256,48 @@ class MatplotlibRenderer:
             square_view=coordinate_aspect is not None,
             coordinate_aspect=coordinate_aspect,
         )
-        cmap_name = str(state["colormap"])
         axes.set_xlabel(x_label)
         axes.set_ylabel(y_label)
+        self._update_image_chrome(
+            axes,
+            key,
+            z,
+            valid,
+            state,
+            data_range,
+            (vmin, vmax),
+            cmap,
+            value_label,
+        )
+
+    def _update_image_chrome(
+        self,
+        axes: Any,
+        key: str,
+        z: np.ndarray,
+        valid: np.ndarray | None,
+        state: DisplayState,
+        data_range: tuple[float, float] | None,
+        color_limits: tuple[float, float],
+        cmap: Any,
+        value_label: str,
+    ) -> None:
+        """Distribution, colorbar and spatial-tick chrome for ONE image axes.
+
+        The standalone Image kind and a focused FacetGrid image cell both
+        call this single authority, so the focused cell can never drift
+        from the standalone chrome; ``key`` namespaces the cached artists
+        (``image`` / ``facet:<i>:image``).
+        """
+
+        policy = self.style.render
+        vmin, vmax = color_limits
+        histogram_limits, distribution_limits = self._resolve_distribution_limits(
+            key,
+            data_range,
+            (vmin, vmax),
+        )
+        cmap_name = str(state["colormap"])
 
         distribution_axes = self._axes.get("distribution", [])
         if distribution_axes:
@@ -2484,9 +2531,79 @@ class MatplotlibRenderer:
                 tick_profile="rolling",
             )
 
+    #: Side-chrome artist keys the focused image cell creates under its
+    #: ``facet:<i>:image`` namespace.  Purged together with the side axes so
+    #: a later focus rebuilds them on the new axes instead of ghosting.
+    _FACET_FOCUS_CHROME_SUFFIXES = (
+        "distribution",
+        "distribution_cache",
+        "distribution:count_ceiling",
+        "distribution_data_limits",
+        "guides",
+        "colorbar",
+        "colorbar_mappable",
+        "colorbar_state",
+    )
+
+    def _sync_facet_focus_chrome(self, index: int | None) -> None:
+        """Create or destroy the focused image cell's side chrome axes.
+
+        The distribution and colorbar axes exist exactly while one image
+        cell is focused: they are facts of the presentation, not of the
+        figure, so unfocusing destroys them (and their cached artists)
+        rather than parking stale chrome behind a visibility flag.
+        """
+
+        previous = self._facet_focus_chrome_index
+        if previous == index:
+            return
+        if previous is not None:
+            key = f"facet:{previous}:image"
+            for suffix in self._FACET_FOCUS_CHROME_SUFFIXES:
+                self._artists.pop(f"{key}:{suffix}", None)
+            removed: list[Any] = []
+            for role in ("distribution", "colorbar"):
+                removed.extend(self._axes.pop(role, ()))
+            removed_ids = {id(axis) for axis in removed}
+            # Selector scenes (the color rail and its handles) cache their
+            # artists per scene kind; a scene living on a removed axes must
+            # die with it or the compose path repaints it at the dead box.
+            for kind, artists in tuple(self._selector_artists.items()):
+                if any(
+                    getattr(item, "axes", None) is not None
+                    and id(item.axes) in removed_ids
+                    for item in artists
+                ):
+                    self._remove_artists(artists)
+                    self._selector_artists.pop(kind, None)
+                    self._selector_topologies.pop(kind, None)
+            for axis in removed:
+                self._chrome_dirty_axes.discard(axis)
+                axis.remove()
+            self._background_region = None
+        if index is not None:
+            assert self.plan.facet_focus_axes is not None
+            for item in self.plan.facet_focus_axes:
+                if item.role == "image":
+                    continue
+                axis = self._figure.add_axes(item.box.matplotlib_bounds())
+                axis.set_gid(item.role)
+                self._axes.setdefault(item.role, []).append(axis)
+            self._background_region = None
+        self._facet_focus_chrome_index = index
+
     def _position_facet_axes_for_frame(self, axes: Sequence[Any]) -> None:
         """Apply final cell boxes before artists resolve pixel-dependent work."""
 
+        focus_plans = (
+            self.plan.facet_focus_axes
+            if self._facet_focus_index is not None
+            and isinstance(self.spec.cell, ImagePlot)
+            else None
+        )
+        self._sync_facet_focus_chrome(
+            self._facet_focus_index if focus_plans is not None else None
+        )
         if self._facet_focus_index is None:
             for index, axis in enumerate(axes):
                 bounds = self.plan.axes[index].box.matplotlib_bounds()
@@ -2499,13 +2616,20 @@ class MatplotlibRenderer:
                     axis.set_visible(visible)
             return
         selected_index = self._facet_focus_index
-        bounds = facet_focus_box(self.plan).matplotlib_bounds()
+        if focus_plans is not None:
+            # A focused image cell IS the standalone Image surface: the cell
+            # takes the split's image box, the side axes carry its chrome.
+            bounds = next(
+                item.box for item in focus_plans if item.role == "image"
+            ).matplotlib_bounds()
+        else:
+            bounds = facet_focus_box(self.plan).matplotlib_bounds()
         for index, axis in enumerate(axes):
             axis.set_visible(index == selected_index)
         axes[selected_index].set_position(bounds)
 
     def _update_facets(self, payload: Any, state: DisplayState) -> None:
-        from matplotlib.ticker import FixedLocator, MaxNLocator, ScalarFormatter
+        from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
         cells = tuple(getattr(payload, "cells", ()))
         axes = self._axes.get("facet_cell", [])
@@ -2672,16 +2796,22 @@ class MatplotlibRenderer:
                     raise RuntimeError("focused facet image was not prepared")
                 values, valid, extent = prepared_image
                 key = f"facet:{index}:image"
+                cell_data_range = _image_data_range(values, valid)
                 cell_image_limits = (
                     self._resolve_image_limits(
                         key,
-                        _image_data_range(values, valid),
+                        cell_data_range,
                         state,
                     )
                     if focused
                     else image_limits
                 )
-                self._update_image_artist(
+                if focused and self._color_limit_candidate is not None:
+                    cell_image_limits = (
+                        self._color_limit_candidate.value.low,
+                        self._color_limit_candidate.value.high,
+                    )
+                _cell_image, cell_cmap = self._update_image_artist(
                     axis,
                     values,
                     valid,
@@ -2695,6 +2825,34 @@ class MatplotlibRenderer:
                         cell_payload.y,
                     ),
                 )
+                if focused:
+                    # The focused cell IS the standalone Image surface: one
+                    # chrome authority paints its distribution, colorbar and
+                    # value label under the cell's key namespace.
+                    labels = self.spec.labels
+                    explicit_value = _state_label(
+                        state,
+                        "value_label",
+                        labels.value if labels and labels.value else None,
+                    )
+                    self._update_image_chrome(
+                        axis,
+                        key,
+                        values,
+                        valid,
+                        state,
+                        cell_data_range,
+                        cell_image_limits,
+                        cell_cmap,
+                        (
+                            explicit_value
+                            if explicit_value
+                            and _EXPLICIT_UNIT_SUFFIX.search(explicit_value)
+                            else _quantity_label(
+                                cell_payload.z, "value", explicit_value
+                            )
+                        ),
+                    )
                 cell_labels = getattr(self.spec.cell, "labels", None)
                 explicit_x = _state_label(
                     state,
@@ -2748,51 +2906,34 @@ class MatplotlibRenderer:
                 length=2,
             )
             row, column = divmod(index, columns)
-            # Locator installs reset the axis' tick artists, so each branch
-            # runs only when its configuration actually changed; a reset tick
-            # is unpositioned until the next full Axis draw.
-            if column:
-                y_signature = ("facet-y-empty",)
-                if getattr(axis.yaxis, "_zlc_tick_signature", None) != y_signature:
-                    axis.set_yticks([])
-                    axis.yaxis._zlc_tick_signature = y_signature
-            else:
-                y_signature = ("facet-y-major",)
-                if getattr(axis.yaxis, "_zlc_tick_signature", None) != y_signature:
-                    axis.yaxis.set_major_locator(
-                        MaxNLocator(nbins=3, prune="both")
-                    )
-                    axis.yaxis.set_major_formatter(ScalarFormatter())
-                    axis.tick_params(axis="y", labelleft=True)
-                    axis.yaxis._zlc_tick_signature = y_signature
-            if row < rows - 1 and index + columns < len(cells):
-                x_signature = ("facet-x-empty",)
-                if getattr(axis.xaxis, "_zlc_tick_signature", None) != x_signature:
-                    axis.set_xticks([])
-                    axis.xaxis._zlc_tick_signature = x_signature
-            else:
-                low, high = axis.get_xlim()
-                interior = tuple(
-                    value
-                    for value in MaxNLocator(nbins=4).tick_values(low, high)
-                    if min(low, high) < value < max(low, high)
-                )
-                picked = (
-                    (
-                        min(
-                            interior,
-                            key=lambda value: abs(value - (low + high) / 2.0),
-                        ),
-                    )
-                    if interior
-                    else ()
-                )
-                x_signature = ("facet-x-fixed", picked)
-                if getattr(axis.xaxis, "_zlc_tick_signature", None) != x_signature:
-                    axis.xaxis.set_major_locator(FixedLocator(picked))
-                    axis.xaxis.set_major_formatter(ScalarFormatter())
-                    axis.tick_params(axis="x", labelbottom=True)
-                    axis.xaxis._zlc_tick_signature = x_signature
+            if focused:
+                # The focused cell's ticks belong to the standalone-kind
+                # policy applied below; installing the overview locators in
+                # between would reset the tick artists twice per frame.
+                continue
+            # EVERY cell carries the SAME tick marks (one shared locator and
+            # formatter on both axes); only tick LABELS are boundary-gated,
+            # so the cells read against one coordinate frame while the grid
+            # interior stays uncluttered.  Locator installs reset the axis'
+            # tick artists, so each branch runs only when its configuration
+            # actually changed (a reset tick is unpositioned until the next
+            # full Axis draw) -- and the label flag is PART of the signature,
+            # so a cell whose boundary classification changes as a live grid
+            # grows re-fires its label gating.
+            label_left = column == 0
+            label_bottom = row == rows - 1 or index + columns >= len(cells)
+            y_signature = ("facet-y-major", label_left)
+            if getattr(axis.yaxis, "_zlc_tick_signature", None) != y_signature:
+                axis.yaxis.set_major_locator(MaxNLocator(nbins=3, prune="both"))
+                axis.yaxis.set_major_formatter(ScalarFormatter())
+                axis.tick_params(axis="y", labelleft=label_left)
+                axis.yaxis._zlc_tick_signature = y_signature
+            x_signature = ("facet-x-major", label_bottom)
+            if getattr(axis.xaxis, "_zlc_tick_signature", None) != x_signature:
+                axis.xaxis.set_major_locator(MaxNLocator(nbins=3, prune="both"))
+                axis.xaxis.set_major_formatter(ScalarFormatter())
+                axis.tick_params(axis="x", labelbottom=label_bottom)
+                axis.xaxis._zlc_tick_signature = x_signature
 
         outer_labels = (("x", outer_x, 0.5, 0.012, 0.0), ("y", outer_y, 0.008, 0.5, 90.0))
         for name, value, x_pos, y_pos, rotation in outer_labels:
@@ -2830,7 +2971,17 @@ class MatplotlibRenderer:
             fontsize=self.style.fonts.figure_title_pt,
             pad=self.style.render.compact_axes_title_pad_pt,
         )
-        apply_smart_ticks(selected)
+        if isinstance(self.spec.cell, ImagePlot):
+            # The chrome authority already applied the standalone image
+            # kind's spatial tick budget; restating it keeps the signature
+            # stable instead of re-installing default-budget locators.
+            apply_smart_ticks(
+                selected,
+                max_ticks_x=self.style.render.image_spatial_max_ticks,
+                max_ticks_y=self.style.render.image_spatial_max_ticks,
+            )
+        else:
+            apply_smart_ticks(selected)
         selected.tick_params(
             axis="both",
             labelsize=self.style.fonts.tick_pt,
@@ -3047,7 +3198,10 @@ class MatplotlibRenderer:
                 )
                 self._artists["figure:title"] = title_artist
             title_artist.set_text(title)
-            title_artist.set_visible(self._facet_focus_index is None and bool(title))
+            # The authored figure title stays up in BOTH presentations: the
+            # focused cell shows its cell-value title alongside it, exactly
+            # like a standalone plot shows its own title.
+            title_artist.set_visible(bool(title))
         else:
             owner = self.primary_axes
             owner.set_title(

@@ -738,6 +738,20 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return False
             gesture_front = self._gesture_front
             gesture_axes = self._gesture_axes
+            if (
+                gesture_front is not None
+                and front.interaction.facet_focus_index
+                != gesture_front.interaction.facet_focus_index
+            ):
+                # A focus transition REPLACES the interactive surface while
+                # the double-click that requested it is still in flight: the
+                # axes the press captured are gone by design -- that is what
+                # the layout change means -- so the focused front supersedes
+                # the gesture's expectation instead of being dropped for
+                # mismatching it.  On static data no further front would
+                # ever arrive to break the deadlock.
+                self._clear_interaction()
+                return self._promote_front(front)
             if gesture_front is not None and gesture_axes is not None:
                 surface_compatible = (
                     front.identity.kind == gesture_front.identity.kind

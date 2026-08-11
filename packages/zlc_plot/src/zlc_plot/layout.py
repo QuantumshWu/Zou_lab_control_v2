@@ -376,6 +376,12 @@ class SurfacePlan:
     facet_shape: tuple[int, int] | None
     recommended_preset: str | None
     facet_typography: FacetTypographyPlan | None
+    #: FacetGrid only: the focused-cell geometry, resolved through the SAME
+    #: image split the standalone Image kind gets -- (image, distribution,
+    #: colorbar) AxesPlans over the overview's full data region.  The
+    #: renderer uses it when the focused cell is an image so the focused
+    #: view carries the standalone kind's complete chrome.
+    facet_focus_axes: tuple[AxesPlan, ...] | None
     rolling_side_distribution: bool
 
     def __post_init__(self) -> None:
@@ -399,6 +405,13 @@ class SurfacePlan:
         if not axes or any(not isinstance(item, AxesPlan) for item in axes):
             raise ValueError("surface must contain AxesPlan values")
         object.__setattr__(self, "axes", axes)
+        if self.facet_focus_axes is not None:
+            focus_axes = tuple(self.facet_focus_axes)
+            if not focus_axes or any(
+                not isinstance(item, AxesPlan) for item in focus_axes
+            ):
+                raise ValueError("facet_focus_axes must contain AxesPlan values")
+            object.__setattr__(self, "facet_focus_axes", focus_axes)
         if not isinstance(self.rolling_side_distribution, bool):
             raise TypeError("rolling_side_distribution must be bool")
 
@@ -490,14 +503,10 @@ def facet_image_cell_aspect(x_count: int, y_count: int) -> float:
     return x_size / y_size
 
 
-def facet_focus_box(plan: SurfacePlan) -> NormalizedBox:
-    """Return the full data region occupied by a FacetGrid overview."""
+def _facet_cells_union(axes: tuple[AxesPlan, ...]) -> NormalizedBox:
+    """The full data region occupied by a FacetGrid overview's cells."""
 
-    if not isinstance(plan, SurfacePlan):
-        raise TypeError("plan must be SurfacePlan")
-    if plan.kind != "facet_grid":
-        raise TypeError("facet focus geometry requires a FacetGrid surface")
-    boxes = tuple(item.box for item in plan.axes if item.role == "facet_cell")
+    boxes = tuple(item.box for item in axes if item.role == "facet_cell")
     if not boxes:
         raise ValueError("FacetGrid surface has no cell geometry")
     return NormalizedBox(
@@ -506,6 +515,16 @@ def facet_focus_box(plan: SurfacePlan) -> NormalizedBox:
         max(box.right for box in boxes),
         max(box.bottom for box in boxes),
     )
+
+
+def facet_focus_box(plan: SurfacePlan) -> NormalizedBox:
+    """Return the full data region occupied by a FacetGrid overview."""
+
+    if not isinstance(plan, SurfacePlan):
+        raise TypeError("plan must be SurfacePlan")
+    if plan.kind != "facet_grid":
+        raise TypeError("facet focus geometry requires a FacetGrid surface")
+    return _facet_cells_union(plan.axes)
 
 
 def recommended_facet_preset(
@@ -768,6 +787,7 @@ def resolve_surface(
     typography = None
     shape = None
     show_distribution = False
+    facet_focus_axes = None
     if canonical_kind == "image":
         axes = _split_image(data, layout.image_split)
     elif canonical_kind == "rolling":
@@ -814,6 +834,11 @@ def resolve_surface(
             row_gap,
             column_gap,
         )
+        # A focused image cell is the standalone Image kind's surface: the
+        # SAME _split_image split, applied over the overview's data region.
+        facet_focus_axes = _split_image(
+            _facet_cells_union(axes), layout.image_split
+        )
     else:
         axes = (AxesPlan("main", data),)
     return SurfacePlan(
@@ -831,6 +856,7 @@ def resolve_surface(
         facet_shape=shape,
         recommended_preset=recommended_name,
         facet_typography=typography,
+        facet_focus_axes=facet_focus_axes,
         rolling_side_distribution=show_distribution,
     )
 

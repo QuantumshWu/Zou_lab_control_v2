@@ -462,7 +462,6 @@ def _image_parameters(
     style: PlotStyleConfig,
     *,
     default_interpolation: str,
-    include_colorbar: bool = True,
 ) -> tuple[ParameterSpec[object], ...]:
     policy = style.render
     entries: list[ParameterSpec[object]] = [
@@ -512,16 +511,15 @@ def _image_parameters(
             choices=policy.image_interpolations,
         ),
     ]
-    if include_colorbar:
-        entries.append(
-            ParameterSpec(
-                "show_colorbar",
-                bool,
-                RenderEffect.CHROME,
-                default=True,
-                label="Colorbar",
-            )
+    entries.append(
+        ParameterSpec(
+            "show_colorbar",
+            bool,
+            RenderEffect.CHROME,
+            default=True,
+            label="Colorbar",
         )
+    )
     return tuple(entries)
 
 
@@ -631,6 +629,10 @@ def _parameter_schema_for_context(
     if semantic_kind is PlotKind.HISTOGRAM:
         entries.extend(_histogram_parameters())
     if semantic_kind is PlotKind.IMAGE:
+        # A FacetGrid whose cell is an image carries the FULL image surface:
+        # the focused cell is the standalone Image kind, so its parameters
+        # (colorbar included) must exist here too.  The overview keeps the
+        # colorbar hidden through the renderer's visibility mechanism.
         entries.extend(
             _image_parameters(
                 style,
@@ -639,7 +641,6 @@ def _parameter_schema_for_context(
                     if kind is PlotKind.FACET_GRID
                     else style.render.image_default_interpolation
                 ),
-                include_colorbar=kind is not PlotKind.FACET_GRID,
             )
         )
     if kind is PlotKind.ROLLING:
@@ -666,7 +667,7 @@ def _parameter_schema_for_context(
                 ),
             )
         )
-    if kind is PlotKind.IMAGE:
+    if semantic_kind is PlotKind.IMAGE:
         entries.append(
             ParameterSpec(
                 "show_point_labels",

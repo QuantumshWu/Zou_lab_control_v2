@@ -4,8 +4,14 @@ from time import perf_counter
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession, RollingPlot
+from data_factory import (
+    Axis,
+    DatasetSchema,
+    DatasetSnapshot,
+    PointTable,
+    PointTopology,
+)
+from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, ImagePlot, PlotSession, RollingPlot
 from zlc_plot.data_view import DataView
 
 
@@ -74,6 +80,64 @@ def test_replace_spec_and_rolling_projection_have_bounded_cost() -> None:
         assert elapsed < MAX_ROLLING_20_FRAME_SECONDS, elapsed
     finally:
         rolling.close()
+
+
+def test_facet_cell_count_never_materializes_a_declared_domain(monkeypatch) -> None:
+    """Counting a DECLARED facet domain reads axis-sized arrays only.
+
+    ``facet_cell_count`` used to build ``np.arange`` over every ELEMENT
+    (about 20 million for one 9x1200x1920 camera facet) plus full flat
+    coordinate copies just to COUNT a declared domain -- measured as 2.63 s
+    of a 3.1 s semantic sweep.  The declared paths must answer without one
+    element pass; only the undeclared point-coordinate fallback may still
+    walk elements.
+    """
+
+    bias = [float(v) for v in range(9)]
+    table = PointTable.from_columns({"bias": bias})
+    topology = PointTopology.from_cartesian(
+        (Axis.create("bias", values=bias),), point_table=table
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=3),
+        table,
+        data_axes=(
+            Axis.create("sy", values=tuple(float(v) for v in range(120))),
+            Axis.create("sx", values=tuple(float(v) for v in range(160))),
+        ),
+        point_topology=topology,
+        dtype=np.uint8,
+        generation="facet-count-guard",
+    )
+    values = np.zeros((3, 9, 120, 160), dtype=np.uint8)
+    view = DataView(DatasetSnapshot(schema, values, revision=0))
+    cell = ImagePlot(AxisRef.data("sx"), AxisRef.data("sy"))
+
+    element_passes: list[object] = []
+    original = DataView._all_positions
+
+    def spy(self):
+        element_passes.append(True)
+        return original(self)
+
+    # DataView instances are slotted; spy at the class seam instead.
+    monkeypatch.setattr(DataView, "_all_positions", spy)
+
+    assert view.facet_cell_count(
+        FacetGridPlot(AxisRef.point_dimension("bias"), cell)
+    ) == 9
+    assert view.facet_cell_count(FacetGridPlot(AxisRef.repeat(), cell)) == 3
+    curve_cell = CurvePlot(AxisRef.point_dimension("bias"))
+    assert (
+        view.facet_cell_count(FacetGridPlot(AxisRef.data("sy"), curve_cell))
+        == 120
+    )
+    assert element_passes == []
+
+    # The undeclared point-coordinate fallback keeps the exact generic
+    # count -- and is the only path allowed to walk elements.
+    assert view.facet_cell_count(FacetGridPlot(AxisRef.point("bias"), cell)) == 9
+    assert element_passes
 
 
 def test_flat_planes_materialize_lazily_and_exactly_once() -> None:

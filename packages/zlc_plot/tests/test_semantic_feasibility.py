@@ -268,14 +268,30 @@ def test_semantic_probe_never_builds_a_payload(monkeypatch) -> None:
         session.close()
 
 
-def test_semantic_probe_key_tracks_size_and_cache_is_bounded(monkeypatch) -> None:
+def test_semantic_probe_cache_survives_display_and_size_edits(monkeypatch) -> None:
+    """The expensive validation is a function of (generation, spec pair) ONLY.
+
+    The cache used to key on the display revision, every state value, the
+    viewport, the size and the DPR, so EVERY display-parameter edit
+    invalidated everything and a describe re-paid the full validation
+    sweep (measured 3.18 s on a big camera facet).  The size/DPR-dependent
+    facet layout gate is evaluated per call from the cached cell count
+    instead of being folded into the key, so neither a display edit nor a
+    size change may trigger one further ``_validate_candidate_spec`` call.
+    """
+
     from zlc_plot.session import _SEMANTIC_PROBE_CACHE_MAX
 
     session = PlotSession(
         _grid_snapshot(),
-        CurvePlot(AxisRef.point_dimension("col")),
+        FacetGridPlot(
+            AxisRef.point_dimension("row"),
+            CurvePlot(AxisRef.point_dimension("col")),
+        ),
     )
     try:
+        session.describe_semantics()  # populates the probe cache
+
         calls: list[object] = []
         original = session._validate_candidate_spec
 
@@ -284,11 +300,10 @@ def test_semantic_probe_key_tracks_size_and_cache_is_bounded(monkeypatch) -> Non
             return original(candidate)
 
         monkeypatch.setattr(session, "_validate_candidate_spec", spy)
-        candidate = AxisRef.repeat()
-        session._semantic_feasibility("group", candidate)
-        first_count = len(calls)
-        session._semantic_feasibility("group", candidate)
-        assert len(calls) == first_count
+
+        session.set_parameter("show_grid", True)
+        session.describe_semantics()
+        assert calls == [], "a display edit re-paid the validation sweep"
 
         selected_size = next(
             name
@@ -296,8 +311,8 @@ def test_semantic_probe_key_tracks_size_and_cache_is_bounded(monkeypatch) -> Non
             if name != session.surface_plan.preset
         )
         session.set_size(selected_size)
-        session._semantic_feasibility("group", candidate)
-        assert len(calls) == first_count + 1
+        session.describe_semantics()
+        assert calls == [], "a size change re-paid the validation sweep"
         assert len(session._semantic_probe_cache) <= _SEMANTIC_PROBE_CACHE_MAX
     finally:
         session.close()

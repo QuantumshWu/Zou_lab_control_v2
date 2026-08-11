@@ -93,6 +93,102 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         host.close(timeout=10)
 
 
+@pytest.mark.gui
+def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
+    """The focus-rendered front supersedes the in-flight gesture's surface.
+
+    ``_install_front`` used to drop the focused front because the layout
+    change replaced the axes the double-click press had captured
+    (``replacement_axes != gesture_axes``) -- and on STATIC data no later
+    front ever arrived, so the session focused while the widget kept the
+    overview pixels forever.  A front whose facet focus differs from the
+    gesture front's is the focus transition itself and must repaint.
+    """
+
+    try:
+        app = ensure_qt5_application([])
+        from PyQt5.QtCore import QPoint, Qt
+        from PyQt5.QtTest import QTest
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    from zlc_data import SPATIAL_X, SPATIAL_Y
+    from data_factory import PointTopology
+    from zlc_plot import ImagePlot
+
+    table = PointTable.from_columns({"bias": [-1.0, 0.0, 1.0]})
+    topology = PointTopology.from_cartesian(
+        (Axis.create("bias", values=[-1.0, 0.0, 1.0]),), point_table=table
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        table,
+        data_axes=(
+            Axis.create(
+                "sy", values=tuple(float(v) for v in range(40)), role=SPATIAL_Y
+            ),
+            Axis.create(
+                "sx", values=tuple(float(v) for v in range(60)), role=SPATIAL_X
+            ),
+        ),
+        point_topology=topology,
+        dtype=np.float64,
+        generation="qt-focus-test",
+    )
+    frame = np.add.outer(np.arange(40.0), np.arange(60.0))
+    values = np.stack([frame + 50.0 * index for index in range(3)])[None]
+    host = RasterPlotHost.from_plot(
+        DatasetSnapshot(schema, values, 1),
+        FacetGridPlot(
+            AxisRef.point_dimension("bias"),
+            ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+        ),
+        size="4x4",
+    )
+    widget = None
+    try:
+        widget = Qt5PlotWidget(host)
+        widget.show()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and widget.presented_front is None:
+            app.processEvents()
+            time.sleep(0.005)
+        overview = widget.presented_front
+        assert overview is not None
+        assert overview.interaction.facet_focus_index is None
+        overview_pixels = overview.buffer.pixels
+
+        cell = next(
+            item
+            for item in overview.interaction.axes
+            if item.role == "facet_cell" and item.cell_index == 1
+        )
+        left, top, right, bottom = cell.bounds
+        target = QPoint(
+            int((left + right) / 2.0 * widget.width()),
+            int((top + bottom) / 2.0 * widget.height()),
+        )
+        QTest.mouseDClick(widget, Qt.LeftButton, pos=target)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            app.processEvents()
+            current = widget.presented_front
+            if (
+                current is not None
+                and current.interaction.facet_focus_index == 1
+            ):
+                break
+            time.sleep(0.01)
+        current = widget.presented_front
+        assert current is not None
+        assert current.interaction.facet_focus_index == 1
+        assert current.buffer.pixels != overview_pixels
+    finally:
+        if widget is not None:
+            widget.close_adapter()
+        host.close(timeout=10)
+
+
 def test_qt_raster_host_accepts_facet_grid_spec() -> None:
     spec = facet_spec()
     assert isinstance(spec, FacetGridPlot)
