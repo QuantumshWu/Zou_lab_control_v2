@@ -137,7 +137,9 @@ def stack_scan_result(
                 tuple(
                     row[index] for row in rows for _point in range(source_points)
                 ),
-                unit=str(unit),
+                # None is how a dataset spells "no unit"; the plot treats it
+                # the same way.  An empty string is neither layer's spelling.
+                unit=str(unit) if unit else None,
             )
         )
     scan_cells = tuple(

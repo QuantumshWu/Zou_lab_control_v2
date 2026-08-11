@@ -328,10 +328,15 @@ class SimulationWorld:
             field_x = (self._dac_values["da_bias_x"] - optimum["da_bias_x"]) * scale
             field_y = (self._dac_values["da_bias_y"] - optimum["da_bias_y"]) * scale
             field_z = (self._dac_values["da_bias_z"] - optimum["da_bias_z"]) * scale
-            center_x = 0.5 * (width - 1) + 0.2 * width * field_x
-            center_y = 0.5 * (height - 1) + 0.2 * height * field_y
             sigma_x = 40.0 / 2.354820045
             sigma_y = 20.0 / 2.354820045
+            # A bias field moves the quadrupole zero only a LITTLE: the spot
+            # walks within its own size (one sigma per unit net field, so at
+            # the full DAC range it stays inside its own FWHM), and the main
+            # effect of an uncompensated field is fewer atoms -- the exp() on
+            # the peak below, not the position.
+            center_x = 0.5 * (width - 1) + sigma_x * field_x
+            center_y = 0.5 * (height - 1) + sigma_y * field_y
             x_axis, y_axis = self._mot_axes(height, width)
             counts = self.rng.standard_normal((height, width), dtype=np.float32)
             counts *= 1.5

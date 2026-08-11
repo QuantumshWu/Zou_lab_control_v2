@@ -62,11 +62,17 @@ def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     for column in api_parameter_columns_for(sequence):
         lo = float(column.limit_lo if column.limit_lo is not None else column.lo)
         hi = float(column.limit_hi if column.limit_hi is not None else column.hi)
+        # The port's unit becomes the dataset axis's unit, and an axis unit is
+        # something the plot's registry RESOLVES -- "s", "ms", "" -- not a
+        # phrase.  A DAC code is a dimensionless count; the scan column's
+        # "DAC code (0 = 0 V)" is the editor's label for the same fact, and
+        # carrying it as the unit broke the first plot ever drawn over a scan
+        # ("raster plot host failed to start: unknown unit ...").
         ports.append(
             ScanPort(
                 PULSE_PARAM_FAMILY + str(column.name),
                 str(column.name),
-                str(column.unit),
+                "" if column.is_dac else str(column.unit),
                 lo,
                 hi,
             )

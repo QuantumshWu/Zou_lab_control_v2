@@ -196,20 +196,34 @@ def test_mot_follows_the_net_field_and_is_best_at_the_planted_optimum() -> None:
     assert centroid_x(at_optimum) == pytest.approx((320 - 1) * 0.5, abs=0.5)
     assert centroid_y(at_optimum) == pytest.approx((200 - 1) * 0.5, abs=0.5)
 
+    # A bias field walks the spot only within its OWN size -- the quadrupole
+    # zero moves a little -- while the main effect is fewer atoms.  Half the
+    # DAC range is half a sigma-ish of walk, never a spot-width of it.
+    fwhm_x, fwhm_y = 40.0, 20.0
     shifted = frames(5, da_x=opt_x, da_y=opt_y + 256, da_z=opt_z)
-    assert centroid_y(shifted) - centroid_y(at_optimum) > 10.0
-    assert float(np.sum(shifted)) < float(np.sum(at_optimum))
+    walk_y = centroid_y(shifted) - centroid_y(at_optimum)
+    assert 1.5 < walk_y < fwhm_y, walk_y
+    assert float(np.sum(shifted)) < float(np.sum(at_optimum)), (
+        "brightness, not position, is the MAIN effect of a field"
+    )
 
     shifted = frames(5, da_x=opt_x + 256, da_y=opt_y, da_z=opt_z)
-    assert centroid_x(shifted) - centroid_x(at_optimum) > 20.0
+    walk_x = centroid_x(shifted) - centroid_x(at_optimum)
+    assert 3.0 < walk_x < fwhm_x, walk_x
+    assert float(np.sum(shifted)) < float(np.sum(at_optimum))
+
+    # Even the FULL range keeps the spot inside its own feature size.
+    extreme = frames(5, da_x=511, da_y=opt_y, da_z=opt_z)
+    assert abs(centroid_x(extreme) - centroid_x(at_optimum)) < fwhm_x
 
     defocused = frames(5, da_x=opt_x, da_y=opt_y, da_z=opt_z + 256)
     assert float(np.sum(defocused)) < float(np.sum(at_optimum))
 
-    # Nothing compensated: the state an optimisation starts from.
+    # Nothing compensated: the state an optimisation starts from -- dimmer,
+    # and nudged off centre by a couple of pixels at most.
     uncompensated = frames(5, da_x=0, da_y=0, da_z=0)
     assert float(np.sum(uncompensated)) < float(np.sum(at_optimum))
-    assert abs(centroid_x(uncompensated) - centroid_x(at_optimum)) > 5.0
+    assert 1.0 < abs(centroid_x(uncompensated) - centroid_x(at_optimum)) < fwhm_x
 
 
 
