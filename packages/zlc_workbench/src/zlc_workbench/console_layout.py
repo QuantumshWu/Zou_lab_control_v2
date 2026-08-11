@@ -27,7 +27,7 @@ from .logic import (
 from .panel_state import PanelState
 
 
-LAYOUT_FORMAT = "zlc.console-board/v5"
+LAYOUT_FORMAT = "zlc.console-board/v6"
 
 
 class LayoutError(ValueError):
@@ -42,6 +42,9 @@ class LogicLayoutEntry:
     source_signal: str
     device_keys: Mapping[str, str]
     artifact_inputs: Mapping[str, str]
+    #: Whether Start opens this node's declared preview.  Part of the board an
+    #: operator arranged, like the panels themselves -- not of the measurement.
+    auto_preview: bool = True
 
     def __post_init__(self) -> None:
         node_id = str(self.node_id).strip()
@@ -63,6 +66,7 @@ class LogicLayoutEntry:
         ):
             raise LayoutError("artifact input names and paths must be strings")
         object.__setattr__(self, "artifact_inputs", dict(self.artifact_inputs))
+        object.__setattr__(self, "auto_preview", bool(self.auto_preview))
 
     def to_tree(self) -> dict[str, Any]:
         return {
@@ -72,6 +76,7 @@ class LogicLayoutEntry:
             "source_signal": self.source_signal,
             "device_keys": dict(self.device_keys),
             "artifact_inputs": dict(self.artifact_inputs),
+            "auto_preview": self.auto_preview,
         }
 
 
@@ -226,6 +231,7 @@ def resolve_layout(
                     selected,
                     dict(entry.artifact_inputs),
                 ),
+                auto_preview=entry.auto_preview,
             )
         )
 
@@ -309,6 +315,7 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
             "source_signal",
             "device_keys",
             "artifact_inputs",
+            "auto_preview",
         },
         where,
     )
@@ -328,6 +335,7 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
         _string(entry["source_signal"], f"{where} source_signal"),
         dict(device_keys),
         dict(artifact_inputs),
+        _boolean(entry["auto_preview"], f"{where} auto_preview"),
     )
 
 
@@ -372,6 +380,12 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
 def _string(value: object, where: str) -> str:
     if not isinstance(value, str):
         raise LayoutError(f"{where} must be a string")
+    return value
+
+
+def _boolean(value: object, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise LayoutError(f"{where} must be true or false")
     return value
 
 

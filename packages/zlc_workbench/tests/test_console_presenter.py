@@ -106,12 +106,17 @@ class _LogicRowView:
         self.title = str(title)
         self.kind = str(kind)
         self.start_requested = _Signal()
+        self.auto_preview_changed = _Signal()
         self.stop_requested = _Signal()
         self.edit_requested = _Signal()
         self.remove_requested = _Signal()
         self.state = ("idle", "")
         self.commands = (False, False)
         self.publishes: tuple = ()
+        self.auto_preview = True
+
+    def set_auto_preview(self, enabled: bool) -> None:
+        self.auto_preview = bool(enabled)
 
     def set_state(self, state: str, status_text: str = "") -> None:
         self.state = (str(state), str(status_text))
@@ -141,7 +146,8 @@ class _ConsoleView:
         "panel_order_committed",
         "panel_remove_requested",
         "panel_edit_requested", "panel_plot_error",
-        "logic_start_requested", "logic_stop_requested",
+        "logic_start_requested", "logic_auto_preview_changed",
+        "logic_stop_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
         "panel_producer_restart_requested", "panel_editor_closed",
@@ -341,6 +347,11 @@ class _ConsoleView:
             row.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)
             )
+            row.auto_preview_changed.connect(
+                lambda enabled, nid=key: (
+                    self.logic_auto_preview_changed.emit(nid, bool(enabled))
+                )
+            )
             row.stop_requested.connect(
                 lambda _=None, nid=key: self.logic_stop_requested.emit(nid)
             )
@@ -372,6 +383,9 @@ class _ConsoleView:
             can_start=can_start,
             can_stop=can_stop,
         )
+
+    def set_logic_auto_preview(self, node_id: str, enabled: bool) -> None:
+        self._rows[str(node_id)].set_auto_preview(bool(enabled))
 
     def set_logic_publishes(self, node_id: str, rows) -> None:
         self._rows[str(node_id)].set_publishes(rows)
@@ -1797,6 +1811,8 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
 
     import json
 
+    # An arranged board includes which rows open a plot when they start.
+    presenter.set_logic_auto_preview(occupancy_id, False)
     authored_display = dict(first.state.display)
     assert authored_display["show_colorbar"] is False
     document = json.loads(json.dumps(presenter.layout()))
@@ -1820,6 +1836,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "source_signal": "",
             "device_keys": {"camera": "camera"},
             "artifact_inputs": {},
+            "auto_preview": True,
         },
         {
             "node_id": occupancy_id,
@@ -1830,6 +1847,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "artifact_inputs": {
                 "calibration_path": str(tmp_path / "chosen.json")
             },
+            "auto_preview": False,
         }
     ]
 
@@ -1862,6 +1880,8 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert presenter.logic[occupancy_id].draft.artifact_inputs == {
         "calibration_path": str(tmp_path / "chosen.json")
     }
+    assert restored_logic.auto_preview is True
+    assert presenter.logic[occupancy_id].auto_preview is False
 
 
 def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
@@ -1895,6 +1915,7 @@ def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
             "source_signal": "",
             "device_keys": {},
             "artifact_inputs": {},
+            "auto_preview": True,
         }
     )
 
@@ -2194,3 +2215,87 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     }
     assert frame.overlay.point_ids == site_ids
     assert binding.frozen_data.overlay == {"overlay_signal": status_signal}
+
+
+@pytest.mark.parametrize("wanted", (True, False))
+def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
+    presenter, session, tmp_path, wanted
+) -> None:
+    """WHICH panel is the node's declaration; WHETHER is the operator's.
+
+    Occupancy publishes five signals and a console that guessed would have to
+    pick among them, so the node names the one an operator opens it to watch.
+    The button beside Start says whether that happens at all -- a preference
+    about this board, which is why it lives on the row and in the layout and
+    not in the authoring schema a notebook also drives.
+    """
+
+    import numpy as np
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
+    site_ids = ("site-0", "site-1")
+    calibration_path = tmp_path / "preview-calibration.json"
+    TrapCalibration(
+        SiteMap(
+            site_ids,
+            np.asarray(((12.0, 10.0), (30.0, 20.0))),
+            np.asarray((True, True)),
+            np.asarray((1.0, 1.0)),
+        ),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((-1.0e20, 0.0)),
+                np.asarray((True, True)),
+                np.asarray((1.0, 1.0)),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract((96, 128)),
+    ).save(calibration_path)
+
+    occupancy_id = presenter.add_logic(
+        "occupancy",
+        node_id="occupancy",
+        artifact_inputs={"calibration_path": str(calibration_path)},
+        source_signal=camera_node.signal_key("frames"),
+        open_editor=False,
+    )
+    presenter.set_logic_auto_preview(occupancy_id, wanted)
+    row = next(
+        row for row in presenter.view.logic_rows if row.title == occupancy_id
+    )
+    assert row.auto_preview is wanted, "the row shows the stored preference"
+
+    assert presenter.start_logic(occupancy_id) is True
+    deadline = time.monotonic() + 10.0
+    while presenter.logic[occupancy_id].host.running and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(0.005)
+    presenter.poll_logic()
+
+    declared = tuple(
+        spec.output_name
+        for spec in presenter.logic[occupancy_id].descriptor.node_previews
+    )
+    assert declared == ("rate",)
+    rate_signal = stable_signal_key(occupancy_id, "rate")
+    opened = [
+        binding
+        for binding in presenter.panels.values()
+        if binding.state.signal == rate_signal
+    ]
+    if wanted:
+        assert len(opened) == 1, "the declared preview is the panel that opened"
+        _settle_panel_hosts(presenter, lambda: opened[0].host is not None)
+        assert opened[0].port is not None, "and it is wired to that signal"
+    else:
+        assert not presenter.panels, "nothing opens itself when the row says no"

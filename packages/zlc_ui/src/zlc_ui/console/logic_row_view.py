@@ -27,6 +27,7 @@ class LogicRowView(FluentFrame):
     stop_requested = QtCore.pyqtSignal()
     edit_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal()
+    auto_preview_changed = QtCore.pyqtSignal(bool)
 
     _STATE_COLORS = {"idle": GREY, "running": GREEN, "error": RED}
 
@@ -55,6 +56,17 @@ class LogicRowView(FluentFrame):
         self.status_label.setMinimumWidth(0)
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.start_button = FluentButton("Start", color=GREEN)
+        #: Beside Start because it says what Start will DO: with it on, the
+        #: node's declared preview opens as an ordinary panel, already wired
+        #: to the signal.  It is an operator preference about this board, not
+        #: a parameter of the measurement.
+        self.preview_button = FluentButton("Plot", color=ACCENT)
+        self.preview_button.setCheckable(True)
+        self.preview_button.setChecked(True)
+        self.preview_button.setToolTip(
+            "Open this node's plot panel when it starts"
+        )
+        self.preview_button.toggled.connect(self.auto_preview_changed.emit)
         self.stop_button = FluentButton("Stop", color=ORANGE)
         self.edit_button = FluentButton("Edit", color=ACCENT)
         self.remove_button = FluentButton("Remove", color=GREY)
@@ -68,12 +80,27 @@ class LogicRowView(FluentFrame):
         top.addWidget(self.name_label, 1)
         top.addWidget(self.kind_label)
         top.addWidget(self.status_label, 2)
-        for button in (self.start_button, self.stop_button, self.edit_button, self.remove_button):
+        for button in (
+            self.preview_button,
+            self.start_button,
+            self.stop_button,
+            self.edit_button,
+            self.remove_button,
+        ):
             top.addWidget(button)
         outer.addLayout(top)
 
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
+
+    def set_auto_preview(self, enabled: bool) -> None:
+        """Show the owner's stored preference without re-emitting it."""
+
+        blocked = self.preview_button.blockSignals(True)
+        try:
+            self.preview_button.setChecked(bool(enabled))
+        finally:
+            self.preview_button.blockSignals(blocked)
 
     def set_state(self, state: str, status_text: str = "") -> None:
         state = str(state)

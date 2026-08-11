@@ -134,6 +134,15 @@ class LogicBinding:
     draft_revision: int = 0
     finalization_key: tuple = ()
     finalization: LogicDraftFinalization | None = None
+    #: Open this node's declared preview panel when it starts.  A preference
+    #: about THIS board, not a parameter of the measurement -- it lives here
+    #: and travels with the saved layout, never in the authoring schema, so a
+    #: notebook driving the same node never meets a GUI concept.
+    auto_preview: bool = True
+    #: Declared previews already answered for the run below, so an operator who
+    #: closes one gets to keep it closed until the node is started again.
+    previewed: tuple[str, ...] = ()
+    preview_host: object | None = field(default=None, compare=False)
 
 
 def stable_signal_key(node_id: str, output_name: str) -> str:

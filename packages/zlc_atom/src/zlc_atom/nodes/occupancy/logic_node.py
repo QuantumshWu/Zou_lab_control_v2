@@ -8,6 +8,7 @@ from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
     LogicNodeDescriptor,
     NodeKind,
+    NodePreviewSpec,
     OutputSpec,
     ResolvedArtifact,
 )
@@ -83,6 +84,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         OutputSpec("rate", "occupancy.rate.v1"),
         OutputSpec("frame_judged", "occupancy.frame_judged.v1"),
     ),
+    # Five outputs, and the one an operator opens the node to watch is the
+    # loading rate; the rest are what you go looking for once it surprises you.
+    node_previews=(NodePreviewSpec("rate"),),
     build=_build,
 )
 

@@ -442,8 +442,14 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         ) == (("capture_preview", "calibration.capture-preview.v1"),)
         assert tuple(
             (preview.output_name, preview.plot_kind)
-            for preview in descriptors["calibration"].task_previews
+            for preview in descriptors["calibration"].node_previews
         ) == (("capture_preview", "image"),)
+        # A preview is not a Task privilege: an ordinary measurement names the
+        # output an operator came to watch in exactly the same words.
+        assert tuple(
+            (preview.output_name, preview.plot_kind)
+            for preview in descriptors["camera_measurement"].node_previews
+        ) == (("frames", ""),)
         assert not hasattr(descriptors["calibration"], "task_reports")
         assert [
             (value.name, value.contract_id)

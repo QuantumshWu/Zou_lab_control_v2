@@ -15,6 +15,7 @@ from zlc_atom.nodes._framework.descriptor import (
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
+    NodePreviewSpec,
     OutputSpec,
     SelectionMapping,
 )
@@ -211,6 +212,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with
     # the acquisition configuration.
     outputs=(OutputSpec(CAMERA_FRAMES_OUTPUT.name, CAMERA_FRAMES_OUTPUT.contract_id),),
+    node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT.name),),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
     ),

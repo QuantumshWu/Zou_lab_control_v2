@@ -301,6 +301,7 @@ class ConsolePresenter:
         self.view.panel_remove_requested.connect(self.remove_panel)
         self.view.panel_edit_requested.connect(self.edit_panel)
         self.view.logic_start_requested.connect(self.start_logic)
+        self.view.logic_auto_preview_changed.connect(self.set_logic_auto_preview)
         self.view.logic_stop_requested.connect(self.stop_logic)
         self.view.logic_edit_requested.connect(self.edit_logic)
         self.view.logic_remove_requested.connect(self.remove_logic)
@@ -2325,6 +2326,7 @@ class ConsolePresenter:
                     binding.draft.source_signal,
                     binding.draft.device_keys,
                     binding.draft.artifact_inputs,
+                    binding.auto_preview,
                 )
                 for binding in self.logic.values()
             ),
@@ -2985,26 +2987,52 @@ class ConsolePresenter:
         active = self._active_task()
         return False if active is None else self.stop_logic(active.node_id)
 
-    def _ensure_task_previews(self, binding: LogicBinding) -> None:
-        """Mount declared Task outputs through the ordinary panel data path."""
+    def set_logic_auto_preview(self, node_id: str, enabled: bool) -> None:
+        """Remember whether starting this node should open its plot panel."""
 
-        if (
-            not self._is_task(binding)
-            or binding.host is None
-            or not binding.host.running
-        ):
+        binding = self.logic.get(str(node_id))
+        if binding is None:
             return
-        previews = tuple(getattr(binding.descriptor, "task_previews", ()))
+        binding.auto_preview = bool(enabled)
+        self._refresh_console_projection()
+
+    def _ensure_node_previews(self, binding: LogicBinding) -> None:
+        """Mount this node's declared previews through the ordinary panel path.
+
+        WHICH panel is the node's own declaration -- a console that guessed
+        would have to choose among eight occupancy outputs -- and WHETHER it
+        opens is the operator's per-row preference.
+        """
+
+        if not binding.auto_preview or binding.host is None:
+            return
+        previews = tuple(binding.descriptor.node_previews)
         if not previews:
             return
+        if binding.preview_host is not binding.host:
+            # A new run asks the question again; ONE run answers it once, so a
+            # preview the operator closed stays closed until the next Start.
+            binding.preview_host = binding.host
+            binding.previewed = ()
+        pending = tuple(
+            preview
+            for preview in previews
+            if str(preview.output_name) not in binding.previewed
+        )
+        if not pending:
+            return
         front = self.session.signal_plane.freeze()
-        for preview in previews:
+        for preview in pending:
             output_name = str(preview.output_name)
             signal = stable_signal_key(binding.node_id, output_name)
-            if any(panel.state.signal == signal for panel in self.panels.values()):
-                continue
             value = front.value(signal)
+            # Nothing published yet is not an answer -- a run that ends in one
+            # tick publishes on the same poll that stops it, and gating on
+            # "still running" is how that node's plot never appeared.
             if value is None:
+                continue
+            binding.previewed += (output_name,)
+            if any(panel.state.signal == signal for panel in self.panels.values()):
                 continue
             publication = front.publication(signal)
             panel = self.add_panel(
@@ -3537,7 +3565,7 @@ class ConsolePresenter:
                         severity="error",
                     )
                 self._capture_artifact_results(binding)
-                self._ensure_task_previews(binding)
+                self._ensure_node_previews(binding)
                 if not binding.host.running and binding.lease is not None:
                     binding.lease.release()
                     binding.lease = None
@@ -3647,7 +3675,15 @@ class ConsolePresenter:
         can_stop = bool(
             binding.pending is not None or (host is not None and host.running)
         )
-        shown = (state, status, published, artifacts, can_start, can_stop)
+        shown = (
+            state,
+            status,
+            published,
+            artifacts,
+            can_start,
+            can_stop,
+            binding.auto_preview,
+        )
         if shown == binding.shown:
             return
         binding.shown = shown
@@ -3658,6 +3694,7 @@ class ConsolePresenter:
             can_stop=can_stop,
         )
         self.view.set_logic_publishes(binding.node_id, published)
+        self.view.set_logic_auto_preview(binding.node_id, binding.auto_preview)
         self.refresh_logic_editor(binding.node_id)
 
     def _source_options(

@@ -11,7 +11,7 @@ from zlc_atom.nodes._framework.descriptor import (
     NodeKind,
     OutputSpec,
     ResolvedWorkspaceResource,
-    TaskPreviewSpec,
+    NodePreviewSpec,
     WorkspaceResourceSpec,
 )
 from zlc_pulse import PulseSequence
@@ -225,7 +225,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             CAPTURE_PREVIEW_DECLARATION.contract_id,
         ),
     ),
-    task_previews=(TaskPreviewSpec("capture_preview", "image"),),
+    node_previews=(NodePreviewSpec("capture_preview", "image"),),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),

@@ -63,6 +63,7 @@ class TaskConsoleHandle(QtCore.QObject):
 
     # -- one named logic node --------------------------------------------
     logic_start_requested = QtCore.pyqtSignal(str)
+    logic_auto_preview_changed = QtCore.pyqtSignal(str, bool)
     logic_stop_requested = QtCore.pyqtSignal(str)
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
@@ -481,6 +482,11 @@ class TaskConsoleHandle(QtCore.QObject):
             row.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)
             )
+            row.auto_preview_changed.connect(
+                lambda enabled, nid=key: (
+                    self.logic_auto_preview_changed.emit(nid, bool(enabled))
+                )
+            )
             row.stop_requested.connect(
                 lambda _=None, nid=key: self.logic_stop_requested.emit(nid)
             )
@@ -515,6 +521,9 @@ class TaskConsoleHandle(QtCore.QObject):
             can_start=can_start,
             can_stop=can_stop,
         )
+
+    def set_logic_auto_preview(self, node_id: str, enabled: bool) -> None:
+        self._rows[str(node_id)].set_auto_preview(bool(enabled))
 
     def set_logic_publishes(self, node_id: str, rows: tuple[tuple[str, str, str], ...]) -> None:
         self._rows[str(node_id)].set_publishes(rows)

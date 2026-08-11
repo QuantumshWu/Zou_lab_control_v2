@@ -206,15 +206,21 @@ class ArtifactOutputSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class TaskPreviewSpec:
-    """UI-neutral request to preview one declared Task Dataset output."""
+class NodePreviewSpec:
+    """UI-neutral request to preview one declared output of this node.
+
+    A node with eight outputs knows which one an operator came to watch, and
+    nothing else does.  The KIND is normally left empty: the plotting package
+    reads it off the data, exactly as it does for a hand-added panel, and a
+    node that pins one is claiming its data would otherwise be read wrong.
+    """
 
     output_name: str
-    plot_kind: str
+    plot_kind: str = ""
 
     def __post_init__(self) -> None:
-        if not self.output_name or not self.plot_kind:
-            raise ValueError("task preview requires output_name and plot_kind")
+        if not self.output_name:
+            raise ValueError("node preview requires an output_name")
 
 
 @dataclass(frozen=True)
@@ -269,7 +275,7 @@ class LogicNodeDescriptor:
     resolve_outputs: Callable[[Mapping[str, object]], tuple[OutputSpec, ...]] | None = None
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
-    task_previews: tuple[TaskPreviewSpec, ...] = ()
+    node_previews: tuple[NodePreviewSpec, ...] = ()
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -287,7 +293,7 @@ class LogicNodeDescriptor:
             raise TypeError("authoring_schema must be AuthoringSchema")
         inputs = tuple(self.input_specs)
         outputs = tuple(self.outputs)
-        task_previews = tuple(self.task_previews)
+        node_previews = tuple(self.node_previews)
         artifact_outputs = tuple(self.artifact_outputs)
         requirements = tuple(self.device_requirements)
         selection_mappings = tuple(self.selection_mappings)
@@ -300,8 +306,8 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_outputs must be callable or None")
         if outputs and self.resolve_outputs is not None:
             raise ValueError("static outputs and resolve_outputs are exclusive")
-        if any(not isinstance(value, TaskPreviewSpec) for value in task_previews):
-            raise TypeError("task_previews must contain TaskPreviewSpec values")
+        if any(not isinstance(value, NodePreviewSpec) for value in node_previews):
+            raise TypeError("node_previews must contain NodePreviewSpec values")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
@@ -322,17 +328,20 @@ class LogicNodeDescriptor:
             raise ValueError("input names must be unique")
         if len({value.name for value in outputs}) != len(outputs):
             raise ValueError("output names must be unique")
-        if len({value.output_name for value in task_previews}) != len(task_previews):
-            raise ValueError("task preview output names must be unique")
-        unknown_previews = {
-            value.output_name for value in task_previews
-        } - {value.name for value in outputs}
+        if len({value.output_name for value in node_previews}) != len(node_previews):
+            raise ValueError("node preview output names must be unique")
+        # Only a node whose outputs are fixed at declaration can be held to
+        # them here; one that resolves them from its values answers later.
+        unknown_previews = (
+            set()
+            if self.resolve_outputs is not None
+            else {value.output_name for value in node_previews}
+            - {value.name for value in outputs}
+        )
         if unknown_previews:
             raise ValueError(
-                f"task previews use undeclared outputs: {sorted(unknown_previews)}"
+                f"node previews use undeclared outputs: {sorted(unknown_previews)}"
             )
-        if task_previews and self.kind is not NodeKind.TASK:
-            raise ValueError("only Task nodes may declare task previews")
         if len({value.name for value in artifact_outputs}) != len(artifact_outputs):
             raise ValueError("artifact output names must be unique")
         if len(
@@ -402,7 +411,7 @@ class LogicNodeDescriptor:
             raise ValueError("a processor requires exactly one DatasetInputSpec")
         object.__setattr__(self, "input_specs", inputs)
         object.__setattr__(self, "outputs", outputs)
-        object.__setattr__(self, "task_previews", task_previews)
+        object.__setattr__(self, "node_previews", node_previews)
         object.__setattr__(self, "artifact_outputs", artifact_outputs)
         object.__setattr__(self, "device_requirements", requirements)
         object.__setattr__(self, "selection_mappings", selection_mappings)
@@ -464,10 +473,10 @@ __all__ = [
     "DeviceRequirement",
     "LogicNodeDescriptor",
     "NodeKind",
+    "NodePreviewSpec",
     "OutputSpec",
     "ResolvedArtifact",
     "ResolvedWorkspaceResource",
     "SelectionMapping",
-    "TaskPreviewSpec",
     "WorkspaceResourceSpec",
 ]

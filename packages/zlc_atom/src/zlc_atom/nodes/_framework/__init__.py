@@ -9,11 +9,11 @@ from .descriptor import (
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
+    NodePreviewSpec,
     OutputSpec,
     ResolvedArtifact,
     ResolvedWorkspaceResource,
     SelectionMapping,
-    TaskPreviewSpec,
     WorkspaceResourceSpec,
 )
 from .discovery import discover_logic_nodes
@@ -27,11 +27,11 @@ __all__ = [
     "DeviceRequirement",
     "LogicNodeDescriptor",
     "NodeKind",
+    "NodePreviewSpec",
     "OutputSpec",
     "ResolvedArtifact",
     "ResolvedWorkspaceResource",
     "SelectionMapping",
-    "TaskPreviewSpec",
     "WorkspaceResourceSpec",
     "discover_logic_nodes",
 ]
