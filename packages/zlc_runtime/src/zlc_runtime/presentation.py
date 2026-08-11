@@ -577,28 +577,33 @@ class SurfaceBatchArbiter:
             tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]
         ] = []
         batch_error: BaseException | None = None
+        blamed: SurfaceUpdate | None = None
         for update in cohort.updates:
             try:
                 port = resolve(update.panel_id)
             except BaseException as error:
                 port = None
                 batch_error = batch_error or error
+                blamed = blamed or update
             if port is None:
                 batch_error = batch_error or RuntimeError(
                     f"surface port {update.panel_id!r} no longer exists"
                 )
+                blamed = blamed or update
                 records.append((None, update, None, False))
                 continue
             try:
                 operation = update.future.result()
             except BaseException as error:
                 batch_error = batch_error or error
+                blamed = blamed or update
                 records.append((port, update, error, False))
                 continue
             try:
                 port.observe(update, operation)
             except BaseException as error:
                 batch_error = batch_error or error
+                blamed = blamed or update
                 records.append((port, update, error, False))
                 continue
             records.append((port, update, operation, True))
@@ -609,21 +614,23 @@ class SurfaceBatchArbiter:
                     batch_error = batch_error or RuntimeError(
                         "surface batch contains an unusable operation"
                     )
+                    blamed = blamed or update
                     break
                 try:
                     accepted = port.can_accept(update, operation)
                 except BaseException as error:
                     batch_error = error
+                    blamed = update
                     break
                 if not accepted:
                     batch_error = RuntimeError(
                         f"surface update {update.panel_id!r} is no longer acceptable"
                     )
+                    blamed = update
                     break
 
         if batch_error is not None:
-            for port, update, _operation, _successful in records:
-                self._reject(port, update, batch_error)
+            self._abandon(records, batch_error, blamed)
             return
 
         accepted: list[tuple[SurfacePort, SurfaceUpdate]] = []
@@ -637,9 +644,38 @@ class SurfaceBatchArbiter:
                 accepted.append((port, update))
         except BaseException as error:
             accepted_ids = {id(update) for _port, update in accepted}
-            for port, update, _operation, _successful in records:
-                if id(update) not in accepted_ids:
-                    self._reject(port, update, error)
+            remaining = tuple(
+                record for record in records if id(record[1]) not in accepted_ids
+            )
+            self._abandon(
+                remaining, error, remaining[0][1] if remaining else None
+            )
+
+    @classmethod
+    def _abandon(
+        cls,
+        records: Sequence[tuple[SurfacePort | None, SurfaceUpdate, object | None, bool]],
+        error: BaseException,
+        blamed: SurfaceUpdate | None,
+    ) -> None:
+        """Drop the cohort, telling only the member that could not go.
+
+        The group flips together or not at all, so ONE member's refusal ends
+        the shot for every member -- but it is not a FAILURE of the others.
+        Handing them all the same error is how a single panel rebuilt under a
+        staged render (a cell kind changed, a host replaced) painted "no
+        longer acceptable" on every card on the board, each of which was
+        about to redraw perfectly on the next shot.  They leave unpresented
+        instead, which is what an abandoned cohort already does.
+        """
+
+        for port, update, _outcome, _successful in records:
+            if port is None:
+                continue
+            if update is blamed:
+                cls._reject(port, update, error)
+            else:
+                cls._finish_unpresented(((port, update),))
 
     def cancel_all(self) -> None:
         while self._cohorts:

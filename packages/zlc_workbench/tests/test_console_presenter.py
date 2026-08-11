@@ -2217,6 +2217,31 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     assert binding.frozen_data.overlay == {"overlay_signal": status_signal}
 
 
+def test_a_card_stops_wearing_an_error_once_the_panel_has_drawn_again(
+    presenter, session
+) -> None:
+    """The dot is the panel's condition now, not a log of what once happened.
+
+    A batch abandoned for a sibling's sake, a refused gesture, a rebuilt
+    host: the panel draws again on the next shot, and the mark stayed on
+    forever -- an operator reading a red card had no way to tell a broken
+    panel from one that stumbled once ten minutes ago.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    card = presenter.view.cards[0]
+
+    binding.port.last_error = RuntimeError("the renderer refused this frame")
+    presenter.beat()
+    assert card.status == ("the renderer refused this frame", True)
+
+    binding.port.last_error = None
+    presenter.beat()
+    assert card.status == ("", False), "a healed panel keeps no mark"
+
+
 @pytest.mark.parametrize("wanted", (True, False))
 def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
     presenter, session, tmp_path, wanted

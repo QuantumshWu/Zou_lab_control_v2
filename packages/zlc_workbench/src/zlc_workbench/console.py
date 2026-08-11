@@ -2906,7 +2906,17 @@ class ConsolePresenter:
                 or getattr(binding.bridge, "last_error", None)
                 or getattr(binding.port, "last_error", None)
             )
-            if error is None or error is binding.reported_error:
+            if error is None:
+                # The mark is the panel's CURRENT condition, not a log of what
+                # once went wrong: a panel that has drawn again since clears
+                # its own error, and the card that still wore the dot told an
+                # operator a healthy panel was broken until the window closed.
+                if binding.reported_error is not None:
+                    binding.reported_error = None
+                    if panel_id in self.view.panel_ids():
+                        self.view.set_panel_status(panel_id, "", error=False)
+                continue
+            if error is binding.reported_error:
                 continue
             binding.reported_error = error
             self._report(

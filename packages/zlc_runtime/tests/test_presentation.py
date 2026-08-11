@@ -279,7 +279,15 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
     assert ports[1].presented is publication
 
 
-def test_surface_arbiter_rejects_the_whole_completed_batch_once() -> None:
+def test_a_failed_member_sinks_the_batch_and_is_the_only_one_blamed() -> None:
+    """All-or-nothing is about PIXELS, not about blame.
+
+    One member's failure ends the shot for the whole group, and the others
+    are simply unpresented: they will draw the next shot.  Handing them the
+    failing member's error is how one panel's trouble ended up marked on
+    every card on the board.
+    """
+
     channels = OwnerChannels(_Sink())
     arbiter = SurfaceBatchArbiter(channels)
     front = _front()
@@ -290,7 +298,33 @@ def test_surface_arbiter_rejects_the_whole_completed_batch_once() -> None:
     second.futures[0].set_exception(RuntimeError("worker failed"))
     arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
     assert not first.accepted and not second.accepted
-    assert len(first.rejected) == len(second.rejected) == 1
+    assert len(second.rejected) == 1
+    assert str(second.rejected[0][1]) == "worker failed"
+    assert not first.rejected and len(first.finished) == 1
+
+
+def test_a_rebuilt_panel_does_not_mark_the_panel_beside_it() -> None:
+    """A panel whose host was replaced refuses the update prepared for the old
+    one.  That is the currency guard doing its job -- and it says nothing at
+    all about the sibling, which is why only the rebuilt panel hears about it.
+    """
+
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    front = _front()
+    healthy = _Port("healthy", "camera/frame")
+    rebuilt = _Port("rebuilt", "camera/frame")
+    assert arbiter.enqueue_group((healthy, rebuilt), front)
+    healthy.futures[0].set_result("healthy")
+    rebuilt.futures[0].set_result("rebuilt")
+    rebuilt.acceptable = False  # its host was replaced under the staged render
+    arbiter.drain(
+        lambda panel_id: {"healthy": healthy, "rebuilt": rebuilt}.get(panel_id)
+    )
+    assert not healthy.accepted and not rebuilt.accepted
+    assert len(rebuilt.rejected) == 1
+    assert "no longer acceptable" in str(rebuilt.rejected[0][1])
+    assert not healthy.rejected and len(healthy.finished) == 1
 
 
 def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None:
