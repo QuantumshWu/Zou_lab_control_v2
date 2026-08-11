@@ -1,6 +1,5 @@
-"""Data-only node declarations and the narrow application context."""
+"""Data-only node declarations."""
 
-from .context import ApplicationContext
 from .descriptor import (
     ArtifactCodec,
     ArtifactOutputSpec,
@@ -22,7 +21,6 @@ from .discovery import discover_logic_nodes
 __all__ = [
     "ArtifactCodec",
     "ArtifactOutputSpec",
-    "ApplicationContext",
     "ArtifactInputSpec",
     "DatasetInputSpec",
     "DeviceAccess",

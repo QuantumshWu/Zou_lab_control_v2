@@ -5,10 +5,10 @@ import pytest
 from zlc_atom.execution import (
     DeviceBroker,
     DeviceIdentityEvidenceKind,
-    IdentityProof,
     PhysicalDeviceIdentity,
     ResourceKey,
 )
+from zlc_atom.execution.ports import IdentityProof
 
 
 def test_identity_proof_is_opaque_and_single_use() -> None:
