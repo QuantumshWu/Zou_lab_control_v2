@@ -7,6 +7,13 @@ the points from its own scan table, ``stepped_scan`` has the HOST advance
 them, one applied point at a time.  Everything else -- what a plan is, which
 ports a bench offers, how a captured point lands in the dataset, how the plan
 is authored -- is the same for both and lives here.
+
+The board-advanced LOOP lives here too, for one reason: it has a second
+consumer.  The ``temperature`` Task scans ``t_off`` and publishes survival,
+not frames; it is not allowed to import the ``seamless_scan`` node and it must
+not grow a second copy of the loop, so the loop is library and the node
+package is its authoring form.  The host-advanced loop still has exactly one
+consumer and stays in ``stepped_scan`` until it has two.
 """
 
 from .dataset import (
@@ -15,6 +22,7 @@ from .dataset import (
     ScanLiveSlot,
     scan_dataset_schema,
 )
+from .seamless import SeamlessScanMeasurement
 from .plan import (
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
@@ -42,6 +50,7 @@ __all__ = [
     "ScanLiveSlot",
     "ScanPlan",
     "ScanPort",
+    "SeamlessScanMeasurement",
     "bind_plan",
     "drain_backlog",
     "follow_source",

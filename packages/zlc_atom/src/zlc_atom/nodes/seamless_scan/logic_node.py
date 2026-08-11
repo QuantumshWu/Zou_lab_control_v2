@@ -5,6 +5,11 @@ the template, the plan, how many whole sweeps and how many in-place shots per
 point, and how long the pulse stays stopped before the table starts.  There
 is nothing to say about how a fresh value is taken: the fired cycle drives
 the source, so its publications ARE the played rows, in order.
+
+The loop this node offers is ``scan.SeamlessScanMeasurement``: it moved into
+the library the day a second consumer appeared (the temperature Task), and
+what stays here is what only this node knows -- its form, and that the frames
+it takes are published as the scan itself.
 """
 
 from __future__ import annotations
@@ -27,12 +32,11 @@ from zlc_atom.nodes.scan import (
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     SCAN_PULSE_RESOURCE,
+    SeamlessScanMeasurement,
     bind_plan,
     plan_from_authored,
     scan_ports_for,
 )
-
-from .measurement import SeamlessScanMeasurement
 
 
 #: How long the pulse stays stopped before the table plays.  A tenth of a

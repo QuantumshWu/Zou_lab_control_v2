@@ -3,19 +3,27 @@
 The plan's axes become hardware SLOTS and its rows become the board's scan
 table.  One load, one fire, and the board plays every point back to back with
 no host in the loop -- which is the only way the points can be seamless, and
-the reason this node exists apart from the stepped one.
+the reason the seamless node exists apart from the stepped one.
 
 Two consequences shape everything here.
 
 FRAME ORDER EQUALS POINT ORDER BY CONSTRUCTION.  The source is driven by the
 fired cycle, so the n-th publication is the n-th played row; there is no
-gating question to ask and no straddling frame to skip.  That is why this
-node has no capture choice: the question does not arise.
+gating question to ask and no straddling frame to skip.  That is why the
+seamless node has no capture choice: the question does not arise.
 
 ONLY THE BOARD'S OWN KNOBS CAN BE SCANNED.  A ``device:`` port is moved by a
 host call, which is exactly what does not happen between two cycles of one
 fired table, so such a plan is refused when it is bound -- by name, pointing
 at the node that can run it.
+
+THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
+``acquire`` plays the plan and hands back the dataset it filled; ``execute``
+is that plus the one sentence the ``seamless_scan`` NODE adds -- publish it as
+this run's FINAL scan.  A Task that scans for a reason of its own publishes
+something else: the ``temperature`` Task's finals are survival per site and
+per point, and the frames are the evidence underneath.  Both run this loop, so
+neither can drift from the other about what a played point means.
 """
 
 from __future__ import annotations
@@ -36,17 +44,9 @@ from zlc_pulse import (
 )
 from zlc_runtime import FinalDatasetOutput
 
-from zlc_atom.nodes.scan import (
-    PULSE_PARAM_FAMILY,
-    SCAN_OUTPUT,
-    ScanDatasetWriter,
-    ScanLiveSlot,
-    ScanPlan,
-    ScanPort,
-    drain_backlog,
-    follow_source,
-    next_source_value,
-)
+from .dataset import SCAN_OUTPUT, ScanDatasetWriter, ScanLiveSlot
+from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
+from .source import drain_backlog, follow_source, next_source_value
 
 
 class SeamlessScanMeasurement:
@@ -146,7 +146,14 @@ class SeamlessScanMeasurement:
         )
         return scan_rows_to_wire(validate_scan_table(table, columns), columns)
 
-    def execute(self, context: object):
+    def acquire(self, context: object):
+        """Play the whole plan from one fire and return the dataset it filled.
+
+        The live slot is attached to the caller's generation, so whoever runs
+        this loop shows the growing scan while it runs -- and then says for
+        itself what the finished dataset MEANS.
+        """
+
         board = self.sequencer.describe()
         rows = self.plan.rows()
         shots = self.shots_per_point
@@ -195,21 +202,29 @@ class SeamlessScanMeasurement:
             tap.close()
             self.sequencer.safe()
         self._check_cancelled(context)
-        snapshot = writer.snapshot()
+        return writer.snapshot()
+
+    def run_record(self) -> dict[str, object]:
+        """What this run WAS, in the words of the plan that drove it."""
+
+        return {
+            "source_signal": self._signal_name,
+            "pulse": self.sequence.name,
+            "plan": self.plan.to_tree(),
+            "scan_shape": self.plan.shape,
+            "repeats": self.repeats,
+            "shots_per_point": self.shots_per_point,
+            "settle_seconds": self.settle_seconds,
+        }
+
+    def execute(self, context: object):
+        snapshot = self.acquire(context)
         context.publish_final(
             {
                 SCAN_OUTPUT.name: FinalDatasetOutput(
                     SCAN_OUTPUT,
                     snapshot,
-                    {
-                        "source_signal": self._signal_name,
-                        "pulse": self.sequence.name,
-                        "plan": self.plan.to_tree(),
-                        "scan_shape": self.plan.shape,
-                        "repeats": self.repeats,
-                        "shots_per_point": shots,
-                        "settle_seconds": self.settle_seconds,
-                    },
+                    self.run_record(),
                 )
             }
         )
