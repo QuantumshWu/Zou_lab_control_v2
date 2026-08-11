@@ -30,13 +30,13 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — three-commit simulation / Pulse API scan / whole-repository audit Goal`
-- Production HEAD at final verification：`Step 3 final tree（parent 7465817；由本次第三个 commit 归档）`
-- Stage set：`Step 1 board-wiring-driven Simulation + MOT/Pylon exposure -> Step 2 Pulse API Scan Measurement -> Step 3 whole-repository responsibility/dead-code audit and fixes；每步独立 commit`
-- Current phase：`Step 3 complete。职责/层级/唯一真相源/死代码审计与修正已经完成；没有为删除项建立替代抽象或兼容层。`
-- Last completed action：`Step 3 修正 Pylon actual working point 与 Repeat=0 单帧free-run/多帧external ordered语义，连续buffer固定4 cycles；TaskConsole panel default由zlc_plot唯一投影为100 ms且size policy只由zlc_plot投影；删除zlc_data transform孤岛、runtime continuous-derived旧owner与5个零消费者模块、Atom provenance/generation单消费者框架、旧plot ingress和UI/Workbench并行历史入口。最终diff为94 files、584 insertions/4754 deletions，无新增production文件或替代framework。`
-- Last verified tests：`最终全树在同一当前仓库进程中 1183 passed in 188.39s；随后默认值/零场中心纠正的5条定向用例5 passed in 1.54s，进程打印当前root、SimulationWorld与Console真实__file__；git diff --check通过。正式 python -m zou_lab_control_v2 check确认8个package全部解析到本repo且3个retired names均消失；分块定向证据保留在本Goal执行记录。`
-- Pending acceptance gates：`none。Step 1/2已分别提交，Step 3 code、tests、authority更新由本次第三个commit一起归档。`
+- Goal status：`complete — six-item Atom execution / FigureViewer / Calibration redundancy retirement`
+- Production HEAD at final verification：`57ce135`
+- Stage set：`44b145f 删除未使用的 Atom run engine -> 677a309 删除 resource arbiter/ApplicationContext 残余 -> 01ab128 分离 FigureViewer frame name 与 plot title -> 57ce135 删除 Calibration 白算、手抄 contract 与 JSON 重复字段`
+- Current phase：`complete。六项逐一按生产调用图确认后删除；正式 installation binding、zlc_runtime NodeHost 与 canonical Calibration 数据均保留，没有替代抽象、兼容 alias 或新 production 文件。`
+- Last completed action：`zlc_atom/execution 现在只负责安装时 physical identity/capability binding，未来 device 的运行、占用、cancel 继续走 DeviceUseCoordinator + zlc_runtime.NodeHost；FigureViewer 不再用 frame name 覆盖图内 title；Calibration 不再为三个模型计算无消费者 reference_signals，ArtifactOutputSpec 直接读取 CALIBRATION_ARTIFACT_CODEC.contract_id，JSON report 只保留模型样本计数与 run_record。`
+- Last verified tests：`仅按用户要求运行直接相关窄测试：execution/binding 10 passed；resource/context import 2 passed；真实 FigureViewer archive reopen 1 passed；Calibration oracle + virtual artifact chain 2 passed。每个 Python 进程均先打印当前仓库 root 与被测 production __file__；各阶段 git diff --check 通过。未机械重跑 package/full-tree。`
+- Pending acceptance gates：`none for this bounded redundancy goal；正式实验 UI 的后续人工验收仍由用户单独进行。`
 - Next action：`none — Goal complete。`
 - New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon Repeat=0 使用 source-less free-running LatestImageOnly；Repeat>0 才使用 external OneByOne/Line1。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；panel默认和HarmonicClock最小谐波都由zlc_plot唯一规定为100 ms。Camera Measurement新draft的exposure默认0.1 s。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类；MOT只有cooling/load后才亮，signed零场是唯一期望亮度最优点并位于像素几何中心。`
 
