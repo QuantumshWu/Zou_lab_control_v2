@@ -138,6 +138,47 @@ def _live_source_plane():
     return plane, state, node, slot, first
 
 
+def test_a_followed_slot_publishes_every_update_between_two_freezes() -> None:
+    """A follower asked for every shot; a display asks for the newest one.
+
+    Both used to be served by freeze alone, so a burst -- a board playing a
+    whole scan table from one fire -- collapsed into ONE publication and the
+    pixels of the earlier cycles were overwritten in the slot before anyone
+    could see them.  A scan that counts one publication per played shot then
+    waits forever for shots that no longer exist.
+    """
+
+    plane, state, node, slot, _first = _live_source_plane()
+    try:
+        _baseline, tap = plane.follow_publications("camera/frame")
+        for revision in range(2, 5):
+            state["frame"] = _live_output("frame", revision)
+            plane.mark_changed(node, slot)
+
+        received = []
+        while True:
+            try:
+                received.append(tap.next(0.0).payload)
+            except TimeoutError:
+                break
+        assert len(received) == 3, (
+            "every update between two freezes must reach the follower, "
+            f"got {len(received)}"
+        )
+
+        # And the display still sees the newest one, exactly once more.
+        front = plane.freeze()
+        value = front.value("camera/frame")
+        assert value is not None
+        try:
+            extra = tap.next(0.0).payload
+        except TimeoutError:
+            extra = None
+        assert extra is None, "freeze must not republish what was already sent"
+    finally:
+        plane.close()
+
+
 def test_detach_with_slow_slot_cannot_withdraw_or_wake_replacement() -> None:
     """Retirement is generation-linearized before a live slot joins."""
 

@@ -964,7 +964,16 @@ class SignalDataPlane:
             self._membership_changed = True
 
     def mark_changed(self, node, slot) -> None:
-        """Dirty only the exact live slot that emitted this wake."""
+        """Dirty only the exact live slot that emitted this wake.
+
+        A FOLLOWER asked for every event this slot emits; a display asks for
+        the newest one it can get.  Both were served by freeze alone, so a
+        burst -- a board playing a whole scan table from one fire -- collapsed
+        into a single publication, and the earlier cycles' pixels were
+        overwritten in the slot before anything could read them.  A followed
+        slot therefore materialises HERE, on the producer's own thread, and
+        leaves nothing behind for freeze to publish twice.
+        """
 
         if slot is None:
             raise ValueError("changed live slot must not be None")
@@ -980,6 +989,7 @@ class SignalDataPlane:
             ):
                 return
             self._dirty.add(owner_id)
+            followed = state.publication_stream is not None
             output_names = frozenset(state.output_names)
             wake = (
                 self._request_owner_wake
@@ -993,8 +1003,45 @@ class SignalDataPlane:
                 )
                 else None
             )
+        if followed:
+            self._publish_followed(owner_id, state)
         if wake is not None:
             wake()
+
+    def _publish_followed(self, owner_id: str, state: _GenerationState) -> None:
+        """Materialise one followed slot's current values right now.
+
+        The same two steps freeze takes for a dirty state -- read the slot
+        outside the lock, publish inside it -- so a follower and a display
+        cannot disagree about what a publication is.  The dirty mark is
+        cleared with the publication and the front is marked for rebuild, so
+        the next freeze shows this value without emitting it a second time.
+        """
+
+        try:
+            values, warning = self._freeze_one(state)
+        except Exception as error:
+            with self._lock:
+                if self._states.get(owner_id) is state and not state.retired:
+                    state.failure = f"{type(error).__name__}: {error}"
+                    self._membership_changed = True
+            return
+        with self._lock:
+            if (
+                self._states.get(owner_id) is not state
+                or state.retired
+                or state.terminal
+                or owner_id not in self._dirty
+            ):
+                return
+            self._dirty.discard(owner_id)
+            self._membership_changed = True
+            try:
+                self._publish_locked(state, values)
+            except Exception as error:
+                state.failure = f"{type(error).__name__}: {error}"
+                return
+            state.failure = warning
 
     def describe_signals(self) -> tuple["SignalDescription", ...]:
         """Every signal this plane currently carries, as plain values.
