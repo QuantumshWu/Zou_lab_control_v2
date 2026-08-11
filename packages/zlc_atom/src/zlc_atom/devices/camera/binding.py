@@ -7,15 +7,9 @@ from zlc_atom.execution import (
     DeviceIdentityEvidenceKind,
     PhysicalDeviceIdentity,
     ResourceKey,
-    SafetyOperation,
     bind_verified_device,
 )
 from zlc_atom.install.descriptors import InstalledLeaf
-
-
-def _reject_untyped_command(_command: object) -> None:
-    raise TypeError("camera operations must use the CameraAdapter capability")
-
 
 def bind_camera(
     context,
@@ -34,16 +28,9 @@ def bind_camera(
                 identity,
                 DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
             ),
-            execute_command=_reject_untyped_command,
             capability_probe=lambda: {
                 "camera.adapter": camera,
                 "camera.working_point": camera.capture_working_point(),
-            },
-            close_session=lambda _command: camera.finish_record_capture()
-            if camera.capture_state()
-            else None,
-            interrupt_operations={
-                SafetyOperation.DISARM: lambda: camera.finish_record_capture()
             },
         )
     except BaseException:

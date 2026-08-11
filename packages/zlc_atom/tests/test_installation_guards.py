@@ -6,7 +6,13 @@ import types
 import pytest
 
 from zlc_atom.authoring import AuthoringSchema
-from zlc_atom.execution import DeviceBroker, ResourceKey, bind_trivial_device
+from zlc_atom.execution import (
+    DeviceBroker,
+    DeviceIdentityEvidenceKind,
+    PhysicalDeviceIdentity,
+    ResourceKey,
+    bind_verified_device,
+)
 from zlc_atom.install import (
     CAPABILITY_TYPES,
     DeviceCatalogSnapshot,
@@ -23,11 +29,14 @@ def test_discovery_automatically_collects_a_synthetic_leaf_without_graph_changes
     descriptor_module_name = "tests._synthetic_device_types"
 
     def factory(context, key, _values):
-        binding, _proof = bind_trivial_device(
+        binding, _proof = bind_verified_device(
             context.broker,
             key=ResourceKey.parse(f"device/{key}"),
-            identity=f"synthetic:{key}",
-            execute_command=lambda command: calls.append(str(command)),
+            identity_probe=lambda: PhysicalDeviceIdentity(
+                f"synthetic:{key}",
+                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
+            ),
+            capability_probe=dict,
         )
         return InstalledLeaf(
             key,

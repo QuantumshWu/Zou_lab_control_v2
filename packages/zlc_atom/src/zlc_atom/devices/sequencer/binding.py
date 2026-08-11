@@ -7,7 +7,6 @@ from zlc_atom.execution import (
     DeviceIdentityEvidenceKind,
     PhysicalDeviceIdentity,
     ResourceKey,
-    SafetyOperation,
     bind_verified_device,
 )
 from zlc_atom.install.descriptors import InstalledLeaf
@@ -29,12 +28,7 @@ def bind_sequencer(
             identity,
             DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
         ),
-        execute_command=lambda command: device.fire(forever=bool(command))
-        if command is not None
-        else device.fire(),
         capability_probe=lambda: {"sequencer.streamer": device},
-        close_session=lambda _command: device.close(),
-        interrupt_operations={SafetyOperation.STOP: lambda: device.close()},
     )
     return InstalledLeaf(
         key,
