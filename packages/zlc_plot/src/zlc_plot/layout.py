@@ -8,11 +8,12 @@ window size and thereby create backend-specific layout behaviour.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 
 from ._validation import finite_real, integer
 from .kinds import PlotKind
-from .style import PlotStyleConfig
+from .style import FontStyleConfig, PlotStyleConfig
 
 
 _PANEL_PRESET_CELLS = (
@@ -325,13 +326,21 @@ class FacetTopology:
 
 @dataclass(frozen=True, slots=True)
 class FacetTypographyPlan:
-    """Cell chrome uses the reference compact/normal typography tier."""
+    """Cell chrome uses the reference compact/normal typography tier.
+
+    ``cell_title_max_width_pt`` is one cell's EXCLUSIVE title room: its own
+    width plus the column gap, because two neighbours each annexing half a
+    gap cannot collide.  ``cell_title_min_pt`` is the readable floor a title
+    may shrink to before it is truncated instead.
+    """
 
     tier: str
     scale: float
     cell_title_pt: float
     tick_pt: float
     outer_axis_label_pt: float
+    cell_title_min_pt: float
+    cell_title_max_width_pt: float
 
     def __post_init__(self) -> None:
         if self.tier not in {"compact", "normal"}:
@@ -341,8 +350,12 @@ class FacetTypographyPlan:
             "cell_title_pt",
             "tick_pt",
             "outer_axis_label_pt",
+            "cell_title_min_pt",
+            "cell_title_max_width_pt",
         ):
             object.__setattr__(self, field, _finite(getattr(self, field), field, positive=True))
+        if self.cell_title_min_pt > self.cell_title_pt:
+            raise ValueError("the title floor cannot exceed the planned title size")
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,19 +524,94 @@ def recommended_facet_preset(
     return layout.validate_preset(f"{row_units}x{column_units}")
 
 
+def _facet_scale(
+    selected: PanelPreset,
+    recommended: PanelPreset,
+    style: PlotStyleConfig,
+) -> tuple[str, float]:
+    compact = selected.rows < recommended.rows or selected.columns < recommended.columns
+    scale = style.fonts.facet_compact_scale if compact else style.fonts.facet_normal_scale
+    return ("compact" if compact else "normal"), scale
+
+
+def _facet_gaps(
+    scale: float,
+    style: PlotStyleConfig,
+    layout: PlotLayoutConfig,
+) -> tuple[int, int]:
+    """(row gap, column gap) in design pixels for one typography scale."""
+
+    row_gap = _round_pixel(
+        style.fonts.tick_pt * scale * layout.design_dpi / 72.0
+    ) + layout.facet_row_gap_extra_px
+    column_gap = max(
+        layout.facet_min_column_gap_px,
+        _round_pixel(layout.facet_column_gap_px * scale),
+    )
+    return row_gap, column_gap
+
+
+@lru_cache(maxsize=1024)
+def _text_width_pt(text: str, families: tuple[str, ...], size_pt: float) -> float:
+    """Measure one line of text, in points, without a canvas."""
+
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextToPath
+
+    width, _height, _descent = TextToPath().get_text_width_height_descent(
+        text,
+        FontProperties(family=list(families), size=size_pt),
+        False,
+    )
+    return float(width)
+
+
+def fitted_facet_cell_title(
+    label: str,
+    typography: FacetTypographyPlan,
+    fonts: FontStyleConfig,
+) -> tuple[str, float]:
+    """The exact text and size one cell title may occupy without overlap.
+
+    A title wider than the cell's exclusive room shrinks to fit; a title
+    still too wide at the readable floor is truncated with an ellipsis,
+    because two overlapping titles read as one wrong label while a
+    shortened one reads as itself.
+    """
+
+    label = str(label)
+    budget = typography.cell_title_max_width_pt
+    width = _text_width_pt(label, fonts.sans_serif, typography.cell_title_pt)
+    if width <= budget:
+        return label, typography.cell_title_pt
+    fitted = typography.cell_title_pt * budget / width
+    if fitted >= typography.cell_title_min_pt:
+        return label, fitted
+    floor = typography.cell_title_min_pt
+    for keep in range(len(label) - 1, 0, -1):
+        shortened = label[:keep].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+        if _text_width_pt(shortened, fonts.sans_serif, floor) <= budget:
+            return shortened, floor
+    return "\N{HORIZONTAL ELLIPSIS}", floor
+
+
 def _facet_typography(
     selected: PanelPreset,
     recommended: PanelPreset,
     style: PlotStyleConfig,
+    *,
+    cell_title_max_width_pt: float,
 ) -> FacetTypographyPlan:
-    compact = selected.rows < recommended.rows or selected.columns < recommended.columns
-    scale = style.fonts.facet_compact_scale if compact else style.fonts.facet_normal_scale
+    tier, scale = _facet_scale(selected, recommended, style)
+    cell_title_pt = style.fonts.tick_pt * scale
     return FacetTypographyPlan(
-        tier="compact" if compact else "normal",
+        tier=tier,
         scale=scale,
-        cell_title_pt=style.fonts.tick_pt * scale,
+        cell_title_pt=cell_title_pt,
         tick_pt=style.fonts.tick_pt * scale,
         outer_axis_label_pt=style.fonts.axis_label_pt,
+        cell_title_min_pt=min(style.fonts.facet_title_min_pt, cell_title_pt),
+        cell_title_max_width_pt=cell_title_max_width_pt,
     )
 
 
@@ -574,17 +662,10 @@ def _facet_axes(
     data_width: int,
     data_height: int,
     margins: Margins,
-    typography: FacetTypographyPlan,
-    layout: PlotLayoutConfig,
+    row_gap: int,
+    column_gap: int,
 ) -> tuple[AxesPlan, ...]:
     rows, columns = shape
-    row_gap = _round_pixel(
-        typography.tick_pt * layout.design_dpi / 72.0
-    ) + layout.facet_row_gap_extra_px
-    column_gap = max(
-        layout.facet_min_column_gap_px,
-        _round_pixel(layout.facet_column_gap_px * typography.scale),
-    )
     cell_width = max((data_width - (columns - 1) * column_gap) / columns, 1.0)
     cell_height = max((data_height - (rows - 1) * row_gap) / rows, 1.0)
     figure_width = margins.left + data_width + margins.right
@@ -696,7 +777,8 @@ def resolve_surface(
     elif canonical_kind == "facet_grid":
         assert facet_topology is not None and recommended_name is not None
         recommended = layout.preset(recommended_name)
-        typography = _facet_typography(selected, recommended, style)
+        _tier, scale = _facet_scale(selected, recommended, style)
+        row_gap, column_gap = _facet_gaps(scale, style, layout)
         shape = (
             facet_shape(
                 facet_topology.cell_count,
@@ -710,14 +792,27 @@ def resolve_surface(
                 max_columns=layout.facet_max_columns,
             )
         )
+        columns = shape[1]
+        cell_width = max((data_width - (columns - 1) * column_gap) / columns, 1.0)
+        typography = _facet_typography(
+            selected,
+            recommended,
+            style,
+            # One cell's exclusive title room: its own width plus the column
+            # gap, since two neighbours each annexing half a gap cannot
+            # collide.  Design pixels become points at the design DPI.
+            cell_title_max_width_pt=(
+                (cell_width + column_gap) * 72.0 / layout.design_dpi
+            ),
+        )
         axes = _facet_axes(
             facet_topology.cell_count,
             shape,
             data_width,
             data_height,
             margins,
-            typography,
-            layout,
+            row_gap,
+            column_gap,
         )
     else:
         axes = (AxesPlan("main", data),)

@@ -40,7 +40,7 @@ from ._selector_scene import (
     SelectorSceneStyle,
     SelectorTarget,
 )
-from .layout import SurfacePlan, facet_focus_box
+from .layout import SurfacePlan, facet_focus_box, fitted_facet_cell_title
 from .parameters import RenderEffect
 from .primitives import ImagePointOverlay, PointStatus, PulseTimelineData
 from .selectors import (
@@ -2713,14 +2713,19 @@ class MatplotlibRenderer:
         rows, columns = self.plan.facet_shape or (1, max(len(cells), 1))
         for index, axis in visible_axes:
             cell = cells[index]
-            label = _facet_cell_title(cell, index)
+            label = str(_facet_cell_title(cell, index))
+            if typography is not None:
+                # The plan knows each cell's exclusive title room; a title
+                # wider than it shrinks (then truncates) rather than
+                # overlapping its neighbour into one unreadable line.
+                title_text, title_pt = fitted_facet_cell_title(
+                    label, typography, self.style.fonts
+                )
+            else:
+                title_text, title_pt = label, self.style.fonts.tick_pt
             axis.set_title(
-                str(label),
-                fontsize=(
-                    typography.cell_title_pt
-                    if typography is not None
-                    else self.style.fonts.tick_pt
-                ),
+                title_text,
+                fontsize=title_pt,
                 pad=self.style.render.compact_axes_title_pad_pt,
             )
             axis.tick_params(
@@ -2809,7 +2814,9 @@ class MatplotlibRenderer:
         selected.set_xlabel(outer_x, fontsize=self.style.fonts.axis_label_pt)
         selected.set_ylabel(outer_y, fontsize=self.style.fonts.axis_label_pt)
         selected.set_title(
-            selected.get_title(),
+            # The focused cell owns the whole panel: its title is the FULL
+            # label again, not whatever fitted the grid cell's room.
+            str(_facet_cell_title(cells[selected_index], selected_index)),
             fontsize=self.style.fonts.figure_title_pt,
             pad=self.style.render.compact_axes_title_pad_pt,
         )

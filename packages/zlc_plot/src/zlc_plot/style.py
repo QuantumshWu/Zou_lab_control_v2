@@ -90,6 +90,9 @@ class FontStyleConfig:
     facet_fit_annotation_pt: float
     facet_normal_scale: float
     facet_compact_scale: float
+    #: The smallest size a facet cell title may shrink to before the text is
+    #: truncated instead; below this, a shorter title beats unreadable ink.
+    facet_title_min_pt: float
     pulse_repeat_pt: float
     pulse_bar_label_pt: float
     pulse_scan_annotation_pt: float
@@ -111,6 +114,7 @@ class FontStyleConfig:
             "facet_fit_annotation_pt",
             "facet_normal_scale",
             "facet_compact_scale",
+            "facet_title_min_pt",
             "pulse_repeat_pt",
             "pulse_bar_label_pt",
             "pulse_scan_annotation_pt",
@@ -701,6 +705,7 @@ def build_plot_style() -> PlotStyleConfig:
         facet_fit_annotation_pt=3.5,
         facet_normal_scale=1.0,
         facet_compact_scale=0.5,
+        facet_title_min_pt=3.25,
         pulse_repeat_pt=5.7,
         pulse_bar_label_pt=5.3,
         pulse_scan_annotation_pt=3.36,
