@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..data_contract import image_axes
+from ..data_contract import image_axes, live_grid_dimensions
 from ..kinds import AxisRef, PlotKind
 from zlc_data import DatasetSchema
 from ..specs import FacetGridPlot, HistogramPlot, ImagePlot, Reduction
@@ -72,36 +72,65 @@ def _data_axes_cell(schema: DatasetSchema) -> ImagePlot | None:
 
 
 def default_spec(schema: Any) -> FacetGridPlot | None:
-    """Facet the repeat axis, or the outer scan loop, over a data-decided cell.
+    """Facet the repeat axis or the outer scan loops over a data-decided cell.
 
-    The cell shows what is INSIDE one point: two data axes make an image
-    cell, anything less falls back to the curve default.  The repeat axis is
-    the one facet dimension every acquisition shares, so it wins whenever it
-    is non-trivial.  Without repeats, a Cartesian scan facets its outermost
-    (slowest) dimension -- for image cells even a SINGLE scan dimension is a
-    legitimate facet, because the cell needs nothing left to walk; a curve
-    cell walks a dimension itself, so it still needs a second one.
+    The cell shows the DENSEST structure the data offers.  Two data axes
+    make an image cell (a camera frame).  A SCALAR point over two or more
+    live scan dimensions images its two innermost dimensions instead -- the
+    scan heatmap, which is what a field map was measured for.  Anything less
+    falls back to the curve default.  Degenerate axes (one value) are real
+    provenance but not structure, so inference never sees them.
+
+    The facet axis differs by cell on purpose:
+
+    * frame cells: the repeat axis wins whenever it is non-trivial -- each
+      shot's frame is the thing to compare; without repeats, the outermost
+      live dimension facets the frames.
+    * scan-heatmap cells: the OUTER dimensions win and repeats reduce into
+      the cell's mean -- the averaged map is the measurement, and a
+      per-sweep facet stays one authored change away.  With no outer
+      dimension left, repeats are the only lawful facet; without either,
+      the plain image kind already IS the picture, so there is no grid.
+    * curve cells: the repeat axis, since the curve itself walks the
+      innermost dimension.
     """
 
     if not isinstance(schema, DatasetSchema):
         return None
-    cell = _data_axes_cell(schema) or curve_default_spec(schema)
+    live = live_grid_dimensions(schema)
+    repeats = schema.repeat_axis.size > 1
+    cell = _data_axes_cell(schema)
+    if cell is not None:
+        if repeats:
+            return FacetGridPlot(AxisRef.repeat(), cell)
+        if live:
+            return FacetGridPlot(AxisRef.point_dimension(live[0]), cell)
+        return None
+    live_data_axes = tuple(
+        axis for axis in schema.cell_schema.data_axes if axis.size > 1
+    )
+    if not live_data_axes and len(live) >= 2:
+        # Declared slowest-first, so the last live dimension is the innermost
+        # loop: the horizontal image axis, exactly as the dense image kind
+        # reads the same grid.
+        heatmap = ImagePlot(
+            AxisRef.point_dimension(live[-1]),
+            AxisRef.point_dimension(live[-2]),
+            reduction=Reduction.MEAN,
+        )
+        if len(live) >= 3:
+            return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
+        if repeats:
+            return FacetGridPlot(AxisRef.repeat(), heatmap)
+        return None
+    cell = curve_default_spec(schema)
     if cell is None:
         return None
-    dimensions = (
-        ()
-        if schema.grid_topology is None
-        else schema.grid_topology.dimension_ids
-    )
-    if schema.repeat_axis.size > 1:
-        facet = AxisRef.repeat()
-    elif len(dimensions) >= 2 or (
-        len(dimensions) == 1 and isinstance(cell, ImagePlot)
-    ):
-        facet = AxisRef.point_dimension(str(dimensions[0]))
-    else:
-        return None
-    return FacetGridPlot(facet, cell)
+    if repeats:
+        return FacetGridPlot(AxisRef.repeat(), cell)
+    if len(live) >= 2:
+        return FacetGridPlot(AxisRef.point_dimension(live[0]), cell)
+    return None
 
 
 HANDLER = KindHandler(

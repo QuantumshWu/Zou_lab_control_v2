@@ -150,14 +150,24 @@ def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
     assert dense_image.x == AxisRef.data("column")
     assert dense_image.y == AxisRef.data("row")
 
-    # FacetGrid has a real default now: repeat wins while it is non-trivial,
-    # the outermost scan dimension complements the fast-axis-x cell.
+    # FacetGrid on a scalar two-dimension scan: the scan grid itself is the
+    # cell (the heatmap the scan was measured for) and, with no outer
+    # dimension left, the non-trivial repeat axis is the one lawful facet.
     inferred_facet = facet.default_spec(topology_schema)
     assert inferred_facet.facet == AxisRef.repeat()
-    assert inferred_facet.cell == curve.default_spec(topology_schema)
+    assert isinstance(inferred_facet.cell, ImagePlot)
+    assert inferred_facet.cell.x == AxisRef.point_dimension("y")
+    assert inferred_facet.cell.y == AxisRef.point_dimension("x")
 
 
-def test_facet_default_uses_the_outer_scan_loop_without_repeats() -> None:
+def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_no_grid() -> None:
+    """The scan grid IS the cell, and nothing is left to facet it over.
+
+    The plain image kind already draws that exact heatmap, so the facet
+    default refuses instead of wrapping one cell in a grid; the kind stays
+    admitted for authored layouts.
+    """
+
     points = PointTable.from_columns(
         {
             "x": np.repeat(np.arange(2.0), 3),
@@ -178,9 +188,12 @@ def test_facet_default_uses_the_outer_scan_loop_without_repeats() -> None:
         generation="facet-default-no-repeat",
     )
     facet = next(h for h in HANDLERS if h.kind is PlotKind.FACET_GRID)
-    inferred = facet.default_spec(schema)
-    assert inferred.facet == AxisRef.point_dimension("x")
-    assert inferred.cell.x == AxisRef.point_dimension("y")
+    image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
+    assert facet.admits(schema)
+    assert facet.default_spec(schema) is None
+    heatmap = image.default_spec(schema)
+    assert heatmap.x == AxisRef.point_dimension("y")
+    assert heatmap.y == AxisRef.point_dimension("x")
 
     # A flat point table with a single repeat has no unambiguous facet axis:
     # the kind stays admitted (renderable with an authored layout) but must

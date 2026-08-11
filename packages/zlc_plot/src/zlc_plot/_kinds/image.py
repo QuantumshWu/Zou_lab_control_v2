@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..data_contract import image_axes
+from ..data_contract import image_axes, live_grid_dimensions
 from ..kinds import AxisRef, PlotKind
 from zlc_data import DatasetSchema
 from ..specs import ImagePlot, Reduction
@@ -48,17 +48,20 @@ def default_spec(schema: Any) -> ImagePlot | None:
 
     if not isinstance(schema, DatasetSchema):
         return None
-    if schema.grid_topology is not None and len(schema.grid_topology.dimension_ids) >= 2:
+    dimensions = live_grid_dimensions(schema)
+    if len(dimensions) >= 2:
         # Dense data axes collapse under the declared reduction; the scan
-        # grid itself is the unambiguous image surface.
+        # grid itself is the unambiguous image surface.  Only LIVE dimensions
+        # count -- a one-value dimension cannot be an image axis, and it used
+        # to produce a one-pixel-thick "grid image" instead of falling back
+        # to the data axes below.
         # Axes are declared slowest-first (C order), so the last dimension is
         # the innermost scan loop: that is the horizontal image axis, and the
         # dimension above it is the vertical one.  Slowest-first here would
         # silently transpose every scan image.
-        dimensions = schema.grid_topology.dimension_ids
         return ImagePlot(
-            AxisRef.point_dimension(str(dimensions[-1])),
-            AxisRef.point_dimension(str(dimensions[-2])),
+            AxisRef.point_dimension(dimensions[-1]),
+            AxisRef.point_dimension(dimensions[-2]),
             reduction=Reduction.MEAN,
         )
     # By role, through the one place that decides which axes are the image.

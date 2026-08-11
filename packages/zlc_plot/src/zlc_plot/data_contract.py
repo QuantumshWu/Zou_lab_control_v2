@@ -118,6 +118,27 @@ def image_axes(schema: DatasetSchema) -> tuple[Any, Any] | None:
     return significant[-1], significant[-2]
 
 
+def live_grid_dimensions(schema: DatasetSchema) -> tuple[str, ...]:
+    """Scan dimensions with more than one value, slowest-first.
+
+    A degenerate dimension (one value) is real provenance but not structure:
+    nothing can facet or image over it, so kind inference treats it as
+    invisible.  This is the one place that says so -- every default_spec
+    that reads the grid reads it through here.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("schema must be zlc_data.DatasetSchema")
+    topology = schema.grid_topology
+    if topology is None:
+        return ()
+    return tuple(
+        str(dimension)
+        for dimension, size in zip(topology.dimension_ids, topology.logical_shape)
+        if size > 1
+    )
+
+
 def schema_equal(left: DatasetSchema, right: DatasetSchema) -> bool:
     """Are these two schemas the same schema?
 
@@ -267,6 +288,7 @@ __all__ = [
     "descriptor_from_point_column",
     "descriptor_from_topology",
     "implicit_coordinates",
+    "live_grid_dimensions",
     "point_column",
     "resolve_unit",
     "schema_data_axes",
