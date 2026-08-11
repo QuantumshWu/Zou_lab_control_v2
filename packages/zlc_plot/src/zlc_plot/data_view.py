@@ -546,39 +546,33 @@ class DataView:
             # only a strictly increasing declared domain is bit-identical.
             return None
 
-        values = np.moveaxis(
-            self._samples.value.canonical, x_resolved.dimension, -1
+        return self._dense_curve_data(
+            x,
+            x_resolved,
+            self._samples.value.canonical,
+            self._samples.valid_mask,
+            aggregation,
         )
-        usable = np.moveaxis(self._samples.valid_mask, x_resolved.dimension, -1)
+
+    def _dense_curve_data(
+        self,
+        x: AxisRef,
+        x_resolved: "_ResolvedAxis",
+        values: NDArray[Any],
+        usable: NDArray[np.bool_],
+        aggregation: Reduction,
+    ) -> CurveData:
+        """One dense curve out of one (possibly row-sliced) value tensor."""
+
+        x_canonical = np.asarray(x_resolved.domain_canonical)
         nx = int(x_canonical.size)
-        values = np.reshape(values, (-1, nx), order="C")
-        usable = np.reshape(usable, (-1, nx), order="C")
-        counts = np.sum(usable, axis=0, dtype=np.int64)
-        with warnings.catch_warnings():
-            # Empty positions are intentionally NaN and marked invalid below.
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            if aggregation is Reduction.MEAN:
-                y = np.mean(values, axis=0, where=usable)
-            elif aggregation is Reduction.MEDIAN:
-                converted = np.asarray(values, dtype=np.float64)
-                y = np.nanmedian(np.where(usable, converted, np.nan), axis=0)
-            elif aggregation is Reduction.SUM:
-                y = np.sum(values, axis=0, where=usable, initial=0)
-                y = np.where(counts > 0, y, np.nan)
-            elif aggregation is Reduction.MIN:
-                converted = np.asarray(values, dtype=np.float64)
-                y = np.min(converted, axis=0, where=usable, initial=np.inf)
-                y = np.where(counts > 0, y, np.nan)
-            elif aggregation is Reduction.MAX:
-                converted = np.asarray(values, dtype=np.float64)
-                y = np.max(converted, axis=0, where=usable, initial=-np.inf)
-                y = np.where(counts > 0, y, np.nan)
-            elif aggregation is Reduction.FIRST:
-                first = np.argmax(usable, axis=0)
-                y = np.take_along_axis(values, first[np.newaxis, :], axis=0)[0]
-                y = np.where(counts > 0, y, np.nan)
-            else:
-                raise AssertionError(f"unsupported reduction: {aggregation!r}")
+        moved = np.reshape(
+            np.moveaxis(values, x_resolved.dimension, -1), (-1, nx), order="C"
+        )
+        moved_usable = np.reshape(
+            np.moveaxis(usable, x_resolved.dimension, -1), (-1, nx), order="C"
+        )
+        y, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
         y = np.asarray(y, dtype=np.float64)
         valid = (counts > 0) & np.isfinite(y)
         y_display = self._samples.value.canonical_unit.convert_value_to(
@@ -608,7 +602,7 @@ class DataView:
             revision=self._samples.revision,
             generation=self._samples.generation,
             x_ref=x,
-            group_by=groups,
+            group_by=(),
             series=(series,),
         )
 
@@ -756,75 +750,51 @@ class DataView:
             # domains.  Keep that uncommon policy in one implementation.
             return None
 
-        values = np.moveaxis(
+        return self._dense_image_data(
+            x,
+            y,
+            x_resolved,
+            y_resolved,
             self._samples.value.canonical,
-            (y_dimension, x_dimension),
-            (-2, -1),
-        )
-        usable = np.moveaxis(
             self._samples.valid_mask,
-            (y_dimension, x_dimension),
-            (-2, -1),
+            aggregation,
         )
-        ny, nx = int(y_canonical.size), int(x_canonical.size)
-        values = np.reshape(values, (-1, ny, nx), order="C")
-        usable = np.reshape(usable, (-1, ny, nx), order="C")
-        if values.shape[0] == 1:
-            # A monitor-camera frame normally has R=P=1 and no additional
-            # reduction dimensions.  Every supported reduction of one sample
-            # is that sample.  Preserve the immutable source view and its dtype;
-            # validity stays separate so a camera frame does not acquire full
-            # float64 and int64 companions before it reaches the renderer.
-            z = np.asarray(values[0])
-            valid = np.asarray(usable[0], dtype=np.bool_)
-        else:
-            counts = np.sum(usable, axis=0, dtype=np.int64)
-            with warnings.catch_warnings():
-                # Empty cells are intentionally NaN and marked invalid below.
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                if aggregation is Reduction.MEAN:
-                    z = np.mean(values, axis=0, where=usable)
-                elif aggregation is Reduction.MEDIAN:
-                    converted = np.asarray(values, dtype=np.float64)
-                    z = np.nanmedian(
-                        np.where(usable, converted, np.nan),
-                        axis=0,
-                    )
-                elif aggregation is Reduction.SUM:
-                    z = np.sum(values, axis=0, where=usable, initial=0)
-                    z = np.where(counts > 0, z, np.nan)
-                elif aggregation is Reduction.MIN:
-                    converted = np.asarray(values, dtype=np.float64)
-                    z = np.min(
-                        converted,
-                        axis=0,
-                        where=usable,
-                        initial=np.inf,
-                    )
-                    z = np.where(counts > 0, z, np.nan)
-                elif aggregation is Reduction.MAX:
-                    converted = np.asarray(values, dtype=np.float64)
-                    z = np.max(
-                        converted,
-                        axis=0,
-                        where=usable,
-                        initial=-np.inf,
-                    )
-                    z = np.where(counts > 0, z, np.nan)
-                elif aggregation is Reduction.FIRST:
-                    first = np.argmax(usable, axis=0)
-                    z = np.take_along_axis(
-                        values,
-                        first[np.newaxis, :, :],
-                        axis=0,
-                    )[0]
-                    z = np.where(counts > 0, z, np.nan)
-                else:
-                    raise AssertionError(
-                        f"unsupported reduction: {aggregation!r}"
-                    )
-            valid = (counts > 0) & np.isfinite(z)
 
+    def _dense_image_data(
+        self,
+        x: AxisRef,
+        y: AxisRef,
+        x_resolved: "_ResolvedAxis",
+        y_resolved: "_ResolvedAxis",
+        values: NDArray[Any],
+        usable: NDArray[np.bool_],
+        aggregation: Reduction,
+    ) -> ImageData:
+        """One dense image out of one (possibly row-sliced) value tensor."""
+
+        x_canonical = np.asarray(x_resolved.domain_canonical)
+        y_canonical = np.asarray(y_resolved.domain_canonical)
+        ny, nx = int(y_canonical.size), int(x_canonical.size)
+        moved = np.reshape(
+            np.moveaxis(
+                values,
+                (y_resolved.dimension, x_resolved.dimension),
+                (-2, -1),
+            ),
+            (-1, ny, nx),
+            order="C",
+        )
+        moved_usable = np.reshape(
+            np.moveaxis(
+                usable,
+                (y_resolved.dimension, x_resolved.dimension),
+                (-2, -1),
+            ),
+            (-1, ny, nx),
+            order="C",
+        )
+        z, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
+        valid = (counts > 0) & np.isfinite(z)
         # Reductions may promote their result; the singleton camera path keeps
         # the producer's native dtype and immutable storage.
         z = np.asarray(z)
@@ -1045,7 +1015,15 @@ class DataView:
     ) -> HistogramData:
         flat_valid = self._samples.valid_mask.reshape(-1)
         flat_values = self._samples.value.canonical.reshape(-1)
-        values = flat_values[positions[flat_valid[positions]]]
+        return self._histogram_from_values(
+            bins, flat_values[positions[flat_valid[positions]]]
+        )
+
+    def _histogram_from_values(
+        self,
+        bins: int | Sequence[float],
+        values: NDArray[Any],
+    ) -> HistogramData:
         _require_real_numeric(values, None)
         canonical_bins: int | NDArray[Any]
         if isinstance(bins, bool):
@@ -1154,6 +1132,20 @@ class DataView:
             _require_real_numeric(values, None)
             values = values[np.isfinite(values)]
             shared_bins = aligned_histogram_edges(values, int(bins))
+        if isinstance(cell, HistogramPlot) and bins is None:
+            raise DataViewError("histogram facet cells require explicit bins")
+        dense = self._dense_facet(spec, shared_bins)
+        if dense is not None:
+            return dense
+        return self._facet_from_positions(spec, shared_bins, base_positions)
+
+    def _facet_from_positions(
+        self,
+        spec: FacetGridPlot,
+        shared_bins: int | Sequence[float] | None,
+        base_positions: NDArray[np.int64],
+    ) -> FacetData:
+        cell = spec.cell
         cells: list[FacetCell] = []
         for facet_index, (key, cell_positions) in enumerate(
             self._groups((spec.facet,), base_positions)
@@ -1174,12 +1166,138 @@ class DataView:
                     cell.reduction,
                 )
             else:
-                if bins is None:
-                    raise DataViewError("histogram facet cells require explicit bins")
                 assert shared_bins is not None
                 payload = self._histogram_from_positions(
                     shared_bins,
                     cell_positions,
+                )
+            cells.append(
+                FacetCell(
+                    facet_index=facet_index,
+                    facet_value_canonical=facet_value.canonical,
+                    facet_value_display=facet_value.display,
+                    label=facet_value.label,
+                    payload=payload,
+                )
+            )
+        return FacetData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            spec=spec,
+            cells=tuple(cells),
+        )
+
+    def _dense_facet(
+        self,
+        spec: FacetGridPlot,
+        shared_bins: int | Sequence[float] | None,
+    ) -> FacetData | None:
+        """Row-sliced twin of the dense projections, one cell at a time.
+
+        A facet over the repeat axis or any point-domain axis selects whole
+        repeats or whole point rows, and slicing those preserves the
+        regularity the dense paths rely on: each cell is the same dense
+        tensor, shorter.  Cells over DATA axes therefore reduce through the
+        same kernel as their single-kind projections -- no (position, value)
+        pairs, no code sort, no per-pixel grouping.  Facets over DATA axes
+        and grouped curve cells keep the generic algorithm.
+        """
+
+        facet = spec.facet
+        cell = spec.cell
+        values = self._samples.value.canonical
+        valid_mask = self._samples.valid_mask
+        if facet.domain is AxisDomain.REPEAT:
+            slice_axis = 0
+        elif facet.domain in (
+            AxisDomain.POINT_ROW,
+            AxisDomain.POINT_COORDINATE,
+            AxisDomain.POINT_DIMENSION,
+        ):
+            slice_axis = 1
+        else:
+            return None
+
+        x_resolved = y_resolved = None
+        if isinstance(cell, CurvePlot):
+            # The same qualifying guards as _dense_data_curve, so a cell
+            # this path draws and the one the single kind draws agree.
+            if cell.group is not None or cell.x.domain is not AxisDomain.DATA:
+                return None
+            try:
+                x_resolved = self._resolve(cell.x)
+            except AxisResolutionError:
+                return None
+            _require_real_numeric(x_resolved.coordinate.canonical, cell.x)
+            x_domain = np.asarray(x_resolved.domain_canonical)
+            if not np.all(_finite_coordinate(x_domain)):
+                return None
+            if x_domain.size > 1 and not np.all(np.diff(x_domain) > 0):
+                return None
+        elif isinstance(cell, ImagePlot):
+            if (
+                cell.x.domain is not AxisDomain.DATA
+                or cell.y.domain is not AxisDomain.DATA
+            ):
+                return None
+            try:
+                x_resolved = self._resolve(cell.x)
+                y_resolved = self._resolve(cell.y)
+            except AxisResolutionError:
+                return None
+            _require_real_numeric(x_resolved.coordinate.canonical, cell.x)
+            _require_real_numeric(y_resolved.coordinate.canonical, cell.y)
+            if not (
+                np.all(_finite_coordinate(np.asarray(x_resolved.domain_canonical)))
+                and np.all(_finite_coordinate(np.asarray(y_resolved.domain_canonical)))
+            ):
+                return None
+        elif not isinstance(cell, HistogramPlot):
+            return None
+
+        # One representative element per candidate slice puts the existing
+        # domain machinery (labels, declared indices, units) to work on an
+        # array the size of the SLICE COUNT, not of the dataset.
+        data_size = 1
+        for size in values.shape[2:]:
+            data_size *= int(size)
+        if slice_axis == 0:
+            representatives = np.arange(values.shape[0], dtype=np.int64) * (
+                values.shape[1] * data_size
+            )
+        else:
+            representatives = np.arange(values.shape[1], dtype=np.int64) * data_size
+        domain = self._domain(facet, representatives)
+        if not domain.values:
+            return None
+
+        cells: list[FacetCell] = []
+        for facet_index, facet_value in enumerate(domain.values):
+            selector = np.flatnonzero(domain.codes == facet_index)
+            if slice_axis == 0:
+                cell_values = values[selector]
+                cell_valid = valid_mask[selector]
+            else:
+                cell_values = values[:, selector]
+                cell_valid = valid_mask[:, selector]
+            if isinstance(cell, CurvePlot):
+                payload: FacetPayload = self._dense_curve_data(
+                    cell.x, x_resolved, cell_values, cell_valid, cell.reduction
+                )
+            elif isinstance(cell, ImagePlot):
+                payload = self._dense_image_data(
+                    cell.x,
+                    cell.y,
+                    x_resolved,
+                    y_resolved,
+                    cell_values,
+                    cell_valid,
+                    cell.reduction,
+                )
+            else:
+                assert shared_bins is not None
+                payload = self._histogram_from_values(
+                    shared_bins, cell_values[cell_valid]
                 )
             cells.append(
                 FacetCell(
@@ -1612,6 +1730,54 @@ def _require_real_numeric(values: NDArray[Any], ref: AxisRef | None) -> None:
     if np.asarray(values).dtype.kind not in "biuf":
         target = "dataset values" if ref is None else repr(ref)
         raise DataViewError(f"{target} must be real numeric for this projection")
+
+
+def _masked_leading_reduce(
+    values: NDArray[Any],
+    usable: NDArray[np.bool_],
+    aggregation: Reduction,
+) -> tuple[NDArray[Any], NDArray[np.int64]]:
+    """Reduce the leading axis under a validity mask: THE dense reduction.
+
+    ``values``/``usable`` are ``(samples, *cell_shape)``.  Every dense
+    projection -- curve, image, and each facet cell -- reduces through this
+    one kernel, so they cannot disagree.  A single leading sample
+    short-circuits to that sample in its native dtype, which is what keeps a
+    live camera frame from acquiring float64 companions on its way to the
+    renderer; values where ``counts`` is zero are unspecified, validity is
+    the contract.
+    """
+
+    if values.shape[0] == 1:
+        return np.asarray(values[0]), np.asarray(usable[0], dtype=np.int64)
+    counts = np.sum(usable, axis=0, dtype=np.int64)
+    with warnings.catch_warnings():
+        # Empty positions are intentionally NaN and marked invalid by the
+        # caller through ``counts``.
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        if aggregation is Reduction.MEAN:
+            result = np.mean(values, axis=0, where=usable)
+        elif aggregation is Reduction.MEDIAN:
+            converted = np.asarray(values, dtype=np.float64)
+            result = np.nanmedian(np.where(usable, converted, np.nan), axis=0)
+        elif aggregation is Reduction.SUM:
+            result = np.sum(values, axis=0, where=usable, initial=0)
+            result = np.where(counts > 0, result, np.nan)
+        elif aggregation is Reduction.MIN:
+            converted = np.asarray(values, dtype=np.float64)
+            result = np.min(converted, axis=0, where=usable, initial=np.inf)
+            result = np.where(counts > 0, result, np.nan)
+        elif aggregation is Reduction.MAX:
+            converted = np.asarray(values, dtype=np.float64)
+            result = np.max(converted, axis=0, where=usable, initial=-np.inf)
+            result = np.where(counts > 0, result, np.nan)
+        elif aggregation is Reduction.FIRST:
+            first = np.argmax(usable, axis=0)
+            result = np.take_along_axis(values, np.expand_dims(first, 0), axis=0)[0]
+            result = np.where(counts > 0, result, np.nan)
+        else:
+            raise AssertionError(f"unsupported reduction: {aggregation!r}")
+    return np.asarray(result), counts
 
 
 def _reduce_segments(

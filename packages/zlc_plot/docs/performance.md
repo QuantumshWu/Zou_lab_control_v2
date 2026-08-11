@@ -445,3 +445,24 @@ itself (per-cell domain derivation and several full-size passes over the
 data axes, reduce the rest" as a reshape+mean would take it to tens of
 milliseconds, at the cost of a second projection path that must prove
 equivalence.
+
+### Superseded: the facet now reuses the dense projections (2026-08-11, later)
+
+The "still open" paragraph above is resolved the right way round: instead
+of a faster generic aggregator, `facet()` now routes through the SAME dense
+mechanism the single kinds already had.  A facet over the repeat axis or a
+point-domain axis slices whole rows, which preserves the regularity
+`_dense_data_image`/`_dense_data_curve` rely on -- so each cell reduces
+through the one shared kernel (`_masked_leading_reduce`, now also the single
+implementation behind both single-kind dense paths, which had duplicated
+the reduction chain).  Facets over DATA axes and grouped curve cells keep
+the generic algorithm.
+
+Measured on the same `(1, 9, 1200, 1920)` scan: session construct
+3.3 s -> 0.87 s (projection itself 0.39 s; the rest is Matplotlib
+composition).  Image cells 0.72 s, histogram cells 0.77 s; curve cells over
+a scan dimension stay generic (1.66 s) because their x is not a data axis.
+`tests/test_facet_dense_equivalence.py` proves the dense path ENGAGES for
+scan-of-frames cells and agrees with the generic path cell for cell --
+image (mean/median/sum), repeat facets, curve cells, histogram cells,
+invalid cells included.
