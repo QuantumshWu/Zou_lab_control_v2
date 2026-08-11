@@ -135,6 +135,49 @@ def test_frame_cells_keep_their_repeat_facet_and_live_dimension_fallback() -> No
     assert spec.facet == AxisRef.point_dimension("b")
 
 
+def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:
+    """(cycles, frames, y, x): frames ARE points, and the grid shows them.
+
+    A cycle with no scan topology publishes its frames on the point axis;
+    the facet walks that axis so frame_0 | frame_1 sit side by side --
+    with repeats averaged into each frame's cell, because the cycle's
+    structure, not the shot count, is what the acquisition authored.
+    """
+
+    frames = PointTable.from_columns({"frame": [0, 1]})
+    single = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        frames,
+        data_axes=_frame_axes(),
+    )
+    spec = facet_default(single)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet == AxisRef.point("frame")
+    assert isinstance(spec.cell, ImagePlot)
+    assert spec.cell.x == AxisRef.data("x")
+    assert spec.cell.y == AxisRef.data("y")
+
+    with_cycles = DatasetSchema.create(
+        Axis.create("repeat", size=30),
+        frames,
+        data_axes=_frame_axes(),
+    )
+    spec = facet_default(with_cycles)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet == AxisRef.point("frame")
+
+    one_frame = DatasetSchema.create(
+        Axis.create("repeat", size=30),
+        PointTable.from_columns({"frame": [0]}),
+        data_axes=_frame_axes(),
+    )
+    spec = facet_default(one_frame)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet == AxisRef.repeat(), (
+        "a single-frame capture has only its repeats to show"
+    )
+
+
 def test_a_site_resolved_scan_keeps_the_grouped_curve_cell() -> None:
     """One live data axis is per-site structure, not a scalar: curves stay.
 

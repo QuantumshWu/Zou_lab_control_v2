@@ -19,7 +19,6 @@ from zlc_data import (
     PointColumn,
     PointTable,
     REPEAT,
-    SITE,
     StreamGenerationId,
     VALID,
     ValidityContract,
@@ -60,13 +59,16 @@ def snapshot_from_array(
     "0" and revision 0 forever -- which froze every live plot downstream, since
     a plot rejects a revision that is not newer than the one it holds.
 
-    The first array dimension is the repeat axis.  A ``SITE`` role is encoded
-    in the shared point table; all other roles remain explicit tensor axes.
-    Producers with domain identities or physical coordinates pass their exact
-    ``PointColumn``/``AxisSpec`` by role.  Generated axes are only the fallback
-    for outputs whose producer has no stronger metadata.  The helper keeps the
-    array-facing node API separate from the typed artifact so consumers never
-    infer axis meaning from shape.
+    The first array dimension is the repeat axis.  The point axis has ONE
+    uniform rule: whoever wants it supplies its ``PointColumn`` in
+    ``point_columns`` -- that column's role owns the point axis, whatever
+    the role (``SITE`` for readout sites, ``READOUT_EVENT`` for a camera
+    cycle's frames, ...).  No column, no point axis: every role is then a
+    cell axis.  No role is special-cased here.  Producers with richer cell
+    metadata pass their exact ``AxisSpec`` by role; generated axes are only
+    the fallback for outputs whose producer has no stronger metadata.  The
+    helper keeps the array-facing node API separate from the typed artifact
+    so consumers never infer axis meaning from shape.
     """
 
     producer = str(producer).strip()
@@ -92,8 +94,6 @@ def snapshot_from_array(
             raise TypeError("axis_specs values must be AxisSpec values")
         if axis.role != role:
             raise ValueError("axis_specs keys must match their AxisSpec role")
-        if role == SITE:
-            raise ValueError("SITE metadata belongs in point_columns")
         if normalized_roles.count(role) != 1:
             raise ValueError(
                 "an explicit axis spec requires exactly one matching role"
@@ -108,8 +108,6 @@ def snapshot_from_array(
             raise TypeError("point_columns values must be PointColumn values")
         if column.role != role:
             raise ValueError("point_columns keys must match their PointColumn role")
-        if role != SITE:
-            raise ValueError("only SITE is represented by a point column")
         if normalized_roles.count(role) != 1:
             raise ValueError(
                 "an explicit point column requires exactly one matching role"
@@ -117,11 +115,25 @@ def snapshot_from_array(
     trailing_shape = tuple(int(size) for size in array.shape[1:])
     if len(normalized_roles) != len(trailing_shape):
         raise ValueError("roles must describe every non-repeat array dimension")
-    if normalized_roles.count(SITE) > 1:
-        raise ValueError("a dataset may contain at most one SITE role")
 
-    site_position = normalized_roles.index(SITE) if SITE in normalized_roles else None
-    if site_position is None:
+    # ONE uniform rule, no role is special: the point axis belongs to the
+    # single explicitly supplied point column's role.  No column, no point
+    # axis.  PointColumn itself refuses roles outside the point domain.
+    if len(normalized_point_columns) > 1:
+        raise ValueError(
+            "a dataset has one point axis; give exactly one point column"
+        )
+    point_role = next(iter(normalized_point_columns), None)
+    if point_role is not None and point_role in normalized_axis_specs:
+        raise ValueError(
+            f"{point_role.value} owns the point axis; its metadata belongs "
+            "in point_columns, not axis_specs"
+        )
+
+    point_position = (
+        normalized_roles.index(point_role) if point_role is not None else None
+    )
+    if point_position is None:
         point_size = 1
         cell_roles = normalized_roles
         cell_shape = trailing_shape
@@ -129,26 +141,42 @@ def snapshot_from_array(
         if not cell_roles:
             tensor = tensor.reshape((repeat_size, 1, 1))
     else:
-        point_size = trailing_shape[site_position]
+        point_size = trailing_shape[point_position]
         if point_size <= 0:
-            raise ValueError("SITE axis must be non-empty")
-        cell_roles = tuple(role for role in normalized_roles if role is not SITE)
-        tensor = np.moveaxis(array, site_position + 1, 1)
-        cell_shape = tuple(size for index, size in enumerate(trailing_shape) if index != site_position)
+            raise ValueError(f"{point_role.value} axis must be non-empty")
+        cell_roles = tuple(
+            role for role in normalized_roles if role is not point_role
+        )
+        tensor = np.moveaxis(array, point_position + 1, 1)
+        cell_shape = tuple(size for index, size in enumerate(trailing_shape) if index != point_position)
         tensor = tensor.reshape((repeat_size, point_size, *cell_shape))
         if not cell_roles:
             tensor = tensor.reshape((repeat_size, point_size, 1))
 
     # A schema built purely from generated metadata is a function of this key
-    # alone, so one instance is reused for every publication of the shape --
-    # explicit axis specs or point columns carry caller-owned metadata and are
-    # built fresh instead.
+    # alone, so one instance is reused for every publication of the shape.
+    # An explicit point column joins the key by VALUE -- a live camera
+    # monitor freezes at 10 Hz with the same frame column every time, and
+    # rebuilding (and re-fingerprinting) the schema per freeze is the cost
+    # this cache exists to avoid.  Explicit axis specs stay uncached.
     cache_key: tuple | None = None
     if (
         not normalized_axis_specs
-        and not normalized_point_columns
         and (value_unit is None or isinstance(value_unit, str))
     ):
+        column_key: tuple = ()
+        if normalized_point_columns:
+            column = normalized_point_columns[point_role]
+            column_key = (
+                str(column.coordinate_id),
+                column.name,
+                column.role,
+                column.value_kind,
+                tuple(column.values),
+                column.unit,
+                column.coordinate_frame,
+                column.coordinate_labels,
+            )
         cache_key = (
             producer,
             signal,
@@ -157,6 +185,7 @@ def snapshot_from_array(
             trailing_shape,
             array.dtype.str,
             value_unit,
+            column_key,
         )
     schema: DatasetSchema | None = None
     if cache_key is not None:
@@ -165,22 +194,15 @@ def snapshot_from_array(
             if schema is not None:
                 _SCHEMA_CACHE.move_to_end(cache_key)
     if schema is None:
-        point_column = normalized_point_columns.get(SITE)
-        if point_column is None:
-            point_column = PointColumn(
-                AxisId(f"{producer}.{signal}.site"),
-                "site",
-                SITE,
-                PointColumn.NUMERIC,
-                tuple(range(point_size)),
-            )
-        elif len(point_column.values) != point_size:
-            raise ValueError("SITE PointColumn length must match the SITE axis size")
-        point_table = (
-            PointTable(point_size, (point_column,))
-            if SITE in normalized_roles
-            else PointTable(1)
-        )
+        if point_role is None:
+            point_table = PointTable(1)
+        else:
+            point_column = normalized_point_columns[point_role]
+            if len(point_column.values) != point_size:
+                raise ValueError(
+                    f"{point_role.value} PointColumn length must match its axis size"
+                )
+            point_table = PointTable(point_size, (point_column,))
         # Implicit coordinates: a spatial axis of a camera frame is indexed 0..n-1,
         # which is exactly what an AxisSpec means when it carries none.  Writing
         # them out made every published frame build a 2048-element tuple, validate

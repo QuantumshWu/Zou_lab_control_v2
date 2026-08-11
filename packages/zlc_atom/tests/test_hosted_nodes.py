@@ -240,12 +240,17 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         assert publication is not None
         value = publication.value(host.signal_key("frames"))
         assert value is not None
-        # One signal for the whole cycle: the frames live on the event axis.
+        # One signal for the whole cycle: the frames ARE the point rows.
+        schema = value.snapshot.block.schema
         assert tuple(
-            axis.role for axis in value.snapshot.block.schema.cell_schema.data_axes
-        ) == (READOUT_EVENT, SPATIAL_Y, SPATIAL_X)
+            axis.role for axis in schema.cell_schema.data_axes
+        ) == (SPATIAL_Y, SPATIAL_X)
+        frame_column = schema.point_table.columns[0]
+        assert frame_column.name == "frame"
+        assert frame_column.role == READOUT_EVENT
+        assert frame_column.values == tuple(range(windows))
         frames = np.asarray(value.snapshot.block.values)
-        assert frames.shape[:3] == (1, 1, windows)
+        assert frames.shape[:2] == (1, windows)
         record = publication.run_record
         assert value.run_record == record
         assert record["node"] == "cm"

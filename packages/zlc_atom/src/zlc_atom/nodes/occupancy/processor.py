@@ -123,20 +123,18 @@ def _unpack_frames(frames: object) -> tuple[list[object], tuple[int, ...]]:
         frames = getattr(frames, "values")
     if isinstance(frames, np.ndarray):
         array = np.asarray(frames)
-        if array.ndim == 5 and array.shape[1] == 1:
-            array = array[:, 0]
         if array.ndim == 3:
             return [array[index] for index in range(array.shape[0])], (int(array.shape[0]),)
         if array.ndim == 4:
             if array.shape[1] == 1:
                 return [array[index, 0] for index in range(array.shape[0])], (int(array.shape[0]),)
-            return [array[repeat, event] for repeat in range(array.shape[0]) for event in range(array.shape[1])], (
+            return [array[repeat, frame] for repeat in range(array.shape[0]) for frame in range(array.shape[1])], (
                 int(array.shape[0]),
                 int(array.shape[1]),
             )
         if array.ndim < 3:
             raise ValueError("camera frame arrays require a leading frame dimension")
-        raise ValueError("camera frame arrays must be (frame,y,x) or (repeat,event,y,x)")
+        raise ValueError("camera frame arrays must be (frame,y,x) or (repeat,frame,y,x)")
     values = list(frames)  # type: ignore[arg-type]
     if not values:
         raise ValueError("occupancy requires at least one frame")
@@ -166,6 +164,25 @@ def inherited_stamps(snapshot: object) -> dict[str, object]:
     }
 
 
+def _site_column(producer: str, signal: str, site_map: object) -> PointColumn:
+    """One signal's site identity: the calibration's REAL site ids.
+
+    Every site-axed output shares this construction, so counts and the
+    overlay cannot disagree about which site is which.
+    """
+
+    return PointColumn(
+        AxisId(f"{producer}.{signal}.site"),
+        "site",
+        SITE,
+        PointColumn.TEXT,
+        tuple(site_map.site_ids),
+        coordinate_labels=tuple(
+            str(index) for index in range(1, site_map.n_sites + 1)
+        ),
+    )
+
+
 def _site_overlay_snapshot(
     statuses: np.ndarray,
     *,
@@ -177,16 +194,7 @@ def _site_overlay_snapshot(
 ) -> OwnedSnapshot:
     site_map = calibration.site_map
     frame = CoordinateFrameId(site_map.coordinate_frame)
-    site = PointColumn(
-        AxisId(f"{producer}.site_overlay.site"),
-        "site",
-        SITE,
-        PointColumn.TEXT,
-        tuple(site_map.site_ids),
-        coordinate_labels=tuple(
-            str(index) for index in range(1, site_map.n_sites + 1)
-        ),
-    )
+    site = _site_column(producer, "site_overlay", site_map)
     base = snapshot_from_array(
         statuses,
         producer=producer,
@@ -439,12 +447,32 @@ class OccupancyProcessor:
             SPATIAL_Y,
             SPATIAL_X,
         )
+        # frame_judged mirrors its input's structure: a per-frame derived
+        # image keeps the frames on the POINT axis, so it lines up with the
+        # camera publication frame for frame.
+        frame_judged_points = (
+            {
+                READOUT_EVENT: PointColumn(
+                    AxisId(f"{self.producer}.frame_judged.frame"),
+                    "frame",
+                    READOUT_EVENT,
+                    PointColumn.NUMERIC,
+                    tuple(range(int(frame_judged.shape[1]))),
+                )
+            }
+            if frame_judged.ndim == 4
+            else None
+        )
+        site_map = self.calibration.site_map
         artifacts = {
             "counts": snapshot_from_array(
                 counts,
                 producer=self.producer,
                 signal="counts",
                 roles=site_roles,
+                point_columns={
+                    SITE: _site_column(self.producer, "counts", site_map)
+                },
                 generation=generation,
                 revision=revision,
             ),
@@ -453,6 +481,9 @@ class OccupancyProcessor:
                 producer=self.producer,
                 signal="occupied",
                 roles=site_roles,
+                point_columns={
+                    SITE: _site_column(self.producer, "occupied", site_map)
+                },
                 generation=generation,
                 revision=revision,
             ),
@@ -461,6 +492,9 @@ class OccupancyProcessor:
                 producer=self.producer,
                 signal="valid",
                 roles=site_roles,
+                point_columns={
+                    SITE: _site_column(self.producer, "valid", site_map)
+                },
                 generation=generation,
                 revision=revision,
             ),
@@ -477,6 +511,9 @@ class OccupancyProcessor:
                 producer=self.producer,
                 signal="survival",
                 roles=(READOUT_EVENT, SITE),
+                point_columns={
+                    SITE: _site_column(self.producer, "survival", site_map)
+                },
                 generation=generation,
                 revision=revision,
             ),
@@ -493,6 +530,7 @@ class OccupancyProcessor:
                 producer=self.producer,
                 signal="frame_judged",
                 roles=frame_roles,
+                point_columns=frame_judged_points,
                 generation=generation,
                 revision=revision,
             ),

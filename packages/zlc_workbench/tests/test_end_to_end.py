@@ -129,9 +129,9 @@ def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> Non
     reopened = json.loads(completed.stdout)
     assert reopened["pulse"] == PULSE_NAME
     assert reopened["dataset"] == ["frames"]
-    # ONE frames signal: the whole cycle sits on the event axis of one block,
-    # (repeat, point, event, y, x).
-    assert reopened["frames"] == [1, 1, CAMERA_WINDOWS, 96, 128], (
+    # ONE frames signal: the whole cycle sits on the point axis of one block,
+    # (repeat, frame, y, x).
+    assert reopened["frames"] == [1, CAMERA_WINDOWS, 96, 128], (
         f"unexpected block shape {reopened['frames']}"
     )
 

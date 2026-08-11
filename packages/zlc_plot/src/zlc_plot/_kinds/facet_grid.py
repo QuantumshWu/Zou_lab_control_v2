@@ -83,9 +83,13 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
 
     The facet axis differs by cell on purpose:
 
-    * frame cells: the repeat axis wins whenever it is non-trivial -- each
-      shot's frame is the thing to compare; without repeats, the outermost
-      live dimension facets the frames.
+    * frame cells: with no scan topology, a NON-TRIVIAL point axis wins --
+      a camera cycle publishes its frames as points, and frame_0 | frame_1
+      side by side (cycles averaged) is what the cycle was authored to
+      show; a single-frame capture facets its repeats instead.  Under a
+      scan topology the repeat axis wins whenever it is non-trivial (each
+      shot's frame is the thing to compare), then the outermost live
+      dimension.
     * scan-heatmap cells: the OUTER dimensions win and repeats reduce into
       the cell's mean -- the averaged map is the measurement, and a
       per-sweep facet stays one authored change away.  With no outer
@@ -101,6 +105,11 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
     repeats = schema.repeat_axis.size > 1
     cell = _data_axes_cell(schema)
     if cell is not None:
+        if schema.grid_topology is None and schema.point_table.row_count > 1:
+            column = schema.point_table.columns[0]
+            return FacetGridPlot(
+                AxisRef.point(str(column.coordinate_id)), cell
+            )
         if repeats:
             return FacetGridPlot(AxisRef.repeat(), cell)
         if live:

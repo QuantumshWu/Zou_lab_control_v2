@@ -206,8 +206,27 @@ def scan_dataset_schema(
         source_domains: tuple[tuple[object, ...], ...] = ()
         source_cells: tuple[tuple[int, ...], ...] = ((),)
     elif source_topology is None:
-        source_ids = (free_axis_id("scan.source_point"),)
-        source_domains = (tuple(range(source_points)),)
+        # The source's point axis keeps its IDENTITY as a scan dimension --
+        # a camera cycle's frames stay "frame", exactly as the plan's axes
+        # share their AxisId between point column and topology dimension.
+        # A source whose single column cannot be a coordinate domain
+        # (repeated or missing values) gets the anonymous fallback.
+        column = (
+            source_schema.point_table.columns[0]
+            if len(source_schema.point_table.columns) == 1
+            else None
+        )
+        values = None if column is None else tuple(column.values)
+        if (
+            values is not None
+            and len(set(values)) == len(values)
+            and all(value is not None for value in values)
+        ):
+            source_ids = (column.coordinate_id,)
+            source_domains = (values,)
+        else:
+            source_ids = (free_axis_id("scan.source_point"),)
+            source_domains = (tuple(range(source_points)),)
         source_cells = tuple((index,) for index in range(source_points))
     else:
         source_ids = source_topology.dimension_ids

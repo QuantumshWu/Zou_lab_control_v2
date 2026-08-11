@@ -102,8 +102,8 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert set(publication.signals) == {signal_key}
         value = publication.value(signal_key)
         assert value is not None
-        # One monitor snapshot: (repeat=1, point=1, event=cycle, y, x).
-        assert value.snapshot.block.values.shape == (1, 1, 3, 16, 20)
+        # One monitor snapshot: (repeat=1, frame points=cycle, y, x).
+        assert value.snapshot.block.values.shape == (1, 3, 16, 20)
         assert value.snapshot.block.values.dtype.str == "<u2"
         assert measurement.request.roi_xywh == (2, 3, 20, 16)
         assert measurement.actual_working_point is not None

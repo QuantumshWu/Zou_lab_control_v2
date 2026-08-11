@@ -307,8 +307,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert frames_publication is not None and frames_value is not None
         assert frames_value.coverage is None
         assert frames_value.transient is False
-        # (repeat, point, event): three cycles of one frame each.
-        assert frames_value.shape[:3] == (3, 1, 1)
+        # (repeat, frame): three cycles of one frame each on the point axis.
+        assert frames_value.shape[:2] == (3, 1)
         assert not plane.is_generation_live(frames_signal)
 
         occupancy_descriptor = catalog.get("occupancy")
@@ -400,11 +400,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         n_sites = first_calibration.calibration.site_map.n_sites
         assert counts.shape == occupied.shape == valid.shape == (3, n_sites, 1)
         assert rate.shape == (3, 1, 1)
-        # frame_judged is (repeat, point, y, x); the camera's frames block is
-        # (repeat, point, event, y, x) with a one-event cycle.
+        # frame_judged mirrors its input: both blocks are (repeat, frame, y, x),
+        # so a one-frame cycle's judged block equals the camera block directly.
         np.testing.assert_array_equal(
             frame_judged.values,
-            frames_value.values[:, :, 0],
+            frames_value.values,
         )
         assert all(
             value.coverage is None and value.transient is False

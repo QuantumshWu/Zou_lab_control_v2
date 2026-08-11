@@ -152,8 +152,8 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     value = session.signal_plane.freeze().value(frames_signal)
     assert value is not None
     shape = value.shape
-    # (repeat, point, event, y, x): the whole three-frame cycle in one block.
-    assert shape[:3] == (1, 1, 3)
+    # (repeat, frame, y, x): the cycle's frames ARE the point axis now.
+    assert shape[:2] == (1, 3)
     expected = f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
     assert tuple(value[1] for value in row.publishes) == (expected,)
     occupancy_id = presenter.add_logic("occupancy")

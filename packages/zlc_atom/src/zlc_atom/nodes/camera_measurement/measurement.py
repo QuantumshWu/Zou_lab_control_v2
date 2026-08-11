@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import numpy as np
-from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+from zlc_data import AxisId, PointColumn, READOUT_EVENT, SPATIAL_X, SPATIAL_Y
 from zlc_runtime import MonitorCoverage
 from zlc_runtime import (
     DatasetOutputDeclaration,
@@ -25,13 +25,29 @@ from zlc_atom.data import snapshot_from_array
 
 _CAMERA_FRAME_CONTRACT = "camera.frames.v1"
 
-#: The camera's ONE output: a cycle of frames on the READOUT_EVENT axis.
+#: The camera's ONE output: a cycle of frames on the dataset's POINT axis.
 #: A cycle is one acquisition event; publishing its frames as N sibling
 #: signals leaked the acquisition configuration into the signal vocabulary
 #: (a panel bound to "frame_1" broke the moment frames_per_cycle changed),
-#: and no consumer could see the whole cycle at once.  The event axis is the
-#: role the data model already reserves for exactly this.
+#: and no consumer could see the whole cycle at once.  The frames live on
+#: the POINT axis -- (repeat cycles) x (frame points) x (y, x) -- because a
+#: frame is a point of the acquisition, not structure inside a pixel plane:
+#: that is what lets a grid facet the frames side by side and lets a scan
+#: nest them into its own point table.  The column's role is READOUT_EVENT,
+#: the point-domain role the data model reserves for exactly this.
 CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT)
+
+
+def _frame_point_column(producer: str, frames: int) -> PointColumn:
+    """The frame-index point column one cycle publishes."""
+
+    return PointColumn(
+        AxisId(f"{producer}.frames.frame"),
+        "frame",
+        READOUT_EVENT,
+        PointColumn.NUMERIC,
+        tuple(range(int(frames))),
+    )
 
 
 def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
@@ -142,9 +158,11 @@ class _CameraMonitorSlot:
         if records is None:
             raise RuntimeError("camera monitor slot has no accepted cycle")
         generation, revision = self.node._next_publication_stamp()
+        # Cells are repeat x point rows; a cycle's frames ARE its point rows,
+        # and a monitor publication is always one COMPLETE cycle.
         coverage = MonitorCoverage(
-            written_cells=1,
-            total_cells=1,
+            written_cells=len(records),
+            total_cells=len(records),
         )
         return {
             CAMERA_FRAMES_OUTPUT.name: LiveDatasetOutput(
@@ -157,6 +175,11 @@ class _CameraMonitorSlot:
                     producer=self.node.instance_id,
                     signal=CAMERA_FRAMES_OUTPUT.name,
                     roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+                    point_columns={
+                        READOUT_EVENT: _frame_point_column(
+                            self.node.instance_id, len(records)
+                        )
+                    },
                     generation=generation,
                     revision=revision,
                 ),
@@ -584,6 +607,11 @@ class CameraMeasurementNode:
                     producer=self.instance_id,
                     signal=CAMERA_FRAMES_OUTPUT.name,
                     roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+                    point_columns={
+                        READOUT_EVENT: _frame_point_column(
+                            self.instance_id, len(cycles[0])
+                        )
+                    },
                     generation=generation,
                     revision=revision,
                 ),
