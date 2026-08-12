@@ -587,7 +587,9 @@ class DeviceManagerPresenter:
             return ""
         chosen = ask(
             "Save apparatus as",
-            str(self.path.parent),
+            # The file being edited, name and all: "save as" starts from what
+            # you have, and an empty name box makes every save begin by typing.
+            str(self.path),
             "Apparatus (*.json);;All files (*)",
         )
         if not chosen:

@@ -21,6 +21,8 @@ from typing import Any
 
 from PyQt5 import QtCore
 
+from zlc_ui.fluent import fluent_open_path, fluent_save_path
+
 from .logic_row_view import LogicRowView
 from .logic_editor_view import LogicEditorView
 from .panel_card_view import PanelCardView
@@ -230,25 +232,15 @@ class TaskConsoleHandle(QtCore.QObject):
 
         return choose_signal(rows, self._view)
 
-    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
-        """Ask where to write; "" when the operator declines."""
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
+        """Ask where to write, offering a name; "" when they decline."""
 
-        from PyQt5 import QtWidgets
+        return fluent_save_path(self._view, caption, suggested, filter)
 
-        path, _selected = QtWidgets.QFileDialog.getSaveFileName(
-            self._view, str(caption), str(start_dir), str(filter)
-        )
-        return str(path)
-
-    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
+    def ask_open_path(self, caption: str, start: str, filter: str) -> str:
         """Ask for a file to open; "" when the operator declines."""
 
-        from PyQt5 import QtWidgets
-
-        path, _selected = QtWidgets.QFileDialog.getOpenFileName(
-            self._view, str(caption), str(start_dir), str(filter)
-        )
-        return str(path)
+        return fluent_open_path(self._view, caption, start, filter)
 
     def save_screenshot(self, path: str) -> str:
         """Write one screenshot of the complete TaskConsole window."""

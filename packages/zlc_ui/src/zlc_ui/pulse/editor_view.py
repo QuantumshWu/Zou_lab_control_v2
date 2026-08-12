@@ -5,6 +5,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    fluent_open_path,
+    fluent_save_path,
     fluent_confirm,
     ACCENT,
     GREEN,
@@ -130,13 +132,11 @@ class PulseEditorView(QtWidgets.QWidget):
         self.scan_view.scan_step_back_button.setEnabled(bool(can_step))
         self.scan_view.scan_step_forward_button.setEnabled(bool(can_step))
 
-    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
-        path, _selected = QtWidgets.QFileDialog.getOpenFileName(self, str(caption), str(start_dir), str(filter))
-        return str(path)
+    def ask_open_path(self, caption: str, start: str, filter: str) -> str:
+        return fluent_open_path(self, caption, start, filter)
 
-    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
-        path, _selected = QtWidgets.QFileDialog.getSaveFileName(self, str(caption), str(start_dir), str(filter))
-        return str(path)
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
+        return fluent_save_path(self, caption, suggested, filter)
 
     def confirm(self, title: str, text: str, ok: str = "OK", cancel: str = "Cancel") -> bool:
         """Ask a yes-or-no, in the same dialog every other message uses.

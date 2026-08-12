@@ -356,6 +356,9 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
             "fit",
             "overlay_signal",
             "published_outputs",
+            "selector",
+            "classifier_threshold",
+            "focused_cell",
         },
         where,
     )
@@ -380,6 +383,17 @@ def _panel_from_tree(value: object, index: int) -> PanelState:
                     f"{where} published_outputs",
                 ).items()
             },
+            selector=dict(_mapping(entry["selector"], f"{where} selector")),
+            classifier_threshold=dict(
+                _mapping(
+                    entry["classifier_threshold"], f"{where} classifier_threshold"
+                )
+            ),
+            focused_cell=(
+                None
+                if entry["focused_cell"] is None
+                else _integer(entry["focused_cell"], f"{where} focused_cell")
+            ),
         )
     except Exception as error:
         raise LayoutError(f"{where}: {error}") from error

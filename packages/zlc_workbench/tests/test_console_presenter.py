@@ -245,10 +245,10 @@ class _ConsoleView:
     def show_warning(self, title: str, text: str) -> None:
         self.status.append(("error", str(text)))
 
-    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
+    def ask_open_path(self, caption: str, start: str, filter: str) -> str:
         return self.open_answer
 
-    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
         return self.save_answer
 
     def save_screenshot(self, path: str) -> str:
@@ -1591,7 +1591,9 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
 
     second_editor_host.remove_selector(SelectorKind.AREA).result()
     presenter.beat()
-    assert panel.interaction_selection is None
+    # The panel's own record holds it now, so a removed selector is a
+    # panel that has none written down -- and a saved board has none either.
+    assert panel.state.selector == {}
 
     before_zoom = dict(presenter.logic[second_id].draft.values)
     _zoom_in(second_editor_host)
@@ -1930,6 +1932,9 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "display": authored_display,
         "fit": {"model": "gaussian"}, "overlay_signal": "",
         "published_outputs": {},
+        "selector": {},
+        "classifier_threshold": {},
+        "focused_cell": None,
     }
     # Nothing of this session's bookkeeping: ids are minted fresh on the way in.
     assert not any("panel_id" in panel for panel in document["panels"])
@@ -2057,6 +2062,9 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
             "fit": {},
             "overlay_signal": "",
             "published_outputs": {},
+            "selector": {},
+            "classifier_threshold": {},
+            "focused_cell": None,
         }
     )
 
@@ -2081,7 +2089,8 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
         {"signal": "nobody.publishes.this", "title": "gone", "kind": "image",
          "cell_kind": "", "size": "",
          "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
-         "overlay_signal": "", "published_outputs": {}}
+         "overlay_signal": "", "published_outputs": {},
+         "selector": {}, "classifier_threshold": {}, "focused_cell": None}
     )
 
     assert presenter.apply_layout(document) is True

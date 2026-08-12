@@ -190,7 +190,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert visible.y.span > authored_roi[3]
 
         panel.editor_host.remove_selector(plot.SelectorKind.AREA).result()
-        _wait_until(lambda: panel.interaction_selection is None, presenter)
+        _wait_until(lambda: panel.state.selector == {}, presenter)
         _wait_until(
             lambda: _visible_producer_roi(panel_editor) != selected_roi,
             presenter,

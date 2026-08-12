@@ -1703,6 +1703,47 @@ def fluent_message(parent, title: str, text: str, *, kind: str = "info") -> None
     _exec_centered_dialog(dlg, parent)
 
 
+def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) -> str:
+    """What a file saved out of a window is called.
+
+    A name the operator recognises plus the moment it was written, because two
+    saves of the same board are two files and the second must not silently be
+    the first.  ONE rule: the Edit tab's Save Fig and the console's own Save
+    Layout / Save Screenshot had begun to grow their own.
+    """
+
+    from datetime import datetime  # noqa: PLC0415 -- only a save needs the clock
+
+    text = str(stem).strip().replace("/", "_").replace("\\", "_") or "untitled"
+    moment = stamp if stamp is not None else datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix = str(extension).lstrip(".")
+    return f"{text}_{moment}.{suffix}" if suffix else f"{text}_{moment}"
+
+
+def fluent_save_path(parent, caption: str, suggested: str, filter: str) -> str:
+    """Ask where to write, offering a name; "" when the operator declines.
+
+    The suggestion is a PATH, not a directory: Qt fills the name box from it,
+    and a dialog that opens with an empty name box makes every save begin with
+    typing.  Written once -- three windows had a copy of this call, and two of
+    them passed a bare folder.
+    """
+
+    path, _selected = QtWidgets.QFileDialog.getSaveFileName(
+        parent, str(caption), str(suggested), str(filter)
+    )
+    return str(path)
+
+
+def fluent_open_path(parent, caption: str, start: str, filter: str) -> str:
+    """Ask which file to read; "" when the operator declines."""
+
+    path, _selected = QtWidgets.QFileDialog.getOpenFileName(
+        parent, str(caption), str(start), str(filter)
+    )
+    return str(path)
+
+
 def fluent_confirm(
     parent,
     title: str,

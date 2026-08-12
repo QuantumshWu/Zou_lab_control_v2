@@ -13,6 +13,8 @@ from typing import Any
 
 from PyQt5 import QtCore
 
+from zlc_ui.fluent import fluent_open_path, fluent_save_path
+
 from .view import DeviceManagerView
 
 
@@ -199,27 +201,11 @@ class DeviceManagerHandle(QtCore.QObject):
     def read_values(self, instance_id: str) -> tuple[tuple[str, object], ...]:
         return self._view.read_values(instance_id)
 
-    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
-        from PyQt5 import QtWidgets
+    def ask_open_path(self, caption: str, start: str, filter: str) -> str:
+        return fluent_open_path(self._view, caption, start, filter)
 
-        path, _selected = QtWidgets.QFileDialog.getOpenFileName(
-            self._view,
-            str(caption),
-            str(start_dir),
-            str(filter),
-        )
-        return str(path)
-
-    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
-        from PyQt5 import QtWidgets
-
-        path, _selected = QtWidgets.QFileDialog.getSaveFileName(
-            self._view,
-            str(caption),
-            str(start_dir),
-            str(filter),
-        )
-        return str(path)
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
+        return fluent_save_path(self._view, caption, suggested, filter)
 
     def show_status(self, text: str, severity: str) -> None:
         self._view.show_status(text, severity)

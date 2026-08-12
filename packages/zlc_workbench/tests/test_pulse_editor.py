@@ -409,12 +409,12 @@ class _EditorView:
     def show_done(self, text: str) -> None:
         self.done.append(str(text))
 
-    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
-        self.asked = (str(caption), str(start_dir), str(filter))
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
+        self.asked = (str(caption), str(suggested), str(filter))
         return self.save_answer
 
-    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
-        self.asked = (str(caption), str(start_dir), str(filter))
+    def ask_open_path(self, caption: str, start: str, filter: str) -> str:
+        self.asked = (str(caption), str(start), str(filter))
         return self.open_answer
 
     # -- the schedule ----------------------------------------------------

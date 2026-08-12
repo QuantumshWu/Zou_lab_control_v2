@@ -201,6 +201,14 @@ class PanelState:
     fit: Mapping[str, Any] = field(default_factory=dict)
     overlay_signal: str = ""
     published_outputs: Mapping[str, bool] = field(default_factory=dict)
+    #: How this panel is being LOOKED at, and it is part of the panel: the
+    #: region drives the derived signals and the producer, the level decides
+    #: which population every point belongs to, and the opened cell is which
+    #: of them is being read.  Written down so a board comes back as it was
+    #: left; empty means "nothing chosen", not "restore nothing".
+    selector: Mapping[str, Any] = field(default_factory=dict)
+    classifier_threshold: Mapping[str, Any] = field(default_factory=dict)
+    focused_cell: int | None = None
 
     def __post_init__(self) -> None:
         interval = int(self.interval_ms)
@@ -245,6 +253,18 @@ class PanelState:
             "published_outputs",
             _plain_state(published_outputs),
         )
+        object.__setattr__(self, "selector", _plain_state(self.selector))
+        object.__setattr__(
+            self, "classifier_threshold", _plain_state(self.classifier_threshold)
+        )
+        focused_cell = self.focused_cell
+        if focused_cell is not None:
+            focused_cell = int(focused_cell)
+            if focused_cell < 0:
+                raise ValueError("a focused cell index cannot be negative")
+            if PlotKind(str(self.kind)) is not PlotKind.FACET_GRID:
+                raise ValueError("only a FacetGrid panel can open one cell")
+        object.__setattr__(self, "focused_cell", focused_cell)
         overlay_signal = str(self.overlay_signal).strip()
         if overlay_signal and not draws_image_surfaces(kind, cell_kind):
             raise ValueError(
@@ -267,6 +287,9 @@ class PanelState:
             "fit": _document_value(self.fit),
             "overlay_signal": self.overlay_signal,
             "published_outputs": dict(self.published_outputs),
+            "selector": _document_value(self.selector),
+            "classifier_threshold": _document_value(self.classifier_threshold),
+            "focused_cell": self.focused_cell,
         }
 
 

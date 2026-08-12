@@ -185,11 +185,11 @@ class PulseEditorHandle(QtCore.QObject):
 
         return self._view.current_page
 
-    def ask_open_path(self, caption: str, start_dir: str, filter: str) -> str:
-        return self._view.ask_open_path(caption, start_dir, filter)
+    def ask_open_path(self, caption: str, start: str, filter: str) -> str:
+        return self._view.ask_open_path(caption, start, filter)
 
-    def ask_save_path(self, caption: str, start_dir: str, filter: str) -> str:
-        return self._view.ask_save_path(caption, start_dir, filter)
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
+        return self._view.ask_save_path(caption, suggested, filter)
 
     # ---------------------------------------------------------- the schedule
 

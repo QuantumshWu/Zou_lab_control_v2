@@ -71,6 +71,10 @@ from .panel_state import (
 )
 from .presentation import PlotPanelPort
 from .selection import (
+    panel_selection_document,
+    panel_selection_from_document,
+    panel_threshold_document,
+    panel_threshold_from_document,
     _apply_panel_selection,
     _apply_panel_threshold,
     _apply_panel_viewport,
@@ -150,20 +154,13 @@ class PanelBinding:
     #: Live derivation from selections drawn on this panel, if it has one.
     bridge: Any = None
     selections: Any = None
-    #: Canonical selector shared by the live and frozen views of this panel.
-    interaction_selection: Any = None
+    #: The panel's own record holds the selector, the classifier level and the
+    #: opened cell -- they are saved with the board.  Only the VIEWPORT stays
+    #: here: a zoom is measured in display coordinates of one exact picture,
+    #: and pasting yesterday's numbers onto today's data is how a panel opens
+    #: showing a range nobody chose.
     #: Canonical producer range plus display viewport shared by both views.
     interaction_viewport: Any = None
-    #: The classifier threshold this panel was told to use, or None to let
-    #: each surface follow its own fit.  It decides which population every
-    #: point belongs to -- and so the fractions and the fidelity both views
-    #: report -- which is exactly why it cannot be one host's private state.
-    interaction_threshold: Any = None
-    #: Which facet cell this panel is focused on, or None for the overview.
-    #: A view of the same data, exactly like the viewport beside it -- so both
-    #: of this panel's hosts show it, and a double-click in either one is the
-    #: panel's answer rather than that surface's private state.
-    interaction_focus: Any = None
     #: What each host was last seen showing.  Whoever CHANGED is the operator;
     #: a host that merely disagrees with the panel is the one still catching
     #: up with the last mirror, and reading that as a second gesture makes the
@@ -853,14 +850,16 @@ class ConsolePresenter:
         # completion, and the front it produces reaches a staged widget only
         # because that operation is presented.
         _also(apply_panel_fit(host, panel_state, live=live, models=models))
-        if binding.interaction_selection is not None:
-            _also(_apply_panel_selection(host, binding.interaction_selection))
+        selection = panel_selection_from_document(panel_state.selector)
+        if selection is not None:
+            _also(_apply_panel_selection(host, selection))
         if binding.interaction_viewport is not None:
             _selection, viewport = binding.interaction_viewport
             _also(_apply_panel_viewport(host, viewport))
-        if binding.interaction_threshold is not None:
-            _also(_apply_panel_threshold(host, binding.interaction_threshold))
-        _also(self._apply_panel_focus(host, binding.interaction_focus))
+        threshold = panel_threshold_from_document(panel_state.classifier_threshold)
+        if threshold is not None:
+            _also(_apply_panel_threshold(host, threshold))
+        _also(self._apply_panel_focus(host, panel_state.focused_cell))
         return pending
 
     @staticmethod
@@ -940,9 +939,9 @@ class ConsolePresenter:
         if moved is None:
             return
         source, focus = moved
-        if focus == binding.interaction_focus:
+        if focus == binding.state.focused_cell:
             return
-        binding.interaction_focus = focus
+        self._remember_panel_view(binding, focused_cell=focus)
         # Opening or closing a cell RESETS the view inside it -- the plot layer
         # drops the viewport itself, because a range measured in the overview
         # means nothing in one cell and the other way round.  The panel's
@@ -955,6 +954,19 @@ class ConsolePresenter:
             operation = self._apply_panel_focus(host, focus)
             if host is binding.host and operation is not None:
                 self._present_when_done(binding, operation)
+
+    def _remember_panel_view(self, binding: PanelBinding, **changes: Any) -> None:
+        """Write down how this panel is being looked at.
+
+        These belong to the panel's record -- they are saved with the board and
+        restored with it -- but changing one is not a re-specification: the
+        surface that produced the gesture already shows it, and the other one
+        is mirrored beside this call.  So the record is replaced and published,
+        without the configure path a Setting edit takes.
+        """
+
+        binding.state = replace(binding.state, **changes)
+        self._publish_panel_state(binding)
 
     def _offer_state_to_editor(self, binding: PanelBinding) -> None:
         """Hand the Edit host what the live host resolved.
@@ -2947,7 +2959,12 @@ class ConsolePresenter:
         """Write only the stopped, reusable pipeline/layout document."""
 
         path = self.view.ask_save_path(
-            "Save TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
+            "Save TaskConsole layout",
+            # A name, not an empty box: a board is a thing you keep and
+            # reload, so it is named plainly and the dialog warns before it
+            # replaces one.
+            str(Path(self.session.day_folder()) / "layout.json"),
+            "Layouts (*.json)",
         )
         if not path:
             return ""
@@ -2983,7 +3000,7 @@ class ConsolePresenter:
 
         path = self.view.ask_save_path(
             "Save TaskConsole screenshot",
-            str(self.session.day_folder()),
+            str(Path(self.session.day_folder()) / "console.png"),
             "PNG images (*.png)",
         )
         if not path:
@@ -3072,9 +3089,12 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
-        if _same_panel_threshold(binding.interaction_threshold, selector):
+        remembered = panel_threshold_from_document(binding.state.classifier_threshold)
+        if _same_panel_threshold(remembered, selector):
             return
-        binding.interaction_threshold = selector
+        self._remember_panel_view(
+            binding, classifier_threshold=panel_threshold_document(selector)
+        )
         for host in (binding.host, binding.editor_host):
             if host is None or host is source:
                 continue
@@ -3143,7 +3163,7 @@ class ConsolePresenter:
             binding.interaction_viewport = (selection, viewport)
             if other_host is not None:
                 mirror(_apply_panel_viewport(other_host, viewport))
-            area = binding.interaction_selection
+            area = panel_selection_from_document(binding.state.selector)
             return (
                 _UNCHANGED
                 if getattr(area, "selector_kind", "") == "area"
@@ -3151,10 +3171,10 @@ class ConsolePresenter:
             )
 
         if selection is None:
-            previous = binding.interaction_selection
+            previous = panel_selection_from_document(binding.state.selector)
             if previous is None:
                 return _UNCHANGED
-            binding.interaction_selection = None
+            self._remember_panel_view(binding, selector={})
             if other_host is not None:
                 mirror(_remove_panel_selection(other_host, previous))
             return (
@@ -3163,12 +3183,12 @@ class ConsolePresenter:
                 else binding.interaction_viewport[0]
             )
 
-        if (
-            binding.interaction_selection is not None
-            and _same_panel_selection(binding.interaction_selection, selection)
-        ):
+        remembered = panel_selection_from_document(binding.state.selector)
+        if remembered is not None and _same_panel_selection(remembered, selection):
             return _UNCHANGED
-        binding.interaction_selection = selection
+        self._remember_panel_view(
+            binding, selector=panel_selection_document(selection)
+        )
         if other_host is not None:
             mirror(_apply_panel_selection(other_host, selection))
         return selection

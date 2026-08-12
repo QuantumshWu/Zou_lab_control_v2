@@ -15,6 +15,7 @@ from typing import Any
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    stamped_file_name,
     ACCENT,
     GREEN,
     GREY,
@@ -413,17 +414,19 @@ class PanelEditorView(QtWidgets.QWidget):
         directory_text = self.save_directory.text().strip()
         if not directory_text:
             return None
-        if self.save_auto_name.isChecked():
-            stem = str(self._state.get("title") or self.panel_id).strip()
-            stem = f"{stem}_{self._save_stamp}"
-        else:
-            stem = self.save_name.text().strip()
-        stem = stem.replace("/", "_").replace("\\", "_")
-        if not stem:
-            return None
-        stem = Path(stem).stem
         extension = str(self.save_format.currentData() or "png")
-        return Path(directory_text).expanduser() / f"{stem}.{extension}"
+        if self.save_auto_name.isChecked():
+            name = stamped_file_name(
+                str(self._state.get("title") or self.panel_id),
+                extension,
+                stamp=self._save_stamp,
+            )
+        else:
+            typed = self.save_name.text().strip().replace("/", "_").replace("\\", "_")
+            if not typed:
+                return None
+            name = f"{Path(typed).stem}.{extension}"
+        return Path(directory_text).expanduser() / name
 
     def _update_save_controls(self, *_args: object) -> None:
         editable = self._mutation_enabled

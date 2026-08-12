@@ -31,7 +31,7 @@ Two constraints shaped the implementation and are easy to undo by accident:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
@@ -49,6 +49,10 @@ from zlc_runtime.selection_bridge import FacetCondition
 
 __all__ = [
     "PlotSelectionSource",
+    "panel_selection_document",
+    "panel_selection_from_document",
+    "panel_threshold_document",
+    "panel_threshold_from_document",
     "attach_selection_bridge",
     "subscribe_committed_selection",
 ]
@@ -86,6 +90,94 @@ def _apply_panel_threshold(host: Any, selector: Any) -> object:
     """
 
     return host.set_threshold_selector(float(selector.value), display=False)
+
+
+def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]:
+    """One committed region, as the plain numbers a layout can hold.
+
+    Axis NAMES and canonical bounds, which is what the region means: the same
+    box drawn on the same signal tomorrow is the same box.  The revision it
+    was drawn on is not part of it -- that is the moment, not the choice.
+    """
+
+    if selection is None:
+        return {}
+    return {
+        "plot_kind": str(selection.plot_kind),
+        "selector_kind": str(selection.selector_kind),
+        "ranges": [
+            {
+                "axis": str(item.axis),
+                "lower": float(item.lower),
+                "upper": float(item.upper),
+                "coordinate_frame": (
+                    None
+                    if item.coordinate_frame is None
+                    else str(item.coordinate_frame)
+                ),
+            }
+            for item in selection.ranges
+        ],
+        "facets": [
+            {"axis": str(item.axis), "value": item.value}
+            for item in selection.facets
+        ],
+        "repeat_index": (
+            None if selection.repeat_index is None else int(selection.repeat_index)
+        ),
+    }
+
+
+def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState | None:
+    """The region a layout wrote down, back in the runtime's own words."""
+
+    if not document:
+        return None
+    return SelectionState(
+        plot_kind=str(document["plot_kind"]),
+        selector_kind=str(document["selector_kind"]),
+        ranges=tuple(
+            SelectionRange(
+                axis=str(item["axis"]),
+                lower=float(item["lower"]),
+                upper=float(item["upper"]),
+                coordinate_frame=item.get("coordinate_frame"),
+            )
+            for item in document.get("ranges", ())
+        ),
+        facets=tuple(
+            FacetCondition(str(item["axis"]), item["value"])
+            for item in document.get("facets", ())
+        ),
+        repeat_index=document.get("repeat_index"),
+    )
+
+
+def panel_threshold_document(selector: Any) -> dict[str, Any]:
+    """The classifier level an operator chose, as plain numbers."""
+
+    if selector is None:
+        return {}
+    return {
+        "value": float(selector.value),
+        "facet_index": (
+            None if selector.facet_index is None else int(selector.facet_index)
+        ),
+    }
+
+
+def panel_threshold_from_document(document: Mapping[str, Any]) -> Any:
+    """That level, back as the selector state a plot surface accepts."""
+
+    if not document:
+        return None
+    from zlc_plot import SelectorState  # noqa: PLC0415 -- only a restore needs it
+
+    return SelectorState(
+        SelectorKind.THRESHOLD,
+        float(document["value"]),
+        facet_index=document.get("facet_index"),
+    )
 
 
 def _remove_panel_threshold(host: Any) -> object:
