@@ -55,6 +55,9 @@ PYLON_CAMERA_SCHEMA = AuthoringSchema(
     (
         AuthoringField("serial", "str", "Serial number", "", required=True),
         AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.1, minimum=1e-9),
+        # No bounds written down: the sensor's own gain limits differ by model
+        # and pixel format, and the camera refuses what it cannot do.
+        AuthoringField("gain_db", "float", "Gain (dB)", 0.0),
         AuthoringField("trigger_source", "str", "Trigger source", "Line1"),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
@@ -112,6 +115,7 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
         PylonCameraConfig(
             serial=str(authored["serial"]),
             exposure_seconds=float(authored["exposure_seconds"]),
+            gain_db=float(authored["gain_db"]),
             trigger_source=str(authored["trigger_source"]),
             roi_xywh=_roi_xywh(authored),
         ),

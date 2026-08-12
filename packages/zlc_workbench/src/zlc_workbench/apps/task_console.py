@@ -300,7 +300,12 @@ class ExperimentGuiFlow:
         self.console_presenter = presenter
         self.pulse = pulse
         self.timer = timer
-        self.devices.hide()
+        # The Device Manager stays.  It is not an installer that has served its
+        # purpose: it is the bench window -- what is running, and the settings
+        # those running devices accept -- so hiding it left an operator with no
+        # way to reach a camera's gain without shutting the experiment down.
+        # The work windows come up in front of it.
+        self.devices.send_behind()
 
     def _retire_pulse(self) -> None:
         pulse = self.pulse

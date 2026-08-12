@@ -53,10 +53,13 @@ class _ManagerView:
         self.role_committed = _Signal()
         self.type_picked = _Signal()
         self.parameter_committed = _Signal()
+        self.knob_committed = _Signal()
         self.choices: tuple = ()
         self.devices: tuple = ()
         self.forms: dict = {}
         self.values: dict = {}
+        self.knobs: dict = {}
+        self.knob_values: dict = {}
         self.status: list[tuple[str, str]] = []
 
     def set_discovery_enabled(self, enabled, reason="") -> None:
@@ -102,6 +105,13 @@ class _ManagerView:
 
     def read_values(self, instance_id):
         return tuple(self.values.get(str(instance_id), {}).items())
+
+    def set_knob_spec(self, instance_id, spec, values) -> None:
+        self.knobs[str(instance_id)] = spec
+        self.knob_values[str(instance_id)] = dict(values)
+
+    def read_knob_values(self, instance_id):
+        return tuple(self.knob_values.get(str(instance_id), {}).items())
 
     def show_status(self, text: str, severity: str) -> None:
         self.status.append((str(severity), str(text)))
@@ -511,3 +521,58 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     manager.shutdown_active()
     manager.close()
     assert shut_down == [session], "shutdown and close are idempotent"
+
+
+def test_a_running_device_offers_the_knobs_it_volunteers_and_takes_them(
+    tmp_path,
+) -> None:
+    """The bench window is where a running device is actually turned.
+
+    The knobs are the ones the DEVICE declares -- the same list a scan axis is
+    built from -- so this window can never offer a setting the hardware does
+    not accept, and a refusal is the device's own sentence.
+    """
+
+    from zlc_atom.install import create_installation
+
+    installation = create_installation("virtual")
+
+    class _Session:
+        def __init__(self, installed) -> None:
+            self.installation = installed
+
+    session = _Session(installation)
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=installation.config
+        if hasattr(installation, "config")
+        else None,
+        initialize_session=lambda _candidate: session,
+    )
+    try:
+        manager._active_session = session
+        manager._show()
+
+        camera = installation.device("camera")
+        (declared,) = camera.tunable_fields()
+        assert declared.name == "exposure_seconds"
+        assert "camera" in view.knobs, "a running camera offered nothing to turn"
+        assert view.knob_values["camera"]["exposure_seconds"] == pytest.approx(
+            float(declared.default)
+        )
+
+        view.knob_values["camera"]["exposure_seconds"] = 0.05
+        assert manager.tune_device("camera", "exposure_seconds") is True
+        (moved,) = camera.tunable_fields()
+        assert float(moved.default) == pytest.approx(0.05)
+        assert view.knob_values["camera"]["exposure_seconds"] == pytest.approx(0.05)
+
+        view.knob_values["camera"]["exposure_seconds"] = 1e9
+        assert manager.tune_device("camera", "exposure_seconds") is False
+        assert "exposure_seconds must lie in" in view.status[-1][1]
+        (unmoved,) = camera.tunable_fields()
+        assert float(unmoved.default) == pytest.approx(0.05)
+    finally:
+        installation.close()

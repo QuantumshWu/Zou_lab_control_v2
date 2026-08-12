@@ -156,7 +156,11 @@ class VirtualCamera:
                 "exposure_seconds",
                 "float",
                 "Exposure (s)",
-                float(self.config.exposure_seconds),
+                # The LIVE exposure, not the one written down: this camera is
+                # tuned by a scan and by the bench window, and a field that
+                # answers with the authored value reports a setting the camera
+                # stopped using at the first move.
+                float(self._exposure_seconds),
                 minimum=1e-6,
                 maximum=10.0,
             ),

@@ -24,6 +24,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
     InstallationConfig,
@@ -35,6 +36,7 @@ from zlc_atom.install import (
     discover_device_catalog,
     installation_config_from_template,
     installation_template_names,
+    tunable_devices,
 )
 from .authoring_form import display_value, project_schema
 
@@ -112,6 +114,7 @@ class DeviceManagerPresenter:
         self.view.save_as_requested.connect(self.save_as)
         self.view.cancel_requested.connect(self.cancel)
         self.view.lifecycle_requested.connect(self.toggle_lifecycle)
+        self.view.knob_committed.connect(self.tune_device)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
@@ -375,6 +378,64 @@ class DeviceManagerPresenter:
         if frozen == dict(current.parameters):
             return False
         return self._replace(instance_id, lambda item: replace(item, parameters=frozen))
+
+    # -------------------------------------------------------------- live bench
+
+    def _live_knobs(self) -> dict[str, tuple[object, tuple]]:
+        """Every running device that volunteers knobs, by instance id.
+
+        Read from ``tunable_devices`` -- the same collection a scan axis is
+        built from -- so a knob an operator can turn here is exactly a knob a
+        scan can sweep, and neither list can name a device the other cannot.
+        The values come with it: a device answers for its own current setting,
+        which is why nothing here remembers one.
+        """
+
+        installation = getattr(self._active_session, "installation", None)
+        if installation is None:
+            return {}
+        live: dict[str, tuple[object, tuple]] = {}
+        for key, device in tunable_devices(installation).items():
+            try:
+                fields = tuple(device.tunable_fields())
+            except Exception as error:
+                self._report(f"{key}: {error}", severity="warning")
+                continue
+            if fields:
+                live[str(key)] = (device, fields)
+        return live
+
+    def tune_device(self, instance_id: str, field: str = "") -> bool:
+        """Move one live knob to what its form now says.
+
+        Per field, because that is how a device accepts one: ``tune`` validates
+        and applies a single named knob against the hardware's own limits.  A
+        refusal is the device's sentence, shown as it was written.
+        """
+
+        entry = self._live_knobs().get(str(instance_id))
+        if entry is None:
+            return False
+        device, fields = entry
+        wanted = dict(self.view.read_knob_values(str(instance_id)))
+        moved = False
+        for declared in fields:
+            if field and declared.name != str(field):
+                continue
+            value = wanted.get(declared.name)
+            if value is None or float(value) == float(declared.default):
+                continue
+            try:
+                device.tune(declared.name, float(value))
+            except Exception as error:
+                self._report(f"{instance_id}: {error}", severity="warning")
+                self._show()
+                return False
+            moved = True
+        if moved:
+            self._report(f"{instance_id} {field or 'settings'} applied")
+            self._show()
+        return moved
 
     # ------------------------------------------------------------ session life
 
@@ -650,6 +711,16 @@ class DeviceManagerPresenter:
             )
         )
         self.view.set_loaded_devices(active_devices)
+        # A running device's knobs are shown through the SAME projection the
+        # configuration forms use: they are declared with the same authoring
+        # fields, so one form machinery edits both -- what an apparatus writes
+        # down, and what the bench is doing right now.
+        for key, (_device, fields) in self._live_knobs().items():
+            self.view.set_knob_spec(
+                key,
+                project_schema(AuthoringSchema(fields)),
+                tuple((item.name, display_value(item.default)) for item in fields),
+            )
         configured = {item.instance_id for item in self.devices}
         self.view.set_discovered_devices(
             tuple(

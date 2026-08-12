@@ -61,6 +61,28 @@ class _Node:
         return self._increment
 
 
+class _FloatNode:
+    """A GenICam float node: gain lives on a continuous range, not a grid."""
+
+    def __init__(self, value=0.0, low=0.0, high=24.0):
+        self.value = float(value)
+        self._low, self._high = float(low), float(high)
+        self.writes: list[float] = []
+
+    def SetValue(self, value):
+        self.value = float(value)
+        self.writes.append(float(value))
+
+    def GetValue(self):
+        return self.value
+
+    def GetMin(self):
+        return self._low
+
+    def GetMax(self):
+        return self._high
+
+
 class _StringNode:
     def __init__(self, value=""):
         self.value = value
@@ -107,6 +129,7 @@ class _FakeCamera:
         self.OffsetX = _Node(0, 0, 1904, 4)
         self.OffsetY = _Node(0, 0, 1152, 2)
         self.ExposureTime = _Node(1000, 1, 10_000_000, 1)
+        self.Gain = _FloatNode(0.0, 0.0, 24.0)
         self.MaxNumBuffer = _Node(8, 1, 256, 1)
         self.PixelFormat = _StringNode("Mono8")
         self.TriggerSelector = _StringNode()
@@ -529,3 +552,36 @@ def test_the_module_imports_without_a_basler_runtime() -> None:
     module = importlib.import_module("zlc_atom.devices.camera.pylon")
     assert module.PylonCameraAdapter is PylonCameraAdapter
     assert "pypylon" not in {name.split(".")[0] for name in dir(module)}
+
+
+def test_the_camera_volunteers_its_analog_gain_and_reports_the_real_one() -> None:
+    """The one knob a Basler offers here is the one the sensor actually has.
+
+    Its limits are the camera's, read back rather than written down, and the
+    working point stops claiming a gain of 1.0 over whatever the sensor was
+    set to.
+    """
+
+    camera = _FakeCamera()
+    adapter = PylonCameraAdapter(
+        PylonCameraConfig(serial="1", exposure_seconds=0.01, gain_db=6.0),
+        camera=camera,
+    )
+    adapter.open()
+    assert camera.Gain.writes == [6.0], "the authored gain never reached the sensor"
+
+    (field,) = adapter.tunable_fields()
+    assert field.name == "gain_db"
+    assert (field.minimum, field.maximum) == (0.0, 24.0)
+    assert field.default == pytest.approx(6.0)
+
+    adapter.tune("gain_db", 12.0)
+    assert camera.Gain.GetValue() == pytest.approx(12.0)
+    # A working point carries the LINEAR factor, which is what every reader of
+    # one means by gain; the camera states dB.
+    assert adapter.capture_working_point().gain == pytest.approx(10.0 ** (12.0 / 20.0))
+
+    with pytest.raises(ValueError, match="gain_db must lie in"):
+        adapter.tune("gain_db", 30.0)
+    with pytest.raises(ValueError, match="no tunable field"):
+        adapter.tune("exposure_seconds", 0.1)

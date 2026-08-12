@@ -50,6 +50,9 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
     assert _fields(PYLON_CAMERA_SCHEMA) == {
         "serial",
         "exposure_seconds",
+        # Analog gain is the operator's, in every sense: they set it, a scan
+        # sweeps it, and the bench window turns it while the camera runs.
+        "gain_db",
         "trigger_source",
         "roi_x",
         "roi_y",

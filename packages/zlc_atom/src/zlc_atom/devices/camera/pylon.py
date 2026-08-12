@@ -21,6 +21,7 @@ from typing import Sequence
 
 import numpy as np
 
+from ...authoring import AuthoringField
 from .contract import (
     CameraAcquisitionMode,
     CameraCaptureTerminalRecord,
@@ -65,6 +66,11 @@ class PylonCameraConfig:
 
     serial: str
     exposure_seconds: float = 0.1
+    #: Basler's analog gain, in dB, from the sensor's Analog Control section.
+    #: Written down here so an apparatus starts the camera where it was left;
+    #: the CAMERA holds the live value from then on, because that is where it
+    #: is, and where a scan or the Device Manager moves it.
+    gain_db: float = 0.0
     trigger_source: str = "Line1"
     roi_xywh: tuple[int, int, int, int] | None = None
     timeout_seconds: float = 2.0
@@ -83,12 +89,16 @@ class PylonCameraConfig:
         exposure = float(self.exposure_seconds)
         if not np.isfinite(exposure) or exposure <= 0.0:
             raise ValueError("exposure_seconds must be positive and finite")
+        gain_db = float(self.gain_db)
+        if not np.isfinite(gain_db):
+            raise ValueError("gain_db must be finite")
         timeout = float(self.timeout_seconds)
         if not np.isfinite(timeout) or timeout <= 0.0:
             raise ValueError("timeout_seconds must be positive and finite")
         object.__setattr__(self, "serial", serial)
         object.__setattr__(self, "trigger_source", trigger_source)
         object.__setattr__(self, "exposure_seconds", exposure)
+        object.__setattr__(self, "gain_db", gain_db)
         object.__setattr__(self, "timeout_seconds", timeout)
         object.__setattr__(self, "roi_xywh", _roi_request(self.roi_xywh))
 
@@ -129,6 +139,7 @@ class PylonCameraAdapter:
             self._apply_pixel_format()
             self._apply_trigger(monitor=False)
             self._apply_exposure()
+            self._apply_gain()
             self._apply_roi()
         except BaseException as primary:
             try:
@@ -217,6 +228,57 @@ class PylonCameraAdapter:
         # Basler exposes ExposureTime in microseconds, and it is legal to change
         # while grabbing -- no stream pause needed.
         self._camera.ExposureTime.SetValue(float(self.config.exposure_seconds) * 1e6)
+
+    def _apply_gain(self) -> None:
+        # Analog gain, like the exposure above it: legal to change while
+        # grabbing, so no stream pause.  The camera clamps to its own limits,
+        # which is why this asks for the value and then believes the readback.
+        self._camera.Gain.SetValue(float(self.config.gain_db))
+
+    def _gain_node(self) -> object:
+        """The camera's own gain node, opened if it has to be."""
+
+        self.open()
+        return self._camera.Gain
+
+    def tunable_fields(self) -> tuple[AuthoringField, ...]:
+        """The runtime knob this camera volunteers, in the camera's own words.
+
+        Bounds are read from the sensor rather than written down here: they
+        differ per model and per pixel format, and a limit this file invents
+        is a limit that disagrees with the hardware.  Declared through the
+        same AuthoringField every other device uses, so one declaration
+        serves a scan axis, the Device Manager form, and nothing else needs
+        to know this camera exists.
+        """
+
+        node = self._gain_node()
+        return (
+            AuthoringField(
+                "gain_db",
+                "float",
+                "Gain (dB)",
+                float(node.GetValue()),
+                minimum=float(node.GetMin()),
+                maximum=float(node.GetMax()),
+            ),
+        )
+
+    def tune(self, name: str, value: float) -> None:
+        """Move one volunteered knob on the live camera."""
+
+        (field,) = self.tunable_fields()
+        if str(name) != field.name:
+            raise ValueError(
+                f"pylon camera has no tunable field {name!r}; "
+                f"it offers {field.name!r}"
+            )
+        gain = float(value)
+        if not np.isfinite(gain) or not (field.minimum <= gain <= field.maximum):
+            raise ValueError(
+                f"gain_db must lie in [{field.minimum:g}, {field.maximum:g}]"
+            )
+        self._camera.Gain.SetValue(gain)
 
     def _apply_pixel_format(self) -> None:
         with self._paused_stream():
@@ -417,7 +479,10 @@ class PylonCameraAdapter:
             external_trigger_integration_start_offset_seconds=(
                 None if free_running else 0.0
             ),
-            gain=1.0,
+            # Basler states gain in dB; the working point carries the
+            # linear factor every reader of it already assumes, so the two
+            # cannot be confused (and 1.0 was simply not the camera's answer).
+            gain=float(10.0 ** (float(camera.Gain.GetValue()) / 20.0)),
             readout_mode=(
                 "pylon:Mono8;free-running;grab=LatestImageOnly"
                 if free_running

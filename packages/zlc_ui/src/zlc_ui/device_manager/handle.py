@@ -29,6 +29,7 @@ class DeviceManagerHandle(QtCore.QObject):
     role_committed = QtCore.pyqtSignal(str, str)
     type_picked = QtCore.pyqtSignal(str, str)
     parameter_committed = QtCore.pyqtSignal(str, str)
+    knob_committed = QtCore.pyqtSignal(str, str)
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
     discovered_add_requested = QtCore.pyqtSignal(str)
@@ -44,6 +45,7 @@ class DeviceManagerHandle(QtCore.QObject):
         "role_committed",
         "type_picked",
         "parameter_committed",
+        "knob_committed",
         "template_selected",
         "discovery_requested",
         "discovered_add_requested",
@@ -77,11 +79,18 @@ class DeviceManagerHandle(QtCore.QObject):
         target = self._window if self._window is not None else self._view
         return bool(target.isVisible())
 
-    def hide(self) -> None:
-        """Hide this top-level window without retiring its shared session."""
+    def send_behind(self) -> None:
+        """Let the work windows come up in front, without going away.
+
+        The bench window is where an operator sees what is running and reaches
+        what those devices accept while they run, so it stays on screen for the
+        whole experiment; it simply stops being the front window once the
+        console and the pulse editor exist.
+        """
 
         target = self._window if self._window is not None else self._view
-        target.hide()
+        if hasattr(target, "lower"):
+            target.lower()
 
     def restore(self) -> None:
         """Restore the existing top-level window; do not create another one."""
@@ -139,6 +148,17 @@ class DeviceManagerHandle(QtCore.QObject):
         devices: tuple[tuple[str, str, str], ...],
     ) -> None:
         self._view.set_loaded_devices(devices)
+
+    def set_knob_spec(
+        self,
+        instance_id: str,
+        spec: object,
+        values: tuple[tuple[str, object], ...],
+    ) -> None:
+        self._view.set_knob_spec(instance_id, spec, values)
+
+    def read_knob_values(self, instance_id: str) -> tuple[tuple[str, object], ...]:
+        return self._view.read_knob_values(instance_id)
 
     def set_discovery_enabled(
         self,
