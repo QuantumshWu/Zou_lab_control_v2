@@ -25,7 +25,7 @@ from zlc_plot import DEFAULTS, PlotKind
 from zlc_plot.primitives import ImageFrame
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 from zlc_runtime import selection_output_catalog
-from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui import FormFieldProps, FormSpec
 
 from .board import LiveBoard
 from .console_layout import (
@@ -849,7 +849,19 @@ class ConsolePresenter:
         # A fit is an analysis, not a display parameter: it has its own
         # completion, and the front it produces reaches a staged widget only
         # because that operation is presented.
-        _also(apply_panel_fit(host, panel_state, live=live, models=models))
+        # Filtered like the semantic and display bags beside it: a model this
+        # host does not offer is not a fit to arm.  The vocabulary comes from
+        # the same surface they use, so one refresh answers for all three --
+        # only one of seven callers used to pass it, and the rest re-armed the
+        # outgoing kind's model and painted its refusal into every cell.
+        _also(
+            apply_panel_fit(
+                host,
+                panel_state,
+                live=live,
+                models=models if models is not None else surface.get("fit_models"),
+            )
+        )
         selection = panel_selection_from_document(panel_state.selector)
         if selection is not None:
             _also(_apply_panel_selection(host, selection))
@@ -1527,7 +1539,18 @@ class ConsolePresenter:
                 return False
             self._release_panel(binding)
             binding.host = host
-            self._match_host_to_panel(binding, host, state=candidate, present=True)
+            # The record and the vocabulary move to the new host BEFORE anything
+            # is sent to it.  A freshly built host has not described itself yet,
+            # so the unbound surface is the honest answer -- and the projection
+            # sends only what a vocabulary declares.  Configuring it against the
+            # OUTGOING cell kind's surface is what fired one guaranteed-to-fail
+            # configure on every cell-kind change, whose failure nobody saw
+            # because this call site was the one that dropped its operation.
+            binding.state = candidate
+            binding.parameter_surface = self._unbound_panel_parameters(candidate)
+            binding.configuration = self._match_host_to_panel(
+                binding, host, present=True
+            )
             binding.port = PlotPanelPort(
                 panel_id,
                 candidate.signal,
@@ -1550,8 +1573,6 @@ class ConsolePresenter:
             )
             binding.initial_presented = False
             binding.display_publication = publication
-            binding.state = candidate
-            binding.parameter_surface = self._unbound_panel_parameters(candidate)
             if binding.frozen_data is None:
                 binding.frozen_data = self._panel_frozen_data(
                     binding,
