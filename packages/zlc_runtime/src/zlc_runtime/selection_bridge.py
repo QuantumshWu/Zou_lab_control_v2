@@ -1622,37 +1622,34 @@ class SelectionBridge:
             if state.plot_kind == "image"
             else _RANGE_SELECTION_OUTPUTS
         )
-        enabled = {
-            name: reducer
-            for name, _label, reducer in catalog
-            if self._output_enabled.get(name, True)
-        }
         output: dict[str, LiveDatasetOutput] = {}
-        if "roi_frame" in enabled:
-            roi_frame = materialize_derived_dataset(
+        scalar_outputs: dict[str, Callable[[np.ndarray], float]] = {}
+        for name, _label, reducer in catalog:
+            if not self._output_enabled.get(name, True):
+                continue
+            if reducer is not None:
+                scalar_outputs[name] = reducer
+                continue
+            derived = materialize_derived_dataset(
                 source.ref,
                 values,
                 schema=derived_schema,
                 validity=compact_dataset_validity(valid_values, derived_schema),
-                reference_for=lambda schema: self._next_reference(
+                reference_for=lambda schema, output_name=name: self._next_reference(
                     source,
-                    "roi_frame",
+                    output_name,
                     schema,
                 ),
             )
-            declaration = DatasetOutputDeclaration(
-                "roi_frame",
-                self._contract_id("selection", "roi_frame"),
-            )
             total = derived_schema.repeat_axis.size * derived_schema.point_table.row_count
-            output["roi_frame"] = LiveDatasetOutput(
-                declaration,
-                roi_frame,
+            output[name] = LiveDatasetOutput(
+                DatasetOutputDeclaration(
+                    name,
+                    self._contract_id("selection", name),
+                ),
+                derived,
                 MonitorCoverage(total, total),
             )
-        scalar_outputs = {
-            name: reducer for name, reducer in enabled.items() if reducer is not None
-        }
         if not scalar_outputs:
             return output
         statistics = _roi_statistics(
@@ -1660,7 +1657,7 @@ class SelectionBridge:
             valid_values & np.isfinite(values),
             scalar_outputs,
         )
-        mean_schema = DatasetSchema(
+        scalar_schema = DatasetSchema(
             derived_schema.repeat_axis,
             derived_schema.point_table,
             derived_schema.grid_topology,
@@ -1669,16 +1666,16 @@ class SelectionBridge:
                 source_schema.cell_schema.value_unit,
             ),
         )
-        total = mean_schema.repeat_axis.size * mean_schema.point_table.row_count
+        total = scalar_schema.repeat_axis.size * scalar_schema.point_table.row_count
         for name in scalar_outputs:
             answer, validity = statistics[name]
             derived = materialize_derived_dataset(
                 source.ref,
-                answer.reshape(mean_schema.physical_shape),
-                schema=mean_schema,
+                answer.reshape(scalar_schema.physical_shape),
+                schema=scalar_schema,
                 validity=compact_dataset_validity(
-                    validity.reshape(mean_schema.physical_shape),
-                    mean_schema,
+                    validity.reshape(scalar_schema.physical_shape),
+                    scalar_schema,
                 ),
                 reference_for=lambda schema, output_name=name: self._next_reference(
                     source,

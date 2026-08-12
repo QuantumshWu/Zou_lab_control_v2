@@ -448,6 +448,16 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
         publication = front.publication("@logic/fit/x0")
         assert publication is not None
         assert publication.direct_parent_refs[0].sequence == 1
+        bridge.configure_outputs({"x0": False})
+        hidden = plane.freeze()
+        assert hidden.value("@logic/fit/x0") is None
+        assert hidden.value("@logic/fit/x0_err") is not None
+        bridge.configure_outputs({"x0": True})
+        replayed = plane.freeze().value("@logic/fit/x0")
+        assert replayed is not None
+        assert float(replayed.snapshot.block.values.reshape(-1)[0]) == 2.5
+        publication = plane.freeze().publication("@logic/fit/x0")
+        assert publication is not None
         events.emit_selection(
             SelectionChange.REMOVED,
             SelectionState(
