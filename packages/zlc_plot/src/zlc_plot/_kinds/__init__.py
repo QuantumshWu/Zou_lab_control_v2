@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from zlc_data import DatasetSchema
+
+from ..data_contract import live_grid_dimensions
 from .base import KindHandler
 from .curve import HANDLER as CURVE_HANDLER
 from .facet_grid import HANDLER as FACET_GRID_HANDLER
@@ -57,15 +60,48 @@ def default_spec(schema: Any, kind: Any) -> Any:
 #:
 #: Only kinds a dataset can PROVE it wants are here.  A curve fits nearly any
 #: schema, so it goes last and acts as the fallback; an image must be probed
-#: before it or every frame would come back as a curve.  Histogram, rolling and
-#: facet-grid are absent on purpose: each is a decision about how to look at
-#: data that could equally be shown another way, and inferring one would be
-#: guessing at intent rather than reading structure.
+#: before it or every frame would come back as a curve.  Histogram and rolling
+#: are absent on purpose: each is a decision about how to look at data that
+#: could equally be shown another way, and inferring one would be guessing at
+#: intent rather than reading structure.
+#:
+#: A facet grid is not in this list either, and for a different reason: it is
+#: not one more candidate to try, it is the answer to a question none of these
+#: can answer -- "is there structure here that a single flat plot would have
+#: to average away".  :func:`_grid_reads_structure_a_flat_plot_would_pool`
+#: asks it before the list is walked at all.
 _INFERENCE_ORDER: tuple[KindHandler, ...] = (
     PULSE_TIMELINE_HANDLER,
     IMAGE_HANDLER,
     CURVE_HANDLER,
 )
+
+
+def _grid_reads_structure_a_flat_plot_would_pool(schema: Any) -> bool:
+    """Whether one flat plot of this dataset would pool something real.
+
+    A flat image IS one frame: every point row and every live scan dimension
+    it carries is reduced into that one picture.  A flat curve walks ONE
+    dimension: a second live dimension is pooled into it.  Where that
+    happens, the structure being pooled is the measurement -- two frames of a
+    cycle, seven points of a scan -- and the operator asked to see the
+    signal, not its average.
+
+    Degenerate axes are provenance, not structure, so they are invisible here
+    exactly as they are everywhere else; a single-frame cycle and a
+    one-dimensional scan of scalars keep the plain kind that already shows
+    all of them.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        return False
+    live = live_grid_dimensions(schema)
+    dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
+    if len(dense) >= 2:
+        # A frame per point: any live point structure is a second frame.
+        return bool(live) or schema.point_table.row_count > 1
+    # A scalar or a single vector per point: the curve walks one dimension.
+    return len(live) >= 2
 
 
 def fitting_spec(schema: Any, kind: Any = None) -> Any:
@@ -84,6 +120,10 @@ def fitting_spec(schema: Any, kind: Any = None) -> Any:
 
     if kind is not None:
         return default_spec(schema, kind)
+    if _grid_reads_structure_a_flat_plot_would_pool(schema):
+        grid = FACET_GRID_HANDLER.default_spec(schema)
+        if grid is not None:
+            return grid
     for handler in _INFERENCE_ORDER:
         candidate = handler.default_spec(schema)
         if candidate is not None:

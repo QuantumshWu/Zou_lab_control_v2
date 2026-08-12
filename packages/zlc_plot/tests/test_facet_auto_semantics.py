@@ -115,13 +115,21 @@ def test_a_degenerate_data_axis_still_counts_as_a_scalar_point() -> None:
     assert spec.cell.x == AxisRef.point_dimension("b")
 
 
-def test_frame_cells_keep_their_repeat_facet_and_live_dimension_fallback() -> None:
+def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None:
+    """A scanned frame belongs to its scan point, not to its sweep.
+
+    Pooling repeats is the reduction the operator declared and says so on
+    the panel; pooling a scan point silently averages seven different
+    physical settings into one picture, and the scan becomes invisible in
+    the plot of the scan.  So the scan facets and the repeats reduce.
+    """
+
     frames_with_repeats = _scan_schema(
         {"a": 3}, repeats=4, data_axes=_frame_axes()
     )
     spec = facet_default(frames_with_repeats)
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.repeat()
+    assert spec.facet == AxisRef.point_dimension("a")
     assert isinstance(spec.cell, ImagePlot)
     assert spec.cell.x == AxisRef.data("x")
     assert spec.cell.y == AxisRef.data("y")
@@ -133,6 +141,25 @@ def test_frame_cells_keep_their_repeat_facet_and_live_dimension_fallback() -> No
     assert isinstance(spec, FacetGridPlot)
     # The degenerate "a" is invisible: the LIVE dimension facets the frames.
     assert spec.facet == AxisRef.point_dimension("b")
+
+    # A grid has ONE facet axis, so a two-dimensional scan of frames facets
+    # its points: every (a, b) gets its own cell instead of one of them
+    # being averaged into the other.
+    frames_scanned_twice = _scan_schema(
+        {"a": 2, "b": 3}, repeats=4, data_axes=_frame_axes()
+    )
+    spec = facet_default(frames_scanned_twice)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet == AxisRef.point_rows()
+    assert isinstance(spec.cell, ImagePlot)
+
+    # With nothing else live, the repeats ARE the only structure there is.
+    frames_repeated_only = _scan_schema(
+        {"a": 1}, repeats=4, data_axes=_frame_axes()
+    )
+    spec = facet_default(frames_repeated_only)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet == AxisRef.repeat()
 
 
 def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:

@@ -87,13 +87,17 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
 
     The facet axis differs by cell on purpose:
 
-    * frame cells: with no scan topology, a NON-TRIVIAL point axis wins --
-      a camera cycle publishes its frames as points, and frame_0 | frame_1
-      side by side (cycles averaged) is what the cycle was authored to
-      show; a single-frame capture facets its repeats instead.  Under a
-      scan topology the repeat axis wins whenever it is non-trivial (each
-      shot's frame is the thing to compare), then the outermost live
-      dimension.
+    * frame cells: the facet is whatever would otherwise be POOLED.  With no
+      scan topology a non-trivial point axis wins -- a camera cycle
+      publishes its frames as points, and frame_0 | frame_1 side by side
+      (cycles averaged) is what the cycle was authored to show.  Under a
+      scan topology the scan wins: one live dimension facets by that
+      dimension, so each cell is labelled with the value it was taken at,
+      and two or more facet by the point ROWS, one cell per scan point,
+      because a grid has one facet axis and a two-dimensional scan of
+      frames has no dimension to spare.  Repeats come last of all: pooling
+      them is the reduction the operator declared, while pooling a scan
+      point or a frame destroys the measurement.
     * scan-heatmap cells: the OUTER dimensions win and repeats reduce into
       the cell's mean -- the averaged map is the measurement, and a
       per-sweep facet stays one authored change away.  With no outer
@@ -114,10 +118,12 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
             return FacetGridPlot(
                 AxisRef.point(str(column.coordinate_id)), cell
             )
+        if len(live) == 1:
+            return FacetGridPlot(AxisRef.point_dimension(live[0]), cell)
+        if len(live) >= 2:
+            return FacetGridPlot(AxisRef.point_rows(), cell)
         if repeats:
             return FacetGridPlot(AxisRef.repeat(), cell)
-        if live:
-            return FacetGridPlot(AxisRef.point_dimension(live[0]), cell)
         return None
     live_data_axes = tuple(
         axis for axis in schema.cell_schema.data_axes if axis.size > 1
