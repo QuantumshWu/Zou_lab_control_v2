@@ -19,9 +19,33 @@ from zlc_atom.install import (
     DeviceSpec,
     DeviceTypeDescriptor,
     InstalledLeaf,
+    Installation,
     create_installation,
     discover_device_catalog,
 )
+
+
+def test_a_failed_device_close_is_retried_before_installation_is_terminal() -> None:
+    attempts = 0
+
+    def close() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("camera is still owned")
+
+    installation = Installation(
+        {
+            "camera": InstalledLeaf(
+                "camera", "test.camera", object(), {}, closer=close
+            )
+        },
+        world=None,
+    )
+    with pytest.raises(ExceptionGroup, match="installation close failed"):
+        installation.close()
+    installation.close()
+    assert attempts == 2
 
 
 def test_discovery_automatically_collects_a_synthetic_leaf_without_graph_changes(monkeypatch) -> None:

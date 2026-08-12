@@ -70,9 +70,9 @@ class Installation:
                 leaf.close()
             except BaseException as error:
                 errors.append(error)
-        self._closed = True
         if errors:
             raise ExceptionGroup("installation close failed", errors)
+        self._closed = True
 
     def __enter__(self) -> "Installation":
         return self
