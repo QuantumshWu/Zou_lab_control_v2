@@ -99,7 +99,13 @@ def compose_panel_spec(schema: object, spec: object, state: "PanelState") -> obj
     return project_panel_state(schema, spec, state)[0]
 
 
-def apply_panel_fit(host: object, state: "PanelState | None", *, live: bool) -> object:
+def apply_panel_fit(
+    host: object,
+    state: "PanelState | None",
+    *,
+    live: bool,
+    models: object = None,
+) -> object:
     """Arm or clear this panel's authored fit on one host; return the operation.
 
     THE decision of what a panel's ``fit`` record means, in one place.  What
@@ -107,11 +113,21 @@ def apply_panel_fit(host: object, state: "PanelState | None", *, live: bool) -> 
     console presents it when it lands, a save awaits it before writing the
     file -- but "which model, or none" must not be re-derived per caller.
 
+    ``models`` is what this host offers, when the caller has already been
+    told: a record naming a model this data cannot be fitted with means
+    there is no fit to arm.  Callers used to check that themselves before
+    calling, in two places, one of which then armed the fit WITHOUT the rest
+    of the record.
+
     Returns ``None`` only when there is no host operation to perform.
     """
 
     fit = {} if state is None else dict(state.fit)
     model = fit.pop("model", None)
+    if model is not None and models is not None:
+        offered = {str(getattr(item, "model_id", item)) for item in tuple(models)}
+        if str(model) not in offered:
+            model = None
     # ``live`` is the caller's fact about its host, not an archived value.
     fit.pop("live", None)
     if not model:

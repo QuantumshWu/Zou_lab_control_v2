@@ -2422,3 +2422,59 @@ def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"})
     _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "image")
     assert binding.state.display.get("show_colorbar") is False
+
+
+def test_a_fit_record_naming_a_model_this_data_cannot_use_arms_nothing() -> None:
+    """One authority decides what a fit record means, including "not here".
+
+    Two callers used to ask the compatibility question themselves before
+    calling, and one of them then armed the fit with only its model id --
+    dropping everything else the record said.  The question belongs with the
+    answer.
+    """
+
+    from zlc_workbench.panel_state import PanelState, apply_panel_fit
+
+    class _Model:
+        def __init__(self, model_id: str) -> None:
+            self.model_id = model_id
+
+    class _Host:
+        def __init__(self) -> None:
+            self.armed: list[tuple[str, dict]] = []
+            self.cleared = 0
+
+        def fit(self, model, **options):
+            self.armed.append((str(model), dict(options)))
+            return "armed"
+
+        def clear_fit(self):
+            self.cleared += 1
+            return "cleared"
+
+    state = PanelState(
+        signal="s",
+        kind="curve",
+        size="2x2",
+        interval_ms=100,
+        title="fit record",
+        fit={"model": "gaussian", "guess_centre": 1.0},
+    )
+
+    offered = _Host()
+    assert apply_panel_fit(
+        offered, state, live=True, models=(_Model("gaussian"),)
+    ) == "armed"
+    assert offered.armed == [("gaussian", {"live": True, "guess_centre": 1.0})], (
+        "the whole record is armed, not just its model id"
+    )
+
+    absent = _Host()
+    assert apply_panel_fit(
+        absent, state, live=True, models=(_Model("lorentzian"),)
+    ) == "cleared"
+    assert not absent.armed, "a model this data cannot use is not a fit to arm"
+
+    # Nothing said about what is offered means the record is taken as given.
+    unasked = _Host()
+    assert apply_panel_fit(unasked, state, live=True) == "armed"

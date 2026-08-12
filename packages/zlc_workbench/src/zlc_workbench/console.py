@@ -1701,17 +1701,11 @@ class ConsolePresenter:
                                 binding.state, surface
                             )
                             binding.parameter_surface = surface
-                            selected = binding.state.fit.get("model")
-                            compatible = {
-                                str(getattr(model, "model_id")) for model in models
-                            }
-                            if selected is not None and str(selected) in compatible:
-                                self._present_when_done(
-                                    binding,
-                                    apply_panel_fit(
-                                        host, binding.state, live=True
-                                    ),
-                                )
+                            operation = apply_panel_fit(
+                                host, binding.state, live=True, models=models
+                            )
+                            if operation is not None:
+                                self._present_when_done(binding, operation)
                             self._publish_panel_state(binding)
                             # Clearing the de-dup memory belongs to THIS
                             # one-time first projection.  ``initial_state``
@@ -1773,12 +1767,12 @@ class ConsolePresenter:
                             )
                         ),
                     )
-                    selected = binding.state.fit.get("model")
-                    compatible = {
-                        str(getattr(model, "model_id")) for model in models
-                    }
-                    if selected is not None and str(selected) in compatible:
-                        editor.fit(str(selected), live=True)
+                    # The frozen view arms the SAME record, through the same
+                    # authority: arming just the model id here dropped every
+                    # other thing the record said about the fit.
+                    apply_panel_fit(
+                        editor, binding.state, live=True, models=models
+                    )
                 except Exception as error:
                     self._report(
                         f"cannot prepare {binding.state.title} plot editor: "
