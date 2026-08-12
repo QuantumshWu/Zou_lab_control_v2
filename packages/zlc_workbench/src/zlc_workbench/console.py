@@ -1981,31 +1981,6 @@ class ConsolePresenter:
                             binding.reported_error = None
                         self._apply_deriving(binding)
 
-            editor = binding.editor_host
-            if (
-                editor is not None
-                and binding.editor_selections is None
-                and binding.frozen_data is not None
-            ):
-                metadata, error = editor.initial_state
-                if metadata is None and error is None:
-                    continue
-                frozen = binding.frozen_data
-                try:
-                    if error is not None:
-                        raise error
-                    assert metadata is not None
-                    _display, models = metadata
-                    self._match_host_to_panel(binding, editor, models=models)
-                    binding.editor_selections = self._subscribe_editor_gestures(
-                        binding, editor, frozen
-                    )
-                except Exception as error:
-                    self._report(
-                        f"cannot prepare {binding.state.title} plot editor: "
-                        f"{_error_text(error)}",
-                        severity="error",
-                    )
 
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
@@ -2104,6 +2079,18 @@ class ConsolePresenter:
             old_selections.close()
         if old_host is not None:
             self._retire_plot_host(old_host)
+        # Listening and showing are one act.  Waiting for the host's first
+        # description before subscribing left a window -- several beats wide,
+        # with the surface already on screen -- in which everything the
+        # operator did on it was heard by nobody.
+        binding.editor_selections = self._subscribe_editor_gestures(
+            binding, host, frozen
+        )
+        # The panel's configuration goes on it now; the models this host will
+        # offer are not needed to say what the panel already says, and its
+        # completion is reported through the same path as every other editor
+        # configure.
+        binding.editor_configuration = self._match_host_to_panel(binding, host)
         return host
 
     def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:
