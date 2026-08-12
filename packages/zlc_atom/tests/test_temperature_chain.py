@@ -178,13 +178,20 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
             "an empty trap answers nothing about recapture and must stay NaN"
         )
 
-        # --- The rate IS the pooled fraction of the loaded sites, per shot.
-        rate = np.asarray(rate_value.block.values, dtype=float).reshape(
-            REPEATS, len(T_OFF_MS)
+        # --- The rate IS the pooled fraction of every loaded site, and it is
+        #     pooled ONCE: there is no repeat axis left for a panel to average
+        #     differently from the artifact.
+        assert rate_value.snapshot.block.schema.repeat_axis.size == 1, (
+            "the rate is pooled across repeats, so nothing is left to reduce"
         )
-        with np.errstate(invalid="ignore"):
-            per_shot = np.nanmean(survival, axis=2)
-        np.testing.assert_allclose(rate, per_shot, rtol=0, atol=1e-12)
+        rate = np.asarray(rate_value.block.values, dtype=float).reshape(
+            1, len(T_OFF_MS)
+        )
+        loaded = np.count_nonzero(np.isfinite(survival), axis=(0, 2))
+        recaptured = np.nansum(survival, axis=(0, 2))
+        np.testing.assert_allclose(
+            rate[0], recaptured / loaded, rtol=0, atol=1e-12
+        )
 
         # --- The physics: the measured curve is the curve THIS WORLD would
         #     predict for these release times.  The prediction comes from the
@@ -217,7 +224,7 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
         payload = json.loads(saved.read_text(encoding="utf-8"))
         assert payload["t_off"] == {"unit": "ms", "values": list(T_OFF_MS)}
         curve = payload["run_record"]["curve"]
-        np.testing.assert_allclose(curve["survival_rate"], pooled, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(curve["survival_rate"], rate[0], rtol=0, atol=1e-12)
         assert sum(curve["loaded_pairs"]) == judged.size
         np.testing.assert_allclose(
             curve["t_off_seconds"],

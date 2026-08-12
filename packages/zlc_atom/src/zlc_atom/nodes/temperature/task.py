@@ -266,31 +266,25 @@ class TemperatureTask:
         self._before[visit, row] = occupied[0]
         self._after[visit, row] = occupied[1]
 
-    def _survival(self) -> tuple[np.ndarray, np.ndarray]:
-        """Survival per site, and the recapture fraction per (repeat, point).
+    def _survival(self) -> np.ndarray:
+        """Survival per site, per release time, per repeat.
 
         A site that held no atom before the release answers nothing about
         recapture, so its survival is NaN -- not zero, which would be a
         measured loss that never happened.
         """
 
-        before, after = self._before, self._after
-        survival = np.where(before, after.astype("<f8"), np.nan)
-        loaded = np.sum(before, axis=-1)
-        rate = np.divide(
-            np.sum(before & after, axis=-1, dtype=float),
-            loaded,
-            out=np.full(loaded.shape, np.nan, dtype="<f8"),
-            where=loaded > 0,
-        )
-        return survival, rate
+        return np.where(self._before, self._after.astype("<f8"), np.nan)
 
     def _curve(self) -> dict[str, object]:
         """The pooled recapture fraction against the release time.
 
         Pooled, not averaged over per-shot fractions: every loaded site is one
         Bernoulli trial, and a shot that loaded three atoms says less than one
-        that loaded thirty.
+        that loaded thirty.  This IS the published rate -- the signal reads
+        the list this record carries -- because two ways to average the same
+        run produce two different curves under one name, and the operator was
+        watching one while the artifact kept the other.
         """
 
         loaded = np.sum(self._before, axis=(0, 2), dtype=float)
@@ -348,8 +342,12 @@ class TemperatureTask:
         self._generation = generation
         frames = self._scan.acquire(context, on_point=self._judge)
         context.report_progress("Reading survival")
-        survival, rate = self._survival()
+        survival = self._survival()
         curve = self._curve()
+        # One repeat, because pooling IS across the repeats: there is nothing
+        # left for a panel to average, so what it draws cannot disagree with
+        # what was saved.
+        rate = np.asarray(curve["survival_rate"], dtype="<f8")[None, :]
         record = self._run_record(curve)
         # This Task publishes its results once, at the end; the revision only
         # has to be its own and positive, and the sweep count is that number.
