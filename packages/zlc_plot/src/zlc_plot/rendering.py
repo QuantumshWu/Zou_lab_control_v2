@@ -140,34 +140,57 @@ def _data_limits(values: np.ndarray) -> tuple[float, float] | None:
     return float(np.min(finite)), float(np.max(finite))
 
 
-def _deadband_image_limits(
+def _relim_retains(mode: str) -> bool:
+    """Whether an autoscaled axis may keep the limits it already shows.
+
+    THE answer to that question, for every autoscaled axis there is.  TIGHT
+    means tight: the picture takes the data's range, every time, so a step
+    the operator can see moves the scale.  The other modes ask for a steady
+    view and hold what they have until the data leaves it -- that hysteresis
+    is why a scale, and all the chrome keyed to it, does not flicker from
+    one shot to the next.  FIXED never reaches here at all: its limits are
+    authored, so nothing is autoscaled to retain.
+
+    The colour scale and the count axis each carried a copy of this sentence
+    and disagreed about it for as long as both existed: the count axis
+    re-fitted on tight, the colour scale sat behind a 35% deadband, and an
+    operator who chose tight watched an image's scale ignore a peak that had
+    moved by a fifth.
+    """
+
+    return mode != "tight"
+
+
+def _autoscaled_limits(
     data_range: tuple[float, float],
     current: tuple[float, float] | None,
     *,
     padding_fraction: float,
     deadband_fraction: float,
-    mode: str = "tight",
-    force: bool = False,
+    zero_based: bool = False,
+    retain: bool = True,
 ) -> tuple[float, float]:
+    """The limits one autoscaled axis takes for this data.
+
+    Two questions, and they are not the same question: ``zero_based`` is the
+    SHAPE the axis wants -- a count read against zero, anything else against
+    its own span -- and ``retain`` is whether the limits already on screen
+    may be kept.  A single ``mode`` argument answered both, so the colour
+    rail, which passed "tight" to ask for the padded shape, gave up its
+    hysteresis in the same breath without ever asking to.
+    """
+
     low, high = map(float, data_range)
-    if mode == "normal" and low >= 0.0:
+    if zero_based and low >= 0.0:
         target = (0.0, high * 1.2 if high else 1.0)
     else:
         data_span = (high - low) or (abs(high) or 1.0)
         padding = padding_fraction * data_span
         target = low - padding, high + padding
-    if current is None or force or mode == "tight":
-        # TIGHT means tight: the picture takes the data's range, every time.
-        # The retention below is what stops an ordinary shot-to-shot wobble
-        # from making the scale (and everything keyed to it) flicker, and it
-        # belongs to the mode that asks for a steady view -- an operator who
-        # picks tight has asked for the opposite, and a 35% deadband made
-        # that choice do nothing for any change smaller than a third of the
-        # span.  The histogram axis has always read tight this way; this is
-        # the same rule, said once more where the colour scale lives.
+    if current is None or not retain:
         return target
     current_low, current_high = map(float, current)
-    if mode == "normal" and low >= 0.0:
+    if zero_based and low >= 0.0:
         if (
             current_low == 0.0
             and current_high > 0.0
@@ -1775,7 +1798,7 @@ class MatplotlibRenderer:
             force = (
                 previous is None
                 or previous_mode != count_semantics
-                or mode == "tight"
+                or not _relim_retains(mode)
             )
             if force:
                 automatic = target
@@ -1876,13 +1899,15 @@ class MatplotlibRenderer:
             automatic = current if current is not None else (0.0, 1.0)
         else:
             policy = self.style.render
-            automatic = _deadband_image_limits(
+            automatic = _autoscaled_limits(
                 data_range,
                 current,
                 padding_fraction=policy.image_color_padding_fraction,
                 deadband_fraction=policy.image_color_deadband_fraction,
-                mode=mode,
-                force=self._artists.get(mode_key) != mode,
+                zero_based=mode == "normal",
+                # Changing the mode is a new question, so the answer is
+                # re-fitted rather than held over from the old one.
+                retain=_relim_retains(mode) and self._artists.get(mode_key) == mode,
             )
         selected = _select_display_limits(
             mode, automatic, state, quantity, allow_partial=allow_partial
@@ -1907,13 +1932,15 @@ class MatplotlibRenderer:
             selected = current if current is not None else (0.0, 1.0)
         else:
             policy = self.style.render
-            selected = _deadband_image_limits(
+            # The rail shows where this data sits under the colour scale.
+            # It is not one of the panel's relim-mode axes: its domain is the
+            # data's own span, damped, so the handles the operator drags do
+            # not shift under the pointer between revisions.
+            selected = _autoscaled_limits(
                 data_range,
                 current,
                 padding_fraction=policy.image_color_padding_fraction,
                 deadband_fraction=policy.image_color_deadband_fraction,
-                mode="tight",
-                force=current is None,
             )
         histogram_limits = tuple(map(float, selected))
         self._artists[limits_key] = histogram_limits
