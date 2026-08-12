@@ -68,6 +68,8 @@ class TaskConsoleHandle(QtCore.QObject):
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
     logic_draft_changed = QtCore.pyqtSignal(str, object)
+    panel_publisher_edit_requested = QtCore.pyqtSignal(str)
+    panel_publisher_draft_changed = QtCore.pyqtSignal(str, object)
 
     def __init__(
         self,
@@ -89,6 +91,7 @@ class TaskConsoleHandle(QtCore.QObject):
         self._rows: dict[str, LogicRowView] = {}
         self._panel_publisher_rows: dict[str, LogicRowView] = {}
         self._logic_editors: dict[str, LogicEditorView] = {}
+        self._panel_publisher_editors: dict[str, LogicEditorView] = {}
         self._panel_editors: dict[str, PanelEditorView] = {}
         self._panel_intervals: tuple[int, ...] = ()
         self._panel_default_interval = 0
@@ -213,7 +216,11 @@ class TaskConsoleHandle(QtCore.QObject):
             card.set_editing_enabled(editing)
         for row in self._rows.values():
             row.set_task_takeover(self._task_takeover)
+        for row in self._panel_publisher_rows.values():
+            row.edit_button.setEnabled(editing)
         for editor in self._logic_editors.values():
+            editor.set_mutation_enabled(editing)
+        for editor in self._panel_publisher_editors.values():
             editor.set_mutation_enabled(editing)
         for editor in self._panel_editors.values():
             editor.set_mutation_enabled(editing)
@@ -551,17 +558,52 @@ class TaskConsoleHandle(QtCore.QObject):
                     # and nothing decides what a Start would open.
                     row.preview_switch,
                     row.stop_button,
-                    row.edit_button,
                     row.remove_button,
                 ):
                     button.hide()
+                row.edit_requested.connect(
+                    lambda _=None, pid=key: self.panel_publisher_edit_requested.emit(pid)
+                )
             row.set_publishes(published)
+            row.edit_button.setEnabled(not self._task_takeover)
             incoming[key] = row
         for key, row in tuple(self._panel_publisher_rows.items()):
             if key not in incoming:
+                self.close_panel_publisher_editor(key)
                 row.setParent(None)
         self._panel_publisher_rows = incoming
         self._show_logic_rows()
+
+    def open_panel_publisher_editor(self, panel_id: str, projection: Any) -> None:
+        key = str(panel_id)
+        editor = self._panel_publisher_editors.get(key)
+        if editor is None:
+            editor = LogicEditorView(key, projection, show_actions=False)
+            editor.set_mutation_enabled(not self._task_takeover)
+            editor.draft_changed.connect(
+                lambda patch, pid=key: self.panel_publisher_draft_changed.emit(pid, patch)
+            )
+            self._panel_publisher_editors[key] = editor
+            title = str(dict(projection).get("api_name") or key)
+            self._view.add_editor_tab(editor, f"Edit · {title}")
+        else:
+            editor.update_projection(projection)
+            self._view.focus_editor_tab(editor)
+
+    def update_panel_publisher_editor(self, panel_id: str, projection: Any) -> bool:
+        editor = self._panel_publisher_editors.get(str(panel_id))
+        if editor is None:
+            return False
+        editor.update_projection(projection)
+        return True
+
+    def focus_panel_publisher_editor(self, panel_id: str) -> bool:
+        editor = self._panel_publisher_editors.get(str(panel_id))
+        return False if editor is None else self._view.focus_editor_tab(editor)
+
+    def close_panel_publisher_editor(self, panel_id: str) -> bool:
+        editor = self._panel_publisher_editors.pop(str(panel_id), None)
+        return False if editor is None else self._view.remove_editor_tab(editor)
 
     # --------------------------------------------------------- logic editors
 
@@ -619,6 +661,10 @@ class TaskConsoleHandle(QtCore.QObject):
         for node_id, candidate in tuple(self._logic_editors.items()):
             if candidate is editor:
                 self.close_logic_editor(node_id)
+                return
+        for panel_id, candidate in tuple(self._panel_publisher_editors.items()):
+            if candidate is editor:
+                self.close_panel_publisher_editor(panel_id)
                 return
         for panel_id, candidate in tuple(self._panel_editors.items()):
             if candidate is editor:

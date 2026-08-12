@@ -531,11 +531,43 @@ publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
 assert all(button.isHidden() for button in (
-    publisher.start_button, publisher.stop_button,
-    publisher.edit_button, publisher.remove_button,
+    publisher.start_button, publisher.preview_switch, publisher.stop_button,
+    publisher.remove_button,
 ))
-assert view.tabs.count() == 3
-assert view.tabs.currentWidget() is editor
+assert not publisher.edit_button.isHidden()
+publisher_edits = []
+handle.panel_publisher_edit_requested.connect(publisher_edits.append)
+QtTest.QTest.mouseClick(publisher.edit_button, QtCore.Qt.LeftButton)
+assert publisher_edits == ['panel-1']
+publisher_projection = {
+    'node_id': 'panel-1',
+    'api_name': 'Image outputs',
+    'kind': 'panel publisher',
+    'form_spec': FormSpec((
+        FormFieldProps(key='roi_mean', kind='bool', label='Mean', default=True),
+        FormFieldProps(key='roi_max', kind='bool', label='Max', default=True),
+    )),
+    'form_values': {'roi_mean': True, 'roi_max': True},
+    'source_required': False,
+    'device_options': {}, 'device_keys': {},
+    'preview_offered': False, 'auto_preview': False,
+    'running': False, 'pending': False,
+    'can_start': False, 'can_stop': False,
+    'issues': (), 'error': '', 'status': '',
+}
+publisher_patches = []
+handle.panel_publisher_draft_changed.connect(
+    lambda panel_id, patch: publisher_patches.append((panel_id, patch))
+)
+handle.open_panel_publisher_editor('panel-1', publisher_projection)
+publisher_editor = handle._panel_publisher_editors['panel-1']
+assert publisher_editor.source_combo is None
+assert publisher_editor.start_button.isHidden()
+publisher_editor.form.widget_for('roi_max').click()
+assert publisher_patches == [('panel-1', {'values': {'roi_max': False}})]
+assert view.tabs.indexOf(editor) >= 0
+assert view.tabs.indexOf(publisher_editor) >= 0
+assert view.tabs.currentWidget() is publisher_editor
 assert not editor.start_button.isEnabled()
 assert not editor.stop_button.isEnabled()
 assert not handle._rows['camera-1'].start_button.isEnabled()
@@ -615,9 +647,13 @@ assert editor.start_button.isEnabled()
 assert editor.stop_button.isEnabled()
 view.editor_close_requested.emit(editor)
 app.processEvents()
-assert view.tabs.count() == 2
+assert view.tabs.indexOf(editor) < 0
+assert view.tabs.indexOf(publisher_editor) >= 0
 assert 'camera-1' not in handle._logic_editors
 assert handle.logic_row_ids() == ('camera-1',)
+view.editor_close_requested.emit(publisher_editor)
+app.processEvents()
+assert 'panel-1' not in handle._panel_publisher_editors
 """
     )
 

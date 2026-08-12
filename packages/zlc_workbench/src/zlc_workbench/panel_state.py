@@ -200,6 +200,7 @@ class PanelState:
     display: Mapping[str, Any] = field(default_factory=dict)
     fit: Mapping[str, Any] = field(default_factory=dict)
     overlay_signal: str = ""
+    published_outputs: Mapping[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         interval = int(self.interval_ms)
@@ -230,6 +231,20 @@ class PanelState:
         object.__setattr__(self, "semantic", _plain_state(self.semantic))
         object.__setattr__(self, "display", _plain_state(self.display))
         object.__setattr__(self, "fit", _plain_state(self.fit))
+        published_outputs = {
+            str(name): enabled
+            for name, enabled in self.published_outputs.items()
+        }
+        if any(
+            not name or not isinstance(enabled, bool)
+            for name, enabled in published_outputs.items()
+        ):
+            raise ValueError("published output choices must map names to booleans")
+        object.__setattr__(
+            self,
+            "published_outputs",
+            _plain_state(published_outputs),
+        )
         overlay_signal = str(self.overlay_signal).strip()
         if overlay_signal and not draws_image_surfaces(kind, cell_kind):
             raise ValueError(
@@ -251,6 +266,7 @@ class PanelState:
             "display": _document_value(self.display),
             "fit": _document_value(self.fit),
             "overlay_signal": self.overlay_signal,
+            "published_outputs": dict(self.published_outputs),
         }
 
 

@@ -29,6 +29,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_workbench.console import ConsolePresenter
+from zlc_workbench.console_layout import LayoutDocument
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import compose_panel_spec
 from zlc_workbench.session import ExperimentSession, Workspace
@@ -150,6 +151,7 @@ class _ConsoleView:
         "panel_order_committed",
         "panel_remove_requested",
         "panel_edit_requested", "panel_plot_error",
+        "panel_publisher_edit_requested", "panel_publisher_draft_changed",
         "logic_start_requested", "logic_auto_preview_changed",
         "logic_stop_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
@@ -188,6 +190,7 @@ class _ConsoleView:
         self.task_takeover = False
         self.panel_mutation_enabled: dict[str, bool] = {}
         self.panel_publishers: dict[str, tuple] = {}
+        self.panel_publisher_editors: dict[str, dict] = {}
         #: Every front the presenter put on a staged panel widget, in order.
         self.presented_fronts: list[tuple[str, object]] = []
 
@@ -318,6 +321,22 @@ class _ConsoleView:
             str(panel_id): tuple(rows)
             for panel_id, rows in publishers
         }
+
+    def open_panel_publisher_editor(self, panel_id: str, projection) -> None:
+        self.panel_publisher_editors[str(panel_id)] = dict(projection)
+
+    def update_panel_publisher_editor(self, panel_id: str, projection) -> bool:
+        key = str(panel_id)
+        if key not in self.panel_publisher_editors:
+            return False
+        self.panel_publisher_editors[key] = dict(projection)
+        return True
+
+    def focus_panel_publisher_editor(self, panel_id: str) -> bool:
+        return str(panel_id) in self.panel_publisher_editors
+
+    def close_panel_publisher_editor(self, panel_id: str) -> bool:
+        return self.panel_publisher_editors.pop(str(panel_id), None) is not None
 
     def open_panel_editor(self, panel_id: str, projection) -> None:
         self.panel_editors[str(panel_id)] = dict(projection)
@@ -1019,6 +1038,71 @@ def test_selector_interaction_does_not_disconnect_panel_signals(
     presenter.view.selectors_toggled.emit(False)
     assert binding.bridge is bridge and bridge.started
     assert presenter.view.selectors is False
+
+
+def test_panel_publisher_edit_owns_stable_output_selection(
+    presenter, session
+) -> None:
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
+    presenter.beat()
+    assert presenter.view.panel_publishers[binding.panel_id] == ()
+
+    assert presenter.edit_panel_publisher(binding.panel_id)
+    projection = presenter.view.panel_publisher_editors[binding.panel_id]
+    assert projection["source_required"] is False
+    assert "source_signal" not in projection
+    assert set(projection["form_spec"].keys) == {
+        "roi_frame", "roi_mean", "roi_min", "roi_max",
+        "roi_min_10_mean", "roi_max_10_mean",
+    }
+    assert all(field.kind == "bool" for field in projection["form_spec"].fields)
+
+    fit_model = next(
+        value
+        for _label, value in binding.parameter_surface["fit"][0]["choices"]
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"fit": {"model": fit_model}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit_outputs")),
+    )
+    projection = presenter.view.panel_publisher_editors[binding.panel_id]
+    assert set(binding.parameter_surface["fit_outputs"]).issubset(
+        {
+            (field.key, field.label)
+            for field in projection["form_spec"].fields
+        }
+    )
+
+    presenter.view.panel_publisher_draft_changed.emit(
+        binding.panel_id,
+        {"values": {"roi_frame": False, "roi_max": False}},
+    )
+    _commit_area(binding.host)
+    roi_mean = f"@logic/{binding.panel_id}/roi_mean"
+    roi_frame = f"@logic/{binding.panel_id}/roi_frame"
+    roi_max = f"@logic/{binding.panel_id}/roi_max"
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.freeze().value(roi_mean) is not None,
+    )
+    assert session.signal_plane.freeze().value(roi_frame) is None
+    assert session.signal_plane.freeze().value(roi_max) is None
+
+    presenter.view.panel_publisher_draft_changed.emit(
+        binding.panel_id,
+        {"values": {"roi_max": True}},
+    )
+    assert session.signal_plane.freeze().value(roi_max) is not None
+
+    tree = LayoutDocument((binding.state,), ()).to_tree()
+    restored = LayoutDocument.from_tree(tree).panels[0]
+    assert restored.published_outputs == binding.state.published_outputs
 
 
 def test_committed_selection_outputs_enter_the_real_occupancy_input(
@@ -1843,6 +1927,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "semantic": {semantic_key: str(semantic_value)},
         "display": authored_display,
         "fit": {"model": "gaussian"}, "overlay_signal": "",
+        "published_outputs": {},
     }
     # Nothing of this session's bookkeeping: ids are minted fresh on the way in.
     assert not any("panel_id" in panel for panel in document["panels"])
@@ -1969,6 +2054,7 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
             "display": {},
             "fit": {},
             "overlay_signal": "",
+            "published_outputs": {},
         }
     )
 
@@ -1993,7 +2079,7 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
         {"signal": "nobody.publishes.this", "title": "gone", "kind": "image",
          "cell_kind": "", "size": "",
          "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
-         "overlay_signal": ""}
+         "overlay_signal": "", "published_outputs": {}}
     )
 
     assert presenter.apply_layout(document) is True

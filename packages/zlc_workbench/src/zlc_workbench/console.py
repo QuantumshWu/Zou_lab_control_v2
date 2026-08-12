@@ -24,6 +24,8 @@ from zlc_atom.nodes.occupancy import SITE_STATUS_CONTRACT, site_overlay
 from zlc_plot import DEFAULTS, PlotKind
 from zlc_plot.primitives import ImageFrame
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
+from zlc_runtime import selection_output_catalog
+from zlc_ui.form import FormFieldProps, FormSpec
 
 from .board import LiveBoard
 from .console_layout import (
@@ -381,6 +383,12 @@ class ConsolePresenter:
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
             draft_changed.connect(self._logic_draft_changed)
+        publisher_edit = getattr(self.view, "panel_publisher_edit_requested", None)
+        if publisher_edit is not None:
+            publisher_edit.connect(self.edit_panel_publisher)
+        publisher_changed = getattr(self.view, "panel_publisher_draft_changed", None)
+        if publisher_changed is not None:
+            publisher_changed.connect(self._panel_publisher_draft_changed)
         panel_changed = getattr(self.view, "panel_state_changed", None)
         if panel_changed is not None:
             panel_changed.connect(self.update_panel_state)
@@ -1193,7 +1201,6 @@ class ConsolePresenter:
                 ),
             )
             for panel_id in self.panels
-            if any(row.producer == panel_id for row in projected)
         )
         if panel_publishers != self._shown_panel_publishers:
             self._shown_panel_publishers = panel_publishers
@@ -1712,6 +1719,7 @@ class ConsolePresenter:
         semantic_unavailable: str = "",
         display_unavailable: str = "",
         fit_unavailable: str = "",
+        fit_outputs: Sequence[tuple[str, str]] = (),
     ) -> Mapping[str, object]:
         """Project one plot-owned display declaration for every panel view."""
 
@@ -1726,6 +1734,7 @@ class ConsolePresenter:
             "semantic_unavailable": str(semantic_unavailable),
             "display_unavailable": str(display_unavailable),
             "fit_unavailable": str(fit_unavailable),
+            "fit_outputs": tuple((str(name), str(label)) for name, label in fit_outputs),
         }
 
     def _unbound_panel_parameters(self, state: PanelState) -> Mapping[str, object]:
@@ -1817,11 +1826,24 @@ class ConsolePresenter:
                 "step": None,
             },
         ) if models or current_model is not None else ()
+        fit_outputs: list[tuple[str, str]] = []
+        for model in models:
+            if str(getattr(model, "model_id")) != str(current_model):
+                continue
+            for parameter in tuple(getattr(model, "parameters")):
+                name = str(getattr(parameter, "name"))
+                label = str(
+                    getattr(parameter, "display_label", None)
+                    or name.replace("_", " ").title()
+                )
+                fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
+            break
         return self._parameter_surface(
             display_controls,
             state,
             semantic=semantic_entries,
             fit=fit_entries,
+            fit_outputs=fit_outputs,
         )
 
     @staticmethod
@@ -2044,6 +2066,108 @@ class ConsolePresenter:
         update = getattr(self.view, "update_panel_editor", None)
         if callable(update):
             update(str(panel_id), projection)
+        return True
+
+    def _panel_publisher_fields(
+        self,
+        binding: PanelBinding,
+    ) -> tuple[tuple[str, str], ...]:
+        kind = "image" if self._paints_image_surfaces(binding) else "curve"
+        fields = list(selection_output_catalog(kind))
+        fields.extend(tuple(binding.parameter_surface.get("fit_outputs", ())))
+        return tuple(fields)
+
+    def panel_publisher_editor_projection(
+        self,
+        panel_id: str,
+    ) -> dict[str, Any] | None:
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return None
+        fields = self._panel_publisher_fields(binding)
+        values = {
+            name: binding.state.published_outputs.get(name, True)
+            for name, _label in fields
+        }
+        return {
+            "node_id": binding.panel_id,
+            "api_name": f"{binding.state.title} outputs",
+            "kind": "panel publisher",
+            "form_spec": FormSpec(
+                tuple(
+                    FormFieldProps(
+                        key=name,
+                        kind="bool",
+                        label=label,
+                        default=True,
+                    )
+                    for name, label in fields
+                )
+            ),
+            "form_values": values,
+            "source_required": False,
+            "device_options": {},
+            "device_keys": {},
+            "preview_offered": False,
+            "auto_preview": False,
+            "running": False,
+            "pending": False,
+            "can_start": False,
+            "can_stop": False,
+            "issues": (),
+            "error": "",
+            "status": "",
+        }
+
+    def edit_panel_publisher(self, panel_id: str) -> bool:
+        projection = self.panel_publisher_editor_projection(panel_id)
+        if projection is None:
+            return False
+        opened = getattr(self.view, "open_panel_publisher_editor", None)
+        focused = getattr(self.view, "focus_panel_publisher_editor", None)
+        if callable(opened):
+            opened(str(panel_id), projection)
+        if callable(focused):
+            focused(str(panel_id))
+        return callable(opened) or callable(focused)
+
+    def refresh_panel_publisher_editor(self, panel_id: str) -> bool:
+        projection = self.panel_publisher_editor_projection(panel_id)
+        update = getattr(self.view, "update_panel_publisher_editor", None)
+        if projection is None or not callable(update):
+            return False
+        return bool(update(str(panel_id), projection))
+
+    def _panel_publisher_draft_changed(
+        self,
+        panel_id: str,
+        patch: Mapping[str, Any],
+    ) -> None:
+        values = patch.get("values", {})
+        if isinstance(values, Mapping):
+            self.update_panel_published_outputs(str(panel_id), values)
+
+    def update_panel_published_outputs(
+        self,
+        panel_id: str,
+        values: Mapping[str, Any],
+    ) -> bool:
+        """Replace publisher policy without reconfiguring the plot host."""
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return False
+        published = dict(binding.state.published_outputs)
+        published.update({str(name): bool(enabled) for name, enabled in values.items()})
+        candidate = replace(binding.state, published_outputs=published)
+        if candidate == binding.state:
+            return False
+        binding.state = candidate
+        if binding.bridge is not None:
+            binding.bridge.configure_outputs(candidate.published_outputs)
+        self._publish_panel_state(binding)
+        self._refresh_signal_choices()
+        self._refresh_console_projection()
         return True
 
     def _replace_panel_editor_host(self, binding: PanelBinding) -> object:
@@ -2361,6 +2485,7 @@ class ConsolePresenter:
             )
         self._offer_panel(binding.panel_id)
         self.refresh_panel_editor(binding.panel_id)
+        self.refresh_panel_publisher_editor(binding.panel_id)
 
     def _release_panel(self, binding: PanelBinding) -> None:
         """Let go of one panel's derivation and its plotting host."""
@@ -2444,6 +2569,9 @@ class ConsolePresenter:
         close_editor = getattr(self.view, "close_panel_editor", None)
         if callable(close_editor):
             close_editor(key)
+        close_publisher = getattr(self.view, "close_panel_publisher_editor", None)
+        if callable(close_publisher):
+            close_publisher(key)
         self._release_panel(binding)
         self.view.remove_panel(key)
         for previews in self._transient_task_previews.values():
@@ -2892,6 +3020,7 @@ class ConsolePresenter:
                 self._enqueue_panel_threshold(binding.panel_id, host, selector)
             ),
         )
+        binding.bridge.configure_outputs(binding.state.published_outputs)
 
     def _enqueue_panel_threshold(
         self,
