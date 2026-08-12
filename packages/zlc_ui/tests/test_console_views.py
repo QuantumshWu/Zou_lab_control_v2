@@ -295,31 +295,41 @@ assert events == [('panel-1',)]
     )
 
 
-def test_board_qtest_drag_reorders_and_matches_packer() -> None:
+def test_board_qtest_drop_uses_the_nearest_anchor_before_gravity() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore, QtTest
-from zlc_ui.board import BoardMetrics, GeomProxy, pack
+from zlc_ui.board import BoardMetrics
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
 metrics = BoardMetrics(10, lambda size: (100, 80))
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-board = ConsoleBoardView(metrics=metrics); board.resize(260, 220); board.set_cards(cards); board.show(); app.processEvents()
+board = ConsoleBoardView(metrics=metrics); board.resize(350, 260); board.set_cards(cards); board.show(); app.processEvents()
 events = []
 board.order_committed.connect(events.append)
-target = cards[2].geometry().center()
-local_target = cards[0].mapFrom(board, target)
-QtTest.QTest.mousePress(cards[0], QtCore.Qt.LeftButton, pos=QtCore.QPoint(20, 20))
-QtTest.QTest.mouseMove(cards[0], local_target)
-QtTest.QTest.mouseRelease(cards[0], QtCore.Qt.LeftButton, pos=local_target)
-assert events
-order = events[-1]
-assert order[0] != 'panel-0'
-proxies = [GeomProxy(board._size_key(board._cards[panel_id])) for panel_id in order]
-pack(proxies, metrics, board.width())
-for panel_id, proxy in zip(order, proxies):
-    assert board._cards[panel_id].geometry().getRect()[:2] == (proxy.col, proxy.row)
+assert tuple(card.geometry().getRect()[:2] for card in cards) == ((10, 10), (120, 10), (230, 10))
+
+def drop_top_left_at(card, top_left):
+    grab = QtCore.QPoint(18, 18)
+    target = card.mapFrom(board, QtCore.QPoint(top_left[0] + 18, top_left[1] + 18))
+    QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, pos=grab)
+    QtTest.QTest.mouseMove(card, target)
+    QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=target)
+    app.processEvents()
+
+drop_top_left_at(cards[2], (12, 96))
+assert board._order == ('panel-0', 'panel-1', 'panel-2')
+assert tuple(card.geometry().getRect()[:2] for card in cards) == ((10, 10), (120, 10), (10, 100))
+
+board.resize(120, 400); app.processEvents()
+assert all(card.geometry().x() == 10 for card in cards)
+board.resize(350, 260); app.processEvents()
+assert tuple(card.geometry().getRect()[:2] for card in cards) == ((10, 10), (120, 10), (10, 100))
+
+drop_top_left_at(cards[2], (12, 14))
+assert board._order == ('panel-2', 'panel-0', 'panel-1')
+assert tuple(board._cards[panel_id].geometry().getRect()[:2] for panel_id in board._order) == ((10, 10), (120, 10), (230, 10))
 """
     )
 

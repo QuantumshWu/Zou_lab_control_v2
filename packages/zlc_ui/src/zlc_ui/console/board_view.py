@@ -1,4 +1,4 @@
-"""v1-style free-drag board backed by the pure north-west packer."""
+"""Free-drag board backed by one two-dimensional gravity rule."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.board import (
     BoardMetrics,
     GeomProxy,
-    drop_index,
+    nearest_anchor,
     min_board_width,
     pack,
 )
@@ -17,13 +17,15 @@ from .panel_card_view import PanelCardView
 
 
 class ConsoleBoardView(QtWidgets.QWidget):
-    """Let cards move freely, then snap their order on mouse release.
+    """Let cards move freely, then snap their position on mouse release.
 
     This is deliberately a two-phase interaction.  During a drag the card is
     an ordinary child widget at the operator's raw pointer position; the other
-    cards do not move and there is no placeholder/ghost.  At release the pure
-    packer chooses the semantic insertion index and restores north-west gravity
-    for the complete board, matching the v1 ``_snap_dropped_card`` path.
+    cards do not move and there is no placeholder/ghost.  At release its
+    top-left chooses the nearest grid anchor from the settled board; that card
+    stays pinned while the others undergo the same north-west gravity used by
+    ordinary resize.  Thus a lower-left drop remains a lower-left intent rather
+    than being flattened into an insertion index.
     """
 
     order_committed = QtCore.pyqtSignal(tuple)
@@ -38,6 +40,8 @@ class ConsoleBoardView(QtWidgets.QWidget):
         )
         self._cards: dict[str, PanelCardView] = {}
         self._order: tuple[str, ...] = ()
+        self._anchor_id: str | None = None
+        self._anchor: tuple[int, int] | None = None
         self._wired_cards: set[PanelCardView] = set()
         self._active_card: PanelCardView | None = None
 
@@ -68,6 +72,9 @@ class ConsoleBoardView(QtWidgets.QWidget):
                 card.setParent(None)
                 card.hide()
         self._cards = {card.panel_id: card for card in incoming}
+        if self._anchor_id not in self._cards:
+            self._anchor_id = None
+            self._anchor = None
         for card in incoming:
             card.setParent(self)
             card.show()
@@ -108,21 +115,34 @@ class ConsoleBoardView(QtWidgets.QWidget):
             return 0
         return max(self.width(), min_board_width(proxies, self._metrics))
 
-    def _pack_current(self) -> None:
+    def _pack_current(self) -> dict[str, GeomProxy]:
         if not self._order:
             self.setMinimumSize(0, 0)
-            return
-        self._apply_packed(self._order)
+            return {}
+        return self._apply_packed(self._order)
 
     def _apply_packed(self, order: tuple[str, ...]) -> dict[str, GeomProxy]:
-        proxies = [GeomProxy(self._size_key(self._cards[panel_id])) for panel_id in order]
-        pack(proxies, self._metrics, self._board_width(order))
+        proxies = {
+            panel_id: GeomProxy(self._size_key(self._cards[panel_id]))
+            for panel_id in order
+        }
+        pinned = None
+        if self._anchor_id in proxies and self._anchor is not None:
+            pinned = proxies[self._anchor_id]
+            pinned.col, pinned.row = self._anchor
+        pack(
+            tuple(proxies[panel_id] for panel_id in order),
+            self._metrics,
+            self._board_width(order),
+            pinned=pinned,
+        )
         by_id: dict[str, GeomProxy] = {}
         right = bottom = 0
         updates_enabled = self.updatesEnabled()
         self.setUpdatesEnabled(False)
         try:
-            for panel_id, proxy in zip(order, proxies):
+            for panel_id in order:
+                proxy = proxies[panel_id]
                 by_id[panel_id] = proxy
                 width, height = self._metrics.card_size(proxy.size)
                 rect = QtCore.QRect(int(proxy.col), int(proxy.row), int(width), int(height))
@@ -139,7 +159,10 @@ class ConsoleBoardView(QtWidgets.QWidget):
         # to reflow it into one column.  The pure packer's one-card bound is
         # the only horizontal minimum; the current packed bottom may safely
         # determine the vertical scroll extent.
-        self.setMinimumSize(min_board_width(proxies, self._metrics), bottom + self._metrics.gap)
+        self.setMinimumSize(
+            min_board_width(tuple(proxies.values()), self._metrics),
+            bottom + self._metrics.gap,
+        )
         return by_id
 
     def _card_size_changed(self, card: PanelCardView) -> None:
@@ -163,17 +186,31 @@ class ConsoleBoardView(QtWidgets.QWidget):
         if card is not self._active_card:
             self._active_card = card
         others = tuple(panel_id for panel_id in self._order if panel_id != card.panel_id)
-        other_proxies = [GeomProxy(self._size_key(self._cards[panel_id])) for panel_id in others]
-        index = drop_index(
+        other_proxies = [
+            GeomProxy(
+                self._size_key(self._cards[panel_id]),
+                int(self._cards[panel_id].x()),
+                int(self._cards[panel_id].y()),
+            )
+            for panel_id in others
+        ]
+        anchor = nearest_anchor(
             GeomProxy(self._size_key(card), int(card.x()), int(card.y())),
             other_proxies,
             self._metrics,
             self._board_width(self._order),
         )
-        committed = others[:index] + (card.panel_id,) + others[index:]
+        self._anchor_id = card.panel_id
+        self._anchor = anchor
         self._active_card = None
-        self._order = committed
-        self._pack_current()
+        self._order = others + (card.panel_id,)
+        packed = self._pack_current()
+        pin = packed[card.panel_id]
+        index = sum(
+            (packed[panel_id].row, packed[panel_id].col) < (pin.row, pin.col)
+            for panel_id in others
+        )
+        self._order = others[:index] + (card.panel_id,) + others[index:]
         self.order_committed.emit(self._order)
 
     def _cancel_drag(self) -> None:

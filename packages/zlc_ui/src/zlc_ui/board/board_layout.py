@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-__all__ = ["BoardMetrics", "GeomProxy", "board_width", "drop_index",
+__all__ = ["BoardMetrics", "GeomProxy", "board_width", "nearest_anchor",
            "first_free_slot", "min_board_width", "pack"]
 
 
@@ -114,25 +114,48 @@ def board_width(configs: Sequence, metrics: BoardMetrics) -> int:
     return max(2 * widest + 3 * metrics.gap, min_board_width(configs, metrics))
 
 
-def pack(order: Sequence, metrics: BoardMetrics, board_w: int | None = None) -> bool:
-    """The ONE board packer: place each card, IN THE GIVEN LIST ORDER, at the TOP-MOST then
-    LEFT-MOST gap-clear slot (:func:`first_free_slot`).  Strict north-west gravity as a PURE function
-    of the ORDER (the board's single source of truth), the sizes, and ``board_w`` -- it does NOT read
-    any card's current pixel position, so it is deterministic and idempotent.
+def pack(
+    order: Sequence,
+    metrics: BoardMetrics,
+    board_w: int | None = None,
+    *,
+    pinned=None,
+) -> bool:
+    """Apply deterministic north-west gravity to ``order``.
 
-    Placement depends only on order: the first card lands at ``(gap, gap)``; every later card fills
-    the first free NW slot clearing all already-placed cards by the gap within ``board_w`` (else drops
-    to a new shelf below).  An Add appended LAST therefore always lands in the next bottom slot --
-    never a middle hole -- and re-packing a settled board moves nothing.  A drop REORDERS the list
-    (:func:`drop_index`); pack recomputes every pixel from the new order.  ``board_w`` None -> a
-    two-wide headless fallback; a given width is honoured but clamped up to one-card-wide.  Returns
-    True if any card's ``(col, row)`` changed."""
+    With no ``pinned`` card, every card takes the first north-west free slot in
+    sequence.  A drop supplies one pinned card whose authored anchor remains
+    fixed while every other card falls around it in the same way.  This is the
+    single distinction needed between ordinary reflow and an operator's
+    explicit two-dimensional placement; it does not introduce a second
+    packing algorithm.
+
+    ``board_w`` defaults to a two-wide headless width and is always clamped to
+    fit one card.  A pinned x-coordinate is likewise clamped for a narrow
+    viewport, but its authored coordinate is not mutated by the caller, so
+    widening the viewport can restore it.  Returns whether any proxy moved.
+    """
     order = list(order)
     board_w = (board_width(order, metrics) if board_w is None
                else max(board_w, min_board_width(order, metrics)))
     placed: list = []
     moved = False
+    if pinned is not None:
+        if not any(cfg is pinned for cfg in order):
+            raise ValueError("the pinned card must belong to the packed board")
+        width, _height = metrics.card_size(pinned.size)
+        col = min(
+            max(int(pinned.col), metrics.gap),
+            max(metrics.gap, board_w - metrics.gap - width),
+        )
+        row = max(int(pinned.row), metrics.gap)
+        if (pinned.col, pinned.row) != (col, row):
+            pinned.col, pinned.row = col, row
+            moved = True
+        placed.append(pinned)
     for cfg in order:
+        if cfg is pinned:
+            continue
         col, row = first_free_slot(cfg, placed, board_w, metrics)
         if (cfg.col, cfg.row) != (col, row):
             cfg.col, cfg.row = col, row
@@ -141,31 +164,45 @@ def pack(order: Sequence, metrics: BoardMetrics, board_w: int | None = None) -> 
     return moved
 
 
-def drop_index(
+def nearest_anchor(
     cfg,
     others: Sequence,
     metrics: BoardMetrics,
     board_w: int | None = None,
-) -> int:
-    """The ORDER index at which to insert a card DROPPED at its raw pixel ``(cfg.col, cfg.row)`` among
-    ``others`` (already in order), so it lands NEAREST the drop point under :func:`pack` gravity.
+) -> tuple[int, int]:
+    """Nearest two-dimensional gravity anchor to a dropped card's top-left.
 
-    The drop rule is expressed THROUGH the one packer instead of a separate placement math: for every
-    candidate insertion index we pack a trial order (proxies, so the real configs are never mutated)
-    and measure where the dropped card ends up; the index whose resulting top-left is closest to the
-    raw drop wins.  A drop near an existing card's slot lands ON it (index before it -> that card and
-    everything after shift DOWN the order and re-pack = "displace"); a drop past the last card lands
-    at the bottom (append).  Ties -> the earliest index, so dropping squarely onto a card displaces
-    it.  Board width None -> the same headless fallback :func:`pack` uses."""
-    board_w = (board_width(list(others) + [cfg], metrics) if board_w is None else board_w)
+    Anchors come from the settled board itself: its origin and every sibling's
+    left/right and top/bottom grid lines.  Occupied anchors remain candidates;
+    choosing one means that the dropped card displaces the card there.  The
+    chosen anchor is resolved *before* gravity, so vertical intent is never
+    flattened into a trial list order.  Equal distances prefer the northern,
+    then western anchor.
+    """
+
+    configs = list(others) + [cfg]
+    board_w = board_width(configs, metrics) if board_w is None else board_w
+    board_w = max(board_w, min_board_width(configs, metrics))
     drop_x, drop_y = int(round(cfg.col)), int(round(cfg.row))
-    proxies = [GeomProxy(o.size) for o in others]
-    best_i, best_d = 0, None
-    for k in range(len(proxies) + 1):
-        probe = GeomProxy(cfg.size)
-        trial = proxies[:k] + [probe] + proxies[k:]
-        pack(trial, metrics, board_w)
-        d = (probe.col - drop_x) ** 2 + (probe.row - drop_y) ** 2
-        if best_d is None or d < best_d:
-            best_d, best_i = d, k
-    return best_i
+    width, _height = metrics.card_size(cfg.size)
+    xs = {metrics.gap}
+    ys = {metrics.gap}
+    for other in others:
+        left, top, right, bottom = _aabb(other, metrics)
+        xs.update((left, right + metrics.gap))
+        ys.update((top, bottom + metrics.gap))
+    max_x = max(metrics.gap, board_w - metrics.gap - width)
+    candidates = (
+        (x, y)
+        for x in xs
+        for y in ys
+        if metrics.gap <= x <= max_x and y >= metrics.gap
+    )
+    return min(
+        candidates,
+        key=lambda point: (
+            (point[0] - drop_x) ** 2 + (point[1] - drop_y) ** 2,
+            point[1],
+            point[0],
+        ),
+    )

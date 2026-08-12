@@ -5,7 +5,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
-from zlc_ui.board import BoardMetrics, drop_index, pack
+from zlc_ui.board import BoardMetrics, nearest_anchor, pack
 from zlc_ui.graph import FlowGraphNode, describe_shape_text, flow_graph_from_tree
 
 
@@ -86,15 +86,15 @@ def test_board_graph_and_shape_values() -> None:
     ]
     assert pack(cards, metrics, board_w=100)
     assert cards[0].col <= cards[1].col
-    assert drop_index(cards[0], cards[1:], metrics, board_w=100) in {0, 1}
+    assert nearest_anchor(cards[0], cards[1:], metrics, board_w=100) == (4, 4)
 
 
-def test_drop_index_uses_probe_position_without_mutating_layout_record() -> None:
+def test_nearest_anchor_uses_probe_position_without_mutating_layout_record() -> None:
     metrics = BoardMetrics(8, lambda size: (500, 275))
     others = [SimpleNamespace(size="small", col=0, row=0) for _ in range(3)]
     pack(others, metrics, board_w=1200)
     probe = SimpleNamespace(size="small", col=600, row=0)
-    assert drop_index(probe, others, metrics, 1200) == 1
+    assert nearest_anchor(probe, others, metrics, 1200) == (516, 8)
     assert (probe.col, probe.row) == (600, 0)
 
     graph = flow_graph_from_tree(
@@ -110,22 +110,14 @@ def test_drop_index_uses_probe_position_without_mutating_layout_record() -> None
     assert describe_shape_text("1 × 2") == "1 × 2"
 
 
-def test_gravity_drop_index_accepts_many_north_west_slots() -> None:
+def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
     metrics = BoardMetrics(10, lambda size: (100, 80))
-    others = [SimpleNamespace(size="small", col=0, row=0) for _ in range(5)]
+    others = [SimpleNamespace(size="small", col=0, row=0) for _ in range(2)]
     pack(others, metrics, board_w=350)
-    # The v1 rule is not a two-panel swap: the raw release point is compared
-    # with every trial order produced by the same north-west packer.
-    indices = {
-        drop_index(
-            SimpleNamespace(size="small", col=point[0], row=point[1]),
-            others,
-            metrics,
-            board_w=350,
-        )
-        for point in ((10, 10), (120, 10), (230, 10), (10, 100), (120, 100))
-    }
-    assert indices == {0, 1, 2, 3, 4}
+    probe = SimpleNamespace(size="small", col=12, row=96)
+    assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 100)
+    probe.col, probe.row = 12, 14
+    assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)
 
 
 def test_figure_info_and_owner_wake_construct() -> None:
