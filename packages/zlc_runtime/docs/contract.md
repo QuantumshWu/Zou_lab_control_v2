@@ -2,9 +2,9 @@
 
 > 本文件描述当前 monorepo 中 `zlc_runtime` 的公开边界，用于调用方与实现保持一致；它不是仓库 Goal，也不覆盖根目录 `ARCHITECTURE_DESIGN.md` 与 `IMPLEMENTATION_PLAN.md`。
 
-## 顶层 facade（allow-list，≤23 名）
+## 顶层 facade（allow-list，≤24 名）
 
-`BoardScheduler` `DatasetCoverage` `DatasetOutputDeclaration` `FinalDatasetOutput` `HarmonicClock` `LiveDatasetOutput` `MonitorCoverage` `OwnerChannels` `SurfaceBatchArbiter` `SurfaceUpdate` `SignalDataPlane` `SignalValue` `SignalPublication` `SignalDescription` `AcquisitionStream` `NodeHost` `SelectionBridge` `__version__` `SelectionChange` `SelectionRange` `SelectionState` `FitEventValue`
+`BoardScheduler` `DatasetCoverage` `DatasetOutputDeclaration` `FinalDatasetOutput` `HarmonicClock` `LiveDatasetOutput` `MonitorCoverage` `OwnerChannels` `SurfaceBatchArbiter` `SurfaceUpdate` `SignalDataPlane` `SignalValue` `SignalPublication` `SignalDescription` `AcquisitionStream` `NodeHost` `SelectionBridge` `__version__` `SelectionChange` `SelectionRange` `SelectionState` `FitEventValue` `selection_output_catalog`
 
 `MAX_PUBLIC_NAMES = 23` 是真实包级公开命名空间的机械上限；守卫从
 `dir(zlc_runtime)` 中排除子模块对象后计数。`__version__` 是 facade 的版本探针，因

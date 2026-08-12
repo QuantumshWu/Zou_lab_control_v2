@@ -139,6 +139,7 @@ def test_facade_names_are_the_concrete_runtime_implementations() -> None:
         SelectionChange,
         SelectionRange,
         SelectionState,
+        selection_output_catalog,
     )
     from zlc_runtime.streams import AcquisitionStream, ExactReservation, FollowTap, MonitorTap
 
@@ -153,6 +154,7 @@ def test_facade_names_are_the_concrete_runtime_implementations() -> None:
         "SelectionRange": SelectionRange,
         "SelectionState": SelectionState,
         "FitEventValue": FitEventValue,
+        "selection_output_catalog": selection_output_catalog,
         # Back on the facade because siblings use them.  A name returns the
         # moment one does: reaching into a submodule for something this list
         # does not carry is the same surface with the declaration skipped.

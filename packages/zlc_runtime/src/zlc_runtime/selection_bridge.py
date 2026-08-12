@@ -58,7 +58,81 @@ __all__ = [
     "SelectionEventSource",
     "SelectionRange",
     "SelectionState",
+    "selection_output_catalog",
 ]
+
+
+def _mean(sample: np.ndarray) -> float:
+    return float(np.mean(sample, dtype=np.float64))
+
+
+def _minimum(sample: np.ndarray) -> float:
+    return float(np.min(sample))
+
+
+def _maximum(sample: np.ndarray) -> float:
+    return float(np.max(sample))
+
+
+def _bottom_10_mean(sample: np.ndarray) -> float:
+    count = min(10, sample.size)
+    return float(np.mean(np.partition(sample, count - 1)[:count], dtype=np.float64))
+
+
+def _top_10_mean(sample: np.ndarray) -> float:
+    count = min(10, sample.size)
+    return float(
+        np.mean(
+            np.partition(sample, sample.size - count)[-count:],
+            dtype=np.float64,
+        )
+    )
+
+
+_IMAGE_SELECTION_OUTPUTS = (
+    ("roi_frame", "ROI frame", None),
+    ("roi_mean", "Mean", _mean),
+    ("roi_min", "Min", _minimum),
+    ("roi_max", "Max", _maximum),
+    ("roi_min_10_mean", "Min 10 mean", _bottom_10_mean),
+    ("roi_max_10_mean", "Max 10 mean", _top_10_mean),
+)
+_RANGE_SELECTION_OUTPUTS = (("roi_mean", "Mean", _mean),)
+
+
+def selection_output_catalog(plot_kind: str) -> tuple[tuple[str, str], ...]:
+    """Stable derived-output names and labels for one selector surface."""
+
+    catalog = (
+        _IMAGE_SELECTION_OUTPUTS
+        if str(plot_kind) == "image"
+        else _RANGE_SELECTION_OUTPUTS
+    )
+    return tuple((name, label) for name, label, _reducer in catalog)
+
+
+def _roi_statistics(
+    values: np.ndarray,
+    finite: np.ndarray,
+    reducers: Mapping[str, Callable[[np.ndarray], float]],
+) -> Mapping[str, tuple[np.ndarray, np.ndarray]]:
+    """Evaluate the enabled scalar catalog over one finite-pixel set."""
+
+    shape = values.shape[:2]
+    flat_values = values.reshape(*shape, -1)
+    flat_finite = finite.reshape(*shape, -1)
+    result = {name: np.zeros(shape, dtype=np.float64) for name in reducers}
+    valid = np.zeros(shape, dtype=np.bool_)
+    for index in np.ndindex(shape):
+        sample = flat_values[index][flat_finite[index]]
+        if not sample.size:
+            continue
+        valid[index] = True
+        for name, reducer in reducers.items():
+            result[name][index] = reducer(sample)
+    return MappingProxyType(
+        {name: (answer, valid) for name, answer in result.items()}
+    )
 
 
 def _finite(value: object, field: str) -> float:
@@ -483,12 +557,14 @@ class SelectionBridge:
         self._selection_processor: _BridgeProcessor | None = None
         self._fit_processor: _BridgeProcessor | None = None
         self._fit_event: FitEventValue | None = None
+        self._fit_publication: SignalPublication | None = None
         self._fit_trigger_revision = 0
         self._last_fit_batch_revision: int | None = None
         self._processor_revision = 0
         self._block_revision = 0
         self._subscriptions: list[Callable[[], None]] = []
         self._last_error: Exception | None = None
+        self._output_enabled: dict[str, bool] = {}
 
     @property
     def started(self) -> bool:
@@ -529,6 +605,54 @@ class SelectionBridge:
                 )
             )
 
+    def configure_outputs(self, enabled: Mapping[str, bool]) -> None:
+        """Replace output switches and immediately replay held answers."""
+
+        normalized = {str(name): bool(value) for name, value in enabled.items()}
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("SelectionBridge is closed")
+            if normalized == self._output_enabled:
+                return
+            previous = self._output_enabled
+            self._output_enabled = normalized
+            selection = self._selection
+            fit_event = self._fit_event
+            fit_publication = self._fit_publication
+            selection_names = {
+                name for name, _label in selection_output_catalog("image")
+            }
+            fit_names = (
+                set()
+                if fit_event is None
+                else set(self._unfiltered_fit_output_names(fit_event))
+            )
+            selection_changed = any(
+                previous.get(name, True) != normalized.get(name, True)
+                for name in selection_names
+            )
+            fit_changed = any(
+                previous.get(name, True) != normalized.get(name, True)
+                for name in fit_names
+            )
+            old_selection = self._selection_processor if selection_changed else None
+            old_fit = self._fit_processor if fit_changed else None
+            if selection_changed:
+                self._selection = None
+                self._selection_processor = None
+            if fit_changed:
+                self._fit_processor = None
+            started = self._started
+        for processor in (old_selection, old_fit):
+            if processor is not None:
+                self._withdraw_processor(processor)
+        if not started:
+            return
+        if selection_changed and selection is not None:
+            self._commit_selection(selection)
+        if fit_changed and fit_event is not None and fit_publication is not None:
+            self._publish_fit_event(fit_event, fit_publication, accept_revision=False)
+
     def start(self) -> None:
         with self._lock:
             if self._closed:
@@ -567,6 +691,8 @@ class SelectionBridge:
             self._selection_processor = None
             self._fit_processor = None
             self._selection = None
+            self._fit_event = None
+            self._fit_publication = None
         for unsubscribe in subscriptions:
             unsubscribe()
         for processor in processors:
@@ -610,6 +736,15 @@ class SelectionBridge:
         self._commit_selection(current)
 
     def _on_fit(self, event: FitEventValue) -> None:
+        self._publish_fit_event(event, None, accept_revision=True)
+
+    def _publish_fit_event(
+        self,
+        event: FitEventValue,
+        publication: SignalPublication | None,
+        *,
+        accept_revision: bool,
+    ) -> None:
         if not isinstance(event, FitEventValue):
             raise TypeError("fit callback event must be FitEventValue")
         with self._lock:
@@ -621,16 +756,11 @@ class SelectionBridge:
         # presented).  A bridge without a port (headless benches, tests)
         # resolves against the current publication when the revision still
         # matches exactly.
-        publication: SignalPublication | None = None
         resolver = self._source_publication_for
-        if resolver is not None:
+        if publication is None and resolver is not None:
             candidate = resolver(event.source_revision)
-            if candidate is not None and not isinstance(
-                candidate, SignalPublication
-            ):
-                raise TypeError(
-                    "source_publication_for must return SignalPublication or None"
-                )
+            if candidate is not None and not isinstance(candidate, SignalPublication):
+                raise TypeError("source_publication_for must return SignalPublication or None")
             publication = candidate
         if publication is None:
             current = self._current_source_publication()
@@ -659,7 +789,7 @@ class SelectionBridge:
         source = publication.value(self._source_signal)
         assert source is not None
         with self._lock:
-            if (
+            if accept_revision and (
                 self._last_fit_batch_revision is not None
                 and event.batch_revision <= self._last_fit_batch_revision
             ):
@@ -667,20 +797,33 @@ class SelectionBridge:
                     ValueError("fit batch_revision must increase for every accepted batch")
                 )
                 return
-            if self._fit_event is not None and self._fit_schema_key(
+            schema_changed = self._fit_event is not None and self._fit_schema_key(
                 self._fit_event
-            ) != self._fit_schema_key(event):
-                raise ValueError("fit parameter/sample schema changed inside one bridge")
+            ) != self._fit_schema_key(event)
             self._fit_event = event
-            self._last_fit_batch_revision = event.batch_revision
+            self._fit_publication = publication
+            if accept_revision:
+                self._last_fit_batch_revision = event.batch_revision
             self._fit_trigger_revision += 1
             trigger_revision = self._fit_trigger_revision
             processor = self._fit_processor
             output_names = self._fit_output_names(event)
-            if processor is not None and tuple(
-                item.name for item in processor.dataset_output_declarations
-            ) != output_names:
-                raise ValueError("fit parameter/error vocabulary changed inside one bridge")
+            if processor is not None and (
+                schema_changed
+                or tuple(
+                    item.name for item in processor.dataset_output_declarations
+                )
+                != output_names
+            ):
+                self._fit_processor = None
+                old_processor = processor
+                processor = None
+            else:
+                old_processor = None
+        if old_processor is not None:
+            self._withdraw_processor(old_processor)
+        if not output_names:
+            return
         outputs = self._materialize_fit_outputs(source.snapshot, event)
         if not self._plane.is_generation_live(self._source_signal):
             if processor is not None:
@@ -767,6 +910,8 @@ class SelectionBridge:
 
         if old_processor is not None:
             self._withdraw_processor(old_processor)
+        if not output_names:
+            return
 
         # A box drawn on a run that has already finished is not a live
         # derivation and cannot be one: no further parent publication will ever
@@ -905,12 +1050,14 @@ class SelectionBridge:
         with self._lock:
             if processor._role == "selection":
                 current = self._selection
+                active = self._selection_processor
                 expected = (
                     None
                     if current is None
                     else ("selection", current.revision)
                 )
             else:
+                active = self._fit_processor
                 expected = (
                     None
                     if self._fit_event is None
@@ -919,7 +1066,7 @@ class SelectionBridge:
         # A worker may finish after a newer control event has already issued
         # the same source publication.  Do not let that older result overwrite
         # the newer trigger merely because both parents are otherwise exact.
-        if expected is None or trigger != expected:
+        if active is not processor or expected is None or trigger != expected:
             return
         try:
             self._publish_processor(
@@ -1014,12 +1161,21 @@ class SelectionBridge:
         return "zlc.selection.fit.parameter.v2"
 
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
-        if state.plot_kind == "image":
-            return ("roi_frame", "roi_mean")
-        return ("roi_mean",)
+        return tuple(
+            name
+            for name, _label in selection_output_catalog(state.plot_kind)
+            if self._output_enabled.get(name, True)
+        )
+
+    def _fit_output_names(self, event: FitEventValue) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in self._unfiltered_fit_output_names(event)
+            if self._output_enabled.get(name, True)
+        )
 
     @staticmethod
-    def _fit_output_names(event: FitEventValue) -> tuple[str, ...]:
+    def _unfiltered_fit_output_names(event: FitEventValue) -> tuple[str, ...]:
         names: list[str] = []
         for parameter in event.parameter_names:
             names.append(str(parameter))
@@ -1461,8 +1617,18 @@ class SelectionBridge:
             point_indices,
             data_indices,
         )
+        catalog = (
+            _IMAGE_SELECTION_OUTPUTS
+            if state.plot_kind == "image"
+            else _RANGE_SELECTION_OUTPUTS
+        )
+        enabled = {
+            name: reducer
+            for name, _label, reducer in catalog
+            if self._output_enabled.get(name, True)
+        }
         output: dict[str, LiveDatasetOutput] = {}
-        if state.plot_kind == "image":
+        if "roi_frame" in enabled:
             roi_frame = materialize_derived_dataset(
                 source.ref,
                 values,
@@ -1484,26 +1650,15 @@ class SelectionBridge:
                 roi_frame,
                 MonitorCoverage(total, total),
             )
-        finite = valid_values & np.isfinite(values)
-        # The MEAN, and the signal is named for it: a mean is comparable
-        # across ROI sizes, which a raw sum is not, and for anything like a
-        # brightness optimisation the two differ only by the fixed ROI area.
-        # It reduces the CELL -- every data axis of the cut, and only those.
-        cell_positions = tuple(
-            2 + position
-            for position in range(len(derived_schema.cell_schema.data_axes))
-        )
-        counts = np.count_nonzero(finite, axis=cell_positions)
-        # ``where=`` reduces in place over the finite entries; masking into a
-        # temporary first would allocate a second full copy of the ROI on
-        # every published frame.
-        totals = np.sum(values, axis=cell_positions, dtype=np.float64, where=finite)
-        cell_valid = counts > 0
-        mean_values = np.divide(
-            totals,
-            counts,
-            out=np.zeros(counts.shape, dtype=np.float64),
-            where=cell_valid,
+        scalar_outputs = {
+            name: reducer for name, reducer in enabled.items() if reducer is not None
+        }
+        if not scalar_outputs:
+            return output
+        statistics = _roi_statistics(
+            values,
+            valid_values & np.isfinite(values),
+            scalar_outputs,
         )
         mean_schema = DatasetSchema(
             derived_schema.repeat_axis,
@@ -1514,29 +1669,31 @@ class SelectionBridge:
                 source_schema.cell_schema.value_unit,
             ),
         )
-        physical = mean_schema.physical_shape
-        roi_mean = materialize_derived_dataset(
-            source.ref,
-            mean_values.reshape(physical),
-            schema=mean_schema,
-            validity=compact_dataset_validity(
-                cell_valid.reshape(physical),
-                mean_schema,
-            ),
-            reference_for=lambda schema: self._next_reference(
-                source,
-                "roi_mean",
-                schema,
-            ),
-        )
-        mean_total = mean_schema.repeat_axis.size * mean_schema.point_table.row_count
-        output["roi_mean"] = LiveDatasetOutput(
-            DatasetOutputDeclaration(
-                "roi_mean", self._contract_id("selection", "roi_mean")
-            ),
-            roi_mean,
-            MonitorCoverage(mean_total, mean_total),
-        )
+        total = mean_schema.repeat_axis.size * mean_schema.point_table.row_count
+        for name in scalar_outputs:
+            answer, validity = statistics[name]
+            derived = materialize_derived_dataset(
+                source.ref,
+                answer.reshape(mean_schema.physical_shape),
+                schema=mean_schema,
+                validity=compact_dataset_validity(
+                    validity.reshape(mean_schema.physical_shape),
+                    mean_schema,
+                ),
+                reference_for=lambda schema, output_name=name: self._next_reference(
+                    source,
+                    output_name,
+                    schema,
+                ),
+            )
+            output[name] = LiveDatasetOutput(
+                DatasetOutputDeclaration(
+                    name,
+                    self._contract_id("selection", name),
+                ),
+                derived,
+                MonitorCoverage(total, total),
+            )
         return output
 
     def _materialize_fit_outputs(
@@ -1620,6 +1777,7 @@ class SelectionBridge:
         )
         coverage = MonitorCoverage(sample_count, sample_count)
 
+        enabled = set(self._fit_output_names(event))
         for parameter in event.parameter_names:
             unit = event.parameter_units[parameter] or None
             schema = DatasetSchema(
@@ -1643,6 +1801,8 @@ class SelectionBridge:
                 ),
             ):
                 name = f"{parameter}{suffix}"
+                if name not in enabled:
+                    continue
                 output[name] = self._materialize_fit_vector(
                     source,
                     fit_source_ref,

@@ -1,6 +1,6 @@
 """Finite public facade for the dependency-light runtime primitives."""
 
-MAX_PUBLIC_NAMES = 23
+MAX_PUBLIC_NAMES = 24
 __version__ = "0.1.0"
 
 from .dataset import DatasetCoverage, MonitorCoverage
@@ -28,6 +28,7 @@ from .selection_bridge import (
     SelectionChange,
     SelectionRange,
     SelectionState,
+    selection_output_catalog,
 )
 from .host import NodeHost
 from .streams import AcquisitionStream
@@ -58,6 +59,7 @@ __all__ = (
     "SelectionRange",
     "SelectionState",
     "FitEventValue",
+    "selection_output_catalog",
 )
 
 # Importing focused submodules necessarily adds their module objects to the

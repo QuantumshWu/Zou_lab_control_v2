@@ -45,6 +45,7 @@ from zlc_runtime.selection_bridge import (
     SelectionChange,
     SelectionRange,
     SelectionState,
+    selection_output_catalog,
 )
 from zlc_runtime.selection_bridge import _StaleFit
 
@@ -265,6 +266,65 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         roi_publication = front.publication("@logic/image/roi_frame")
         assert roi_publication is not None
         assert roi_publication.direct_parent_refs == (initial.publication("camera/frame").event_ref,)
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() -> None:
+    schema = _image_schema()
+    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    derived = {name for name, _label in selection_output_catalog("image")}
+    assert derived == {
+        "roi_frame",
+        "roi_mean",
+        "roi_min",
+        "roi_max",
+        "roi_min_10_mean",
+        "roi_max_10_mean",
+    }
+    plane.set_front_signals(
+        {"camera/frame", *(f"@logic/image/{name}" for name in derived)}
+    )
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="image")
+    bridge.start()
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("x", -1.0, 2.0),
+            SelectionRange("y", 10.0, 30.0),
+        ),
+        revision=1,
+    )
+    try:
+        events.emit_selection(SelectionChange.COMMITTED, selection)
+        front = plane.freeze()
+        expected = {
+            "roi_mean": 5.5,
+            "roi_min": 0.0,
+            "roi_max": 11.0,
+            "roi_min_10_mean": 4.5,
+            "roi_max_10_mean": 6.5,
+        }
+        for name, scalar in expected.items():
+            value = front.value(f"@logic/image/{name}")
+            assert value is not None
+            assert float(value.snapshot.block.values.reshape(-1)[0]) == scalar
+            assert value.snapshot.block.schema.cell_schema.value_unit == "counts"
+
+        bridge.configure_outputs({name: name == "roi_max" for name in derived})
+        front = plane.freeze()
+        assert front.value("@logic/image/roi_max") is not None
+        assert all(
+            front.value(f"@logic/image/{name}") is None
+            for name in derived - {"roi_max"}
+        )
+
+        bridge.configure_outputs({name: True for name in derived})
+        front = plane.freeze()
+        assert all(front.value(f"@logic/image/{name}") is not None for name in derived)
     finally:
         _close(bridge, plane, source)
 
@@ -740,6 +800,7 @@ def test_fit_contract_fields_and_exports_are_exact() -> None:
         "SelectionEventSource",
         "SelectionRange",
         "SelectionState",
+        "selection_output_catalog",
     )
     assert not hasattr(selection_bridge_module, "FitParameter")
     contract = (Path(__file__).parents[1] / "docs" / "contract.md").read_text(
