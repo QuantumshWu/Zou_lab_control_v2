@@ -703,13 +703,19 @@ class ConsolePresenter:
 
         node_id = self._direct_producer_node_id(overlay_signal)
         binding = None if node_id is None else self.logic.get(node_id)
-        if binding is None or binding.node is None:
-            # A node this console does not run holds no calibration, so there
-            # is no site map: refusing beats inventing rings.
+        if binding is None:
+            # A signal this console does not produce holds no calibration here,
+            # so there is no site map: refusing beats inventing rings.
             raise ValueError(
-                f"no running node publishes {overlay_signal!r}, so its sites "
+                f"this console publishes no {overlay_signal!r}, so its sites "
                 "are unknown"
             )
+        if binding.node is None:
+            # The run has ENDED and its judgement is still on the bench -- data
+            # a stopped run measured is kept -- but the node that knows where
+            # the sites are is gone with it, so there are no rings to draw.
+            # That is an absence, not a wiring mistake.
+            return None
         outputs: dict[str, object] = {}
         for output in self._logic_outputs(binding):
             sibling = front.value(stable_signal_key(binding.node_id, output.name))
@@ -1269,11 +1275,25 @@ class ConsolePresenter:
         return self.update_panel_state(panel_id, {"title": str(title)})
 
     def edit_panel(self, panel_id: str) -> bool:
-        """Open or focus the panel's non-modal Edit projection."""
+        """Open or focus the panel's non-modal Edit projection.
+
+        Opening it FREEZES the moment it is opened.  Edit shows one exact
+        revision and holds it until Refresh, which is what makes a fit or a
+        saved figure reproducible -- but the moment worth holding is the one
+        the operator stepped aside to look at, not whenever this panel
+        happened to be created.  A panel opened at the start of a scan and
+        edited ten minutes later showed the scan's first point, which is not
+        the picture the card beside it was showing, and no amount of looking
+        at the Edit tab could say why.
+        """
 
         binding = self.panels.get(panel_id)
         if binding is None:
             return False
+        if binding.editor_host is None:
+            # Focusing an already-open Edit keeps its frozen revision: that is
+            # the one its fit and its Save Fig belong to.
+            self.refresh_panel_snapshot(panel_id)
         projection = self.panel_editor_projection(panel_id)
         opened = getattr(self.view, "open_panel_editor", None)
         focused = getattr(self.view, "focus_panel_editor", None)

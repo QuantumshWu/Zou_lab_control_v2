@@ -568,13 +568,40 @@ class NodeHost:
             self._owner.mark_owner_reaped()
 
     def _finish_worker_cancelled(self) -> None:
-        if self._live_opened:
-            self._detach_plane_state()
-        else:
+        self._end_run("cancelled", None)
+
+    def _end_run(self, phase: str, error: str | None) -> None:
+        """How a run that did not succeed leaves the bench.
+
+        Cancelled and failed differ in one thing, and it is the thing that
+        matters to whoever was watching: stopping a measurement ENDS it, it
+        does not unmeasure it, so what the run published is kept -- partial,
+        and said to be partial by its own coverage.  A failure stands behind
+        nothing, so its generation is withdrawn.
+
+        Both endings were written out separately, and the copy that runs when
+        the worker was interrupted MID-STEP -- the common case, since Stop
+        raises out of whatever the node was doing -- named the run "cancelled"
+        and then disposed of it as a failure.  A stopped scan therefore
+        vanished from the bench, taking the panel watching it, its Edit
+        snapshot and its Save with it.
+        """
+
+        kept = False
+        if phase == "cancelled" and self._live_opened:
+            try:
+                self._finish_live_plane_state(cut_short=True)
+                kept = True
+            except BaseException:
+                # A generation that cannot be closed cleanly is not left
+                # half-attached to the plane; it goes, and the operator is not
+                # told a second, unrelated story about why.
+                kept = False
+        if not kept:
             self._retire_plane_state()
         self._result = _UNRESOLVED
-        self._phase = "cancelled"
-        self._error = None
+        self._phase = phase
+        self._error = error
         self._active = False
         self._terminal = True
 
@@ -604,13 +631,13 @@ class NodeHost:
         self._terminal = True
 
     def _finish_worker_failure(self, error: BaseException) -> None:
-        cancelled = isinstance(error, _StartSuppressed) or self.cancel_requested
-        self._phase = "cancelled" if cancelled else "failed"
-        self._error = None if cancelled else f"{type(error).__name__}: {error}"
-        self._result = _UNRESOLVED
-        self._active = False
-        self._terminal = True
-        self._retire_plane_state()
+        # An error raised out of a run the operator STOPPED is the stop: the
+        # node was interrupted in the middle of a step, which is what Stop
+        # does.  It ends the same way a stop caught between steps ends.
+        if isinstance(error, _StartSuppressed) or self.cancel_requested:
+            self._end_run("cancelled", None)
+            return
+        self._end_run("failed", f"{type(error).__name__}: {error}")
 
     def _warn(self, message: str) -> None:
         message = canonical_text(message, "node warning")
@@ -716,10 +743,10 @@ class NodeHost:
         self._plane_state = False
         self._live_opened = False
 
-    def _finish_live_plane_state(self) -> None:
+    def _finish_live_plane_state(self, *, cut_short: bool = False) -> None:
         if not self._plane_state:
             return
-        retained = self._data_plane.finish_live(self)
+        retained = self._data_plane.finish_live(self, cut_short=cut_short)
         self._plane_state = retained
         self._live_opened = False
 

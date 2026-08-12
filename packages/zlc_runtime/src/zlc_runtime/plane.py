@@ -1808,12 +1808,20 @@ class SignalDataPlane:
                 raise RuntimeError("signal owner id belongs to another generation")
         return self._withdraw_owner(owner_id)
 
-    def finish_live(self, node: object) -> bool:
-        """Retain a completed exact live generation and finish its FollowTaps.
+    def finish_live(self, node: object, *, cut_short: bool = False) -> bool:
+        """Retain an ended exact live generation and finish its FollowTaps.
 
         Monitor/latest slots keep their existing detach behavior and return
         ``False``.  Exact Dataset slots return ``True`` after their final
         current snapshot is published and the generation becomes terminal.
+
+        ``cut_short`` is the operator pressing Stop.  A run that ran to the end
+        must have filled every cell -- that assertion below is what catches a
+        node which forgot to publish -- but a run that was STOPPED is
+        legitimately partial, and what it did measure is measured.  Ending a
+        run and un-measuring it are not the same act; treating them as one is
+        what made a stopped scan vanish from the bench, taking the panel that
+        was watching it, its Edit snapshot and its Save with it.
         """
 
         owner_id = _node_instance_id(node)
@@ -1845,7 +1853,9 @@ class SignalDataPlane:
             for value in values.values()
         ):
             raise RuntimeError("exact live terminal changed its coverage extent")
-        if not all(value.coverage.complete for value in values.values()):
+        if not cut_short and not all(
+            value.coverage.complete for value in values.values()
+        ):
             raise RuntimeError("exact live terminal Dataset coverage is incomplete")
         run_record = _shared_run_record(values)
 

@@ -527,7 +527,19 @@ class PanelEditorView(QtWidgets.QWidget):
         if shape is not None:
             pieces.append(f"shape {tuple(shape)}")
         if stale:
-            pieces.append("STALE: panel signal changed; refresh before Save Fig")
+            # Two different facts wore one sentence, and for the common one it
+            # was false: a panel whose SIGNAL was retargeted, and a panel whose
+            # frozen picture belongs to a run that has since been replaced.
+            state = projection.get("state")
+            signal = ""
+            if isinstance(state, Mapping):
+                signal = str(state.get("signal") or "")
+            frozen_signal = str(projection.get("frozen_signal") or "")
+            pieces.append(
+                "STALE: this panel now shows another signal; refresh before Save Fig"
+                if signal and frozen_signal and signal != frozen_signal
+                else "STALE: frozen from an earlier run; refresh before Save Fig"
+            )
         else:
             pieces.append("frozen and ready to save")
         return " · ".join(pieces)

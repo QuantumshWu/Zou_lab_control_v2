@@ -977,8 +977,10 @@ def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
         {"overlay_signal": "@logic/other/site_overlay"},
     ) is False
     assert binding.state is original
+    # Not "no RUNNING node": a stopped run's data stays on the bench, so what
+    # makes this choice invalid is that no node here publishes that signal.
     assert any(
-        "no running node publishes" in text
+        "this console publishes no" in text
         for severity, text in presenter.view.status
         if severity == "error"
     )
