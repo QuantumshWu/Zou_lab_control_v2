@@ -2426,9 +2426,10 @@ def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
         for _severity, text in presenter.view.status
     ), presenter.view.status
 
-    presenter.view.save_answer = str(tmp_path / "crossed")
     _settle_panel_hosts(presenter, lambda: binding.frozen_data is not None)
-    written = presenter.save_panel_figure(binding.panel_id, "crossed")
+    written = presenter.save_panel_figure(
+        binding.panel_id, str(tmp_path / "crossed")
+    )
     assert written is not None, presenter.view.status
 
     # And the authored appearance survived the crossing, so going back shows
