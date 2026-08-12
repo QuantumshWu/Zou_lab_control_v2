@@ -95,6 +95,10 @@ class LogicCandidate:
 
     node: Any
     host: NodeHost
+    #: What this run declares it puts on screen, resolved from the same frozen
+    #: values that built the node -- beside its outputs, which are resolved
+    #: from those values too.
+    previews: tuple = ()
     claims: tuple[DeviceClaim, ...] = ()
     reservation: LogicReservation | None = None
 
@@ -143,6 +147,10 @@ class LogicBinding:
     #: closes one gets to keep it closed until the node is started again.
     previewed: tuple[str, ...] = ()
     preview_host: object | None = field(default=None, compare=False)
+    #: The previews the RUNNING node declared, frozen when it started.  What
+    #: an operator types afterwards is a draft for the next run, and a draft
+    #: mid-edit is not even a valid request.
+    preview_specs: tuple = ()
 
 
 def stable_signal_key(node_id: str, output_name: str) -> str:

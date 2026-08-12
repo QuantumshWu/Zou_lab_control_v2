@@ -274,6 +274,14 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is current_host
     assert current_host.running, "invalid Restart stopped the valid current run"
+    # The run keeps declaring what IT shows.  A half-typed draft is not even a
+    # valid request -- asking it what to plot raised out of the console's poll.
+    presenter.beat()
+    presenter.poll_logic()
+    assert tuple(
+        (spec.output_name, spec.plot_kind)
+        for spec in presenter.logic[node_id].preview_specs
+    ) == (("frames", "image"),), "the running node's declaration is the run's"
     presenter.stop_logic(node_id)
 
 

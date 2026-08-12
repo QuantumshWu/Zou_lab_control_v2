@@ -3048,11 +3048,14 @@ class ConsolePresenter:
         WHICH panel, and drawn HOW, is the node's own declaration -- it knows
         what it just measured, and a console reading only a shape would be
         guessing; WHETHER it opens is the operator's per-row preference.
+
+        The declaration is the RUNNING node's, frozen when it started: what
+        the operator types next belongs to the next run.
         """
 
         if not binding.auto_preview or binding.host is None:
             return
-        previews = tuple(binding.descriptor.previews_for(binding.draft.values))
+        previews = tuple(binding.preview_specs)
         if not previews:
             return
         if binding.preview_host is not binding.host:
@@ -3839,6 +3842,7 @@ class ConsolePresenter:
             extras=self._logic_extras(),
         )
         node = binding.descriptor.instantiate(**arguments)
+        previews = binding.descriptor.previews_for(finalization.values)
         host = make_host(
             binding.descriptor,
             node,
@@ -3856,7 +3860,7 @@ class ConsolePresenter:
             )
             for requirement in binding.descriptor.device_requirements
         )
-        return LogicCandidate(node, host, claims)
+        return LogicCandidate(node, host, previews, claims)
 
     def _discard_pending(self, binding: LogicBinding) -> None:
         candidate, binding.pending = binding.pending, None
@@ -3923,6 +3927,7 @@ class ConsolePresenter:
         candidate.reservation = None
         binding.node = candidate.node
         binding.host = candidate.host
+        binding.preview_specs = candidate.previews
         binding.lease = lease
         binding.pending = None
         binding.artifact_results = ()
