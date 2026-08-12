@@ -94,6 +94,16 @@ class LogicRowView(FluentFrame):
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
 
+    def set_preview_offered(self, offered: bool) -> None:
+        """Show the switch only for a node that declares something to open.
+
+        A processor answers a signal it does not own; nothing about starting
+        it says which of its answers belongs on this board, so there is no
+        preference to express and no switch to express it with.
+        """
+
+        self.preview_switch.setVisible(bool(offered))
+
     def set_auto_preview(self, enabled: bool) -> None:
         """Show the owner's stored preference without re-emitting it.
 

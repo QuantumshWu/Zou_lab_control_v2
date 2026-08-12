@@ -114,6 +114,10 @@ class _LogicRowView:
         self.commands = (False, False)
         self.publishes: tuple = ()
         self.auto_preview = True
+        self.preview_offered = True
+
+    def set_preview_offered(self, offered: bool) -> None:
+        self.preview_offered = bool(offered)
 
     def set_auto_preview(self, enabled: bool) -> None:
         self.auto_preview = bool(enabled)
@@ -340,10 +344,13 @@ class _ConsoleView:
 
     # -- logic rows -------------------------------------------------------
 
-    def add_logic_row(self, node_id: str, kind: str) -> None:
+    def add_logic_row(
+        self, node_id: str, kind: str, offers_preview: bool = True
+    ) -> None:
         key = str(node_id)
         if key not in self._rows:
             row = _LogicRowView(key, str(kind))
+            row.set_preview_offered(offers_preview)
             row.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)
             )

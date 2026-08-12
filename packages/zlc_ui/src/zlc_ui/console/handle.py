@@ -474,7 +474,9 @@ class TaskConsoleHandle(QtCore.QObject):
             tuple(self._rows.values()) + tuple(self._panel_publisher_rows.values())
         )
 
-    def add_logic_row(self, node_id: str, kind: str) -> None:
+    def add_logic_row(
+        self, node_id: str, kind: str, offers_preview: bool = True
+    ) -> None:
         key = str(node_id)
         row = self._rows.get(key)
         if row is None:
@@ -482,6 +484,7 @@ class TaskConsoleHandle(QtCore.QObject):
             row.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)
             )
+            row.set_preview_offered(offers_preview)
             row.auto_preview_changed.connect(
                 lambda enabled, nid=key: (
                     self.logic_auto_preview_changed.emit(nid, bool(enabled))

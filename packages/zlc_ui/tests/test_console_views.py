@@ -482,6 +482,7 @@ projection = {
     )),
     'artifact_values': {'calibration_path': 'C:/data/calibration.json'},
     'auto_preview': True,
+    'preview_offered': True,
     'artifact_results': ({
         'name': 'artifact_path', 'contract_id': 'calibration.readout.v1',
         'path': 'C:/data/calibration-2.json',
@@ -903,6 +904,7 @@ producer = {
     'device_options': {'camera': ('camera', 'mot_camera')},
     'running': True, 'pending': False, 'error': '',
     'auto_preview': True,
+    'preview_offered': True,
 }
 projection = {
     'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
@@ -1673,6 +1675,15 @@ assert order.index(row.preview_switch) == order.index(row.start_button) + 1, (
 
 row.set_task_takeover(True)
 assert not switch.isEnabled(), 'a row that cannot Start cannot re-aim Start'
+
+# A node that declares nothing to open has no preference to express, so it
+# has no switch either -- a control that does nothing is worse than absent.
+row.set_preview_offered(False)
+app.processEvents()
+assert not switch.isVisible(), 'no switch where the node opens nothing'
+row.set_preview_offered(True)
+app.processEvents()
+assert switch.isVisible()
 """
     )
 
@@ -1704,6 +1715,7 @@ projection = {
     'artifact_values': {},
     'artifact_results': (),
     'auto_preview': False,
+    'preview_offered': True,
     'can_start': True,
     'can_stop': False,
 }
@@ -1736,5 +1748,8 @@ assert intents == [False], intents
 
 editor.set_mutation_enabled(False)
 assert not switch.isEnabled(), 'a Task owns the console: nothing here re-aims Start'
+
+editor.update_projection(dict(projection, preview_offered=False))
+assert not switch.isVisible(), 'no switch where the node opens nothing'
 """
     )

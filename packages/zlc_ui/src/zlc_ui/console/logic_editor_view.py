@@ -128,6 +128,7 @@ class LogicEditorView(QtWidgets.QWidget):
         actions.addWidget(self.stop_button)
         actions.addWidget(self.remove_button)
         self._body_layout.addLayout(actions)
+        self._show_actions = bool(show_actions)
         self.start_button.setVisible(bool(show_actions))
         self.preview_switch.setVisible(bool(show_actions))
         self.stop_button.setVisible(bool(show_actions))
@@ -175,6 +176,8 @@ class LogicEditorView(QtWidgets.QWidget):
         self._reconcile_selectors(incoming)
         self._rebuild_artifact_results(incoming.get("artifact_results", ()))
 
+        offered = bool(incoming["preview_offered"])
+        self.preview_switch.setVisible(offered and bool(self._show_actions))
         blocked = self.preview_switch.blockSignals(True)
         try:
             self.preview_switch.setChecked(bool(incoming["auto_preview"]))
