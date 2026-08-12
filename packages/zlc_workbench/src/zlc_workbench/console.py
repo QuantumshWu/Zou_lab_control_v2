@@ -543,7 +543,6 @@ class ConsolePresenter:
         # operator.  One argument for both meant every card in the real window
         # was captioned "Panel" and knew its own id as its title.
         self.view.add_panel(panel_id, binding.state.title)
-        self.view.show_panel(panel_id, host)
         self._present_mounted_front(binding)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
@@ -702,16 +701,35 @@ class ConsolePresenter:
     # inside one batch accept pass) and every non-batch render a host produces
     # -- configure, an armed fit, a mirrored selector -- still reaches pixels.
 
-    def _present_panel_front(self, binding: PanelBinding, front: object) -> None:
-        """Put one completed immutable front on the panel's staged widget."""
+    def _present_panel_front(self, binding: PanelBinding, front: object) -> bool:
+        """Put one completed immutable front on the panel's staged widget.
 
-        if front is None:
-            return
+        THE moment a card changes what it shows.  Mounting the new host first
+        and presenting later meant the card went blank for however long the
+        replacement took to render -- a facet grid of twenty-five cells is
+        seconds of nothing -- and any front that arrived in between met the
+        previous host's widget.  Showing the host of the pixels that are
+        landing keeps the old picture until the new one exists, and is a
+        no-op once the card already shows it.
+        """
+
+        host = binding.host
+        if front is None or host is None:
+            return False
+        # A front belongs to the host that painted it.  Renders queued by a
+        # host this panel has since replaced still complete, and handing one
+        # to the card would swap the card onto the new widget to show the old
+        # host's pixels -- which the widget refuses, leaving a blank panel and
+        # a red error.  A retired host's front is simply stale.
+        identity = getattr(front, "identity", None)
+        if getattr(identity, "host_id", None) != getattr(host, "host_id", None):
+            return False
         present = getattr(self.view, "present_panel_front", None)
         if not callable(present):
-            return
+            return False
         try:
-            present(binding.panel_id, front)
+            self.view.show_panel(binding.panel_id, host)
+            return bool(present(binding.panel_id, front))
         except Exception as error:
             # A front can lose its surface between completion and this present
             # (the operator reconfigured meanwhile).  The next render against
@@ -721,6 +739,7 @@ class ConsolePresenter:
             self._report(
                 f"{binding.title}: {_error_text(error)}", severity="error"
             )
+            return False
 
     def _present_panel_operation(
         self,
@@ -747,8 +766,9 @@ class ConsolePresenter:
         front = getattr(host, "front", None)
         if front is None:
             return
-        self._present_panel_front(binding, front)
-        binding.initial_presented = True
+        # Only a present that actually drew counts as done: a refused one used
+        # to mark the panel filled and leave it blank for good.
+        binding.initial_presented = self._present_panel_front(binding, front)
 
     def _present_when_done(self, binding: PanelBinding, operation: object) -> object:
         """Present a host operation's front once its worker completes.
@@ -808,7 +828,6 @@ class ConsolePresenter:
                 binding, _apply_panel_viewport(host, viewport)
             )
         binding.display_publication = publication
-        self.view.show_panel(binding.panel_id, host)
         self._present_mounted_front(binding)
         if old_host is not None:
             self._retire_plot_host(old_host)
@@ -1287,7 +1306,6 @@ class ConsolePresenter:
             else:
                 binding.frozen_stale = True
             binding.reported_error = None
-            self.view.show_panel(panel_id, host)
             self._present_mounted_front(binding)
             if (
                 binding.editor_open
@@ -1654,17 +1672,12 @@ class ConsolePresenter:
                             severity="error",
                         )
             if host is not None:
-                if not binding.initial_presented:
-                    port = binding.port
-                    if port is not None and port.has_pending:
-                        # A staged board batch is already travelling; it will
-                        # present this panel inside its same-shot group.
-                        binding.initial_presented = True
-                    else:
-                        front = getattr(host, "front", None)
-                        if front is not None:
-                            self._present_panel_front(binding, front)
-                            binding.initial_presented = True
+                # Every beat, until this host's first pixels are up.  The
+                # shortcut that used to stand here -- "a staged batch will
+                # present it" -- declared the panel filled without drawing
+                # anything, and on data that has stopped publishing no batch
+                # was ever coming.
+                self._present_mounted_front(binding)
                 metadata, error = host.initial_state
                 if metadata is not None or error is not None:
                     if error is not None:
@@ -2523,7 +2536,6 @@ class ConsolePresenter:
         for binding in candidate.panels:
             self.panels[binding.panel_id] = binding
             self.view.add_panel(binding.panel_id, binding.state.title)
-            self.view.show_panel(binding.panel_id, binding.host)
             self._present_mounted_front(binding)
             self.view.set_panel_selectors_enabled(binding.panel_id, self._deriving)
             self._publish_panel_state(binding)

@@ -541,12 +541,23 @@ def _zoom_out(host) -> None:
 
 
 def test_adding_a_panel_shows_a_card_and_reports_it(presenter, session) -> None:
+    """The card appears at once; it shows the host when the host has drawn.
+
+    A card takes its surface from the front that lands on it -- which is what
+    keeps a panel being re-specified from going blank for the length of the
+    new render -- so a brand new panel is carded immediately and filled a
+    beat later.
+    """
+
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
 
     assert presenter.view.cards, "the view was never given a card"
-    assert presenter.view.cards[0].surface is binding.host
     assert "1 panel" in presenter.view.summary
+    _settle_panel_hosts(
+        presenter, lambda: presenter.view.cards[0].surface is not None
+    )
+    assert presenter.view.cards[0].surface is binding.host
 
 
 def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, session) -> None:
