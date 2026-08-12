@@ -15,6 +15,7 @@ from zlc_ui.fluent import (
     FluentFrame,
     FluentLabel,
     FluentStatusDot,
+    FluentSwitch,
     scaled_px,
 )
 from zlc_ui.fluent import PublishedItemsLegend
@@ -58,15 +59,15 @@ class LogicRowView(FluentFrame):
         self.start_button = FluentButton("Start", color=GREEN)
         #: Beside Start because it says what Start will DO: with it on, the
         #: node's declared preview opens as an ordinary panel, already wired
-        #: to the signal.  It is an operator preference about this board, not
-        #: a parameter of the measurement.
-        self.preview_button = FluentButton("Plot", color=ACCENT)
-        self.preview_button.setCheckable(True)
-        self.preview_button.setChecked(True)
-        self.preview_button.setToolTip(
+        #: to the signal.  A SWITCH, not a button: a command is a button in
+        #: this chrome and a boolean state is a switch, and a checkable
+        #: FluentButton draws no checked state at all -- on and off were the
+        #: same pixels, in the same accent as Edit beside it.
+        self.preview_switch = FluentSwitch("Plot")
+        self.preview_switch.setToolTip(
             "Open this node's plot panel when it starts"
         )
-        self.preview_button.toggled.connect(self.auto_preview_changed.emit)
+        self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
         self.stop_button = FluentButton("Stop", color=ORANGE)
         self.edit_button = FluentButton("Edit", color=ACCENT)
         self.remove_button = FluentButton("Remove", color=GREY)
@@ -81,8 +82,8 @@ class LogicRowView(FluentFrame):
         top.addWidget(self.kind_label)
         top.addWidget(self.status_label, 2)
         for button in (
-            self.preview_button,
             self.start_button,
+            self.preview_switch,
             self.stop_button,
             self.edit_button,
             self.remove_button,
@@ -94,13 +95,17 @@ class LogicRowView(FluentFrame):
         outer.addWidget(self.publishes_label)
 
     def set_auto_preview(self, enabled: bool) -> None:
-        """Show the owner's stored preference without re-emitting it."""
+        """Show the owner's stored preference without re-emitting it.
 
-        blocked = self.preview_button.blockSignals(True)
+        The preference belongs to the node's binding; this widget holds no
+        default of its own, so a rebuilt row cannot disagree with the board.
+        """
+
+        blocked = self.preview_switch.blockSignals(True)
         try:
-            self.preview_button.setChecked(bool(enabled))
+            self.preview_switch.setChecked(bool(enabled))
         finally:
-            self.preview_button.blockSignals(blocked)
+            self.preview_switch.blockSignals(blocked)
 
     def set_state(self, state: str, status_text: str = "") -> None:
         state = str(state)
@@ -132,6 +137,9 @@ class LogicRowView(FluentFrame):
     def _project_commands(self) -> None:
         enabled = not self._task_takeover
         self.start_button.setEnabled(enabled and self._can_start)
+        # It says what the next Start will do, so a row that cannot Start
+        # cannot re-aim Start either.
+        self.preview_switch.setEnabled(enabled)
         self.stop_button.setEnabled(enabled and self._can_stop)
         self.edit_button.setEnabled(enabled)
         self.remove_button.setEnabled(enabled)

@@ -22,6 +22,7 @@ from zlc_ui.fluent import (
     FluentLabel,
     FluentReadoutEdit,
     FluentScrollArea,
+    FluentSwitch,
     FluentTreeComboBox,
     fill_grouped_choice_combo,
     scaled_px,
@@ -36,6 +37,7 @@ class LogicEditorView(QtWidgets.QWidget):
     start_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal()
+    auto_preview_changed = QtCore.pyqtSignal(bool)
 
     def __init__(
         self,
@@ -107,16 +109,27 @@ class LogicEditorView(QtWidgets.QWidget):
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
         self.start_button = FluentButton("Start", color=GREEN)
+        # This is the Start an operator actually presses -- adding a node
+        # opens its Edit and focuses it -- so the switch that says what Start
+        # will do belongs here too.  Both views show the SAME preference: it
+        # lives on the node's binding, and neither widget keeps a default.
+        self.preview_switch = FluentSwitch("Plot")
+        self.preview_switch.setToolTip(
+            "Open this node's plot panel when it starts"
+        )
+        self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
         self.stop_button = FluentButton("Stop", color=ORANGE)
         self.remove_button = FluentButton("Remove", color=ACCENT)
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.remove_button.clicked.connect(self.remove_requested.emit)
         actions.addWidget(self.start_button)
+        actions.addWidget(self.preview_switch)
         actions.addWidget(self.stop_button)
         actions.addWidget(self.remove_button)
         self._body_layout.addLayout(actions)
         self.start_button.setVisible(bool(show_actions))
+        self.preview_switch.setVisible(bool(show_actions))
         self.stop_button.setVisible(bool(show_actions))
         self.remove_button.setVisible(bool(show_actions))
         self._body_layout.addStretch(1)
@@ -161,6 +174,12 @@ class LogicEditorView(QtWidgets.QWidget):
         self.form.setVisible(bool(visible_spec.keys))
         self._reconcile_selectors(incoming)
         self._rebuild_artifact_results(incoming.get("artifact_results", ()))
+
+        blocked = self.preview_switch.blockSignals(True)
+        try:
+            self.preview_switch.setChecked(bool(incoming["auto_preview"]))
+        finally:
+            self.preview_switch.blockSignals(blocked)
 
         running = bool(incoming.get("running"))
         pending = bool(incoming.get("pending"))
@@ -240,6 +259,8 @@ class LogicEditorView(QtWidgets.QWidget):
         self.start_button.setEnabled(
             self._mutation_enabled and can_start and not pending
         )
+        # It says what the next Start will do, so it follows Start's own gate.
+        self.preview_switch.setEnabled(self._mutation_enabled)
         self.stop_button.setEnabled(self._mutation_enabled and can_stop)
         self.remove_button.setEnabled(self._mutation_enabled)
 

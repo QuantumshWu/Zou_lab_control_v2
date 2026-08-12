@@ -3296,6 +3296,9 @@ class ConsolePresenter:
             ),
             "artifact_values": dict(binding.draft.artifact_inputs),
             "artifact_results": self._artifact_results(binding),
+            # Beside Start, in both places an operator can press it.  One
+            # preference, projected twice; neither widget keeps a default.
+            "auto_preview": binding.auto_preview,
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_label": (
                 source_specs[0].name.replace("_", " ").title()

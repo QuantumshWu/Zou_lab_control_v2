@@ -544,6 +544,9 @@ class TaskConsoleHandle(QtCore.QObject):
                 row.status_label.hide()
                 for button in (
                     row.start_button,
+                    # No node behind this row, so nothing here can be started
+                    # and nothing decides what a Start would open.
+                    row.preview_switch,
                     row.stop_button,
                     row.edit_button,
                     row.remove_button,
@@ -570,6 +573,13 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             editor.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)
+            )
+            # The row's switch and the editor's are two views of one binding,
+            # so they raise the SAME intent rather than each owning a state.
+            editor.auto_preview_changed.connect(
+                lambda enabled, nid=key: (
+                    self.logic_auto_preview_changed.emit(nid, bool(enabled))
+                )
             )
             editor.stop_requested.connect(
                 lambda _=None, nid=key: self.logic_stop_requested.emit(nid)

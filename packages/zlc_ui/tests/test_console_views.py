@@ -481,6 +481,7 @@ projection = {
         ),
     )),
     'artifact_values': {'calibration_path': 'C:/data/calibration.json'},
+    'auto_preview': True,
     'artifact_results': ({
         'name': 'artifact_path', 'contract_id': 'calibration.readout.v1',
         'path': 'C:/data/calibration-2.json',
@@ -901,6 +902,7 @@ producer = {
     'device_keys': {'camera': 'camera'},
     'device_options': {'camera': ('camera', 'mot_camera')},
     'running': True, 'pending': False, 'error': '',
+    'auto_preview': True,
 }
 projection = {
     'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
@@ -1617,5 +1619,122 @@ for kind, cell_kind, overlay_signal in (
     assert ('overlay_signal' in editor.panel_form.spec.keys) == (
         'overlay_signal' in spec_keys
     )
+"""
+    )
+
+
+def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on() -> None:
+    """A checkable FluentButton drew NO checked state: on and off were the
+    same pixels, in the same accent as Edit beside it, so the control read as
+    a fourth command button and an operator could not find the toggle at all.
+    A boolean is a switch in this chrome; a command is a button.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentSwitch
+from zlc_ui.console import logic_row_view as tested_module
+print(tested_module.__file__)
+
+app = ensure_qt_app(['test'])
+row = tested_module.LogicRowView('camera_measurement', 'measurement')
+row.resize(760, 48)
+row.show()
+app.processEvents()
+
+switch = row.preview_switch
+assert isinstance(switch, FluentSwitch), type(switch)
+
+seen = []
+switch.toggled.connect(seen.append)
+row.set_auto_preview(False)
+app.processEvents()
+off = switch.grab().toImage()
+row.set_auto_preview(True)
+app.processEvents()
+on = switch.grab().toImage()
+assert not seen, 'showing the owner state must not re-raise it: %r' % (seen,)
+assert on != off, 'the switch must look different when it is on'
+
+order = []
+layout = row.layout().itemAt(0).layout()
+for index in range(layout.count()):
+    widget = layout.itemAt(index).widget()
+    if widget is not None and widget in (
+        row.start_button, row.preview_switch, row.stop_button,
+        row.edit_button, row.remove_button,
+    ):
+        order.append(widget)
+assert order.index(row.preview_switch) == order.index(row.start_button) + 1, (
+    'the switch belongs immediately beside Start')
+
+row.set_task_takeover(True)
+assert not switch.isEnabled(), 'a row that cannot Start cannot re-aim Start'
+"""
+    )
+
+
+def test_the_editor_shows_the_same_preview_switch_beside_its_own_start() -> None:
+    """Adding a node opens its Edit tab and focuses it, so THAT Start is the
+    one an operator presses.  The switch is a projection of the node's stored
+    preference in both places -- the editor keeps no default of its own.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentSwitch
+from zlc_ui.form import FormSpec
+from zlc_ui.console import logic_editor_view as tested_module
+print(tested_module.__file__)
+
+app = ensure_qt_app(['test'])
+projection = {
+    'node_id': 'camera_measurement',
+    'api_name': 'camera_measurement',
+    'kind': 'measurement',
+    'form_spec': FormSpec(()),
+    'form_values': {},
+    'artifact_form_spec': FormSpec(()),
+    'artifact_values': {},
+    'artifact_results': (),
+    'auto_preview': False,
+    'can_start': True,
+    'can_stop': False,
+}
+editor = tested_module.LogicEditorView('camera_measurement', projection)
+editor.resize(900, 420)
+editor.show()
+app.processEvents()
+switch = editor.preview_switch
+assert isinstance(switch, FluentSwitch), type(switch)
+assert switch.isChecked() is False, 'the editor shows the stored preference'
+
+# Beside Start, in pixels: same row, immediately to its right.  A switch that
+# merely EXISTS somewhere is what an operator could not find.
+start = editor.start_button
+assert switch.isVisible() and start.isVisible()
+assert abs(switch.y() - start.y()) <= 2, (switch.geometry(), start.geometry())
+gap = switch.x() - (start.x() + start.width())
+assert 0 <= gap <= 40, (switch.geometry(), start.geometry())
+
+raised = []
+switch.toggled.connect(raised.append)
+editor.update_projection(dict(projection, auto_preview=True))
+assert switch.isChecked() is True
+assert not raised, 'projecting the owner state must not raise intent: %r' % (raised,)
+
+intents = []
+editor.auto_preview_changed.connect(intents.append)
+switch.setChecked(False)
+assert intents == [False], intents
+
+editor.set_mutation_enabled(False)
+assert not switch.isEnabled(), 'a Task owns the console: nothing here re-aims Start'
 """
     )
