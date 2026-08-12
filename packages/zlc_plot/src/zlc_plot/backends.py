@@ -602,10 +602,17 @@ def _qt5_plot_widget_class() -> type[Any]:
         def present_front(self, front: RasterFront) -> bool:
             """Atomically install one compatible front on the Qt owner thread.
 
-            A manually staged front must originate from this widget's host and
-            still match its current display/layout surface.  Data revision may
-            lag the worker's latest revision so an application can coordinate
-            presentation across independent hosts.
+            A front from a different host is a wiring mistake and says so.  A
+            front whose surface has MOVED is not: an operator zooming, a panel
+            re-specified when its measurement restarted, anything that happens
+            between staging a front and presenting it leaves the staged pixels
+            describing a surface that no longer exists.  That is an ordinary
+            race -- the host's own newer front paints instead -- so it is
+            refused by returning False, the same answer a stale revision gets.
+            Raising made every zoom-during-restart shout at the operator.
+
+            Data revision may lag the worker's latest revision so an
+            application can coordinate presentation across independent hosts.
             """
 
             if not isinstance(front, RasterFront):
@@ -622,9 +629,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             if latest is None:
                 raise RuntimeError("RasterPlotHost has no current front")
             if not front.identity.same_surface(latest.identity):
-                raise RuntimeError(
-                    "front no longer matches the host's current display/layout surface"
-                )
+                return False
             return self._install_front(front)
 
         def close_adapter(self) -> None:
