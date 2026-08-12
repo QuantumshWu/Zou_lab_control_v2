@@ -11,18 +11,16 @@ HOW A FRESH VALUE IS TAKEN IS THE OPERATOR'S DECLARATION.  Between two points
 the world changes, and whether the publication that straddles the change must
 be thrown away depends on the SOURCE, not on the board:
 
-Every shot is a complete trial: stop, settle, apply and load the point, fire,
-then capture one value.  ``shots_per_point`` repeats that whole trial at the
-same plan point; ``repeats`` returns to the beginning and walks the whole plan
-again.
+Each point is applied and fired once.  ``shots_per_point`` is the finite
+whole-pulse repeat count compiled into that runtime copy; ``repeats`` returns
+to the beginning and walks the whole plan again.
 
-* ``pulse_gated``: the source is driven by the fired cycle (an externally
-  triggered camera), so it is silent between finite cycles and the next
-  publication after the fire is that shot's.  Nothing is discarded.
+* ``pulse_gated``: each outer pulse iteration produces one publication, so
+  the next ``shots_per_point`` publications are retained.  Nothing is discarded.
 * ``sw_gated``: the source free-runs at its own pace (the Basler MOT
-  monitor).  After the authored post-fire delay, completed publications are
-  discarded; the next may straddle that sampling boundary, so it is discarded
-  and the following publication is retained as this shot.
+  monitor).  Shot ``k`` samples at ``fire + k * pulse duration + delay``.
+  Publications completed before each deadline and the next boundary-straddling
+  publication are discarded; the following publication is retained.
 
 Neither is guessed from the publisher and neither probes the board.  The two
 are different apparatus, and only the operator knows which one is wired up.
@@ -32,9 +30,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from zlc_pulse import (
     PulseSequence,
+    RepeatRegion,
     compile_sequence,
     pulse_field_value,
     resolve_api_parameters,
@@ -173,30 +173,24 @@ class SteppedScanMeasurement:
         context.attach_live_outputs(slot)
         self.source.open(context, cycles=self.repeats * len(rows) * shots)
         try:
-            # Sweeps are the OUTERMOST loop: every plan point is revisited
-            # after the whole plan has played, so the R looks at one point
-            # straddle whatever drifts between sweeps -- which is the
-            # physical difference between repeats and shots.
+            # Sweeps are the OUTERMOST loop.  Shots are the pulse program's
+            # own finite whole-pulse repeat, so one point is loaded and fired
+            # once while the board plays all of its shots.
             total_shots = self.repeats * len(rows) * shots
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
-                    for shot in range(shots):
-                        self._check_cancelled(context)
-                        program = self._apply(row, board)
-                        # Everything published before this shot's apply is the
-                        # old world.  A new boundary belongs to every shot,
-                        # because every shot reapplies and fires the point.
-                        self.source.arm(program)
-                        visit = sweep * shots + shot
-                        self._collect(context, writer, slot, index, visit)
-                        completed = (
-                            (sweep * len(rows) + index) * shots + shot + 1
-                        )
-                        context.report_progress(
-                            "Scanning",
-                            current=completed,
-                            total=total_shots,
-                        )
+                    self._check_cancelled(context)
+                    program = self._apply(row, board)
+                    self.source.arm(program)
+                    self._collect(
+                        context,
+                        writer,
+                        slot,
+                        program,
+                        index,
+                        sweep,
+                        total_shots,
+                    )
         finally:
             self.source.close()
             self.sequencer.safe()
@@ -234,6 +228,27 @@ class SteppedScanMeasurement:
         resolved = resolve_api_parameters(
             self.sequence, self._api_values(pulse_values)
         )
+        repeat = resolved.repeat
+        whole = (
+            repeat is not None
+            and repeat.start_period_id == resolved.periods[0].period_id
+            and repeat.end_period_id == resolved.periods[-1].period_id
+        )
+        if self.shots_per_point > 1:
+            if repeat is not None and not whole:
+                raise ValueError(
+                    "Shots per point needs a whole-pulse repeat, but this "
+                    "template already has a partial repeat and pulse repeats "
+                    "cannot be nested"
+                )
+            repeat = RepeatRegion(
+                resolved.periods[0].period_id,
+                resolved.periods[-1].period_id,
+                self.shots_per_point,
+            )
+        elif whole:
+            repeat = None
+        resolved = replace(resolved, repeat=repeat)
         if resolved.target != board.target:
             raise ValueError("pulse target differs from the connected board")
         program = compile_sequence(resolved, board.geometry, board.clock_hz)
@@ -245,49 +260,73 @@ class SteppedScanMeasurement:
         context: object,
         writer: ScanDatasetWriter,
         slot: ScanLiveSlot,
+        program: object,
         index: int,
-        visit: int,
+        sweep: int,
+        total_shots: int,
     ) -> None:
-        """Fire and retain one shot using the operator-declared gate."""
+        """Fire one point and retain every outer pulse iteration."""
 
+        shots = self.shots_per_point
+        self.sequencer.fire()
+        fired_at = time.monotonic()
         if self.gating == "sw_gated":
-            self.sequencer.fire()
-            if self.free_run_delay_seconds > 0.0:
-                deadline = time.monotonic() + self.free_run_delay_seconds
+            single_repeat_seconds = float(program.duration_seconds) / shots
+            for shot in range(shots):
+                deadline = (
+                    fired_at
+                    + shot * single_repeat_seconds
+                    + self.free_run_delay_seconds
+                )
                 while True:
                     self._check_cancelled(context)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         break
                     time.sleep(min(remaining, 0.1))
-                # A lossless tap retained everything produced during the
-                # delay.  Drop those values before defining the new sampling
-                # boundary, rather than merely reading old data later.
                 self.source.discard_pending()
-            # The straddler: exposed partly at the old point.  Skip exactly it.
-            self.source.next_value(context)
-            self._capture(context, writer, slot, index, visit)
-            self.sequencer.wait_done(None)
+                self.source.next_value(context)
+                self._capture_shot(
+                    context, writer, slot, index, sweep, shot, total_shots
+                )
+            self._wait_done(context)
             return
-        # The operator declared the source pulse-driven, so the board's
-        # silence between trials means the next publication is THIS shot's.
-        self.sequencer.fire()
-        self._capture(context, writer, slot, index, visit)
-        # The frame can land before the program's tail finishes playing; wait
-        # the tail out so the next shot's safe/apply meets an idle board.
-        self.sequencer.wait_done(None)
+        for shot in range(shots):
+            self._capture_shot(
+                context, writer, slot, index, sweep, shot, total_shots
+            )
+        self._wait_done(context)
 
-    def _capture(
+    def _wait_done(self, context: object) -> None:
+        while True:
+            self._check_cancelled(context)
+            report = self.sequencer.wait_done(0.1)
+            if report is None:
+                continue
+            if report.fault:
+                raise RuntimeError(f"stepped pulse failed: {report.fault}")
+            return
+
+    def _capture_shot(
         self,
         context: object,
         writer: ScanDatasetWriter,
         slot: ScanLiveSlot,
         index: int,
-        visit: int,
+        sweep: int,
+        shot: int,
+        total_shots: int,
     ) -> None:
         value = self.source.next_value(context)
+        visit = sweep * self.shots_per_point + shot
         writer.write(value, row=index, visit=visit)
         slot.publish({SCAN_OUTPUT.name: writer.live_output()})
+        completed = (
+            (sweep * len(self.plan.rows()) + index) * self.shots_per_point
+            + shot
+            + 1
+        )
+        context.report_progress("Scanning", current=completed, total=total_shots)
 
 
 __all__ = ["GATING_MODES", "SteppedScanMeasurement"]

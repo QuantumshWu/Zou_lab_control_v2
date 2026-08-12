@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import threading
 import time
 from typing import Any
 
@@ -252,10 +253,9 @@ class ScriptedScanBench:
 
     * every frame is a constant image whose value is that publication's
       index, so a kept shot can be named in an assertion;
-    * one ``fire`` produces exactly ``publications_per_fire`` of them -- one
-      for a pulse-driven source, one straddler plus the shots for a
-      free-running one -- published on the caller's thread, which IS the
-      scan's own, so no race decides what it saw.
+    * one ``fire`` produces exactly ``publications_per_fire`` of them.  The
+      stepped test may pace those publications by the loaded pulse's outer
+      repeat; the seamless test publishes its whole hardware table at once.
 
     Everything else is the production path: the real virtual board compiles,
     loads, writes its scan table and fires; the real camera adapter, the real
@@ -270,11 +270,18 @@ class ScriptedScanBench:
         plane: object,
         *,
         publications_per_fire: int,
+        paced_by_pulse_repeat: bool = False,
+        publications_per_repeat: int | None = None,
         exposure_seconds: float = 0.001,
     ) -> None:
         self._sequencer = sequencer
         self._plane = plane
         self.publications_per_fire = int(publications_per_fire)
+        self.paced_by_pulse_repeat = bool(paced_by_pulse_repeat)
+        self.publications_per_repeat = (
+            None if publications_per_repeat is None
+            else int(publications_per_repeat)
+        )
         if self.publications_per_fire < 1:
             raise ValueError("a fire produces at least one publication")
         self.camera = VirtualCamera(
@@ -302,6 +309,10 @@ class ScriptedScanBench:
         self.published: list[int] = []
         self.events: list[tuple[str, float]] = []
         self.loads = 0
+        self.loaded_loop_counts: list[int] = []
+        self.loaded_sources: list[object | None] = []
+        self._loaded_program = None
+        self._publisher: threading.Thread | None = None
         self.scan_tables: list[tuple[np.ndarray, int]] = []
         self._next_value = 0
 
@@ -318,6 +329,9 @@ class ScriptedScanBench:
         self._plane.freeze()
 
     def close(self) -> None:
+        publisher = self._publisher
+        if publisher is not None:
+            publisher.join(timeout=2.0)
         self.monitor.close()
 
     # --------------------------------------------- the sequencer surface
@@ -327,6 +341,9 @@ class ScriptedScanBench:
 
     def load(self, prog: object, *, source: object | None = None) -> None:
         self.loads += 1
+        self.loaded_loop_counts.append(int(getattr(prog, "loop_count")))
+        self.loaded_sources.append(source)
+        self._loaded_program = prog
         self._sequencer.load(prog, source=source)
 
     def write_scan_table(self, rows: object, *, sweeps: int = 1) -> None:
@@ -336,12 +353,41 @@ class ScriptedScanBench:
     def fire(self, *, forever: bool = False) -> None:
         self.events.append(("fire", time.monotonic()))
         self._sequencer.fire(forever=forever)
-        for _ in range(self.publications_per_fire):
-            self.publish(self._next_value)
-            self._next_value += 1
+        if not self.paced_by_pulse_repeat:
+            for _ in range(self.publications_per_fire):
+                self.publish(self._next_value)
+                self._next_value += 1
+            return
+        program = self._loaded_program
+        loop_count = int(getattr(program, "loop_count"))
+        per_repeat = (
+            self.publications_per_fire // loop_count
+            if self.publications_per_repeat is None
+            else self.publications_per_repeat
+        )
+        period = float(getattr(program, "duration_seconds")) / loop_count
+        started = time.monotonic()
+
+        def publish_repeats() -> None:
+            for shot in range(loop_count):
+                deadline = started + shot * period + min(0.01, period * 0.25)
+                remaining = deadline - time.monotonic()
+                if remaining > 0.0:
+                    time.sleep(remaining)
+                for _ in range(per_repeat):
+                    self.publish(self._next_value)
+                    self._next_value += 1
+                    time.sleep(0.004)
+
+        self._publisher = threading.Thread(target=publish_repeats, daemon=True)
+        self._publisher.start()
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
-        return self._sequencer.wait_done(timeout)
+        report = self._sequencer.wait_done(timeout)
+        if report is not None and self._publisher is not None:
+            self._publisher.join(timeout=2.0)
+            self._publisher = None
+        return report
 
     def safe(self) -> SafeReadback:
         self.events.append(("safe", time.monotonic()))

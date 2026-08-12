@@ -289,15 +289,19 @@ scan engine。Logic Edit 中的 plan 绑定 pulse API parameter 与明确暴露�
 port；Start 只消费这份 plan，不让 Workbench 执行扫描科学逻辑。
 
 用户另选一个当前 LIVE Dataset signal。Start 冻结其 generation、建立一次 lossless tap，
-并独占所选 `sequencer.streamer`。`Repeats` 是最外层的完整 plan 重扫；每个 point 的
-每个 shot 都完整执行：`safe`，在 pulse 关闭时等待 `Settle time`，应用同一个
-device/API point，`resolve_api_parameters -> compile_sequence -> load`，清空此前已完成的
-publication，然后 On。Pulse-driven source 直接保留下一条 publication。Free-running
-source 在 On 后等待用户设置的 `Free-run delay`；等待结束先丢弃 delay 内已完成的值，
-再丢弃跨越采集边界的下一条，随后只保留这一 shot 的下一条 publication。这样
-`Shots per point` 重复的是完整实验 shot，delay 控制实际开始采样的时刻，而不是只延迟
-读取旧队列。Stop、source restart、signal terminal 或 schema 改变都结束本次 Measurement，
-不能跨 generation 混合数据。
+并独占所选 `sequencer.streamer`。`Repeats` 是最外层的完整 plan 重扫；每个 point 只
+`safe/settle`、应用 device/API point、compile/load 和 fire 一次。`Shots per point` 是这个
+运行时 pulse 副本最外层 whole-pulse bracket 的有限 repeat count：`1` 不加 bracket，
+`>1` 新增或改写覆盖首尾的 bracket。模板已有局部 bracket 时不能再嵌套第二层，
+`Shots > 1` 必须明确拒绝，不能覆盖模板的科学含义。单个 period 本身有正时长，允许
+用 start=end 的 bracket 重复；禁止的是 count=1，而不是单-period region。
+
+Pulse-driven source 由 pulse timing 保证，每个 outer iteration 保留一条 publication，直到
+收满 `Shots per point`。Free-running source 以 fire 时刻为共同原点，在每个
+`shot_index * 单次 pulse 长度 + Free-run delay` 的 deadline 清掉此前已完成的 publication，
+丢弃跨越该采样边界的下一条，再保留一条；deadline 不能由连续 sleep 累加，否则软件
+耗时会使采样相位逐 shot 漂移。Stop、source restart、signal terminal 或 schema 改变都结束
+本次 Measurement，不能跨 generation 混合数据。
 
 完成后只发布一个 FINAL `scan` Dataset：保留所选 signal 的 repeat axis、cell schema、
 validity、PointTable 与已有 topology，并为每个 scan axis 增加 typed

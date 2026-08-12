@@ -100,7 +100,7 @@ STEPPED_SCAN_SCHEMA = AuthoringSchema(
                     "sw_gated", "Free-running source (skip the straddling shot)"
                 ),
                 AuthoringChoice(
-                    "pulse_gated", "Pulse-driven source (one fired cycle per shot)"
+                    "pulse_gated", "Pulse-driven source (one pulse repeat per shot)"
                 ),
             ),
         ),

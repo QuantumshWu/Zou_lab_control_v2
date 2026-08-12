@@ -109,10 +109,12 @@ def _scripted_run(
         bench = ScriptedScanBench(
             installation.device("sequencer"),
             plane,
-            # Every fire is one shot.  A free-running source hands over one
-            # boundary straddler before that shot; a pulse-driven source
-            # publishes exactly the shot itself.
-            publications_per_fire=2 if gating == "sw_gated" else 1,
+            # One fire plays the pulse's whole-span repeat.  A free-running
+            # source hands over one boundary straddler plus S samples; a
+            # pulse-driven source publishes exactly S pulse-gated samples.
+            publications_per_fire=8 * shots if gating == "sw_gated" else shots,
+            paced_by_pulse_repeat=True,
+            publications_per_repeat=8 if gating == "sw_gated" else 1,
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan((ScanAxis(BIAS_PORTS[0], values),))
@@ -126,6 +128,7 @@ def _scripted_run(
             shots_per_point=shots,
             settle_seconds=settle,
             gating=gating,
+            free_run_delay_seconds=0.002 if gating == "sw_gated" else 0.0,
         )
         host = NodeHost(node, plane)
         host.start()
@@ -179,36 +182,31 @@ def test_gating_is_the_operators_declaration_and_the_old_fields_are_gone() -> No
     assert "advance" not in STEPPED_SCAN_SCHEMA.field_names
 
 
-def test_every_shot_is_reapplied_and_repeats_rescan_the_whole_plan() -> None:
-    """Shots repeat one point; repeats return and walk the whole plan again.
-
-    Two points, two shots and two sweeps are eight complete experiments, not
-    four applies followed by extra reads.  The first publication after every
-    apply straddles the capture boundary and the second is retained.
-    """
+def test_shots_are_the_pulse_outer_repeat_and_repeats_rescan_the_plan() -> None:
+    """The board loops each point's pulse; the host reapplies each point once."""
 
     kept, bench = _scripted_run(
         gating="sw_gated", shots=2, repeats=2, settle=0.0
     )
-    assert kept.tolist() == [
-        [1.0, 5.0],
-        [3.0, 7.0],
-        [9.0, 13.0],
-        [11.0, 15.0],
-    ]
+    assert kept.shape == (4, 2)
     assert SCRIPTED_SEED_VALUE not in kept.reshape(-1).tolist()
-    assert bench.published == [SCRIPTED_SEED_VALUE, *range(16)]
-    assert bench.loads == 8
-    assert sum(kind == "fire" for kind, _when in bench.events) == 8
-    assert len(bench.stop_intervals()) == 8
+    assert bench.published == [SCRIPTED_SEED_VALUE, *range(64)]
+    assert bench.loads == 4
+    assert bench.loaded_loop_counts == [2, 2, 2, 2]
+    assert all(source.whole_pulse_repeat == 2 for source in bench.loaded_sources)
+    assert sum(kind == "fire" for kind, _when in bench.events) == 4
+    assert len(bench.stop_intervals()) == 4
 
 
 def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:
-    """A pulse-driven source is silent between cycles: nothing is discarded."""
+    """The pulse's outer repeat owns the shots; the host fires each point once."""
 
     kept, bench = _scripted_run(gating="pulse_gated", shots=2, settle=0.0)
     assert kept.tolist() == [[0.0, 2.0], [1.0, 3.0]]
     assert bench.published == [SCRIPTED_SEED_VALUE, 0, 1, 2, 3]
+    assert bench.loads == 2
+    assert bench.loaded_loop_counts == [2, 2]
+    assert sum(kind == "fire" for kind, _when in bench.events) == 2
 
 
 def test_the_authored_settle_time_stops_the_board_before_every_point() -> None:

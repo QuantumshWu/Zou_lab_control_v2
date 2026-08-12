@@ -572,6 +572,7 @@ def test_the_repeat_posts_are_built_to_frame_the_cards_they_span() -> None:
 
     _run_qt(
         """
+from dataclasses import replace
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import PulseScheduleView, RepeatBracket
@@ -600,5 +601,23 @@ assert end.count_spin.minimum() == 2, "once is not a repeat"
 # In the strip, the posts stand beside cards of the same build.
 view = PulseScheduleView(); view.set_schedule(vm); view.show(); app.processEvents()
 view.repeat_committed.emit("p1", "p2", 3)
+
+# One physical period has a non-zero span and may be repeated.  The model and
+# compiler accept start == end; the button must not invent a two-card rule.
+one = replace(
+    vm,
+    document_generation=2,
+    revision=1,
+    period_count=1,
+    periods=(vm.periods[0],),
+)
+assert view.set_schedule(one)
+requested = []
+feedback = []
+view.repeat_committed.connect(lambda *payload: requested.append(payload))
+view.feedback_requested.connect(feedback.append)
+view.bracket_button.click()
+assert requested == [("p1", "p1", one.default_repeat_count)]
+assert feedback == []
 '''
     )

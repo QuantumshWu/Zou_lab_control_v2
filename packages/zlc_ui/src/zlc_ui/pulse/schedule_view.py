@@ -1483,20 +1483,14 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.remove_period_requested.emit(target)
 
     def _request_toggle_bracket(self) -> None:
-        """Bracket the whole pulse, or take the bracket off.
-
-        A bracket spans FROM one period TO another, so one period has nothing
-        to span.  That refusal used to be an `elif` that fell through in
-        silence: the button looked live and did nothing at all.
-        """
+        """Bracket the whole pulse, or take the bracket off."""
 
         if self._schedule is None:
             return
         if self._schedule.repeat is not None:
             self.repeat_committed.emit(None, None, 0)
             return
-        if len(self._schedule.periods) < 2:
-            self.feedback_requested.emit("a repeat needs at least two periods")
+        if not self._schedule.periods:
             return
         self.repeat_committed.emit(
             self._schedule.periods[0].period_id,
