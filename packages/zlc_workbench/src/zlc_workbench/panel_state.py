@@ -115,8 +115,25 @@ def project_panel_state(
         if description.declares(str(name))
     }
     if wanted:
-        candidate = composed_spec(schema, candidate, wanted)
-        semantic.update(wanted)
+        try:
+            candidate = composed_spec(schema, candidate, wanted)
+            semantic.update(wanted)
+        except Exception:
+            # The record was written in another vocabulary and does not
+            # describe a plot this one can be: an image cell cannot take the
+            # curve cell's single axis and keep its own y, and the whole edit
+            # is refused as a collision.  The operator asked for this kind, so
+            # the kind wins: whatever still composes is kept, and the rest
+            # stays in the bag for the way back.  One at a time only here --
+            # the whole edit is the rule, this is what is left when the whole
+            # edit cannot exist at all.
+            for name, value in wanted.items():
+                try:
+                    trial = composed_spec(schema, candidate, {name: value})
+                except Exception:
+                    continue
+                candidate = trial
+                semantic[name] = value
     parameters = parameter_schema_for(
         candidate, style=DEFAULTS.style
     ).declared_subset(dict(state.display))

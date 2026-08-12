@@ -2512,6 +2512,52 @@ def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
     assert binding.state.semantic.get("group") == group
 
 
+def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
+    presenter, session
+) -> None:
+    """The other half of the same gesture: the name crosses, the value cannot.
+
+    Both cell kinds declare ``x``.  The curve cell offers the y pixel axis
+    there; the image cell paints that axis up its own side, so taking it as
+    x collides -- "ImagePlot x and y must be different axes" -- and the whole
+    record was refused as one edit.  The operator asked for an image cell, so
+    the image cell wins: what still composes is kept and the rest waits in the
+    bag for the way back.
+    """
+
+    node, snapshot = _one_shot(session, producer="camera_measurement")
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, title="frames", kind="facet_grid"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "curve"
+        and bool(binding.parameter_surface.get("semantic")),
+    )
+    vertical = None
+    for entry in binding.parameter_surface["semantic"]:
+        if str(entry["key"]) != "x":
+            continue
+        for _label, value in tuple(entry["choices"]):
+            if "spatial-y" in str(getattr(value, "axis_id", "")):
+                vertical = value
+    assert vertical is not None, "the curve cell must offer the y pixel axis as x"
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {"x": vertical}}
+    )
+    _settle_panel_hosts(presenter, lambda: binding.state.semantic.get("x") == vertical)
+
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"}), (
+        "an axis authored under curve must not veto the image cell"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "image")
+    assert binding.state.cell_kind == "image"
+    assert binding.reported_error is None
+
+
 def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
     presenter, session, tmp_path
 ) -> None:
