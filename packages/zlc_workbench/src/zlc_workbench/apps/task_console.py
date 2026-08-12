@@ -105,10 +105,8 @@ def build_panel_host(plot_input, state):
     """
 
     import zlc_plot as plot
-    from zlc_plot.specs import parameter_schema_for
-
     from ..panel_catalog import task_console_fitting_spec
-    from ..panel_state import compose_panel_spec
+    from ..panel_state import project_panel_state
 
     snapshot = getattr(plot_input, "snapshot", plot_input)
     spec = task_console_fitting_spec(
@@ -118,9 +116,9 @@ def build_panel_host(plot_input, state):
         raise ValueError(
             f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
         )
-    spec = compose_panel_spec(snapshot.block.schema, spec, state)
-    schema = parameter_schema_for(spec, style=plot.DEFAULTS.style)
-    parameters = schema.declared_subset(dict(state.display))
+    spec, _semantic, parameters = project_panel_state(
+        snapshot.block.schema, spec, state
+    )
     return plot.RasterPlotHost.from_plot(
         plot_input,
         spec,

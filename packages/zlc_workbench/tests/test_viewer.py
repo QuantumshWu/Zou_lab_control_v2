@@ -545,7 +545,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         host = seen["host"]
         assert seen["state"].semantic == {"reduction": "mean"}
-        assert host.display == {"show_colorbar": False}
+        # The record reaches the host through the BUILDER, which is what knows
+        # the vocabulary it belongs to; the presenter adds only what it
+        # decides here.  Re-sending the saved appearance is how a panel that
+        # had crossed a vocabulary refused to reopen at all.
+        assert host.display == {}
         assert host.size == "4x4"
         assert host.fitted == (
             "anisotropic_gaussian_center",
@@ -565,6 +569,9 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert real_presenter.panel_state == state
         real_presenter._host.wait_for_front(timeout=5.0)
         assert real_presenter._host._session._renderer.primary_axes.get_title() == ""
+        # And the authored appearance really is on the built host.
+        described = real_presenter._host.describe_display().result().value
+        assert described.display_state.values["show_colorbar"] is False
     finally:
         real_presenter.close()
 

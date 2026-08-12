@@ -16,6 +16,7 @@ __all__ = [
     "apply_panel_fit",
     "compose_panel_spec",
     "draws_image_surfaces",
+    "project_panel_state",
 ]
 
 
@@ -50,17 +51,52 @@ def restore_semantic_choice(description: object, name: str, saved: object) -> ob
     return saved
 
 
-def compose_panel_spec(schema: object, spec: object, state: "PanelState") -> object:
-    """Compose saved semantics before a host performs its first render."""
+def project_panel_state(
+    schema: object,
+    spec: object,
+    state: "PanelState",
+) -> tuple[object, dict[str, Any], dict[str, Any]]:
+    """What this panel MEANS on ``spec``: the composed spec and the two bags
+    that spec will accept.
+
+    A panel's records are the complete assignment of whatever vocabulary it
+    last settled under, and an operator crossing vocabularies -- a changed
+    kind, a changed facet cell kind -- is doing something legal.  So a name
+    the new vocabulary never declared is not an error and not a value: it
+    stays in the panel's bag, so switching back restores it, and it is not
+    offered to a spec that has no field for it.
+
+    THE projection, for every consumer.  It used to exist only at the mount,
+    and only for the appearance bag: the semantic bag was handed over whole,
+    so a curve cell's ``group`` reached a histogram cell that has no such
+    field, ``updated_spec`` raised ``KeyError('group')``, and the cell kind
+    simply did not change -- the operator saw nothing happen at all.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.specs import parameter_schema_for
 
     if not isinstance(state, PanelState):
         raise TypeError("state must be PanelState")
     candidate = spec
+    semantic: dict[str, Any] = {}
     for name, saved in state.semantic.items():
         description = describe_semantics(schema, candidate)
+        if not description.declares(str(name)):
+            continue
         value = restore_semantic_choice(description, str(name), saved)
         candidate = updated_spec(schema, candidate, str(name), value)
-    return candidate
+        semantic[str(name)] = value
+    parameters = parameter_schema_for(
+        candidate, style=DEFAULTS.style
+    ).declared_subset(dict(state.display))
+    return candidate, semantic, parameters
+
+
+def compose_panel_spec(schema: object, spec: object, state: "PanelState") -> object:
+    """Compose saved semantics before a host performs its first render."""
+
+    return project_panel_state(schema, spec, state)[0]
 
 
 def apply_panel_fit(host: object, state: "PanelState | None", *, live: bool) -> object:

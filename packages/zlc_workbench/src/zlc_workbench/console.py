@@ -1326,10 +1326,14 @@ class ConsolePresenter:
                 return True
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
-            parameters = dict(candidate.display)
+            surface = binding.parameter_surface
             configuration: dict[str, object] = {
-                "semantic": dict(candidate.semantic),
-                "parameters": parameters,
+                "semantic": self._declared_only(
+                    candidate.semantic, surface.get("semantic", ())
+                ),
+                "parameters": self._declared_only(
+                    candidate.display, surface.get("display", ())
+                ),
                 "size": candidate.size,
             }
             editor_configuration = dict(configuration)
@@ -1436,6 +1440,31 @@ class ConsolePresenter:
             "unavailable_reason": str(
                 getattr(control, "unavailable_reason", "")
             ),
+        }
+
+    @staticmethod
+    def _declared_only(
+        values: Mapping[str, object],
+        entries: Sequence[Mapping[str, object]],
+    ) -> dict[str, object]:
+        """The part of an authored bag the mounted host still declares.
+
+        A panel's record is the COMPLETE assignment of whatever vocabulary it
+        last settled under, and an operator crossing vocabularies -- a changed
+        kind, a changed facet cell kind -- is doing something legal.  The
+        foreign names stay in the record so switching back restores them; what
+        they must not do is travel to a host that never declared them.
+        Handing over the whole bag on every unrelated edit is how a curve
+        cell's ``group`` reached a histogram cell and the change did nothing
+        at all, and how one Save Fig after a cell kind change refused with
+        "unknown display parameter(s)".
+        """
+
+        declared = {str(entry["key"]) for entry in tuple(entries)}
+        return {
+            str(name): value
+            for name, value in dict(values).items()
+            if str(name) in declared
         }
 
     def _parameter_surface(
@@ -1575,10 +1604,17 @@ class ConsolePresenter:
             name: described.get(name, value)
             for name, value in state.semantic.items()
         }
-        display = {
+        described_display = {
             str(entry["key"]): entry.get("value")
             for entry in tuple(surface.get("display", ()))
         }
+        # Overlay onto the record instead of replacing it, exactly as the
+        # semantic branch above does.  Replacing it deleted every name the
+        # current vocabulary does not declare, so an authored colormap did
+        # not survive image -> curve -> image: the panel came back with the
+        # default and the operator's choice was gone for good.
+        display = dict(state.display)
+        display.update(described_display)
         return replace(state, semantic=resolved, display=display)
 
     def _settle_panel_hosts(self) -> None:
@@ -1758,13 +1794,17 @@ class ConsolePresenter:
     ) -> None:
         """Submit the saved panel appearance as one zlc_plot configuration."""
 
-        display = dict(state.display)
+        # This host was built from this exact record and already holds the
+        # appearance that record's vocabulary declares, so nothing about the
+        # appearance is re-sent: sending it again is what refused a save with
+        # "unknown display parameter(s)" whenever the panel had crossed a
+        # vocabulary since it settled.
+        #
         # The overlay arrives from the frozen plot input, which is an
         # ImageFrame only when the panel actually painted image surfaces --
         # re-deciding that here from the outer kind is what dropped the rings
         # off every FacetGrid of frames.
         operation = host.configure(
-            parameters=display,
             size=state.size,
             image_overlay=image_overlay,
         )

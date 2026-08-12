@@ -38,7 +38,7 @@ def build(view: object) -> object:
     from zlc_plot.primitives import ImageFrame
 
     from ..panel_spec import fitting_panel_spec
-    from ..panel_state import compose_panel_spec
+    from ..panel_state import project_panel_state
     from ..viewer import FigureViewerPresenter
 
     def make_host(plot_input, name: str, state):
@@ -57,9 +57,12 @@ def build(view: object) -> object:
             raise ValueError(
                 f"nothing in {name!r} can be drawn as {kind or 'an inferred plot'}"
             )
+        parameters: dict = {}
         if state is not None:
-            spec = compose_panel_spec(snapshot.block.schema, spec, state)
-        return plot.RasterPlotHost.from_plot(plot_input, spec)
+            spec, _semantic, parameters = project_panel_state(
+                snapshot.block.schema, spec, state
+            )
+        return plot.RasterPlotHost.from_plot(plot_input, spec, parameters=parameters)
 
     return FigureViewerPresenter(
         view,

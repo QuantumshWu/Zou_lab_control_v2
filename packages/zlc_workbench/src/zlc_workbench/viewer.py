@@ -412,7 +412,11 @@ class FigureViewerPresenter:
         selected_annotations = (
             PanelPlotAnnotations() if annotations is None else annotations
         )
-        display = {} if state is None else dict(state.display)
+        # The host was built from this same record and already holds the
+        # appearance it accepts; re-sending the whole saved bag is how names
+        # authored under another kind reached a vocabulary that never
+        # declared them.  Only what this call adds travels.
+        display: dict[str, object] = {}
         thresholds: tuple[float | None, ...] | None = None
         if not selected_annotations.empty:
             display["threshold_classifier"] = True

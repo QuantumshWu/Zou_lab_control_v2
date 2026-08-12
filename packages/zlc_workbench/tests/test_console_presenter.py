@@ -2324,3 +2324,122 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
         assert opened[0].port is not None, "and it is wired to that signal"
     else:
         assert not presenter.panels, "nothing opens itself when the row says no"
+
+
+def _semantic_choice(binding, name: str):
+    """One offered value for a semantic field, as the Setting form offers it."""
+
+    for entry in binding.parameter_surface["semantic"]:
+        if str(entry["key"]) != name:
+            continue
+        for _label, value in tuple(entry["choices"]):
+            if value is not None:
+                return value
+    return None
+
+
+def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
+    presenter, session
+) -> None:
+    """The reported gesture: curve, assign Group, then switch to histogram.
+
+    A panel's records are the complete assignment of whatever vocabulary it
+    last settled under.  Crossing vocabularies is legal -- that is what the
+    cell kind control is for -- but the whole bag was handed to the new one,
+    so a curve cell's ``group`` reached a histogram cell that has no such
+    field, ``updated_spec`` raised ``KeyError('group')``, and the change was
+    refused with nothing on screen to say why.
+    """
+
+    node, snapshot = _one_shot(session, producer="camera_measurement")
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, title="field scan", kind="facet_grid"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "curve"
+        and bool(binding.parameter_surface.get("semantic")),
+    )
+    group = _semantic_choice(binding, "group")
+    assert group is not None, (
+        binding.state.cell_kind,
+        binding.parameter_surface.get("semantic_unavailable"),
+        tuple(str(entry["key"]) for entry in binding.parameter_surface["semantic"]),
+    )
+    assert presenter.update_panel_state(binding.panel_id, {"semantic": {"group": group}})
+    _settle_panel_hosts(presenter, lambda: "group" in binding.state.semantic)
+
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "histogram"}), (
+        "an assignment authored under curve must not veto the histogram cell"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "histogram")
+    assert binding.state.cell_kind == "histogram"
+    # The foreign assignment is kept, not destroyed: switching back restores it.
+    assert binding.state.semantic.get("group") == group
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "curve")
+    assert binding.state.semantic.get("group") == group
+
+
+def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
+    presenter, session, tmp_path
+) -> None:
+    """Two doors used to open onto the strict gate with the old vocabulary.
+
+    Right after a cell kind change and before the panel settles, the record
+    still holds the previous vocabulary's names.  Anything that re-sent the
+    whole record -- an unrelated edit, Save Fig -- was refused with "unknown
+    display parameter(s)", which is not a thing the operator did.
+    """
+
+    node, snapshot = _one_shot(session, producer="camera_measurement")
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, title="frames", kind="facet_grid"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "image"
+        and bool(binding.parameter_surface.get("display")),
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"display": {"show_colorbar": False}}
+    )
+    _settle_panel_hosts(
+        presenter, lambda: binding.state.display.get("show_colorbar") is False
+    )
+
+    # Cross to a vocabulary that declares none of those names, then edit
+    # something unrelated in the same beat.
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    unrelated = "1x2" if binding.state.size != "1x2" else "4x4"
+    assert presenter.update_panel_state(binding.panel_id, {"size": unrelated}), (
+        "an unrelated edit must not carry the previous vocabulary to the host",
+        presenter.view.status[-3:],
+    )
+    assert not any(
+        "unknown display parameter" in str(text)
+        for _severity, text in presenter.view.status
+    ), presenter.view.status
+
+    presenter.view.save_answer = str(tmp_path / "crossed")
+    _settle_panel_hosts(presenter, lambda: binding.frozen_data is not None)
+    written = presenter.save_panel_figure(binding.panel_id, "crossed")
+    assert written is not None, presenter.view.status
+
+    # And the authored appearance survived the crossing, so going back shows
+    # what the operator chose rather than the default.  The panel must have
+    # SETTLED under the other vocabulary first: that settle is what used to
+    # replace the record with the description and delete the rest of it.
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "curve"
+        and bool(binding.parameter_surface.get("display")),
+    )
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"})
+    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "image")
+    assert binding.state.display.get("show_colorbar") is False

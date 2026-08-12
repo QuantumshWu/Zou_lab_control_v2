@@ -138,6 +138,20 @@ class SemanticDescription:
                 return field
         raise KeyError(name)
 
+    def declares(self, name: str) -> bool:
+        """Whether this domain has a field by that name.
+
+        A panel's saved semantics are the COMPLETE assignment of whatever
+        domain it last settled under, and crossing domains is legal: a curve
+        cell assigns ``group``, a histogram cell has no such field.  Asking
+        first is how a name authored elsewhere stops being an error --
+        strictness against misspellings stays with :func:`updated_spec`,
+        which guards what actually changes a spec.  Same division as
+        ``ParameterSchema.declared_subset`` against ``prepare_updates``.
+        """
+
+        return any(field.name == str(name) for field in self.fields)
+
     @property
     def values(self) -> Mapping[str, object]:
         """Return current semantic values keyed by field name."""
