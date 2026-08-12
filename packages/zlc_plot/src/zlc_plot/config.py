@@ -75,7 +75,6 @@ class InteractionDefaults:
     double_click_radius_px: float
     selector_hit_radius_fraction: float
     selector_handle_radius_px: float
-    selector_center_radius_px: float
     wheel_zoom_factor: float
 
     def __post_init__(self) -> None:
@@ -119,17 +118,7 @@ class InteractionDefaults:
             self.selector_handle_radius_px,
             "selector_handle_radius_px",
         )
-        center_radius = _positive_float(
-            self.selector_center_radius_px,
-            "selector_center_radius_px",
-        )
-        if center_radius < handle_radius:
-            raise ValueError(
-                "selector_center_radius_px must not be smaller than "
-                "selector_handle_radius_px"
-            )
         object.__setattr__(self, "selector_handle_radius_px", handle_radius)
-        object.__setattr__(self, "selector_center_radius_px", center_radius)
         zoom = _positive_float(self.wheel_zoom_factor, "wheel_zoom_factor")
         if zoom <= 1.0:
             raise ValueError("wheel_zoom_factor must be greater than one")
@@ -189,7 +178,6 @@ DEFAULTS = PlotLibraryDefaults(
         double_click_radius_px=6.0,
         selector_hit_radius_fraction=0.035,
         selector_handle_radius_px=10.0,
-        selector_center_radius_px=20.0,
         wheel_zoom_factor=1.1,
     ),
     projection=ProjectionDefaults(histogram_domain_padding_fraction=0.05),

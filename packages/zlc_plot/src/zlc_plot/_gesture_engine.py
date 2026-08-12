@@ -44,7 +44,6 @@ def area_drag_handle(
     mouse: np.ndarray,
     pixel_point: Callable[[tuple[float, float]], np.ndarray],
     *,
-    center_radius: float,
     handle_radius: float,
 ) -> tuple[float, DragHandle] | None:
     """Choose the area body/handle under one pixel-space pointer.
@@ -71,15 +70,25 @@ def area_drag_handle(
         ((x0, y1), DragHandle.TOP_LEFT),
         ((x0, ym), DragHandle.LEFT),
     )
-    candidates = (
-        (distance((xm, ym)) / center_radius, DragHandle.BODY),
-        *(
+    handle_hit = min(
+        (
             (distance(coordinate) / handle_radius, handle)
             for coordinate, handle in handles
         ),
+        key=lambda item: item[0],
     )
-    score, nearest_handle = min(candidates, key=lambda item: item[0])
-    return (score, nearest_handle) if score <= 1.0 else None
+    if handle_hit[0] <= 1.0:
+        return handle_hit
+
+    corners = np.asarray(
+        tuple(pixel_point(coordinate) for coordinate, _handle in handles[::2]),
+        dtype=float,
+    )
+    low = np.min(corners, axis=0)
+    high = np.max(corners, axis=0)
+    if bool(np.all(low <= mouse) and np.all(mouse <= high)):
+        return 1.0, DragHandle.BODY
+    return None
 
 
 def pan_rectangle(

@@ -111,10 +111,15 @@ def test_backend_neutral_gesture_geometry_has_one_authority() -> None:
         rectangle,
         np.asarray((2.0, 3.0)),
         pixel,
-        center_radius=1.0,
         handle_radius=1.0,
     )
     assert hit == (0.0, DragHandle.BOTTOM_LEFT)
+    assert area_drag_handle(
+        rectangle,
+        np.asarray((4.0, 4.0)),
+        pixel,
+        handle_radius=1.0,
+    ) == (1.0, DragHandle.BODY)
     assert pan_rectangle(
         CrosshairPoint(5.0, 5.0),
         CrosshairPoint(4.0, 6.0),

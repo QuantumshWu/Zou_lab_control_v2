@@ -331,9 +331,6 @@ class GestureSessionMixin:
         mouse = np.asarray((float(pixel_x), float(pixel_y)), dtype=float)
 
         pixel_ratio = self.surface_plan.device_pixel_ratio
-        center_radius = (
-            self._defaults.interaction.selector_center_radius_px * pixel_ratio
-        )
         handle_radius = (
             self._defaults.interaction.selector_handle_radius_px * pixel_ratio
         )
@@ -355,7 +352,6 @@ class GestureSessionMixin:
             displayed.value,
             mouse,
             pixel_point,
-            center_radius=center_radius,
             handle_radius=handle_radius,
         )
 
