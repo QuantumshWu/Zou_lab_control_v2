@@ -30,15 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — six-item Atom execution / FigureViewer / Calibration redundancy retirement`
-- Production HEAD at final verification：`57ce135`
-- Stage set：`44b145f 删除未使用的 Atom run engine -> 677a309 删除 resource arbiter/ApplicationContext 残余 -> 01ab128 分离 FigureViewer frame name 与 plot title -> 57ce135 删除 Calibration 白算、手抄 contract 与 JSON 重复字段`
-- Current phase：`complete。六项逐一按生产调用图确认后删除；正式 installation binding、zlc_runtime NodeHost 与 canonical Calibration 数据均保留，没有替代抽象、兼容 alias 或新 production 文件。`
-- Last completed action：`zlc_atom/execution 现在只负责安装时 physical identity/capability binding，未来 device 的运行、占用、cancel 继续走 DeviceUseCoordinator + zlc_runtime.NodeHost；FigureViewer 不再用 frame name 覆盖图内 title；Calibration 不再为三个模型计算无消费者 reference_signals，ArtifactOutputSpec 直接读取 CALIBRATION_ARTIFACT_CODEC.contract_id，JSON report 只保留模型样本计数与 run_record。`
-- Last verified tests：`仅按用户要求运行直接相关窄测试：execution/binding 10 passed；resource/context import 2 passed；真实 FigureViewer archive reopen 1 passed；Calibration oracle + virtual artifact chain 2 passed。每个 Python 进程均先打印当前仓库 root 与被测 production __file__；各阶段 git diff --check 通过。未机械重跑 package/full-tree。`
-- Pending acceptance gates：`none for this bounded redundancy goal；正式实验 UI 的后续人工验收仍由用户单独进行。`
+- Goal status：`complete — 温度链根修 + console 解锁（6 项）`
+- Production HEAD at final verification：`d6aa5e9`
+- Stage set：`29810ef 装载时刻=cooling 点亮 -> 699f5a0 surface 变了的 front 是陈旧不是错误 -> 366c803 Task 拥有台架不拥有窗口 -> 5332e90 survival_rate 只有一个数 -> 04336f5 survival 边跑边发 -> d6aa5e9 image 可两侧各取一轴 + 语义袋整体应用`
+- Current phase：`complete。六项逐条在真台架上先复现再修，未新增契约层/守卫层/测试文件；被行为变更打红的既有测试就地改述。`
+- Last completed action：`(1) 世界不再由 cooling 下降沿反推装载时刻——它现在是 cooling 点亮的那一刻，所以延长的 cooling 窗不能把装载推到第一张照片之后（实测原来 159/159 个 cycle 的 before 帧就是上一点的 after 帧）；workspace/pulses/temperature_template.json 已按打包版重播（probe_a/probe_b 拉 probe 而非 cooling）。(2) temperature 每判完一个 cycle 就把 survival/survival_rate 随同帧发在同一 live front，coverage 说明测了多少。(3) _task_command_blocked 从 19 处收到 3 处：只挡启动别的节点、改/删正在跑的那一行。(4) Qt5PlotWidget.present_front 对 surface 变化返回 False（只有 front 来自别的 host 才抛）。(5) survival_rate 发布为池化分数、repeat 轴为 1，与 artifact 同一份列表。(6) image kind 接受「一根 point 坐标 + 一根稠密数据轴」，survival 一键出 site x t_off 热图；语义袋整体合成（kind 先行），saved 记录可还原 facet/x 对调这种任何单步顺序都到不了的配置。`
+- Last verified tests：`按边界窄跑：zlc_atom 物理/架构/scan/temperature chain（含 4 分钟真链）、zlc_plot+zlc_workbench 全量 708 passed、console/logic/ui 71 passed。九步真窗口验收在全新 workspace 上零 FAIL，含 8a（Task 跑到一半开面板、coverage 1/6→6/6）、8c（site x t_off 热图）。每个探针都先 import zou_lab_control_v2 并打印被测模块 __file__。`
+- Pending acceptance gates：`test_v3_architecture::test_discovered_descriptors_build_and_exercise_declared_devices 在本机稳定超时（该测试自带 10 s 死线，30-repeat calibration 现需 >10 s）。与本 Goal 无关：用今天物理改动之前的 world.py 复跑同样卡在 10.10 s。未改该测试。`
 - Next action：`none — Goal complete。`
-- New decisions since architecture review：`稳定 coordinate ID 与人类显示 label 是所有 axis/coordinate 的通用两层语义；SiteMap 不再由 Image signal 的 metadata/run_record 隐式推断。Occupancy plugin 发布显式 typed site_overlay sibling（canonical ids、display labels、pixel centers、status），Workbench 只接 Image signal 与 optional Overlay signal，zlc_plot 只绘制通用 point overlay。任何实现不得用 site 字符串正则、名称前缀或 Workbench artifact 偷读。Camera Measurement 的 Frames per cycle 是一个外部 shot/cycle 的完整 sibling group；Repeat=0 的 latest 只能覆盖完整 cycle，不能由无 shot 身份的单帧 latest/buffer 再按数量拼组。唯一 grouping owner 是 Camera Measurement；adapter 只如实交付物理 ordinal/discontinuity。连续monitor固定保留4个完整cycle，容量由共同层一次给出，device不得另设分组策略；该容量裁决已经结束，不得因上下文压缩再次改大。Pylon Repeat=0 使用 source-less free-running LatestImageOnly；Repeat>0 才使用 external OneByOne/Line1。Display同步不新增board-wide transaction：现有BoardScheduler已按同一continuous publication group把same-shot sibling ports交给同一SurfaceBatchArbiter batch；panel默认和HarmonicClock最小谐波都由zlc_plot唯一规定为100 ms。Camera Measurement新draft的exposure默认0.1 s。Simulation继续由一个world拥有physics/seed/state，第二个MOT descriptor复用同一VirtualCamera adapter而不新增camera类；MOT只有cooling/load后才亮，signed零场是唯一期望亮度最优点并位于像素几何中心。`
 
 ## 1. 执行纪律
 
