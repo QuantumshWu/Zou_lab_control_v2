@@ -452,7 +452,12 @@ class SimulationWorld:
         with self._lock:
             ordinal = self._fire_count
             self._fire_count += 1
-            load_tick = float(cooling[0][1]) if cooling else None
+            # Atoms come from the MOT, so a cycle loads them while its cooling
+            # light is on -- and it loads them when that light COMES ON.  The
+            # moment used to be the light going OFF, which put the load after
+            # any picture taken while the cooling was still on: that frame then
+            # showed the PREVIOUS cycle's atoms, and nothing anywhere said so.
+            load_tick = float(cooling[0][0]) if cooling else None
             loaded = False
             cursor = 0.0
 
