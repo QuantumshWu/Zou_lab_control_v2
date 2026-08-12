@@ -115,6 +115,17 @@ def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     for row in rows:
         if isinstance(row, (str, bytes, Mapping)) or not isinstance(row, Sequence):
             raise TypeError("each editor.scan_rows row must be a list")
+    if "api_parameters" not in tree:
+        old_slots = tuple(tree.get("slots", ()))
+        scan_indices = tuple(
+            index
+            for index, slot in enumerate(old_slots)
+            if not str(slot["slot_id"]).startswith("api_")
+        )
+        rows = tuple(
+            tuple(row[index] for index in scan_indices)
+            for row in rows
+        )
     dirty = raw.get("scan_source_dirty", False)
     if not isinstance(dirty, bool):
         raise TypeError("editor.scan_source_dirty must be a boolean")
