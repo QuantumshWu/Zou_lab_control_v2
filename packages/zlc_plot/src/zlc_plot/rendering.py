@@ -156,7 +156,15 @@ def _deadband_image_limits(
         data_span = (high - low) or (abs(high) or 1.0)
         padding = padding_fraction * data_span
         target = low - padding, high + padding
-    if current is None or force:
+    if current is None or force or mode == "tight":
+        # TIGHT means tight: the picture takes the data's range, every time.
+        # The retention below is what stops an ordinary shot-to-shot wobble
+        # from making the scale (and everything keyed to it) flicker, and it
+        # belongs to the mode that asks for a steady view -- an operator who
+        # picks tight has asked for the opposite, and a 35% deadband made
+        # that choice do nothing for any change smaller than a third of the
+        # span.  The histogram axis has always read tight this way; this is
+        # the same rule, said once more where the colour scale lives.
         return target
     current_low, current_high = map(float, current)
     if mode == "normal" and low >= 0.0:
