@@ -275,7 +275,9 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
             "the temperature template never produced a two-frame cycle"
         )
 
-        t_offs = (0.2, 0.6, 1.2, 2.4)
+        # Microseconds, in the template's own unit: where a recapture curve
+        # for micro-kelvin atoms in a micron trap actually falls.
+        t_offs = (0.004, 0.010, 0.016, 0.024)
         shots = 6
         plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "t_off", t_offs),))
         scan_node = descriptors["seamless_scan"].instantiate(
@@ -317,12 +319,17 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         assert np.all(np.diff(survival) < 0), (
             f"survival must fall with t_off: {survival.round(3).tolist()}"
         )
-        lifetime_ms = float(installation.world.trap_off_lifetime_s) * 1e3
-        slope = np.polyfit(np.asarray(t_offs), np.log(survival), 1)[0]
-        planted = -1.0 / lifetime_ms
-        assert 0.25 <= slope / planted <= 1.25, (
-            f"measured decay {slope:.3f}/ms against a planted {planted:.3f}/ms; "
-            f"survival={survival.round(3).tolist()}"
+        # Against the world's OWN model of what a release does, not against a
+        # formula copied here: an atom leaves because it is fast enough to
+        # walk out of the trap while the light is off.
+        planted = np.asarray(
+            [installation.world.release_survival(value * 1e-3) for value in t_offs],
+            dtype=float,
+        )
+        planted = planted / planted[0]
+        assert np.all(np.abs(survival / survival[0] - planted) <= 0.2), (
+            f"measured {(survival / survival[0]).round(3).tolist()} against the "
+            f"world's own {planted.round(3).tolist()}"
         )
     finally:
         if host is not None and not host.observation.terminal:

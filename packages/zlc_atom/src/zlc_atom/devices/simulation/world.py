@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import threading
 from typing import Any, Callable
 
@@ -22,6 +23,36 @@ DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
 #: exactly -optimum, making the net field (dac - optimum) / 512 per axis.
 DEFAULT_MOT_FIELD_OPTIMUM_DAC = (96, -144, 48)
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
+
+#: 87-Rb, the atom this bench traps: 86.909 180 5 u.
+RB87_MASS_KG = 1.443160648e-25
+BOLTZMANN_J_PER_K = 1.380649e-23
+
+#: What the traps hold, and the trap that holds it.  A release loses atoms
+#: because atoms MOVE: switch the light off and every atom flies at the speed
+#: it already had, and the ones that walk out of the trap's reach before it
+#: comes back are gone.  So the loss is set by how fast the atoms are (their
+#: temperature), how far they may go (the trap's reach), and how fast an atom
+#: may be and still be held at all (the trap's depth, quoted as a temperature
+#: the way traps are).  Those are apparatus facts and they live here, on the
+#: apparatus -- a measurement asks the bench what happened, it does not tell
+#: the bench what the answer should be.
+DEFAULT_ATOM_TEMPERATURE_K = 2.0e-5
+DEFAULT_TRAP_DEPTH_K = 1.0e-3
+DEFAULT_TRAP_WAIST_M = 1.0e-6
+
+
+def _maxwell_boltzmann_below(speed: float, most_probable_speed: float) -> float:
+    """The fraction of a thermal gas slower than ``speed``.
+
+    The Maxwell-Boltzmann speed distribution, integrated: erf(x) minus the
+    2 x exp(-x^2) / sqrt(pi) that the v^2 weight adds back.
+    """
+
+    if speed <= 0.0:
+        return 0.0
+    x = float(speed) / float(most_probable_speed)
+    return math.erf(x) - 2.0 * x * math.exp(-x * x) / math.sqrt(math.pi)
 
 
 def _readonly(values: object) -> np.ndarray:
@@ -114,7 +145,9 @@ class SimulationWorld:
         self.atom_rate = 1_100.0
         self.atom_sigma_px = 0.7
         self.loading_probability = 0.5
-        self.trap_off_lifetime_s = 2.0e-3
+        self.atom_temperature_k = DEFAULT_ATOM_TEMPERATURE_K
+        self.trap_depth_k = DEFAULT_TRAP_DEPTH_K
+        self.trap_waist_m = DEFAULT_TRAP_WAIST_M
         self.dark_current_e_per_s = 0.0
         site_count = len(self.geometry.site_centers_xy)
         efficiency_log = self.rng.normal(0.0, 1.0, site_count)
@@ -199,12 +232,44 @@ class SimulationWorld:
         self._mot_population = 1.0
         return np.array(shot, copy=True)
 
+    def release_survival(self, trap_off_seconds: float) -> float:
+        """The chance one trapped atom is still trapped after a release.
+
+        The trap is off for ``trap_off_seconds`` and every atom flies at the
+        speed it had.  It is back inside the trap's reach at the end only if
+        it was slower than reach/time; it was bound in the first place only
+        if it was slower than the depth allows.  So the survivors are the
+        slow tail of the thermal distribution, and the release time alone
+        decides how slow that tail has to be.
+
+        This is what makes release-recapture a THERMOMETER: the shape of
+        this curve against the release time is the atoms' temperature, and
+        nothing else about the bench enters it.
+        """
+
+        off_time = float(trap_off_seconds)
+        if not np.isfinite(off_time) or off_time < 0:
+            raise ValueError("trap_off_seconds must be finite and non-negative")
+        most_probable = math.sqrt(
+            2.0 * BOLTZMANN_J_PER_K * self.atom_temperature_k / RB87_MASS_KG
+        )
+        escape = math.sqrt(
+            2.0 * BOLTZMANN_J_PER_K * self.trap_depth_k / RB87_MASS_KG
+        )
+        bound = _maxwell_boltzmann_below(escape, most_probable)
+        if bound <= 0.0:
+            return 0.0
+        if off_time == 0.0:
+            return 1.0
+        recaptured = min(escape, self.trap_waist_m / off_time)
+        return _maxwell_boltzmann_below(recaptured, most_probable) / bound
+
     def _lose_atoms(self, trap_off_seconds: float) -> None:
         off_time = float(trap_off_seconds)
         if not np.isfinite(off_time) or off_time < 0:
             raise ValueError("trap_off_seconds must be finite and non-negative")
         if off_time:
-            survival = np.exp(-off_time / self.trap_off_lifetime_s)
+            survival = self.release_survival(off_time)
             self._occupancy &= self.rng.random(self._occupancy.size) < survival
             self._mot_population *= float(survival)
 
