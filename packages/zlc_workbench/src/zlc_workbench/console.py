@@ -248,6 +248,11 @@ class ConsolePresenter:
         layout_policy = DEFAULTS.layout
         self._default_interval_ms = live_policy.default_refresh_interval_ms
 
+        #: The nine panel presets zlc_plot declares.  A panel records only a
+        #: size the plot layer can mount: a state that holds any other string
+        #: is a panel whose NEXT mount raises "unknown panel preset", and it
+        #: can then never be retargeted at another signal.
+        self._sizes = tuple(layout_policy.size_names)
         size_setter = getattr(self.view, "set_panel_sizes", None)
         if callable(size_setter):
             size_setter(layout_policy.size_names, layout_policy.default_preset)
@@ -355,6 +360,14 @@ class ConsolePresenter:
             raise ValueError(
                 f"display interval {normalized} is not in {self._intervals}"
             )
+        return normalized
+
+    def _panel_size(self, value: object) -> str:
+        """Validate against the plot layer's presets before state can hold it."""
+
+        normalized = str(value)
+        if normalized not in self._sizes:
+            raise ValueError(f"panel size {normalized!r} is not in {self._sizes}")
         return normalized
 
     def add_blank_panel(
@@ -719,6 +732,7 @@ class ConsolePresenter:
         overlay: object = _UNCHANGED,
         models: object = None,
         present: bool = False,
+        live: bool = True,
     ) -> object:
         """Make one of this panel's hosts show what the panel says.
 
@@ -737,6 +751,11 @@ class ConsolePresenter:
         ``present`` is for a host whose widget STAGES its fronts: the card
         needs each resulting operation presented, while the Edit surface
         auto-presents its own.
+
+        ``live`` is False for a host that exists only to be written to a file.
+        Such a host is not following anything, and everything it was told must
+        have LANDED before the file is written -- the analysis is part of the
+        picture, not a later arrival somebody else will present.
         """
 
         panel_state = binding.state if state is None else state
@@ -755,13 +774,19 @@ class ConsolePresenter:
         pending = host.configure(**configuration)
 
         def _also(operation: object) -> None:
-            if present and operation is not None:
+            if operation is None:
+                return
+            if present:
                 self._present_when_done(binding, operation)
+            elif not live and hasattr(operation, "result"):
+                operation.result()
 
+        if not live and hasattr(pending, "result"):
+            pending.result()
         # A fit is an analysis, not a display parameter: it has its own
         # completion, and the front it produces reaches a staged widget only
         # because that operation is presented.
-        _also(apply_panel_fit(host, panel_state, live=True, models=models))
+        _also(apply_panel_fit(host, panel_state, live=live, models=models))
         if binding.interaction_selection is not None:
             _also(_apply_panel_selection(host, binding.interaction_selection))
         if binding.interaction_viewport is not None:
@@ -782,6 +807,12 @@ class ConsolePresenter:
         """
 
         if focus is None:
+            # "No cell is open" is a fact, not an instruction: a host already
+            # showing its overview -- or a plot with no cells at all -- has
+            # nothing to close, and asking anyway is what refused a save with
+            # "facet overview is available only for FacetGridPlot".
+            if ConsolePresenter._host_focus(host) is None:
+                return None
             overview = getattr(host, "show_facet_overview", None)
             return overview() if callable(overview) else None
         focus_facet = getattr(host, "focus_facet", None)
@@ -856,6 +887,22 @@ class ConsolePresenter:
             operation = self._apply_panel_focus(host, focus)
             if host is binding.host and operation is not None:
                 self._present_when_done(binding, operation)
+
+    def _offer_state_to_editor(self, binding: PanelBinding) -> None:
+        """Hand the Edit host what the live host resolved.
+
+        A configure comes back DESCRIBED: automatic values resolved, names
+        normalised, and that description is written back into the panel's
+        record.  Only the live host's completion was read that way, so the
+        Edit surface kept whatever it had been told before -- the same
+        record's two readers holding two answers again.
+        """
+
+        editor = binding.editor_host
+        if editor is not None:
+            binding.editor_configuration = self._match_host_to_panel(
+                binding, editor
+            )
 
     def _present_panel_front(self, binding: PanelBinding, front: object) -> bool:
         """Put one completed immutable front on the panel's staged widget.
@@ -1243,14 +1290,16 @@ class ConsolePresenter:
             except ValueError as error:
                 self._report(f"{panel_id}: {error}", severity="warning")
                 return False
-        if "interval_ms" in changes:
-            try:
-                changes["interval_ms"] = self._panel_interval(
-                    changes["interval_ms"]
-                )
-            except (TypeError, ValueError) as error:
-                self._report(f"{panel_id}: {_error_text(error)}", severity="error")
-                return False
+        for name, check in (
+            ("interval_ms", self._panel_interval),
+            ("size", self._panel_size),
+        ):
+            if name in changes:
+                try:
+                    changes[name] = check(changes[name])
+                except (TypeError, ValueError) as error:
+                    self._report(f"{panel_id}: {_error_text(error)}", severity="error")
+                    return False
 
         signal = str(changes.get("signal", current.signal)).strip()
         title = str(changes.get("title", current.title)).strip()
@@ -1796,6 +1845,7 @@ class ConsolePresenter:
                         )
                         binding.parameter_surface = surface
                         binding.reported_error = None
+                        self._offer_state_to_editor(binding)
                         self._publish_panel_state(binding)
             editor_pending = binding.editor_configuration
             if editor_pending is not None and editor_pending.done():
@@ -1843,6 +1893,7 @@ class ConsolePresenter:
                             self._match_host_to_panel(
                                 binding, host, models=models, present=True
                             )
+                            self._offer_state_to_editor(binding)
                             self._publish_panel_state(binding)
                             # Clearing the de-dup memory belongs to THIS
                             # one-time first projection.  ``initial_state``
@@ -1906,37 +1957,6 @@ class ConsolePresenter:
                         f"{_error_text(error)}",
                         severity="error",
                     )
-
-    def _configure_panel_host(
-        self,
-        host: object,
-        state: PanelState,
-        image_overlay: object | None = None,
-    ) -> None:
-        """Submit the saved panel appearance as one zlc_plot configuration."""
-
-        # This host was built from this exact record and already holds the
-        # appearance that record's vocabulary declares, so nothing about the
-        # appearance is re-sent: sending it again is what refused a save with
-        # "unknown display parameter(s)" whenever the panel had crossed a
-        # vocabulary since it settled.
-        #
-        # The overlay arrives from the frozen plot input, which is an
-        # ImageFrame only when the panel actually painted image surfaces --
-        # re-deciding that here from the outer kind is what dropped the rings
-        # off every FacetGrid of frames.
-        operation = host.configure(
-            size=state.size,
-            image_overlay=image_overlay,
-        )
-        if hasattr(operation, "result"):
-            operation.result()
-        # This host exists to be SAVED, so the fit must have landed before the
-        # file is written -- the analysis is part of the picture, not a later
-        # arrival somebody else will present.
-        fit_operation = apply_panel_fit(host, state, live=False)
-        if hasattr(fit_operation, "result"):
-            fit_operation.result()
 
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
@@ -2215,7 +2235,19 @@ class ConsolePresenter:
                 state=binding.state,
                 frozen=frozen,
                 make_host=make_saved_host,
-                configure_host=self._configure_panel_host,
+                # The file must be the picture on screen.  Saving through the
+                # panel's ONE projection is what puts the operator's selector,
+                # viewport and focused cell into it; a narrower copy here is
+                # how a saved figure came out showing something else.
+                configure_host=lambda host, state, overlay: (
+                    self._match_host_to_panel(
+                        binding,
+                        host,
+                        state=state,
+                        overlay=overlay,
+                        live=False,
+                    )
+                ),
             )
         except Exception as error:
             self._report(
