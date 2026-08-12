@@ -30,14 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — 面板与 Edit tab 的同一份配置 + scan 框选驱动 plan`
-- Production HEAD at final verification：`ce01ab0`
-- Stage set：`6a1641c 一份 PanelState，一个函数把它放到 host 上（含 facet focus 镜像）-> 7a25574 scan 上画的区域就是它下一次要扫的范围 -> ce01ab0 已结束那一发的 frozen 图自己说明它过期了`
+- Goal status：`complete — 四条查实项全部完成 + 自查出的三处补丁式修复已改为根修`
+- Production HEAD at final verification：`2e5dc21`
+- Stage set：`6a1641c 一份 PanelState 一个函数 -> 7a25574 scan 框选=下次扫的范围 -> ce01ab0 frozen 图自述过期 -> eba7ea9 Save Fig 走同一投影 + size 校验 + editor configure 写回 -> 77f9c5a relim 只说一遍 -> 37ff283 staleness 改为推导 -> 4d7d61e 记录只由自己的 configure 写回 -> 2e5dc21 阈值是面板的答案`
 - Current phase：`complete。两条症状先在台架上复现/交叉验证再修；未新增契约层或测试文件；被行为变更打红的既有测试就地改述。`
-- Last completed action：`(1)「让一个 host 符合面板」原本写了四遍（状态提交、live 首投影、editor 首投影、Save），各知道一个子集 —— 收成 _match_host_to_panel，建/改 host 的每处都调它。(2) facet focus 在 zlc_plot 里没有对外事件，console 的镜像只有 selection/viewport 两条；focus 现在由 beat 从两个 host 各自的 front 边沿检测并镜像，且开关 cell 时作废面板记住的 viewport（plot 层自己会清）。(3)「加 fit 另一边错、必须 Refresh」的真根因不是 fit：两 host 都 armed，差异来自同一条记录解在 live/frozen 两份数据上；错的是同一信号换 generation 时 frozen 从不标 stale（全代码只有换 signal 那一处标），于是 Edit 拿死掉的 run 当现行、Save Fig 还开着、死快照上的框选还路由到 live。现在 generation 边界标 stale 并发布。(4) 两个 scan 节点声明 SelectionMapping：框选命名的被扫轴保持点数取所选范围；facet cell 内框选只动该 cell 画的轴；相机 ROI 不动 plan。port label 与 scan 轴 id 各收成一处。`
-- Last verified tests：`zlc_workbench+zlc_ui 459 passed；scan/selection/architecture 35 passed；九步真窗口验收（含 5a 双击聚焦、5b 框选派生、6 fit+Save Fig、7e 换 cell kind 无白屏、8a Task 中途开面板）零 FAIL。探针均先 import zou_lab_control_v2 并打印被测模块 __file__。`
-- Pending acceptance gates：`四条已查实未做：Save Fig 是第四份更窄的 host 投影（漏 selector/viewport/focus）；threshold classifier 阈值是 host 私有状态，两视图可不同且无 stale 提示；size 未对 plot preset 词表校验，可写进 PanelState 并让下次 mount 报 unknown panel preset；editor host 的 configure 结果被丢弃而 live 的会写回 PanelState。另：test_v3_architecture 的 10 s 死线在本机稳定超时，与本 Goal 无关。`
-- Next action：`none — Goal complete。`
+- Last completed action：`(1) 四条查实项：Save Fig 改走 _match_host_to_panel（带 live=False，写文件前等 analysis 落地）；size 对 layout_policy.size_names 校验；editor configure 结果经 _offer_state_to_editor 写回。(2) 用户质疑 relim 那一改是补丁——属实：同一句「tight 是否保持」写在色标与计数轴两处，且我那一行让色标条（只想要 padded 形状）丢了迟滞。改为 _relim_retains 单源 + zero_based/retain 两个明确参数。(3) 自查出 frozen_stale 是「可推导事实存成 6 个写点的布尔」，改为 PanelBinding 属性（零写点）；实测整套 presenter 测试在该行为被变异后仍全绿=从来无守卫。(4) _settle_panel_hosts 有两个人写记录：首投影拿 host 首帧默认值覆盖，实测 record=True/card=False/editor=True。现在首投影只把记录自己的值解析进词表（restore_semantic_choice），值的写回只留 configure 完成一条路。(5) 阈值：zlc_plot 中拟合最优值与操作者的决定分家（vector 只存 choice，fit 值按需导出，_classifier_thresholds_settled 唯一合成点；remove 线=回到拟合值）；workbench 给 level 手势开面板通道，两个 Edit 订阅点合成 _subscribe_editor_gestures。`
+- Last verified tests：`zlc_plot 337 passed；zlc_workbench 371 passed（+zlc_ui 全绿）。实测探针：tight 跟随 270→258 得 (208.5,262.5) 而色标条仍 held；stale told False→True→Refresh 清除；首投影竞态下 record/card/editor 三处一致且 host 只被告知 [True,True]；阈值 Edit 上拖→卡片跟随 238.94、重跑一发仍 238.94、撤销后各自回到自身数据的拟合值（226.07/298.68）。探针均先 import zou_lab_control_v2 并打印被测模块 __file__。`
+- Pending acceptance gates：`(a) 已实测未修：facet 双击聚焦后每格用自己的颜色量程，同一数据同一格 768 个采样里 573 个变（总览 (-7.8,85.8) vs 焦点 (-2.6,28.6)）——总览池化 vs 焦点逐格两个保留槽同时是权威，疑与用户报告的「切回去 xlim/ylim 变大」同族。(b) frozen_stale 的换代行为无任何测试守卫（变异全绿），目前只有探针证据。(c) Edit 面的手势通道比画面晚 armed 数拍，此窗口内的拖拽面板收不到。(d) test_v3_architecture 的 10 s 死线在本机稳定超时，与本 Goal 无关。`
+- Next action：`(a) facet 焦点态颜色量程的所有权裁决与根修（先复现 573/768，再决定池化是否无条件）。`
 - Post-goal Stepped Scan correction (2026-08-12)：`2177a9a` 修正最初对 `Shots per point` 的错误理解。每个 shot 现在都完整执行 `safe/settle -> apply+load 同一 point -> On -> Free-run delay -> capture`；`Repeats` 只在最外层从头重扫整张 plan。进度总数为 `repeats x points x shots`，Dataset repeat 轴仍为 `repeats x shots x source-repeat`。旧实现的“一次 apply 后连续读取多个 shots”已经删除，不得恢复。
 
 ## 1. 执行纪律
