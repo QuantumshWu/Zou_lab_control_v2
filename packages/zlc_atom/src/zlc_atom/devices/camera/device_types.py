@@ -7,8 +7,6 @@ from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.dcam import DcamCameraAdapter, DcamCameraConfig
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
 from zlc_atom.devices.camera._dcam_driver import DcamSdkDriver
-from zlc_atom.devices.camera.endpoint import DEFAULT_HOST, DEFAULT_PORT
-from zlc_atom.devices.camera.remote import RemoteCameraAdapter
 from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
@@ -152,31 +150,6 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
     return bind_camera(context, key, camera, f"dcam-camera:{key}", "camera.dcam")
 
 
-#: A camera reached over the network, by the camera server that owns it.
-#: Writing the endpoint down is what lets an apparatus configuration be saved
-#: and reopened tomorrow, exactly as the hardware sequencer does; which driver
-#: sits behind the endpoint is the server machine's business, not authoring's.
-REMOTE_CAMERA_SCHEMA = AuthoringSchema(
-    (
-        AuthoringField("host", "str", "Camera server host", DEFAULT_HOST),
-        AuthoringField("port", "int", "Camera server port", DEFAULT_PORT, minimum=1, maximum=65535),
-    )
-)
-
-
-def _remote_factory(context, key: str, values: dict) -> InstalledLeaf:
-    """Dial a camera server from a written-down endpoint.
-
-    Unlike the sequencer, no injected dialler is needed: the remote client
-    lives in this same package, so the endpoint alone is a complete request.
-    """
-
-    authored = REMOTE_CAMERA_SCHEMA.project_values(values)
-    camera = RemoteCameraAdapter(str(authored["host"]), int(authored["port"]))
-    camera.open()
-    return bind_camera(context, key, camera, f"remote-camera:{key}", "camera.remote")
-
-
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
         "camera.dcam",
@@ -194,18 +167,10 @@ DEVICE_TYPES = (
         factory=_pylon_factory,
         discover=_discover_pylon,
     ),
-    DeviceTypeDescriptor(
-        "camera.remote",
-        "camera",
-        REMOTE_CAMERA_SCHEMA,
-        ("camera.adapter", "camera.working_point"),
-        factory=_remote_factory,
-    ),
 )
 
 __all__ = [
     "DCAM_CAMERA_SCHEMA",
     "DEVICE_TYPES",
     "PYLON_CAMERA_SCHEMA",
-    "REMOTE_CAMERA_SCHEMA",
 ]

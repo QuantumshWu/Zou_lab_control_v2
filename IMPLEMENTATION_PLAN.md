@@ -30,7 +30,9 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — 四条查实项 + 自查三处补丁改根修 + 三条遗留全部清掉`
+- Active Goal status（2026-08-12）：`in progress — 全仓审计收敛、独立 Device GUI、SLM 系统及 qCMOS 原子荧光闭环`
+- Active Goal Milestone 1：`complete in this milestone commit`。已精确删除 Camera Remote 的 adapter/endpoint、`camera.remote` descriptor/factory/schema、`camera_server` CLI、回环测试与 W3 文档；DCAM/Pylon/Virtual Camera 及全部 `zlc_pulse`/FPGA remote 保留。直接证据：catalog 守卫 `1 passed`；旧 `camera.remote` 配置明确得到 `KeyError: unknown device types`；`camera_server` CLI 返回 unknown，而 `pulse_server` 仍映射 `zlc_pulse.remote`；`git diff --check` 通过。下一步进入按依赖顺序的全仓审计，并先把新 SLM/独立 Device GUI 裁决迁入两份权威。
+- Previous Goal status：`complete — 四条查实项 + 自查三处补丁改根修 + 三条遗留全部清掉`
 - Production HEAD at latest focused verification：`64056c3`
 - Stage set：`6a1641c 一份 PanelState 一个函数 -> 7a25574 scan 框选=下次扫的范围 -> ce01ab0 frozen 图自述过期 -> eba7ea9 Save Fig 走同一投影 + size 校验 + editor configure 写回 -> 77f9c5a relim 只说一遍 -> 37ff283 staleness 改为推导 -> 4d7d61e 记录只由自己的 configure 写回 -> 2e5dc21 阈值是面板的答案`
 - Current phase：`complete。Panel publisher Edit 与 ROI 输出目录已在现有 PanelState/SelectionBridge/LogicEditor 骨架内收口；无新 production 文件或类。`
@@ -521,12 +523,7 @@ load+write_scan_table(sweeps=repeats)+fire 板自推进,按 played 序归属 cap
 W2 温度链——temperature_template(load/probe_a/release(t_off API)/probe_b/rest,
 probe 期驱动 probe+trap+emCCD)、端到端守卫=标定→双帧监视→occupancy live
 processor→**streamed** t_off 扫→survival_rate 指数衰减斜率对上世界种的
-trap_off_lifetime(从 ground truth 推导非硬编码);W3 远程相机全流程——
-camera/remote.py(控制面 length-prefixed JSON TCP 照 zlc_pulse 样板+帧走同连接
-二进制块道,native dtype 端到端)、camera/endpoint.py 端口单源、`camera.remote`
-设备类型、`python -m zou_lab_control_v2 camera_server` CLI、回环测试含夺占语义。
-带宽结论(写进 remote.py docstring):2048²·uint8@10Hz=336Mbps 需千兆有线,
-100Hz 需 10GbE 或 ROI/binning,WiFi 不支持全幅。
+trap_off_lifetime(从 ground truth 推导非硬编码)。
 
 过程根因两条:①温度模板首版 probe 期误驱 cooling——虚拟世界只把 probe 通道
 算成像光,且 cooling 连高会把 load_tick(首段 cooling 窗末端)推迟到 frame0 之后
