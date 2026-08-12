@@ -2013,9 +2013,17 @@ def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     assert presenter.apply_layout(old_layout) is False
 
 
-def test_panel_edit_projects_the_direct_producer_and_restart_uses_start(
+def test_panel_edit_projects_the_direct_producer_restarts_it_and_ages(
     presenter, session, monkeypatch
 ) -> None:
+    """Edit knows whose data it shows, and when that run is over.
+
+    Its picture is one frozen revision; a later RUN of the same signal leaves
+    it describing an experiment the bench no longer holds -- its fit solved
+    against gone data, its Save still armed -- so the projection says so
+    until Refresh.
+    """
+
     node_id = presenter.add_logic("camera_measurement")
     node, snapshot = _one_shot(session, producer=node_id)
     panel = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
@@ -2024,6 +2032,15 @@ def test_panel_edit_projects_the_direct_producer_and_restart_uses_start(
     projection = presenter.view.panel_editors[panel.panel_id]
     assert projection["producer_node_id"] == node_id
     assert projection["producer_logic"] == presenter.logic_editor_projection(node_id)
+    assert projection["stale"] is False
+
+    _one_shot(session, producer=node_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: presenter.view.panel_editors[panel.panel_id]["stale"] is True,
+    )
+    assert presenter.refresh_panel_snapshot(panel.panel_id)
+    assert presenter.view.panel_editors[panel.panel_id]["stale"] is False
 
     started: list[str] = []
     monkeypatch.setattr(
