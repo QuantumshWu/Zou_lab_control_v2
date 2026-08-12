@@ -2784,12 +2784,25 @@ class MatplotlibRenderer:
         # standalone plot of that kind already accepts.  It stays an explicit
         # three-branch on purpose: a per-kind hook would hide that the pooling
         # is the grid's decision, not the cell's.
+        #
+        # It is the grid's decision while ONE cell is open too.  Opening a cell
+        # is looking closer at the same measurement, not opening another plot,
+        # and skipping the pooling here let the cell resolve limits under its
+        # own key: the same data in the same cell was painted two ways --
+        # measured at 573 of 768 samples different, colour scale (-7.8, 85.8)
+        # in the overview against (-2.6, 28.6) opened -- so what the operator
+        # compared before double-clicking was not what they then examined, and
+        # a saved figure's scale depended on which cell happened to be open.
+        # The focused cell's own rail and colorbar are what show where it sits
+        # inside the shared scale; authored limits are what override it.
+        # Pooling costs one scan per cell per revision, cached under each
+        # cell's own key -- the same price the overview already pays.
         cell_options: tuple[dict[str, Any], ...] = tuple({} for _ in cells)
         curve_series: tuple[tuple[_PreparedSeries, ...], ...] = ()
         curve_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
         histogram_arrays: tuple[tuple[np.ndarray, np.ndarray], ...] = ()
         histogram_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
-        if isinstance(semantic, CurvePlot) and not focused:
+        if isinstance(semantic, CurvePlot):
             curve_series = tuple(
                 self._prepare_curve_series(
                     self._series(getattr(cell, "payload", cell))
@@ -2822,15 +2835,9 @@ class MatplotlibRenderer:
         elif isinstance(semantic, HistogramPlot):
             histogram_arrays = tuple(
                 self._histogram_arrays(getattr(cell, "payload", cell), state)
-                if not focused or index == self._facet_focus_index
-                else (np.asarray([], dtype=float), np.asarray([], dtype=float))
-                for index, cell in enumerate(cells)
+                for cell in cells
             )
-            usable = (
-                tuple(item for item in histogram_arrays if item[0].size >= 2)
-                if not focused
-                else ()
-            )
+            usable = tuple(item for item in histogram_arrays if item[0].size >= 2)
             if usable:
                 shared_edges = usable[0][0]
                 if any(
@@ -2860,7 +2867,7 @@ class MatplotlibRenderer:
                 {"arrays": arrays, "limits": histogram_limits}
                 for arrays in histogram_arrays
             )
-        elif isinstance(semantic, ImagePlot) and not focused:
+        elif isinstance(semantic, ImagePlot):
             pooled_low: float | None = None
             pooled_high: float | None = None
             for index, cell in enumerate(cells):
