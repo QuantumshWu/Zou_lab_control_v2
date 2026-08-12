@@ -417,24 +417,21 @@ class FitSessionMixin:
         ) -> tuple[FitResult | None, str | None, FitSelection | None, FitOverlay]:
             if cancelled is not None and bool(cancelled()):
                 raise FitCancelled("facet fit cancelled")
-            cell_projection = projection._with_context(
-                replace(
-                    projection._context,
-                    focused_facet_index=index,
-                )
-            )
             warm = warm_starts[index]
             try:
                 # The request's own selector, not the default priority: the
                 # batch used to solve one domain and the accepted record report
                 # another, because only the recording path was told.
-                selection = cell_projection.fit_selection(
-                    model, selector_kind=selector_kind
+                # One batch, one domain: the region the operator drew
+                # applies to every cell, so only the computed cell varies --
+                # the focused facet still says whose selectors may speak.
+                selection = projection.fit_selection(
+                    model, selector_kind=selector_kind, facet_index=index
                 )
                 if warm_start_as_initial and warm is not None and initial is None:
                     try:
                         result = self._solve_fit_selection(
-                            cell_projection,
+                            projection,
                             model,
                             selection,
                             initial=warm,
@@ -450,7 +447,7 @@ class FitSessionMixin:
                         result = None
                     if result is None or not result.success:
                         result = self._solve_fit_selection(
-                            cell_projection,
+                            projection,
                             model,
                             selection,
                             initial=None,
@@ -462,7 +459,7 @@ class FitSessionMixin:
                         )
                 else:
                     result = self._solve_fit_selection(
-                        cell_projection,
+                        projection,
                         model,
                         selection,
                         initial=initial,
@@ -472,7 +469,7 @@ class FitSessionMixin:
                         request_generation=request_generation,
                         warm_start=warm,
                     )
-                overlay = cell_projection._make_fit_overlay(result, selection)
+                overlay = projection._make_fit_overlay(result, selection)
             except FitCancelled:
                 raise
             except Exception as error:
@@ -1467,14 +1464,12 @@ class FitSessionMixin:
         cells = tuple(getattr(projection.payload, "cells", ()))
         selections: list[FitSelection | None] = []
         for index, _cell in enumerate(cells):
-            cell_projection = projection._with_context(
-                replace(projection._context, focused_facet_index=index)
-            )
             try:
                 selections.append(
-                    cell_projection.fit_selection(
+                    projection.fit_selection(
                         model,
                         selector_kind=selector_kind,
+                        facet_index=index,
                     )
                 )
             except (TypeError, ValueError, KeyError):

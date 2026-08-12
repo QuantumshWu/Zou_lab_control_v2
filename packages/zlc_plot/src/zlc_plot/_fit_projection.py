@@ -869,18 +869,30 @@ class FitProjection:
         model: FitModelSpec,
         *,
         selector_kind: SelectorKind | None = None,
+        facet_index: int | None = None,
     ) -> FitSelection:
+        """Select the data one fit runs on.
+
+        ``facet_index`` names the cell to compute; the focused facet is the
+        cell the operator is looking at, and so the one whose selectors may
+        define the domain.  A grid batch computes every cell over the single
+        region that was drawn, so the two differ there and nowhere else.
+        """
+
         if self._view is None:
             raise TypeError("fit is available only for zlc_data.OwnedSnapshot plots")
         if not isinstance(model, FitModelSpec):
             raise TypeError("model must be FitModelSpec")
         self._require_fit_model_compatible(model)
-        payload = self._focused_payload(self._focused_facet_index)
+        if facet_index is None:
+            facet_index = self._focused_facet_index
+        payload = self._focused_payload(facet_index)
         if isinstance(payload, CurveData):
             return self._curve_fit_selection(
                 model,
                 selector_kind=selector_kind,
                 payload=payload,
+                facet_index=facet_index,
             )
         if isinstance(payload, ImageData) and (
             model.capabilities & _REGULAR_IMAGE_CAPABILITIES
@@ -889,6 +901,7 @@ class FitProjection:
                 model,
                 selector_kind=selector_kind,
                 payload=payload,
+                facet_index=facet_index,
             )
         if self._is_histogram_plot():
             if not isinstance(payload, HistogramData):
@@ -897,6 +910,7 @@ class FitProjection:
                 model,
                 selector_kind=selector_kind,
                 payload=payload,
+                facet_index=facet_index,
             )
         if not isinstance(payload, ImageData):
             raise TypeError("unsupported fit projection payload")
@@ -904,6 +918,7 @@ class FitProjection:
             model,
             selector_kind=selector_kind,
             payload=payload,
+            facet_index=facet_index,
         )
 
     def _curve_fit_selection(
@@ -912,6 +927,7 @@ class FitProjection:
         *,
         selector_kind: SelectorKind | None,
         payload: CurveData,
+        facet_index: int | None = None,
     ) -> FitSelection:
         """Fit the first painted series, with scope applied to that series."""
 
@@ -975,7 +991,7 @@ class FitProjection:
             coordinates=(coordinates,),
             observations=y_canonical[valid],
             selected_indices=indices,
-            facet_index=self._focused_facet_index,
+            facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
             source_revisions=payload.source_revisions,
@@ -987,6 +1003,7 @@ class FitProjection:
         *,
         selector_kind: SelectorKind | None,
         payload: HistogramData,
+        facet_index: int | None = None,
     ) -> FitSelection:
         """Fit the exact bins painted by the current histogram projection."""
 
@@ -1041,7 +1058,7 @@ class FitProjection:
             coordinates=(model_centers,),
             observations=counts[valid],
             selected_indices=indices,
-            facet_index=self._focused_facet_index,
+            facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
             source_revisions=payload.source_revisions,
@@ -1053,6 +1070,7 @@ class FitProjection:
         *,
         selector_kind: SelectorKind | None,
         payload: ImageData,
+        facet_index: int | None = None,
     ) -> FitSelection:
         """Describe a painted regular image without expanding coordinate grids."""
 
@@ -1090,7 +1108,7 @@ class FitProjection:
             coordinates=(x_solver, y_solver),
             observations=observations,
             selected_indices=None,
-            facet_index=self._focused_facet_index,
+            facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             regular_image=regular,
             _authority=authority,
@@ -1103,6 +1121,7 @@ class FitProjection:
         *,
         selector_kind: SelectorKind | None,
         payload: ImageData,
+        facet_index: int | None = None,
     ) -> FitSelection:
         """Fit the painted image projection without returning to raw samples."""
 
@@ -1150,7 +1169,7 @@ class FitProjection:
             coordinates=coordinates,
             observations=selected_observations,
             selected_indices=selected_indices,
-            facet_index=self._focused_facet_index,
+            facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
             source_revisions=payload.source_revisions,

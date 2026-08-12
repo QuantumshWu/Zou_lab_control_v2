@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
+from zlc_plot._fit_projection import FitScope
 from zlc_plot.fit import FacetFitBatchResult, FitEngine
+from zlc_plot.selectors import NumericRange, SelectorKind
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 
 
@@ -168,5 +170,28 @@ def test_facet_live_fit_pairs_the_whole_batch_with_its_data_frame() -> None:
 
         session.fit("lorentzian", live=True)
         assert session.last_fit.model.model_id == "lorentzian"
+    finally:
+        session.close()
+
+
+def test_one_region_gives_every_cell_of_the_batch_the_same_domain() -> None:
+    """A region is drawn in one cell; the whole batch is solved over it.
+
+    The region belongs to the cell the operator drew it in, so every other
+    cell used to fall through to the viewport -- a batch whose cells were
+    silently fitted over different data.
+    """
+
+    session = PlotSession(_facet_snapshot(), _spec())
+    try:
+        session.commit_selector(SelectorKind.X_RANGE, NumericRange(-1.0, 1.0))
+        session.set_viewport(NumericRange(-3.0, 0.0), NumericRange(-10.0, 10.0))
+        result = session.fit("gaussian_offset", live=False, fit_all_facets=True)
+        assert isinstance(result, FacetFitBatchResult)
+
+        selections = session._accepted_fit.selections
+        assert len(selections) == 2
+        assert {selection.scope for selection in selections} == {FitScope.SELECTOR}
+        assert len({selection.observations.size for selection in selections}) == 1
     finally:
         session.close()
