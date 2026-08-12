@@ -342,6 +342,13 @@ class LogicNodeDescriptor:
             raise ValueError(
                 f"node previews use undeclared outputs: {sorted(unknown_previews)}"
             )
+        if node_previews and self.kind is NodeKind.PROCESSOR:
+            # A preview is what STARTING this node offers to show, and a
+            # processor is not started to be watched: it exists to answer
+            # someone else's signal, and which of its answers an operator
+            # wants on screen is a decision about that board, made by adding
+            # the panel.  A measurement or a Task owns the shot it opens.
+            raise ValueError("a processor node declares no preview")
         if len({value.name for value in artifact_outputs}) != len(artifact_outputs):
             raise ValueError("artifact output names must be unique")
         if len(

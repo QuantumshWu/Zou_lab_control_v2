@@ -201,18 +201,13 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         assert set(presenter.logic) == {camera_id, occupancy_id}
         assert all(binding.host is None for binding in presenter.logic.values())
         assert presenter.logic[occupancy_id].draft.source_signal == frames_signal
-        # Three panels: the two added here, plus the one occupancy declares as
-        # its preview and the row's Plot button agreed to open.  It is ordinary
-        # board state from the moment it appears, so it is saved with the rest.
-        rate_signal = stable_signal_key("occupancy", "rate")
+        # Two panels, both added here: occupancy is a processor and opens
+        # nothing of its own -- it answers a signal it does not own, and which
+        # of its answers belongs on this board is the operator's decision.
         assert {
             (binding.state.signal, binding.state.kind)
             for binding in presenter.panels.values()
-        } == {
-            (judged_signal, "image"),
-            (frames_signal, "histogram"),
-            (rate_signal, "curve"),
-        }
+        } == {(judged_signal, "image"), (frames_signal, "histogram")}
         assert not session.camera.capture_state()
 
         # Header Save Screenshot is one GUI image and creates no archive/layout.

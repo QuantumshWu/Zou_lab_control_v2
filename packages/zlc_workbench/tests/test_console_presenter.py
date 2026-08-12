@@ -2244,79 +2244,57 @@ def test_a_card_stops_wearing_an_error_once_the_panel_has_drawn_again(
 
 @pytest.mark.parametrize("wanted", (True, False))
 def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
-    presenter, session, tmp_path, wanted
+    presenter, session, wanted
 ) -> None:
     """WHICH panel is the node's declaration; WHETHER is the operator's.
 
-    Occupancy publishes five signals and a console that guessed would have to
-    pick among them, so the node names the one an operator opens it to watch.
-    The button beside Start says whether that happens at all -- a preference
-    about this board, which is why it lives on the row and in the layout and
-    not in the authoring schema a notebook also drives.
+    A measurement owns the shot it takes, so it names the output an operator
+    started it to watch.  The switch beside Start says whether that happens
+    at all -- a preference about this board, which is why it lives on the row
+    and in the layout and not in the authoring schema a notebook also drives.
     """
 
-    import numpy as np
-    from zlc_atom.nodes.calibration import (
-        FrameContract,
-        ReadoutModel,
-        ReadoutModelKind,
-        SiteMap,
-        TrapCalibration,
-    )
     from zlc_workbench.logic import stable_signal_key
 
-    camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
-    site_ids = ("site-0", "site-1")
-    calibration_path = tmp_path / "preview-calibration.json"
-    TrapCalibration(
-        SiteMap(
-            site_ids,
-            np.asarray(((12.0, 10.0), (30.0, 20.0))),
-            np.asarray((True, True)),
-            np.asarray((1.0, 1.0)),
-        ),
-        (
-            ReadoutModel(
-                site_ids,
-                np.asarray((-1.0e20, 0.0)),
-                np.asarray((True, True)),
-                np.asarray((1.0, 1.0)),
-            ),
-        ),
-        ReadoutModelKind.BOX,
-        FrameContract((96, 128)),
-    ).save(calibration_path)
-
-    occupancy_id = presenter.add_logic(
-        "occupancy",
-        node_id="occupancy",
-        artifact_inputs={"calibration_path": str(calibration_path)},
-        source_signal=camera_node.signal_key("frames"),
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        node_id="monitor",
+        values={
+            "exposure_seconds": 0.02,
+            "repeat": 0,
+            "frames_per_cycle": CAMERA_WINDOWS,
+        },
+        device_keys={"camera": "camera"},
         open_editor=False,
     )
-    presenter.set_logic_auto_preview(occupancy_id, wanted)
+    presenter.set_logic_auto_preview(camera_id, wanted)
     row = next(
-        row for row in presenter.view.logic_rows if row.title == occupancy_id
+        row for row in presenter.view.logic_rows if row.title == camera_id
     )
     assert row.auto_preview is wanted, "the row shows the stored preference"
 
-    assert presenter.start_logic(occupancy_id) is True
-    deadline = time.monotonic() + 10.0
-    while presenter.logic[occupancy_id].host.running and time.monotonic() < deadline:
-        presenter.poll_logic()
-        time.sleep(0.005)
-    presenter.poll_logic()
-
     declared = tuple(
         spec.output_name
-        for spec in presenter.logic[occupancy_id].descriptor.node_previews
+        for spec in presenter.logic[camera_id].descriptor.node_previews
     )
-    assert declared == ("rate",)
-    rate_signal = stable_signal_key(occupancy_id, "rate")
+    assert declared == ("frames",), "a measurement names what Start shows"
+
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id) is True
+    frames_signal = stable_signal_key(camera_id, "frames")
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        if session.signal_plane.freeze().value(frames_signal) is not None:
+            break
+        session.fire(shots=1)
+        time.sleep(0.01)
+    presenter.poll_logic()
+
     opened = [
         binding
         for binding in presenter.panels.values()
-        if binding.state.signal == rate_signal
+        if binding.state.signal == frames_signal
     ]
     if wanted:
         assert len(opened) == 1, "the declared preview is the panel that opened"
