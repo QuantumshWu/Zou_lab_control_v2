@@ -76,7 +76,6 @@ from .selection import (
 )
 from .topology import format_signal_shape, project_signals
 
-
 __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
@@ -137,6 +136,16 @@ class PanelBinding:
     interaction_selection: Any = None
     #: Canonical producer range plus display viewport shared by both views.
     interaction_viewport: Any = None
+    #: Which facet cell this panel is focused on, or None for the overview.
+    #: A view of the same data, exactly like the viewport beside it -- so both
+    #: of this panel's hosts show it, and a double-click in either one is the
+    #: panel's answer rather than that surface's private state.
+    interaction_focus: Any = None
+    #: What each host was last seen showing.  Whoever CHANGED is the operator;
+    #: a host that merely disagrees with the panel is the one still catching
+    #: up with the last mirror, and reading that as a second gesture makes the
+    #: two surfaces push each other back and forth forever.
+    focus_seen: tuple[Any, Any] = (None, None)
     #: The last failure already shown, so one refusal is reported once.
     reported_error: Any = None
     #: Exact publication used to construct a not-yet-board-anchored host.
@@ -701,6 +710,153 @@ class ConsolePresenter:
     # inside one batch accept pass) and every non-batch render a host produces
     # -- configure, an armed fit, a mirrored selector -- still reaches pixels.
 
+    def _match_host_to_panel(
+        self,
+        binding: PanelBinding,
+        host: object,
+        *,
+        state: PanelState | None = None,
+        overlay: object = _UNCHANGED,
+        models: object = None,
+        present: bool = False,
+    ) -> object:
+        """Make one of this panel's hosts show what the panel says.
+
+        A panel owns two hosts: the live card, and the Edit tab's copy of the
+        same configuration over frozen data.  The design is one PanelState
+        reaching both (ARCHITECTURE_DESIGN 10.3), and what legitimately
+        differs between them is the DATA -- never the appearance, the fit, or
+        where the operator has looked.
+
+        This was written four times over -- the state change, the two first
+        projections, and the save path -- each with a different subset, which
+        is how the Edit tab ended up holding gestures the card did not and the
+        card holding an analysis the Edit tab did not.  It is written once
+        here, and every site that builds or updates a host calls it.
+
+        ``present`` is for a host whose widget STAGES its fronts: the card
+        needs each resulting operation presented, while the Edit surface
+        auto-presents its own.
+        """
+
+        panel_state = binding.state if state is None else state
+        surface = binding.parameter_surface
+        configuration: dict[str, object] = {
+            "semantic": self._declared_only(
+                panel_state.semantic, surface.get("semantic", ())
+            ),
+            "parameters": self._declared_only(
+                panel_state.display, surface.get("display", ())
+            ),
+            "size": panel_state.size,
+        }
+        if overlay is not _UNCHANGED:
+            configuration["image_overlay"] = overlay
+        pending = host.configure(**configuration)
+
+        def _also(operation: object) -> None:
+            if present and operation is not None:
+                self._present_when_done(binding, operation)
+
+        # A fit is an analysis, not a display parameter: it has its own
+        # completion, and the front it produces reaches a staged widget only
+        # because that operation is presented.
+        _also(apply_panel_fit(host, panel_state, live=True, models=models))
+        if binding.interaction_selection is not None:
+            _also(_apply_panel_selection(host, binding.interaction_selection))
+        if binding.interaction_viewport is not None:
+            _selection, viewport = binding.interaction_viewport
+            _also(_apply_panel_viewport(host, viewport))
+        _also(self._apply_panel_focus(host, binding.interaction_focus))
+        return pending
+
+    @staticmethod
+    def _apply_panel_focus(host: object, focus: object) -> object:
+        """Put one host on the panel's focused cell, or back on the overview.
+
+        A cell is named by its INDEX between the two hosts -- they draw the
+        same grid over different data, so cell 3 means the same thing to both
+        -- but the plot layer opens a cell from that host's own overview
+        identity and its own axes, which is what makes the focus refuse a
+        surface that has moved underneath it.
+        """
+
+        if focus is None:
+            overview = getattr(host, "show_facet_overview", None)
+            return overview() if callable(overview) else None
+        focus_facet = getattr(host, "focus_facet", None)
+        front = getattr(host, "front", None)
+        interaction = getattr(front, "interaction", None)
+        if not callable(focus_facet) or interaction is None:
+            return None
+        axes = next(
+            (
+                item
+                for item in interaction.axes
+                if getattr(item, "role", "") == "facet_cell"
+                and getattr(item, "cell_index", None) == int(focus)
+            ),
+            None,
+        )
+        if axes is None:
+            return None
+        return focus_facet(front.identity, axes)
+
+    @staticmethod
+    def _host_focus(host: object) -> object:
+        """Which cell this host is showing, as its own front reports it."""
+
+        front = getattr(host, "front", None)
+        interaction = getattr(front, "interaction", None)
+        return getattr(interaction, "facet_focus_index", None)
+
+    def _settle_panel_focus(self, binding: PanelBinding) -> None:
+        """A cell focused on either surface is the panel's answer.
+
+        Zooming into a cell is looking at the same data more closely -- the
+        viewport beside it has always been mirrored -- so whichever surface
+        the operator double-clicked, both show it.  Read from the fronts the
+        beat already has rather than through a second subscription.
+
+        What counts is a CHANGE: a host that simply disagrees with the panel
+        may be the one still catching up with the last mirror, and treating
+        that as a fresh gesture makes the two surfaces chase each other.
+        """
+
+        hosts = (binding.host, binding.editor_host)
+        seen = tuple(
+            None if host is None else self._host_focus(host) for host in hosts
+        )
+        if seen == binding.focus_seen:
+            return
+        moved = next(
+            (
+                (host, value)
+                for host, value, before in zip(hosts, seen, binding.focus_seen)
+                if host is not None and value != before
+            ),
+            None,
+        )
+        binding.focus_seen = seen
+        if moved is None:
+            return
+        source, focus = moved
+        if focus == binding.interaction_focus:
+            return
+        binding.interaction_focus = focus
+        # Opening or closing a cell RESETS the view inside it -- the plot layer
+        # drops the viewport itself, because a range measured in the overview
+        # means nothing in one cell and the other way round.  The panel's
+        # remembered viewport is therefore void from this moment, and keeping
+        # it would paste a ghost range onto every host built afterwards.
+        binding.interaction_viewport = None
+        for host in hosts:
+            if host is None or host is source:
+                continue
+            operation = self._apply_panel_focus(host, focus)
+            if host is binding.host and operation is not None:
+                self._present_when_done(binding, operation)
+
     def _present_panel_front(self, binding: PanelBinding, front: object) -> bool:
         """Put one completed immutable front on the panel's staged widget.
 
@@ -818,15 +974,7 @@ class ConsolePresenter:
         binding.bridge = binding.selections = None
         binding.host = host
         binding.initial_presented = False
-        if binding.interaction_selection is not None:
-            self._present_when_done(
-                binding, _apply_panel_selection(host, binding.interaction_selection)
-            )
-        if binding.interaction_viewport is not None:
-            _selection, viewport = binding.interaction_viewport
-            self._present_when_done(
-                binding, _apply_panel_viewport(host, viewport)
-            )
+        self._match_host_to_panel(binding, host, present=True)
         binding.display_publication = publication
         self._present_mounted_front(binding)
         if old_host is not None:
@@ -1234,16 +1382,7 @@ class ConsolePresenter:
                 return False
             self._release_panel(binding)
             binding.host = host
-            if binding.interaction_selection is not None:
-                self._present_when_done(
-                    binding,
-                    _apply_panel_selection(host, binding.interaction_selection),
-                )
-            if binding.interaction_viewport is not None:
-                _selection, viewport = binding.interaction_viewport
-                self._present_when_done(
-                    binding, _apply_panel_viewport(host, viewport)
-                )
+            self._match_host_to_panel(binding, host, state=candidate, present=True)
             binding.port = PlotPanelPort(
                 panel_id,
                 candidate.signal,
@@ -1331,23 +1470,14 @@ class ConsolePresenter:
                 return True
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
-            surface = binding.parameter_surface
-            configuration: dict[str, object] = {
-                "semantic": self._declared_only(
-                    candidate.semantic, surface.get("semantic", ())
-                ),
-                "parameters": self._declared_only(
-                    candidate.display, surface.get("display", ())
-                ),
-                "size": candidate.size,
-            }
-            editor_configuration = dict(configuration)
+            live_overlay: object = _UNCHANGED
+            editor_overlay: object = _UNCHANGED
             if (
                 draws_image_surfaces(candidate.kind, candidate.cell_kind)
                 and candidate.overlay_signal != current.overlay_signal
             ):
-                configuration["image_overlay"] = None
-                editor_configuration["image_overlay"] = None
+                live_overlay = None
+                editor_overlay = None
                 previous_overlay_revision = binding.overlay_revision
                 frozen_replacement = None
                 try:
@@ -1389,29 +1519,27 @@ class ConsolePresenter:
                                 ),
                             )
                             if isinstance(frozen_input, ImageFrame):
-                                editor_configuration["image_overlay"] = (
-                                    frozen_input.overlay
-                                )
+                                editor_overlay = frozen_input.overlay
                 except (TypeError, ValueError) as error:
                     binding.overlay_revision = previous_overlay_revision
                     self._report(f"{panel_id}: {_error_text(error)}", severity="error")
                     return False
                 if frozen_replacement is not None:
                     binding.frozen_data = frozen_replacement
-            binding.configuration = binding.host.configure(**configuration)
+            binding.configuration = self._match_host_to_panel(
+                binding,
+                binding.host,
+                state=candidate,
+                overlay=live_overlay,
+                present=True,
+            )
             if binding.editor_host is not None:
-                binding.editor_configuration = binding.editor_host.configure(
-                    **editor_configuration
+                binding.editor_configuration = self._match_host_to_panel(
+                    binding,
+                    binding.editor_host,
+                    state=candidate,
+                    overlay=editor_overlay,
                 )
-            if candidate.fit != current.fit:
-                # A fit is an analysis, not a display parameter: it has its own
-                # completion, and the front it produces reaches this panel's
-                # staged widget only because the operation is presented.
-                self._present_when_done(
-                    binding, apply_panel_fit(binding.host, candidate, live=True)
-                )
-                if binding.editor_host is not None:
-                    apply_panel_fit(binding.editor_host, candidate, live=True)
             binding.state = candidate
 
         self._publish_panel_state(binding)
@@ -1678,6 +1806,7 @@ class ConsolePresenter:
                 # anything, and on data that has stopped publishing no batch
                 # was ever coming.
                 self._present_mounted_front(binding)
+                self._settle_panel_focus(binding)
                 metadata, error = host.initial_state
                 if metadata is not None or error is not None:
                     if error is not None:
@@ -1701,11 +1830,9 @@ class ConsolePresenter:
                                 binding.state, surface
                             )
                             binding.parameter_surface = surface
-                            operation = apply_panel_fit(
-                                host, binding.state, live=True, models=models
+                            self._match_host_to_panel(
+                                binding, host, models=models, present=True
                             )
-                            if operation is not None:
-                                self._present_when_done(binding, operation)
                             self._publish_panel_state(binding)
                             # Clearing the de-dup memory belongs to THIS
                             # one-time first projection.  ``initial_state``
@@ -1731,11 +1858,7 @@ class ConsolePresenter:
                         raise error
                     assert metadata is not None
                     _display, models = metadata
-                    if binding.interaction_selection is not None:
-                        _apply_panel_selection(editor, binding.interaction_selection)
-                    if binding.interaction_viewport is not None:
-                        _selection, viewport = binding.interaction_viewport
-                        _apply_panel_viewport(editor, viewport)
+                    self._match_host_to_panel(binding, editor, models=models)
                     binding.editor_selections = subscribe_committed_selection(
                         editor,
                         lambda selection, expected=frozen, expected_host=editor,
@@ -1766,12 +1889,6 @@ class ConsolePresenter:
                                 viewport=viewport,
                             )
                         ),
-                    )
-                    # The frozen view arms the SAME record, through the same
-                    # authority: arming just the model id here dropped every
-                    # other thing the record said about the fit.
-                    apply_panel_fit(
-                        editor, binding.state, live=True, models=models
                     )
                 except Exception as error:
                     self._report(
