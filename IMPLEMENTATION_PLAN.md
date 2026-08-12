@@ -31,13 +31,14 @@
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
 - Goal status：`complete — 四条查实项 + 自查三处补丁改根修 + 三条遗留全部清掉`
-- Production HEAD at latest focused verification：`36a57f6`
+- Production HEAD at latest focused verification：`64056c3`
 - Stage set：`6a1641c 一份 PanelState 一个函数 -> 7a25574 scan 框选=下次扫的范围 -> ce01ab0 frozen 图自述过期 -> eba7ea9 Save Fig 走同一投影 + size 校验 + editor configure 写回 -> 77f9c5a relim 只说一遍 -> 37ff283 staleness 改为推导 -> 4d7d61e 记录只由自己的 configure 写回 -> 2e5dc21 阈值是面板的答案`
-- Current phase：`complete。两条症状先在台架上复现/交叉验证再修；未新增契约层或测试文件；被行为变更打红的既有测试就地改述。`
+- Current phase：`complete。Panel publisher Edit 与 ROI 输出目录已在现有 PanelState/SelectionBridge/LogicEditor 骨架内收口；无新 production 文件或类。`
 - Last completed action：`(1) 四条查实项：Save Fig 改走 _match_host_to_panel（带 live=False，写文件前等 analysis 落地）；size 对 layout_policy.size_names 校验；editor configure 结果经 _offer_state_to_editor 写回。(2) 用户质疑 relim 那一改是补丁——属实：同一句「tight 是否保持」写在色标与计数轴两处，且我那一行让色标条（只想要 padded 形状）丢了迟滞。改为 _relim_retains 单源 + zero_based/retain 两个明确参数。(3) 自查出 frozen_stale 是「可推导事实存成 6 个写点的布尔」，改为 PanelBinding 属性（零写点）；实测整套 presenter 测试在该行为被变异后仍全绿=从来无守卫。(4) _settle_panel_hosts 有两个人写记录：首投影拿 host 首帧默认值覆盖，实测 record=True/card=False/editor=True。现在首投影只把记录自己的值解析进词表（restore_semantic_choice），值的写回只留 configure 完成一条路。(5) 阈值：zlc_plot 中拟合最优值与操作者的决定分家（vector 只存 choice，fit 值按需导出，_classifier_thresholds_settled 唯一合成点；remove 线=回到拟合值）；workbench 给 level 手势开面板通道，两个 Edit 订阅点合成 _subscribe_editor_gestures。 (6) 三条遗留清掉：facet 聚焦态原本跳过池化（颜色尺/x 跨度/分箱），同一格两种画法——改为两种视图都由网格池化，实测 clim 双击前后同为 (-9,99)、聚焦时仍跟随 live 到 (-18,198)；代价实测 49.8→51.2 ms/版本（9×256×320），即那三个门没买到性能。Edit 面的订阅原本等 host 首次描述（只为拿 models），改为挂载即订阅+投影，settle 里第二个「prepare the editor」分支删除。frozen_stale 换代行为补进现有 Edit 投影测试并经变异验证。`
 - Last verified tests：`zlc_plot 337 passed；zlc_workbench 371 passed；九步真窗口验收全绿（1a–9，零 FAIL，含 5a 双击聚焦、5b 框选派生、6 fit+Save Fig、7e 换 cell kind 无白屏、8a Task 中途开面板、8c per-site 热图）。阈值链路与 relim/stale 均有探针数值，见上。`
 - Pending acceptance gates：`Stepped/Pylon 本轮只跑直接相关守卫，尚待操作者真机验收；test_v3_architecture 的 10 s 死线与本轮无关。`
-- Next action：`none。`
+- Next action：`操作者验收 Panel publisher Edit 的 switch、ROI 六项与 fit 参数发布选择；无需再改本链。`
+- Post-goal Panel-derived output correction (2026-08-12)：`b6f6a17 -> 2ca01e4 -> 64056c3`。`zlc_runtime` 的一个 catalog 同时拥有 Image ROI 六个稳定 leaf 的名称、标签与 reducer，materializer 只按 catalog 的 array/scalar 类型循环，不按 `roi_mean` 等名字堆条件。每个 Panel 的唯一 `PanelState.published_outputs` 持久化真实开关；Logic tab 的 panel publisher row 始终存在并可 Edit，复用无 actions/source 的 `LogicEditorView` bool switches。切换会由同一个 SelectionBridge withdraw/reissue held ROI/fit answer，Workbench/UI 不计算科学结果、不复制 fit 参数词汇，也不触发 plot host configure/render。定向证据：runtime catalog+fit replay 2 passed；Workbench publisher/layout/Occupancy 5 passed；Qt publisher Edit 1 passed。
 - Post-goal Stepped Scan correction (2026-08-12)：用户后续物理裁决取代 `2177a9a` 的 host-repeat 实现。每个 point 只 `safe/settle -> apply+load -> fire` 一次；`Shots per point` 写入运行时 pulse 副本的 whole-pulse bracket count，由硬件在一次 fire 内重复。Pulse-driven source顺序收满 S 条；free-running source按同一 fire 原点的 `k * 单次 pulse 长度 + delay` deadline 取 S 条，不累计软件 sleep 漂移。`Repeats` 仍从头重扫整张 plan，Dataset repeat 轴仍为 `repeats x shots x source-repeat`。单-period bracket 合法；partial bracket 与 S>1 因现有硬件不支持嵌套而拒绝。
 - Post-goal device shutdown correction (2026-08-12)：`36a57f6` 修复 Installation 在任一 leaf close 失败后仍标 terminal 的真实所有权漏洞；现在只有全部 device 成功关闭才进入 closed，失败后的下一次 close 会真实重试，不能让仍占用的 Pylon 被伪报为已释放。
 

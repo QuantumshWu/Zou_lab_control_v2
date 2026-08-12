@@ -198,6 +198,8 @@ generation 原子取代；它不能因为 FINAL 数据仍可读而阻止同一 r
 - Image Area 用当前 ROI origin/binning 把显示坐标转回 sensor 坐标，adapter 在 Start/Restart 时做硬件 increment 对齐。
 - selector 只更新共享 draft；用户按同一个 `Restart` 后，才用新 ROI/exposure 重启 measurement。
 - ROI 数据和 fit 参数同时是 data plane 中的普通 typed Dataset。Logic input 可以声明一个固定 contract，也可以显式声明 source-neutral；后一种由插件用实际 Dataset schema 和自己的动态 artifact/request 判断是否可用。Occupancy 属于后一种，因为可用 frame shape 由所选 Calibration 决定，Workbench 不得用 producer 名称或固定 `camera.frames` 字符串提前隐藏 ROI/fit signal。
+- 每个可派生 Panel 在 Logic tab 中有一条稳定的 publisher row；它属于 Panel，不是可 Start/Stop 的 Logic Node，也不能换 source。该行的 Edit 只把同一 `PanelState.published_outputs` 投影成 switch，选择哪些 ROI/fit Dataset 真正进入 data plane；没有当前 selection/fit 或全部关闭时，该行和 Edit 入口也不得消失。
+- ROI 输出词汇和数学只由 `zlc_runtime` 的 selection catalog 声明一次。Image Area 的稳定输出为裁剪后的 `roi_frame`、逐 `(repeat, point)` 的 `roi_mean`/`roi_min`/`roi_max`，以及 ROI 内最低/最高至多 10 个有效有限像素均值 `roi_min_10_mean`/`roi_max_10_mean`；无有效像素时结果 invalid。Workbench/UI 只投影目录标签和开关，不复写字段名、统计公式或另算一遍。Fit 输出词汇来自当前 `zlc_plot` fit model 的 parameter declarations；新 revision 只更新值，不重建 publisher form。
 
 ## 8. 目标 Logic Node
 
