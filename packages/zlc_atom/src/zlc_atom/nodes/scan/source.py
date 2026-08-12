@@ -1,19 +1,24 @@
-"""Following the live signal a scan reads at every point.
+"""Where a scan point's value comes from.
 
-Both engines watch ONE live signal and take its publications in order; only
-what they do between publications differs.  Three facts live here.
+Both engines do the same three things at every point -- take a value, write it
+into the plan's slot, move on -- and differ only in where that value comes
+from.  Two answers exist on this bench.
 
-A publication materialises when the plane FREEZES.  Waiting for the display
-to freeze would couple acquisition to whether a panel happens to be open --
-a scan on a panel-less bench would simply never advance -- so the scan
-freezes for itself.  Freezing with nothing staged is cheap by the plane's
-own design; unchanged slots reuse their immutable fronts.
+A SCAN NODE WATCHES SOMEBODY ELSE'S SIGNAL.  The operator says which one, and
+the value of a point is whatever that signal publishes next: camera frames, a
+processor's counts, anything live.  That is the whole point of the scan nodes
+-- they scan a knob against a quantity the bench is already producing.
 
-Everything published before a point is applied belongs to the old world, so
-the backlog is dropped on purpose before the fire that applies the point.
+A TASK THAT OWNS ITS CAMERA TAKES THE FRAMES ITSELF.  Release-recapture is not
+"scan t_off against whatever happens to be running": the two probe windows of
+one cycle ARE the measurement, so the Task holds the camera, arms it for the
+whole table, and reads the cycles the fired program triggers.  That source is
+a camera capture wearing this protocol, so it lives with the camera
+(``camera_measurement.measurement.CameraCycleSource``) -- no scan node uses
+it, and the scan package is what the scan NODES stand on.
 
-A source that restarts mid-scan is not a source with a gap; it is a
-different generation, and the scan says so instead of stitching.
+Both are sources: open before the board is loaded, arm just before the fire,
+one value per played point, closed at the end.
 """
 
 from __future__ import annotations
@@ -22,54 +27,89 @@ from zlc_runtime import SignalValue
 from zlc_runtime.streams import StreamEndedEarly
 
 
-def follow_source(signal_plane, signal_name: str, generation: object):
-    """Subscribe to the source's future publications, or refuse the restart."""
+class PublishedSignalSource:
+    """The point's value is the next publication of a signal somebody runs.
 
-    baseline, tap = signal_plane.follow_publications(signal_name)
-    if baseline.event_ref.generation != generation:
-        raise RuntimeError("the source signal restarted before the scan began")
-    return tap
+    A publication materialises when the plane FREEZES.  Waiting for the
+    display to freeze would couple acquisition to whether a panel happens to
+    be open -- a scan on a panel-less bench would simply never advance -- so
+    the scan freezes for itself.  Freezing with nothing staged is cheap by the
+    plane's own design; unchanged slots reuse their immutable fronts.
+
+    A source that restarts mid-scan is not a source with a gap; it is a
+    different generation, and the scan says so instead of stitching.
+    """
+
+    def __init__(
+        self,
+        signal_plane: object,
+        signal_name: str,
+        generation: object,
+    ) -> None:
+        self.signal_plane = signal_plane
+        self.signal_name = str(signal_name)
+        self._generation = generation
+        self._tap = None
+
+    def open(self, context: object, *, cycles: int) -> None:
+        """Subscribe before the board is loaded, so nothing played is missed."""
+
+        del context, cycles
+        baseline, tap = self.signal_plane.follow_publications(self.signal_name)
+        if baseline.event_ref.generation != self._generation:
+            raise RuntimeError("the source signal restarted before the scan began")
+        self._tap = tap
+
+    def _require_tap(self):
+        tap = self._tap
+        if tap is None:
+            raise RuntimeError("the scan source was not opened")
+        return tap
+
+    def arm(self, program: object, table: object = None) -> None:
+        """Everything published so far belongs to the world before this point."""
+
+        del program, table
+        tap = self._require_tap()
+        while True:
+            self.signal_plane.freeze()
+            try:
+                tap.next(0.0)
+            except TimeoutError:
+                return
+            except StreamEndedEarly:
+                raise RuntimeError(
+                    "the source signal restarted during the scan"
+                ) from None
+
+    def next_value(self, context: object) -> SignalValue:
+        """The next publication's value of the watched signal, waiting for it."""
+
+        tap = self._require_tap()
+        while True:
+            if context.cancel_requested():
+                raise RuntimeError("the scan was cancelled")
+            self.signal_plane.freeze()
+            try:
+                publication = tap.next(0.1).payload
+            except TimeoutError:
+                continue
+            except StreamEndedEarly:
+                raise RuntimeError(
+                    "the source signal restarted during the scan"
+                ) from None
+            value = publication.value(self.signal_name)
+            if not isinstance(value, SignalValue):
+                raise RuntimeError("the source publication lost the selected signal")
+            return value
+
+    def close(self) -> None:
+        tap, self._tap = self._tap, None
+        if tap is not None:
+            tap.close()
+
+    def describe(self) -> dict[str, object]:
+        return {"source_signal": self.signal_name}
 
 
-def next_source_value(
-    signal_plane,
-    tap,
-    signal_name: str,
-    context,
-) -> SignalValue:
-    """The next publication's value of the watched signal, waiting for it."""
-
-    while True:
-        if context.cancel_requested():
-            raise RuntimeError("the scan was cancelled")
-        signal_plane.freeze()
-        try:
-            publication = tap.next(0.1).payload
-        except TimeoutError:
-            continue
-        except StreamEndedEarly:
-            raise RuntimeError(
-                "the source signal restarted during the scan"
-            ) from None
-        value = publication.value(signal_name)
-        if not isinstance(value, SignalValue):
-            raise RuntimeError("the source publication lost the selected signal")
-        return value
-
-
-def drain_backlog(signal_plane, tap) -> None:
-    """Discard everything already published; the caller knows it is stale."""
-
-    while True:
-        signal_plane.freeze()
-        try:
-            tap.next(0.0)
-        except TimeoutError:
-            return
-        except StreamEndedEarly:
-            raise RuntimeError(
-                "the source signal restarted during the scan"
-            ) from None
-
-
-__all__ = ["drain_backlog", "follow_source", "next_source_value"]
+__all__ = ["PublishedSignalSource"]

@@ -159,26 +159,33 @@ class CompiledProgram:
     def scan_enabled(self) -> bool:
         return bool(self.scan_points)
 
-    def camera_window_count(self, channel: str) -> int:
+    def camera_window_count(self, channel: str, table: object = None) -> int:
         """How many windows this program opens on one lane.
 
         Asked of the program, so a device twin does not keep its own copy of
         the rising-edge rule -- a copy is a second answer to a question the
         board settles in hardware.
+
+        A program that carries SLOTS has no timing of its own: the scan table
+        supplies it.  Pass the played rows to ask about them; pass one row to
+        ask what a single played cycle opens.
         """
 
         from .schedule import trigger_times  # noqa: PLC0415 -- one direction only
 
-        return int(len(trigger_times(self, str(channel))))
+        return int(len(trigger_times(self, str(channel), table)))
 
-    def camera_window_exposures(self, channel: str) -> tuple[float, ...]:
+    def camera_window_exposures(
+        self, channel: str, table: object = None
+    ) -> tuple[float, ...]:
         """How long each of those windows is open, in seconds."""
 
         from .schedule import trigger_windows  # noqa: PLC0415 -- one direction only
 
         clock = float(self.clock_hz)
         return tuple(
-            (end - start) / clock for start, end in trigger_windows(self, str(channel))
+            (end - start) / clock
+            for start, end in trigger_windows(self, str(channel), table)
         )
 
     @property

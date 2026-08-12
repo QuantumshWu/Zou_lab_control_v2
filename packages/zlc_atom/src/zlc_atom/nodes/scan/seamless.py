@@ -46,7 +46,6 @@ from zlc_runtime import FinalDatasetOutput
 
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter, ScanLiveSlot
 from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
-from .source import drain_backlog, follow_source, next_source_value
 
 
 class SeamlessScanMeasurement:
@@ -56,9 +55,7 @@ class SeamlessScanMeasurement:
         self,
         *,
         sequencer: object,
-        signal_plane: object,
-        signal_name: str,
-        source_generation: object,
+        source: object,
         sequence: PulseSequence,
         plan: ScanPlan,
         ports: tuple[ScanPort, ...],
@@ -70,9 +67,7 @@ class SeamlessScanMeasurement:
         self.instance_id = str(producer).strip() or "seamless_scan"
         self.producer = self.instance_id
         self.sequencer = sequencer
-        self.signal_plane = signal_plane
-        self._signal_name = str(signal_name)
-        self._source_generation = source_generation
+        self.source = source
         self.sequence = sequence
         self.plan = plan
         self.ports = ports
@@ -146,17 +141,23 @@ class SeamlessScanMeasurement:
         )
         return scan_rows_to_wire(validate_scan_table(table, columns), columns)
 
-    def acquire(self, context: object):
+    def acquire(self, context: object, *, on_point: object = None):
         """Play the whole plan from one fire and return the dataset it filled.
 
         The live slot is attached to the caller's generation, so whoever runs
         this loop shows the growing scan while it runs -- and then says for
         itself what the finished dataset MEANS.
+
+        ``on_point`` is how a Task reads a point AS it lands: release-recapture
+        judges each cycle against the calibration the moment the camera hands
+        it over, which is the only place the cycle still exists as one cycle --
+        the finished scan dataset has folded the frames into its point table.
         """
 
         board = self.sequencer.describe()
         rows = self.plan.rows()
         shots = self.shots_per_point
+        cycles = self.repeats * len(rows) * shots
         writer = ScanDatasetWriter(
             rows,
             [(port.label, port.unit) for port in self.ports],
@@ -170,26 +171,25 @@ class SeamlessScanMeasurement:
         # the first point starts from.
         self.sequencer.safe()
         time.sleep(self.settle_seconds)
-        tap = follow_source(
-            self.signal_plane, self._signal_name, self._source_generation
-        )
+        self.source.open(context, cycles=cycles)
         try:
             streamed, columns = self._streamed_sequence(board)
             wire = self._wire_table(rows, columns)
             program = compile_sequence(streamed, board.geometry, board.clock_hz)
             self.sequencer.load(program, source=streamed)
             self.sequencer.write_scan_table(wire, sweeps=self.repeats)
-            drain_backlog(self.signal_plane, tap)
+            self.source.arm(program, wire)
             self.sequencer.fire()
             per_sweep = len(rows) * shots
-            for played in range(self.repeats * per_sweep):
+            for played in range(cycles):
                 self._check_cancelled(context)
                 sweep, rest = divmod(played, per_sweep)
                 row_index, shot = divmod(rest, shots)
-                value = next_source_value(
-                    self.signal_plane, tap, self._signal_name, context
-                )
-                writer.write(value, row=row_index, visit=sweep * shots + shot)
+                value = self.source.next_value(context)
+                visit = sweep * shots + shot
+                writer.write(value, row=row_index, visit=visit)
+                if on_point is not None:
+                    on_point(value, row=row_index, visit=visit)
                 slot.publish({SCAN_OUTPUT.name: writer.live_output()})
                 if (played + 1) % shots == 0:
                     context.report_progress(
@@ -199,7 +199,7 @@ class SeamlessScanMeasurement:
                     )
             self.sequencer.wait_done(None)
         finally:
-            tap.close()
+            self.source.close()
             self.sequencer.safe()
         self._check_cancelled(context)
         return writer.snapshot()
@@ -208,7 +208,7 @@ class SeamlessScanMeasurement:
         """What this run WAS, in the words of the plan that drove it."""
 
         return {
-            "source_signal": self._signal_name,
+            **self.source.describe(),
             "pulse": self.sequence.name,
             "plan": self.plan.to_tree(),
             "scan_shape": self.plan.shape,

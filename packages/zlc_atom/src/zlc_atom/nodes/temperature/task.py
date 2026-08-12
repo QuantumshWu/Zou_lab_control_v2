@@ -2,24 +2,32 @@
 
 WHAT THE EXPERIMENT IS.  The traps are loaded, the atoms are photographed, the
 trap is switched OFF for ``t_off`` and back ON, and they are photographed
-again.  An atom that drifted further than the trap can recapture is gone from
-the second picture.  Sweeping ``t_off`` and watching how fast the atoms stop
-coming back is how a bench measures how hot they are.
+again.  An atom that was fast enough to leave the trap's reach while the light
+was off is gone from the second picture.  Sweeping ``t_off`` and watching how
+fast the atoms stop coming back is how a bench measures how hot they are.
+
+THIS TASK OWNS THE WHOLE CHAIN.  It holds the sequencer and the camera, plays
+the release template with the board advancing ``t_off`` from its own scan
+table, reads the cycles that fired program triggers, judges every frame with
+the calibrated readout, pairs the two probe windows, and publishes survival.
+An operator picks two devices and a calibration and presses Start; being asked
+to first run a camera node and then hand its signal over was asking them to
+wire up a fact this Task already knows.
 
 THE PAIRING IS THIS TASK'S OWN SEMANTICS, AND THAT IS WHY IT LIVES HERE.  The
 two probe windows of ONE fired cycle are a pair: the first says which sites
 were loaded, the second says which of those survived.  ``occupancy`` judges
 one frame at a time and knows nothing about what the frame beside it means --
 a survival special case there would be a temperature experiment hiding inside
-a general classifier.  What temperature borrows is the readout CONTRACT
-(``TrapCalibration.detect``), not a second opinion about frames.
+a general classifier.  So the judging IS ``OccupancyProcessor``, asked cycle
+by cycle; only the pairing is written here.
 
-THE SWEEP IS A SCAN, SO IT IS THE SCAN ENGINE.  ``t_off`` is a period duration
-the board can advance from its own scan table, and the site camera is
-triggered by the same fired program, so the frames arrive in played order with
-no host in the loop: exactly the board-advanced (seamless) engine, run whole
-from ``nodes/scan``.  This Task adds no loop of its own; it says what the
-frames MEAN once they have landed.
+WHAT IT DOES NOT REPORT.  A temperature.  Turning this curve into kelvin needs
+the trap's own reach and depth -- how far an atom may drift and still be
+recaptured -- and nothing on this bench declares them.  A number derived from
+an operator typing a radius into this form would be that radius squared, not a
+measurement, so what is published is the recapture curve and the release time
+at which it has fallen to 1/e: read off the measured points, no model assumed.
 
 WHAT IT PUBLISHES.  Survival keeps the SITE axis -- per site, per release
 time, per repeat -- because a trap that never recaptures is a fact about that
@@ -30,7 +38,7 @@ is FINAL: this Task's results outlive its run.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
 from pathlib import Path
 
 import numpy as np
@@ -41,10 +49,16 @@ from zlc_runtime import DatasetOutputDeclaration, FinalDatasetOutput
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
+from zlc_atom.nodes.calibration.pulse import CAMERA_TRIGGER_PORT
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraCycleSource,
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
+from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.scan import (
     PULSE_PARAM_FAMILY,
     SCAN_OUTPUT,
-    ScanAxis,
     ScanPlan,
     SeamlessScanMeasurement,
     bind_plan,
@@ -58,8 +72,8 @@ from zlc_atom.nodes.scan import (
 T_OFF_PARAMETER = "t_off"
 
 #: One release, two pictures.  The pairing is the whole measurement, so a
-#: source that publishes any other number of frames per cycle is refused
-#: rather than paired by guesswork.
+#: template that opens any other number of probe windows per cycle is refused
+#: when the camera is armed against it, rather than paired by guesswork.
 PROBE_FRAMES = 2
 
 #: Survival per (repeat, release time, site), and the recapture fraction per
@@ -70,13 +84,8 @@ SURVIVAL_RATE_OUTPUT = DatasetOutputDeclaration(
     "survival_rate", "temperature.survival-rate.v1"
 )
 
-#: The saved result: the survival table, the decay it was fitted to, and the
-#: temperature that decay implies.
+#: The saved result: the survival table and the release time it decays over.
 TEMPERATURE_ARTIFACT_CONTRACT = "temperature.release-recapture.v1"
-
-#: 87-Rb, the atom this bench traps: 86.909 180 5 u.
-RB87_MASS_KG = 1.443160648e-25
-BOLTZMANN_J_PER_K = 1.380649e-23
 
 #: How long the pulse stays stopped before the table plays.  Every cycle loads
 #: its own atoms, so this is only what the bench needs to reach the state the
@@ -84,7 +93,7 @@ BOLTZMANN_J_PER_K = 1.380649e-23
 SETTLE_SECONDS = 0.05
 
 
-def _seconds(values: Sequence[float], unit: str) -> np.ndarray:
+def _seconds(values: object, unit: str) -> np.ndarray:
     """Plan values in the port's own time unit, as seconds.
 
     The pulse package owns what a time unit means; nothing here re-spells it.
@@ -100,8 +109,39 @@ def _seconds(values: Sequence[float], unit: str) -> np.ndarray:
     return np.asarray(values, dtype=float) * nanoseconds * 1e-9
 
 
+def _one_over_e_crossing(seconds: np.ndarray, fraction: np.ndarray) -> float | None:
+    """The release time where the recapture fraction has fallen to 1/e.
+
+    Read off the measured curve by straight interpolation between the two
+    points that bracket the crossing.  No decay model: ballistic escape is
+    not an exponential, and fitting one would report a lifetime this
+    experiment does not have.  ``None`` when the sweep never gets there --
+    a run that came back with a curve is still a run.
+    """
+
+    order = np.argsort(seconds)
+    x = np.asarray(seconds, dtype=float)[order]
+    y = np.asarray(fraction, dtype=float)[order]
+    keep = np.isfinite(y)
+    x, y = x[keep], y[keep]
+    if x.size < 2 or not y[0] > 0.0:
+        return None
+    target = y[0] / math.e
+    below = np.flatnonzero(y <= target)
+    if not below.size:
+        return None
+    index = int(below[0])
+    if index == 0:
+        return float(x[0])
+    x0, x1 = float(x[index - 1]), float(x[index])
+    y0, y1 = float(y[index - 1]), float(y[index])
+    if y0 == y1:
+        return x1
+    return x0 + (y0 - target) * (x1 - x0) / (y0 - y1)
+
+
 class TemperatureTask:
-    """Scan the release time, pair the probes, fit the decay, save the result."""
+    """Play the release plan, judge every cycle, publish the survival curve."""
 
     instance_id = "temperature"
 
@@ -109,55 +149,98 @@ class TemperatureTask:
         self,
         *,
         sequencer: object,
+        sequencer_key: str,
+        camera: object,
+        camera_key: str,
         signal_plane: object,
-        signal_name: str,
-        source_generation: object,
         sequence: PulseSequence,
         calibration: TrapCalibration,
         calibration_path: str | Path,
-        t_off_values: Sequence[float],
+        plan: ScanPlan,
         repeats: int,
         model_kind: ReadoutModelKind | None,
-        capture_radius_m: float,
         artifact_directory: str | Path,
     ) -> None:
         if not isinstance(calibration, TrapCalibration):
             raise TypeError("calibration must be TrapCalibration")
         if not isinstance(sequence, PulseSequence):
             raise TypeError("sequence must be PulseSequence")
+        if not isinstance(plan, ScanPlan):
+            raise TypeError("plan must be ScanPlan")
         directory = Path(artifact_directory).expanduser().resolve()
         if not directory.is_dir():
             raise ValueError("artifact_directory must be an existing directory")
-        radius = float(capture_radius_m)
-        if not np.isfinite(radius) or radius <= 0:
-            raise ValueError("capture_radius_m must be positive and finite")
-        plan = ScanPlan(
-            (ScanAxis(PULSE_PARAM_FAMILY + T_OFF_PARAMETER, tuple(t_off_values)),)
-        )
+        release_port = PULSE_PARAM_FAMILY + T_OFF_PARAMETER
+        if len(plan.axes) != 1 or plan.axes[0].port != release_port:
+            played = tuple(axis.port for axis in plan.axes)
+            raise ValueError(
+                "release-recapture sweeps the release time and nothing else; "
+                f"this plan sweeps {played}"
+            )
         # Binding is where the plan meets the pulse: a template that declares
         # no release, or a release time outside what the board can play, is
         # refused here, by name, before anything is armed.
         ports = bind_plan(plan, scan_ports_for(sequence))
+        self._devices = {"camera": str(camera_key), "sequencer": str(sequencer_key)}
         self._calibration = calibration
         self._calibration_path = Path(calibration_path).expanduser().resolve()
         self._model = calibration.select_model(model_kind)
         self._artifact_directory = directory
-        self._capture_radius_m = radius
         self._port = ports[0]
         self._t_off = plan.axes[0].values
+        self._repeats = int(repeats)
+        if self._repeats < 1:
+            raise ValueError("repeats must be at least 1")
+        # The readout exposure is the one the CALIBRATION measured its
+        # thresholds at: judging frames taken at any other exposure against
+        # them is judging by numbers that mean something else.  So the camera
+        # this Task drives is configured from the artifact, and there is no
+        # exposure on its form to disagree with.
+        contract = calibration.frame_contract
+        if contract.exposure_seconds is None:
+            raise ValueError(
+                "this calibration does not record the exposure its thresholds "
+                "were measured at, so a release-recapture run cannot reproduce it"
+            )
+        self._camera = CameraMeasurementNode(
+            camera=camera,  # type: ignore[arg-type]
+            request=CameraMeasurementRequest(
+                camera_key=camera_key,
+                exposure_seconds=float(contract.exposure_seconds),
+                roi_xywh=contract.roi_xywh,
+                repeat=self._repeats * len(self._t_off),
+                frames_per_cycle=PROBE_FRAMES,
+            ),
+            signal_plane=signal_plane,
+            producer=self.instance_id,
+        )
+        # One readout contract for the whole bench: the same classifier the
+        # occupancy node runs, asked once per cycle.  What temperature adds is
+        # what the two frames of a cycle MEAN to each other.
+        self._occupancy = OccupancyProcessor(
+            calibration,
+            calibration_path=self._calibration_path,
+            producer=self.instance_id,
+            model_kind=model_kind,
+        )
         self._scan = SeamlessScanMeasurement(
             sequencer=sequencer,
-            signal_plane=signal_plane,
-            signal_name=signal_name,
-            source_generation=source_generation,
+            source=CameraCycleSource(
+                self._camera, trigger_channel=CAMERA_TRIGGER_PORT
+            ),
             sequence=sequence,
             plan=plan,
             ports=ports,
-            repeats=int(repeats),
+            repeats=self._repeats,
             shots_per_point=1,
             settle_seconds=SETTLE_SECONDS,
             producer=self.instance_id,
         )
+        self._before = np.zeros(
+            (self._repeats, len(self._t_off), calibration.n_sites), dtype=bool
+        )
+        self._after = np.zeros_like(self._before)
+        self._generation = ""
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -166,56 +249,24 @@ class TemperatureTask:
         # view of it.
         return (SCAN_OUTPUT, SURVIVAL_OUTPUT, SURVIVAL_RATE_OUTPUT)
 
-    def _cycles(self, frames: object) -> np.ndarray:
-        """The scan dataset as (repeat, release time, probe, y, x).
+    def _judge(self, value: object, *, row: int, visit: int) -> None:
+        """One landed cycle: which sites held an atom, and which held it still.
 
-        The scan writes one publication per played point, and a publication is
-        one camera CYCLE whose frames are its point rows, so the dataset's
-        points are (release time) x (probe window) in that order.  Anything
-        else is a source that cannot be paired.
+        Asked while the cycle is still a cycle.  Once the scan has written it
+        into the dataset, its two frames are two rows of a point table beside
+        every other release time, and the pair is no longer addressable.
         """
 
-        values = np.asarray(frames.block.values)
-        repeats, points = values.shape[0], values.shape[1]
-        releases = len(self._t_off)
-        per_point, remainder = divmod(points, releases)
-        if remainder or per_point != PROBE_FRAMES:
-            raise ValueError(
-                "release-recapture pairs the two probe windows of one cycle, "
-                f"and this source published {points / releases:g} frames per "
-                "release time"
-            )
-        return values.reshape(repeats, releases, PROBE_FRAMES, *values.shape[2:])
-
-    def _occupancy(self, cycles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Which sites held an atom before the release, and which after.
-
-        One readout contract, asked once per frame: the calibration that
-        measured these sites also owns what counts as occupied.
-        """
-
-        occupied = np.asarray(
-            [
-                [
-                    [
-                        self._calibration.detect(
-                            image, model_kind=self._model.kind
-                        ).occupied
-                        for image in pair
-                    ]
-                    for pair in repeat
-                ]
-                for repeat in cycles
-            ],
-            dtype=bool,
+        result = self._occupancy.process(
+            value.snapshot,
+            generation=self._generation,
+            revision=visit * len(self._t_off) + row + 1,
         )
-        return occupied[:, :, 0, :], occupied[:, :, 1, :]
+        occupied = np.asarray(result.occupied, dtype=bool)[0]
+        self._before[visit, row] = occupied[0]
+        self._after[visit, row] = occupied[1]
 
-    def _survival(
-        self,
-        before: np.ndarray,
-        after: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _survival(self) -> tuple[np.ndarray, np.ndarray]:
         """Survival per site, and the recapture fraction per (repeat, point).
 
         A site that held no atom before the release answers nothing about
@@ -223,6 +274,7 @@ class TemperatureTask:
         measured loss that never happened.
         """
 
+        before, after = self._before, self._after
         survival = np.where(before, after.astype("<f8"), np.nan)
         loaded = np.sum(before, axis=-1)
         rate = np.divide(
@@ -233,70 +285,35 @@ class TemperatureTask:
         )
         return survival, rate
 
-    def _fit(self, before: np.ndarray, after: np.ndarray) -> dict[str, object]:
-        """The decay of the POOLED recapture fraction, and what it implies.
+    def _curve(self) -> dict[str, object]:
+        """The pooled recapture fraction against the release time.
 
         Pooled, not averaged over per-shot fractions: every loaded site is one
         Bernoulli trial, and a shot that loaded three atoms says less than one
         that loaded thirty.
-
-        The lifetime is the 1/e time of that decay.  Turning it into a
-        temperature needs one apparatus fact this Task cannot measure -- how
-        far an atom may drift and still be recaptured -- so the operator
-        declares it, and what is reported is the ballistic escape estimate it
-        implies, named as such in the artifact.
         """
 
-        loaded = np.sum(before, axis=(0, 2), dtype=float)
-        recaptured = np.sum(before & after, axis=(0, 2), dtype=float)
-        empty = tuple(
-            float(value)
-            for value, count in zip(self._t_off, loaded, strict=True)
-            if count <= 0
+        loaded = np.sum(self._before, axis=(0, 2), dtype=float)
+        recaptured = np.sum(self._before & self._after, axis=(0, 2), dtype=float)
+        fraction = np.divide(
+            recaptured,
+            loaded,
+            out=np.full(loaded.shape, np.nan, dtype="<f8"),
+            where=loaded > 0,
         )
-        if empty:
-            raise ValueError(
-                f"no trap was loaded at release times {empty}, so there is "
-                "nothing to recapture there"
-            )
-        fraction = recaptured / loaded
-        dark = tuple(
-            float(value)
-            for value, kept in zip(self._t_off, fraction, strict=True)
-            if kept <= 0
-        )
-        if dark:
-            raise ValueError(
-                f"every atom was lost at release times {dark}, so the decay "
-                "has no logarithm there; measure shorter releases"
-            )
         seconds = _seconds(self._t_off, self._port.unit)
-        slope, intercept = (
-            float(value) for value in np.polyfit(seconds, np.log(fraction), 1)
-        )
-        if slope >= 0.0:
-            raise ValueError(
-                "the recapture fraction does not fall with the release time "
-                f"({tuple(round(float(value), 3) for value in fraction)}), so "
-                "this run has no release-recapture lifetime"
-            )
-        lifetime = -1.0 / slope
-        speed = self._capture_radius_m / lifetime
+        crossing = _one_over_e_crossing(seconds, fraction)
         return {
+            "t_off_seconds": [float(value) for value in seconds],
             "loaded_pairs": [int(value) for value in loaded],
             "recaptured_pairs": [int(value) for value in recaptured],
             "survival_rate": [float(value) for value in fraction],
-            "lifetime_seconds": lifetime,
-            "amplitude": float(np.exp(intercept)),
-            "decay_model": "survival = amplitude * exp(-t_off / lifetime)",
-            "temperature_kelvin": (
-                RB87_MASS_KG * speed * speed / (3.0 * BOLTZMANN_J_PER_K)
+            "release_time_1e_seconds": crossing,
+            "release_time_model": (
+                "read off the measured curve: the release time where the "
+                "recapture fraction has fallen to 1/e of its shortest-release "
+                "value, interpolated between the two points that bracket it"
             ),
-            "temperature_model": (
-                "ballistic escape: an atom leaves the recapture radius in one "
-                "lifetime, so v_rms = radius / lifetime and T = m v_rms^2 / (3 kB)"
-            ),
-            "capture_radius_m": self._capture_radius_m,
             "atom": "Rb-87",
         }
 
@@ -312,33 +329,31 @@ class TemperatureTask:
             unit=self._port.unit or None,
         )
 
-    def _run_record(self, fit: dict[str, object]) -> dict[str, object]:
+    def _run_record(self, curve: dict[str, object]) -> dict[str, object]:
         return {
             "node": self.instance_id,
             "parameters": {
                 "calibration_path": str(self._calibration_path),
                 "model_kind": self._model.kind.value,
-                "capture_radius_m": self._capture_radius_m,
                 "probe_frames": PROBE_FRAMES,
             },
+            "named_devices": dict(self._devices),
             "scan": self._scan.run_record(),
-            "fit": dict(fit),
+            "camera": self._camera.run_record,
+            "curve": dict(curve),
         }
 
     def execute(self, context: object) -> dict[str, object]:
-        frames = self._scan.acquire(context)
+        generation = str(getattr(context.generation, "value", context.generation))
+        self._generation = generation
+        frames = self._scan.acquire(context, on_point=self._judge)
         context.report_progress("Reading survival")
-        cycles = self._cycles(frames)
-        before, after = self._occupancy(cycles)
-        survival, rate = self._survival(before, after)
-        fit = self._fit(before, after)
-        record = self._run_record(fit)
-        generation = str(
-            getattr(context.generation, "value", context.generation)
-        )
+        survival, rate = self._survival()
+        curve = self._curve()
+        record = self._run_record(curve)
         # This Task publishes its results once, at the end; the revision only
         # has to be its own and positive, and the sweep count is that number.
-        revision = self._scan.repeats
+        revision = self._repeats
         point_column = self._point_column()
         outputs = {
             SCAN_OUTPUT.name: FinalDatasetOutput(SCAN_OUTPUT, frames, record),
@@ -386,8 +401,7 @@ class TemperatureTask:
         context.publish_final(outputs)
         return {
             "artifact_path": artifact_path,
-            "lifetime_seconds": fit["lifetime_seconds"],
-            "temperature_kelvin": fit["temperature_kelvin"],
+            "release_time_1e_seconds": curve["release_time_1e_seconds"],
         }
 
 

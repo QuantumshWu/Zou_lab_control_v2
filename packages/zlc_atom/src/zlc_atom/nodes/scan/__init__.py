@@ -37,9 +37,10 @@ from .plan import (
     scan_ports_for,
     scan_ports_for_devices,
 )
-from .source import drain_backlog, follow_source, next_source_value
+from .source import PublishedSignalSource
 
 __all__ = [
+    "PublishedSignalSource",
     "DEVICE_PARAM_FAMILY",
     "PULSE_PARAM_FAMILY",
     "SCAN_OUTPUT",
@@ -52,10 +53,7 @@ __all__ = [
     "ScanPort",
     "SeamlessScanMeasurement",
     "bind_plan",
-    "drain_backlog",
-    "follow_source",
     "load_scan_template",
-    "next_source_value",
     "plan_from_authored",
     "scan_dataset_schema",
     "scan_ports_for",

@@ -32,6 +32,7 @@ from zlc_atom.nodes.scan import (
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     SCAN_PULSE_RESOURCE,
+    PublishedSignalSource,
     SeamlessScanMeasurement,
     bind_plan,
     plan_from_authored,
@@ -128,9 +129,9 @@ def _build(
         )
     return SeamlessScanMeasurement(
         sequencer=sequencer,
-        signal_plane=signal_plane,
-        signal_name=str(source_signal),
-        source_generation=publication.event_ref.generation,
+        source=PublishedSignalSource(
+            signal_plane, str(source_signal), publication.event_ref.generation
+        ),
         sequence=sequence,
         plan=parsed,
         ports=ports,

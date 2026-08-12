@@ -45,9 +45,6 @@ from zlc_atom.nodes.scan import (
     ScanLiveSlot,
     ScanPlan,
     ScanPort,
-    drain_backlog,
-    follow_source,
-    next_source_value,
 )
 
 
@@ -62,9 +59,7 @@ class SteppedScanMeasurement:
         self,
         *,
         sequencer: object,
-        signal_plane: object,
-        signal_name: str,
-        source_generation: object,
+        source: object,
         sequence: PulseSequence,
         plan: ScanPlan,
         ports: tuple[ScanPort, ...],
@@ -78,9 +73,7 @@ class SteppedScanMeasurement:
         self.instance_id = str(producer).strip() or "stepped_scan"
         self.producer = self.instance_id
         self.sequencer = sequencer
-        self.signal_plane = signal_plane
-        self._signal_name = str(signal_name)
-        self._source_generation = source_generation
+        self.source = source
         self.sequence = sequence
         self.plan = plan
         self.ports = ports
@@ -170,9 +163,7 @@ class SteppedScanMeasurement:
         )
         slot = ScanLiveSlot()
         context.attach_live_outputs(slot)
-        tap = follow_source(
-            self.signal_plane, self._signal_name, self._source_generation
-        )
+        self.source.open(context, cycles=self.repeats * len(rows) * shots)
         try:
             # Sweeps are the OUTERMOST loop: every plan point is revisited
             # after the whole plan has played, so the R looks at one point
@@ -181,17 +172,17 @@ class SteppedScanMeasurement:
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
                     self._check_cancelled(context)
-                    self._apply(row, board)
+                    program = self._apply(row, board)
                     # Everything published before the apply is the old world.
-                    drain_backlog(self.signal_plane, tap)
-                    self._collect(context, tap, writer, slot, index, sweep)
+                    self.source.arm(program)
+                    self._collect(context, writer, slot, index, sweep)
                     context.report_progress(
                         "Scanning",
                         current=sweep * len(rows) + index + 1,
                         total=self.repeats * len(rows),
                     )
         finally:
-            tap.close()
+            self.source.close()
             self.sequencer.safe()
         self._check_cancelled(context)
         snapshot = writer.snapshot()
@@ -201,7 +192,7 @@ class SteppedScanMeasurement:
                     SCAN_OUTPUT,
                     snapshot,
                     {
-                        "source_signal": self._signal_name,
+                        **self.source.describe(),
                         "pulse": self.sequence.name,
                         "plan": self.plan.to_tree(),
                         "scan_shape": self.plan.shape,
@@ -215,7 +206,7 @@ class SteppedScanMeasurement:
         )
         return snapshot
 
-    def _apply(self, row: Sequence[float], board: object) -> None:
+    def _apply(self, row: Sequence[float], board: object):
         """Stop the pulse, settle, move the knobs, load this point's program."""
 
         pulse_values, device_moves = self._split_row(row)
@@ -228,15 +219,13 @@ class SteppedScanMeasurement:
         )
         if resolved.target != board.target:
             raise ValueError("pulse target differs from the connected board")
-        self.sequencer.load(
-            compile_sequence(resolved, board.geometry, board.clock_hz),
-            source=resolved,
-        )
+        program = compile_sequence(resolved, board.geometry, board.clock_hz)
+        self.sequencer.load(program, source=resolved)
+        return program
 
     def _collect(
         self,
         context: object,
-        tap: object,
         writer: ScanDatasetWriter,
         slot: ScanLiveSlot,
         index: int,
@@ -250,12 +239,10 @@ class SteppedScanMeasurement:
             # while the source keeps sampling the world at its own pace.
             self.sequencer.fire()
             # The straddler: exposed partly at the old point.  Skip exactly it.
-            next_source_value(
-                self.signal_plane, tap, self._signal_name, context
-            )
+            self.source.next_value(context)
             for shot in range(shots):
                 self._check_cancelled(context)
-                self._capture(context, tap, writer, slot, index, sweep * shots + shot)
+                self._capture(context, writer, slot, index, sweep * shots + shot)
             self.sequencer.wait_done(None)
             return
         for shot in range(shots):
@@ -264,7 +251,7 @@ class SteppedScanMeasurement:
             # pulse-driven, so the board's silence between cycles means the
             # next publication is THIS cycle's -- exact, zero frames lost.
             self.sequencer.fire()
-            self._capture(context, tap, writer, slot, index, sweep * shots + shot)
+            self._capture(context, writer, slot, index, sweep * shots + shot)
             # The frame can land before the program's tail finishes playing;
             # wait the tail out so the next fire meets an idle board.
             self.sequencer.wait_done(None)
@@ -272,15 +259,12 @@ class SteppedScanMeasurement:
     def _capture(
         self,
         context: object,
-        tap: object,
         writer: ScanDatasetWriter,
         slot: ScanLiveSlot,
         index: int,
         visit: int,
     ) -> None:
-        value = next_source_value(
-            self.signal_plane, tap, self._signal_name, context
-        )
+        value = self.source.next_value(context)
         writer.write(value, row=index, visit=visit)
         slot.publish({SCAN_OUTPUT.name: writer.live_output()})
 

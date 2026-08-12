@@ -27,6 +27,7 @@ from zlc_atom.nodes.scan import (
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     SCAN_PULSE_RESOURCE,
+    PublishedSignalSource,
     bind_plan,
     plan_from_authored,
     scan_ports_for,
@@ -140,9 +141,9 @@ def _build(
         )
     return SteppedScanMeasurement(
         sequencer=sequencer,
-        signal_plane=signal_plane,
-        signal_name=str(source_signal),
-        source_generation=publication.event_ref.generation,
+        source=PublishedSignalSource(
+            signal_plane, str(source_signal), publication.event_ref.generation
+        ),
         sequence=sequence,
         plan=parsed,
         ports=ports,

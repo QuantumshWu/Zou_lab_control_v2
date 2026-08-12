@@ -3,15 +3,22 @@ import zou_lab_control_v2
 """The temperature Task, end to end on the virtual bench.
 
 The physics under test IS the product's purpose.  A real calibration measures
-the sites and their thresholds; the temperature Task then plays the release
-template with the board advancing ``t_off`` from its own scan table, pairs the
-two probe windows of every fired cycle, and reports how fast the atoms stop
-coming back.  The virtual world plants a trap-off lifetime, so the fitted
-decay must be that constant -- read from the world's own ground truth, never
+the sites and their thresholds; the temperature Task then takes the camera and
+the sequencer for itself, plays the release template with the board advancing
+``t_off`` from its own scan table, judges every fired cycle with the same
+readout the occupancy node runs, pairs the two probe windows, and reports how
+fast the atoms stop coming back.
+
+The virtual world loses atoms the way a trap does -- the fast ones walk out
+while the light is off -- so the curve the Task measures must be the curve the
+world would predict.  That prediction is read from the world itself, never
 written down here.
 
 What this file guards, beyond "it runs":
 
+* the Task OWNS THE CHAIN: an operator supplies two devices and a calibration,
+  and nothing else -- no camera node to start first, no signal to hand over,
+  no exposure to keep in step by hand;
 * the PAIRING is per site and per shot: survival is 1, 0, or "not a fact",
   never a brightness ratio, and the published rate IS the pooled fraction of
   the loaded sites that came back;
@@ -19,8 +26,8 @@ What this file guards, beyond "it runs":
 * the release times reach the dataset as its point axis, with their unit;
 * the Task's results are FINAL: they are still on the plane after the run is
   terminal and the host is shut down, which is what keeps a panel alive;
-* the saved artifact's fit is the same curve the dataset published, in
-  SECONDS, and it matches the planted lifetime.
+* the saved artifact's curve is the same curve the dataset published, in
+  SECONDS, and the release time it reports is read off that curve.
 """
 
 import json
@@ -29,7 +36,7 @@ import time
 
 import numpy as np
 from zlc_data import SITE
-from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
+from zlc_pulse import sequence_from_tree
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.install import create_installation
@@ -38,20 +45,17 @@ from zlc_atom.nodes import (
     discover_logic_nodes,
     temperature_pulse_template_bytes,
 )
-from zlc_atom.nodes.scan import SCAN_PULSE_CONTRACT
+from zlc_atom.nodes.scan import PULSE_PARAM_FAMILY, SCAN_PULSE_CONTRACT, ScanAxis, ScanPlan
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
 
 #: The release times played, in the template's own unit (ms), and how many
-#: whole sweeps of them.  Four points over one and a half lifetimes, eight
-#: sweeps: enough loaded sites per point that the fitted slope is the physics
-#: and not the counting noise.
-T_OFF_MS = (0.5, 1.0, 2.0, 3.0)
+#: whole sweeps of them.  Microseconds, because that is where a recapture
+#: curve for micro-kelvin atoms in a micron trap actually lives; eight sweeps
+#: over thirty-five sites is enough loaded pairs per point that the measured
+#: fraction is the physics and not the counting noise.
+T_OFF_MS = (0.004, 0.010, 0.016, 0.024)
 REPEATS = 8
-#: The readout exposure the calibration is measured at IS the probe window the
-#: template opens, so the frames the Task judges are the frames its thresholds
-#: were trained on.
-EXPOSURE_SECONDS = 0.005
 
 
 def _wait_terminal(host: object, *, timeout: float) -> None:
@@ -64,16 +68,18 @@ def _wait_terminal(host: object, *, timeout: float) -> None:
     assert observed.terminal, "the host never finished"
 
 
-def test_the_temperature_task_recovers_the_planted_lifetime(tmp_path: Path) -> None:
+def test_the_temperature_task_recovers_the_worlds_recapture_curve(
+    tmp_path: Path,
+) -> None:
     installation = create_installation("virtual")
     plane = SignalDataPlane()
     descriptors = {value.api_name: value for value in discover_logic_nodes()}
     sequencer = installation.device("sequencer")
     camera = installation.device("camera")
-    monitor = None
     host = None
     try:
-        # --- 1. A real calibration: the site map and thresholds the Task reads.
+        # --- 1. A real calibration: the site map and thresholds the Task reads,
+        #        and the exposure it will drive the camera at.
         calibration_node = descriptors["calibration"].instantiate(
             camera=camera,
             camera_key="camera",
@@ -88,49 +94,24 @@ def test_the_temperature_task_recovers_the_planted_lifetime(tmp_path: Path) -> N
         _wait_terminal(calibration_host, timeout=120.0)
         calibration_host.shutdown()
         artifact_path = calibration_node.result.artifact_path
-        calibration = descriptors["temperature"].input_specs[1].codec.resolve(
+        calibration = descriptors["temperature"].input_specs[0].codec.resolve(
             artifact_path
         )
 
-        # --- 2. The site camera as a two-frame-per-cycle monitor: the probe
-        #        pair of one release, published as one cycle.
-        camera_node = descriptors["camera_measurement"].instantiate(
-            camera=camera,
-            camera_key="camera",
-            signal_plane=plane,
-            repeat=0,
-            frames_per_cycle=2,
-            exposure_seconds=EXPOSURE_SECONDS,
-        )
-        monitor = camera_node.monitor()
-        frames_signal = camera_node.signal_key("frames")
-
+        # --- 2. The Task, and nothing else.  Two devices, one calibration, one
+        #        release plan: no camera node was started, no signal was chosen,
+        #        and no exposure was typed anywhere -- the Task takes the one
+        #        the calibration's thresholds were measured at.
         sequence = sequence_from_tree(
             json.loads(temperature_pulse_template_bytes().decode("utf-8"))
         )
-        board = sequencer.describe()
-        seeded = resolve_api_parameters(sequence)
-        sequencer.load(
-            compile_sequence(seeded, board.geometry, board.clock_hz),
-            source=seeded,
-        )
-        sequencer.fire()
-        sequencer.wait_done(5.0)
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            monitor.poll()
-            if plane.freeze().value(frames_signal) is not None:
-                break
-            time.sleep(0.02)
-        assert plane.freeze().value(frames_signal) is not None, (
-            "the temperature template never produced a two-frame cycle"
-        )
-
-        # --- 3. The Task itself.
+        plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "t_off", T_OFF_MS),))
         task = descriptors["temperature"].instantiate(
             sequencer=sequencer,
+            sequencer_key="sequencer",
+            camera=camera,
+            camera_key="camera",
             signal_plane=plane,
-            source_signal=frames_signal,
             calibration=calibration,
             pulse_resource=ResolvedWorkspaceResource(
                 Path("temperature_template.json"),
@@ -138,14 +119,20 @@ def test_the_temperature_task_recovers_the_planted_lifetime(tmp_path: Path) -> N
                 sequence,
             ),
             artifact_directory=tmp_path,
-            t_off=", ".join(str(value) for value in T_OFF_MS),
+            # Authored the way the editor authors it: the plan field is the
+            # JSON text that editor writes back into the draft.
+            plan=json.dumps(plan.to_tree()),
             repeats=REPEATS,
         )
+        assert (
+            task._camera.request.exposure_seconds
+            == calibration.value.frame_contract.exposure_seconds
+        ), "the Task judges frames at the exposure its thresholds were measured at"
+
         host = NodeHost(task, plane)
         host.start()
         deadline = time.monotonic() + 240.0
         while time.monotonic() < deadline and not host.observation.terminal:
-            monitor.poll()
             plane.freeze()
             host.poll()
         observed = host.observation
@@ -199,9 +186,10 @@ def test_the_temperature_task_recovers_the_planted_lifetime(tmp_path: Path) -> N
             per_shot = np.nanmean(survival, axis=2)
         np.testing.assert_allclose(rate, per_shot, rtol=0, atol=1e-12)
 
-        # --- The physics: recapture falls with the release time, at the rate
-        #     the world planted.  Every non-NaN survival entry is one loaded
-        #     site, so the mean over repeats and sites IS the pooled fraction.
+        # --- The physics: the measured curve is the curve THIS WORLD would
+        #     predict for these release times.  The prediction comes from the
+        #     world's own model -- an atom leaves because it is fast enough --
+        #     so this asserts the whole chain, not a formula copied here.
         pooled = np.nanmean(survival, axis=(0, 2))
         assert np.all(np.isfinite(pooled)), (
             f"a release time recaptured nothing: {pooled.tolist()}"
@@ -209,37 +197,43 @@ def test_the_temperature_task_recovers_the_planted_lifetime(tmp_path: Path) -> N
         assert np.all(np.diff(pooled) < 0), (
             f"survival must fall with t_off: {pooled.round(3).tolist()}"
         )
-        lifetime_seconds = float(installation.world.trap_off_lifetime_s)
-        slope = float(
-            np.polyfit(np.asarray(T_OFF_MS) * 1e-3, np.log(pooled), 1)[0]
+        planted = np.asarray(
+            [
+                installation.world.release_survival(value * 1e-3)
+                for value in T_OFF_MS
+            ],
+            dtype=float,
         )
-        planted = -1.0 / lifetime_seconds
-        assert abs(slope - planted) <= 0.35 * abs(planted), (
-            f"measured decay {slope:.1f}/s against a planted {planted:.1f}/s; "
-            f"survival={pooled.round(3).tolist()}"
+        assert np.all(np.abs(pooled - planted) <= 0.12), (
+            f"measured {pooled.round(3).tolist()} against the world's own "
+            f"{planted.round(3).tolist()}"
         )
 
-        # --- The artifact: the same curve, fitted in SECONDS, with the
-        #     temperature that decay implies.
+        # --- The artifact: the same curve, in SECONDS, and a release time read
+        #     off it rather than derived from a number nobody measured.
         result = host.final_result
         saved = Path(result["artifact_path"])
         assert saved.is_file() and saved.parent == tmp_path
         payload = json.loads(saved.read_text(encoding="utf-8"))
         assert payload["t_off"] == {"unit": "ms", "values": list(T_OFF_MS)}
-        fit = payload["run_record"]["fit"]
-        np.testing.assert_allclose(fit["survival_rate"], pooled, rtol=0, atol=1e-12)
-        assert sum(fit["loaded_pairs"]) == judged.size
-        assert abs(fit["lifetime_seconds"] - lifetime_seconds) <= (
-            0.35 * lifetime_seconds
-        ), (
-            f"the saved lifetime {fit['lifetime_seconds']:.2e}s is not the "
-            f"planted {lifetime_seconds:.2e}s"
-        )
-        assert fit["temperature_kelvin"] > 0
+        curve = payload["run_record"]["curve"]
+        np.testing.assert_allclose(curve["survival_rate"], pooled, rtol=0, atol=1e-12)
+        assert sum(curve["loaded_pairs"]) == judged.size
         np.testing.assert_allclose(
-            fit["temperature_kelvin"],
-            result["temperature_kelvin"],
+            curve["t_off_seconds"],
+            np.asarray(T_OFF_MS) * 1e-3,
             rtol=1e-12,
+        )
+        crossing = curve["release_time_1e_seconds"]
+        assert crossing == result["release_time_1e_seconds"]
+        assert crossing is not None, (
+            "this sweep falls past 1/e, so the release time must be readable: "
+            f"{curve['survival_rate']}"
+        )
+        assert min(T_OFF_MS) * 1e-3 <= crossing <= max(T_OFF_MS) * 1e-3
+        assert "temperature_kelvin" not in curve, (
+            "nothing on this bench declares the trap's reach, so a kelvin "
+            "number here would be the operator's own input squared"
         )
 
         # --- A Task's results outlive its run: the panel that watched them is
@@ -248,18 +242,10 @@ def test_the_temperature_task_recovers_the_planted_lifetime(tmp_path: Path) -> N
         host.shutdown()
         host = None
         assert plane.freeze().value(rate_signal) is not None, (
-            "the survival rate was withdrawn when the Task finished, so every "
-            "panel watching it went blank"
+            "a Task's results must outlive the run that produced them"
         )
     finally:
-        if host is not None and not host.observation.terminal:
-            host.cancel("test cleanup")
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline and not host.observation.terminal:
-                host.poll()
         if host is not None:
             host.shutdown()
-        if monitor is not None:
-            monitor.close()
         plane.close()
         installation.close()

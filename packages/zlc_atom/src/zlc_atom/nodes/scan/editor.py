@@ -63,6 +63,7 @@ class _AxisRow(QtWidgets.QWidget):
         remove = FluentButton("×", color=GREY)
         remove.setFixedWidth(32)
         remove.setToolTip("Remove this axis")
+        self.remove_button = remove
         layout.addWidget(self.port_combo, 2)
         layout.addWidget(QtWidgets.QLabel("from"))
         layout.addWidget(self.start_spin, 1)
@@ -143,9 +144,20 @@ class ScanPlanEditor(QtWidgets.QWidget):
     draft_changed = QtCore.pyqtSignal(object)
     managed_fields = ("plan",)
 
-    def __init__(self, parent=None, *, device_ports: bool = True) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        device_ports: bool = True,
+        only_port: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self._device_ports = bool(device_ports)
+        # A node whose measurement IS about one knob -- release-recapture is a
+        # statement about t_off and nothing else -- offers that knob and no
+        # way to add a second.  The row is always there, so the form opens on
+        # something to edit instead of on an empty table.
+        self._only_port = None if only_port is None else str(only_port)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
@@ -154,7 +166,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.add_button = FluentButton("Add axis", color=ACCENT)
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(self.add_button)
+        if self._only_port is None:
+            header.addWidget(self.add_button)
+        else:
+            self.add_button.hide()
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         column.addLayout(self.rows_layout)
@@ -182,6 +197,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         ports = (
             scan_ports_for(sequence) if sequence is not None else ()
         ) + (scan_ports_for_devices(tunables) if self._device_ports else ())
+        if self._only_port is not None:
+            ports = tuple(port for port in ports if port.port == self._only_port)
         values = projection.get("form_values") or {}
         plan_text = str(values.get("plan") or "") if isinstance(values, Mapping) else ""
 
@@ -214,11 +231,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     axes = ()
             for axis in axes:
                 self._attach_row(axis)
+            if self._only_port is not None and not self._rows and self._ports:
+                self._attach_row(None)
         finally:
             self._loading = False
 
     def _attach_row(self, axis: ScanAxis | None) -> None:
         row = _AxisRow(self._ports, axis, self)
+        if self._only_port is not None:
+            row.remove_button.hide()
         row.edited.connect(self._emit_plan)
         row.remove_requested.connect(self._remove_row)
         self._rows.append(row)
@@ -258,16 +279,21 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if plan is None:
             self.summary.setText(
                 "No axes yet.  Each row is one axis, outermost first; "
-                "every point plays the pulse and captures the watched signal."
+                "every point plays the pulse and captures one measurement."
             )
             return
         shape = " × ".join(str(n) for n in plan.shape)
         self.summary.setText(
             f"{len(plan.axes)} axis(es), {shape} = {plan.point_count} points, "
             "outermost first; each point resolves the template, plays it, and "
-            "captures the watched signal."
+            "captures one measurement."
         )
 
 
-def scan_plan_editor_factory(parent=None, *, device_ports: bool = True) -> ScanPlanEditor:
-    return ScanPlanEditor(parent, device_ports=device_ports)
+def scan_plan_editor_factory(
+    parent=None,
+    *,
+    device_ports: bool = True,
+    only_port: str | None = None,
+) -> ScanPlanEditor:
+    return ScanPlanEditor(parent, device_ports=device_ports, only_port=only_port)

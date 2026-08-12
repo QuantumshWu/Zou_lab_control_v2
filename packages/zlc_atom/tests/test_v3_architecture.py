@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 from pathlib import Path
 import time
@@ -23,6 +24,7 @@ from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ArtifactInputSpec,
     DatasetInputSpec,
+    NodeKind,
     calibration_pulse_template_bytes,
     discover_logic_nodes,
 )
@@ -179,18 +181,35 @@ def test_measurement_leaf_has_no_sequencer_dependency_or_operation() -> None:
     assert all("sequencer" not in path.read_text(encoding="utf-8") for path in files)
 
 
+def _descriptor_kind(path: Path) -> object:
+    """The NodeKind a package declares, read from its own descriptor."""
+
+    module = importlib.import_module(
+        f"zlc_atom.nodes.{path.parent.name}.logic_node"
+    )
+    return module.LOGIC_NODE.kind
+
+
 def test_node_cross_imports_have_only_owner_edges() -> None:
-    """A node may reach another PACKAGE only as an owner, or as a library.
+    """Only a TASK may reach into another node; a measurement may not.
 
     ``nodes/scan`` carries no ``logic_node.py``: it is not a node, it is what
     the scan nodes stand on -- the plan, the ports, the dataset, the editor,
     and the board-advanced loop, which moved there the day a second consumer
     appeared.  An edge into it is reuse.
 
-    An edge into another NODE is one node reaching into another's science, and
-    the only kind allowed is consuming what that node SAVED: occupancy and the
-    temperature Task both read a calibration artifact through the codec
-    calibration published it under.  Neither imports its analysis.
+    An edge into another NODE is a node reaching into another's science, and
+    what it means depends on which node reaches.  A MEASUREMENT reaching
+    sideways is duplication waiting to happen, so it may only consume what
+    another node SAVED -- occupancy reads a calibration artifact through the
+    codec calibration published it under, and imports none of its analysis.
+
+    A TASK is the one thing on this bench that owns a whole experiment: the
+    temperature Task holds the camera and the sequencer, drives the camera's
+    own acquisition, judges every cycle with the occupancy processor, and adds
+    only the pairing that is its own.  Those edges are the alternative to
+    three copies of somebody else's science, so they are allowed BY KIND and
+    still listed one by one -- a new one has to be argued for.
     """
 
     nodes_root = ROOT / "src" / "zlc_atom" / "nodes"
@@ -216,10 +235,26 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
             target_owner = module.split(".")[2]
             if target_owner != source_owner and target_owner != "_framework":
                 edges.add((source_owner, target_owner))
-    assert {edge for edge in edges if edge[1] in node_owners} == {
+    node_edges = {edge for edge in edges if edge[1] in node_owners}
+    assert node_edges == {
         ("occupancy", "calibration"),
         ("temperature", "calibration"),
+        ("temperature", "camera_measurement"),
+        ("temperature", "occupancy"),
     }
+    kinds = {
+        path.parent.name: _descriptor_kind(path)
+        for path in nodes_root.rglob("logic_node.py")
+    }
+    sideways = {
+        source
+        for source, target in node_edges
+        if target != "calibration"
+    }
+    assert all(kinds[source] is NodeKind.TASK for source in sideways), (
+        "only a Task may drive another node's engine; a measurement that "
+        f"needs one is asking for a library: {sorted(sideways)}"
+    )
     assert {edge for edge in edges if edge[1] not in node_owners} == {
         ("seamless_scan", "scan"),
         ("stepped_scan", "scan"),

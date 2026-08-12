@@ -1,15 +1,16 @@
 """The temperature Task: release-recapture over the trap-off time.
 
 What the operator authors is the template, the release times to play, how many
-whole sweeps of them to take, which readout model to judge the frames with,
-and the one apparatus fact a recapture curve cannot measure about itself --
-how far an atom may drift and still be recaptured.
+whole sweeps of them to take, and which readout model to judge the frames
+with.  Everything else this measurement needs, it already knows or already
+holds: it takes the camera and the sequencer as its own devices, and the
+exposure and ROI come from the calibration whose thresholds will judge the
+frames -- a third copy on this form would be a number nothing enforces.
 
-There is no exposure here on purpose.  The readout exposure is the one the
-CALIBRATION measured its thresholds at, and it reaches this Task inside the
-artifact; the camera's own exposure belongs to whoever owns the camera, which
-is the monitor node publishing the frames this Task watches.  A third copy on
-this form would be a number nothing enforces.
+The release times are authored with the SAME editor the scan nodes use: from,
+to, points, against the port's own hard limits.  A release plan is a scan
+plan; typing "0.5, 1, 2, 3" into a text box was a second way to say the same
+thing, and it was the way that could not tell you the board refuses 0.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactInputSpec,
     ArtifactOutputSpec,
-    DatasetInputSpec,
     DeviceAccess,
     DeviceRequirement,
     LogicNodeDescriptor,
@@ -37,9 +37,11 @@ from zlc_atom.nodes.calibration import (
     readout_model_kind_from_choice,
 )
 from zlc_atom.nodes.scan import (
+    PULSE_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     SCAN_PULSE_RESOURCE,
+    plan_from_authored,
 )
 
 from .task import (
@@ -48,6 +50,16 @@ from .task import (
     TEMPERATURE_ARTIFACT_CONTRACT,
     T_OFF_PARAMETER,
     TemperatureTask,
+)
+
+
+#: Where a recapture curve lives for micro-kelvin atoms in a micron-sized
+#: trap: a few to a few tens of microseconds, in the template's own unit.
+#: The form opens on this so the first Start measures something, and the
+#: editor's own from/to/points is how it is changed.
+DEFAULT_RELEASE_PLAN = (
+    '{"axes": [{"port": "pulse:param:t_off", "values": '
+    "[0.004, 0.009, 0.014, 0.019, 0.025, 0.03, 0.035, 0.04]}]}"
 )
 
 
@@ -60,14 +72,14 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             "temperature_template.json",
             required=True,
         ),
-        # The values, in the unit the template's own release parameter
+        # The release plan, in the unit the template's own release parameter
         # declares; the plan is bound against that parameter's hard limits,
         # so a release the board cannot play is refused before anything arms.
         AuthoringField(
-            "t_off",
+            "plan",
             "text",
-            "Release times",
-            "0.5, 1, 2, 3",
+            "Release plan",
+            DEFAULT_RELEASE_PLAN,
             required=True,
         ),
         AuthoringField(
@@ -89,44 +101,17 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
                 AuthoringChoice("uniform_psf", "Uniform PSF"),
             ),
         ),
-        # The trap's own reach, which no recapture curve can measure about
-        # itself: it is what turns a 1/e time into a speed, and a speed into
-        # a temperature.
-        AuthoringField(
-            "capture_radius_um",
-            "float",
-            "Recapture radius (um)",
-            1.0,
-            minimum=1e-3,
-        ),
     )
 )
-
-
-def _release_times(payload: object) -> tuple[float, ...]:
-    """The authored release times, as numbers, in the template's unit."""
-
-    if isinstance(payload, (tuple, list)):
-        parts: tuple[object, ...] = tuple(payload)
-    else:
-        parts = tuple(
-            piece
-            for piece in str(payload or "").replace(",", " ").split()
-            if piece
-        )
-    if not parts:
-        raise ValueError(
-            f'the {T_OFF_PARAMETER} release times are empty; they read like '
-            '"0.5, 1, 2, 3"'
-        )
-    return tuple(float(part) for part in parts)
 
 
 def _build(
     *,
     sequencer: object,
+    sequencer_key: str,
+    camera: object,
+    camera_key: str,
     signal_plane: object,
-    source_signal: str,
     calibration: ResolvedArtifact,
     pulse_resource: ResolvedWorkspaceResource,
     artifact_directory: object,
@@ -145,27 +130,32 @@ def _build(
         or not isinstance(calibration.value, TrapCalibration)
     ):
         raise TypeError("calibration must be a resolved calibration artifact")
-    publication = signal_plane.latest_publication(source_signal)
-    if publication is None or not signal_plane.is_generation_live(source_signal):
-        raise ValueError(
-            "the release-recapture Task reads the probe frames off a LIVE "
-            f"signal, and {source_signal!r} is not live on this bench"
-        )
     return TemperatureTask(
         sequencer=sequencer,
+        sequencer_key=sequencer_key,
+        camera=camera,
+        camera_key=camera_key,
         signal_plane=signal_plane,
-        signal_name=str(source_signal),
-        source_generation=publication.event_ref.generation,
         sequence=pulse_resource.value,
         calibration=calibration.value,
         calibration_path=calibration.path,
-        t_off_values=_release_times(authored["t_off"]),
+        plan=plan_from_authored(authored["plan"]),
         repeats=int(authored["repeats"]),
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
-        # Micrometres are what an operator reads off a trap; the Task works in
-        # SI, so the form's unit is converted exactly once, here.
-        capture_radius_m=float(authored["capture_radius_um"]) * 1e-6,
         artifact_directory=artifact_directory,
+    )
+
+
+def _editor_factory(parent=None):
+    from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
+
+    # One axis, and it is the release: this Task pairs the two probe windows
+    # of a cycle, which is a statement about t_off and nothing else.  No
+    # device ports either -- the board advances this plan from its own table.
+    return scan_plan_editor_factory(
+        parent,
+        device_ports=False,
+        only_port=PULSE_PARAM_FAMILY + T_OFF_PARAMETER,
     )
 
 
@@ -174,7 +164,6 @@ LOGIC_NODE = LogicNodeDescriptor(
     NodeKind.TASK,
     TEMPERATURE_SCHEMA,
     input_specs=(
-        DatasetInputSpec("frames", None),
         ArtifactInputSpec(
             "calibration_path",
             "Calibration artifact",
@@ -191,11 +180,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     # curve: the recapture fraction against the release time.  Per-site
     # survival and the frames themselves are what you go looking for once it
     # surprises you.
-    node_previews=(NodePreviewSpec(SURVIVAL_RATE_OUTPUT.name),),
+    node_previews=(NodePreviewSpec(SURVIVAL_RATE_OUTPUT.name, "curve"),),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", TEMPERATURE_ARTIFACT_CONTRACT),
     ),
     device_requirements=(
+        DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
         DeviceRequirement(
             "sequencer.streamer",
             "sequencer",
@@ -203,8 +193,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         ),
     ),
     build=_build,
+    ui_contributions=(_editor_factory,),
     workspace_resources=(SCAN_PULSE_RESOURCE,),
 )
 
 
-__all__ = ["LOGIC_NODE", "TEMPERATURE_SCHEMA"]
+__all__ = ["DEFAULT_RELEASE_PLAN", "LOGIC_NODE", "TEMPERATURE_SCHEMA"]

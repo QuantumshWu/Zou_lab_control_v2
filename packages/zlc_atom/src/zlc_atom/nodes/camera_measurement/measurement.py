@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import numpy as np
 from zlc_data import AxisId, PointColumn, READOUT_EVENT, SPATIAL_X, SPATIAL_Y
@@ -11,6 +11,7 @@ from zlc_runtime import (
     DatasetOutputDeclaration,
     FinalDatasetOutput,
     LiveDatasetOutput,
+    SignalValue,
 )
 from zlc_runtime import SignalPublication
 
@@ -47,6 +48,44 @@ def _frame_point_column(producer: str, frames: int) -> PointColumn:
         READOUT_EVENT,
         PointColumn.NUMERIC,
         tuple(range(int(frames))),
+    )
+
+
+def frames_snapshot(
+    cycles: "Sequence[Sequence[CameraFrameRecord]]",
+    *,
+    producer: str,
+    generation: object,
+    revision: int,
+):
+    """Cycles of frames as one dataset: (cycle) x (frame) x (y, x).
+
+    Every publisher of camera frames -- the finite capture, the monitor slot,
+    and a scan that owns its camera -- means exactly this dataset, so they
+    build it here.  Three copies of the same stacking is how the frame point
+    column drifts between the live view and the saved run.
+    """
+
+    frames = tuple(tuple(cycle) for cycle in cycles)
+    if not frames:
+        raise ValueError("camera publication requires at least one cycle")
+    sizes = {len(cycle) for cycle in frames}
+    if len(sizes) != 1 or not sizes.pop():
+        raise ValueError("every published camera cycle must have the same frames")
+    return snapshot_from_array(
+        np.stack(
+            [
+                np.stack([np.asarray(record.image) for record in cycle], axis=0)
+                for cycle in frames
+            ],
+            axis=0,
+        ),
+        producer=producer,
+        signal=CAMERA_FRAMES_OUTPUT.name,
+        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+        point_columns={READOUT_EVENT: _frame_point_column(producer, len(frames[0]))},
+        generation=str(getattr(generation, "value", generation)),
+        revision=int(revision),
     )
 
 
@@ -167,30 +206,111 @@ class _CameraMonitorSlot:
         return {
             CAMERA_FRAMES_OUTPUT.name: LiveDatasetOutput(
                 CAMERA_FRAMES_OUTPUT,
-                snapshot_from_array(
-                    np.stack(
-                        [np.asarray(record.image) for record in records],
-                        axis=0,
-                    )[None, ...],
+                frames_snapshot(
+                    (records,),
                     producer=self.node.instance_id,
-                    signal=CAMERA_FRAMES_OUTPUT.name,
-                    roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-                    point_columns={
-                        READOUT_EVENT: _frame_point_column(
-                            self.node.instance_id, len(records)
-                        )
-                    },
                     generation=generation,
                     revision=revision,
                 ),
                 coverage,
-                self.node._require_run_record(),
+                self.node.run_record,
             )
         }
 
     def close(self) -> None:
         self.closed = True
         self._change_listener = None
+
+
+class CameraCycleSource:
+    """The point's value is the cycle of frames the fired program triggered.
+
+    The camera is armed once for the whole table -- one buffer, one exact
+    count -- because the board plays the table from one fire and every cycle's
+    triggers are already scheduled.  Reading a cycle at a time is what lets
+    the scan grow on screen while it runs.
+
+    There is no backlog to discard: a triggered camera holds exactly the
+    frames the program asked for, so arming IS the moment the old world ends.
+    """
+
+    def __init__(self, camera_node: object, *, trigger_channel: str) -> None:
+        self.camera_node = camera_node
+        self.trigger_channel = str(trigger_channel)
+        self._generation: object | None = None
+        self._capture = None
+        self._taken = 0
+
+    def open(self, context: object, *, cycles: int) -> None:
+        # The frames belong to the run that opened this source, so they are
+        # stamped with its generation -- not with one this source invented.
+        self._generation = context.generation
+        # The camera was built for a definite acquisition; if the plan plays a
+        # different number of cycles, one of the two is wrong about what this
+        # run is, and an exact capture would deadlock waiting for frames that
+        # were never triggered.
+        request = self.camera_node.request
+        if int(cycles) != request.repeat:
+            raise ValueError(
+                f"the plan plays {int(cycles)} cycles and the camera is armed "
+                f"for {request.repeat}"
+            )
+
+    def arm(self, program: object, table: object = None) -> None:
+        """Check the cycle, then arm for the whole run.
+
+        The cycle the board is about to play must open exactly the windows
+        this capture reads, or an exact read waits forever for a frame no
+        trigger will ever produce.  ``table`` is the first row the board will
+        play: a program that carries scan slots has no timing until the table
+        supplies one, so the count is asked about one played cycle.
+        """
+
+        played = int(
+            program.camera_window_count(
+                self.trigger_channel,
+                None if table is None else table[:1],
+            )
+        )
+        expected = self.camera_node.request.frames_per_cycle
+        if played != expected:
+            raise ValueError(
+                f"the template opens {played} camera windows per cycle and "
+                f"this measurement reads {expected}"
+            )
+        if self._capture is None:
+            self._capture = self.camera_node.prepare(owns_generation=False)
+
+    def next_value(self, context: object) -> SignalValue:
+        if self._capture is None:
+            raise RuntimeError("the camera source was not armed")
+        if context.cancel_requested():
+            raise RuntimeError("the scan was cancelled")
+        records = self._capture.next_cycle()
+        self._taken += 1
+        return SignalValue(
+            CAMERA_FRAMES_OUTPUT.name,
+            frames_snapshot(
+                (records,),
+                producer=self.camera_node.instance_id,
+                generation=self._generation,
+                revision=self._taken,
+            ),
+            MonitorCoverage(written_cells=len(records), total_cells=len(records)),
+            run_record=self.camera_node.run_record,
+        )
+
+    def close(self) -> None:
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            capture.close()
+
+    def describe(self) -> dict[str, object]:
+        request = self.camera_node.request
+        return {
+            "source_camera": request.camera_key,
+            "frames_per_cycle": request.frames_per_cycle,
+        }
 
 
 @dataclass(frozen=True)
@@ -238,16 +358,7 @@ class FiniteCapture:
         cycles: list[tuple[CameraFrameRecord, ...]] = []
         try:
             for _repeat in range(self.repeat):
-                records = tuple(
-                    self.camera.read_frame_records(
-                        self.frames_per_cycle,
-                        timeout=self.timeout,
-                        exact=True,
-                    )
-                )
-                if len(records) != self.frames_per_cycle:
-                    raise RuntimeError("camera returned an incomplete atomic cycle")
-                cycles.append(records)
+                cycles.append(self.next_cycle())
             terminal = self.camera.finish_record_capture()
         except BaseException:
             self.camera.finish_record_capture()
@@ -256,6 +367,27 @@ class FiniteCapture:
         self.closed = True
         self.collected = self.node._publish_finite(tuple(cycles), terminal, publish=publish)
         return self.collected
+
+    def next_cycle(self) -> tuple[CameraFrameRecord, ...]:
+        """The next complete cycle of this capture.
+
+        A scan takes its cycles one at a time -- that is what lets the dataset
+        grow on screen while the board is still playing -- and a finite
+        measurement takes them all before publishing.  Same read.
+        """
+
+        if self.closed:
+            raise RuntimeError("finite capture is closed")
+        records = tuple(
+            self.camera.read_frame_records(
+                self.frames_per_cycle,
+                timeout=self.timeout,
+                exact=True,
+            )
+        )
+        if len(records) != self.frames_per_cycle:
+            raise RuntimeError("camera returned an incomplete atomic cycle")
+        return records
 
     def close(self) -> CameraCaptureTerminalRecord:
         if self.closed:
@@ -453,7 +585,10 @@ class CameraMeasurementNode:
         self._actual_working_point = point
         self._run_record = record
 
-    def _require_run_record(self) -> dict[str, object]:
+    @property
+    def run_record(self) -> dict[str, object]:
+        """What this acquisition IS, frozen when the camera was armed."""
+
         record = self._run_record
         if record is None:
             raise RuntimeError("camera run record was not frozen after arm")
@@ -593,29 +728,13 @@ class CameraMeasurementNode:
         outputs = {
             CAMERA_FRAMES_OUTPUT.name: FinalDatasetOutput(
                 CAMERA_FRAMES_OUTPUT,
-                snapshot_from_array(
-                    np.stack(
-                        [
-                            np.stack(
-                                [np.asarray(frame.image) for frame in cycle],
-                                axis=0,
-                            )
-                            for cycle in cycles
-                        ],
-                        axis=0,
-                    ),
+                frames_snapshot(
+                    cycles,
                     producer=self.instance_id,
-                    signal=CAMERA_FRAMES_OUTPUT.name,
-                    roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-                    point_columns={
-                        READOUT_EVENT: _frame_point_column(
-                            self.instance_id, len(cycles[0])
-                        )
-                    },
                     generation=generation,
                     revision=revision,
                 ),
-                self._require_run_record(),
+                self.run_record,
             )
         }
         published = publish(outputs) if publish is not None else self.signal_plane.publish_final(self, outputs)
@@ -631,6 +750,8 @@ class CameraMeasurementNode:
 
 __all__ = [
     "CAMERA_FRAMES_OUTPUT",
+    "CameraCycleSource",
+    "frames_snapshot",
     "CameraMeasurementNode",
     "CameraMeasurementRequest",
     "FiniteCapture",
