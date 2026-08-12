@@ -2782,7 +2782,10 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         track_w = self._content_width()
         track_h = min(self.height(), scaled_px(30, minimum=24))
         y = int((self.height() - track_h) / 2)
-        track_color = ACCENT if self.isChecked() and self.isEnabled() else (PLACEHOLDER if self.isEnabled() else BG)
+        # The TRACK carries the state, and it says it in this window's own
+        # status colours: green is running, grey is not, which is what the
+        # board's status dots already mean.  Accent blue said only "accent".
+        track_color = GREEN if self.isChecked() and self.isEnabled() else (PLACEHOLDER if self.isEnabled() else BG)
         painter.setBrush(QtGui.QBrush(QtGui.QColor(track_color)))
         painter.setPen(QtCore.Qt.NoPen)
         painter.drawRoundedRect(0, y, track_w, track_h, track_h / 2, track_h / 2)
@@ -2790,8 +2793,12 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         margin = scaled_px(3, minimum=2)
         thumb_d = max(1, track_h - margin * 2)
         offset = self._offset if self._animating else self._checked_offset(track_w, thumb_d, margin)
-        # The same orange as the Pause and Load Fluent buttons.
-        painter.setBrush(QtGui.QBrush(QtGui.QColor(ORANGE)))
+        # The THUMB is the control, so it wears the accent every other control
+        # in this window wears.  Disabled, it drops to the placeholder grey:
+        # the accent on an inert track reads as something still clickable.
+        painter.setBrush(
+            QtGui.QBrush(QtGui.QColor(ACCENT if self.isEnabled() else PLACEHOLDER))
+        )
         painter.drawEllipse(int(offset), y + margin, thumb_d, thumb_d)
 
         if self.text():
