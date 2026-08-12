@@ -147,7 +147,6 @@ class PaletteConfig:
     pulse_name: str
     pulse_grid: str
     pulse_repeat_note: str
-    bad: str
 
     def __post_init__(self) -> None:
         for field in ("series", "pulse_cycle", "bracket_cycle"):
@@ -172,7 +171,6 @@ class PaletteConfig:
             "pulse_name",
             "pulse_grid",
             "pulse_repeat_note",
-            "bad",
         ):
             object.__setattr__(self, field, _color(getattr(self, field), field))
 
@@ -729,7 +727,6 @@ def build_plot_style() -> PlotStyleConfig:
         pulse_name="white",
         pulse_grid="0.88",
         pulse_repeat_note="0.35",
-        bad="#9a9a9a",
     )
     artists = ArtistStyleConfig(
         curve=LineToken(

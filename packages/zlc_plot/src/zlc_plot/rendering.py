@@ -1942,13 +1942,18 @@ class MatplotlibRenderer:
 
         policy = self.style.render
         cmap_name = str(state["colormap"])
-        cmap_cache_key = (cmap_name, self.style.palette.bad)
+        cmap_cache_key = (cmap_name,)
         cached_cmap = self._artists.get("image:cmap_cache")
         if cached_cmap is not None and cached_cmap[0] == cmap_cache_key:
             cmap = cached_cmap[1]
         else:
             cmap = matplotlib.colormaps[cmap_name].copy()
-            cmap.set_bad(self.style.palette.bad)
+            # "No data here" is the surface showing through, not a colour of
+            # its own.  A grey of its own is how one image panel came to say
+            # it twice -- grey inside the extent, white in the square band
+            # beside it -- and how a facet cell with nothing in it looked
+            # like a different fact from an empty image plot.
+            cmap.set_bad("none")
             self._artists["image:cmap_cache"] = (cmap_cache_key, cmap)
         interpolation = str(state["interpolation"])
         mapping_state = (cmap_name, interpolation, color_limits)
@@ -2103,7 +2108,7 @@ class MatplotlibRenderer:
     def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
         """The colormap's 256-entry uint8 RGBA table, cached per colormap."""
 
-        lut_key = (cmap_name, self.style.palette.bad)
+        lut_key = (cmap_name,)
         cached = self._artists.get("image:lut_cache")
         if cached is not None and cached[0] == lut_key:
             return cached[1]
