@@ -2790,8 +2790,8 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         margin = scaled_px(3, minimum=2)
         thumb_d = max(1, track_h - margin * 2)
         offset = self._offset if self._animating else self._checked_offset(track_w, thumb_d, margin)
-        # The light disabled-lineedit grey, softer than a pure white dot.
-        painter.setBrush(QtGui.QBrush(QtGui.QColor(BG)))
+        # The same orange as the Pause and Load Fluent buttons.
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(ORANGE)))
         painter.drawEllipse(int(offset), y + margin, thumb_d, thumb_d)
 
         if self.text():
