@@ -52,7 +52,11 @@ def test_curve_fit_selection_prefers_area_then_x_range_then_viewport_then_all() 
     selected = _projection(spec, selectors=(area, x_range), viewport=viewport).fit_selection(model)
     assert selected.scope is FitScope.SELECTOR
     assert selected.selector_kind is SelectorKind.AREA
-    assert selected.sample_count == 2
+    # x in [1, 4] -- all four of them.  A box restricts the COORDINATE; the two
+    # samples whose observation lies outside its vertical extent are still part
+    # of the curve being fitted, and dropping them for their VALUE is how a box
+    # that did not reach over the peak deleted the peak from the fit.
+    assert selected.sample_count == 4
 
     selected = _projection(spec, selectors=(x_range,), viewport=viewport).fit_selection(model)
     assert selected.selector_kind is SelectorKind.X_RANGE

@@ -940,11 +940,14 @@ class FitProjection:
                 valid &= (x_canonical >= value.low) & (x_canonical <= value.high)
             elif active.kind is SelectorKind.AREA:
                 assert isinstance(value, RectangleRange)
+                # A fit domain restricts the COORDINATE, never the value being
+                # fitted: dropping samples for lying outside the box vertically
+                # is outlier surgery nobody asked for, and it deleted the peak
+                # from every fit whose box did not reach over it.  An image
+                # domain has always meant this (both of its axes ARE
+                # coordinates); a curve's y is the observation.
                 valid &= (x_canonical >= value.x.low) & (
                     x_canonical <= value.x.high
-                )
-                valid &= (y_canonical >= value.y.low) & (
-                    y_canonical <= value.y.high
                 )
             elif active.kind is SelectorKind.THRESHOLD:
                 valid &= y_canonical >= float(value)
@@ -955,9 +958,6 @@ class FitProjection:
             viewport = authority.viewport
             valid &= (x_canonical >= viewport.x.low) & (
                 x_canonical <= viewport.x.high
-            )
-            valid &= (y_canonical >= viewport.y.low) & (
-                y_canonical <= viewport.y.high
             )
             scope = FitScope.VIEWPORT
         else:
@@ -1011,8 +1011,10 @@ class FitProjection:
             elif active.kind is SelectorKind.AREA:
                 value = active.value
                 assert isinstance(value, RectangleRange)
+                # The bin CENTRE is this plot's coordinate; the count is what
+                # is being fitted.  A box that does not reach the tallest bins
+                # used to delete exactly the peak of the distribution.
                 valid &= (canonical >= value.x.low) & (canonical <= value.x.high)
-                valid &= (counts >= value.y.low) & (counts <= value.y.high)
             elif active.kind is SelectorKind.THRESHOLD:
                 valid &= canonical >= float(active.value)
             else:
@@ -1023,7 +1025,6 @@ class FitProjection:
         elif authority.viewport is not None:
             viewport = authority.viewport
             valid &= (canonical >= viewport.x.low) & (canonical <= viewport.x.high)
-            valid &= (counts >= viewport.y.low) & (counts <= viewport.y.high)
             scope = FitScope.VIEWPORT
         else:
             scope = FitScope.ALL
