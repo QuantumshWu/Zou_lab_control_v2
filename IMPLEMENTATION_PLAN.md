@@ -38,6 +38,7 @@
 - Last verified tests：`按边界窄跑：zlc_atom 物理/架构/scan/temperature chain（含 4 分钟真链）、zlc_plot+zlc_workbench 全量 708 passed、console/logic/ui 71 passed。九步真窗口验收在全新 workspace 上零 FAIL，含 8a（Task 跑到一半开面板、coverage 1/6→6/6）、8c（site x t_off 热图）。每个探针都先 import zou_lab_control_v2 并打印被测模块 __file__。`
 - Pending acceptance gates：`test_v3_architecture::test_discovered_descriptors_build_and_exercise_declared_devices 在本机稳定超时（该测试自带 10 s 死线，30-repeat calibration 现需 >10 s）。与本 Goal 无关：用今天物理改动之前的 world.py 复跑同样卡在 10.10 s。未改该测试。`
 - Next action：`none — Goal complete。`
+- Post-goal user decisions (2026-08-12)：`38f8095` 将所有 Fluent switch 的圆形 thumb 改为与 Pause/Load 共用的 ORANGE；`042d365` 保留 Stepped Scan 的 `Settle time` 作为每点 safe/off 状态下的恢复等待，并新增默认 0 s 的 `Free-run delay`：On 后等待、清掉 delay 内已完成值、再丢跨采样边界的一帧，随后才保留 shots。二者不得在后续恢复中混为同一参数。
 
 ## 1. 执行纪律
 
