@@ -332,13 +332,16 @@ def validate_scan_table(
 
     import numpy as np  # noqa: PLC0415 -- numpy is this package's dependency
 
-    width = max(1, len(tuple(columns)))
+    specs = tuple(columns)
+    if not specs:
+        raise ValueError("a scan table requires at least one bound field")
+    width = len(specs)
     array = np.atleast_2d(np.asarray(rows))
     if array.ndim != 2:
         raise ValueError("a scan table is two-dimensional: one row per point")
     if array.shape[1] != width:
         raise ValueError(
-            f"scan table has {array.shape[1]} column(s) but {len(tuple(columns))} "
+            f"scan table has {array.shape[1]} column(s) but {len(specs)} "
             "field(s) are bound"
         )
     if not array.shape[0]:
@@ -351,7 +354,7 @@ def validate_scan_table(
     # wherever it is written -- and a duration column keeps its fraction: 2.5 us
     # is a legal sweep point, and rounding every column to an integer was the
     # wire's rule applied one layer too early.
-    for index, spec in enumerate(tuple(columns)):
+    for index, spec in enumerate(specs):
         column = values[:, index]
         if (column < spec.limit_lo).any() or (column > spec.limit_hi).any():
             raise ValueError(
@@ -361,7 +364,7 @@ def validate_scan_table(
             )
     return tuple(
         tuple(int(round(v)) if spec.is_dac else float(v)
-              for v, spec in zip(row, tuple(columns), strict=True))
+              for v, spec in zip(row, specs, strict=True))
         for row in values
     )
 

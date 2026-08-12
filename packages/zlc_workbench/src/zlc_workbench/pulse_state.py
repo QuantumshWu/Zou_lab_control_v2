@@ -92,9 +92,7 @@ def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     if not isinstance(encoded, Mapping):
         raise TypeError("pulse editor state must be an object")
     raw = dict(encoded)
-    if "scan_use_loaded" in raw:
-        raw.pop("scan_use_loaded")
-        raw.setdefault("scan_source_dirty", not bool(raw.get("scan_source", "")))
+    legacy_use_loaded = raw.pop("scan_use_loaded", None)
     unknown = tuple(key for key in raw if key not in _EDITOR_FIELDS)
     if unknown:
         raise ValueError(f"unknown pulse editor field(s): {', '.join(map(str, unknown))}")
@@ -115,18 +113,34 @@ def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     for row in rows:
         if isinstance(row, (str, bytes, Mapping)) or not isinstance(row, Sequence):
             raise TypeError("each editor.scan_rows row must be a list")
+    legacy_api_columns = False
     if "api_parameters" not in tree:
         old_slots = tuple(tree.get("slots", ()))
+        legacy_api_columns = any(
+            str(slot["slot_id"]).startswith("api_") for slot in old_slots
+        )
         scan_indices = tuple(
             index
             for index, slot in enumerate(old_slots)
             if not str(slot["slot_id"]).startswith("api_")
         )
-        rows = tuple(
-            tuple(row[index] for index in scan_indices)
-            for row in rows
+        rows = (
+            tuple(
+                tuple(row[index] for index in scan_indices)
+                for row in rows
+            )
+            if scan_indices
+            else ()
         )
-    dirty = raw.get("scan_source_dirty", False)
+    dirty = raw.get(
+        "scan_source_dirty",
+        bool(source)
+        and (
+            legacy_api_columns
+            or legacy_use_loaded is True
+            or not bool(rows)
+        ),
+    )
     if not isinstance(dirty, bool):
         raise TypeError("editor.scan_source_dirty must be a boolean")
     repeats = raw.get("scan_repeats", 0)
