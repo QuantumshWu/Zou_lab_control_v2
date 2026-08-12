@@ -1299,7 +1299,13 @@ class FitProjection:
         result: FitResult,
         selection: FitSelection,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return the full painted one-dimensional domain in solver/display units."""
+        """Return the painted one-dimensional domain in solver/display units.
+
+        The curve is drawn where it was solved.  Outside that window it is not
+        a claim about anything, and for a decay -- whose origin is the window
+        start -- the extrapolation runs away from the data within a few
+        samples.
+        """
 
         payload = self._focused_payload(selection.facet_index)
         if self._is_histogram_plot() and hasattr(payload, "centers"):
@@ -1309,7 +1315,11 @@ class FitProjection:
                 centers,
                 result.model.coordinate_relations[0],
             )
-            return canonical, np.asarray(centers.display, dtype=float).reshape(-1)
+            return self._clip_to_fitted_domain(
+                canonical,
+                np.asarray(centers.display, dtype=float).reshape(-1),
+                selection,
+            )
 
         series = tuple(getattr(payload, "series", ()))
         if not series:
@@ -1320,7 +1330,28 @@ class FitProjection:
             x,
             result.model.coordinate_relations[0],
         )
-        return canonical, np.asarray(x.display, dtype=float).reshape(-1)
+        return self._clip_to_fitted_domain(
+            canonical,
+            np.asarray(x.display, dtype=float).reshape(-1),
+            selection,
+        )
+
+    @staticmethod
+    def _clip_to_fitted_domain(
+        canonical: np.ndarray,
+        display: np.ndarray,
+        selection: FitSelection,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        fitted = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
+        fitted = fitted[np.isfinite(fitted)]
+        if fitted.size == 0:
+            return canonical, display
+        inside = (canonical >= float(np.min(fitted))) & (
+            canonical <= float(np.max(fitted))
+        )
+        if not bool(np.any(inside)):
+            return canonical, display
+        return canonical[inside], display[inside]
 
     def _fit_solver_coordinate_to_display(
         self,

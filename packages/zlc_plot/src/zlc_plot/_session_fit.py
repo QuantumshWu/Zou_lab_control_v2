@@ -917,7 +917,9 @@ class FitSessionMixin:
             )
         if not isinstance(result, FitResult):
             raise TypeError("FitEngine.fit must return FitResult")
-        if result.model != model:
+        # The engine may bind the model's origin to the window it was handed;
+        # that copy is still this model, so identity is the model id.
+        if result.model.model_id != model.model_id:
             raise RuntimeError("FitEngine returned a result for another model")
         if result.source_revision != selection.data_revision:
             raise RuntimeError("FitEngine returned a result for another data revision")

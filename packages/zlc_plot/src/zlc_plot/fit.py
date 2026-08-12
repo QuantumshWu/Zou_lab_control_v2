@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import math
 from numbers import Real
@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 
 ArrayTuple = tuple[np.ndarray, ...]
+
+# Models whose x origin is the start of the window they are fitted over.
+_DOMAIN_ANCHORED = "domain_anchored"
 Evaluator = Callable[..., np.ndarray]
 Initializer = Callable[[ArrayTuple, np.ndarray], Sequence[float]]
 CandidateInitializer = Callable[
@@ -351,6 +354,71 @@ class FitModelSpec:
             return self.parameter_names.index(parameter_name)
         except ValueError as error:
             raise ValueError(f"unknown fit parameter: {name!r}") from error
+
+    def anchored_at(self, origin: float) -> "FitModelSpec":
+        """Return this model with its x origin moved to ``origin``.
+
+        A decay is written from an origin: ``A`` is the amplitude *at x=0*.
+        Fitted over a window that opens at shot 1200 the very same curve needs
+        ``A*exp(1200/tau)`` -- a number no solver can carry and no operator can
+        read.  The origin belongs to the window being fitted, not to the world,
+        so it is bound here and travels with the result: overlay, components
+        and jacobian all evaluate through this spec and see the same anchor.
+        """
+
+        origin = float(origin)
+        if self.independent_arity != 1:
+            raise ValueError("only single-axis fit models can be anchored")
+        if not math.isfinite(origin):
+            raise ValueError("fit anchor must be finite")
+        if origin == 0.0:
+            return self
+
+        def relative(coordinates: ArrayTuple) -> ArrayTuple:
+            first, *rest = coordinates
+            return (np.asarray(first, dtype=np.float64) - origin, *rest)
+
+        def anchor(evaluate: Evaluator) -> Evaluator:
+            def anchored(x, *values):
+                return evaluate(np.asarray(x, dtype=np.float64) - origin, *values)
+
+            return anchored
+
+        presentation = self.presentation
+        if presentation.components:
+            presentation = replace(
+                presentation,
+                components=tuple(
+                    replace(component, evaluator=anchor(component.evaluator))
+                    for component in presentation.components
+                ),
+            )
+        initializer = self.initializer
+        candidate = self.candidate_initializer
+        limits = self.bounds_initializer
+        return replace(
+            self,
+            evaluator=anchor(self.evaluator),
+            jacobian=None if self.jacobian is None else anchor(self.jacobian),
+            initializer=lambda coordinates, observed: initializer(
+                relative(coordinates), observed
+            ),
+            candidate_initializer=(
+                None
+                if candidate is None
+                else lambda coordinates, observed: candidate(
+                    relative(coordinates), observed
+                )
+            ),
+            bounds_initializer=(
+                None
+                if limits is None
+                else lambda coordinates, observed: limits(
+                    relative(coordinates), observed
+                )
+            ),
+            presentation=presentation,
+        )
 
     def evaluate(self, coordinates: ArrayTuple, values: Sequence[float]) -> np.ndarray:
         coordinates = _coordinate_arrays(coordinates, self.independent_arity)
@@ -1180,7 +1248,10 @@ class FacetFitBatchResult:
             if result is not None:
                 if not isinstance(result, FitResult):
                     raise TypeError("facet fit results must contain FitResult or None")
-                if result.model != self.model or result.source_revision != revision:
+                if (
+                    result.model.model_id != self.model.model_id
+                    or result.source_revision != revision
+                ):
                     raise ValueError("facet fit result model/revision mismatch")
                 if error is not None:
                     raise ValueError(
@@ -1416,6 +1487,8 @@ class FitEngine:
             indices = indices[finite]
         if values.size <= len(spec.parameters):
             raise ValueError("fit requires more finite observations than parameters")
+        if _DOMAIN_ANCHORED in spec.capabilities:
+            spec = spec.anchored_at(float(np.min(coords[0])))
         default_bounds = (
             spec.bounds_initializer(coords, values)
             if spec.bounds_initializer is not None
@@ -2177,14 +2250,8 @@ def _init_damped_sine(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     frequency = float(frequencies[1 + np.argmax(spectrum[1:])]) if spectrum.size > 1 else 1 / _span(x)
     frequency = max(frequency, np.finfo(float).eps)
     decay_time = _span(x)
-    origin = float(np.min(x))
-    exponent = origin / decay_time
-    if abs(exponent) < 700.0:
-        amplitude *= math.exp(exponent)
-    phase = float(
-        (-2.0 * np.pi * frequency * origin + np.pi) % (2.0 * np.pi) - np.pi
-    )
-    return amplitude, offset, frequency, decay_time, phase
+    # Anchored at the window start: the phase is measured from there.
+    return amplitude, offset, frequency, decay_time, 0.0
 
 
 def _damped_sine_candidates(
@@ -2222,13 +2289,9 @@ def _init_exponential(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     x = coords[0]
     offset = float(np.median(y[np.argsort(x)[-max(1, y.size // 10) :]]))
     decay_time = _span(x) / 3
-    observed_amplitude = float(y[np.argmin(x)] - offset)
-    exponent = float(np.min(x)) / decay_time
-    amplitude = (
-        observed_amplitude * math.exp(exponent)
-        if abs(exponent) < 700.0
-        else observed_amplitude
-    )
+    # The model is anchored at the start of this window, so the amplitude is
+    # the height there -- no extrapolation back to a distant origin.
+    amplitude = float(y[np.argmin(x)] - offset)
     return amplitude or float(np.ptp(y) or 1.0), offset, decay_time
 
 
@@ -2575,10 +2638,13 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _damped_sine,
             _init_damped_sine,
             (FitTarget.SERIES,),
-            formula=r"$f(t)=A\sin(2\pi f t+\varphi)e^{-t/\tau}+B$",
+            formula=(
+                r"$f(t)=A\sin(2\pi f (t-t_0)+\varphi)e^{-(t-t_0)/\tau}+B$"
+            ),
             jacobian=_damped_sine_jacobian,
             candidate_initializer=_damped_sine_candidates,
             bounds_initializer=_damped_sine_bounds,
+            capabilities=frozenset({_DOMAIN_ANCHORED}),
         ),
         FitModelSpec(
             "exponential_decay",
@@ -2597,10 +2663,11 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _exponential_decay,
             _init_exponential,
             (FitTarget.SERIES,),
-            formula=r"$f(t)=Ae^{-t/\tau}+B$",
+            formula=r"$f(t)=Ae^{-(t-t_0)/\tau}+B$",
             jacobian=_exponential_decay_jacobian,
             candidate_initializer=_exponential_candidates,
             bounds_initializer=_exponential_bounds,
+            capabilities=frozenset({_DOMAIN_ANCHORED}),
         ),
         FitModelSpec(
             "anisotropic_gaussian_center",
