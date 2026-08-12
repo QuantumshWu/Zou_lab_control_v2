@@ -163,6 +163,16 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         )
         for period in tree["periods"]
     )
+    slot_trees = tuple(tree.get("slots", ()))
+    legacy_api_trees = (
+        ()
+        if "api_parameters" in tree
+        else tuple(
+            slot
+            for slot in slot_trees
+            if str(slot["slot_id"]).startswith("api_")
+        )
+    )
     slots = tuple(
         PulseSlot(
             kind=str(slot["kind"]),
@@ -174,7 +184,8 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             unit=str(slot["unit"]),
             slot_id=str(slot["slot_id"]),
         )
-        for slot in tree["slots"]
+        for slot in slot_trees
+        if slot not in legacy_api_trees
     )
     api_parameters = tuple(
         PulseApiParameter(
@@ -186,7 +197,18 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             ),
             unit=str(parameter["unit"]),
         )
-        for parameter in tree["api_parameters"]
+        for parameter in tree.get("api_parameters", ())
+    ) + tuple(
+        PulseApiParameter(
+            parameter_id=str(slot["slot_id"]),
+            field_ref=PulseFieldRef(
+                kind=str(slot["field_ref"]["kind"]),
+                period_id=slot["field_ref"].get("period_id"),
+                port=slot["field_ref"].get("port"),
+            ),
+            unit=str(slot["unit"]),
+        )
+        for slot in legacy_api_trees
     )
     delays = tuple(
         OutputDelay(str(delay["port"]), delay["value"], str(delay["unit"]))

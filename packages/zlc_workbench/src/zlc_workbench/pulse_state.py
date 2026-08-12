@@ -88,9 +88,13 @@ def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     """Decode the pulse and its sole ``editor`` section as one candidate."""
 
     sequence = sequence_from_tree(tree)
-    raw = tree["editor"] if "editor" in tree else {}
-    if not isinstance(raw, Mapping):
+    encoded = tree["editor"] if "editor" in tree else {}
+    if not isinstance(encoded, Mapping):
         raise TypeError("pulse editor state must be an object")
+    raw = dict(encoded)
+    if "scan_use_loaded" in raw:
+        raw.pop("scan_use_loaded")
+        raw.setdefault("scan_source_dirty", not bool(raw.get("scan_source", "")))
     unknown = tuple(key for key in raw if key not in _EDITOR_FIELDS)
     if unknown:
         raise ValueError(f"unknown pulse editor field(s): {', '.join(map(str, unknown))}")
