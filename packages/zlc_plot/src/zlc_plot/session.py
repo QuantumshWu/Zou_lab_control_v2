@@ -2252,8 +2252,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             cleared_viewport = self._viewport is not None
             self._viewport = None
             if cleared_viewport:
+                # Closing a cell is an interaction, not a request to forget the
+                # answer: the accepted overlay lags until a newer data revision
+                # or an explicit clear, exactly as _invalidate_fit_context says.
                 self._invalidate_fit_context()
-                self._clear_fit_presentation()
             self._facet_focus_index = None
             self._render_current(
                 RenderEffect.BASE_GEOMETRY
@@ -2276,8 +2278,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._cancel_gesture()
             self._focused_facet_index = index
             self._viewport = None
+            # Opening another cell is looking at the same measurement more
+            # closely.  The accepted result of a facet fit is a per-cell batch
+            # over ALL cells (a live fit on a grid is forced to all_facets), so
+            # it does not even depend on which cell is open -- deleting it here
+            # left the operator with no fit, nothing to re-solve it (an armed
+            # live fit only resolves on a NEW data revision), and a console
+            # that refuses to re-apply an identical fit record, which is why
+            # recovery needed a trip through "no model" first.
             self._invalidate_fit_context()
-            self._clear_fit_presentation()
         return changed
 
     def _clamp_facet_state(self, cell_count: int) -> None:
