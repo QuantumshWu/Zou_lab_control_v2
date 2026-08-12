@@ -112,6 +112,18 @@ def _same_panel_selection(left: object, right: object) -> bool:
     return _signature(left) == _signature(right)
 
 
+def _run_of(publication: object) -> object | None:
+    """Which RUN a publication belongs to.
+
+    The generation IS the run: everything published under it came out of one
+    execution of the node.  A publication carrying none answers for itself,
+    so two objects are two moments either way.
+    """
+
+    generation = getattr(getattr(publication, "event_ref", None), "generation", None)
+    return publication if generation is None else generation
+
+
 @dataclass
 class PanelBinding:
     """One runtime binding around the panel's single authored state."""
@@ -123,7 +135,6 @@ class PanelBinding:
     #: Edit deliberately keeps one frozen data revision until Refresh.  It is
     #: not panel configuration and therefore does not live in ``PanelState``.
     frozen_data: PanelFrozenData | None = None
-    frozen_stale: bool = False
     #: Panel Edit owns a second, frozen plotting surface.  It is deliberately
     #: not the live monitor host and therefore has no PlotPanelPort.
     editor_host: Any = None
@@ -165,6 +176,37 @@ class PanelBinding:
     parameter_surface: Mapping[str, object] = field(default_factory=dict)
     configuration: Any = None
     editor_configuration: Any = None
+
+    @property
+    def frozen_stale(self) -> bool:
+        """Whether Edit's frozen picture still describes what the bench holds.
+
+        A comparison between two moments this binding already holds: what
+        Edit froze, and what the card is showing.  Another signal, or the
+        same signal from a later RUN, means the frozen fit was solved against
+        data the bench no longer has.
+
+        As a stored boolean it needed a writer everywhere either moment could
+        change and a rollback in the one place that could fail -- and it was
+        still missed at the one that mattered, which is how the Edit tab sat
+        on the previous run's picture with nothing saying so.  Derived, it
+        cannot be forgotten.
+        """
+
+        frozen = self.frozen_data
+        if frozen is None:
+            return False
+        if frozen.signal != self.state.signal:
+            return True
+        # ``display_publication`` is what this card is showing: the publication
+        # its host was built from, and thereafter every one presented on it.
+        # Asking the port instead reads one beat behind -- at the moment a new
+        # run replaces the host, the port still answers with the old run and
+        # the stale mark would arrive a beat late, which is the whole defect.
+        shown = self.display_publication
+        if shown is None:
+            return False
+        return _run_of(frozen.publication) != _run_of(shown)
 
     @property
     def signal(self) -> str:
@@ -1023,15 +1065,9 @@ class ConsolePresenter:
         binding.initial_presented = False
         self._match_host_to_panel(binding, host, present=True)
         binding.display_publication = publication
-        # A new generation of the same signal is a different run.  The Edit
-        # tab's frozen picture belongs to the run that just ended -- its fit
-        # is solved against data the bench no longer holds -- so it says so,
-        # the way it already does when the signal itself changes.  Silence
-        # here is what made the two views disagree with no way to tell which
-        # one was current, and Refresh the only cure.
-        binding.frozen_stale = True
-        # Said, not just recorded: the Edit tab's stale mark, its Save gate and
-        # its selection routing all read this through the projection.
+        # This host shows a new run, so Edit's frozen picture is now of the run
+        # that just ended -- said out loud, because the Edit tab's stale mark,
+        # its Save gate and its selection routing all read the projection.
         self._publish_panel_state(binding)
         self._present_mounted_front(binding)
         if old_host is not None:
@@ -1363,7 +1399,6 @@ class ConsolePresenter:
             binding.state = candidate
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.frozen_data = None
-            binding.frozen_stale = False
             binding.display_publication = None
             self._publish_panel_state(binding)
             self._refresh_console_projection()
@@ -1475,7 +1510,6 @@ class ConsolePresenter:
                     state=candidate,
                     front=front,
                 )
-                binding.frozen_stale = False
             elif candidate.signal == current.signal:
                 frozen = binding.frozen_data
                 frozen_input = frozen.snapshot
@@ -1501,8 +1535,6 @@ class ConsolePresenter:
                         state=candidate,
                     ),
                 )
-            else:
-                binding.frozen_stale = True
             binding.reported_error = None
             self._present_mounted_front(binding)
             if (
@@ -2154,17 +2186,14 @@ class ConsolePresenter:
             front=front,
         )
         previous = binding.frozen_data
-        previous_stale = binding.frozen_stale
         if (
             previous is not None
             and previous.signal == frozen.signal
             and previous.publication is publication
         ):
-            binding.frozen_stale = False
             self.refresh_panel_editor(panel_id)
             return True
         binding.frozen_data = frozen
-        binding.frozen_stale = False
         if binding.editor_host is not None:
             try:
                 previous_ref = getattr(
@@ -2195,7 +2224,6 @@ class ConsolePresenter:
                     self._replace_panel_editor_host(binding)
             except Exception as error:
                 binding.frozen_data = previous
-                binding.frozen_stale = previous_stale
                 self._report(
                     f"cannot refresh {binding.state.title} plot editor: "
                     f"{_error_text(error)}",
