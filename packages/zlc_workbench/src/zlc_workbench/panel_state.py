@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from zlc_plot import PlotKind, describe_semantics, updated_spec
+from zlc_plot import PlotKind, describe_semantics
+from zlc_plot.semantics import composed_spec
 
 
 __all__ = [
@@ -39,13 +40,26 @@ def _document_value(value: Any) -> Any:
 
 
 def restore_semantic_choice(description: object, name: str, saved: object) -> object:
-    """Resolve one layout value through the plot-owned semantic choices."""
+    """Resolve one layout value through the plot-owned semantic choices.
+
+    A field's OFFERED choices come first -- they are this spec's vocabulary --
+    and the whole axis vocabulary comes second.  A record is not a dropdown:
+    it re-states a configuration that was legal when it was saved, and a
+    field can legitimately not offer an axis right now that the finished
+    configuration puts there (a grid whose facet and cell x trade places
+    offers neither move on its own).  Resolving only against the offered
+    subset handed the raw document string on to composition instead.
+    """
 
     field_for = getattr(description, "field", None)
     if not callable(field_for):
         return saved
     field = field_for(str(name))
-    for candidate in tuple(getattr(field, "choice_values", ())):
+    vocabulary = (
+        *tuple(getattr(field, "choice_values", ())),
+        *tuple(getattr(description, "axis_choices", ())),
+    )
+    for candidate in vocabulary:
         if candidate == saved or _document_value(candidate) == saved:
             return candidate
     return saved
@@ -80,13 +94,29 @@ def project_panel_state(
         raise TypeError("state must be PanelState")
     candidate = spec
     semantic: dict[str, Any] = {}
-    for name, saved in state.semantic.items():
+    saved_values = dict(state.semantic)
+    # The kind comes first and alone: it decides which vocabulary the rest of
+    # the record is even spoken in.
+    if "kind" in saved_values:
         description = describe_semantics(schema, candidate)
-        if not description.declares(str(name)):
-            continue
-        value = restore_semantic_choice(description, str(name), saved)
-        candidate = updated_spec(schema, candidate, str(name), value)
-        semantic[str(name)] = value
+        saved_kind = saved_values.pop("kind")
+        if description.declares("kind"):
+            value = restore_semantic_choice(description, "kind", saved_kind)
+            candidate = composed_spec(schema, candidate, {"kind": value})
+            semantic["kind"] = value
+    # Everything else is ONE edit.  Applied one field at a time, a record can
+    # describe a plot that no order of gestures can reach -- a grid whose
+    # facet and cell x trade places collides with itself either way round --
+    # and the panel silently came back as something else.
+    description = describe_semantics(schema, candidate)
+    wanted = {
+        str(name): restore_semantic_choice(description, str(name), saved)
+        for name, saved in saved_values.items()
+        if description.declares(str(name))
+    }
+    if wanted:
+        candidate = composed_spec(schema, candidate, wanted)
+        semantic.update(wanted)
     parameters = parameter_schema_for(
         candidate, style=DEFAULTS.style
     ).declared_subset(dict(state.display))

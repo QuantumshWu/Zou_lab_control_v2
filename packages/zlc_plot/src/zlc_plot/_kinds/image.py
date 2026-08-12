@@ -72,12 +72,36 @@ def default_spec(schema: Any) -> ImagePlot | None:
     # every unassigned axis has: a single-axis scan of frames averages its
     # scan points here, and shows them apart as a facet grid instead.
     pair = image_axes(schema)
-    if pair is None:
+    if pair is not None:
+        x_axis, y_axis = pair
+        return ImagePlot(
+            AxisRef.data(str(x_axis.axis_id)),
+            AxisRef.data(str(y_axis.axis_id)),
+            reduction=Reduction.MEAN,
+        )
+    # One coordinate from the point table and one dense data axis are still
+    # two coordinates: a scan of a per-site quantity IS a map of site against
+    # what was scanned, and the view has always been able to draw that pair.
+    # Refusing to offer it left an operator with thirty-five overlaid curves
+    # and no legend -- no way to see WHICH trap stopped coming back.
+    dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
+    if len(dense) != 1:
         return None
-    x_axis, y_axis = pair
+    if len(dimensions) == 1:
+        point = AxisRef.point_dimension(dimensions[0])
+    elif (
+        not dimensions
+        and schema.point_table.row_count > 1
+        and len(schema.point_table.columns) == 1
+    ):
+        point = AxisRef.point(str(schema.point_table.columns[0].coordinate_id))
+    else:
+        return None
+    # The scanned knob runs along x, the way it does on the curve of the same
+    # data; the sites stack up the side.
     return ImagePlot(
-        AxisRef.data(str(x_axis.axis_id)),
-        AxisRef.data(str(y_axis.axis_id)),
+        point,
+        AxisRef.data(str(dense[0].axis_id)),
         reduction=Reduction.MEAN,
     )
 

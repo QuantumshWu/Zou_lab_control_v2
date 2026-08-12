@@ -119,7 +119,12 @@ from .specs import (
     semantic_spec,
 )
 from .state import DisplayState, DisplayStateStore
-from .semantics import SemanticDescription, describe_semantics, updated_spec
+from .semantics import (
+    SemanticDescription,
+    composed_spec,
+    describe_semantics,
+    updated_spec,
+)
 from .session_policy import replace_spec_initial_state
 
 
@@ -1453,14 +1458,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._assert_open()
             data = self._projection.data
             schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
-            candidate_spec = self._spec
-            for name, value in semantic_values.items():
-                candidate_spec = updated_spec(
-                    schema,
-                    candidate_spec,
-                    str(name),
-                    value,
-                )
+            # One bag, one composition: a configuration is a description of
+            # the finished plot, not a sequence of gestures to replay.
+            candidate_spec = composed_spec(
+                schema,
+                self._spec,
+                {str(name): value for name, value in semantic_values.items()},
+            )
             spec_changed = candidate_spec != self._spec
 
         if spec_changed:

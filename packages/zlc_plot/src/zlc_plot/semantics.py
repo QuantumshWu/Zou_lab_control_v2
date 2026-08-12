@@ -344,37 +344,69 @@ def updated_spec(
     name: str,
     value: object,
 ) -> PlotSpec:
-    """Compose the candidate specification one semantic edit produces.
-
-    This is the single composition authority: every frontend routes a
-    semantic ``(name, value)`` pair through here and submits the result to
-    ``replace_spec``.  A kind switch resolves to the registry-owned default;
-    a FacetGrid routes cell-level roles into its cell.  Labels are then
-    re-derived by ``merge_labels`` role matching — a semantic edit never
-    copies a label into a slot whose meaning changed.  Viewport and display
-    parameter carry-over remain session policy applied at replacement time.
-    """
+    """Compose the candidate specification one semantic edit produces."""
 
     if not isinstance(name, str) or not name.strip():
         raise TypeError("semantic field name must be non-empty text")
-    if name == "kind":
-        if not isinstance(value, PlotKind):
+    return composed_spec(schema, spec, {name: value})
+
+
+def composed_spec(
+    schema: DatasetSchema | None,
+    spec: PlotSpec,
+    values: Mapping[str, object],
+) -> PlotSpec:
+    """Compose the candidate specification a whole bag of choices produces.
+
+    This is the single composition authority: every frontend routes semantic
+    choices through here and submits the result to ``replace_spec``.  A kind
+    switch resolves to the registry-owned default; a FacetGrid routes
+    cell-level roles into its cell.  Labels are then re-derived by
+    ``merge_labels`` role matching — a semantic edit never copies a label
+    into a slot whose meaning changed.  Viewport and display parameter
+    carry-over remain session policy applied at replacement time.
+
+    A BAG IS ONE EDIT, not a sequence of them.  Applying the fields one at a
+    time makes every halfway house a specification in its own right, and some
+    legal destinations have no legal route: swapping a grid's facet with its
+    cell's x fails in BOTH orders, because whichever moves first collides with
+    the other.  A saved panel then could not reload the configuration it was
+    saved from.
+    """
+
+    if not isinstance(values, Mapping):
+        raise TypeError("semantic values must be a mapping")
+    if not values:
+        return spec
+    rest = dict(values)
+    candidate = spec
+    if "kind" in rest:
+        # The kind rebases everything: the other choices land on ITS default.
+        kind = rest.pop("kind")
+        if not isinstance(kind, PlotKind):
             raise TypeError("semantic kind value must be PlotKind")
-        if value is spec.kind:
-            return spec
-        candidate = default_spec(schema, value)
-        if candidate is None:
-            raise ValueError(
-                f"{value.value} has no unambiguous default for this dataset"
-            )
-    elif name not in _field_names(spec):
-        raise KeyError(name)
-    elif isinstance(spec, FacetGridPlot) and name != "facet":
+        if kind is not spec.kind:
+            candidate = default_spec(schema, kind)
+            if candidate is None:
+                raise ValueError(
+                    f"{kind.value} has no unambiguous default for this dataset"
+                )
+        if not rest:
+            return replace(candidate, labels=merge_labels(spec, candidate))
+    unknown = tuple(name for name in rest if name not in _field_names(candidate))
+    if unknown:
+        raise KeyError(unknown[0])
+    if isinstance(candidate, FacetGridPlot):
+        cell_values = {name: rest[name] for name in rest if name != "facet"}
+        outer = {name: rest[name] for name in rest if name == "facet"}
+        cell = semantic_spec(candidate)
         candidate = replace(
-            spec, cell=replace(semantic_spec(spec), **{name: value})
+            candidate,
+            cell=replace(cell, **cell_values) if cell_values else cell,
+            **outer,
         )
     else:
-        candidate = replace(spec, **{name: value})
+        candidate = replace(candidate, **rest)
     return replace(candidate, labels=merge_labels(spec, candidate))
 
 

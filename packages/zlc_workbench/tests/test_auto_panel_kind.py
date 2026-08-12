@@ -89,6 +89,31 @@ def _occupancy_counts(*, frames: int, sites: int):
     ).block.schema
 
 
+def _scan_of_scalars(*, points: int):
+    """(repeat, points) -- one number per scanned point, no cell axis."""
+
+    from zlc_atom.data import snapshot_from_array
+    from zlc_data import AxisId, PointColumn, SCAN_POINT
+
+    return snapshot_from_array(
+        np.zeros((2, points), dtype=float),
+        producer="scan",
+        signal="value",
+        roles=(SCAN_POINT,),
+        point_columns={
+            SCAN_POINT: PointColumn(
+                AxisId("scan.knob"),
+                "knob",
+                SCAN_POINT,
+                PointColumn.NUMERIC,
+                tuple(float(index) for index in range(points)),
+            )
+        },
+        generation="auto-kind",
+        revision=1,
+    ).block.schema
+
+
 def test_a_grid_of_judged_frames_draws_one_cell_per_frame() -> None:
     """The reported refusal: 1 x 3 x 35 counts, and the grid said no.
 
@@ -128,8 +153,20 @@ def test_the_automatic_kind_is_the_flat_kind_the_data_proves() -> None:
 
     frames = _camera_frames(cycles=3, frames=2)
     assert isinstance(task_console_fitting_spec(frames, "", ""), ImagePlot)
+
+    # A judged cycle proves two coordinates as well -- which frame, and which
+    # site -- so it is a map, not thirty-five curves three points long.  One
+    # coordinate comes from the point table and one from the cell; a picture
+    # does not care which side of the dataset its axes live on.
     counts = _occupancy_counts(frames=3, sites=35)
-    assert isinstance(task_console_fitting_spec(counts, "", ""), CurvePlot)
+    counts_spec = task_console_fitting_spec(counts, "", "")
+    assert isinstance(counts_spec, ImagePlot), counts_spec
+    assert counts_spec.x.axis_id == "cam.frames.frame"
+    assert counts_spec.y.axis_id.endswith("site")
+
+    # A scan of a scalar proves one coordinate, so it stays a curve.
+    scalar = _scan_of_scalars(points=6)
+    assert isinstance(task_console_fitting_spec(scalar, "", ""), CurvePlot)
 
 
 def test_a_measurement_declares_the_plot_its_own_start_opens() -> None:
