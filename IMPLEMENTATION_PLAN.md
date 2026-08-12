@@ -30,15 +30,14 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — 温度链根修 + console 解锁（6 项）`
-- Production HEAD at final verification：`d6aa5e9`
-- Stage set：`29810ef 装载时刻=cooling 点亮 -> 699f5a0 surface 变了的 front 是陈旧不是错误 -> 366c803 Task 拥有台架不拥有窗口 -> 5332e90 survival_rate 只有一个数 -> 04336f5 survival 边跑边发 -> d6aa5e9 image 可两侧各取一轴 + 语义袋整体应用`
-- Current phase：`complete。六项逐条在真台架上先复现再修，未新增契约层/守卫层/测试文件；被行为变更打红的既有测试就地改述。`
-- Last completed action：`(1) 世界不再由 cooling 下降沿反推装载时刻——它现在是 cooling 点亮的那一刻，所以延长的 cooling 窗不能把装载推到第一张照片之后（实测原来 159/159 个 cycle 的 before 帧就是上一点的 after 帧）；workspace/pulses/temperature_template.json 已按打包版重播（probe_a/probe_b 拉 probe 而非 cooling）。(2) temperature 每判完一个 cycle 就把 survival/survival_rate 随同帧发在同一 live front，coverage 说明测了多少。(3) _task_command_blocked 从 19 处收到 3 处：只挡启动别的节点、改/删正在跑的那一行。(4) Qt5PlotWidget.present_front 对 surface 变化返回 False（只有 front 来自别的 host 才抛）。(5) survival_rate 发布为池化分数、repeat 轴为 1，与 artifact 同一份列表。(6) image kind 接受「一根 point 坐标 + 一根稠密数据轴」，survival 一键出 site x t_off 热图；语义袋整体合成（kind 先行），saved 记录可还原 facet/x 对调这种任何单步顺序都到不了的配置。`
-- Last verified tests：`按边界窄跑：zlc_atom 物理/架构/scan/temperature chain（含 4 分钟真链）、zlc_plot+zlc_workbench 全量 708 passed、console/logic/ui 71 passed。九步真窗口验收在全新 workspace 上零 FAIL，含 8a（Task 跑到一半开面板、coverage 1/6→6/6）、8c（site x t_off 热图）。每个探针都先 import zou_lab_control_v2 并打印被测模块 __file__。`
-- Pending acceptance gates：`test_v3_architecture::test_discovered_descriptors_build_and_exercise_declared_devices 在本机稳定超时（该测试自带 10 s 死线，30-repeat calibration 现需 >10 s）。与本 Goal 无关：用今天物理改动之前的 world.py 复跑同样卡在 10.10 s。未改该测试。`
+- Goal status：`complete — 面板与 Edit tab 的同一份配置 + scan 框选驱动 plan`
+- Production HEAD at final verification：`ce01ab0`
+- Stage set：`6a1641c 一份 PanelState，一个函数把它放到 host 上（含 facet focus 镜像）-> 7a25574 scan 上画的区域就是它下一次要扫的范围 -> ce01ab0 已结束那一发的 frozen 图自己说明它过期了`
+- Current phase：`complete。两条症状先在台架上复现/交叉验证再修；未新增契约层或测试文件；被行为变更打红的既有测试就地改述。`
+- Last completed action：`(1)「让一个 host 符合面板」原本写了四遍（状态提交、live 首投影、editor 首投影、Save），各知道一个子集 —— 收成 _match_host_to_panel，建/改 host 的每处都调它。(2) facet focus 在 zlc_plot 里没有对外事件，console 的镜像只有 selection/viewport 两条；focus 现在由 beat 从两个 host 各自的 front 边沿检测并镜像，且开关 cell 时作废面板记住的 viewport（plot 层自己会清）。(3)「加 fit 另一边错、必须 Refresh」的真根因不是 fit：两 host 都 armed，差异来自同一条记录解在 live/frozen 两份数据上；错的是同一信号换 generation 时 frozen 从不标 stale（全代码只有换 signal 那一处标），于是 Edit 拿死掉的 run 当现行、Save Fig 还开着、死快照上的框选还路由到 live。现在 generation 边界标 stale 并发布。(4) 两个 scan 节点声明 SelectionMapping：框选命名的被扫轴保持点数取所选范围；facet cell 内框选只动该 cell 画的轴；相机 ROI 不动 plan。port label 与 scan 轴 id 各收成一处。`
+- Last verified tests：`zlc_workbench+zlc_ui 459 passed；scan/selection/architecture 35 passed；九步真窗口验收（含 5a 双击聚焦、5b 框选派生、6 fit+Save Fig、7e 换 cell kind 无白屏、8a Task 中途开面板）零 FAIL。探针均先 import zou_lab_control_v2 并打印被测模块 __file__。`
+- Pending acceptance gates：`四条已查实未做：Save Fig 是第四份更窄的 host 投影（漏 selector/viewport/focus）；threshold classifier 阈值是 host 私有状态，两视图可不同且无 stale 提示；size 未对 plot preset 词表校验，可写进 PanelState 并让下次 mount 报 unknown panel preset；editor host 的 configure 结果被丢弃而 live 的会写回 PanelState。另：test_v3_architecture 的 10 s 死线在本机稳定超时，与本 Goal 无关。`
 - Next action：`none — Goal complete。`
-- Post-goal user decisions (2026-08-12)：`38f8095` 将所有 Fluent switch 的圆形 thumb 改为与 Pause/Load 共用的 ORANGE；`042d365` 保留 Stepped Scan 的 `Settle time` 作为每点 safe/off 状态下的恢复等待，并新增默认 0 s 的 `Free-run delay`：On 后等待、清掉 delay 内已完成值、再丢跨采样边界的一帧，随后才保留 shots。二者不得在后续恢复中混为同一参数。
 
 ## 1. 执行纪律
 
