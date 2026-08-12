@@ -149,6 +149,7 @@ SCAN_UNTIL_STOP = 0
 #: starts a render worker and a drawing session, and doing that for a page
 #: nobody has turned to is most of what a window spends before it appears.
 PREVIEW_PAGE = "Preview"
+SCAN_PAGE = "Scan"
 
 
 def _connection_name(mode: str, endpoint: str) -> str:
@@ -863,6 +864,7 @@ class BoardState:
     firing: bool = False
     forever: bool = False
     loaded: bool = False
+    cursor: int | None = None
     #: What the board is holding, as the board named it.  NOT "is it what the
     #: editor shows" -- that is a comparison, and a comparison between a board
     #: fact and a local one belongs wherever the local one is known.  Keeping
@@ -927,6 +929,11 @@ class PulseEditorPresenter:
         #: Runtime-only scan feedback.  Authored source, rows and repeats live
         #: only in ``_state`` beside the sequence they belong to.
         self._scan_progress = ""
+        self._applied_scan: tuple[
+            str,
+            tuple[str, ...],
+            tuple[tuple[float, ...], ...],
+        ] | None = None
         self._held_point: int | None = None
         # An editor with a sequencer can fire what it is showing; without one
         # it is a viewer, and says so rather than offering a dead button.
@@ -1083,10 +1090,6 @@ class PulseEditorPresenter:
         self._saved_state = candidate
         self.path = str(path)
         self.refresh()
-        self._done(
-            f"opened {Path(path).name} - {len(candidate.sequence.periods)} period(s), "
-            f"{len(candidate.sequence.slots)} scan slot(s)"
-        )
         return True
 
     def start_new_pulse(self) -> bool:
@@ -1764,6 +1767,11 @@ class PulseEditorPresenter:
                     scan_columns_for(source),
                 )
             )
+        digest = str(getattr(getattr(state, "program", None), "digest", ""))
+        if digest and wire_rows:
+            self._remember_applied_scan(digest, source, wire_rows)
+        elif not wire_rows:
+            self._applied_scan = None
         self._accept_state(
             replace(
                 self._state,
@@ -1826,6 +1834,30 @@ class PulseEditorPresenter:
         self.sequencer.load(program, source=source)
         if rows:
             self.sequencer.write_scan_table(rows, sweeps=sweeps)
+        self._remember_applied_scan(program.digest, source, rows)
+
+    def _remember_applied_scan(
+        self,
+        digest: str,
+        source: PulseSequence,
+        wire_rows: Sequence[Sequence[int]],
+    ) -> None:
+        """Freeze the table that was actually handed to the sequencer."""
+
+        if not wire_rows:
+            self._applied_scan = None
+            return
+        if not source.slots:
+            self._applied_scan = None
+            return
+        from zlc_pulse import scan_columns_for, scan_rows_from_wire
+
+        columns = scan_columns_for(source)
+        self._applied_scan = (
+            str(digest),
+            tuple(column.name for column in columns),
+            scan_rows_from_wire(wire_rows, columns),
+        )
 
     def _acquire_command(self) -> bool:
         if self.sequencer is None:
@@ -2030,12 +2062,14 @@ class PulseEditorPresenter:
             reported = dict(self.sequencer.snapshot())
         except Exception as error:
             return BoardState(attached=True, answering=False, fault=str(error))
+        cursor = reported.get("cursor")
         return BoardState(
             attached=True,
             answering=True,
             firing=bool(reported.get("firing")),
             forever=bool(reported.get("forever")),
             loaded=bool(reported.get("loaded")),
+            cursor=None if cursor is None else int(cursor),
             applied_digest=str(reported.get("applied_digest") or ""),
         )
 
@@ -2061,14 +2095,15 @@ class PulseEditorPresenter:
     def show_page(self, page: str) -> None:
         """The operator turned to a page.  Anything deferred for it happens now.
 
-        Only the Preview defers anything today, which is why it is the only
-        page named here: a page that costs nothing to fill does not need to be
-        told it is visible.
+        Preview drawing and Scan cursor polling are both visible-page work.
+        Neither is useful while its page is hidden.
         """
 
         self._preview_on_screen = str(page) == PREVIEW_PAGE
         if self._preview_on_screen:
             self.refresh_preview()
+        if self.sequence is not None:
+            self._refresh_scan_page()
 
     def refresh_run_state(self) -> None:
         """Ask the board again and show the answer.
@@ -2106,8 +2141,11 @@ class PulseEditorPresenter:
         on screen, and that comparison is local.
         """
 
+        was_running = self._board_state.firing
         self._board_state = self.board_state()
         self._render_run_state()
+        if was_running != self._board_state.firing and self.sequence is not None:
+            self._refresh_scan_page()
 
     def _render_run_state(self) -> None:
         """Tell the window what is running, from what the board last said.
@@ -2447,6 +2485,10 @@ class PulseEditorPresenter:
                 repeats=self._state.scan_repeats,
                 busy=False,
                 progress_text=self._scan_progress,
+                progress_polling=bool(
+                    self._board_state.firing and rows
+                    and str(getattr(view, "current_page", "")) == SCAN_PAGE
+                ),
             )
         )
         # A table appearing is a change in what the controls can do: stepping
@@ -2523,7 +2565,6 @@ class PulseEditorPresenter:
             )
         )
         self._scan_progress = f"{len(self._state.scan_rows)} scan point(s) ready"
-        self._done(f"scan program produced {len(self._state.scan_rows)} point(s)")
         self.refresh()
         return True
 
@@ -2736,7 +2777,37 @@ class PulseEditorPresenter:
 
         return scan_rows_to_wire(rows, scan_columns_for(self.sequence))
 
+    def refresh_scan_progress(self) -> None:
+        """Where the board is in the table, asked only while the page is visible."""
+
+        if self.sequencer is None:
+            return
+        self._poll_board()
+        cursor = self._board_state.cursor
+        applied = self._applied_scan
+        if not self.running or cursor is None or applied is None:
+            self._scan_progress = ""
+            self.view.set_scan_progress_text(self._scan_progress)
+            return
+        digest, names, rows = applied
+        if digest != self._board_state.applied_digest or not rows:
+            self._scan_progress = ""
+            self.view.set_scan_progress_text(self._scan_progress)
+            return
+        point = int(cursor) % len(rows)
+        values = ", ".join(
+            f"{name} = {float(value):g}"
+            for name, value in zip(names, rows[point], strict=True)
+        )
+        self._scan_progress = (
+            f"Scan: point {point + 1} / {len(rows)}"
+            + (f"  {values}" if values else "")
+        )
+        self.view.set_scan_progress_text(self._scan_progress)
+
     def _scan_cursor(self) -> int | None:
+        """Current board row for the Hold gesture."""
+
         cursor = getattr(self.sequencer, "cursor", None)
         if not callable(cursor):
             return None
@@ -2744,21 +2815,6 @@ class PulseEditorPresenter:
             return cursor()
         except Exception:
             return None
-
-    def refresh_scan_progress(self) -> None:
-        """Where the board is in the table, asked only while the page is visible."""
-
-        if self.sequencer is None:
-            return
-        cursor = self._scan_cursor()
-        total = len(self._state.scan_rows)
-        if cursor is None:
-            self._scan_progress = "running" if self.running else ""
-        elif total:
-            self._scan_progress = f"point {int(cursor) % total + 1}/{total}"
-        else:
-            self._scan_progress = f"point {int(cursor)}"
-        self.view.set_scan_progress_text(self._scan_progress)
 
     # -------------------------------------------------------------- refresh
 
