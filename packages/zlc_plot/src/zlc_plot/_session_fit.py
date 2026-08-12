@@ -384,6 +384,7 @@ class FitSessionMixin:
         cancelled: Callable[[], bool] | None,
         request_generation: int | None = None,
         warm_start_as_initial: bool = False,
+        selector_kind: SelectorKind | None = None,
     ) -> tuple[FacetFitBatchResult, tuple[FitSelection | None, ...]]:
         """Fit every projected cell and construct overlays through one path.
 
@@ -424,7 +425,12 @@ class FitSessionMixin:
             )
             warm = warm_starts[index]
             try:
-                selection = cell_projection.fit_selection(model)
+                # The request's own selector, not the default priority: the
+                # batch used to solve one domain and the accepted record report
+                # another, because only the recording path was told.
+                selection = cell_projection.fit_selection(
+                    model, selector_kind=selector_kind
+                )
                 if warm_start_as_initial and warm is not None and initial is None:
                     try:
                         result = self._solve_fit_selection(
@@ -798,6 +804,7 @@ class FitSessionMixin:
                 options=started.request.options,
                 cancelled=should_cancel,
                 request_generation=started.request_generation,
+                selector_kind=started.request.selector_kind,
             )
             return self._stamp_fit_batch_revision(batch)
         selection = started.selection
