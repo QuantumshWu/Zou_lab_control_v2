@@ -56,6 +56,16 @@
   2. **双击进 cell 后 fit 消失**：`PlotSession.focus_facet → _select_facet`，目标格与当前不同时**同时**调 `_invalidate_fit_context()` 和 `_clear_fit_presentation()`（`session.py:2279-2280`），后者删掉 `_accepted_fit`（那张已画出的整格批量结果）。之后**没有任何东西重解**：armed 的 live fit 只在**新数据 revision** 才解，扫描停了就永远回不来；而 console **拒绝重复应用相同的 fit 记录**（`console.py:1443`），所以必须先切 `fit_mode=none` 再挂——与操作者描述完全一致。这个 clear 是**多余的**：FacetGridPlot 的 live fit 被强制 all_facets（`_session_fit.py:569-571`），已接受的结果是**逐格批量、与聚焦无关**；实测只要不做那一次 clear，fit 跨聚焦存活且像素一致。（操作者猜的"某格不收敛毒死整批"**不是**本因。）
   3. **切回 image 切不回去**：同形两个故障，被 `2db4c82`（晚于实验机的树）分开。实验机那一版：semantic 记录**逐名**交给新 spec、没有"这个词表声明过吗"的守卫 → 在 curve cell 上选过的 Group 让 image 挂载抛 `KeyError('group')`，`update_panel_state` 返回 False，状态条只有一句 `panel-1: 'group'`，cell kind 原地不动 —— 就是"切不回去了"，且提示毫无意义。`2db4c82` 修了那条，但**过滤仍未覆盖 host 重建路径**：`console.py:1530` 用**尚未刷新的、上一种 kind 的** `binding.parameter_surface` 去 configure 全新 host，而 surface 要到 `:1554` 才更新 → 每次换 cell kind 都会发出**一次注定失败的 configure，且其 future 被丢弃**（其它调用点都会存进 `binding.configuration`），于是这次拒绝**看不见**。HEAD 上操作者还能遇到的是**静默无动作**的第三种：被两个词表**都声明**的语义名（例如在 curve cell 上选的 x 轴）会合法地带进 image cell，于是 image 回来是**空白**。
 
+- Goal 进度 (2026-08-12 晚)：**已修 4/7**
+  - ✅ `1929877` seamless Stop：`wait_for_board`/`check_cancelled` 收成一处（`nodes/scan/source.py`），两个引擎共用；虚拟 streamer 的超时改成"最多等这么久再回答"。Stop 延迟 4.451s→0.026s，`wait_done` 调用 1.8M→10。
+  - ✅ `deabef2` 聚焦不再删除已接受的 fit：`_select_facet` 与 `show_facet_overview` 只 `_invalidate_fit_context()`（规则本就写在该函数文档里）；只有"fit 绑定的 selector 被删"才清除。实测 overlays 3→3→3→3。
+  - ✅ `b63e642` 一个 host 只被告知它自己词表声明的东西：`_match_host_to_panel` 现在把 `surface["fit_models"]` 传给 `apply_panel_fit`（原来 7 个调用点只有 1 个传）；重建路径先搬记录与 surface 再投影，并保留 operation（原来先用**上一种 kind** 的 surface 发一次注定失败且被丢弃的 configure）。顺带修好 HEAD 上红着的 `test_gui_seam`。
+  - ✅ `4ac8c60` fit 域只按坐标裁：curve/histogram 的 viewport 与 AREA 不再按观测值/计数过滤（image 一直如此）。THRESHOLD 仍按值裁且仍需显式指名。
+  - ⬜ **待做 1**：facet batch 的域应**整批决定一次**。现状 `_session_fit.py:~421` 给每个 cell 建投影时写 `focused_facet_index=index`，于是选择器只在它所属那格可用、其余格落到 viewport；且 `_fit_facet_batch` 不接 `selector_kind`（`:376/427/793`，而 `:1396-1399` 会带）→ 解算域≠报告域。
+  - ⬜ **待做 2**：取消/撤下的 fit 仍占发布位（见上文第 3 条审查）。修法：给 fit 通道补上与选择器通道对等的撤销事件（`clear_fit()` 通知 → 翻译层映射 → `SelectionBridge` 退处理器），并定下"取消不留 valid 的旧答案"。
+  - ⬜ **待做 3**：指数/阻尼正弦模型无 x0 → 把拟合域平移到窗口起点（`x - x_ref`），先看 `FitModelSpec.coordinate_relations` 能否承载。
+  - ⬜ **待做 4**：cell-kind 切换后 image 空白的第三种成因（两词表都声明的语义名被合法带过去）。
+
 ## 1. 执行纪律
 
 1. 任何临时 Python 脚本第一行必须是 `import zou_lab_control_v2`，并在断言前打印实际被测生产模块的 `__file__`。
