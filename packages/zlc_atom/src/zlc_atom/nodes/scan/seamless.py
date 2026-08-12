@@ -152,6 +152,7 @@ class SeamlessScanMeasurement:
         judges each cycle against the calibration the moment the camera hands
         it over, which is the only place the cycle still exists as one cycle --
         the finished scan dataset has folded the frames into its point table.
+        What it returns, if anything, is published beside the frames.
         """
 
         board = self.sequencer.describe()
@@ -188,9 +189,14 @@ class SeamlessScanMeasurement:
                 value = self.source.next_value(context)
                 visit = sweep * shots + shot
                 writer.write(value, row=row_index, visit=visit)
+                front = {SCAN_OUTPUT.name: writer.live_output()}
                 if on_point is not None:
-                    on_point(value, row=row_index, visit=visit)
-                slot.publish({SCAN_OUTPUT.name: writer.live_output()})
+                    # Whatever the reader made of this point travels in the
+                    # SAME front as the frames it was read from: they are one
+                    # shot, and two publications could show a panel a survival
+                    # that its own evidence has not arrived for yet.
+                    front.update(on_point(value, row=row_index, visit=visit) or {})
+                slot.publish(front)
                 if (played + 1) % shots == 0:
                     context.report_progress(
                         "Scanning",

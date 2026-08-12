@@ -45,7 +45,12 @@ import numpy as np
 from zlc_data import SCAN_POINT, SITE, AxisId, PointColumn
 from zlc_durable import unique_path, write_readable_json
 from zlc_pulse import TIME_UNIT_TO_NS, PulseSequence
-from zlc_runtime import DatasetOutputDeclaration, FinalDatasetOutput
+from zlc_runtime import (
+    DatasetCoverage,
+    DatasetOutputDeclaration,
+    FinalDatasetOutput,
+    LiveDatasetOutput,
+)
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
@@ -240,6 +245,9 @@ class TemperatureTask:
             (self._repeats, len(self._t_off), calibration.n_sites), dtype=bool
         )
         self._after = np.zeros_like(self._before)
+        #: Which (repeat, release time) cells have been judged, so a growing
+        #: publication can say how much of itself is measured.
+        self._seen = np.zeros(self._before.shape[:2], dtype=bool)
         self._generation = ""
 
     @property
@@ -249,22 +257,46 @@ class TemperatureTask:
         # view of it.
         return (SCAN_OUTPUT, SURVIVAL_OUTPUT, SURVIVAL_RATE_OUTPUT)
 
-    def _judge(self, value: object, *, row: int, visit: int) -> None:
+    def _judge(self, value: object, *, row: int, visit: int) -> dict[str, object]:
         """One landed cycle: which sites held an atom, and which held it still.
 
         Asked while the cycle is still a cycle.  Once the scan has written it
         into the dataset, its two frames are two rows of a point table beside
         every other release time, and the pair is no longer addressable.
+
+        The answer goes out with that cycle, so the curve an operator started
+        this Task to watch grows a point at a time instead of appearing when
+        it is already too late to change anything about the run.
         """
 
+        revision = visit * len(self._t_off) + row + 1
         result = self._occupancy.process(
             value.snapshot,
             generation=self._generation,
-            revision=visit * len(self._t_off) + row + 1,
+            revision=revision,
         )
         occupied = np.asarray(result.occupied, dtype=bool)[0]
         self._before[visit, row] = occupied[0]
         self._after[visit, row] = occupied[1]
+        self._seen[visit, row] = True
+        return {
+            SURVIVAL_OUTPUT.name: LiveDatasetOutput(
+                SURVIVAL_OUTPUT,
+                self._survival_snapshot(self._survival(), revision),
+                DatasetCoverage(
+                    written_cells=int(self._seen.sum()),
+                    total_cells=int(self._seen.size),
+                ),
+            ),
+            SURVIVAL_RATE_OUTPUT.name: LiveDatasetOutput(
+                SURVIVAL_RATE_OUTPUT,
+                self._rate_snapshot(self._pooled()[2], revision),
+                DatasetCoverage(
+                    written_cells=int(np.count_nonzero(self._seen.any(axis=0))),
+                    total_cells=int(len(self._t_off)),
+                ),
+            ),
+        }
 
     def _survival(self) -> np.ndarray:
         """Survival per site, per release time, per repeat.
@@ -275,6 +307,49 @@ class TemperatureTask:
         """
 
         return np.where(self._before, self._after.astype("<f8"), np.nan)
+
+    def _pooled(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Loaded pairs, recaptured pairs, and their fraction per release time.
+
+        One computation, whether it is going on screen half-finished or into
+        the artifact at the end.
+        """
+
+        loaded = np.sum(self._before, axis=(0, 2), dtype=float)
+        recaptured = np.sum(self._before & self._after, axis=(0, 2), dtype=float)
+        fraction = np.divide(
+            recaptured,
+            loaded,
+            out=np.full(loaded.shape, np.nan, dtype="<f8"),
+            where=loaded > 0,
+        )
+        return loaded, recaptured, fraction
+
+    def _survival_snapshot(self, survival: np.ndarray, revision: int):
+        return snapshot_from_array(
+            survival,
+            producer=self.instance_id,
+            signal=SURVIVAL_OUTPUT.name,
+            roles=(SCAN_POINT, SITE),
+            axis_specs={SITE: self._calibration.site_map.site_axis},
+            point_columns={SCAN_POINT: self._point_column()},
+            generation=self._generation,
+            revision=int(revision),
+        )
+
+    def _rate_snapshot(self, fraction: np.ndarray, revision: int):
+        # One repeat, because pooling IS across the repeats: there is nothing
+        # left for a panel to average, so what it draws cannot disagree with
+        # what was saved.
+        return snapshot_from_array(
+            np.asarray(fraction, dtype="<f8")[None, :],
+            producer=self.instance_id,
+            signal=SURVIVAL_RATE_OUTPUT.name,
+            roles=(SCAN_POINT,),
+            point_columns={SCAN_POINT: self._point_column()},
+            generation=self._generation,
+            revision=int(revision),
+        )
 
     def _curve(self) -> dict[str, object]:
         """The pooled recapture fraction against the release time.
@@ -287,14 +362,7 @@ class TemperatureTask:
         watching one while the artifact kept the other.
         """
 
-        loaded = np.sum(self._before, axis=(0, 2), dtype=float)
-        recaptured = np.sum(self._before & self._after, axis=(0, 2), dtype=float)
-        fraction = np.divide(
-            recaptured,
-            loaded,
-            out=np.full(loaded.shape, np.nan, dtype="<f8"),
-            where=loaded > 0,
-        )
+        loaded, recaptured, fraction = self._pooled()
         seconds = _seconds(self._t_off, self._port.unit)
         crossing = _one_over_e_crossing(seconds, fraction)
         return {
@@ -344,42 +412,20 @@ class TemperatureTask:
         context.report_progress("Reading survival")
         survival = self._survival()
         curve = self._curve()
-        # One repeat, because pooling IS across the repeats: there is nothing
-        # left for a panel to average, so what it draws cannot disagree with
-        # what was saved.
-        rate = np.asarray(curve["survival_rate"], dtype="<f8")[None, :]
         record = self._run_record(curve)
-        # This Task publishes its results once, at the end; the revision only
-        # has to be its own and positive, and the sweep count is that number.
-        revision = self._repeats
-        point_column = self._point_column()
+        # The last publication of a run that has been publishing all along,
+        # so its revision continues that count rather than restarting it.
+        revision = self._repeats * len(self._t_off) + 1
         outputs = {
             SCAN_OUTPUT.name: FinalDatasetOutput(SCAN_OUTPUT, frames, record),
             SURVIVAL_OUTPUT.name: FinalDatasetOutput(
                 SURVIVAL_OUTPUT,
-                snapshot_from_array(
-                    survival,
-                    producer=self.instance_id,
-                    signal=SURVIVAL_OUTPUT.name,
-                    roles=(SCAN_POINT, SITE),
-                    axis_specs={SITE: self._calibration.site_map.site_axis},
-                    point_columns={SCAN_POINT: point_column},
-                    generation=generation,
-                    revision=revision,
-                ),
+                self._survival_snapshot(survival, revision),
                 record,
             ),
             SURVIVAL_RATE_OUTPUT.name: FinalDatasetOutput(
                 SURVIVAL_RATE_OUTPUT,
-                snapshot_from_array(
-                    rate,
-                    producer=self.instance_id,
-                    signal=SURVIVAL_RATE_OUTPUT.name,
-                    roles=(SCAN_POINT,),
-                    point_columns={SCAN_POINT: point_column},
-                    generation=generation,
-                    revision=revision,
-                ),
+                self._rate_snapshot(self._pooled()[2], revision),
                 record,
             ),
         }
