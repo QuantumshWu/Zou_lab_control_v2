@@ -29,9 +29,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from zlc_pulse import PulseSequence, api_parameter_columns_for, sequence_from_tree
 
-from zlc_atom.nodes._framework.descriptor import WorkspaceResourceSpec
+from zlc_atom.nodes._framework.descriptor import (
+    SelectionMapping,
+    WorkspaceResourceSpec,
+)
 
 
 PULSE_PARAM_FAMILY = "pulse:param:"
@@ -62,6 +66,32 @@ class ScanPort:
             raise ValueError(f"port {self.port!r} has no usable range")
 
 
+def port_label(port: str) -> str:
+    """The human name of a port, derived from the port itself.
+
+    THE definition, so a label and its port cannot drift: a pulse parameter
+    is named by its parameter id, and a device knob by the device and the
+    field it belongs to.
+    """
+
+    text = str(port)
+    if text.startswith(PULSE_PARAM_FAMILY):
+        return text[len(PULSE_PARAM_FAMILY):]
+    if text.startswith(DEVICE_PARAM_FAMILY):
+        return text[len(DEVICE_PARAM_FAMILY):].replace(":", ".")
+    raise ValueError(f"{port!r} belongs to no known port family")
+
+
+def scan_axis_id(label: str) -> str:
+    """What the dataset calls the axis a scan sweeps under ``label``.
+
+    One spelling, shared by the writer that names the axis and by anyone --
+    a selection, say -- reading a name back off a published dataset.
+    """
+
+    return f"scan.{label}"
+
+
 def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     """Every port this pulse offers, from its own declarations.
 
@@ -81,10 +111,11 @@ def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
         # "DAC code (0 = 0 V)" is the editor's label for the same fact, and
         # carrying it as the unit broke the first plot ever drawn over a scan
         # ("raster plot host failed to start: unknown unit ...").
+        port = PULSE_PARAM_FAMILY + str(column.name)
         ports.append(
             ScanPort(
-                PULSE_PARAM_FAMILY + str(column.name),
-                str(column.name),
+                port,
+                port_label(port),
                 "" if column.is_dac else str(column.unit),
                 lo,
                 hi,
@@ -112,10 +143,11 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
         for field in fields():
             if field.minimum is None or field.maximum is None:
                 continue
+            port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
             ports.append(
                 ScanPort(
-                    f"{DEVICE_PARAM_FAMILY}{key}:{field.name}",
-                    f"{key}.{field.name}",
+                    port,
+                    port_label(port),
                     "",
                     float(field.minimum),
                     float(field.maximum),
@@ -270,8 +302,76 @@ def plan_from_authored(payload: object) -> ScanPlan:
     return ScanPlan.from_tree(json.loads(text))
 
 
+def _selected_plan(
+    selection: object,
+    draft: Mapping[str, object],
+    context: Mapping[str, object],
+) -> dict[str, object]:
+    """The authored plan, narrowed to the region the operator drew.
+
+    A box or an x range on a scan's own plot names SCANNED axes -- that is
+    what the dataset's axes are -- so it says "sweep this part next".  Each
+    named axis keeps its point COUNT, because that is what the plan's form
+    offers (from, to, points): the same effort spent over a smaller range.
+    An axis the region does not name is untouched, and a region that names
+    none of them -- a camera ROI drawn on the frames a scan captured --
+    leaves the plan exactly as it was.  The frames belong to the camera.
+    """
+
+    del context
+    plan = plan_from_authored(draft.get("plan"))
+    wanted = {
+        str(getattr(item, "axis", "")): item
+        for item in getattr(selection, "ranges", ())
+    }
+    axes: list[ScanAxis] = []
+    for axis in plan.axes:
+        chosen = wanted.get(scan_axis_id(port_label(axis.port)))
+        if chosen is None or len(axis.values) < 2:
+            axes.append(axis)
+            continue
+        axes.append(
+            ScanAxis(
+                axis.port,
+                tuple(
+                    float(value)
+                    for value in np.linspace(
+                        float(chosen.lower), float(chosen.upper), len(axis.values)
+                    )
+                ),
+            )
+        )
+    return {"plan": json.dumps(ScanPlan(tuple(axes)).to_tree())}
+
+
+#: What a region drawn on a scan's plot does to that scan's plan.  A cell of a
+#: facet grid reports its OWN kind here -- the grid is a layout, the cell is
+#: the picture -- so a box inside one cell narrows the axes that cell draws.
+SCAN_PLAN_SELECTIONS = (
+    SelectionMapping(
+        plot_kind="image",
+        selector_kind="area",
+        draft_fields=("plan",),
+        map_patch=_selected_plan,
+    ),
+    SelectionMapping(
+        plot_kind="curve",
+        selector_kind="x_range",
+        draft_fields=("plan",),
+        map_patch=_selected_plan,
+    ),
+    SelectionMapping(
+        plot_kind="image",
+        selector_kind="x_range",
+        draft_fields=("plan",),
+        map_patch=_selected_plan,
+    ),
+)
+
+
 __all__ = [
     "DEVICE_PARAM_FAMILY",
+    "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
     "SCAN_PULSE_CONTRACT",
     "SCAN_PULSE_RESOURCE",

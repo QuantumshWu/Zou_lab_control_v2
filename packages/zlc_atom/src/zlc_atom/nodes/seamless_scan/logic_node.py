@@ -28,6 +28,7 @@ from zlc_atom.nodes._framework.descriptor import (
     ResolvedWorkspaceResource,
 )
 from zlc_atom.nodes.scan import (
+    SCAN_PLAN_SELECTIONS,
     DEVICE_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
@@ -166,6 +167,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         ),
     ),
     build=_build,
+    # A region drawn on this scan's own plot is a statement about
+    # what to sweep next, in the axes the picture is drawn in.
+    selection_mappings=SCAN_PLAN_SELECTIONS,
     ui_contributions=(_editor_factory,),
     workspace_resources=(SCAN_PULSE_RESOURCE,),
 )

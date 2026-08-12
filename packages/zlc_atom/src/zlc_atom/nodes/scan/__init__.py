@@ -24,6 +24,7 @@ from .dataset import (
 )
 from .seamless import SeamlessScanMeasurement
 from .plan import (
+    SCAN_PLAN_SELECTIONS,
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_PULSE_CONTRACT,
@@ -40,6 +41,7 @@ from .plan import (
 from .source import PublishedSignalSource
 
 __all__ = [
+    "SCAN_PLAN_SELECTIONS",
     "PublishedSignalSource",
     "DEVICE_PARAM_FAMILY",
     "PULSE_PARAM_FAMILY",

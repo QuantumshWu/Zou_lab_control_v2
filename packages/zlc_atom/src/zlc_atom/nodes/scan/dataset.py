@@ -46,6 +46,7 @@ from zlc_data import (
     SCAN_POINT,
     owned_snapshot_from_arrays,
 )
+from .plan import scan_axis_id
 from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
@@ -139,7 +140,7 @@ def scan_dataset_schema(
     axis_domains: list[tuple[float, ...]] = []
     per_axis_indices: list[tuple[int, ...]] = []
     for index, (name, unit) in enumerate(axes):
-        axis_id = free_axis_id(f"scan.{name}")
+        axis_id = free_axis_id(scan_axis_id(name))
         domain, indices = _unique_domain(tuple(row[index] for row in rows))
         axis_ids.append(axis_id)
         axis_domains.append(domain)
