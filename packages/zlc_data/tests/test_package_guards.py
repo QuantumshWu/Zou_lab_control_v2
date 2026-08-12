@@ -19,7 +19,7 @@ EXPECTED_PACKAGE = (ROOT / "src" / "zlc_data").resolve()
 #: submodules.  A sibling reaching past this list is the same surface with the
 #: declaration skipped -- nobody can then see how wide it really is -- so what
 #: zlc_runtime, zlc_plot and zlc_atom depend on is declared here.
-MAX_PUBLIC_NAMES = 70
+MAX_PUBLIC_NAMES = 71
 EXPECTED_PUBLIC_API = frozenset(
     {
         # Returned from the withdrawn lists the moment a sibling needed them
@@ -63,6 +63,7 @@ EXPECTED_PUBLIC_API = frozenset(
         "OwnedSnapshot",
         "PointColumn",
         "PointTable",
+        "point_ordinal_axis",
         "READOUT_EVENT",
         "REPEAT",
         "SCAN_POINT",

@@ -54,13 +54,12 @@ __all__ = [
 ]
 
 
-#: Plot kinds the runtime can derive from.  A rolling plot is a curve over the
-#: shot ordinal, which is a real upstream axis, so it bridges as one.
+#: Plot kinds the runtime can derive from.  Rolling x is plot-owned history,
+#: not an axis of the current source snapshot, so it deliberately is absent.
 _PLOT_KINDS = {
     "image": "image",
     "curve": "curve",
     "histogram": "histogram",
-    "rolling": "curve",
 }
 
 #: Selector kinds that describe a region.
@@ -210,6 +209,12 @@ class PlotSelectionSource:
                     self._deliver(
                         self._on_threshold, None if removed else event.selector
                     )
+                return
+            if _name_of(event.subject.plot_kind) == "rolling":
+                # Rolling x is the plot's cross-revision history ordinal, not
+                # an axis of the current source snapshot.
+                self._last_error = None
+                self._states.pop(_selector_kind_of(event), None)
                 return
             change = _change_of(event)
             try:
@@ -578,6 +583,14 @@ def _range(axis: object, bounds: object, role: str) -> SelectionRange:
             f"this plot's {role} bounds cut no named upstream axis, so there is "
             "nothing to select on"
         )
+    domain = _name_of(getattr(axis, "domain", ""))
+    if domain in {"repeat", "point_row"}:
+        return SelectionRange(
+            axis="",
+            lower=float(bounds.low),
+            upper=float(bounds.high),
+            domain=domain,
+        )
     name = getattr(axis, "axis_id", None)
     if not isinstance(name, str) or not name:
         raise _Unbridgeable(f"the {role} axis of this plot has no upstream name")
@@ -586,6 +599,8 @@ def _range(axis: object, bounds: object, role: str) -> SelectionRange:
 
 def _viewport_state(event: object) -> tuple[SelectionState | None, object | None]:
     canonical, display, subject = event
+    if _name_of(subject.plot_kind) == "rolling":
+        return None, display
     plot_kind = _PLOT_KINDS.get(_name_of(subject.plot_kind))
     if plot_kind is None:
         return None, display

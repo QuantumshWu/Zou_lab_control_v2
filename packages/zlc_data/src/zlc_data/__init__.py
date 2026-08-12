@@ -15,6 +15,7 @@ from .axis import (
     AxisSourceRef,
     AxisSpec,
     CoordinateFrameId,
+    point_ordinal_axis,
 )
 from .schema import (
     DatasetSchema,
@@ -110,6 +111,7 @@ __all__ = [
     "CellValidity",
     "ComponentValidity",
     "CoordinateFrameId",
+    "point_ordinal_axis",
     "DataBlock",
     "DatasetComponentValidity",
     "DatasetRevision",

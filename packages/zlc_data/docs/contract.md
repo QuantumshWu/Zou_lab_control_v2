@@ -77,6 +77,7 @@ facade.
   "OwnedSnapshot",
   "PointColumn",
   "PointTable",
+  "point_ordinal_axis",
   "READOUT_EVENT",
   "REPEAT",
   "SCAN_POINT",

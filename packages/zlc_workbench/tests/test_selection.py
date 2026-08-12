@@ -704,6 +704,95 @@ def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
         host.close()
 
 
+def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> None:
+    """Repeat and point-row axes are structural, not unnamed failures."""
+
+    plot = pytest.importorskip("zlc_plot")
+    snapshot = _curve_scan_snapshot(repeats=4)
+    values = snapshot.block.values
+    cases = (
+        (plot.AxisRef.repeat(), "repeat", values[1:3, :, :]),
+        (plot.AxisRef.point_rows(), "point_row", values[:, 1:3, :]),
+    )
+
+    for axis, domain, expected in cases:
+        plane, source_node = _plane_for(
+            snapshot, {"@logic/panel-1/roi_mean"}
+        )
+        host = plot.RasterPlotHost.from_plot(snapshot, plot.CurvePlot(axis))
+        bridge = source = None
+        try:
+            bridge, source = attach_selection_bridge(
+                plane, host, "camera/frame", bridge_id="panel-1"
+            )
+            host.wait_for_front(20.0)
+            viewports: list = []
+            source.subscribe_viewport(
+                lambda state, _display: viewports.append(state)
+            )
+            host.set_viewport(
+                plot.NumericRange(1.0, 2.0),
+                plot.NumericRange(-1.0, 20.0),
+            ).result(timeout=15)
+            assert viewports and viewports[-1].ranges[0].domain == domain
+            host._submit(
+                lambda: host._require_session().commit_selector(
+                    plot.SelectorKind.X_RANGE,
+                    plot.NumericRange(1.0, 2.0),
+                    display=False,
+                ),
+                mode=_control_mode(),
+            ).result(timeout=15)
+
+            assert source.last_error is None, source.last_error
+            assert bridge.last_error is None, bridge.last_error
+            assert bridge.selection is not None
+            assert bridge.selection.ranges[0].domain == domain
+            derived = _wait_published(plane, "@logic/panel-1/roi_mean")
+            np.testing.assert_array_equal(derived.snapshot.block.values, expected)
+        finally:
+            if bridge is not None:
+                bridge.close()
+            if source is not None:
+                source.close()
+            host.close()
+            plane.retire(source_node)
+            plane.close()
+
+
+def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
+    """Rolling x belongs to plot history, so it derives nothing and is no error."""
+
+    plot = pytest.importorskip("zlc_plot")
+    snapshot = _curve_scan_snapshot()
+    host = plot.RasterPlotHost.from_plot(snapshot, plot.RollingPlot())
+    source = PlotSelectionSource(host)
+    seen: list = []
+    viewports: list = []
+    source.subscribe_selection(lambda *_args: seen.append(True))
+    source.subscribe_viewport(lambda *_args: viewports.append(True))
+    try:
+        host.wait_for_front(20.0)
+        host.set_viewport(
+            plot.NumericRange(0.0, 1.0),
+            plot.NumericRange(-1.0, 10.0),
+        ).result(timeout=15)
+        host._submit(
+            lambda: host._require_session().commit_selector(
+                plot.SelectorKind.X_RANGE,
+                plot.NumericRange(0.0, 1.0),
+                display=False,
+            ),
+            mode=_control_mode(),
+        ).result(timeout=15)
+        assert seen == []
+        assert viewports == []
+        assert source.last_error is None
+    finally:
+        source.close()
+        host.close()
+
+
 def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
     """The same translation inside a focused facet cell keeps the cell."""
 

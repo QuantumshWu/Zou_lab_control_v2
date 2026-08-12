@@ -37,6 +37,7 @@ from zlc_data import (
     compact_dataset_validity,
     expand_dataset_validity,
     materialize_derived_dataset,
+    point_ordinal_axis,
 )
 from zlc_data import SelectionChange, resolve_selection_indices
 from zlc_data.selection import IndexRangeSelection, take_indices
@@ -154,15 +155,30 @@ def _nonnegative_integer(value: object, field: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class SelectionRange:
-    """One canonical closed coordinate range over an upstream axis."""
+    """One canonical closed coordinate range over an upstream axis.
+
+    Named producer axes carry ``axis``.  Repeat and point-row axes are
+    structural, so ``domain`` tells the bridge which source-schema axis the
+    same bounds describe without inventing a fake name.
+    """
 
     axis: str
     lower: float
     upper: float
     coordinate_frame: str | None = None
+    domain: str = "named"
 
     def __post_init__(self) -> None:
-        axis = canonical_text(self.axis, "selection axis")
+        domain = canonical_text(self.domain, "selection domain")
+        if domain not in {"named", "repeat", "point_row"}:
+            raise ValueError("selection domain must be named, repeat, or point_row")
+        if not isinstance(self.axis, str):
+            raise TypeError("selection axis must be text")
+        axis = self.axis.strip()
+        if domain == "named":
+            axis = canonical_text(axis, "selection axis")
+        elif axis:
+            raise ValueError("a structural selection range cannot carry an axis name")
         lower = _finite(self.lower, "selection lower")
         upper = _finite(self.upper, "selection upper")
         if lower > upper:
@@ -174,6 +190,7 @@ class SelectionRange:
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
         object.__setattr__(self, "coordinate_frame", frame)
+        object.__setattr__(self, "domain", domain)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1303,54 +1320,52 @@ class SelectionBridge:
         schema: DatasetSchema,
         state: SelectionState,
     ) -> Selection:
+        def range_term(value: SelectionRange):
+            if value.domain == "repeat":
+                axis = schema.repeat_axis
+            elif value.domain == "point_row":
+                axis = point_ordinal_axis(schema.point_table.row_count)
+            else:
+                _axis_id, axis, _kind = self._resolve_axis(schema, value.axis)
+            frame = (
+                axis.coordinate_frame
+                if value.coordinate_frame is None
+                else CoordinateFrameId(value.coordinate_frame)
+            )
+            return Selection.coordinate_range(
+                axis.axis_id,
+                value.lower,
+                value.upper,
+                coordinate_frame=frame,
+            ).terms[0]
+
         if state.plot_kind == "image":
             if state.selector_kind != "area" or len(state.ranges) != 2:
                 raise ValueError("image SelectionBridge requires a two-axis area")
             first, second = state.ranges
-            first_id, _first_axis, first_kind = self._resolve_axis(schema, first.axis)
-            second_id, _second_axis, second_kind = self._resolve_axis(schema, second.axis)
-            # Two image vocabularies exist: a camera frame's cell axes (kind
-            # "data") and a scan heatmap's grid dimensions (kind "point",
-            # point-row columns or topology dimensions).  A box over point
-            # axes masks the point ROWS whose column values fall inside both
-            # ranges -- the sub-grid -- through exactly the machinery below.
-            if first_kind != second_kind or first_kind not in {"data", "point"}:
+            def axis_kind(value: SelectionRange) -> str:
+                if value.domain == "repeat":
+                    return "repeat"
+                if value.domain == "point_row":
+                    return "point"
+                _axis_id, _axis, kind = self._resolve_axis(schema, value.axis)
+                return kind
+
+            # An image has two axes in one domain: either two point quantities
+            # (a scan heatmap) or two tensor quantities (repeat/data).  Mixing
+            # point rows with a tensor axis cannot describe a rectangular
+            # source surface.
+            first_kind, second_kind = axis_kind(first), axis_kind(second)
+            if (first_kind == "point") != (second_kind == "point"):
                 raise ValueError(
-                    "image area axes must both be source data axes or both be "
-                    "point-dimension axes"
+                    "image area axes must both be point axes or both be tensor axes"
                 )
-            if first.coordinate_frame != second.coordinate_frame:
-                raise ValueError("image area axes must use one coordinate frame")
-            frame = (
-                None
-                if first.coordinate_frame is None
-                else CoordinateFrameId(first.coordinate_frame)
-            )
-            selection = Selection.rectangle(
-                first_id,
-                second_id,
-                first.lower,
-                first.upper,
-                second.lower,
-                second.upper,
-                coordinate_frame=frame,
-            )
+            selection = Selection((range_term(first), range_term(second)))
         else:
             if len(state.ranges) != 1:
                 raise ValueError("curve/histogram SelectionBridge requires one x range")
             selected = state.ranges[0]
-            axis_id, _axis, _kind = self._resolve_axis(schema, selected.axis)
-            frame = (
-                None
-                if selected.coordinate_frame is None
-                else CoordinateFrameId(selected.coordinate_frame)
-            )
-            selection = Selection.coordinate_range(
-                axis_id,
-                selected.lower,
-                selected.upper,
-                coordinate_frame=frame,
-            )
+            selection = Selection((range_term(selected),))
         terms = list(selection.terms)
         for facet in state.facets:
             axis_id, axis, kind = self._resolve_axis(schema, facet.axis)
@@ -1407,6 +1422,8 @@ class SelectionBridge:
             axis_id: (axis, kind)
             for _label, axis_id, axis, kind in self._axis_catalog(schema)
         }
+        point_ordinal = point_ordinal_axis(schema.point_table.row_count)
+        catalog[point_ordinal.axis_id] = (point_ordinal, "point")
         terms = {term.axis_id: term for term in selection.terms}
 
         def indices_for(axis_id: AxisId, default_size: int) -> range | tuple[int, ...]:

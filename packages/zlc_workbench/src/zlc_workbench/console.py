@@ -106,6 +106,7 @@ def _same_panel_selection(left: object, right: object) -> bool:
             tuple(
                 (
                     str(entry.axis).rsplit(".", 1)[-1],
+                    entry.domain,
                     entry.lower,
                     entry.upper,
                     entry.coordinate_frame,
