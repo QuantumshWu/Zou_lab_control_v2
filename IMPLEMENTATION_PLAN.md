@@ -30,15 +30,15 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
-- Goal status：`complete — 四条查实项全部完成 + 自查出的三处补丁式修复已改为根修`
-- Production HEAD at final verification：`2e5dc21`
+- Goal status：`complete — 四条查实项 + 自查三处补丁改根修 + 三条遗留全部清掉`
+- Production HEAD at final verification：`1275089`+守卫提交
 - Stage set：`6a1641c 一份 PanelState 一个函数 -> 7a25574 scan 框选=下次扫的范围 -> ce01ab0 frozen 图自述过期 -> eba7ea9 Save Fig 走同一投影 + size 校验 + editor configure 写回 -> 77f9c5a relim 只说一遍 -> 37ff283 staleness 改为推导 -> 4d7d61e 记录只由自己的 configure 写回 -> 2e5dc21 阈值是面板的答案`
 - Current phase：`complete。两条症状先在台架上复现/交叉验证再修；未新增契约层或测试文件；被行为变更打红的既有测试就地改述。`
-- Last completed action：`(1) 四条查实项：Save Fig 改走 _match_host_to_panel（带 live=False，写文件前等 analysis 落地）；size 对 layout_policy.size_names 校验；editor configure 结果经 _offer_state_to_editor 写回。(2) 用户质疑 relim 那一改是补丁——属实：同一句「tight 是否保持」写在色标与计数轴两处，且我那一行让色标条（只想要 padded 形状）丢了迟滞。改为 _relim_retains 单源 + zero_based/retain 两个明确参数。(3) 自查出 frozen_stale 是「可推导事实存成 6 个写点的布尔」，改为 PanelBinding 属性（零写点）；实测整套 presenter 测试在该行为被变异后仍全绿=从来无守卫。(4) _settle_panel_hosts 有两个人写记录：首投影拿 host 首帧默认值覆盖，实测 record=True/card=False/editor=True。现在首投影只把记录自己的值解析进词表（restore_semantic_choice），值的写回只留 configure 完成一条路。(5) 阈值：zlc_plot 中拟合最优值与操作者的决定分家（vector 只存 choice，fit 值按需导出，_classifier_thresholds_settled 唯一合成点；remove 线=回到拟合值）；workbench 给 level 手势开面板通道，两个 Edit 订阅点合成 _subscribe_editor_gestures。`
-- Last verified tests：`zlc_plot 337 passed；zlc_workbench 371 passed（+zlc_ui 全绿）。实测探针：tight 跟随 270→258 得 (208.5,262.5) 而色标条仍 held；stale told False→True→Refresh 清除；首投影竞态下 record/card/editor 三处一致且 host 只被告知 [True,True]；阈值 Edit 上拖→卡片跟随 238.94、重跑一发仍 238.94、撤销后各自回到自身数据的拟合值（226.07/298.68）。探针均先 import zou_lab_control_v2 并打印被测模块 __file__。`
-- Pending acceptance gates：`(a) 已实测未修：facet 双击聚焦后每格用自己的颜色量程，同一数据同一格 768 个采样里 573 个变（总览 (-7.8,85.8) vs 焦点 (-2.6,28.6)）——总览池化 vs 焦点逐格两个保留槽同时是权威，疑与用户报告的「切回去 xlim/ylim 变大」同族。(b) frozen_stale 的换代行为无任何测试守卫（变异全绿），目前只有探针证据。(c) Edit 面的手势通道比画面晚 armed 数拍，此窗口内的拖拽面板收不到。(d) test_v3_architecture 的 10 s 死线在本机稳定超时，与本 Goal 无关。`
-- Next action：`(a) facet 焦点态颜色量程的所有权裁决与根修（先复现 573/768，再决定池化是否无条件）。`
-- Post-goal Stepped Scan correction (2026-08-12)：`2177a9a` 修正最初对 `Shots per point` 的错误理解。每个 shot 现在都完整执行 `safe/settle -> apply+load 同一 point -> On -> Free-run delay -> capture`；`Repeats` 只在最外层从头重扫整张 plan。进度总数为 `repeats x points x shots`，Dataset repeat 轴仍为 `repeats x shots x source-repeat`。旧实现的“一次 apply 后连续读取多个 shots”已经删除，不得恢复。
+- Last completed action：`(1) 四条查实项：Save Fig 改走 _match_host_to_panel（带 live=False，写文件前等 analysis 落地）；size 对 layout_policy.size_names 校验；editor configure 结果经 _offer_state_to_editor 写回。(2) 用户质疑 relim 那一改是补丁——属实：同一句「tight 是否保持」写在色标与计数轴两处，且我那一行让色标条（只想要 padded 形状）丢了迟滞。改为 _relim_retains 单源 + zero_based/retain 两个明确参数。(3) 自查出 frozen_stale 是「可推导事实存成 6 个写点的布尔」，改为 PanelBinding 属性（零写点）；实测整套 presenter 测试在该行为被变异后仍全绿=从来无守卫。(4) _settle_panel_hosts 有两个人写记录：首投影拿 host 首帧默认值覆盖，实测 record=True/card=False/editor=True。现在首投影只把记录自己的值解析进词表（restore_semantic_choice），值的写回只留 configure 完成一条路。(5) 阈值：zlc_plot 中拟合最优值与操作者的决定分家（vector 只存 choice，fit 值按需导出，_classifier_thresholds_settled 唯一合成点；remove 线=回到拟合值）；workbench 给 level 手势开面板通道，两个 Edit 订阅点合成 _subscribe_editor_gestures。 (6) 三条遗留清掉：facet 聚焦态原本跳过池化（颜色尺/x 跨度/分箱），同一格两种画法——改为两种视图都由网格池化，实测 clim 双击前后同为 (-9,99)、聚焦时仍跟随 live 到 (-18,198)；代价实测 49.8→51.2 ms/版本（9×256×320），即那三个门没买到性能。Edit 面的订阅原本等 host 首次描述（只为拿 models），改为挂载即订阅+投影，settle 里第二个「prepare the editor」分支删除。frozen_stale 换代行为补进现有 Edit 投影测试并经变异验证。`
+- Last verified tests：`zlc_plot 337 passed；zlc_workbench 371 passed；九步真窗口验收全绿（1a–9，零 FAIL，含 5a 双击聚焦、5b 框选派生、6 fit+Save Fig、7e 换 cell kind 无白屏、8a Task 中途开面板、8c per-site 热图）。阈值链路与 relim/stale 均有探针数值，见上。`
+- Pending acceptance gates：`仅剩一条与本 Goal 无关：test_v3_architecture 的 10 s 死线在本机稳定超时。另注：zlc_ui/tests/test_pulse_views.py 当前红是另一个 agent 未提交的在飞改动（子进程源缺 from dataclasses import replace），按纪律 7 未动。`
+- Next action：`none。`
+- Post-goal Stepped Scan correction (2026-08-12)：用户后续物理裁决取代 `2177a9a` 的 host-repeat 实现。每个 point 只 `safe/settle -> apply+load -> fire` 一次；`Shots per point` 写入运行时 pulse 副本的 whole-pulse bracket count，由硬件在一次 fire 内重复。Pulse-driven source顺序收满 S 条；free-running source按同一 fire 原点的 `k * 单次 pulse 长度 + delay` deadline 取 S 条，不累计软件 sleep 漂移。`Repeats` 仍从头重扫整张 plan，Dataset repeat 轴仍为 `repeats x shots x source-repeat`。单-period bracket 合法；partial bracket 与 S>1 因现有硬件不支持嵌套而拒绝。
 
 ## 1. 执行纪律
 
