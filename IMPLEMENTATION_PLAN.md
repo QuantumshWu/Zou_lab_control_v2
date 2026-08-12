@@ -56,16 +56,17 @@
   2. **双击进 cell 后 fit 消失**：`PlotSession.focus_facet → _select_facet`，目标格与当前不同时**同时**调 `_invalidate_fit_context()` 和 `_clear_fit_presentation()`（`session.py:2279-2280`），后者删掉 `_accepted_fit`（那张已画出的整格批量结果）。之后**没有任何东西重解**：armed 的 live fit 只在**新数据 revision** 才解，扫描停了就永远回不来；而 console **拒绝重复应用相同的 fit 记录**（`console.py:1443`），所以必须先切 `fit_mode=none` 再挂——与操作者描述完全一致。这个 clear 是**多余的**：FacetGridPlot 的 live fit 被强制 all_facets（`_session_fit.py:569-571`），已接受的结果是**逐格批量、与聚焦无关**；实测只要不做那一次 clear，fit 跨聚焦存活且像素一致。（操作者猜的"某格不收敛毒死整批"**不是**本因。）
   3. **切回 image 切不回去**：同形两个故障，被 `2db4c82`（晚于实验机的树）分开。实验机那一版：semantic 记录**逐名**交给新 spec、没有"这个词表声明过吗"的守卫 → 在 curve cell 上选过的 Group 让 image 挂载抛 `KeyError('group')`，`update_panel_state` 返回 False，状态条只有一句 `panel-1: 'group'`，cell kind 原地不动 —— 就是"切不回去了"，且提示毫无意义。`2db4c82` 修了那条，但**过滤仍未覆盖 host 重建路径**：`console.py:1530` 用**尚未刷新的、上一种 kind 的** `binding.parameter_surface` 去 configure 全新 host，而 surface 要到 `:1554` 才更新 → 每次换 cell kind 都会发出**一次注定失败的 configure，且其 future 被丢弃**（其它调用点都会存进 `binding.configuration`），于是这次拒绝**看不见**。HEAD 上操作者还能遇到的是**静默无动作**的第三种：被两个词表**都声明**的语义名（例如在 curve cell 上选的 x 轴）会合法地带进 image cell，于是 image 回来是**空白**。
 
-- Goal 进度 (2026-08-12 晚)：**已修 4/7**
+- Goal 进度 (2026-08-13)：**7/7 全部完成**，各带实测与 commit
   - ✅ `1929877` seamless Stop：`wait_for_board`/`check_cancelled` 收成一处（`nodes/scan/source.py`），两个引擎共用；虚拟 streamer 的超时改成"最多等这么久再回答"。Stop 延迟 4.451s→0.026s，`wait_done` 调用 1.8M→10。
-  - ✅ `deabef2` 聚焦不再删除已接受的 fit：`_select_facet` 与 `show_facet_overview` 只 `_invalidate_fit_context()`（规则本就写在该函数文档里）；只有"fit 绑定的 selector 被删"才清除。实测 overlays 3→3→3→3。
-  - ✅ `b63e642` 一个 host 只被告知它自己词表声明的东西：`_match_host_to_panel` 现在把 `surface["fit_models"]` 传给 `apply_panel_fit`（原来 7 个调用点只有 1 个传）；重建路径先搬记录与 surface 再投影，并保留 operation（原来先用**上一种 kind** 的 surface 发一次注定失败且被丢弃的 configure）。顺带修好 HEAD 上红着的 `test_gui_seam`。
+  - ✅ `deabef2` 聚焦不再删除已接受的 fit：`_select_facet` 与 `show_facet_overview` 只 `_invalidate_fit_context()`；只有"fit 绑定的 selector 被删"才清除。实测 overlays 3→3→3→3。
+  - ✅ `b63e642` 一个 host 只被告知它自己词表声明的东西：`_match_host_to_panel` 把 `surface["fit_models"]` 传给 `apply_panel_fit`（原来 7 个调用点只有 1 个传）；重建路径先搬记录与 surface 再投影，并保留 operation。顺带修好 HEAD 上红着的 `test_gui_seam`。
   - ✅ `4ac8c60` fit 域只按坐标裁：curve/histogram 的 viewport 与 AREA 不再按观测值/计数过滤（image 一直如此）。THRESHOLD 仍按值裁且仍需显式指名。
-  - ✅ 部分：`_fit_facet_batch` 现在接收并转发 `selector_kind`（解算域=报告域）。
-  - ⬜ **待做 1（剩余一半）**：facet batch 的域应**整批决定一次**。`_session_fit.py:~418-421` 给每个 cell 建投影时写 `focused_facet_index=index`，于是选择器只在它所属那格可用、其余格静默落到 viewport。裁决：一次 fit 只有一个域——操作者在某格画的区间应作用于整批（各 cell 共享轴）。改动要点：让每格投影解析 authority 时用**会话真正聚焦的那一格**，同时不要把 payload 切片的含义一起改掉。
-  - ⬜ **待做 2**：取消/撤下的 fit 仍占发布位（见上文第 3 条审查）。修法：给 fit 通道补上与选择器通道对等的撤销事件（`clear_fit()` 通知 → 翻译层映射 → `SelectionBridge` 退处理器），并定下"取消不留 valid 的旧答案"。
-  - ⬜ **待做 3**：指数/阻尼正弦模型无 x0 → 把拟合域平移到窗口起点（`x - x_ref`），先看 `FitModelSpec.coordinate_relations` 能否承载。
-  - ⬜ **待做 4**：cell-kind 切换后 image 空白的第三种成因（两词表都声明的语义名被合法带过去）。
+  - ✅ `84766b7`+`b7a17dc` 一次 grid fit 只有一个域：`focused_facet_index` 原本同时表示"算哪一格"和"操作者在看哪一格（谁的选择器能说话）"。`fit_selection(..., facet_index=)` 把"算哪一格"变成参数，字段只剩名字所说的那一个意思；接受/记录路径也不再换焦点重算。实测（两格 + cell0 画 X_RANGE + viewport）：cell0 selector/5 + cell1 viewport/7 → 两格都 selector/5，四种请求形态一致。
+  - ✅ `22c7bec` 衰减族锚在被拟合的窗口：`FitModelSpec.anchored_at(origin)`，`FitEngine.fit` 对声明 `domain_anchored` 的模型绑定原点，锚随 `result.model` 走（overlay/分量/雅可比同一锚）；两个 seeder 删掉"外推回远处原点"的补偿；overlay 只画在解算域内。实测 60 点衰减（A=5,B=1,τ=20）在 x=0/1200/1e6 三处：A=5.0000 τ=20.0000，曲线 RMS 3.7e-16（原来 seed A=1.485e+27）。
+  - ✅ `744c787` 撤下的 fit 不再占发布位：fit 通道补上与 `SelectionChange.REMOVED` 对等的撤销事件（`subscribe_fit` 送 `None` → 翻译层 → bridge 退处理器）。实测：un-arm 后十条 `@logic/panel-1/*` 从 plane、publishers、消费者 source options、signal groups 一并退出；重新 arm 十个名字全部收回，`last_error` None。
+  - ✅ `6e59d65` cell-kind 第三成因（两词表都声明的**名字**、但新词表接不了那个**值**）：`project_panel_state` 保持"整条记录一次编辑"为规则，当这条编辑根本不可能成立时，操作者的手势赢——还能合成的留下，其余留在袋里等切回去。实测 curve 的 `x=spatial-y` 切 image：原来 False + "ImagePlot x and y must be different axes"，现在 True。
+  - 测试：zlc_plot 338 / zlc_runtime 163 / zlc_workbench 376 全绿；五条新断言各自做过变异验证（改回旧行为即红）。
+  - 留作已知设计（不是缺陷）：提交/移动/删除选择器**不会**立刻重解已接受的 fit——它按数据修订版锚定，下一帧数据才更新（`session.py` 提交路径注释即此规则）。跑完的一批数据上，删掉框后旧答案会一直留着，直到操作者撤下 fit（现在撤下会真的退出发布）。
 
 ## 1. 执行纪律
 
