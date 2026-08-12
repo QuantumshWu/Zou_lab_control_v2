@@ -38,6 +38,7 @@
 - Last verified tests：`zlc_workbench+zlc_ui 459 passed；scan/selection/architecture 35 passed；九步真窗口验收（含 5a 双击聚焦、5b 框选派生、6 fit+Save Fig、7e 换 cell kind 无白屏、8a Task 中途开面板）零 FAIL。探针均先 import zou_lab_control_v2 并打印被测模块 __file__。`
 - Pending acceptance gates：`四条已查实未做：Save Fig 是第四份更窄的 host 投影（漏 selector/viewport/focus）；threshold classifier 阈值是 host 私有状态，两视图可不同且无 stale 提示；size 未对 plot preset 词表校验，可写进 PanelState 并让下次 mount 报 unknown panel preset；editor host 的 configure 结果被丢弃而 live 的会写回 PanelState。另：test_v3_architecture 的 10 s 死线在本机稳定超时，与本 Goal 无关。`
 - Next action：`none — Goal complete。`
+- Post-goal Stepped Scan correction (2026-08-12)：`2177a9a` 修正最初对 `Shots per point` 的错误理解。每个 shot 现在都完整执行 `safe/settle -> apply+load 同一 point -> On -> Free-run delay -> capture`；`Repeats` 只在最外层从头重扫整张 plan。进度总数为 `repeats x points x shots`，Dataset repeat 轴仍为 `repeats x shots x source-repeat`。旧实现的“一次 apply 后连续读取多个 shots”已经删除，不得恢复。
 
 ## 1. 执行纪律
 
