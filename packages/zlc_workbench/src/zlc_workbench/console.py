@@ -976,6 +976,16 @@ class ConsolePresenter:
         binding.initial_presented = False
         self._match_host_to_panel(binding, host, present=True)
         binding.display_publication = publication
+        # A new generation of the same signal is a different run.  The Edit
+        # tab's frozen picture belongs to the run that just ended -- its fit
+        # is solved against data the bench no longer holds -- so it says so,
+        # the way it already does when the signal itself changes.  Silence
+        # here is what made the two views disagree with no way to tell which
+        # one was current, and Refresh the only cure.
+        binding.frozen_stale = True
+        # Said, not just recorded: the Edit tab's stale mark, its Save gate and
+        # its selection routing all read this through the projection.
+        self._publish_panel_state(binding)
         self._present_mounted_front(binding)
         if old_host is not None:
             self._retire_plot_host(old_host)
@@ -1493,7 +1503,7 @@ class ConsolePresenter:
                             state=candidate,
                         )
                         if isinstance(plot_input, ImageFrame):
-                            configuration["image_overlay"] = plot_input.overlay
+                            live_overlay = plot_input.overlay
                     frozen = binding.frozen_data
                     if frozen is not None and frozen.publication is not None:
                         frozen_value = self._publication_value(
