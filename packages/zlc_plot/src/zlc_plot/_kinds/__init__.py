@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
-from zlc_data import DatasetSchema
-
-from ..data_contract import live_grid_dimensions
+from ..kinds import PlotKind
 from .base import KindHandler
 from .curve import HANDLER as CURVE_HANDLER
-from .facet_grid import HANDLER as FACET_GRID_HANDLER
+from .facet_grid import HANDLER as FACET_GRID_HANDLER, cell_within_one_cell
 from .histogram import HANDLER as HISTOGRAM_HANDLER
 from .image import HANDLER as IMAGE_HANDLER
 from .pulse_timeline import HANDLER as PULSE_TIMELINE_HANDLER
@@ -65,11 +64,12 @@ def default_spec(schema: Any, kind: Any) -> Any:
 #: could equally be shown another way, and inferring one would be guessing at
 #: intent rather than reading structure.
 #:
-#: A facet grid is not in this list either, and for a different reason: it is
-#: not one more candidate to try, it is the answer to a question none of these
-#: can answer -- "is there structure here that a single flat plot would have
-#: to average away".  :func:`_grid_reads_structure_a_flat_plot_would_pool`
-#: asks it before the list is walked at all.
+#: A facet grid is not in this list either, and for the original reason: a
+#: grid is a way of LOOKING at data rather than something the data proves,
+#: so it is asked for -- by an operator choosing it, or by the node whose
+#: Start opened the panel, which knows what it measured and says so in its
+#: preview declaration.  Inferring one from shape alone is guessing at
+#: intent, and a shape-reading rule here was exactly that.
 _INFERENCE_ORDER: tuple[KindHandler, ...] = (
     PULSE_TIMELINE_HANDLER,
     IMAGE_HANDLER,
@@ -77,34 +77,7 @@ _INFERENCE_ORDER: tuple[KindHandler, ...] = (
 )
 
 
-def _grid_reads_structure_a_flat_plot_would_pool(schema: Any) -> bool:
-    """Whether one flat plot of this dataset would pool something real.
-
-    A flat image IS one frame: every point row and every live scan dimension
-    it carries is reduced into that one picture.  A flat curve walks ONE
-    dimension: a second live dimension is pooled into it.  Where that
-    happens, the structure being pooled is the measurement -- two frames of a
-    cycle, seven points of a scan -- and the operator asked to see the
-    signal, not its average.
-
-    Degenerate axes are provenance, not structure, so they are invisible here
-    exactly as they are everywhere else; a single-frame cycle and a
-    one-dimensional scan of scalars keep the plain kind that already shows
-    all of them.
-    """
-
-    if not isinstance(schema, DatasetSchema):
-        return False
-    live = live_grid_dimensions(schema)
-    dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
-    if len(dense) >= 2:
-        # A frame per point: any live point structure is a second frame.
-        return bool(live) or schema.point_table.row_count > 1
-    # A scalar or a single vector per point: the curve walks one dimension.
-    return len(live) >= 2
-
-
-def fitting_spec(schema: Any, kind: Any = None) -> Any:
+def fitting_spec(schema: Any, kind: Any = None, *, cell: Any = None) -> Any:
     """A spec this dataset admits, or ``None`` if it admits none.
 
     With no ``kind`` the dataset's own structure decides -- the one answer to
@@ -118,12 +91,19 @@ def fitting_spec(schema: Any, kind: Any = None) -> Any:
     drawn like that" is one question however it is asked.
     """
 
+    if cell is not None and kind is not PlotKind.FACET_GRID:
+        raise ValueError("only a facet grid has a cell kind")
     if kind is not None:
-        return default_spec(schema, kind)
-    if _grid_reads_structure_a_flat_plot_would_pool(schema):
-        grid = FACET_GRID_HANDLER.default_spec(schema)
-        if grid is not None:
+        grid = default_spec(schema, kind)
+        if cell is None or grid is None:
             return grid
+        # Naming a cell kind changes the KIND of the cell, never the rule
+        # for what one cell shows: that stays with the grid that composed it.
+        inner = default_spec(schema, cell)
+        if inner is None:
+            return None
+        inner = cell_within_one_cell(schema, grid.facet, inner)
+        return None if inner is None else replace(grid, cell=inner)
     for handler in _INFERENCE_ORDER:
         candidate = handler.default_spec(schema)
         if candidate is not None:

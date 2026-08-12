@@ -1,13 +1,10 @@
-"""What a panel opens as when nobody named a kind.
+"""Who decides what a started node draws, and what a grid can draw at all.
 
-The rule is one question, asked of the data: would a single flat plot have
-to average something real away?  A cycle of one frame is a picture; a cycle
-of two frames is two pictures.  A one-dimensional scan of scalars is a
-curve; a scan of frames is one picture per point.
-
-These are the shapes the bench actually publishes -- camera_measurement's
-frames and the scan nodes' datasets -- built through their own production
-helpers so this stays a statement about the product, not about a fixture.
+Two questions that used to be tangled.  WHICH plot a node's Start opens is
+the node's own answer -- it knows what it is about to measure, and a shape
+alone does not.  What a facet grid can draw is a question about the data,
+and the answer must not be "nothing" for a signal an operator can obviously
+see in cells.
 """
 
 from __future__ import annotations
@@ -15,8 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zlc_data import SPATIAL_X, SPATIAL_Y
-from zlc_plot import CurvePlot, FacetGridPlot, ImagePlot
+from zlc_data import READOUT_EVENT, SITE, SPATIAL_X, SPATIAL_Y
+from zlc_plot import CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 
 
@@ -75,114 +72,88 @@ def _auto(schema):
     return task_console_fitting_spec(schema, "", "")
 
 
-def test_a_single_frame_cycle_is_a_picture_and_a_two_frame_cycle_is_a_grid() -> None:
-    single = _auto(_camera_frames(cycles=3, frames=1))
-    assert isinstance(single, ImagePlot), single
-
-    pair = _auto(_camera_frames(cycles=3, frames=2))
-    assert isinstance(pair, FacetGridPlot), pair
-    assert isinstance(pair.cell, ImagePlot)
-
-
-def test_a_one_dimensional_scan_of_scalars_is_the_curve_it_looks_like() -> None:
-    """The one shape a flat plot shows completely: one axis, one number."""
-
-    spec = _auto(_scan(_scalar_source(), axes={"da_bias_x": 3}, visits=2))
-    assert isinstance(spec, CurvePlot), spec
-
-
-def test_every_other_scan_opens_as_a_grid_instead_of_averaging_itself() -> None:
-    """A scan of frames is one picture per point, not one picture."""
-
-    frames = _camera_frames(cycles=1, frames=1)
-
-    one_axis = _auto(_scan(frames, axes={"da_bias_x": 3}, visits=2))
-    assert isinstance(one_axis, FacetGridPlot), one_axis
-    assert isinstance(one_axis.cell, ImagePlot)
-
-    two_axes = _auto(
-        _scan(frames, axes={"da_bias_x": 3, "da_bias_y": 2}, visits=2)
-    )
-    assert isinstance(two_axes, FacetGridPlot), two_axes
-    assert isinstance(two_axes.cell, ImagePlot)
-
-    # Frames per point AND points per scan: still one cell per thing measured.
-    cycles = _camera_frames(cycles=1, frames=2)
-    scanned_frames = _auto(_scan(cycles, axes={"da_bias_x": 3}, visits=1))
-    assert isinstance(scanned_frames, FacetGridPlot), scanned_frames
-
-
-def test_a_two_dimensional_scalar_scan_keeps_every_point_it_measured() -> None:
-    """Two scan axes and one number per point: the map, or a grid of maps.
-
-    Either way nothing is pooled that the operator did not ask to pool --
-    which is the whole question the automatic kind is answering.
-    """
-
-    swept_once = _auto(
-        _scan(_scalar_source(), axes={"a": 3, "b": 4}, visits=1)
-    )
-    assert isinstance(swept_once, ImagePlot), swept_once
-
-    swept_again = _auto(
-        _scan(_scalar_source(), axes={"a": 3, "b": 4}, visits=3)
-    )
-    assert isinstance(swept_again, FacetGridPlot), swept_again
-    assert isinstance(swept_again.cell, ImagePlot)
-
-
-def test_a_one_dimensional_scan_of_per_site_values_stays_one_curve_family() -> None:
-    """One scan axis and a vector per point is still one flat picture."""
+def _occupancy_counts(*, frames: int, sites: int):
+    """(repeat, frames, sites) exactly as the occupancy processor publishes."""
 
     from zlc_atom.data import snapshot_from_array
+    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_column
 
-    from zlc_data import SITE
-
-    sites = snapshot_from_array(
-        np.zeros((1, 6), dtype=np.float64),
+    return snapshot_from_array(
+        np.zeros((1, frames, sites), dtype=float),
         producer="occupancy",
         signal="counts",
-        roles=(SITE,),
+        roles=(READOUT_EVENT, SITE),
+        point_columns={READOUT_EVENT: _frame_point_column("cam", frames)},
         generation="auto-kind",
         revision=1,
     ).block.schema
-    spec = _auto(_scan(sites, axes={"da_bias_x": 3}, visits=1))
-    assert isinstance(spec, CurvePlot), spec
 
 
-def test_only_a_node_that_owns_its_shot_offers_to_open_a_plot() -> None:
-    """Start opens what the node came to show; a processor came to answer.
+def test_a_grid_of_judged_frames_draws_one_cell_per_frame() -> None:
+    """The reported refusal: 1 x 3 x 35 counts, and the grid said no.
 
-    Occupancy reacts to a camera it does not own, and which of its five
-    answers belongs on this board is a decision about the board -- made by
-    adding the panel, not by the node's own declaration.
+    Three frames judged over thirty-five sites is three cells with a curve
+    -- or a histogram -- in each; there is nothing ambiguous about it.  The
+    grid refused because only its image-cell branch knew how to face a point
+    axis, and a curve cell fell through to "nothing to facet".
+    """
+
+    schema = _occupancy_counts(frames=3, sites=35)
+    frame_axis = "cam.frames.frame"
+
+    automatic = task_console_fitting_spec(schema, "facet_grid", "")
+    assert isinstance(automatic, FacetGridPlot), automatic
+    assert automatic.facet.axis_id == frame_axis
+    assert isinstance(automatic.cell, CurvePlot)
+    # Inside one cell there is one frame, so the curve walks the sites.
+    assert automatic.cell.x.axis_id.endswith("site")
+
+    asked_for_curve = task_console_fitting_spec(schema, "facet_grid", "curve")
+    assert isinstance(asked_for_curve, FacetGridPlot)
+    assert asked_for_curve.facet.axis_id == frame_axis
+    assert isinstance(asked_for_curve.cell, CurvePlot)
+
+    asked_for_histogram = task_console_fitting_spec(schema, "facet_grid", "histogram")
+    assert isinstance(asked_for_histogram, FacetGridPlot)
+    assert isinstance(asked_for_histogram.cell, HistogramPlot)
+
+
+def test_the_automatic_kind_is_the_flat_kind_the_data_proves() -> None:
+    """One rule, and a grid is not part of it: a grid is asked for.
+
+    Reading a shape and deciding the operator wanted cells is guessing at
+    intent -- which is why WHICH grid a node opens is the node's own
+    declaration, not something inferred here.
+    """
+
+    frames = _camera_frames(cycles=3, frames=2)
+    assert isinstance(task_console_fitting_spec(frames, "", ""), ImagePlot)
+    counts = _occupancy_counts(frames=3, sites=35)
+    assert isinstance(task_console_fitting_spec(counts, "", ""), CurvePlot)
+
+
+def test_a_measurement_declares_the_plot_its_own_start_opens() -> None:
+    """The node knows what it is about to measure; a shape does not.
+
+    One frame per cycle IS a picture; a cycle of several is several, and one
+    image of them is their average -- which is no frame the camera took.
     """
 
     from zlc_atom.nodes import discover_logic_nodes
-    from zlc_atom.nodes._framework.descriptor import (
-        LogicNodeDescriptor,
-        NodeKind,
-        NodePreviewSpec,
-        OutputSpec,
+
+    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    camera = descriptors["camera_measurement"]
+    values = {field.name: field.default for field in camera.authoring_schema.fields}
+
+    single = camera.previews_for({**values, "frames_per_cycle": 1})
+    assert tuple((spec.output_name, spec.plot_kind) for spec in single) == (
+        ("frames", "image"),
     )
-    from zlc_atom.authoring import AuthoringSchema
+    several = camera.previews_for({**values, "frames_per_cycle": 3})
+    assert tuple((spec.output_name, spec.plot_kind) for spec in several) == (
+        ("frames", "facet_grid"),
+    )
 
-    declared = {
-        descriptor.api_name: tuple(
-            spec.output_name for spec in descriptor.node_previews
-        )
-        for descriptor in discover_logic_nodes()
-    }
-    assert declared["occupancy"] == ()
-    assert declared["camera_measurement"] == ("frames",)
-    assert declared["seamless_scan"] == ("scan",)
-    assert declared["stepped_scan"] == ("scan",)
-
-    with pytest.raises(ValueError, match="processor"):
-        LogicNodeDescriptor(
-            "invented",
-            NodeKind.PROCESSOR,
-            AuthoringSchema(()),
-            outputs=(OutputSpec("rate", "invented.rate.v1"),),
-            node_previews=(NodePreviewSpec("rate"),),
-        )
+    # A processor answers someone else's signal; nothing about starting it
+    # says which of its answers belongs on this board.
+    assert descriptors["occupancy"].node_previews == ()

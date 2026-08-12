@@ -7,7 +7,7 @@ from typing import Any
 from ..data_contract import image_axes, live_grid_dimensions
 from ..kinds import AxisRef, PlotKind
 from zlc_data import DatasetSchema
-from ..specs import FacetGridPlot, HistogramPlot, ImagePlot, Reduction
+from ..specs import CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, Reduction
 from .base import KindHandler
 from .curve import default_spec as curve_default_spec
 
@@ -75,36 +75,118 @@ def _data_axes_cell(schema: DatasetSchema) -> ImagePlot | None:
     )
 
 
-def default_spec(schema: Any) -> FacetGridPlot | None:
-    """Facet the repeat axis or the outer scan loops over a data-decided cell.
+def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
+    """What varies from cell to cell: the thing one plot would have to pool.
 
-    The cell shows the DENSEST structure the data offers.  Two data axes
+    One rule, and it depends on what the CELL already consumes, because a
+    grid has exactly one facet axis and the two must not claim the same
+    thing.  A curve cell walks a scan dimension itself, so the grid faces
+    the dimension outside it; an image cell consumes the data axes, leaving
+    every scan point free to have its own cell.
+
+    Frames of a cycle and points of a scan are different measurements and
+    get a cell each; repeats are the same measurement again, and pooling
+    them is the reduction the operator declared, so they face a grid only
+    when nothing else varies.  ``None`` means nothing varies: the flat plot
+    already IS the picture.
+    """
+
+    live = live_grid_dimensions(schema)
+    repeats = schema.repeat_axis.size > 1
+    dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
+    # No scan topology and several point rows: the point axis IS the thing
+    # measured several times -- the frames of a camera cycle, the frames
+    # occupancy judged.
+    points_vary = schema.grid_topology is None and schema.point_table.row_count > 1
+    point_axis = (
+        AxisRef.point(str(schema.point_table.columns[0].coordinate_id))
+        if points_vary
+        else None
+    )
+    if isinstance(cell, CurvePlot):
+        # A curve walks something itself.  It can hand the point axis to the
+        # grid only when the dense data gives it another one to walk; with a
+        # scalar per point the curve IS the walk over those points, and what
+        # is left to face are the sweeps.
+        if point_axis is not None and dense:
+            return point_axis
+        if len(live) >= 2:
+            # The curve walks the innermost dimension; the grid takes the
+            # outermost.
+            return AxisRef.point_dimension(live[0])
+        return AxisRef.repeat() if repeats else None
+    if point_axis is not None:
+        return point_axis
+    if len(live) == 1:
+        return AxisRef.point_dimension(live[0])
+    if len(live) >= 2:
+        # One facet axis, two or more scanned dimensions: every point
+        # measured gets its cell rather than one dimension being folded
+        # into the other.
+        return AxisRef.point_rows()
+    return AxisRef.repeat() if repeats else None
+
+
+def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
+    """The cell spec as ONE cell of a grid faceted by ``facet`` sees it.
+
+    Every cell kind defaulted in isolation reads the whole dataset, so it
+    reaches for the very structure the facets walk ACROSS: an image cell
+    over a scan claims the scan grid as its surface, a curve cell walks the
+    point axis that is now one value per cell.  Both are right alone and
+    wrong inside a cell, and the composition is one rule -- so it lives once,
+    here, rather than being re-derived by whoever composes next.
+
+    What remains inside a cell is the dense data.  A cell that cannot be
+    moved off the facet axis is a refusal, not a guess.
+    """
+
+    dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
+    if isinstance(cell, ImagePlot) and len(dense) >= 2:
+        # Data axes are declared slowest-first, so the last is horizontal.
+        return ImagePlot(
+            AxisRef.data(str(dense[-1].axis_id)),
+            AxisRef.data(str(dense[-2].axis_id)),
+            reduction=cell.reduction,
+            labels=cell.labels,
+        )
+    if isinstance(cell, CurvePlot):
+        if facet in (cell.x, cell.group):
+            if not dense:
+                return None
+            x = AxisRef.data(str(dense[0].axis_id))
+            # Whatever the curve grouped BY is either the facet (the grid
+            # owns it now) or the very axis it just started walking.
+            group = cell.group if cell.group not in (facet, x) else None
+            return CurvePlot(
+                x, group=group, reduction=cell.reduction, labels=cell.labels
+            )
+    if facet in (
+        getattr(cell, "x", None),
+        getattr(cell, "y", None),
+        getattr(cell, "group", None),
+    ):
+        return None
+    return cell
+
+
+def default_spec(schema: Any) -> FacetGridPlot | None:
+    """One cell per thing measured, showing the densest structure it holds.
+
+    Two questions, asked separately because they are separate: WHAT varies
+    from cell to cell (see :func:`_facet_axis`), and what one cell shows.
+
+    The cell shows the densest structure the data offers.  Two data axes
     make an image cell (a camera frame).  A SCALAR point over two or more
     live scan dimensions images its two innermost dimensions instead -- the
-    scan heatmap, which is what a field map was measured for.  Anything less
-    falls back to the curve default.  Degenerate axes (one value) are real
-    provenance but not structure, so inference never sees them.
+    scan heatmap, which is what a field map was measured for, and which
+    consumes those dimensions, so that branch keeps its own facet.  Anything
+    else falls back to the curve default: one curve per cell, which is how
+    thirty-five sites judged in each of three frames become three cells with
+    thirty-five points, instead of a panel that refuses to draw at all.
 
-    The facet axis differs by cell on purpose:
-
-    * frame cells: the facet is whatever would otherwise be POOLED.  With no
-      scan topology a non-trivial point axis wins -- a camera cycle
-      publishes its frames as points, and frame_0 | frame_1 side by side
-      (cycles averaged) is what the cycle was authored to show.  Under a
-      scan topology the scan wins: one live dimension facets by that
-      dimension, so each cell is labelled with the value it was taken at,
-      and two or more facet by the point ROWS, one cell per scan point,
-      because a grid has one facet axis and a two-dimensional scan of
-      frames has no dimension to spare.  Repeats come last of all: pooling
-      them is the reduction the operator declared, while pooling a scan
-      point or a frame destroys the measurement.
-    * scan-heatmap cells: the OUTER dimensions win and repeats reduce into
-      the cell's mean -- the averaged map is the measurement, and a
-      per-sweep facet stays one authored change away.  With no outer
-      dimension left, repeats are the only lawful facet; without either,
-      the plain image kind already IS the picture, so there is no grid.
-    * curve cells: the repeat axis, since the curve itself walks the
-      innermost dimension.
+    Degenerate axes (one value) are real provenance but not structure, so
+    inference never sees them.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -112,44 +194,33 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
     live = live_grid_dimensions(schema)
     repeats = schema.repeat_axis.size > 1
     cell = _data_axes_cell(schema)
-    if cell is not None:
-        if schema.grid_topology is None and schema.point_table.row_count > 1:
-            column = schema.point_table.columns[0]
-            return FacetGridPlot(
-                AxisRef.point(str(column.coordinate_id)), cell
-            )
-        if len(live) == 1:
-            return FacetGridPlot(AxisRef.point_dimension(live[0]), cell)
-        if len(live) >= 2:
-            return FacetGridPlot(AxisRef.point_rows(), cell)
-        if repeats:
-            return FacetGridPlot(AxisRef.repeat(), cell)
-        return None
-    live_data_axes = tuple(
-        axis for axis in schema.cell_schema.data_axes if axis.size > 1
-    )
-    if not live_data_axes and len(live) >= 2:
-        # Declared slowest-first, so the last live dimension is the innermost
-        # loop: the horizontal image axis, exactly as the dense image kind
-        # reads the same grid.
-        heatmap = ImagePlot(
-            AxisRef.point_dimension(live[-1]),
-            AxisRef.point_dimension(live[-2]),
-            reduction=Reduction.MEAN,
+    if cell is None:
+        live_data_axes = tuple(
+            axis for axis in schema.cell_schema.data_axes if axis.size > 1
         )
-        if len(live) >= 3:
-            return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
-        if repeats:
-            return FacetGridPlot(AxisRef.repeat(), heatmap)
-        return None
-    cell = curve_default_spec(schema)
+        if not live_data_axes and len(live) >= 2:
+            # Declared slowest-first, so the last live dimension is the
+            # innermost loop: the horizontal image axis, exactly as the dense
+            # image kind reads the same grid.  The heatmap IS the scan, so
+            # what is left to face is an outer loop or the sweeps.
+            heatmap = ImagePlot(
+                AxisRef.point_dimension(live[-1]),
+                AxisRef.point_dimension(live[-2]),
+                reduction=Reduction.MEAN,
+            )
+            if len(live) >= 3:
+                return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
+            if repeats:
+                return FacetGridPlot(AxisRef.repeat(), heatmap)
+            return None
+        cell = curve_default_spec(schema)
     if cell is None:
         return None
-    if repeats:
-        return FacetGridPlot(AxisRef.repeat(), cell)
-    if len(live) >= 2:
-        return FacetGridPlot(AxisRef.point_dimension(live[0]), cell)
-    return None
+    facet = _facet_axis(schema, cell)
+    if facet is None:
+        return None
+    cell = cell_within_one_cell(schema, facet, cell)
+    return None if cell is None else FacetGridPlot(facet, cell)
 
 
 HANDLER = KindHandler(

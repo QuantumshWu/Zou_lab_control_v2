@@ -276,6 +276,9 @@ class LogicNodeDescriptor:
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     node_previews: tuple[NodePreviewSpec, ...] = ()
+    resolve_node_previews: (
+        Callable[[Mapping[str, object]], tuple[NodePreviewSpec, ...]] | None
+    ) = None
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -308,6 +311,12 @@ class LogicNodeDescriptor:
             raise ValueError("static outputs and resolve_outputs are exclusive")
         if any(not isinstance(value, NodePreviewSpec) for value in node_previews):
             raise TypeError("node_previews must contain NodePreviewSpec values")
+        if self.resolve_node_previews is not None and not callable(
+            self.resolve_node_previews
+        ):
+            raise TypeError("resolve_node_previews must be callable or None")
+        if node_previews and self.resolve_node_previews is not None:
+            raise ValueError("static and resolved node previews are exclusive")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
@@ -342,13 +351,6 @@ class LogicNodeDescriptor:
             raise ValueError(
                 f"node previews use undeclared outputs: {sorted(unknown_previews)}"
             )
-        if node_previews and self.kind is NodeKind.PROCESSOR:
-            # A preview is what STARTING this node offers to show, and a
-            # processor is not started to be watched: it exists to answer
-            # someone else's signal, and which of its answers an operator
-            # wants on screen is a decision about that board, made by adding
-            # the panel.  A measurement or a Task owns the shot it opens.
-            raise ValueError("a processor node declares no preview")
         if len({value.name for value in artifact_outputs}) != len(artifact_outputs):
             raise ValueError("artifact output names must be unique")
         if len(
@@ -444,6 +446,28 @@ class LogicNodeDescriptor:
         if len({value.name for value in outputs}) != len(outputs):
             raise ValueError("resolved output names must be unique")
         return outputs
+
+    def previews_for(
+        self, values: Mapping[str, object]
+    ) -> tuple[NodePreviewSpec, ...]:
+        """The previews this exact authored request declares.
+
+        What a measurement's Start puts on screen is the measurement's own
+        answer, and it can depend on what it was asked to measure: a camera
+        cycle of one frame IS a picture, and a cycle of three is three of
+        them side by side.  The node knows which it is about to take; the
+        plotting package, given only a shape, would be guessing.
+        """
+
+        if self.resolve_node_previews is None:
+            return self.node_previews
+        authored = self.authoring_schema.project_values(values)
+        previews = tuple(self.resolve_node_previews(authored))
+        if any(not isinstance(value, NodePreviewSpec) for value in previews):
+            raise TypeError("resolve_node_previews must return NodePreviewSpec values")
+        if len({value.output_name for value in previews}) != len(previews):
+            raise ValueError("resolved preview output names must be unique")
+        return previews
 
     def selection_patch(
         self,

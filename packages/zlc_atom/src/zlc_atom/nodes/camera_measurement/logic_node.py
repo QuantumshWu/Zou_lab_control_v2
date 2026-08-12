@@ -204,6 +204,24 @@ def _build(
     )
 
 
+def _frames_preview(values) -> tuple[NodePreviewSpec, ...]:
+    """What Start puts on screen: the cycle this run is about to take.
+
+    One frame per cycle IS one picture.  Several are several pictures, and
+    a single image of them is their average -- which is not any frame the
+    camera took.  The node knows how many it asked for; a plot given only
+    the shape would be guessing at what the operator meant.
+    """
+
+    frames = int(values["frames_per_cycle"])
+    return (
+        NodePreviewSpec(
+            CAMERA_FRAMES_OUTPUT.name,
+            "image" if frames <= 1 else "facet_grid",
+        ),
+    )
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "camera_measurement",
     NodeKind.MEASUREMENT,
@@ -212,7 +230,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with
     # the acquisition configuration.
     outputs=(OutputSpec(CAMERA_FRAMES_OUTPUT.name, CAMERA_FRAMES_OUTPUT.contract_id),),
-    node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT.name),),
+    resolve_node_previews=_frames_preview,
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
     ),

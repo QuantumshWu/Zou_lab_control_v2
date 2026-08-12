@@ -3045,14 +3045,14 @@ class ConsolePresenter:
     def _ensure_node_previews(self, binding: LogicBinding) -> None:
         """Mount this node's declared previews through the ordinary panel path.
 
-        WHICH panel is the node's own declaration -- a console that guessed
-        would have to choose among eight occupancy outputs -- and WHETHER it
-        opens is the operator's per-row preference.
+        WHICH panel, and drawn HOW, is the node's own declaration -- it knows
+        what it just measured, and a console reading only a shape would be
+        guessing; WHETHER it opens is the operator's per-row preference.
         """
 
         if not binding.auto_preview or binding.host is None:
             return
-        previews = tuple(binding.descriptor.node_previews)
+        previews = tuple(binding.descriptor.previews_for(binding.draft.values))
         if not previews:
             return
         if binding.preview_host is not binding.host:
@@ -3081,11 +3081,18 @@ class ConsolePresenter:
             if any(panel.state.signal == signal for panel in self.panels.values()):
                 continue
             publication = front.publication(signal)
+            # The node names the kind it means; this exact dataset may not be
+            # drawable that way -- a scan of one axis over one number is a
+            # curve, not a grid of one cell -- and then the panel opens as
+            # what the data proves rather than refusing to open at all.
+            kind = str(preview.plot_kind)
+            if kind and self._spec_for(value.snapshot, kind, "") is None:
+                kind = ""
             panel = self.add_panel(
                 signal,
                 value.snapshot,
                 title=output_name.replace("_", " ").title(),
-                kind=str(preview.plot_kind),
+                kind=kind,
                 initial_publication=publication,
             )
             if value.transient:

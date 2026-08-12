@@ -2280,11 +2280,15 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
     )
     assert row.auto_preview is wanted, "the row shows the stored preference"
 
+    binding = presenter.logic[camera_id]
     declared = tuple(
-        spec.output_name
-        for spec in presenter.logic[camera_id].descriptor.node_previews
+        (spec.output_name, spec.plot_kind)
+        for spec in binding.descriptor.previews_for(binding.draft.values)
     )
-    assert declared == ("frames",), "a measurement names what Start shows"
+    assert declared == (("frames", "facet_grid"),), (
+        "a measurement names what Start shows, and how: three frames per "
+        "cycle are three pictures, never one average of them"
+    )
 
     session.load_pulse(PULSE_NAME)
     assert presenter.start_logic(camera_id) is True
