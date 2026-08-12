@@ -38,11 +38,13 @@ from .plan import (
     scan_ports_for,
     scan_ports_for_devices,
 )
-from .source import PublishedSignalSource
+from .source import PublishedSignalSource, check_cancelled, wait_for_board
 
 __all__ = [
     "SCAN_PLAN_SELECTIONS",
     "PublishedSignalSource",
+    "check_cancelled",
+    "wait_for_board",
     "DEVICE_PARAM_FAMILY",
     "PULSE_PARAM_FAMILY",
     "SCAN_OUTPUT",

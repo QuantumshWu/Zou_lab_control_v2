@@ -49,6 +49,8 @@ from zlc_atom.nodes.scan import (
     ScanLiveSlot,
     ScanPlan,
     ScanPort,
+    check_cancelled,
+    wait_for_board,
 )
 
 
@@ -104,10 +106,6 @@ class SteppedScanMeasurement:
     @property
     def dataset_output_declarations(self):
         return (SCAN_OUTPUT,)
-
-    def _check_cancelled(self, context: object) -> None:
-        if context.cancel_requested():
-            raise RuntimeError("the scan was cancelled")
 
     def _split_row(
         self, row: Sequence[float]
@@ -179,7 +177,7 @@ class SteppedScanMeasurement:
             total_shots = self.repeats * len(rows) * shots
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
-                    self._check_cancelled(context)
+                    check_cancelled(context)
                     program = self._apply(row, board)
                     self.source.arm(program)
                     self._collect(
@@ -194,7 +192,7 @@ class SteppedScanMeasurement:
         finally:
             self.source.close()
             self.sequencer.safe()
-        self._check_cancelled(context)
+        check_cancelled(context)
         snapshot = writer.snapshot()
         context.publish_final(
             {
@@ -279,7 +277,7 @@ class SteppedScanMeasurement:
                     + self.free_run_delay_seconds
                 )
                 while True:
-                    self._check_cancelled(context)
+                    check_cancelled(context)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         break
@@ -289,23 +287,13 @@ class SteppedScanMeasurement:
                 self._capture_shot(
                     context, writer, slot, index, sweep, shot, total_shots
                 )
-            self._wait_done(context)
+            wait_for_board(self.sequencer, context)
             return
         for shot in range(shots):
             self._capture_shot(
                 context, writer, slot, index, sweep, shot, total_shots
             )
-        self._wait_done(context)
-
-    def _wait_done(self, context: object) -> None:
-        while True:
-            self._check_cancelled(context)
-            report = self.sequencer.wait_done(0.1)
-            if report is None:
-                continue
-            if report.fault:
-                raise RuntimeError(f"stepped pulse failed: {report.fault}")
-            return
+        wait_for_board(self.sequencer, context)
 
     def _capture_shot(
         self,

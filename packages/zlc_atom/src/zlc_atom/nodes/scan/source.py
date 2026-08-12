@@ -27,6 +27,42 @@ from zlc_runtime import SignalValue
 from zlc_runtime.streams import StreamEndedEarly
 
 
+def check_cancelled(context: object) -> None:
+    """Leave now if the operator has pressed Stop.
+
+    One sentence for both engines and for the wait below: a scan that ends
+    because it was stopped says so the same way wherever it noticed.
+    """
+
+    if context.cancel_requested():
+        raise RuntimeError("the scan was cancelled")
+
+
+def wait_for_board(sequencer: object, context: object) -> None:
+    """Wait for the board to finish playing, and stay stoppable while waiting.
+
+    Stop is a cooperative flag; a wait that cannot see it is a wait an operator
+    cannot end.  So the bench is asked in slices and the flag is read between
+    them: pressing Stop leaves this within one slice, the caller's ``finally``
+    drives the outputs safe, and nothing waits for the rest of the table to
+    play out -- ending a scan is not the same act as letting it finish.
+
+    Both engines wait here.  Passing ``None`` to ``wait_done`` is what made a
+    stopped seamless scan run to the end of its table (measured: Stop at
+    4.018 s, terminal at 8.469 s, the whole difference asleep inside the
+    streamer), while its sibling had this loop written out beside it.
+    """
+
+    while True:
+        check_cancelled(context)
+        report = sequencer.wait_done(0.1)
+        if report is None:
+            continue
+        if report.fault:
+            raise RuntimeError(f"the pulse failed: {report.fault}")
+        return
+
+
 class PublishedSignalSource:
     """The point's value is the next publication of a signal somebody runs.
 

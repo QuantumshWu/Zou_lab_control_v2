@@ -46,6 +46,7 @@ from zlc_runtime import FinalDatasetOutput
 
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter, ScanLiveSlot
 from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
+from .source import check_cancelled, wait_for_board
 
 
 class SeamlessScanMeasurement:
@@ -84,10 +85,6 @@ class SeamlessScanMeasurement:
     @property
     def dataset_output_declarations(self):
         return (SCAN_OUTPUT,)
-
-    def _check_cancelled(self, context: object) -> None:
-        if context.cancel_requested():
-            raise RuntimeError("the scan was cancelled")
 
     def _streamed_sequence(self, board: object) -> tuple[PulseSequence, tuple]:
         """The template with the plan's axes turned into hardware slots."""
@@ -183,7 +180,7 @@ class SeamlessScanMeasurement:
             self.sequencer.fire()
             per_sweep = len(rows) * shots
             for played in range(cycles):
-                self._check_cancelled(context)
+                check_cancelled(context)
                 sweep, rest = divmod(played, per_sweep)
                 row_index, shot = divmod(rest, shots)
                 value = self.source.next_value(context)
@@ -203,11 +200,11 @@ class SeamlessScanMeasurement:
                         current=(played + 1) // shots,
                         total=self.repeats * len(rows),
                     )
-            self.sequencer.wait_done(None)
+            wait_for_board(self.sequencer, context)
         finally:
             self.source.close()
             self.sequencer.safe()
-        self._check_cancelled(context)
+        check_cancelled(context)
         return writer.snapshot()
 
     def run_record(self) -> dict[str, object]:

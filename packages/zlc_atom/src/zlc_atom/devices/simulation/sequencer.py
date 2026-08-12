@@ -87,6 +87,11 @@ class VirtualPulseStreamer(PulseStreamer):
         if deadline is not None:
             remaining = max(0.0, deadline - time.monotonic())
             if timeout is not None and remaining > max(0.0, float(timeout)):
+                # A timeout is "answer within this long", not "answer now":
+                # returning immediately turns every polling caller into a spin
+                # at full speed for the length of the table.  The slice the
+                # caller asked for is the slice it waits.
+                time.sleep(max(0.0, float(timeout)))
                 return None
             if remaining > 0.0:
                 time.sleep(remaining)
