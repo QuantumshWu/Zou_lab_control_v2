@@ -301,6 +301,7 @@ class ScriptedScanBench:
         self.signal_name = self._node.signal_key("frames")
         self.published: list[int] = []
         self.events: list[tuple[str, float]] = []
+        self.loads = 0
         self.scan_tables: list[tuple[np.ndarray, int]] = []
         self._next_value = 0
 
@@ -325,6 +326,7 @@ class ScriptedScanBench:
         return self._sequencer.describe()
 
     def load(self, prog: object, *, source: object | None = None) -> None:
+        self.loads += 1
         self._sequencer.load(prog, source=source)
 
     def write_scan_table(self, rows: object, *, sweeps: int = 1) -> None:

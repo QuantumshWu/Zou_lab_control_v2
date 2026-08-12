@@ -11,11 +11,11 @@ capture publishes the growing dataset through the run's live slot -- a panel
 attaching mid-scan sees every point so far -- and the finished run publishes
 the very same arrays as the FINAL result.
 
-REPEATS AND SHOTS SHARE THE REPEAT AXIS.  ``shots_per_point`` takes S
-consecutive looks while a point stays applied; ``repeats`` walks the WHOLE
-plan R more times.  Physically different -- consecutive looks see the same
-drift, sweeps see it move -- but structurally the same fact: the same
-conditions, again.  That fact already has a home, the dataset's repeat
+REPEATS AND SHOTS SHARE THE REPEAT AXIS.  ``shots_per_point`` runs S complete
+adjacent trials of one point; ``repeats`` walks the WHOLE plan R more times.
+Physically different -- adjacent trials see the same drift, sweeps see it
+move -- but structurally the same fact: the same conditions, again.  That
+fact already has a home, the dataset's repeat
 axis, so both land there (size R x S x the source's own repeats, sweeps
 slowest) and every repeat-aware projection -- mean, facet-by-repeat,
 per-shot rolling -- applies without knowing the scan existed.  The

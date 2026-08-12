@@ -90,6 +90,7 @@ def _scripted_run(
     gating: str,
     shots: int,
     settle: float,
+    repeats: int = 1,
     values: tuple[float, ...] = (-256.0, 256.0),
 ) -> tuple[np.ndarray, ScriptedScanBench]:
     """Run the node over a source whose every publication is named.
@@ -108,9 +109,10 @@ def _scripted_run(
         bench = ScriptedScanBench(
             installation.device("sequencer"),
             plane,
-            # A free-running source hands over the straddling shot as well;
-            # a pulse-driven one publishes exactly one cycle per fire.
-            publications_per_fire=shots + 1 if gating == "sw_gated" else 1,
+            # Every fire is one shot.  A free-running source hands over one
+            # boundary straddler before that shot; a pulse-driven source
+            # publishes exactly the shot itself.
+            publications_per_fire=2 if gating == "sw_gated" else 1,
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan((ScanAxis(BIAS_PORTS[0], values),))
@@ -120,6 +122,7 @@ def _scripted_run(
             source_signal=bench.signal_name,
             pulse_resource=_pulse_resource(_template_sequence()),
             plan=plan.to_tree(),
+            repeats=repeats,
             shots_per_point=shots,
             settle_seconds=settle,
             gating=gating,
@@ -176,18 +179,28 @@ def test_gating_is_the_operators_declaration_and_the_old_fields_are_gone() -> No
     assert "advance" not in STEPPED_SCAN_SCHEMA.field_names
 
 
-def test_sw_gated_discards_the_shot_that_straddled_the_change() -> None:
-    """A free-running source pays exactly one publication per point.
+def test_every_shot_is_reapplied_and_repeats_rescan_the_whole_plan() -> None:
+    """Shots repeat one point; repeats return and walk the whole plan again.
 
-    Each point publishes three named shots; the first was exposed across the
-    apply, so the kept two are the SECOND and THIRD -- asserted by value, not
-    by count, because a count survives keeping the wrong ones.
+    Two points, two shots and two sweeps are eight complete experiments, not
+    four applies followed by extra reads.  The first publication after every
+    apply straddles the capture boundary and the second is retained.
     """
 
-    kept, bench = _scripted_run(gating="sw_gated", shots=2, settle=0.0)
-    assert kept.tolist() == [[1.0, 4.0], [2.0, 5.0]]
+    kept, bench = _scripted_run(
+        gating="sw_gated", shots=2, repeats=2, settle=0.0
+    )
+    assert kept.tolist() == [
+        [1.0, 5.0],
+        [3.0, 7.0],
+        [9.0, 13.0],
+        [11.0, 15.0],
+    ]
     assert SCRIPTED_SEED_VALUE not in kept.reshape(-1).tolist()
-    assert bench.published == [SCRIPTED_SEED_VALUE, 0, 1, 2, 3, 4, 5]
+    assert bench.published == [SCRIPTED_SEED_VALUE, *range(16)]
+    assert bench.loads == 8
+    assert sum(kind == "fire" for kind, _when in bench.events) == 8
+    assert len(bench.stop_intervals()) == 8
 
 
 def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:

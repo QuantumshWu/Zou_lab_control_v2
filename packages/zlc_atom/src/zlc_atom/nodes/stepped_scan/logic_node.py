@@ -63,9 +63,9 @@ STEPPED_SCAN_SCHEMA = AuthoringSchema(
             required=True,
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
-        # repeats x shots): consecutive looks while the point stays applied
-        # versus whole-plan sweeps.  Physically different, structurally the
-        # same fact -- the same conditions, again.
+        # repeats x shots): complete adjacent trials of one point versus
+        # whole-plan sweeps.  Physically different, structurally the same
+        # fact -- the same conditions, again.
         AuthoringField(
             "repeats",
             "int",

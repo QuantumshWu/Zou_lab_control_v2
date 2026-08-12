@@ -289,13 +289,14 @@ scan engine。Logic Edit 中的 plan 绑定 pulse API parameter 与明确暴露�
 port；Start 只消费这份 plan，不让 Workbench 执行扫描科学逻辑。
 
 用户另选一个当前 LIVE Dataset signal。Start 冻结其 generation、建立一次 lossless tap，
-并独占所选 `sequencer.streamer`。每个 point 依次执行：`safe`，在 pulse 关闭时等待
-`Settle time`，应用 device/API 值，`resolve_api_parameters -> compile_sequence -> load`，
-然后清空应用前已完成的 publication 并 On。Pulse-driven source 每个 shot 由一次 fire
-产生，直接保留下一条 publication。Free-running source 在 On 后等待用户设置的
-`Free-run delay`；等待结束先丢弃 delay 内已完成的值，再丢弃跨越采集边界的下一条，
-随后保留 `Shots per point` 条。这样 delay 控制实际开始采样的时刻，而不是只延迟读取
-旧队列。Stop、source restart、signal terminal 或 schema 改变都结束本次 Measurement，
+并独占所选 `sequencer.streamer`。`Repeats` 是最外层的完整 plan 重扫；每个 point 的
+每个 shot 都完整执行：`safe`，在 pulse 关闭时等待 `Settle time`，应用同一个
+device/API point，`resolve_api_parameters -> compile_sequence -> load`，清空此前已完成的
+publication，然后 On。Pulse-driven source 直接保留下一条 publication。Free-running
+source 在 On 后等待用户设置的 `Free-run delay`；等待结束先丢弃 delay 内已完成的值，
+再丢弃跨越采集边界的下一条，随后只保留这一 shot 的下一条 publication。这样
+`Shots per point` 重复的是完整实验 shot，delay 控制实际开始采样的时刻，而不是只延迟
+读取旧队列。Stop、source restart、signal terminal 或 schema 改变都结束本次 Measurement，
 不能跨 generation 混合数据。
 
 完成后只发布一个 FINAL `scan` Dataset：保留所选 signal 的 repeat axis、cell schema、

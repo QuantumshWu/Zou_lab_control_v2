@@ -11,15 +11,18 @@ HOW A FRESH VALUE IS TAKEN IS THE OPERATOR'S DECLARATION.  Between two points
 the world changes, and whether the publication that straddles the change must
 be thrown away depends on the SOURCE, not on the board:
 
+Every shot is a complete trial: stop, settle, apply and load the point, fire,
+then capture one value.  ``shots_per_point`` repeats that whole trial at the
+same plan point; ``repeats`` returns to the beginning and walks the whole plan
+again.
+
 * ``pulse_gated``: the source is driven by the fired cycle (an externally
-  triggered camera), so it is silent between finite cycles and every
-  publication after a fire is that fire's.  One fire per shot, nothing
-  discarded, exact at any pipeline depth.
+  triggered camera), so it is silent between finite cycles and the next
+  publication after the fire is that shot's.  Nothing is discarded.
 * ``sw_gated``: the source free-runs at its own pace (the Basler MOT
-  monitor).  One fire applies the point and the board's end state holds it.
-  After the authored delay, completed publications are discarded; the next
-  may straddle that sampling boundary, so it is discarded and the
-  ``shots_per_point`` after it are kept.
+  monitor).  After the authored post-fire delay, completed publications are
+  discarded; the next may straddle that sampling boundary, so it is discarded
+  and the following publication is retained as this shot.
 
 Neither is guessed from the publisher and neither probes the board.  The two
 are different apparatus, and only the operator knows which one is wired up.
@@ -174,18 +177,26 @@ class SteppedScanMeasurement:
             # after the whole plan has played, so the R looks at one point
             # straddle whatever drifts between sweeps -- which is the
             # physical difference between repeats and shots.
+            total_shots = self.repeats * len(rows) * shots
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
-                    self._check_cancelled(context)
-                    program = self._apply(row, board)
-                    # Everything published before the apply is the old world.
-                    self.source.arm(program)
-                    self._collect(context, writer, slot, index, sweep)
-                    context.report_progress(
-                        "Scanning",
-                        current=sweep * len(rows) + index + 1,
-                        total=self.repeats * len(rows),
-                    )
+                    for shot in range(shots):
+                        self._check_cancelled(context)
+                        program = self._apply(row, board)
+                        # Everything published before this shot's apply is the
+                        # old world.  A new boundary belongs to every shot,
+                        # because every shot reapplies and fires the point.
+                        self.source.arm(program)
+                        visit = sweep * shots + shot
+                        self._collect(context, writer, slot, index, visit)
+                        completed = (
+                            (sweep * len(rows) + index) * shots + shot + 1
+                        )
+                        context.report_progress(
+                            "Scanning",
+                            current=completed,
+                            total=total_shots,
+                        )
         finally:
             self.source.close()
             self.sequencer.safe()
@@ -235,14 +246,11 @@ class SteppedScanMeasurement:
         writer: ScanDatasetWriter,
         slot: ScanLiveSlot,
         index: int,
-        sweep: int,
+        visit: int,
     ) -> None:
-        """Take this point's shots the way the operator says they are gated."""
+        """Fire and retain one shot using the operator-declared gate."""
 
-        shots = self.shots_per_point
         if self.gating == "sw_gated":
-            # One cycle applies the point; the board's end state holds it
-            # while the source keeps sampling the world at its own pace.
             self.sequencer.fire()
             if self.free_run_delay_seconds > 0.0:
                 deadline = time.monotonic() + self.free_run_delay_seconds
@@ -258,21 +266,16 @@ class SteppedScanMeasurement:
                 self.source.discard_pending()
             # The straddler: exposed partly at the old point.  Skip exactly it.
             self.source.next_value(context)
-            for shot in range(shots):
-                self._check_cancelled(context)
-                self._capture(context, writer, slot, index, sweep * shots + shot)
+            self._capture(context, writer, slot, index, visit)
             self.sequencer.wait_done(None)
             return
-        for shot in range(shots):
-            self._check_cancelled(context)
-            # One finite cycle per shot.  The operator declared the source
-            # pulse-driven, so the board's silence between cycles means the
-            # next publication is THIS cycle's -- exact, zero frames lost.
-            self.sequencer.fire()
-            self._capture(context, writer, slot, index, sweep * shots + shot)
-            # The frame can land before the program's tail finishes playing;
-            # wait the tail out so the next fire meets an idle board.
-            self.sequencer.wait_done(None)
+        # The operator declared the source pulse-driven, so the board's
+        # silence between trials means the next publication is THIS shot's.
+        self.sequencer.fire()
+        self._capture(context, writer, slot, index, visit)
+        # The frame can land before the program's tail finishes playing; wait
+        # the tail out so the next shot's safe/apply meets an idle board.
+        self.sequencer.wait_done(None)
 
     def _capture(
         self,
