@@ -65,6 +65,7 @@ from .panel_state import (
     PanelState,
     apply_panel_fit,
     draws_image_surfaces,
+    restore_semantic_choice,
 )
 from .presentation import PlotPanelPort
 from .selection import (
@@ -1918,11 +1919,45 @@ class ConsolePresenter:
                                 display.semantics,
                                 models,
                             )
-                            binding.state = self._state_with_described_parameters(
-                                binding.state, surface
-                            )
                             binding.parameter_surface = surface
-                            self._match_host_to_panel(
+                            # The record comes into the plot's vocabulary the
+                            # moment that vocabulary is known: a panel restored
+                            # from a layout holds each choice in the document's
+                            # plain form until something can say which typed
+                            # choice it names, and that is this description.
+                            #
+                            # Only the record's OWN values are resolved.  Taking
+                            # the described values wholesale -- which is what
+                            # stood here -- imported the host's defaults for
+                            # every name, including ones the operator had just
+                            # changed while this first render was still in
+                            # flight: measured as a card showing the classifier
+                            # off while the record and the Edit tab both said
+                            # on.  What the panel asked for is described by the
+                            # panel's own configure, and reaches the record
+                            # through the one write-back above.
+                            # Only names THIS vocabulary declares: a record
+                            # keeps the assignments of every vocabulary it has
+                            # crossed, on purpose, and asking the description
+                            # about one it never declared is a KeyError.
+                            declared = {
+                                str(field.name)
+                                for field in tuple(display.semantics.fields)
+                            }
+                            binding.state = replace(
+                                binding.state,
+                                semantic={
+                                    name: (
+                                        restore_semantic_choice(
+                                            display.semantics, name, value
+                                        )
+                                        if str(name) in declared
+                                        else value
+                                    )
+                                    for name, value in binding.state.semantic.items()
+                                },
+                            )
+                            binding.configuration = self._match_host_to_panel(
                                 binding, host, models=models, present=True
                             )
                             self._offer_state_to_editor(binding)
