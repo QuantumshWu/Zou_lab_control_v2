@@ -369,9 +369,6 @@ class ConsolePresenter:
         actual compatible publication.
         """
 
-        if self._task_command_blocked("adding a panel"):
-            return None
-
         wanted = str(kind or self._default_panel_kind)
         if wanted not in self._panel_kind_labels:
             self._report(
@@ -825,10 +822,6 @@ class ConsolePresenter:
         on the next redraw is a board that ignores the operator.
         """
 
-        if self._task_command_blocked("reordering panels"):
-            self.view.set_panel_order(tuple(self.panels))
-            return False
-
         wanted = [str(panel_id) for panel_id in order if str(panel_id) in self.panels]
         if len(wanted) != len(self.panels):
             wanted += [panel_id for panel_id in self.panels if panel_id not in wanted]
@@ -1000,9 +993,6 @@ class ConsolePresenter:
     def edit_panel(self, panel_id: str) -> bool:
         """Open or focus the panel's non-modal Edit projection."""
 
-        if self._task_command_blocked("editing a panel"):
-            return False
-
         binding = self.panels.get(panel_id)
         if binding is None:
             return False
@@ -1139,9 +1129,6 @@ class ConsolePresenter:
         )
         if candidate == current and not needs_mount:
             return False
-        if candidate != current and self._task_command_blocked("changing a panel"):
-            return False
-
         if not candidate.signal:
             if binding.host is not None or binding.port is not None:
                 self._release_panel_editor(binding)
@@ -1969,16 +1956,12 @@ class ConsolePresenter:
                 self._retire_plot_host(host)
 
     def _panel_editor_closed(self, panel_id: str) -> None:
-        if self._task_command_blocked("closing an Edit tab"):
-            return
         binding = self.panels.get(str(panel_id))
         if binding is not None:
             binding.editor_open = False
             self._release_panel_editor(binding)
 
     def close_panel_editor(self, panel_id: str) -> bool:
-        if self._task_command_blocked("closing an Edit tab"):
-            return False
         binding = self.panels.get(str(panel_id))
         if binding is not None:
             binding.editor_open = False
@@ -1990,8 +1973,6 @@ class ConsolePresenter:
         return False
 
     def refresh_panel_snapshot(self, panel_id: str) -> bool:
-        if self._task_command_blocked("refreshing a panel snapshot"):
-            return False
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return False
@@ -2066,9 +2047,6 @@ class ConsolePresenter:
 
     def save_panel_figure(self, panel_id: str, selected: str) -> object | None:
         """Save only the exact frozen data currently shown in Panel Edit."""
-
-        if self._task_command_blocked("saving a panel figure"):
-            return None
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
@@ -2263,8 +2241,6 @@ class ConsolePresenter:
         return True
 
     def remove_panel(self, panel_id: str) -> None:
-        if self._task_command_blocked("removing a panel"):
-            return
         if self._remove_panel_now(panel_id):
             self._refresh_console_projection()
 
@@ -2568,9 +2544,6 @@ class ConsolePresenter:
         is still three quarters of an afternoon's work.
         """
 
-        if self._task_command_blocked("loading a layout"):
-            return False
-
         if any(
             binding.pending is not None
             or (binding.host is not None and binding.host.running)
@@ -2615,9 +2588,6 @@ class ConsolePresenter:
     def save_layout(self) -> str:
         """Write only the stopped, reusable pipeline/layout document."""
 
-        if self._task_command_blocked("saving a layout"):
-            return ""
-
         path = self.view.ask_save_path(
             "Save TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
         )
@@ -2635,9 +2605,6 @@ class ConsolePresenter:
 
     def load_layout(self) -> bool:
         """Restore a layout as stopped drafts without building devices."""
-
-        if self._task_command_blocked("loading a layout"):
-            return False
 
         path = self.view.ask_open_path(
             "Load TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
@@ -2987,19 +2954,23 @@ class ConsolePresenter:
         task_id = self._active_task_id
         return None if task_id is None else self.logic.get(task_id)
 
-    def _task_command_blocked(
-        self,
-        action: str,
-        *,
-        node_id: str = "",
-        active_stop: bool = False,
-    ) -> bool:
-        """Apply one admission rule to every authored/lifecycle mutation."""
+    def _task_command_blocked(self, action: str, *, node_id: str = "") -> bool:
+        """What a running Task refuses, and it is not much.
+
+        A Task holds its devices exclusively, so nothing else can be STARTED
+        while it runs; and its run is defined by the draft it started from, so
+        that row cannot be re-drafted or removed under it.  Pass ``node_id``
+        for an action aimed at one row: another row's own business is its own.
+
+        Everything else the window does -- panels, layouts, figures, editors --
+        costs the Task nothing.  Refusing all of it meant an operator could not
+        open a plot to watch the very run they had just started.
+        """
 
         active = self._active_task()
         if active is None:
             return False
-        if active_stop and str(node_id) == active.node_id:
+        if node_id and str(node_id) != active.node_id:
             return False
         _state, status = self._logic_state(active)
         self._report(
@@ -3174,9 +3145,6 @@ class ConsolePresenter:
         open_editor: bool = True,
     ) -> str:
         """Create one stopped row draft; Start is the first build boundary."""
-
-        if self._task_command_blocked("adding a logic node"):
-            return ""
 
         descriptor = self.catalog.get(api_name)
         if descriptor is None:
@@ -3417,7 +3385,9 @@ class ConsolePresenter:
     ) -> bool:
         """Patch the row draft without mutating its current run."""
 
-        if self._task_command_blocked("changing a logic draft"):
+        if self._task_command_blocked(
+            "changing a logic draft", node_id=str(node_id)
+        ):
             return False
 
         binding = self.logic.get(str(node_id))
@@ -3519,12 +3489,6 @@ class ConsolePresenter:
         return activated
 
     def stop_logic(self, node_id: str) -> bool:
-        if self._task_command_blocked(
-            "stopping another logic node",
-            node_id=str(node_id),
-            active_stop=True,
-        ):
-            return False
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
@@ -3547,8 +3511,6 @@ class ConsolePresenter:
         return True
 
     def edit_logic(self, node_id: str) -> bool:
-        if self._task_command_blocked("editing a logic node"):
-            return False
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
@@ -3564,7 +3526,9 @@ class ConsolePresenter:
         waits, because what would be waiting is the window.
         """
 
-        if self._task_command_blocked("removing a logic node"):
+        if self._task_command_blocked(
+            "removing a logic node", node_id=str(node_id)
+        ):
             return False
 
         binding = self.logic.get(str(node_id))

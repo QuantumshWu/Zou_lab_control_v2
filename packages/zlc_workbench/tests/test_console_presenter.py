@@ -2024,10 +2024,16 @@ def test_panel_edit_projects_the_direct_producer_and_restart_uses_start(
     assert started == [node_id]
 
 
-def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
+def test_a_running_task_owns_the_bench_and_not_the_window(
     presenter, monkeypatch
 ) -> None:
-    """The real view signals and direct endpoints share one admission rule."""
+    """What a Task refuses is what it actually owns.
+
+    It holds its devices exclusively, so nothing else may START, and its run
+    is the draft it started from, so that row may not be re-drafted.  The
+    window is not its property: an operator watching a run must be able to
+    open a panel for it, and used to be told to stop the run first.
+    """
 
     from zlc_runtime.host import LogicNodeObservation, NodeProgress
     from zlc_atom.nodes import calibration_pulse_template_bytes
@@ -2104,16 +2110,24 @@ def test_one_task_host_owns_every_presenter_mutation_until_status_stop(
     assert presenter._active_task_id == task_id
     assert presenter.view.status[-1] == ("task", "calibration: Capturing 2/5")
 
-    panel_ids = tuple(presenter.panels)
-    logic_ids = tuple(presenter.logic)
+    # The window keeps working: a panel for the run in flight, a row prepared
+    # for what comes after it, and the panel that is no longer wanted closed.
     presenter.view.add_panel_requested.emit("curve")
     presenter.view.add_logic_requested.emit("occupancy")
     presenter.view.panel_remove_requested.emit(panel.panel_id)
+    presenter.view.logic_draft_changed.emit(other_id, {"values": {"repeat": 3}})
+    assert panel.panel_id not in presenter.panels, "a panel could not be closed"
+    assert len(presenter.panels) == 1, "a panel could not be opened"
+    assert "occupancy" in " ".join(presenter.logic), "a row could not be added"
+    assert presenter.logic[other_id].draft.values["repeat"] == 3
+
+    # The bench does not: nothing else may take the devices, and the Task's
+    # own draft is the run it is already performing.
     presenter.view.logic_start_requested.emit(other_id)
-    presenter.view.logic_draft_changed.emit(other_id, {"values": {"shots": 3}})
-    assert tuple(presenter.panels) == panel_ids
-    assert tuple(presenter.logic) == logic_ids
     assert presenter.logic[other_id].host is None
+    assert (
+        presenter.update_logic_draft(task_id, values={"repeats": 99}) is False
+    ), "the running Task's own draft is the run it started"
 
     presenter.view.stop_task_requested.emit()
     assert host.cancelled is True
