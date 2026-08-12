@@ -385,6 +385,8 @@ Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不
 
 每个 panel 只有一份 Workbench-owned `PanelState`，其中包含 signal binding、size、update interval、plot semantic/display/fit 参数和固定 plot kind。Setting frame 和 Panel Edit 都是这一份 state 的 view/controller，不各自保存副本。
 
+Monitor board 的几何只由 `zlc_ui` 的一条二维重力规则决定。拖动时卡片自由移动、其他卡片不 live reflow；松手时先用被拖卡片的真实左上角选择 settled board 上欧氏距离最近的二维格点，再把该卡固定在这个格点，让其他卡片保持相对顺序并向西北收敛。占用中的左上格点仍可选择，语义是把原卡挤开；某卡左下方的空格点也同等参与距离比较，不能先把落点压成一维 insertion index。窗口变窄时只对固定卡片的显示 x 做必要 clamp，不覆盖 authored anchor，因此再次放宽会恢复操作者选择的行。几何 owner 不进入 Workbench、`PanelState` 或科学 layout codec。
+
 ### 10.3 Panel Edit tab
 
 Edit 是一个 tab，不是 modal。它包含：
