@@ -111,7 +111,7 @@ class _Events:
         for callback in tuple(self._selection_callbacks):
             callback(change, state)
 
-    def emit_fit(self, event: FitEventValue) -> None:
+    def emit_fit(self, event: FitEventValue | None) -> None:
         for callback in tuple(self._fit_callbacks):
             callback(event)
 
@@ -528,6 +528,56 @@ def _batch_fit_event(
         source_revision=source_revision,
         batch_revision=batch_revision,
     )
+
+
+def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
+    """The fit is no longer on screen, so it is no longer published.
+
+    A removed box retires its processor through SelectionChange.REMOVED; an
+    un-armed fit says the same thing by delivering ``None``.  Without it the
+    parameters stayed on the plane, frozen at an answer nobody is making any
+    more, and their names stayed owned so re-arming could not reclaim them.
+    """
+
+    schema = _curve_schema()
+    values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
+    plane, _source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"})
+    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="fit")
+    bridge.start()
+    try:
+        def emit(x0: float, batch_revision: int) -> None:
+            events.emit_fit(
+                FitEventValue(
+                    parameter_names=("x0",),
+                    parameter_units={"x0": "pixel"},
+                    parameter_values={"x0": np.asarray([x0])},
+                    parameter_errors={"x0": np.asarray([0.1])},
+                    success=np.asarray([True]),
+                    sample_axis_name="",
+                    sample_coordinates=np.asarray([0.0]),
+                    sample_unit="",
+                    sample_labels=None,
+                    source_revision=1,
+                    batch_revision=batch_revision,
+                )
+            )
+
+        emit(2.5, 1)
+        assert plane.freeze().value("@logic/fit/x0") is not None
+
+        events.emit_fit(None)
+        withdrawn = plane.freeze()
+        assert withdrawn.value("@logic/fit/x0") is None
+        assert withdrawn.value("@logic/fit/x0_err") is None
+
+        emit(3.5, 2)
+        replayed = plane.freeze().value("@logic/fit/x0")
+        assert replayed is not None
+        assert float(replayed.snapshot.block.values.reshape(-1)[0]) == 3.5
+    finally:
+        bridge.close()
 
 
 def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> None:

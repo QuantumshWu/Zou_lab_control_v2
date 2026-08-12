@@ -345,15 +345,21 @@ class PlotSelectionSource:
 
     def subscribe_fit(
         self,
-        callback: Callable[[FitEventValue], object],
+        callback: Callable[[FitEventValue | None], object],
     ) -> Callable[[], None]:
-        """Report accepted fits as one parameter table.
+        """Report accepted fits as one parameter table, and their withdrawal.
 
         A scalar fit and a facet batch are the same table with one or many
         samples, which is why the runtime models only the batch shape.
+        ``None`` means the fit is gone -- the answer is no longer on screen,
+        so it is no longer published either.
         """
 
         def _on_fit(event: object) -> None:
+            if event is None:
+                self._last_error = None
+                self._deliver(callback, None)
+                return
             try:
                 value = _fit_value(event)
             except _Unbridgeable as error:

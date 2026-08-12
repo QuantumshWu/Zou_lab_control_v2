@@ -43,7 +43,9 @@ from .specs import FacetGridPlot, HistogramPlot
 if TYPE_CHECKING:
     from .session import PlotSession
 
-FitCallback = Callable[[FitEvent], object]
+# ``None`` withdraws: there is no accepted fit any more, which is
+# what SelectionChange.REMOVED says on the selection channel.
+FitCallback = Callable[[FitEvent | None], object]
 
 # Stable warm-start generation for the threshold classifier: its per-cell
 # seeds survive data revisions independently of user fit requests.
@@ -1515,11 +1517,12 @@ class FitSessionMixin:
             )
 
     def subscribe_fit(self, callback: FitCallback) -> Callable[[], None]:
-        """Observe results only after they are accepted and painted."""
+        """Observe results after they are accepted and painted, and their
+        withdrawal (``None``) when the accepted fit is taken away."""
 
         return self._subscribe_callback(self._fit_callbacks, callback)
 
-    def _notify_fit(self, event: FitEvent) -> None:
+    def _notify_fit(self, event: FitEvent | None) -> None:
         with self._lock:
             callbacks = tuple(self._fit_callbacks)
         self._notify_callbacks(callbacks, event)
@@ -1546,7 +1549,7 @@ class FitSessionMixin:
                 self._fit_warm_starts.clear()
                 self._live_fit_request = None
                 self._fit_context_generation += 1
-                self._accepted_fit = None
+                withdrawn = self._clear_fit_presentation()
                 # Un-arming touches only fit state: an in-flight data-frame
                 # preparation is fit-agnostic under the pair engine and
                 # continues untouched.
@@ -1574,5 +1577,9 @@ class FitSessionMixin:
                 raise
             fit_cancel.set()
             live_fit_cancel.set()
+        if withdrawn:
+            # Nothing is painted any longer, so nothing is published either:
+            # whoever derived signals from this fit hears it go.
+            self._notify_fit(None)
         if logical_completion is not None and not logical_completion.done():
             logical_completion.set_exception(FitCancelled("fit request cleared"))

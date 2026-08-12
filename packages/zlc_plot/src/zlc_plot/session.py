@@ -142,7 +142,7 @@ HostPresentationDispatch = Callable[
     Future[Any],
 ]
 DisplayCallback = Callable[[DisplayState], object]
-FitCallback = Callable[["FitEvent"], object]
+FitCallback = Callable[["FitEvent | None"], object]
 SelectionCallback = Callable[["SelectionEvent"], object]
 _CallbackT = TypeVar("_CallbackT", bound=Callable[..., object])
 _EventT = TypeVar("_EventT")
@@ -3224,6 +3224,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         """Remove a selector and notify external subscribers."""
 
         cancelled_fit: Future[FitResult | FacetFitBatchResult] | None = None
+        withdrawn = False
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -3277,7 +3278,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._live_fit_completion = None
                         self._live_fit_request = None
                         self._live_fit_future = None
-                        self._clear_fit_presentation()
+                        withdrawn = self._clear_fit_presentation()
             try:
                 if self._renderer is not None:
                     self._render_current(
@@ -3311,6 +3312,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     # Un-arming cancels only the live pair solve; an in-flight
                     # data-frame preparation is fit-agnostic and continues.
                     live_fit_cancel.set()
+        if withdrawn:
+            self._notify_fit(None)
         if emit_change:
             self._emit_selection(SelectionChange.REMOVED, state)
         if cancelled_fit is not None and not cancelled_fit.done():

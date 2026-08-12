@@ -453,7 +453,7 @@ class SelectionEventSource(Protocol):
 
     def subscribe_fit(
         self,
-        callback: Callable[[FitEventValue], object],
+        callback: Callable[[FitEventValue | None], object],
     ) -> Callable[[], None]: ...
 
 
@@ -752,7 +752,19 @@ class SelectionBridge:
                 raise ValueError("selector_data disagrees with committed selection state")
         self._commit_selection(current)
 
-    def _on_fit(self, event: FitEventValue) -> None:
+    def _on_fit(self, event: FitEventValue | None) -> None:
+        if event is None:
+            # The fit was withdrawn.  Its outputs described an answer that is
+            # no longer being made, so they retire with it and the names they
+            # held are free again -- the same thing a removed box does.
+            with self._lock:
+                self._fit_event = None
+                self._fit_publication = None
+                processor = self._fit_processor
+                self._fit_processor = None
+            if processor is not None:
+                self._withdraw_processor(processor)
+            return
         self._publish_fit_event(event, None, accept_revision=True)
 
     def _publish_fit_event(
