@@ -70,6 +70,11 @@ class PublishedSignalSource:
         """Everything published so far belongs to the world before this point."""
 
         del program, table
+        self.discard_pending()
+
+    def discard_pending(self) -> None:
+        """Discard every publication completed before a sampling boundary."""
+
         tap = self._require_tap()
         while True:
             self.signal_plane.freeze()

@@ -16,9 +16,10 @@ be thrown away depends on the SOURCE, not on the board:
   publication after a fire is that fire's.  One fire per shot, nothing
   discarded, exact at any pipeline depth.
 * ``sw_gated``: the source free-runs at its own pace (the Basler MOT
-  monitor).  One fire applies the point and the board's end state holds it;
-  the next publication may have been exposed partly at the OLD point, so
-  exactly it is discarded and the ``shots_per_point`` after it are kept.
+  monitor).  One fire applies the point and the board's end state holds it.
+  After the authored delay, completed publications are discarded; the next
+  may straddle that sampling boundary, so it is discarded and the
+  ``shots_per_point`` after it are kept.
 
 Neither is guessed from the publisher and neither probes the board.  The two
 are different apparatus, and only the operator knows which one is wired up.
@@ -67,6 +68,7 @@ class SteppedScanMeasurement:
         shots_per_point: int,
         settle_seconds: float,
         gating: str,
+        free_run_delay_seconds: float,
         tunables: object | None = None,
         producer: str = "stepped_scan",
     ) -> None:
@@ -91,6 +93,9 @@ class SteppedScanMeasurement:
             raise ValueError(
                 f"gating must be one of {GATING_MODES}, not {gating!r}"
             )
+        self.free_run_delay_seconds = float(free_run_delay_seconds)
+        if not self.free_run_delay_seconds >= 0.0:
+            raise ValueError("free_run_delay_seconds must be zero or more")
         self._tunables = dict(tunables or {})
 
     @property
@@ -200,6 +205,7 @@ class SteppedScanMeasurement:
                         "shots_per_point": shots,
                         "settle_seconds": self.settle_seconds,
                         "gating": self.gating,
+                        "free_run_delay_seconds": self.free_run_delay_seconds,
                     },
                 )
             }
@@ -238,6 +244,18 @@ class SteppedScanMeasurement:
             # One cycle applies the point; the board's end state holds it
             # while the source keeps sampling the world at its own pace.
             self.sequencer.fire()
+            if self.free_run_delay_seconds > 0.0:
+                deadline = time.monotonic() + self.free_run_delay_seconds
+                while True:
+                    self._check_cancelled(context)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        break
+                    time.sleep(min(remaining, 0.1))
+                # A lossless tap retained everything produced during the
+                # delay.  Drop those values before defining the new sampling
+                # boundary, rather than merely reading old data later.
+                self.source.discard_pending()
             # The straddler: exposed partly at the old point.  Skip exactly it.
             self.source.next_value(context)
             for shot in range(shots):

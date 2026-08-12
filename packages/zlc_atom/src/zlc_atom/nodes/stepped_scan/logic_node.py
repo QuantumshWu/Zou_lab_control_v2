@@ -2,8 +2,9 @@
 
 What the operator authors is the template, the plan, how many whole sweeps
 and how many shots per point, how long the pulse stays stopped while the
-bench settles -- and the one thing no machine can answer for them: what gates
-a publication on THIS bench, the fired cycle or the source's own clock.
+bench settles, how long a free-running source waits after On -- and the one
+thing no machine can answer for them: what gates a publication on THIS bench,
+the fired cycle or the source's own clock.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from .measurement import SteppedScanMeasurement
 #: a second is what the bench needs to reach the state a point starts from; it
 #: is authored because only the operator knows their apparatus.
 DEFAULT_SETTLE_SECONDS = 0.1
+DEFAULT_FREE_RUN_DELAY_SECONDS = 0.0
 
 
 STEPPED_SCAN_SCHEMA = AuthoringSchema(
@@ -101,6 +103,13 @@ STEPPED_SCAN_SCHEMA = AuthoringSchema(
                 ),
             ),
         ),
+        AuthoringField(
+            "free_run_delay_seconds",
+            "float",
+            "Free-run delay (s)",
+            DEFAULT_FREE_RUN_DELAY_SECONDS,
+            minimum=0.0,
+        ),
     )
 )
 
@@ -116,6 +125,7 @@ def _build(
     shots_per_point: int = 1,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     gating: str = "sw_gated",
+    free_run_delay_seconds: float = DEFAULT_FREE_RUN_DELAY_SECONDS,
     tunable_devices: Mapping | None = None,
 ) -> SteppedScanMeasurement:
     if (
@@ -151,6 +161,7 @@ def _build(
         shots_per_point=int(shots_per_point),
         settle_seconds=float(settle_seconds),
         gating=str(gating),
+        free_run_delay_seconds=float(free_run_delay_seconds),
         tunables=dict(tunable_devices or {}),
     )
 
