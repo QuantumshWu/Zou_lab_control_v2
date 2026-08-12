@@ -3244,6 +3244,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     request,
                 )
                 self._selector_controller.remove(kind)
+                # Taking the line away is how an operator says "classify where
+                # the fit says", so the choice it recorded goes with it.  The
+                # refresh path removes this selector too, but through the
+                # controller directly: that one is repainting the same answer,
+                # not withdrawing it.
+                chosen_previous = self._classifier_thresholds
+                if kind is SelectorKind.THRESHOLD and self._classifier_thresholds:
+                    index = 0 if state.facet_index is None else state.facet_index
+                    if 0 <= index < len(self._classifier_thresholds):
+                        cleared = list(self._classifier_thresholds)
+                        cleared[index] = None
+                        self._classifier_thresholds = tuple(cleared)
                 if affects_fit:
                     self._fit_context_generation += 1
                     if bound_request:
@@ -3266,6 +3278,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             except Exception:
                 with self._lock:
                     self._selector_controller._restore_removed(state)
+                    self._classifier_thresholds = chosen_previous
                     (
                         self._fit_context_generation,
                         self._fit_request_generation,

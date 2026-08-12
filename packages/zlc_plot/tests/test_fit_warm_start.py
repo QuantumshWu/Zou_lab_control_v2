@@ -178,16 +178,19 @@ def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
         parameters={"threshold_classifier": True},
     )
     try:
-        assert len(session._classifier_thresholds) == 1
-        assert session._classifier_thresholds[0] is not None
+        # Read where the classifier actually cuts: nobody has chosen a
+        # threshold here, so that is the one this fit proposes.
+        settled = session._classifier_thresholds_settled()
+        assert len(settled) == 1
+        assert settled[0] is not None
         key = (-1, "bimodal_gaussian", None)
         assert key in session._fit_warm_starts
         seeded = session._fit_warm_starts[key].parameters
-        first_threshold = session._classifier_thresholds[0]
+        first_threshold = settled[0]
         session._refresh_threshold_classifier()
         # The warm refresh re-solves from the prior solution; the threshold
         # is reproducible to the classifier's own scalar-optimizer tolerance.
-        assert session._classifier_thresholds[0] == pytest.approx(
+        assert session._classifier_thresholds_settled()[0] == pytest.approx(
             first_threshold, rel=1e-2, abs=1e-3
         )
         assert session._fit_warm_starts[key].parameters == pytest.approx(

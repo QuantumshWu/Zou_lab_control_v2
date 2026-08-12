@@ -1002,11 +1002,17 @@ class FitSessionMixin:
         self._remember_classifier_warm_starts(model, results)
         self._classifier_results = tuple(results)
         self._classifier_overlays = tuple(overlays)
-        self._classifier_thresholds = tuple(
-            None
-            if result is None or not result.success
-            else _bimodal_classifier_metrics(result)[0]
-            for result in results
+        # ``_classifier_thresholds`` holds what somebody CHOSE, and nothing
+        # else; the fit's own optimum is derived from the results above
+        # whenever it is needed.  They shared this one slot, so every new
+        # revision recomputed over the operator's dragged threshold and threw
+        # it away without saying anything -- measured as a threshold dragged
+        # to 150 reading 175.5 one shot later.
+        chosen = self._classifier_thresholds
+        # A different number of distributions is a different set of them, and
+        # a decision about the old ones says nothing about these.
+        self._classifier_thresholds = (
+            chosen if len(chosen) == len(results) else (None,) * len(results)
         )
         try:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
@@ -1034,8 +1040,33 @@ class FitSessionMixin:
                 else:
                     self._fit_warm_starts[key] = seed
 
+    @staticmethod
+    def _fitted_classifier_threshold(result: object) -> float | None:
+        """Where this fit says the two populations separate best."""
+
+        if result is None or not result.success:
+            return None
+        return _bimodal_classifier_metrics(result)[0]
+
+    def _classifier_thresholds_settled(self) -> tuple[float | None, ...]:
+        """What each distribution is classified at: the choice, else the fit.
+
+        THE composition, so a label, an overlay, a painted line and a
+        fidelity can never be computed against different thresholds.
+        """
+
+        results = self._classifier_results
+        if not results:
+            return ()
+        return tuple(
+            self._fitted_classifier_threshold(result) if chosen is None else chosen
+            for chosen, result in zip(
+                self._classifier_thresholds, results, strict=True
+            )
+        )
+
     def _classifier_thresholds_for_render(self) -> tuple[float | None, ...]:
-        thresholds = list(self._classifier_thresholds)
+        thresholds = list(self._classifier_thresholds_settled())
         if not thresholds:
             return ()
         snapshot = self._selector_controller.snapshot()
@@ -1092,12 +1123,15 @@ class FitSessionMixin:
         return tuple(labels)
 
     def _derived_threshold_classifier_selector(self) -> SelectorState | None:
-        if not self._threshold_classifier_enabled() or not self._classifier_thresholds:
+        """The threshold line to paint when no gesture is holding one."""
+
+        settled = self._classifier_thresholds_settled()
+        if not self._threshold_classifier_enabled() or not settled:
             return None
         index = 0 if self._focused_facet_index is None else self._focused_facet_index
-        if index < 0 or index >= len(self._classifier_thresholds):
+        if index < 0 or index >= len(settled):
             return None
-        threshold = self._classifier_thresholds[index]
+        threshold = settled[index]
         if threshold is None:
             return None
         return SelectorState(

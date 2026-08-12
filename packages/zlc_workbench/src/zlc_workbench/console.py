@@ -70,8 +70,11 @@ from .panel_state import (
 from .presentation import PlotPanelPort
 from .selection import (
     _apply_panel_selection,
+    _apply_panel_threshold,
     _apply_panel_viewport,
     _remove_panel_selection,
+    _remove_panel_threshold,
+    _same_panel_threshold,
     attach_selection_bridge,
     subscribe_committed_selection,
 )
@@ -148,6 +151,11 @@ class PanelBinding:
     interaction_selection: Any = None
     #: Canonical producer range plus display viewport shared by both views.
     interaction_viewport: Any = None
+    #: The classifier threshold this panel was told to use, or None to let
+    #: each surface follow its own fit.  It decides which population every
+    #: point belongs to -- and so the fractions and the fidelity both views
+    #: report -- which is exactly why it cannot be one host's private state.
+    interaction_threshold: Any = None
     #: Which facet cell this panel is focused on, or None for the overview.
     #: A view of the same data, exactly like the viewport beside it -- so both
     #: of this panel's hosts show it, and a double-click in either one is the
@@ -835,6 +843,8 @@ class ConsolePresenter:
         if binding.interaction_viewport is not None:
             _selection, viewport = binding.interaction_viewport
             _also(_apply_panel_viewport(host, viewport))
+        if binding.interaction_threshold is not None:
+            _also(_apply_panel_threshold(host, binding.interaction_threshold))
         _also(self._apply_panel_focus(host, binding.interaction_focus))
         return pending
 
@@ -1987,36 +1997,8 @@ class ConsolePresenter:
                     assert metadata is not None
                     _display, models = metadata
                     self._match_host_to_panel(binding, editor, models=models)
-                    binding.editor_selections = subscribe_committed_selection(
-                        editor,
-                        lambda selection, expected=frozen, expected_host=editor,
-                        expected_panel=binding.panel_id: (
-                            self._enqueue_panel_editor_selection(
-                                expected_panel,
-                                expected_host,
-                                expected,
-                                selection,
-                            )
-                        ),
-                        on_removed=lambda _selection, expected=frozen,
-                        expected_host=editor, expected_panel=binding.panel_id: (
-                            self._enqueue_panel_editor_selection(
-                                expected_panel,
-                                expected_host,
-                                expected,
-                                None,
-                            )
-                        ),
-                        on_viewport=lambda selection, viewport, expected=frozen,
-                        expected_host=editor, expected_panel=binding.panel_id: (
-                            self._enqueue_panel_editor_selection(
-                                expected_panel,
-                                expected_host,
-                                expected,
-                                selection,
-                                viewport=viewport,
-                            )
-                        ),
+                    binding.editor_selections = self._subscribe_editor_gestures(
+                        binding, editor, frozen
                     )
                 except Exception as error:
                     self._report(
@@ -2131,38 +2113,44 @@ class ConsolePresenter:
         frozen = binding.frozen_data
         if host is None or frozen is None:
             return
-        selections = subscribe_committed_selection(
-            host,
-            lambda selection, expected=frozen, expected_host=host: (
-                self._enqueue_panel_editor_selection(
-                    binding.panel_id,
-                    expected_host,
-                    expected,
-                    selection,
-                )
-            ),
-            on_removed=lambda _selection, expected=frozen, expected_host=host: (
-                self._enqueue_panel_editor_selection(
-                    binding.panel_id,
-                    expected_host,
-                    expected,
-                    None,
-                )
-            ),
-            on_viewport=lambda selection, viewport, expected=frozen, expected_host=host: (
-                self._enqueue_panel_editor_selection(
-                    binding.panel_id,
-                    expected_host,
-                    expected,
-                    selection,
-                    viewport=viewport,
-                )
-            ),
-        )
+        selections = self._subscribe_editor_gestures(binding, host, frozen)
         previous = binding.editor_selections
         binding.editor_selections = selections
         if previous is not None:
             previous.close()
+
+    def _subscribe_editor_gestures(
+        self,
+        binding: PanelBinding,
+        host: object,
+        frozen: PanelFrozenData,
+    ) -> object:
+        """Listen to everything the operator can do on Edit's frozen surface.
+
+        Mounting the surface and re-binding an unchanged one to a newer freeze
+        both need exactly this, and they were written out twice: the second
+        copy silently lacked the threshold channel, so a level set before a
+        Refresh reached the panel and one set after it did not.
+        """
+
+        panel_id = binding.panel_id
+
+        def _routed(selection: object | None, **extra: object) -> None:
+            self._enqueue_panel_editor_selection(
+                panel_id, host, frozen, selection, **extra
+            )
+
+        return subscribe_committed_selection(
+            host,
+            lambda selection: _routed(selection),
+            on_removed=lambda _removed: _routed(None),
+            on_threshold=lambda selector: self._enqueue_panel_threshold(
+                panel_id, host, selector
+            ),
+            on_viewport=lambda selection, viewport: _routed(
+                selection, viewport=viewport
+            ),
+        )
 
     def _release_panel_editor(self, binding: PanelBinding) -> None:
         """Detach and close Edit's subscription and frozen plotting host."""
@@ -2913,7 +2901,53 @@ class ConsolePresenter:
             on_viewport=lambda selection, viewport: self._enqueue_panel_selection(
                 binding.panel_id, selection, viewport=viewport
             ),
+            on_threshold=lambda selector, host=binding.host: (
+                self._enqueue_panel_threshold(binding.panel_id, host, selector)
+            ),
         )
+
+    def _enqueue_panel_threshold(
+        self,
+        panel_id: str,
+        host: object,
+        selector: object | None,
+    ) -> None:
+        self._panel_interactions.put(
+            lambda: self._settle_panel_threshold(panel_id, host, selector)
+        )
+
+    def _settle_panel_threshold(
+        self,
+        panel_id: str,
+        source: object,
+        selector: object | None,
+    ) -> None:
+        """A threshold set on either surface is the panel's answer.
+
+        Both of a panel's views classify the same experiment, so they cannot
+        classify it at different levels: the fitted populations and the
+        fidelity printed beside them would disagree with no way to tell which
+        is current.  Removing it hands both views back to their own fit --
+        which may legitimately differ, because it is measured from the data
+        each of them holds.
+        """
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return
+        if _same_panel_threshold(binding.interaction_threshold, selector):
+            return
+        binding.interaction_threshold = selector
+        for host in (binding.host, binding.editor_host):
+            if host is None or host is source:
+                continue
+            operation = (
+                _remove_panel_threshold(host)
+                if selector is None
+                else _apply_panel_threshold(host, selector)
+            )
+            if host is binding.host and operation is not None:
+                self._present_when_done(binding, operation)
 
     def _enqueue_panel_selection(
         self,

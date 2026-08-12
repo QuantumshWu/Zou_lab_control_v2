@@ -66,11 +66,47 @@ _PLOT_KINDS = {
 #: Selector kinds that describe a region.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
 
-#: Selector kinds that mark a point or a level.  A crosshair or threshold is a
-#: READOUT the panel itself shows, not a region derivation, so its events are
-#: ignored here entirely -- recording them into ``last_error`` painted every
-#: crosshair click as a panel failure.
+#: Selector kinds that mark a point or a level.  A crosshair or threshold
+#: cuts no region, so nothing downstream can be derived from one and a
+#: translation failure is not the right thing to record -- doing so painted
+#: every crosshair click as a panel failure.  They are still gestures the
+#: PANEL owns (a threshold decides which population every point belongs to),
+#: which is what ``on_threshold`` carries -- a crosshair reads a number off
+#: the picture and changes no analysis, while a threshold decides which
+#: population every point belongs to, and with it the fractions and the
+#: fidelity both of a panel's surfaces report.
 _POINT_SELECTOR_KINDS = {"crosshair", "threshold"}
+
+
+def _apply_panel_threshold(host: Any, selector: Any) -> object:
+    """Put the panel's chosen classifier threshold on one plot surface.
+
+    The value is canonical, so it crosses between two hosts holding different
+    data revisions unchanged, and it lands on whichever cell that host has
+    open -- the panel keeps both of its hosts on the same cell.
+    """
+
+    return host.set_threshold_selector(float(selector.value), display=False)
+
+
+def _remove_panel_threshold(host: Any) -> object:
+    """Let this surface go back to the threshold its own fit proposes."""
+
+    try:
+        return host.remove_selector(SelectorKind.THRESHOLD, emit_change=False)
+    except KeyError:
+        return None
+
+
+def _same_panel_threshold(left: Any, right: Any) -> bool:
+    """Whether two threshold gestures say the same thing about the same cell."""
+
+    if left is None or right is None:
+        return left is None and right is None
+    return (
+        float(left.value) == float(right.value)
+        and left.facet_index == right.facet_index
+    )
 
 
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
@@ -121,11 +157,17 @@ class PlotSelectionSource:
     two objects would mean two copies of the vocabulary.
     """
 
-    def __init__(self, host: Any) -> None:
+    def __init__(
+        self,
+        host: Any,
+        *,
+        on_threshold: Callable[[Any], object] | None = None,
+    ) -> None:
         self._host = host
         self._states: dict[str, SelectionState] = {}
         self._releases: list[Callable[[], None]] = []
         self._last_error: Exception | None = None
+        self._on_threshold = on_threshold
 
     # ------------------------------------------------------------- properties
 
@@ -158,7 +200,16 @@ class PlotSelectionSource:
 
         def _on_selection(event: object) -> None:
             if _selector_kind_of(event) in _POINT_SELECTOR_KINDS:
-                # A readout, not a region: derive nothing, record nothing.
+                # Derives nothing, records no failure -- and is still an
+                # answer about this panel, so whoever owns the panel hears it.
+                if (
+                    self._on_threshold is not None
+                    and _selector_kind_of(event) == "threshold"
+                ):
+                    removed = _change_of(event) is SelectionChange.REMOVED
+                    self._deliver(
+                        self._on_threshold, None if removed else event.selector
+                    )
                 return
             change = _change_of(event)
             try:
@@ -430,6 +481,7 @@ def attach_selection_bridge(
     on_committed: Callable[[SelectionState], object] | None = None,
     on_removed: Callable[[SelectionState], object] | None = None,
     on_viewport: Callable[[SelectionState, object | None], object] | None = None,
+    on_threshold: Callable[[Any], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
     """Connect one panel's gestures to the plane, deriving as they commit.
 
@@ -441,7 +493,7 @@ def attach_selection_bridge(
     selection, and the subscription outlives the bridge only if it leaks.
     """
 
-    source = PlotSelectionSource(host)
+    source = PlotSelectionSource(host, on_threshold=on_threshold)
     bridge = SelectionBridge(
         plane,
         source_signal,
@@ -482,6 +534,7 @@ def subscribe_committed_selection(
     *,
     on_removed: Callable[[SelectionState], object] | None = None,
     on_viewport: Callable[[SelectionState, object | None], object] | None = None,
+    on_threshold: Callable[[Any], object] | None = None,
 ) -> PlotSelectionSource:
     """Translate committed gestures without publishing a derived signal.
 
@@ -495,7 +548,7 @@ def subscribe_committed_selection(
         raise TypeError("callback must be callable")
     if on_removed is not None and not callable(on_removed):
         raise TypeError("on_removed must be callable or None")
-    source = PlotSelectionSource(host)
+    source = PlotSelectionSource(host, on_threshold=on_threshold)
 
     def _on_selection(
         change: SelectionChange,
