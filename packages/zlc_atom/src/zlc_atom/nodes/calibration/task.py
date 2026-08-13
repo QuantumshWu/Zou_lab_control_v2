@@ -303,20 +303,39 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
     generation = result.artifact_path.stem
     revision = len(result.capture.cycles)
 
+    # Where the crop sat on the sensor: the pictures and the points drawn on
+    # them are both stated there, so an operator reads the same numbers off a
+    # calibration image, a camera panel and the ROI form.
+    roi = calibration.frame_contract.roi_xywh
+    origin_yx = (0, 0) if roi is None else (int(roi[1]), int(roi[0]))
+    binning_yx = tuple(
+        int(value) for value in calibration.frame_contract.binning_yx
+    )
     site_map_snapshot = _snapshot(
         np.asarray(result.report["reference_average"], dtype="<f8")[np.newaxis, ...],
         signal="site_map",
         roles=(SPATIAL_Y, SPATIAL_X),
         axis_specs=_image_axis_specs(
             calibration.frame_contract.image_shape,
-            site_map.coordinate_frame,
+            "sensor_pixel_xy",
+            origin_yx=origin_yx,
+            binning_yx=binning_yx,
         ),
         generation=generation,
         revision=revision,
     )
+    # The site map itself stays in the crop's own indices -- that is what the
+    # readout slices boxes out of -- so the points are moved onto the picture
+    # here, at the one place both are published together.
     overlay = ImagePointOverlay(
         revision,
-        site_map.centers_xy,
+        tuple(
+            (
+                float(origin_yx[1] + binning_yx[1] * float(centre[0])),
+                float(origin_yx[0] + binning_yx[0] * float(centre[1])),
+            )
+            for centre in site_map.centers_xy
+        ),
         point_ids=site_map.site_ids,
         labels=tuple(str(index + 1) for index in range(site_map.n_sites)),
         statuses={
@@ -758,6 +777,8 @@ class CalibrationTask:
                 preview = CalibrationCapturePreviewSlot(
                     repeats=self.request.repeats,
                     frame_shape=actual.frame_shape_yx,
+                    origin_yx=actual.roi_origin_yx,
+                    binning_yx=actual.binning_yx,
                     dtype=actual.dtype,
                     generation=context.generation,
                     run_record=run_record,

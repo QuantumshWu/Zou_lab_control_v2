@@ -46,10 +46,22 @@ _PREVIEW_FRAMES = 3
 def _image_axis_specs(
     frame_shape: tuple[int, int],
     coordinate_frame: str | CoordinateFrameId,
+    *,
+    origin_yx: tuple[int, int] = (0, 0),
+    binning_yx: tuple[int, int] = (1, 1),
 ) -> dict[AxisRoleId, AxisSpec]:
-    """One image schema for Calibration live and FINAL publications."""
+    """One image schema for Calibration live and FINAL publications.
+
+    The pictures a calibration shows are crops of the same sensor the camera
+    panel shows, so they are labelled the same way: in the sensor's own
+    pixels.  Indexed from zero instead, the same trap read as two different
+    places depending on which ROI the run happened to use, and two pictures of
+    one lattice side by side disagreed about where it was.
+    """
 
     height, width = (int(value) for value in frame_shape)
+    origin_y, origin_x = (int(value) for value in origin_yx)
+    step_y, step_x = (max(1, int(value)) for value in binning_yx)
     frame = (
         coordinate_frame
         if isinstance(coordinate_frame, CoordinateFrameId)
@@ -61,6 +73,7 @@ def _image_axis_specs(
             "y",
             SPATIAL_Y,
             height,
+            coordinates=tuple(origin_y + step_y * index for index in range(height)),
             unit="pixel",
             coordinate_frame=frame,
         ),
@@ -69,6 +82,7 @@ def _image_axis_specs(
             "x",
             SPATIAL_X,
             width,
+            coordinates=tuple(origin_x + step_x * index for index in range(width)),
             unit="pixel",
             coordinate_frame=frame,
         ),
@@ -187,6 +201,8 @@ class CalibrationCapturePreviewSlot:
         *,
         repeats: int,
         frame_shape: tuple[int, int],
+        origin_yx: tuple[int, int],
+        binning_yx: tuple[int, int],
         dtype: object,
         generation: object,
         run_record: Mapping[str, object],
@@ -197,6 +213,8 @@ class CalibrationCapturePreviewSlot:
         self.frame_shape = tuple(int(value) for value in frame_shape)
         if len(self.frame_shape) != 2 or any(value <= 0 for value in self.frame_shape):
             raise ValueError("calibration preview frame_shape must be positive Y,X")
+        self.origin_yx = tuple(int(value) for value in origin_yx)
+        self.binning_yx = tuple(max(1, int(value)) for value in binning_yx)
         self.dtype = np.dtype(dtype).newbyteorder("<")
         self.generation = generation
         self.run_record = dict(run_record)
@@ -242,7 +260,12 @@ class CalibrationCapturePreviewSlot:
             self._latest[None, ...],
             signal=CAPTURE_PREVIEW_DECLARATION.name,
             roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-            axis_specs=_image_axis_specs(self.frame_shape, "image_pixel_xy"),
+            axis_specs=_image_axis_specs(
+                self.frame_shape,
+                "sensor_pixel_xy",
+                origin_yx=self.origin_yx,
+                binning_yx=self.binning_yx,
+            ),
             point_columns={READOUT_EVENT: _frame_point_column(_PREVIEW_FRAMES)},
             generation=self.generation,
             revision=self._revision,

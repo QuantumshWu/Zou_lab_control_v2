@@ -348,7 +348,11 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         assert parent_column.role is READOUT_EVENT
         # Sites are CELL data: one image resampled onto the trap lattice.
         (site_axis,) = counts_artifact.block.schema.cell_schema.data_axes
-        assert site_axis is result.calibration.site_map.site_axis
+        # The occupancy publication carries the calibration's site axis, not one
+        # of its own: same id, name, size and 1..n coordinates.  By value rather
+        # than by identity, because a schema built from these exact axes is
+        # shared between publications that describe the same thing.
+        assert site_axis == result.calibration.site_map.site_axis
         assert site_axis.role is SITE
         assert site_axis.coordinates == tuple(range(1, 36))
         assert site_axis.coordinate_labels is None

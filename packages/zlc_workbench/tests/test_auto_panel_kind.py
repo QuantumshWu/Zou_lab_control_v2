@@ -172,8 +172,10 @@ def test_the_automatic_kind_is_the_flat_kind_the_data_proves() -> None:
 def test_a_measurement_declares_the_plot_its_own_start_opens() -> None:
     """The node knows what it is about to measure; a shape does not.
 
-    One frame per cycle IS a picture; a cycle of several is several, and one
-    image of them is their average -- which is no frame the camera took.
+    A cycle's frames are its point rows, one picture each, and that is as true
+    of a cycle of one as of a cycle of three -- so the kind does not follow the
+    count.  It used to, and then changing the count, or restarting the node,
+    changed the shape of the panel underneath the operator.
     """
 
     from zlc_atom.nodes import discover_logic_nodes
@@ -184,7 +186,7 @@ def test_a_measurement_declares_the_plot_its_own_start_opens() -> None:
 
     single = camera.previews_for({**values, "frames_per_cycle": 1})
     assert tuple((spec.output_name, spec.plot_kind) for spec in single) == (
-        ("frames", "image"),
+        ("frames", "facet_grid"),
     )
     several = camera.previews_for({**values, "frames_per_cycle": 3})
     assert tuple((spec.output_name, spec.plot_kind) for spec in several) == (

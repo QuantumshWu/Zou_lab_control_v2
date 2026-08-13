@@ -1495,6 +1495,26 @@ class FitEngine:
             else None
         )
         lower, upper = _solver_bounds(spec, default_bounds, bounds)
+        if spec.targets == (FitTarget.HISTOGRAM,):
+            # A histogram cannot resolve a width finer than its own binning: a
+            # component narrower than a bin describes one bar, not a
+            # distribution, and on sparse data that is exactly what the best
+            # fit becomes -- a spike standing on a single tall bin beside a
+            # broad partner covering everything else.  Widths therefore start
+            # at half a bin: they are the positive parameters measured along
+            # the value axis, which is the sigmas and not a splitting or an
+            # amplitude.
+            steps = np.diff(np.unique(coords[0]))
+            step = float(np.median(steps)) if steps.size else 0.0
+            if step > 0.0:
+                floor = 0.5 * step
+                for index, parameter in enumerate(spec.parameters):
+                    if (
+                        parameter.domain is ParameterDomain.POSITIVE
+                        and parameter.unit_relation is UnitRelation.AXIS_0
+                        and lower[index] < floor < upper[index]
+                    ):
+                        lower[index] = floor
         seeds = _initial_candidates(spec, coords, values, initial, warm_start)
         low_inside = np.nextafter(lower, upper)
         high_inside = np.nextafter(upper, lower)

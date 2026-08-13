@@ -796,7 +796,16 @@ def detect_sites(
     # one image in a run whose contrast does not depend on loading.
     conditional = lit_response / np.maximum(hits, 1)
     local_maxima = hits == ndimage.maximum_filter(hits, size=3, mode="nearest")
-    candidates = np.argwhere(local_maxima & (hits >= required))
+    # A site has to be a place the picture actually shows: within a spot's
+    # reach of the border there is no background to compare against, and the
+    # filters invent one by extending the edge, which biases every frame the
+    # same way -- over a long run those pixels accumulate sightings and a
+    # "site" appears against the frame edge, half of it outside the image.
+    margin = max(2, int(np.ceil(2.0 * spot_sigma)))
+    inside = np.zeros(hits.shape, dtype=bool)
+    if 2 * margin < min(hits.shape):
+        inside[margin:-margin, margin:-margin] = True
+    candidates = np.argwhere(local_maxima & inside & (hits >= required))
     ranked = sorted(
         candidates,
         key=lambda item: (
