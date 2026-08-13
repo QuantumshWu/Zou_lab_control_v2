@@ -204,22 +204,18 @@ def _build(
     )
 
 
-def _frames_preview(values) -> tuple[NodePreviewSpec, ...]:
+def _frames_preview(_values) -> tuple[NodePreviewSpec, ...]:
     """What Start puts on screen: the cycle this run is about to take.
 
-    One frame per cycle IS one picture.  Several are several pictures, and
-    a single image of them is their average -- which is not any frame the
-    camera took.  The node knows how many it asked for; a plot given only
-    the shape would be guessing at what the operator meant.
+    A cycle's frames are its point rows, one picture each, and that is true
+    of a cycle of one as much as a cycle of three.  Naming the kind by the
+    count made the panel change shape when an operator changed the count --
+    restart a measurement with three frames where there had been one and the
+    panel that was an image had to be rebuilt as a grid, losing everything
+    set on it.  One kind, whatever the count.
     """
 
-    frames = int(values["frames_per_cycle"])
-    return (
-        NodePreviewSpec(
-            CAMERA_FRAMES_OUTPUT.name,
-            "image" if frames <= 1 else "facet_grid",
-        ),
-    )
+    return (NodePreviewSpec(CAMERA_FRAMES_OUTPUT.name, "facet_grid"),)
 
 
 LOGIC_NODE = LogicNodeDescriptor(

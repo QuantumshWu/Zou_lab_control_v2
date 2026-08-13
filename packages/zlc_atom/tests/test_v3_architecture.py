@@ -532,7 +532,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(
             (preview.output_name, preview.plot_kind)
             for preview in camera_descriptor.previews_for({"frames_per_cycle": 1})
-        ) == (("frames", "image"),)
+        ) == (("frames", "facet_grid"),)
         assert tuple(
             (preview.output_name, preview.plot_kind)
             for preview in camera_descriptor.previews_for({"frames_per_cycle": 3})

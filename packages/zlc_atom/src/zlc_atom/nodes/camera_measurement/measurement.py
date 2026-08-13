@@ -5,7 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import numpy as np
-from zlc_data import AxisId, PointColumn, READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+from zlc_data import (
+    AxisId,
+    AxisSpec,
+    CoordinateFrameId,
+    PointColumn,
+    READOUT_EVENT,
+    SPATIAL_X,
+    SPATIAL_Y,
+)
 from zlc_runtime import MonitorCoverage
 from zlc_runtime import (
     DatasetOutputDeclaration,
@@ -21,7 +29,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from zlc_atom.data import snapshot_from_array
+from zlc_atom.data import cell_axis_id, snapshot_from_array
 
 
 _CAMERA_FRAME_CONTRACT = "camera.frames.v1"
@@ -51,12 +59,66 @@ def _frame_point_column(producer: str, frames: int) -> PointColumn:
     )
 
 
+def _pixel_axes(
+    point: "CameraWorkingPoint | None",
+    shape_yx: tuple[int, int],
+    *,
+    producer: str,
+):
+    """The sensor pixels a frame covers, as its two spatial axes.
+
+    A frame is a crop of a sensor, and the numbers that mean anything about it
+    are the sensor's own pixel coordinates: where the traps are, where an ROI
+    starts, what a region drawn on the picture refers to.  Published without
+    axes the picture was indexed from zero instead, so every coordinate on it
+    was an offset into that particular crop -- the same region meant somewhere
+    else the moment the ROI moved, which is exactly what a region does when it
+    is used to set the ROI.
+    """
+
+    if point is None:
+        return None
+    origin_y, origin_x = (int(value) for value in point.roi_origin_yx)
+    step_y, step_x = (int(value) for value in getattr(point, "binning_yx", (1, 1)))
+    height, width = (int(value) for value in shape_yx)
+    frame = CoordinateFrameId("sensor_pixel_xy")
+    # The identifiers the dataset would have generated for these two axes: an
+    # axis id is identity -- saved boards, semantic choices and every
+    # downstream reference name a data axis by it -- so only the coordinates
+    # are added here, never the name.
+    # The frame axis is a point column, so the cell is (y, x): those two
+    # indices, and the identity and name that go with them, are the dataset's
+    # own -- only the coordinates are the camera's to add.
+    signal = CAMERA_FRAMES_OUTPUT.name
+    return {
+        SPATIAL_Y: AxisSpec(
+            cell_axis_id(producer, signal, 0, SPATIAL_Y),
+            SPATIAL_Y.value,
+            SPATIAL_Y,
+            height,
+            coordinates=tuple(origin_y + max(1, step_y) * index for index in range(height)),
+            unit="pixel",
+            coordinate_frame=frame,
+        ),
+        SPATIAL_X: AxisSpec(
+            cell_axis_id(producer, signal, 1, SPATIAL_X),
+            SPATIAL_X.value,
+            SPATIAL_X,
+            width,
+            coordinates=tuple(origin_x + max(1, step_x) * index for index in range(width)),
+            unit="pixel",
+            coordinate_frame=frame,
+        ),
+    }
+
+
 def frames_snapshot(
     cycles: "Sequence[Sequence[CameraFrameRecord]]",
     *,
     producer: str,
     generation: object,
     revision: int,
+    working_point: "CameraWorkingPoint | None" = None,
 ):
     """Cycles of frames as one dataset: (cycle) x (frame) x (y, x).
 
@@ -83,6 +145,11 @@ def frames_snapshot(
         producer=producer,
         signal=CAMERA_FRAMES_OUTPUT.name,
         roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+        axis_specs=_pixel_axes(
+            working_point,
+            np.asarray(frames[0][0].image).shape,
+            producer=producer,
+        ),
         point_columns={READOUT_EVENT: _frame_point_column(producer, len(frames[0]))},
         generation=str(getattr(generation, "value", generation)),
         revision=int(revision),
@@ -211,6 +278,7 @@ class _CameraMonitorSlot:
                     producer=self.node.instance_id,
                     generation=generation,
                     revision=revision,
+                    working_point=self.node.actual_working_point,
                 ),
                 coverage,
                 self.node.run_record,
@@ -283,6 +351,7 @@ class CameraCycleSource:
                 producer=self.camera_node.instance_id,
                 generation=self._generation,
                 revision=self._taken,
+                working_point=self.camera_node.actual_working_point,
             ),
             MonitorCoverage(written_cells=len(records), total_cells=len(records)),
             run_record=self.camera_node.run_record,
@@ -747,6 +816,7 @@ class CameraMeasurementNode:
                     producer=self.instance_id,
                     generation=generation,
                     revision=revision,
+                    working_point=self.actual_working_point,
                 ),
                 self.run_record,
             )

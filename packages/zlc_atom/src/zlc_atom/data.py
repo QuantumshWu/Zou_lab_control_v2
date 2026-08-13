@@ -39,6 +39,19 @@ _SCHEMA_CACHE_LOCK = threading.Lock()
 _SCHEMA_CACHE_CAPACITY = 128
 
 
+def cell_axis_id(producer: str, signal: str, index: int, role: AxisRoleId) -> AxisId:
+    """How a cell axis of a published array is named.
+
+    An axis id is identity: panels, saved boards and semantic choices all name
+    an axis by it, so who generates it decides what those references survive.
+    A producer that wants to say something extra about an axis -- what pixels
+    of a sensor it covers, say -- still has to hand back the same identity,
+    which is why the convention lives here and not in each caller.
+    """
+
+    return AxisId(f"{producer}.{signal}.{index}.{role.value}")
+
+
 def snapshot_from_array(
     values: object,
     *,
@@ -215,7 +228,7 @@ def snapshot_from_array(
             axis = normalized_axis_specs.get(role)
             if axis is None:
                 axis = AxisSpec(
-                    AxisId(f"{producer}.{signal}.{index}.{role.value}"),
+                    cell_axis_id(producer, signal, index, role),
                     role.value,
                     role,
                     int(size),
