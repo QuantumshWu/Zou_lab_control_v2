@@ -854,16 +854,19 @@ class CalibrationTask:
         pulse: Mapping[str, object],
     ) -> FrameContract:
         roi_x, roi_y, roi_width, roi_height = _roi_xywh(actual)
-        # The gate is what this run ASKED for, from the request that froze it.
-        # Reading it back out of the pulse only asked the same question of a
-        # less reliable witness.
-        readout_gate = self.request.readout_exposure_seconds
         return FrameContract(
             actual.frame_shape_yx,
             sensor_shape=actual.sensor_shape_yx,
             roi_xywh=(roi_x, roi_y, roi_width, roi_height),
             binning_yx=actual.binning_yx,
-            exposure_seconds=min(actual.exposure_seconds, readout_gate),
+            # What the SENSOR integrated, read back from the sensor: the one
+            # witness to the condition these thresholds were measured under.
+            # It used to be the smaller of that and the readout window the
+            # pulse gates the probe light with -- a third number that is
+            # neither, and one every downstream node then armed its camera at.
+            # A calibration says what it did; it does not legislate the next
+            # run, whose physics is the operator's to judge.
+            exposure_seconds=actual.exposure_seconds,
             camera_id=self.request.camera_key,
             readout_mode=actual.readout_mode,
         )

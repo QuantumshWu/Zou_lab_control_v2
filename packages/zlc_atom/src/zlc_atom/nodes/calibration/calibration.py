@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
 from math import sqrt
@@ -487,6 +487,93 @@ class TrapCalibration:
     default_model_kind: ReadoutModelKind
     frame_contract: FrameContract
     report: Mapping[str, Any] = field(default_factory=dict)
+
+    def rebased(
+        self,
+        roi_xywh: tuple[int, int, int, int] | None,
+        binning_yx: tuple[int, int],
+        image_shape: tuple[int, int],
+    ) -> "TrapCalibration":
+        """This calibration, read against a different crop of the same sensor.
+
+        Where a trap is, is a fact about the SENSOR; where it appears in an
+        array is a fact about the crop the camera happened to take.  A run
+        that moves the ROI therefore does not invalidate a calibration -- it
+        just numbers the same places differently, and the translation is
+        arithmetic this class can do because it knows both crops.
+
+        Binning is not translatable: it changes what one pixel means, so the
+        integration boxes and PSF kernels measured under it would be measuring
+        something else.  A site the new crop does not cover is refused by
+        name, because reading a box that runs off the edge would return a
+        number that looks like a measurement.
+        """
+
+        contract = self.frame_contract
+        binning = tuple(int(value) for value in binning_yx)
+        if binning != tuple(contract.binning_yx):
+            raise ValueError(
+                f"binning {binning} differs from the calibration's "
+                f"{tuple(contract.binning_yx)}: one pixel does not mean the "
+                "same thing, so its thresholds do not either"
+            )
+        shape = tuple(int(value) for value in image_shape)
+        if contract.roi_xywh is None or roi_xywh is None:
+            if shape != tuple(contract.image_shape):
+                raise ValueError(
+                    f"frame shape {shape} differs from calibration "
+                    f"{tuple(contract.image_shape)} and neither run records "
+                    "the crop it came from, so the sites cannot be placed"
+                )
+            return self
+        old_x, old_y, _old_w, _old_h = (int(value) for value in contract.roi_xywh)
+        new_x, new_y, new_w, new_h = (int(value) for value in roi_xywh)
+        if (new_h // binning[0], new_w // binning[1]) != shape:
+            raise ValueError(
+                f"frame shape {shape} does not match the crop {roi_xywh} it "
+                "is said to come from"
+            )
+        shift_x = (old_x - new_x) / float(binning[1])
+        shift_y = (old_y - new_y) / float(binning[0])
+        if shift_x == 0.0 and shift_y == 0.0 and shape == tuple(contract.image_shape):
+            return self
+        centers = np.asarray(self.site_map.centers_xy, dtype=float) + (shift_x, shift_y)
+        radius = max(model.integration_half_width for model in self.models)
+        outside = [
+            self.site_map.site_ids[index]
+            for index, (x, y) in enumerate(centers)
+            if not (
+                radius <= x <= shape[1] - 1 - radius
+                and radius <= y <= shape[0] - 1 - radius
+            )
+        ]
+        if outside:
+            raise ValueError(
+                f"this crop does not cover {len(outside)} calibrated site(s) "
+                f"({', '.join(outside[:4])}{'...' if len(outside) > 4 else ''}): "
+                "move the ROI back over them or calibrate again"
+            )
+        moved_models = []
+        for model in self.models:
+            boxes = model.psf_boxes
+            if boxes is not None:
+                boxes = np.asarray(boxes, dtype=int) + (
+                    int(round(shift_x)),
+                    int(round(shift_y)),
+                    0,
+                    0,
+                )
+            moved_models.append(replace(model, psf_boxes=boxes))
+        return replace(
+            self,
+            site_map=replace(self.site_map, centers_xy=centers),
+            models=tuple(moved_models),
+            frame_contract=replace(
+                contract,
+                image_shape=shape,
+                roi_xywh=(new_x, new_y, new_w, new_h),
+            ),
+        )
 
     def __post_init__(self) -> None:
         if not isinstance(self.site_map, SiteMap):

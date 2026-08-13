@@ -96,7 +96,17 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
     camera.finish_record_capture()
 
 
-def test_external_gate_can_only_shorten_the_camera_working_point() -> None:
+def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
+    """What a pulse window gates is the PROBE, not the sensor.
+
+    Externally triggered here means edge triggered -- the qCMOS driver sets
+    and asserts rising-edge mode -- and an accepted edge integrates the
+    camera's own exposure however long the window is held open.  A shorter
+    window therefore buys a shorter illumination on top of the same
+    background, which is worth knowing when a protocol calls one of its
+    frames "short".
+    """
+
     world = SimulationWorld(seed=3)
     camera = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=world.geometry.image_shape_yx),
@@ -118,7 +128,9 @@ def test_external_gate_can_only_shorten_the_camera_working_point() -> None:
         probe_seconds: float | None = None,
         occupancy: object | None = None,
     ) -> np.ndarray:
-        rendered.append((float(exposure_seconds), np.asarray(occupancy, dtype=bool)))
+        rendered.append(
+            (float(exposure_seconds), float(probe_seconds or 0.0), np.asarray(occupancy, dtype=bool))
+        )
         return render(
             ordinal,
             exposure_seconds=exposure_seconds,
@@ -146,12 +158,22 @@ def test_external_gate_can_only_shorten_the_camera_working_point() -> None:
     camera.finish_record_capture()
     sequencer.close()
 
-    assert [exposure for exposure, _occupancy in rendered] == [
+    # Every frame integrates the camera's exposure...
+    assert [exposure for exposure, _probe, _occupancy in rendered] == [
+        pytest.approx(0.013),
+        pytest.approx(0.013),
+        pytest.approx(0.013),
+    ]
+    # ...and only the light is gated: the middle window is the short one.
+    assert [probe for _exposure, probe, _occupancy in rendered] == [
         pytest.approx(0.013),
         pytest.approx(0.002),
         pytest.approx(0.013),
     ]
-    assert all(np.array_equal(occupancy, rendered[0][1]) for _exposure, occupancy in rendered)
+    assert all(
+        np.array_equal(occupancy, rendered[0][2])
+        for _exposure, _probe, occupancy in rendered
+    )
     assert [record.image.shape for record in records] == [(6, 8)] * 3
 
 

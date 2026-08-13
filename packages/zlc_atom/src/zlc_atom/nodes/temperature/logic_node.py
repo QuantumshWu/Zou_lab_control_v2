@@ -90,6 +90,19 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             minimum=1,
         ),
         AuthoringField(
+            # Empty means "the one the calibration measured its thresholds
+            # at", which is the sensible default and was, until now, the only
+            # possibility.  Whether another exposure is physically comparable
+            # is the operator's judgement, not this node's: a calibration
+            # describes what it did, it does not licence the next run.
+            "exposure_seconds",
+            "float",
+            "Exposure seconds (blank = as calibrated)",
+            None,
+            required=False,
+            minimum=1e-9,
+        ),
+        AuthoringField(
             "model_kind",
             "choice",
             "Readout model",
@@ -141,6 +154,11 @@ def _build(
         calibration_path=calibration.path,
         plan=plan_from_authored(authored["plan"]),
         repeats=int(authored["repeats"]),
+        exposure_seconds=(
+            None
+            if authored["exposure_seconds"] is None
+            else float(authored["exposure_seconds"])
+        ),
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
         artifact_directory=artifact_directory,
     )

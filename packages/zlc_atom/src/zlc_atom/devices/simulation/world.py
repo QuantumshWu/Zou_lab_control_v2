@@ -667,8 +667,27 @@ class SimulationWorld:
                 for device, registered_renderer in tuple(self._cameras):
                     if not device.capture_state():
                         continue
-                    configured = float(device.working_point().exposure_seconds)
-                    exposure = min(configured, (end_tick - start_tick) / clock)
+                    point = device.working_point()
+                    configured = float(point.exposure_seconds)
+                    # How long the sensor integrates is the CAMERA's fact, and
+                    # which fact depends on how it is triggered.  Externally
+                    # triggered means edge triggered here -- the qCMOS driver
+                    # sets and asserts rising-edge mode -- and an accepted
+                    # edge integrates the camera's own exposure however long
+                    # the pulse holds its window open.  Taking the shorter of
+                    # the two was level-trigger physics, so the simulated
+                    # bench and the real one disagreed by construction: a
+                    # readout frame gated 5 ms long really collects 5 ms of
+                    # probe light on top of the full exposure's background,
+                    # and only the simulation pretended otherwise.
+                    free_running = str(point.acquisition_mode).upper().endswith(
+                        "FREE_RUNNING"
+                    )
+                    exposure = (
+                        min(configured, (end_tick - start_tick) / clock)
+                        if free_running
+                        else configured
+                    )
                     integration_end = start + exposure * clock
                     probe_seconds = _overlap_ticks(start, integration_end, probe) / clock
                     if registered_renderer is None:

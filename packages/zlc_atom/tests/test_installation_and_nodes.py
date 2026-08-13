@@ -289,7 +289,12 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         assert result.calibration.frame_contract.image_shape == (96, 128)
         assert result.calibration.frame_contract.sensor_shape == (96, 128)
         assert result.calibration.frame_contract.roi_xywh == (0, 0, 128, 96)
-        assert result.calibration.frame_contract.exposure_seconds == 0.005
+        # What the SENSOR integrated, which under an edge trigger is the
+        # exposure the camera was armed at -- not the shorter window the
+        # pulse gates the probe light with.  The contract records the
+        # condition the thresholds were measured under; it does not
+        # legislate the exposure of any later run.
+        assert result.calibration.frame_contract.exposure_seconds == 0.02
         assert result.calibration.frame_contract.camera_id == "camera"
         json.dumps(result.run_record)
         occupancy_node = OccupancyProcessor(

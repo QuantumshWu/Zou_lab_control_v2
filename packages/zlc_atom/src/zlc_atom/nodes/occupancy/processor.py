@@ -114,6 +114,10 @@ class OccupancyProcessor:
                 "occupancy requires calibration centers in image_pixel_xy coordinates"
             )
         self.calibration = calibration
+        #: The calibration placed against the crop the RUN is taking, once a
+        #: run record says what that crop is.  Until then a run is assumed to
+        #: be taking the crop the calibration was measured on.
+        self._runtime: TrapCalibration | None = None
         self.model = calibration.select_model(model_kind)
         self.calibration_path = (
             None
@@ -142,10 +146,11 @@ class OccupancyProcessor:
                 "occupancy frames must declare exactly SPATIAL_Y, SPATIAL_X cell axes"
             )
         observed = tuple(int(axis.size) for axis in axes)
-        expected = self.calibration.frame_contract.image_shape
+        expected = self.readout.frame_contract.image_shape
         if observed != expected:
             raise ValueError(
-                f"frame shape {observed} differs from calibration {expected}"
+                f"frame shape {observed} differs from the crop this readout "
+                f"is placed against {expected}"
             )
         columns = schema.point_table.columns
         if len(columns) != 1:
@@ -154,6 +159,12 @@ class OccupancyProcessor:
                 f"declares {len(columns)}"
             )
         return columns[0]
+
+    @property
+    def readout(self) -> TrapCalibration:
+        """The calibration as it applies to the frames actually arriving."""
+
+        return self._runtime if self._runtime is not None else self.calibration
 
     def _validate_source_run_record(self, source: SignalValue) -> None:
         """Check only structural camera facts present on the parent."""
@@ -195,25 +206,27 @@ class OccupancyProcessor:
                     f"{contract.sensor_shape}"
                 )
 
-        if contract.roi_xywh is not None:
-            x, y, width, height = contract.roi_xywh
-            origin = pair("roi_origin_yx")
-            if origin is not None and origin != (y, x):
-                raise ValueError(
-                    f"camera ROI origin {origin} differs from calibration {(y, x)}"
-                )
-            shape = pair("roi_shape_yx")
-            if shape is not None and shape != (height, width):
-                raise ValueError(
-                    f"camera ROI shape {shape} differs from calibration "
-                    f"{(height, width)}"
-                )
-
-        binning = pair("binning_yx")
-        if binning is not None and binning != contract.binning_yx:
+        # A run may crop the sensor differently from the calibration: where a
+        # trap IS, is a fact about the sensor, so a different ROI numbers the
+        # same places differently and the calibration can be read against it.
+        # Only a crop that does not COVER the sites is refused, and only by
+        # the calibration itself -- it owns both crops, so it owns the
+        # translation.  Binning is refused there too: it changes what a pixel
+        # means, and with it every threshold measured in pixels.
+        origin = pair("roi_origin_yx")
+        shape = pair("roi_shape_yx")
+        binning = pair("binning_yx") or tuple(contract.binning_yx)
+        if origin is not None and shape is not None:
+            roi = (int(origin[1]), int(origin[0]), int(shape[1]), int(shape[0]))
+            frame = (
+                int(shape[0]) // int(binning[0]),
+                int(shape[1]) // int(binning[1]),
+            )
+            self._runtime = self.calibration.rebased(roi, binning, frame)
+        elif tuple(binning) != tuple(contract.binning_yx):
             raise ValueError(
-                f"camera binning {binning} differs from calibration "
-                f"{contract.binning_yx}"
+                f"camera binning {tuple(binning)} differs from calibration "
+                f"{tuple(contract.binning_yx)}"
             )
 
     @property
@@ -256,7 +269,7 @@ class OccupancyProcessor:
         point_role = point_column.role
         images = np.asarray(frames.block.values)
         repeats, points = images.shape[0], images.shape[1]
-        n_sites = self.calibration.n_sites
+        n_sites = self.readout.n_sites
         flat = images.reshape((repeats * points, *images.shape[2:]))
         # Extracted once.  detect() begins by calling signals(), so asking for
         # counts and then for occupancy ran the box or PSF extraction over every
@@ -264,14 +277,14 @@ class OccupancyProcessor:
         # comparison against the thresholds the calibration already carries.
         counts = np.asarray(
             [
-                self.calibration.signals(image, model_kind=self.model.kind)
+                self.readout.signals(image, model_kind=self.model.kind)
                 for image in flat
             ],
             dtype="<f8",
         )
         model = self.model
         site_valid = (
-            self.calibration.site_map.valid_sites
+            self.readout.site_map.valid_sites
             & model.usable_sites
             & np.isfinite(model.thresholds)
         )
@@ -288,7 +301,7 @@ class OccupancyProcessor:
             out=np.full(valid_count.shape, np.nan, dtype="<f8"),
             where=valid_count > 0,
         )
-        site_axis = self.calibration.site_map.site_axis
+        site_axis = self.readout.site_map.site_axis
         artifacts = {
             "counts": snapshot_from_array(
                 counts,

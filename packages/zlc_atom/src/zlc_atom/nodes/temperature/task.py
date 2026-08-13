@@ -162,6 +162,7 @@ class TemperatureTask:
         calibration_path: str | Path,
         plan: ScanPlan,
         repeats: int,
+        exposure_seconds: float | None = None,
         model_kind: ReadoutModelKind | None,
         artifact_directory: str | Path,
     ) -> None:
@@ -195,22 +196,29 @@ class TemperatureTask:
         self._repeats = int(repeats)
         if self._repeats < 1:
             raise ValueError("repeats must be at least 1")
-        # The readout exposure is the one the CALIBRATION measured its
-        # thresholds at: judging frames taken at any other exposure against
-        # them is judging by numbers that mean something else.  So the camera
-        # this Task drives is configured from the artifact, and there is no
-        # exposure on its form to disagree with.
+        # The calibration's exposure is the DEFAULT, because reproducing the
+        # condition the thresholds were measured at is what an operator
+        # usually wants and typing it again is how it goes wrong.  It is not a
+        # rule: a calibration records what it did, and whether another
+        # exposure is comparable is physics the operator judges.  A run that
+        # differs says so in its record rather than being refused.
         contract = calibration.frame_contract
-        if contract.exposure_seconds is None:
+        if exposure_seconds is None and contract.exposure_seconds is None:
             raise ValueError(
                 "this calibration does not record the exposure its thresholds "
-                "were measured at, so a release-recapture run cannot reproduce it"
+                "were measured at, so a release-recapture run must be given one"
             )
+        self._exposure_seconds = float(
+            contract.exposure_seconds if exposure_seconds is None else exposure_seconds
+        )
+        self._calibrated_exposure_seconds = (
+            None if contract.exposure_seconds is None else float(contract.exposure_seconds)
+        )
         self._camera = CameraMeasurementNode(
             camera=camera,  # type: ignore[arg-type]
             request=CameraMeasurementRequest(
                 camera_key=camera_key,
-                exposure_seconds=float(contract.exposure_seconds),
+                exposure_seconds=self._exposure_seconds,
                 roi_xywh=contract.roi_xywh,
                 repeat=self._repeats * len(self._t_off),
                 frames_per_cycle=PROBE_FRAMES,
@@ -395,6 +403,17 @@ class TemperatureTask:
                 "calibration_path": str(self._calibration_path),
                 "model_kind": self._model.kind.value,
                 "probe_frames": PROBE_FRAMES,
+                # Both numbers, always: an archive that records only what was
+                # used cannot answer "were these thresholds measured under
+                # this condition?", and that question is the whole reason the
+                # exposure may now differ.
+                "exposure_seconds": self._exposure_seconds,
+                "calibrated_exposure_seconds": self._calibrated_exposure_seconds,
+                "exposure_matches_calibration": (
+                    self._calibrated_exposure_seconds is not None
+                    and abs(self._exposure_seconds - self._calibrated_exposure_seconds)
+                    <= 1e-12
+                ),
             },
             "named_devices": dict(self._devices),
             "scan": self._scan.run_record(),
