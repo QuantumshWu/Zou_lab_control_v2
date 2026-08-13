@@ -1064,9 +1064,18 @@ def calibrate(
     shorts = _coerce_short_stack(short_frames, frame_contract)
     if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
         raise ValueError("reference and short frames must share non-empty group counts")
+    # Sites are found on a high quantile across the run, not on its mean.
+    # A trap that is loaded a third of the time contributes a third of its
+    # brightness to a mean, so one threshold cannot hold both it and a trap
+    # loaded most of the time -- the dim half of a lattice simply did not
+    # appear.  A quantile asks "how bright is this place when it IS loaded",
+    # which is the same question for every trap whatever its loading.
+    reference_bright = np.quantile(
+        references.reshape(-1, *references.shape[2:]), 0.9, axis=0
+    )
     reference_average = finite_mean(references, axis=(0, 1))
     site_map = detect_sites(
-        reference_average,
+        reference_bright,
         spot_sigma=detection_spot_sigma,
         min_distance=detection_min_distance,
         detection_sigma=detection_sigma,
