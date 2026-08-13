@@ -15,7 +15,7 @@ from zlc_plot import (
     Reduction,
     describe_semantics,
 )
-from zlc_plot.semantics import axis_size
+from zlc_plot.semantics import axis_size, updated_spec
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot._kinds import HANDLERS
 from zlc_plot.selectors import NumericRange, RectangleRange
@@ -47,13 +47,57 @@ def test_describe_semantics_is_registry_derived_and_marks_rebuild() -> None:
     assert description.field("group").value is None
     assert all(field.rebuild for field in description.fields)
     controls = semantic_controls(description)
-    assert tuple(control.name for control in controls) == (
+    assert tuple(
+        control.name
+        for control in controls
+        if not control.name.startswith("scope:")
+    ) == (
         "kind",
         "x",
         "group",
         "reduction",
     )
+    # An axis that already has a role is not offered a coordinate to be
+    # pinned to: one axis, one fate.
+    assert "scope:x" not in {control.name for control in controls}
     assert all(control.semantic and control.rebuild for control in controls)
+
+
+def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
+    """"Row 1, please" -- and the fit sees row 1 as well.
+
+    The snapshot is 2 repeats x 4 point rows of 0..7 whose "row" column reads
+    [0, 0, 1, 1], so a panel pinned to row 1 holds exactly {2, 3, 6, 7}.
+    Restricting at the single view-construction point is what makes that true
+    of the payload, the fit and the selectors at once, not of the drawing
+    alone.
+    """
+
+    snapshot = _snapshot()
+    schema = snapshot.block.schema
+    row = next(
+        field
+        for field in describe_semantics(schema, HistogramPlot()).fields
+        if field.name == "scope:row"
+    )
+    assert (1.0, "1") in row.choices
+
+    spec = updated_spec(schema, HistogramPlot(), row.name, 1.0)
+    assert spec.scope == ((AxisRef.point("row"), 1.0),)
+
+    session = PlotSession(snapshot, spec)
+    try:
+        seen = np.asarray(session._view._samples.value.canonical).reshape(-1)
+        assert sorted(seen.tolist()) == [2.0, 3.0, 6.0, 7.0]
+        assert int(np.asarray(session._payload.counts).sum()) == 4
+    finally:
+        session.close()
+
+    unscoped = PlotSession(snapshot, HistogramPlot())
+    try:
+        assert int(np.asarray(unscoped._payload.counts).sum()) == 8
+    finally:
+        unscoped.close()
 
 
 def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered() -> None:

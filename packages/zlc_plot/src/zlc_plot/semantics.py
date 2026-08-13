@@ -300,6 +300,66 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
     return str(axis.name)
 
 
+#: A scope row is named after the axis it pins, so a saved panel restores
+#: the same rows by name even as the kind changes underneath them.
+SCOPE_PREFIX = "scope:"
+
+#: An axis with more coordinates than this gets no scope row.  A dropdown of
+#: two thousand pixel rows is not an editor, and truncating one silently would
+#: claim a coverage it does not have; those axes are cut with a box selector,
+#: which is the gesture that suits them.
+SCOPE_CHOICE_LIMIT = 256
+
+
+def scope_field_name(label: str) -> str:
+    return f"{SCOPE_PREFIX}{label}"
+
+
+def _scope_terms(spec: PlotSpec) -> dict[AxisRef, float]:
+    return dict(getattr(spec, "scope", ()))
+
+
+def _scope_axis(schema: DatasetSchema | None, label: str) -> AxisRef:
+    if schema is None:
+        raise KeyError(scope_field_name(label))
+    for ref in axis_choices_for_schema(schema):
+        if _axis_label(schema, ref) == label:
+            return ref
+    raise KeyError(scope_field_name(label))
+
+
+def _scope_coordinates(
+    schema: DatasetSchema,
+    ref: AxisRef,
+) -> tuple[SemanticChoice, ...] | None:
+    """Every coordinate this axis can be pinned to, or None if it takes no row.
+
+    An axis of one value is already pinned, and one of thousands is cut with a
+    box instead -- see SCOPE_CHOICE_LIMIT.
+    """
+
+    from zlc_data.snapshot_projection import axis_catalog
+
+    label = _axis_label(schema, ref)
+    axis = next(
+        (spec for name, _id, spec, _kind in axis_catalog(schema) if name == label),
+        None,
+    )
+    if axis is None:
+        # The point-row ordinal is an addressing scheme, not a declared axis.
+        size = schema.point_table.row_count
+        values: tuple[float, ...] = tuple(float(index) for index in range(size))
+    elif axis.coordinates is None:
+        values = tuple(
+            float(axis.index_origin + index) for index in range(axis.size)
+        )
+    else:
+        values = tuple(float(value) for value in axis.coordinates)
+    if len(values) < 2 or len(values) > SCOPE_CHOICE_LIMIT:
+        return None
+    return tuple((value, f"{value:g}") for value in dict.fromkeys(values))
+
+
 def _kind_label(kind: PlotKind) -> str:
     for handler in HANDLERS:
         if handler.kind is kind:
@@ -380,6 +440,45 @@ def composed_spec(
         return spec
     rest = dict(values)
     candidate = spec
+    # A scope is about WHICH data, not which drawing, so it survives every
+    # other edit -- including a kind switch, which rebases everything else on
+    # the new kind's default.  Dropping it there would silently widen the
+    # panel back to the whole signal.
+    scope = _scope_terms(spec)
+    for name in tuple(rest):
+        if not name.startswith(SCOPE_PREFIX):
+            continue
+        value = rest.pop(name)
+        axis = _scope_axis(schema, name[len(SCOPE_PREFIX) :])
+        if value is None:
+            scope.pop(axis, None)
+        else:
+            scope[axis] = float(value)
+
+    def _settled(candidate: PlotSpec) -> PlotSpec:
+        """Attach the scope to the FINISHED candidate and repair the conflict.
+
+        One axis, one fate: an axis that this edit has just made x is no
+        longer pinned to a single coordinate.  The repair has to read the
+        finished specification -- reading a halfway house, before the roles
+        this bag assigns have landed, sees the previous roles and lets the
+        contradiction through.
+        """
+
+        pinned = dict(scope)
+        roles = {
+            getattr(semantic_spec(candidate), name, None)
+            for name in ("x", "y", "group")
+        }
+        roles.add(getattr(candidate, "facet", None))
+        for axis in tuple(pinned):
+            if axis in roles:
+                pinned.pop(axis)
+        terms = tuple(pinned.items())
+        if terms != tuple(_scope_terms(candidate).items()):
+            candidate = replace(candidate, scope=terms)
+        return replace(candidate, labels=merge_labels(spec, candidate))
+
     if "kind" in rest:
         # The kind rebases everything: the other choices land on ITS default.
         kind = rest.pop("kind")
@@ -392,7 +491,9 @@ def composed_spec(
                     f"{kind.value} has no unambiguous default for this dataset"
                 )
         if not rest:
-            return replace(candidate, labels=merge_labels(spec, candidate))
+            return _settled(candidate)
+    if not rest:
+        return _settled(candidate)
     unknown = tuple(name for name in rest if name not in _field_names(candidate))
     if unknown:
         raise KeyError(unknown[0])
@@ -407,7 +508,7 @@ def composed_spec(
         )
     else:
         candidate = replace(candidate, **rest)
-    return replace(candidate, labels=merge_labels(spec, candidate))
+    return _settled(candidate)
 
 
 SemanticFeasibility = Callable[[str, object], "str | None"]
@@ -577,6 +678,30 @@ def describe_semantics(
             fields.append(_field(name, "Facet", current, choices, True))
         else:
             raise RuntimeError(f"kind registry declared unknown semantic field {name!r}")
+    # One row per axis that can be pinned, after the rows that give axes their
+    # roles: an axis is either drawn along, grouped by, faceted over or pinned
+    # to one coordinate, and these rows are where the last of those is said.
+    # A scope value cannot make a specification inadmissible -- it names a
+    # coordinate the axis already has -- so these rows are not probed, which
+    # also keeps a forty-site axis from costing forty projections to describe.
+    scope = dict(getattr(spec, "scope", ()))
+    used = {x, y, group, spec.facet if isinstance(spec, FacetGridPlot) else None}
+    for ref in axes:
+        if ref in used:
+            continue
+        choices = _scope_coordinates(schema, ref)
+        if choices is None:
+            continue
+        current = scope.get(ref)
+        fields.append(
+            SemanticField(
+                scope_field_name(_axis_label(schema, ref)),
+                f"{_axis_label(schema, ref)} =",
+                current,
+                ((None, "(all)"), *choices),
+                False,
+            )
+        )
     offered_kinds = next(
         tuple(field.choice_values) for field in fields if field.name == "kind"
     )

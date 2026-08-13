@@ -26,7 +26,6 @@ from zlc_data import (
     DatasetRevision,
     DatasetRevisionRef,
     DatasetSchema,
-    GridTopology,
     OwnedSnapshot,
     PointColumn,
     PointTable,
@@ -39,8 +38,14 @@ from zlc_data import (
     materialize_derived_dataset,
     point_ordinal_axis,
 )
-from zlc_data import SelectionChange, resolve_selection_indices
-from zlc_data.selection import IndexRangeSelection, take_indices
+from zlc_data import SelectionChange
+from zlc_data.snapshot_projection import (
+    axis_catalog,
+    restricted_schema,
+    restricted_values,
+    selection_indices,
+)
+from zlc_data.selection import IndexRangeSelection
 from zlc_data import canonical_text
 
 from .dataset import MonitorCoverage
@@ -1229,67 +1234,6 @@ class SelectionBridge:
             event.sample_labels,
         )
 
-    def _axis_catalog(
-        self,
-        schema: DatasetSchema,
-    ) -> tuple[tuple[str, AxisId, AxisSpec, str], ...]:
-        catalog: list[tuple[str, AxisId, AxisSpec, str]] = []
-        catalog.append(
-            (schema.repeat_axis.name, schema.repeat_axis.axis_id, schema.repeat_axis, "repeat")
-        )
-        catalog.append(
-            (schema.repeat_axis.axis_id.value, schema.repeat_axis.axis_id, schema.repeat_axis, "repeat")
-        )
-        for column in schema.point_table.columns:
-            axis = AxisSpec(
-                column.coordinate_id,
-                column.name,
-                column.role,
-                schema.point_table.row_count,
-                column.values,
-                column.unit,
-                column.coordinate_frame,
-            )
-            catalog.extend(
-                (
-                    (column.name, column.coordinate_id, axis, "point"),
-                    (column.coordinate_id.value, column.coordinate_id, axis, "point"),
-                )
-            )
-        # A grid-topology dimension is a point-row quantity whether or not a
-        # matching PointColumn spells its per-row values out: the topology
-        # itself is the declaration ("a matching PointColumn is optional
-        # metadata").  A scan-heatmap cell plots exactly these dimensions, so
-        # a box drawn on it names them -- and before they were catalogued
-        # here, every such box died as "not uniquely present".
-        topology = schema.grid_topology
-        if topology is not None:
-            column_ids = {
-                column.coordinate_id for column in schema.point_table.columns
-            }
-            for position, dimension_id in enumerate(topology.dimension_ids):
-                if dimension_id in column_ids:
-                    continue  # the matching column above already catalogs it
-                domain = topology.coordinate_domains[position]
-                axis = AxisSpec(
-                    dimension_id,
-                    dimension_id.value,
-                    SCAN_POINT,
-                    schema.point_table.row_count,
-                    tuple(
-                        domain[cell[position]] for cell in topology.row_to_cell
-                    ),
-                )
-                catalog.append((dimension_id.value, dimension_id, axis, "point"))
-        for axis in schema.cell_schema.data_axes:
-            catalog.extend(
-                (
-                    (axis.name, axis.axis_id, axis, "data"),
-                    (axis.axis_id.value, axis.axis_id, axis, "data"),
-                )
-            )
-        return tuple(catalog)
-
     def _resolve_axis(
         self,
         schema: DatasetSchema,
@@ -1297,7 +1241,7 @@ class SelectionBridge:
     ) -> tuple[AxisId, AxisSpec, str]:
         matches = {
             (axis_id, axis, kind)
-            for label, axis_id, axis, kind in self._axis_catalog(schema)
+            for label, axis_id, axis, kind in axis_catalog(schema)
             if label == name
         }
         if len(matches) != 1:
@@ -1421,168 +1365,6 @@ class SelectionBridge:
             )
         return Selection(tuple(terms))
 
-    def _selection_indices(
-        self,
-        schema: DatasetSchema,
-        selection: Selection,
-    ) -> tuple[
-        range | tuple[int, ...],
-        tuple[int, ...],
-        dict[AxisId, range | tuple[int, ...]],
-    ]:
-        catalog = {
-            axis_id: (axis, kind)
-            for _label, axis_id, axis, kind in self._axis_catalog(schema)
-        }
-        point_ordinal = point_ordinal_axis(schema.point_table.row_count)
-        catalog[point_ordinal.axis_id] = (point_ordinal, "point")
-        terms = {term.axis_id: term for term in selection.terms}
-
-        def indices_for(axis_id: AxisId, default_size: int) -> range | tuple[int, ...]:
-            """Which indices of one axis survive -- as a RANGE where it can be.
-
-            resolve_selection_indices returns a range precisely so a contiguous
-            run does not have to be expanded, and this used to flatten it to a
-            tuple immediately: every axis then became a gather, a full copy, even
-            the axes nobody selected.  A 512x512 box on a 1200x1920 frame cost
-            7.3 ms of pure copying per frame where a slice costs 0.09.
-            """
-
-            selected = terms.get(axis_id)
-            if selected is None:
-                return range(default_size)
-            axis, _kind = catalog[axis_id]
-            resolved, _removes_axis = resolve_selection_indices(axis, selected)
-            if not len(resolved):
-                raise ValueError(f"selection for axis {axis_id} is empty")
-            return resolved
-
-        repeat = indices_for(schema.repeat_axis.axis_id, schema.repeat_axis.size)
-        points_set = set(range(schema.point_table.row_count))
-        # Every "point"-kind catalog axis masks point ROWS: the table's own
-        # columns and the grid-topology dimensions the catalog materializes
-        # for them.  Restricting this to declared columns silently ignored a
-        # term on a column-less topology dimension.
-        point_ids = {
-            axis_id
-            for axis_id, (_axis, kind) in catalog.items()
-            if kind == "point"
-        }
-        for axis_id in point_ids:
-            if axis_id in terms:
-                axis, _kind = catalog[axis_id]
-                resolved, _removes_axis = resolve_selection_indices(axis, terms[axis_id])
-                points_set.intersection_update(resolved)
-        ordered = sorted(points_set)
-        if not ordered:
-            raise ValueError("selection removed every source point row")
-        # A contiguous run of point rows -- which is every run when nothing
-        # selected on a point axis, the common case -- indexes as a slice.  A
-        # tuple here made the point axis a gather, and a gather of one axis
-        # copies the whole frame behind it.
-        points = (
-            range(ordered[0], ordered[-1] + 1)
-            if ordered[-1] - ordered[0] + 1 == len(ordered)
-            else tuple(ordered)
-        )
-        data: dict[AxisId, range | tuple[int, ...]] = {}
-        for axis in schema.cell_schema.data_axes:
-            data[axis.axis_id] = indices_for(axis.axis_id, axis.size)
-        for axis_id in terms:
-            if axis_id not in catalog:
-                raise ValueError(f"selection axis {axis_id} is absent from source schema")
-        return repeat, points, data
-
-    @staticmethod
-    def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
-        if isinstance(indices, range) and axis.coordinates is None:
-            # An implicit axis cropped to a contiguous run is still implicit:
-            # it starts later.  Writing the coordinates out here undid, one
-            # layer down, the very thing the producer stopped doing -- build a
-            # tuple, validate every element, and digest all of it per frame.
-            return replace(
-                axis,
-                size=len(indices),
-                index_origin=axis.index_origin + indices.start,
-            )
-        coordinates = tuple(axis.coordinate_at(index) for index in indices)
-        return AxisSpec(
-            axis.axis_id,
-            axis.name,
-            axis.role,
-            len(indices),
-            coordinates,
-            axis.unit,
-            axis.coordinate_frame,
-        )
-
-    @staticmethod
-    def _subset_point_table(
-        point_table: PointTable,
-        indices: tuple[int, ...],
-    ) -> PointTable:
-        return PointTable(
-            len(indices),
-            tuple(
-                PointColumn(
-                    column.coordinate_id,
-                    column.name,
-                    column.role,
-                    column.value_kind,
-                    tuple(column.values[index] for index in indices),
-                    column.unit,
-                    column.coordinate_frame,
-                )
-                for column in point_table.columns
-            ),
-        )
-
-    def _derived_schema(
-        self,
-        schema: DatasetSchema,
-        repeat_indices: tuple[int, ...],
-        point_indices: tuple[int, ...],
-        data_indices: Mapping[AxisId, tuple[int, ...]],
-    ) -> DatasetSchema:
-        repeat_axis = self._subset_axis(schema.repeat_axis, repeat_indices)
-        point_table = self._subset_point_table(schema.point_table, point_indices)
-        cell_axes = tuple(
-            self._subset_axis(axis, data_indices[axis.axis_id])
-            for axis in schema.cell_schema.data_axes
-        )
-        cell_schema = ValueSchema(
-            cell_axes,
-            schema.cell_schema.validity_contract,
-            schema.cell_schema.dtype,
-            schema.cell_schema.value_unit,
-        )
-        grid_topology = schema.grid_topology
-        if grid_topology is not None and point_indices != tuple(range(schema.point_table.row_count)):
-            grid_topology = GridTopology(
-                grid_topology.dimension_ids,
-                grid_topology.coordinate_domains,
-                tuple(grid_topology.row_to_cell[index] for index in point_indices),
-            )
-        return DatasetSchema(repeat_axis, point_table, grid_topology, cell_schema)
-
-    @staticmethod
-    def _take(
-        values: np.ndarray,
-        repeat_indices: tuple[int, ...],
-        point_indices: tuple[int, ...],
-        data_indices: Mapping[AxisId, tuple[int, ...]],
-        schema: DatasetSchema,
-    ) -> np.ndarray:
-        # Views where the selection is contiguous, through the rule zlc_data
-        # already owns for exactly this.
-        result = take_indices(values, repeat_indices, axis=0)
-        result = take_indices(result, point_indices, axis=1)
-        for position, axis in enumerate(schema.cell_schema.data_axes):
-            result = take_indices(
-                result, data_indices[axis.axis_id], axis=2 + position
-            )
-        return result
-
     def _next_reference(
         self,
         source: OwnedSnapshot,
@@ -1621,26 +1403,26 @@ class SelectionBridge:
 
         source_schema = source.block.schema
         selection = self._build_selection(source_schema, state)
-        repeat_indices, point_indices, data_indices = self._selection_indices(
+        repeat_indices, point_indices, data_indices = selection_indices(
             source_schema,
             selection,
         )
         valid = expand_dataset_validity(source.block.validity, source_schema)
-        values = self._take(
+        values = restricted_values(
             source.block.values,
+            source_schema,
             repeat_indices,
             point_indices,
             data_indices,
-            source_schema,
         )
-        valid_values = self._take(
+        valid_values = restricted_values(
             valid,
+            source_schema,
             repeat_indices,
             point_indices,
             data_indices,
-            source_schema,
         )
-        derived_schema = self._derived_schema(
+        derived_schema = restricted_schema(
             source_schema,
             repeat_indices,
             point_indices,

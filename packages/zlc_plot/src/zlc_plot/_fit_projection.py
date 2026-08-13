@@ -11,7 +11,9 @@ from typing import Any, Callable
 
 import numpy as np
 
-from zlc_data import OwnedSnapshot
+from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot
+from zlc_data.axis import point_ordinal_axis
+from zlc_data.snapshot_projection import restrict_snapshot, value_selection
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -41,7 +43,7 @@ from .fit import (
     UnitRelation,
     _REGULAR_IMAGE_CAPABILITIES,
 )
-from .kinds import AxisRef
+from .kinds import AxisDomain, AxisRef
 from .primitives import PulseTimelineData
 from ._fit_scene import (
     FitEllipseGlyph,
@@ -293,6 +295,7 @@ class FitProjection:
             )
         self._histogram_projection = histogram_projection
         self._view = None
+        self._scoped_cache: tuple[object, OwnedSnapshot] | None = None
         self._payload = None
         selected_revision = integer(revision, "projection revision", minimum=0)
         self._validate_input(data, self._spec)
@@ -451,6 +454,55 @@ class FitProjection:
         self._build_view()
         self._build_payload_from_view()
 
+    def _scoped_data(self) -> OwnedSnapshot:
+        """The source, cut down to the axes the panel is scoped to.
+
+        The ONE place a panel narrows its own data.  Everything a panel shows
+        is built from the view constructed below -- payload, fit, selectors,
+        the side distribution -- so restricting here is what makes a scoped
+        panel scoped all the way through, instead of drawing one thing and
+        fitting another.
+        """
+
+        assert isinstance(self._data, OwnedSnapshot)
+        scope = getattr(self._spec, "scope", ())
+        if not scope:
+            return self._data
+        source = self._data
+        schema = source.block.schema
+        terms: dict[str, object] = {}
+        for ref, value in scope:
+            if ref.domain is AxisDomain.REPEAT:
+                label = schema.repeat_axis.name
+            elif ref.domain is AxisDomain.POINT_ROW:
+                label = point_ordinal_axis(schema.point_table.row_count).name
+            else:
+                label = str(ref.axis_id)
+            terms[label] = value
+        digest = ",".join(f"{label}={value!r}" for label, value in sorted(terms.items()))
+        key = (source.ref.block_id, source.ref.revision, digest)
+        if self._scoped_cache is not None and self._scoped_cache[0] == key:
+            return self._scoped_cache[1]
+
+        def reference_for(derived_schema: object) -> DatasetRevisionRef:
+            # Deterministic: the same source and the same scope name the same
+            # derived block, so a rebuild does not look like new data to
+            # anything downstream that remembers what it last drew.
+            return DatasetRevisionRef(
+                BlockId(f"{source.ref.block_id.value}|scope:{digest}"),
+                source.ref.stream_generation,
+                derived_schema.fingerprint,
+                source.ref.revision,
+            )
+
+        scoped = restrict_snapshot(
+            source,
+            value_selection(schema, terms),
+            reference_for=reference_for,
+        )
+        self._scoped_cache = (key, scoped)
+        return scoped
+
     def _build_view(self) -> None:
         """Construct the unit-aware DataView without projecting any payload.
 
@@ -476,7 +528,7 @@ class FitProjection:
             overrides[y_ref] = values.get("y_display_unit")
         value_unit = values.get("value_display_unit")
         self._view = DataView(
-            self._data,
+            self._scoped_data(),
             axis_display_units=overrides,
             value_display_unit=value_unit,
             unit_registry=self._unit_registry,

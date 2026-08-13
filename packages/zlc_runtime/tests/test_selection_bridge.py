@@ -1278,7 +1278,7 @@ def test_a_contiguous_roi_is_a_view_not_four_gathers() -> None:
 
     import numpy as np
 
-    from zlc_runtime.selection_bridge import SelectionBridge
+    from zlc_data.snapshot_projection import restricted_values
 
     values = np.zeros((1, 1, 120, 160), dtype=np.uint16)
 
@@ -1289,7 +1289,7 @@ def test_a_contiguous_roi_is_a_view_not_four_gathers() -> None:
         class cell_schema:
             data_axes = ()
 
-    taken = SelectionBridge._take(values, range(0, 1), range(0, 1), {}, _Schema)
+    taken = restricted_values(values, _Schema, range(0, 1), range(0, 1), {})
 
     assert taken.base is not None, "a contiguous selection copied the frame"
     assert taken.shape == (1, 1, 120, 160)
@@ -1812,12 +1812,22 @@ def test_an_implicit_axis_cropped_to_a_run_stays_implicit() -> None:
     it -- per frame, for an axis that is still just indexed 0..n-1 from later."""
 
     from zlc_data import SPATIAL_X
+    from zlc_data.snapshot_projection import restricted_schema
     from zlc_data.axis import AxisId, AxisSpec
-    from zlc_runtime.selection_bridge import SelectionBridge
+    from zlc_data.schema import DatasetSchema, PointTable, ValueSchema
+    from zlc_data.validity import ValidityContract
 
     axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 1920)
+    schema = DatasetSchema(
+        AxisSpec(AxisId("r"), "repeat", REPEAT, 1),
+        PointTable(1),
+        None,
+        ValueSchema((axis,), ValidityContract.value(), np.dtype("uint16")),
+    )
 
-    cropped = SelectionBridge._subset_axis(axis, range(400, 912))
+    cropped = restricted_schema(
+        schema, range(1), range(1), {axis.axis_id: range(400, 912)}
+    ).cell_schema.data_axes[0]
 
     assert cropped.coordinates is None
     assert cropped.size == 512

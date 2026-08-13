@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 import numpy as np
 
 from ._arrays import canonical_dtype
-from .axis import REPEAT, AxisId, AxisSpec
-from .schema import DatasetSchema, PointTable, ValueSchema
+from .axis import REPEAT, SCAN_POINT, AxisId, AxisSpec, point_ordinal_axis
+from .schema import DatasetSchema, GridTopology, PointColumn, PointTable, ValueSchema
+from .selection import (
+    IndexSelection,
+    Selection,
+    resolve_selection_indices,
+    take_indices,
+)
 from .validity import (
     INVALID,
     VALID,
@@ -23,12 +30,20 @@ from .value import (
     DatasetRevisionRef,
     OwnedSnapshot,
     Value,
+    compact_dataset_validity,
+    expand_dataset_validity,
 )
 
 __all__ = [
+    "axis_catalog",
     "materialize_derived_dataset",
     "materialize_scalar_dataset",
     "materialize_value_dataset",
+    "restrict_snapshot",
+    "restricted_schema",
+    "restricted_values",
+    "selection_indices",
+    "value_selection",
 ]
 
 
@@ -119,6 +134,314 @@ def materialize_scalar_dataset(
             CellValidity(np.asarray([[valid]], dtype=np.bool_)),
             schema,
         ),
+    )
+
+
+def axis_catalog(
+    schema: DatasetSchema,
+) -> tuple[tuple[str, AxisId, AxisSpec, str], ...]:
+    """Every axis a selection may name, under every label it answers to.
+
+    Four columns: the label, the axis id, the axis, and which of the three
+    physical dimensions the label restricts -- ``"repeat"``, ``"point"`` or
+    ``"data"``.  Both the human name and the id text are listed, because a
+    selection is authored against whichever the operator had in front of them.
+
+    A grid-topology dimension is a point-row quantity whether or not a matching
+    PointColumn spells its per-row values out: the topology itself is the
+    declaration.  A scan-heatmap cell plots exactly these dimensions, so a box
+    drawn on one names them -- and before they were catalogued here, every such
+    box died as "not uniquely present".
+    """
+
+    catalog: list[tuple[str, AxisId, AxisSpec, str]] = []
+    repeat_axis = schema.repeat_axis
+    catalog.append((repeat_axis.name, repeat_axis.axis_id, repeat_axis, "repeat"))
+    catalog.append(
+        (repeat_axis.axis_id.value, repeat_axis.axis_id, repeat_axis, "repeat")
+    )
+    for column in schema.point_table.columns:
+        axis = AxisSpec(
+            column.coordinate_id,
+            column.name,
+            column.role,
+            schema.point_table.row_count,
+            column.values,
+            column.unit,
+            column.coordinate_frame,
+        )
+        catalog.extend(
+            (
+                (column.name, column.coordinate_id, axis, "point"),
+                (column.coordinate_id.value, column.coordinate_id, axis, "point"),
+            )
+        )
+    topology = schema.grid_topology
+    if topology is not None:
+        column_ids = {column.coordinate_id for column in schema.point_table.columns}
+        for position, dimension_id in enumerate(topology.dimension_ids):
+            if dimension_id in column_ids:
+                continue  # the matching column above already catalogs it
+            domain = topology.coordinate_domains[position]
+            axis = AxisSpec(
+                dimension_id,
+                dimension_id.value,
+                SCAN_POINT,
+                schema.point_table.row_count,
+                tuple(domain[cell[position]] for cell in topology.row_to_cell),
+            )
+            catalog.append((dimension_id.value, dimension_id, axis, "point"))
+    for axis in schema.cell_schema.data_axes:
+        catalog.extend(
+            (
+                (axis.name, axis.axis_id, axis, "data"),
+                (axis.axis_id.value, axis.axis_id, axis, "data"),
+            )
+        )
+    return tuple(catalog)
+
+
+def selection_indices(
+    schema: DatasetSchema,
+    selection: Selection,
+) -> tuple[
+    range | tuple[int, ...],
+    range | tuple[int, ...],
+    dict[AxisId, range | tuple[int, ...]],
+]:
+    """Which repeats, point rows and data indices one selection keeps.
+
+    Ranges wherever the surviving run is contiguous, which is every axis
+    nobody selected on: a range indexes as a slice, and a tuple would make the
+    axis a gather -- and a gather of one axis copies the whole frame behind it.
+    A 512x512 box on a 1200x1920 frame costs 7.3 ms of pure copying that way
+    where the slice costs 0.09.
+    """
+
+    catalog = {
+        axis_id: (axis, kind) for _label, axis_id, axis, kind in axis_catalog(schema)
+    }
+    point_ordinal = point_ordinal_axis(schema.point_table.row_count)
+    catalog[point_ordinal.axis_id] = (point_ordinal, "point")
+    terms = {term.axis_id: term for term in selection.terms}
+
+    def indices_for(axis_id: AxisId, default_size: int) -> range | tuple[int, ...]:
+        selected = terms.get(axis_id)
+        if selected is None:
+            return range(default_size)
+        axis, _kind = catalog[axis_id]
+        resolved, _removes_axis = resolve_selection_indices(axis, selected)
+        if not len(resolved):
+            raise ValueError(f"selection for axis {axis_id} is empty")
+        return resolved
+
+    repeat = indices_for(schema.repeat_axis.axis_id, schema.repeat_axis.size)
+    points_set = set(range(schema.point_table.row_count))
+    # Every "point"-kind catalog axis masks point ROWS: the table's own columns
+    # and the grid-topology dimensions catalogued for them.  Restricting this
+    # to declared columns silently ignored a term on a column-less dimension.
+    point_ids = {
+        axis_id for axis_id, (_axis, kind) in catalog.items() if kind == "point"
+    }
+    for axis_id in point_ids:
+        if axis_id in terms:
+            axis, _kind = catalog[axis_id]
+            resolved, _removes_axis = resolve_selection_indices(axis, terms[axis_id])
+            points_set.intersection_update(resolved)
+    ordered = sorted(points_set)
+    if not ordered:
+        raise ValueError("selection removed every source point row")
+    points = (
+        range(ordered[0], ordered[-1] + 1)
+        if ordered[-1] - ordered[0] + 1 == len(ordered)
+        else tuple(ordered)
+    )
+    data: dict[AxisId, range | tuple[int, ...]] = {}
+    for axis in schema.cell_schema.data_axes:
+        data[axis.axis_id] = indices_for(axis.axis_id, axis.size)
+    for axis_id in terms:
+        if axis_id not in catalog:
+            raise ValueError(f"selection axis {axis_id} is absent from source schema")
+    return repeat, points, data
+
+
+def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
+    if isinstance(indices, range) and axis.coordinates is None:
+        # An implicit axis cropped to a contiguous run is still implicit: it
+        # starts later.  Writing the coordinates out here undid, one layer
+        # down, the very thing the producer stopped doing -- build a tuple,
+        # validate every element, and digest all of it per frame.
+        return replace(
+            axis,
+            size=len(indices),
+            index_origin=axis.index_origin + indices.start,
+        )
+    coordinates = tuple(axis.coordinate_at(index) for index in indices)
+    return AxisSpec(
+        axis.axis_id,
+        axis.name,
+        axis.role,
+        len(indices),
+        coordinates,
+        axis.unit,
+        axis.coordinate_frame,
+    )
+
+
+def _subset_point_table(
+    point_table: PointTable,
+    indices: range | tuple[int, ...],
+) -> PointTable:
+    return PointTable(
+        len(indices),
+        tuple(
+            PointColumn(
+                column.coordinate_id,
+                column.name,
+                column.role,
+                column.value_kind,
+                tuple(column.values[index] for index in indices),
+                column.unit,
+                column.coordinate_frame,
+            )
+            for column in point_table.columns
+        ),
+    )
+
+
+def _keeps_everything(indices: range | tuple[int, ...], size: int) -> bool:
+    return len(indices) == size and all(
+        position == index for position, index in enumerate(indices)
+    )
+
+
+def restricted_schema(
+    schema: DatasetSchema,
+    repeat_indices: range | tuple[int, ...],
+    point_indices: range | tuple[int, ...],
+    data_indices: Mapping[AxisId, range | tuple[int, ...]],
+) -> DatasetSchema:
+    """The schema of what survives -- the source's axes, cropped, not dropped."""
+
+    repeat_axis = _subset_axis(schema.repeat_axis, repeat_indices)
+    point_table = _subset_point_table(schema.point_table, point_indices)
+    cell_axes = tuple(
+        _subset_axis(axis, data_indices[axis.axis_id])
+        for axis in schema.cell_schema.data_axes
+    )
+    cell_schema = ValueSchema(
+        cell_axes,
+        schema.cell_schema.validity_contract,
+        schema.cell_schema.dtype,
+        schema.cell_schema.value_unit,
+    )
+    grid_topology = schema.grid_topology
+    if grid_topology is not None and not _keeps_everything(
+        point_indices, schema.point_table.row_count
+    ):
+        grid_topology = GridTopology(
+            grid_topology.dimension_ids,
+            grid_topology.coordinate_domains,
+            tuple(grid_topology.row_to_cell[index] for index in point_indices),
+        )
+    return DatasetSchema(repeat_axis, point_table, grid_topology, cell_schema)
+
+
+def restricted_values(
+    values: np.ndarray,
+    schema: DatasetSchema,
+    repeat_indices: range | tuple[int, ...],
+    point_indices: range | tuple[int, ...],
+    data_indices: Mapping[AxisId, range | tuple[int, ...]],
+) -> np.ndarray:
+    """The values that survive, as a view wherever the selection is contiguous."""
+
+    result = take_indices(values, repeat_indices, axis=0)
+    result = take_indices(result, point_indices, axis=1)
+    for position, axis in enumerate(schema.cell_schema.data_axes):
+        result = take_indices(result, data_indices[axis.axis_id], axis=2 + position)
+    return result
+
+
+def value_selection(
+    schema: DatasetSchema,
+    terms: Mapping[str, object],
+) -> Selection:
+    """Keep one named coordinate on each named axis.
+
+    The one translation from "this axis, that value" -- a facet cell, a scope
+    row, a site number typed into a panel -- into the Selection vocabulary.
+    An axis that spells its coordinates out is selected BY coordinate; an
+    implicit one is selected by index, because its coordinate is its index and
+    a range over floats would only be a longer way to say so.
+    """
+
+    catalog = {label: axis for label, _id, axis, _kind in axis_catalog(schema)}
+    ordinal = point_ordinal_axis(schema.point_table.row_count)
+    catalog.setdefault(ordinal.axis_id.value, ordinal)
+    catalog.setdefault(ordinal.name, ordinal)
+    resolved: list[object] = []
+    for label, value in terms.items():
+        axis = catalog.get(str(label))
+        if axis is None:
+            raise ValueError(f"selection axis {label!r} is absent from source schema")
+        if axis.coordinates is None:
+            index = int(value) - int(axis.index_origin)
+            if not 0 <= index < axis.size:
+                raise ValueError(
+                    f"axis {label!r} has no index {value!r}: it runs "
+                    f"{axis.index_origin}..{axis.index_origin + axis.size - 1}"
+                )
+            resolved.append(IndexSelection(axis.axis_id, index))
+        else:
+            resolved.append(
+                Selection.coordinate_range(
+                    axis.axis_id,
+                    float(value),
+                    float(value),
+                    coordinate_frame=axis.coordinate_frame,
+                ).terms[0]
+            )
+    return Selection(tuple(resolved))
+
+
+def restrict_snapshot(
+    snapshot: OwnedSnapshot,
+    selection: Selection,
+    *,
+    reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
+) -> OwnedSnapshot:
+    """One selection applied to one snapshot: the same axes, over less of them.
+
+    The single cutter.  Restriction is arithmetic on a schema, its values and
+    its validity, so it lives with the data, and everyone who restricts -- the
+    selection bridge deriving a signal, a panel scoped to one site -- asks
+    here.  Two cutters is how a box drawn on a scoped panel came to cut from
+    the whole signal instead: they agreed about the intent and disagreed about
+    the domain it applied to.
+    """
+
+    if not isinstance(snapshot, OwnedSnapshot):
+        raise TypeError("restrict_snapshot requires an OwnedSnapshot")
+    schema = snapshot.block.schema
+    repeat_indices, point_indices, data_indices = selection_indices(schema, selection)
+    derived = restricted_schema(schema, repeat_indices, point_indices, data_indices)
+    values = restricted_values(
+        snapshot.block.values, schema, repeat_indices, point_indices, data_indices
+    )
+    mask = restricted_values(
+        expand_dataset_validity(snapshot.block.validity, schema),
+        schema,
+        repeat_indices,
+        point_indices,
+        data_indices,
+    )
+    return materialize_derived_dataset(
+        snapshot.ref,
+        values,
+        schema=derived,
+        validity=compact_dataset_validity(mask, derived),
+        reference_for=reference_for,
     )
 
 

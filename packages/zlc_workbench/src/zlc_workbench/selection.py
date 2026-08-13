@@ -487,7 +487,14 @@ class PlotSelectionSource:
         self,
         selector: object,
     ) -> tuple[tuple[FacetCondition, ...], int | None]:
-        """The focused cell's identity, as the runtime's facet restriction.
+        """Everything this panel is already narrowed to, as the runtime's terms.
+
+        Two narrowings, one statement: the cell a selector was drawn inside,
+        and the coordinates the panel itself is pinned to.  Both say "this
+        axis holds this value", which is what a FacetCondition is, and both
+        must cross -- a box drawn on a panel scoped to one site derives a
+        region of THAT site, and without carrying the scope it derived one
+        cut from every site while the operator was looking at one.
 
         A selector drawn inside a focused facet cell carries the cell index,
         and dropping it meant a box in ONE cell derived a region cut from ALL
@@ -501,29 +508,79 @@ class PlotSelectionSource:
         """
 
         index = getattr(selector, "facet_index", None)
-        if index is None:
-            return (), None
         session = self._session_view()
         if session is None:
+            if index is None:
+                return (), None
             raise _Unbridgeable(
                 "the focused facet cell's identity is unreachable from this "
                 "plot host, so a cell-scoped selection cannot be carried"
             )
+        conditions: list[FacetCondition] = []
+        repeat_index: int | None = None
+        for ref, value in getattr(session.spec, "scope", ()):
+            if _name_of(getattr(ref, "domain", None)) == "repeat":
+                # Structural, never by name: the repeat axis is the first
+                # tensor dimension and is anonymous everywhere on the plot
+                # side, so it crosses as a row index like a focused repeat
+                # facet does.
+                repeat_index = self._repeat_row(session, value)
+                continue
+            axis_name = getattr(ref, "axis_id", None)
+            if not isinstance(axis_name, str) or not axis_name:
+                raise _Unbridgeable(
+                    "this panel is scoped to an axis with no upstream name, "
+                    "so a selection drawn on it cannot be carried"
+                )
+            conditions.append(FacetCondition(axis_name, float(value)))
+        if index is None:
+            return tuple(conditions), repeat_index
         facet = getattr(session.spec, "facet", None)
         if facet is None:
             # A focused index without a facet spec: nothing narrower than the
             # whole surface exists, so there is no restriction to add.
-            return (), None
+            return tuple(conditions), repeat_index
         domain = _name_of(getattr(facet, "domain", None))
         if domain == "repeat":
-            return (), int(index)
+            return tuple(conditions), int(index)
         axis_name = getattr(facet, "axis_id", None)
         if not isinstance(axis_name, str) or not axis_name:
             raise _Unbridgeable(
                 f"a {domain} facet has no named upstream axis, so the focused "
                 "cell cannot be carried"
             )
-        return (FacetCondition(axis_name, self._facet_value(session, index)),), None
+        conditions.append(FacetCondition(axis_name, self._facet_value(session, index)))
+        return tuple(conditions), repeat_index
+
+    @staticmethod
+    def _repeat_row(session: Any, value: float) -> int:
+        """Which repeat ROW a pinned repeat coordinate names."""
+
+        block = getattr(getattr(session, "_projection", None), "_data", None)
+        schema = getattr(getattr(block, "block", None), "schema", None)
+        if schema is None:
+            raise _Unbridgeable(
+                "this panel is pinned to one repeat, but the repeat axis is "
+                "unreachable from this plot host, so it cannot be carried"
+            )
+        axis = schema.repeat_axis
+        if axis.coordinates is None:
+            row = int(value) - int(axis.index_origin)
+        else:
+            row = next(
+                (
+                    position
+                    for position, coordinate in enumerate(axis.coordinates)
+                    if float(coordinate) == float(value)
+                ),
+                -1,
+            )
+        if not 0 <= row < axis.size:
+            raise _Unbridgeable(
+                f"this panel is pinned to repeat {value!r}, which the source "
+                "no longer has"
+            )
+        return row
 
     def _session_view(self) -> Any | None:
         """The owning session, reachable only where its state may be read.

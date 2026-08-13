@@ -148,12 +148,42 @@ class PlotLabels:
                 raise ValueError(f"label {name!r} must be non-empty text or None")
 
 
+#: One axis pinned to one of its coordinates.  A scope is a tuple of these:
+#: the panel plots the data where every named axis holds the named value, and
+#: everything downstream -- fits, selectors, the distribution -- sees only
+#: that.  It is a fate an axis can be given, exactly like being x or being
+#: grouped by, which is why it lives on the specification and not among the
+#: display parameters: it changes WHAT is plotted, not how it looks.
+ScopeTerm: TypeAlias = tuple[AxisRef, float]
+
+
+def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError("scope must be a tuple of (AxisRef, value) pairs")
+    terms: list[ScopeTerm] = []
+    seen: set[AxisRef] = set()
+    for term in value:
+        if not isinstance(term, tuple) or len(term) != 2:
+            raise TypeError("each scope term must be an (AxisRef, value) pair")
+        axis, coordinate = term
+        if not isinstance(axis, AxisRef):
+            raise TypeError("scope term axis must be AxisRef")
+        if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+            raise TypeError("scope term value must be a real coordinate")
+        if axis in seen:
+            raise ValueError(f"axis {axis!r} is scoped twice")
+        seen.add(axis)
+        terms.append((axis, float(coordinate)))
+    return tuple(terms)
+
+
 @dataclass(frozen=True, slots=True)
 class CurvePlot:
     x: AxisRef
     group: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
+    scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.CURVE
 
     def __post_init__(self) -> None:
@@ -167,6 +197,7 @@ class CurvePlot:
             raise TypeError("CurvePlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("CurvePlot.labels must be PlotLabels")
+        object.__setattr__(self, "scope", _validated_scope(self.scope))
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +206,7 @@ class ImagePlot:
     y: AxisRef
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
+    scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.IMAGE
 
     def __post_init__(self) -> None:
@@ -186,6 +218,7 @@ class ImagePlot:
             raise TypeError("ImagePlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("ImagePlot.labels must be PlotLabels")
+        object.__setattr__(self, "scope", _validated_scope(self.scope))
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,11 +232,13 @@ class HistogramPlot:
     """
 
     labels: PlotLabels = field(default_factory=PlotLabels)
+    scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.HISTOGRAM
 
     def __post_init__(self) -> None:
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("HistogramPlot.labels must be PlotLabels")
+        object.__setattr__(self, "scope", _validated_scope(self.scope))
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +246,7 @@ class RollingPlot:
     group: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
+    scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.ROLLING
 
     def __post_init__(self) -> None:
@@ -220,6 +256,7 @@ class RollingPlot:
             raise TypeError("RollingPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("RollingPlot.labels must be PlotLabels")
+        object.__setattr__(self, "scope", _validated_scope(self.scope))
 
 
 CellPlot: TypeAlias = CurvePlot | ImagePlot | HistogramPlot
@@ -237,6 +274,7 @@ class FacetGridPlot:
     facet: AxisRef
     cell: CellPlot
     labels: PlotLabels = field(default_factory=PlotLabels)
+    scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.FACET_GRID
 
     def __post_init__(self) -> None:
@@ -246,6 +284,7 @@ class FacetGridPlot:
             raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
+        object.__setattr__(self, "scope", _validated_scope(self.scope))
         used = {
             getattr(self.cell, "x", None),
             getattr(self.cell, "y", None),
