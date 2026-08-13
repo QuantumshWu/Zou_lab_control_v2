@@ -30,7 +30,7 @@ def bind_camera(
             ),
             capability_probe=lambda: {
                 "camera.adapter": camera,
-                "camera.working_point": camera.capture_working_point(),
+                "camera.working_point": camera.working_point(),
             },
         )
     except BaseException:

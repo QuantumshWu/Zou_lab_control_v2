@@ -222,7 +222,7 @@ def test_a_roi_configured_before_open_reaches_the_sensor(fake_pypylon) -> None:
     adapter.open()
 
     assert isinstance(adapter, CameraAdapter)
-    working_point = adapter.capture_working_point()
+    working_point = adapter.working_point()
     assert working_point.roi_shape_yx == (480, 640)
     assert working_point.roi_origin_yx == (50, 100)
     assert abs(working_point.exposure_seconds - 0.01) < 1e-9
@@ -260,10 +260,8 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
         camera=camera,
     )
     adapter.open()
-    point = adapter.configure_measurement(
-        exposure_seconds=0.012345,
-        roi_xywh=(101, 51, 641, 481),
-    )
+    adapter.set_roi((101, 51, 641, 481))
+    point = adapter.set_exposure_seconds(0.012345)
     assert point.exposure_seconds == pytest.approx(0.012345)
     assert point.required_external_trigger_interval_seconds == pytest.approx(0.012345)
     assert point.roi_origin_yx == (50, 100)
@@ -271,7 +269,8 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
     with pytest.raises(RuntimeError, match="while armed"):
-        adapter.configure_measurement(exposure_seconds=0.02, roi_xywh=None)
+        adapter.set_roi(None)
+        adapter.set_exposure_seconds(0.02)
     adapter.finish_record_capture()
 
 
@@ -286,7 +285,7 @@ def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
     assert camera.TriggerMode.GetValue() == "Off"
-    armed_point = adapter.capture_working_point()
+    armed_point = adapter.working_point()
     assert armed_point.acquisition_mode is CameraAcquisitionMode.FREE_RUNNING
     assert armed_point.required_external_trigger_interval_seconds is None
     assert armed_point.external_trigger_integration_start_offset_seconds is None
@@ -393,7 +392,7 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     assert camera.TriggerSource.GetValue() == "Line1"
     assert camera.grab_calls[-1] == "StartGrabbing(one)"
     assert camera.MaxNumBuffer.writes[-1] == 3
-    continuous_point = adapter.capture_working_point()
+    continuous_point = adapter.working_point()
     assert continuous_point.acquisition_mode is CameraAcquisitionMode.EXTERNAL_TRIGGERED
     assert continuous_point.required_external_trigger_interval_seconds == pytest.approx(
         adapter.config.exposure_seconds
@@ -442,7 +441,7 @@ def test_mono8_is_verified_from_sdk_readback(fake_pypylon) -> None:
     adapter.open()
     camera.PixelFormat.value = "Mono12"
     with pytest.raises(RuntimeError, match="Mono8"):
-        adapter.capture_working_point()
+        adapter.working_point()
 
 
 def test_open_failure_closes_once_and_close_remains_idempotent(fake_pypylon) -> None:
@@ -579,7 +578,7 @@ def test_the_camera_volunteers_its_analog_gain_and_reports_the_real_one() -> Non
     assert camera.Gain.GetValue() == pytest.approx(12.0)
     # A working point carries the LINEAR factor, which is what every reader of
     # one means by gain; the camera states dB.
-    assert adapter.capture_working_point().gain == pytest.approx(10.0 ** (12.0 / 20.0))
+    assert adapter.working_point().gain == pytest.approx(10.0 ** (12.0 / 20.0))
 
     with pytest.raises(ValueError, match="gain_db must lie in"):
         adapter.tune("gain_db", 30.0)

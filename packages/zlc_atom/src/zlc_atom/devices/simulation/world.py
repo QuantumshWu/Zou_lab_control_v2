@@ -667,7 +667,7 @@ class SimulationWorld:
                 for device, registered_renderer in tuple(self._cameras):
                     if not device.capture_state():
                         continue
-                    configured = float(device.capture_working_point().exposure_seconds)
+                    configured = float(device.working_point().exposure_seconds)
                     exposure = min(configured, (end_tick - start_tick) / clock)
                     integration_end = start + exposure * clock
                     probe_seconds = _overlap_ticks(start, integration_end, probe) / clock

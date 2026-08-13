@@ -382,25 +382,37 @@ class DcamCameraAdapter:
             ),
         )
 
-    def capture_working_point(self) -> CameraWorkingPoint:
+    def working_point(self) -> CameraWorkingPoint:
         return self._lane.call(self._read_working_point_on_owner)
 
-    def configure_measurement(
-        self,
-        *,
-        exposure_seconds: float,
-        roi_xywh: tuple[int, int, int, int] | None,
-    ) -> CameraWorkingPoint:
-        candidate = replace(
-            self._config,
-            exposure_seconds=positive_real(exposure_seconds, "exposure_seconds"),
-            roi_xywh=roi_xywh,
+    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
+        """Integrate for this long on every trigger, leaving the geometry."""
+
+        return self._reconfigure(
+            replace(
+                self._config,
+                exposure_seconds=positive_real(seconds, "exposure_seconds"),
+            )
         )
+
+    def set_roi(
+        self, roi_xywh: tuple[int, int, int, int] | None
+    ) -> CameraWorkingPoint:
+        """Read this part of the sensor, leaving the exposure.
+
+        ``None`` is the whole sensor, which is what an operator means by no
+        ROI at all.
+        """
+
+        return self._reconfigure(replace(self._config, roi_xywh=roi_xywh))
+
+    def _reconfigure(self, candidate: "DcamCameraConfig") -> CameraWorkingPoint:
+        """Apply one changed field and keep the config at what the sensor did."""
 
         def apply() -> CameraWorkingPoint:
             point = self._apply_settings_on_owner(candidate)
             actual_roi = None
-            if roi_xywh is not None:
+            if candidate.roi_xywh is not None:
                 actual_roi = (
                     point.roi_origin_yx[1],
                     point.roi_origin_yx[0],

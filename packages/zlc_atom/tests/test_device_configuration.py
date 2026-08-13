@@ -189,15 +189,13 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
     installation = create_installation("virtual")
     try:
         mot_camera = installation.device("mot_camera")
-        point = mot_camera.capture_working_point()
+        point = mot_camera.working_point()
         assert point.sensor_shape_yx == (1200, 1920)
         assert point.acquisition_mode == "FREE_RUNNING"
         # The real MOT monitor is a Basler read out as Mono8.
         assert point.dtype.str == "|u1"
-        mot_camera.configure_measurement(
-            exposure_seconds=0.05,
-            roi_xywh=(100, 50, 320, 240),
-        )
+        mot_camera.set_roi((100, 50, 320, 240))
+        mot_camera.set_exposure_seconds(0.05)
         mot_camera.arm(
             1,
             source_group_sizes=(1,),

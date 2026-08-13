@@ -743,7 +743,12 @@ class CalibrationTask:
                     not isinstance(record, CameraFrameRecord) for record in records
                 ):
                     raise RuntimeError(
-                        "camera returned an incomplete calibration cycle"
+                        f"the camera returned {len(records)} frame(s) of a "
+                        "three-frame cycle: it integrates for "
+                        f"{actual.exposure_seconds:g}s per trigger, and a "
+                        "trigger that arrives while it is still busy is "
+                        "ignored -- the pulse must space its camera windows "
+                        "by more than that"
                     )
                 cycle = (records[0], records[1], records[2])
                 cycles.append(cycle)
@@ -834,16 +839,19 @@ class CalibrationTask:
         try:
             pulse = self._resolve_pulse()
             pulse_facts = self._pulse_facts(pulse)
-            # The camera as the operator left it.  Calibration has no opinion
-            # about geometry -- it needs the sites in frame, which is what the
-            # bench was already tuned for -- and reconfiguring on Start threw
-            # away a small, fast ROI for the full sensor every single time.
-            # What was actually used is recorded in the run record, so the
-            # answer stays reproducible without being forced.
-            actual = self.camera.capture_working_point()
+            # The exposure is this run's to state: the three frames are cut
+            # by the pulse THIS task plays, and a camera still integrating
+            # when the next trigger arrives simply ignores it -- which is one
+            # frame short of a cycle, every cycle.  The geometry is the
+            # bench's and is not touched: an ROI tuned around the traps has to
+            # survive a calibration, and what was actually used is recorded in
+            # the run record either way.
+            actual = self.camera.set_exposure_seconds(
+                self.request.reference_exposure_seconds
+            )
             if not isinstance(actual, CameraWorkingPoint):
                 raise TypeError(
-                    "camera capture_working_point must return CameraWorkingPoint"
+                    "camera set_exposure_seconds must return CameraWorkingPoint"
                 )
             self._actual_working_point = actual
             capture, run_record = self._capture(

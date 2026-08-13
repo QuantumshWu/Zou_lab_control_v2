@@ -155,14 +155,26 @@ class CameraAdapter(Protocol):
     @property
     def timeout(self) -> float: ...
 
-    def configure_measurement(
-        self,
-        *,
-        exposure_seconds: float,
-        roi_xywh: tuple[int, int, int, int] | None,
+    # A camera has a state: how long it integrates, and which part of the
+    # sensor it reads.  The two are owned by different people -- the geometry
+    # by the bench, which tunes an ROI around the traps and needs it to
+    # survive; the exposure by whatever run is playing, because it has to fit
+    # between that run's camera triggers -- and they are set separately for
+    # exactly that reason.  One call that demanded both is what let a task
+    # replace a tuned ROI with the full sensor because it only meant to state
+    # an exposure, and left an exposure so long that the third trigger of a
+    # cycle arrived while the sensor was still busy.
+    #
+    # Nothing here is named after a measurement.  A camera is a shared piece
+    # of hardware in a state, not an accessory of whoever last called it.
+
+    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint: ...
+
+    def set_roi(
+        self, roi_xywh: tuple[int, int, int, int] | None
     ) -> CameraWorkingPoint: ...
 
-    def capture_working_point(self) -> CameraWorkingPoint: ...
+    def working_point(self) -> CameraWorkingPoint: ...
 
     def arm(self, frames: int | None, *, source_group_sizes: tuple[int, ...] | None, buffer_frame_count: int, timeout: float) -> None: ...
 

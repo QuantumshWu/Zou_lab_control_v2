@@ -546,17 +546,17 @@ class CameraMeasurementNode:
     def _configure_for_run(self) -> CameraWorkingPoint:
         self._actual_working_point = None
         self._run_record = None
-        point = self.camera.configure_measurement(
-            exposure_seconds=self.request.exposure_seconds,
-            roi_xywh=self.request.roi_xywh,
-        )
+        # This measurement owns both: it exists to point the camera.  The
+        # geometry first, because it is the expensive one to get wrong.
+        self.camera.set_roi(self.request.roi_xywh)
+        point = self.camera.set_exposure_seconds(self.request.exposure_seconds)
         if not isinstance(point, CameraWorkingPoint):
-            raise TypeError("camera configure_measurement must return CameraWorkingPoint")
+            raise TypeError("camera set_exposure_seconds must return CameraWorkingPoint")
         return point
 
     def _freeze_working_point(self, point: CameraWorkingPoint) -> None:
         if not isinstance(point, CameraWorkingPoint):
-            raise TypeError("camera capture_working_point must return CameraWorkingPoint")
+            raise TypeError("camera working_point must return CameraWorkingPoint")
         record = {
             "node": self.instance_id,
             "parameters": {
@@ -612,7 +612,7 @@ class CameraMeasurementNode:
             timeout=timeout,
         )
         try:
-            self._freeze_working_point(self.camera.capture_working_point())
+            self._freeze_working_point(self.camera.working_point())
             return FiniteCapture(
                 self,
                 repeat=self.request.repeat,
@@ -691,7 +691,7 @@ class CameraMeasurementNode:
             timeout=timeout,
         )
         try:
-            self._freeze_working_point(self.camera.capture_working_point())
+            self._freeze_working_point(self.camera.working_point())
             return MonitorCapture(
                 self.camera,
                 node=self,

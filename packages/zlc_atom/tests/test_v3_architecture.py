@@ -72,16 +72,17 @@ class _RecordingCamera:
         self.events.append(("timeout", None))
         return float(self.camera.timeout)  # type: ignore[attr-defined]
 
-    def capture_working_point(self):
+    def working_point(self):
         self.events.append(("working_point", None))
-        return self.camera.capture_working_point()  # type: ignore[attr-defined]
+        return self.camera.working_point()  # type: ignore[attr-defined]
 
-    def configure_measurement(self, *, exposure_seconds, roi_xywh):
-        self.events.append(("configure_measurement", (exposure_seconds, roi_xywh)))
-        return self.camera.configure_measurement(  # type: ignore[attr-defined]
-            exposure_seconds=exposure_seconds,
-            roi_xywh=roi_xywh,
-        )
+    def set_exposure_seconds(self, seconds):
+        self.events.append(("set_exposure_seconds", seconds))
+        return self.camera.set_exposure_seconds(seconds)  # type: ignore[attr-defined]
+
+    def set_roi(self, roi_xywh):
+        self.events.append(("set_roi", roi_xywh))
+        return self.camera.set_roi(roi_xywh)  # type: ignore[attr-defined]
 
     def arm(self, frames, *, source_group_sizes, buffer_frame_count, timeout) -> None:
         self.events.append(("arm", (frames, source_group_sizes, buffer_frame_count)))
@@ -401,8 +402,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert next(
             name
             for name, _ in camera.events
-            if name in {"configure_measurement", "arm"}
-        ) == "configure_measurement"
+            if name in {"set_exposure_seconds", "arm"}
+        ) == "set_exposure_seconds"
 
         calibration_node = descriptors["calibration"].instantiate(
             camera=camera,
@@ -455,17 +456,17 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert len(task_result.capture.frames) == 90
         assert sum(len(group) for group in task_result.reference) == 60
         assert len(task_result.short) == 30
-        # Calibration never re-points the camera: it reads the working point
-        # the bench was tuned to and arms on that.  Reconfiguring on Start
-        # replaced a small, fast ROI with the full sensor every run.
+        # Calibration states the exposure its own pulse needs and touches
+        # nothing else: an ROI tuned around the traps survives a calibration.
+        assert [event for event, _ in task_camera_events].count("set_roi") == 0
         assert [event for event, _ in task_camera_events].count(
-            "configure_measurement"
-        ) == 0
+            "set_exposure_seconds"
+        ) == 1
         assert next(
             name
             for name, _ in task_camera_events
-            if name in {"working_point", "arm"}
-        ) == "working_point"
+            if name in {"set_exposure_seconds", "arm"}
+        ) == "set_exposure_seconds"
         assert ("arm", (90, (3,) * 30, 90)) in task_camera_events
         assert [value for name, value in task_camera_events if name == "read"] == [
             (3, True)

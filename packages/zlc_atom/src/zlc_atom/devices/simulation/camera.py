@@ -87,7 +87,7 @@ class VirtualCamera:
     def frame_dtype(self) -> np.dtype:
         return self._frame_dtype
 
-    def capture_working_point(self) -> CameraWorkingPoint:
+    def working_point(self) -> CameraWorkingPoint:
         with self._condition:
             exposure = self._exposure_seconds
             x, y, width, height = self._roi_xywh
@@ -111,15 +111,27 @@ class VirtualCamera:
             ),
         )
 
-    def configure_measurement(
-        self,
-        *,
-        exposure_seconds: float,
-        roi_xywh: tuple[int, int, int, int] | None,
-    ) -> CameraWorkingPoint:
-        exposure = float(exposure_seconds)
+    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
+        """Integrate for this long on every trigger, leaving the geometry."""
+
+        exposure = float(seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
+        with self._condition:
+            if self._armed:
+                raise RuntimeError("virtual camera settings cannot change while armed")
+            self._exposure_seconds = exposure
+        return self.working_point()
+
+    def set_roi(
+        self, roi_xywh: tuple[int, int, int, int] | None
+    ) -> CameraWorkingPoint:
+        """Read this part of the sensor, leaving the exposure.
+
+        ``None`` is the whole sensor, which is what an operator means by no
+        ROI at all.
+        """
+
         sensor_height, sensor_width = self._sensor_shape_yx
         if roi_xywh is None:
             roi = (0, 0, sensor_width, sensor_height)
@@ -139,9 +151,8 @@ class VirtualCamera:
         with self._condition:
             if self._armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
-            self._exposure_seconds = exposure
             self._roi_xywh = roi
-        return self.capture_working_point()
+        return self.working_point()
 
     def tunable_fields(self) -> tuple[AuthoringField, ...]:
         """The runtime knobs this camera volunteers to a scan (duck-typed).

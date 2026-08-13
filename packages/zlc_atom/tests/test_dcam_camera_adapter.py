@@ -184,15 +184,13 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
     adapter = DcamCameraAdapter(_config(), driver=driver)
     try:
         assert isinstance(adapter, CameraAdapter)
-        point = adapter.capture_working_point()
+        point = adapter.working_point()
         assert point.frame_shape_yx == (8, 8)
         assert point.sensor_shape_yx == (12, 16)
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (8, 8)
-        point = adapter.configure_measurement(
-            exposure_seconds=0.015,
-            roi_xywh=(5, 5, 7, 7),
-        )
+        adapter.set_roi((5, 5, 7, 7))
+        point = adapter.set_exposure_seconds(0.015)
         assert point.exposure_seconds == 0.015
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (4, 4)
@@ -203,7 +201,8 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
             timeout=1.0,
         )
         with pytest.raises(RuntimeError, match="while armed"):
-            adapter.configure_measurement(exposure_seconds=0.02, roi_xywh=None)
+            adapter.set_roi(None)
+            adapter.set_exposure_seconds(0.02)
         adapter.finish_record_capture()
     finally:
         adapter.close()

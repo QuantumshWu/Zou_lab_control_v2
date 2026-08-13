@@ -400,31 +400,40 @@ class PylonCameraAdapter:
     def timeout(self) -> float:
         return float(self.config.timeout_seconds)
 
-    def configure_measurement(
-        self,
-        *,
-        exposure_seconds: float,
-        roi_xywh: tuple[int, int, int, int] | None,
-    ) -> CameraWorkingPoint:
-        exposure = float(exposure_seconds)
+    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
+        """Integrate for this long on every trigger, leaving the geometry."""
+
+        exposure = float(seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
-        roi = _roi_request(roi_xywh)
+        return self._reconfigure(replace(self.config, exposure_seconds=exposure))
+
+    def set_roi(
+        self, roi_xywh: tuple[int, int, int, int] | None
+    ) -> CameraWorkingPoint:
+        """Read this part of the sensor, leaving the exposure.
+
+        ``None`` is the whole sensor, which is what an operator means by no
+        ROI at all.
+        """
+
+        return self._reconfigure(
+            replace(self.config, roi_xywh=_roi_request(roi_xywh))
+        )
+
+    def _reconfigure(self, candidate) -> CameraWorkingPoint:
+        """Apply one changed field and keep the config at what the sensor did."""
+
         if self._armed:
             raise RuntimeError("pylon settings cannot change while armed")
         self.open()
-        candidate = replace(
-            self.config,
-            exposure_seconds=exposure,
-            roi_xywh=roi,
-        )
         self.config = candidate
-        self._roi = roi
+        self._roi = candidate.roi_xywh
         self._apply_exposure()
         self._apply_roi()
-        point = self.capture_working_point()
+        point = self.working_point()
         actual_roi = None
-        if roi is not None:
+        if candidate.roi_xywh is not None:
             actual_roi = (
                 point.roi_origin_yx[1],
                 point.roi_origin_yx[0],
@@ -438,7 +447,7 @@ class PylonCameraAdapter:
         )
         return point
 
-    def capture_working_point(self) -> CameraWorkingPoint:
+    def working_point(self) -> CameraWorkingPoint:
         """Read the sensor's state back, rather than repeating what we asked for."""
 
         self.open()

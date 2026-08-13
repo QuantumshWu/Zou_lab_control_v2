@@ -77,10 +77,8 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
         VirtualCameraConfig(frame_shape_yx=(8, 10)),
         frame_source=source,
     )
-    point = camera.configure_measurement(
-        exposure_seconds=0.007,
-        roi_xywh=(3, 2, 4, 3),
-    )
+    camera.set_roi((3, 2, 4, 3))
+    point = camera.set_exposure_seconds(0.007)
     assert point.exposure_seconds == pytest.approx(0.007)
     assert point.sensor_shape_yx == (8, 10)
     assert point.roi_origin_yx == (2, 3)
@@ -89,7 +87,8 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
 
     camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
     with pytest.raises(RuntimeError, match="while armed"):
-        camera.configure_measurement(exposure_seconds=0.01, roi_xywh=None)
+        camera.set_roi(None)
+        camera.set_exposure_seconds(0.01)
     camera.trigger()
     record = camera.read_frame_records(1, timeout=1.0, exact=True)[0]
     np.testing.assert_array_equal(record.image, full[2:5, 3:7])
@@ -107,7 +106,8 @@ def test_external_gate_can_only_shorten_the_camera_working_point() -> None:
         ),
     )
     world.register_camera(camera)
-    camera.configure_measurement(exposure_seconds=0.013, roi_xywh=(4, 5, 8, 6))
+    camera.set_roi((4, 5, 8, 6))
+    camera.set_exposure_seconds(0.013)
     rendered: list[tuple[float, np.ndarray]] = []
     render = world.render_frame
 

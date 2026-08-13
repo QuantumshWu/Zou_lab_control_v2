@@ -194,8 +194,9 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         def no_device_call(*_args, **_kwargs):
             raise AssertionError("layout/panel save touched the current camera")
 
-        monkeypatch.setattr(session.camera, "configure_measurement", no_device_call)
-        monkeypatch.setattr(session.camera, "capture_working_point", no_device_call)
+        monkeypatch.setattr(session.camera, "set_exposure_seconds", no_device_call)
+        monkeypatch.setattr(session.camera, "set_roi", no_device_call)
+        monkeypatch.setattr(session.camera, "working_point", no_device_call)
         view.open_answer = str(layout_path)
         view.load_layout_requested.emit()
         assert set(presenter.logic) == {camera_id, occupancy_id}
