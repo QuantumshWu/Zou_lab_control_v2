@@ -296,12 +296,19 @@ class SiteMap:
         lattice, and nobody scanned over sites.  So this is an ``AxisSpec``,
         not a point column.
 
-        The coordinates are the ordinals 1..n and the site ids are their
-        LABELS.  Every projection in zlc_plot plots a coordinate as a number,
-        so a text coordinate is refused at build time -- which is exactly why
-        every site-axed signal used to raise ``DataViewError`` the moment
-        anyone tried to draw it, and why a parallel "site ordinal" axis had to
-        be invented to dodge the wall.
+        The coordinates are the ordinals 1..n.  Every projection in zlc_plot
+        plots a coordinate as a number, so a text coordinate is refused at
+        build time -- which is exactly why every site-axed signal used to
+        raise ``DataViewError`` the moment anyone tried to draw it, and why a
+        parallel "site ordinal" axis had to be invented to dodge the wall.
+
+        The site ids are NOT the labels of this axis.  An id is how a record
+        names a site to another record; a label is what a person reads on a
+        picture.  Handing the id over as the label printed "Site=site_0001"
+        across every facet title -- the same fact as the coordinate beside it,
+        spelled in the form nobody can read and in the width nothing has room
+        for.  The ids stay where identity belongs: in the site map, and in
+        what it saves.
         """
 
         return AxisSpec(
@@ -310,7 +317,6 @@ class SiteMap:
             SITE,
             self.n_sites,
             coordinates=tuple(range(1, self.n_sites + 1)),
-            coordinate_labels=self.site_ids,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -337,10 +343,12 @@ class SiteMap:
 
 @dataclass(frozen=True)
 class ReadoutModel:
-    """Per-site integration features, thresholds, usability, and quality."""
+    """Per-site integration features, response levels, and classification."""
 
     site_ids: tuple[str, ...]
     thresholds: np.ndarray
+    dark_mean: np.ndarray
+    bright_mean: np.ndarray
     usable_sites: np.ndarray
     quality: np.ndarray
     kind: ReadoutModelKind = ReadoutModelKind.BOX
@@ -358,8 +366,22 @@ class ReadoutModel:
         if thresholds.ndim == 0:
             thresholds = np.full(len(site_ids), float(thresholds), dtype="<f8")
         thresholds = _immutable_array(thresholds.reshape(-1), "<f8", (len(site_ids),))
+        dark_mean = _immutable_array(self.dark_mean, "<f8", (len(site_ids),))
+        bright_mean = _immutable_array(self.bright_mean, "<f8", (len(site_ids),))
         usable = _immutable_array(self.usable_sites, "?", (len(site_ids),))
         quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
+        with np.errstate(invalid="ignore", over="ignore"):
+            response = bright_mean - dark_mean
+        if np.any(
+            usable
+            & (
+                ~np.isfinite(dark_mean)
+                | ~np.isfinite(bright_mean)
+                | ~np.isfinite(response)
+                | (response <= 0.0)
+            )
+        ):
+            raise ValueError("usable sites require finite bright_mean > dark_mean")
         if not isinstance(self.kind, ReadoutModelKind):
             raise TypeError("kind must be ReadoutModelKind")
         half_width = int(self.integration_half_width)
@@ -402,6 +424,8 @@ class ReadoutModel:
             reducer = None
         object.__setattr__(self, "site_ids", site_ids)
         object.__setattr__(self, "thresholds", thresholds)
+        object.__setattr__(self, "dark_mean", dark_mean)
+        object.__setattr__(self, "bright_mean", bright_mean)
         object.__setattr__(self, "usable_sites", usable)
         object.__setattr__(self, "quality", quality)
         object.__setattr__(self, "integration_half_width", half_width)
@@ -417,6 +441,8 @@ class ReadoutModel:
             "kind": self.kind.value,
             "site_ids": list(self.site_ids),
             "thresholds": _nullable_floats(self.thresholds),
+            "dark_mean": _nullable_floats(self.dark_mean),
+            "bright_mean": _nullable_floats(self.bright_mean),
             "usable_sites": self.usable_sites.tolist(),
             "quality": _nullable_floats(self.quality),
             "threshold_method": self.threshold_method,
@@ -436,6 +462,8 @@ class ReadoutModel:
         return cls(
             tuple(payload["site_ids"]),
             _floats_from_json(payload["thresholds"]),
+            _floats_from_json(payload["dark_mean"]),
+            _floats_from_json(payload["bright_mean"]),
             np.asarray(payload["usable_sites"]),
             _floats_from_json(payload["quality"]),
             kind=ReadoutModelKind(payload["kind"]),
@@ -937,6 +965,8 @@ def _train_readout_model(
     predictions = np.zeros_like(short_signals, dtype=bool)
     site_model_fidelity = np.full(len(centers), np.nan, dtype=float)
     gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
+    dark_means = np.full(len(centers), np.nan, dtype=float)
+    bright_means = np.full(len(centers), np.nan, dtype=float)
     n_train_dark = np.zeros(len(centers), dtype=int)
     n_train_bright = np.zeros(len(centers), dtype=int)
     for site in range(len(centers)):
@@ -948,6 +978,7 @@ def _train_readout_model(
         n_train_dark[site], n_train_bright[site] = dark.size, bright_values.size
         if dark.size >= 2 and bright_values.size >= 2:
             dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
+            dark_means[site], bright_means[site] = dark_mean, bright_mean
             dark_sigma = max(float(np.std(dark, ddof=1)), 1e-12)
             bright_sigma = max(float(np.std(bright_values, ddof=1)), 1e-12)
             gaussian_threshold, bright_above = optimal_gaussian_threshold(dark_mean, dark_sigma, bright_mean, bright_sigma)
@@ -999,6 +1030,8 @@ def _train_readout_model(
     readout_model = ReadoutModel(
         site_map.site_ids,
         thresholds,
+        dark_means,
+        bright_means,
         usable_sites,
         site_fidelity,
         kind=kind,

@@ -351,7 +351,10 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         assert site_axis is result.calibration.site_map.site_axis
         assert site_axis.role is SITE
         assert site_axis.coordinates == tuple(range(1, 36))
-        assert site_axis.coordinate_labels == result.calibration.site_map.site_ids
+        assert site_axis.coordinate_labels is None
+        assert tuple(site_axis.coordinates) == tuple(
+            range(1, len(result.calibration.site_map.site_ids) + 1)
+        )
         assert counts_artifact.block.values.shape == (30, 1, 35)
         assert rate_artifact.block.schema.cell_schema.is_scalar
         assert rate_artifact.block.schema.point_table.columns == (parent_column,)

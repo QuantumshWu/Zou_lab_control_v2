@@ -110,7 +110,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             [True],
             [1.0],
         ),
-        (ReadoutModel(site_ids, [0.0], [True], [1.0]),),
+        (ReadoutModel(site_ids, [0.0], [-1.0], [1.0], [True], [1.0]),),
         ReadoutModelKind.BOX,
         frame_contract,
     )
@@ -211,7 +211,10 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             assert site_axis == calibration.site_map.site_axis, name
             assert site_axis.role is SITE
             assert site_axis.coordinates == (1,)
-            assert site_axis.coordinate_labels == site_ids
+            # The ids identify sites to other records; the axis is read by
+            # a person, and reads 1..n.
+            assert site_axis.coordinate_labels is None
+            assert tuple(site_axis.coordinates) == tuple(range(1, len(site_ids) + 1))
             assert value.values.shape == (1, windows, 1), name
         assert publication.value("@logic/occupancy/rate").schema.cell_schema.is_scalar
         assert publication.value("@logic/occupancy/rate").values.shape == (
