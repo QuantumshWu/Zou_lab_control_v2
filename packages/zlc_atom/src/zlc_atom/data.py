@@ -171,12 +171,13 @@ def snapshot_from_array(
     # An explicit point column joins the key by VALUE -- a live camera
     # monitor freezes at 10 Hz with the same frame column every time, and
     # rebuilding (and re-fingerprinting) the schema per freeze is the cost
-    # this cache exists to avoid.  Explicit axis specs stay uncached.
+    # this cache exists to avoid.  Explicit axis specs join it the same way,
+    # and for the same reason: a camera says which sensor pixels its frames
+    # cover, which is one fact per working point and not one per frame, and
+    # left out of the key it was a fresh tuple of coordinates to validate and
+    # SHA-256 into the fingerprint on every publication.
     cache_key: tuple | None = None
-    if (
-        not normalized_axis_specs
-        and (value_unit is None or isinstance(value_unit, str))
-    ):
+    if value_unit is None or isinstance(value_unit, str):
         column_key: tuple = ()
         if normalized_point_columns:
             column = normalized_point_columns[point_role]
@@ -190,6 +191,21 @@ def snapshot_from_array(
                 column.coordinate_frame,
                 column.coordinate_labels,
             )
+        axis_key = tuple(
+            (
+                role.value,
+                str(axis.axis_id.value),
+                axis.name,
+                axis.size,
+                axis.coordinates,
+                axis.unit,
+                None if axis.coordinate_frame is None else str(axis.coordinate_frame.value),
+                axis.coordinate_labels,
+            )
+            for role, axis in sorted(
+                normalized_axis_specs.items(), key=lambda item: item[0].value
+            )
+        )
         cache_key = (
             producer,
             signal,
@@ -198,6 +214,7 @@ def snapshot_from_array(
             trailing_shape,
             array.dtype.str,
             value_unit,
+            axis_key,
             column_key,
         )
     schema: DatasetSchema | None = None

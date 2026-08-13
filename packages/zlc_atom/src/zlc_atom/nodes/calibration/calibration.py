@@ -745,22 +745,38 @@ def detect_sites(
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     hits = np.zeros(stack.shape[1:], dtype=np.int64)
     lit_response = np.zeros(stack.shape[1:], dtype=float)
-    for frame in stack:
+    # Frames are filtered many at a time, in blocks sized by memory rather than
+    # by frame count: one SciPy call over a block costs a fraction of one call
+    # per frame, and filtering makes two more copies of whatever it is given,
+    # which for a run of 2048-square frames must not be the whole run.
+    per_frame_bytes = max(1, int(np.prod(stack.shape[1:]))) * 8
+    block = max(1, min(int(stack.shape[0]), int(64_000_000 // per_frame_bytes)))
+    for start in range(0, int(stack.shape[0]), block):
+        frames = np.asarray(stack[start : start + block], dtype=float)
+        response = ndimage.gaussian_filter(
+            frames, sigma=(0.0, spot_sigma, spot_sigma)
+        ) - ndimage.gaussian_filter(
+            frames, sigma=(0.0, background_sigma, background_sigma)
+        )
         # Each frame is judged against its own noise: an exposure that came out
         # dim, or a run whose background drifted, changes what "bright" means
         # in that frame and in no other.
-        smooth = ndimage.gaussian_filter(frame, sigma=spot_sigma)
-        response = smooth - ndimage.gaussian_filter(frame, sigma=background_sigma)
-        baseline = float(np.median(response))
-        lower = response[response <= baseline]
-        noise = 1.4826 * float(np.median(np.abs(lower - baseline)))
-        noise = max(
+        # The noise of a frame is read from its lower half, where sites are
+        # not: the median distance below the median.  That is the quarter
+        # quantile of the whole frame, which is one call per block rather than
+        # a masked median per frame.
+        baseline, lower_quartile = np.quantile(
+            response, (0.5, 0.25), axis=(1, 2), keepdims=True
+        )
+        noise = 1.4826 * (baseline - lower_quartile)
+        noise = np.maximum(
             noise,
-            np.finfo(float).eps * max(1.0, float(np.max(np.abs(response)))),
+            np.finfo(float).eps
+            * np.maximum(1.0, np.max(np.abs(response), axis=(1, 2), keepdims=True)),
         )
         lit = response >= baseline + detection_sigma * noise
-        hits += lit
-        lit_response += np.where(lit, response - baseline, 0.0)
+        hits += np.count_nonzero(lit, axis=0)
+        lit_response += np.sum(np.where(lit, response - baseline, 0.0), axis=0)
 
     shots = int(stack.shape[0])
     pixels = int(hits.size)

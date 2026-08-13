@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+
 import numpy as np
 from zlc_data import (
     AxisId,
+    AxisRoleId,
     AxisSpec,
     CoordinateFrameId,
     PointColumn,
@@ -59,6 +62,38 @@ def _frame_point_column(producer: str, frames: int) -> PointColumn:
     )
 
 
+@lru_cache(maxsize=32)
+def _sensor_pixel_axis(
+    producer: str,
+    index: int,
+    role: AxisRoleId,
+    origin: int,
+    step: int,
+    size: int,
+) -> AxisSpec:
+    """One spatial axis of a frame, in the sensor's own pixels.
+
+    Which pixels a frame covers is a fact about the working point, not about
+    the frame -- a run publishes thousands of frames from one crop -- so the
+    coordinates are built once per crop rather than per publication.
+
+    The identity is the dataset's own, from the one function that generates
+    it: saved boards, semantic choices and every downstream reference name a
+    data axis by its id, so a producer adding coordinates must hand back the
+    same name.
+    """
+
+    return AxisSpec(
+        cell_axis_id(producer, CAMERA_FRAMES_OUTPUT.name, index, role),
+        role.value,
+        role,
+        size,
+        coordinates=tuple(origin + step * offset for offset in range(size)),
+        unit="pixel",
+        coordinate_frame=CoordinateFrameId("sensor_pixel_xy"),
+    )
+
+
 def _pixel_axes(
     point: "CameraWorkingPoint | None",
     shape_yx: tuple[int, int],
@@ -74,6 +109,9 @@ def _pixel_axes(
     was an offset into that particular crop -- the same region meant somewhere
     else the moment the ROI moved, which is exactly what a region does when it
     is used to set the ROI.
+
+    The frame axis is a point column, so the cell is (y, x): those are the two
+    cell axes the dataset will generate, in that order.
     """
 
     if point is None:
@@ -81,33 +119,12 @@ def _pixel_axes(
     origin_y, origin_x = (int(value) for value in point.roi_origin_yx)
     step_y, step_x = (int(value) for value in getattr(point, "binning_yx", (1, 1)))
     height, width = (int(value) for value in shape_yx)
-    frame = CoordinateFrameId("sensor_pixel_xy")
-    # The identifiers the dataset would have generated for these two axes: an
-    # axis id is identity -- saved boards, semantic choices and every
-    # downstream reference name a data axis by it -- so only the coordinates
-    # are added here, never the name.
-    # The frame axis is a point column, so the cell is (y, x): those two
-    # indices, and the identity and name that go with them, are the dataset's
-    # own -- only the coordinates are the camera's to add.
-    signal = CAMERA_FRAMES_OUTPUT.name
     return {
-        SPATIAL_Y: AxisSpec(
-            cell_axis_id(producer, signal, 0, SPATIAL_Y),
-            SPATIAL_Y.value,
-            SPATIAL_Y,
-            height,
-            coordinates=tuple(origin_y + max(1, step_y) * index for index in range(height)),
-            unit="pixel",
-            coordinate_frame=frame,
+        SPATIAL_Y: _sensor_pixel_axis(
+            producer, 0, SPATIAL_Y, origin_y, max(1, step_y), height
         ),
-        SPATIAL_X: AxisSpec(
-            cell_axis_id(producer, signal, 1, SPATIAL_X),
-            SPATIAL_X.value,
-            SPATIAL_X,
-            width,
-            coordinates=tuple(origin_x + max(1, step_x) * index for index in range(width)),
-            unit="pixel",
-            coordinate_frame=frame,
+        SPATIAL_X: _sensor_pixel_axis(
+            producer, 1, SPATIAL_X, origin_x, max(1, step_x), width
         ),
     }
 
