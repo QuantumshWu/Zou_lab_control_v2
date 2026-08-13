@@ -16,6 +16,14 @@ from enum import IntEnum
 import numpy as np
 
 
+#: What the DCAM runtime reported when THIS process initialized it.  A
+#: second dcamapi_init answers ALREADY_INITIALIZED and leaves the struct
+#: untouched, so a scan that ran after any camera had been opened read a
+#: zero count out of memory nobody wrote -- and offered no cameras on a
+#: bench that has one, without an error to say so.  The count belongs to
+#: the runtime, so it is remembered where the runtime is.
+_PROCESS_DEVICE_COUNT: int | None = None
+
 _DCAMERR_TIMEOUT = -2147483386
 _DCAMERR_ALREADY_INITIALIZED = -520093695
 _DCAMCAP_START_SEQUENCE = -1
@@ -285,13 +293,20 @@ class DcamSdkDriver:
     def initialize(self) -> bool:
         """Initialize the process runtime; return whether this call owns it."""
 
+        global _PROCESS_DEVICE_COUNT
         init = _DcamApiInit()
         code = int(self._dll.dcamapi_init(ctypes.byref(init)))
         if code == _DCAMERR_ALREADY_INITIALIZED:
-            self._device_count = int(init.device_count)
+            if _PROCESS_DEVICE_COUNT is None:
+                raise RuntimeError(
+                    "the DCAM runtime is already initialized by something "
+                    "outside this driver, so the camera count is unknown"
+                )
+            self._device_count = _PROCESS_DEVICE_COUNT
             return False
         _checked("dcamapi_init", code)
         self._device_count = int(init.device_count)
+        _PROCESS_DEVICE_COUNT = self._device_count
         return True
 
     @property
@@ -301,8 +316,10 @@ class DcamSdkDriver:
         return self._device_count
 
     def uninitialize(self) -> None:
+        global _PROCESS_DEVICE_COUNT
         _checked("dcamapi_uninit", self._dll.dcamapi_uninit())
         self._device_count = None
+        _PROCESS_DEVICE_COUNT = None
 
     def open_device(self, index: int) -> "DcamSdkDevice":
         opened = _DcamDeviceOpen(index)
