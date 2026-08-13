@@ -1221,6 +1221,8 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
             ReadoutModel(
                 site_ids,
                 np.asarray((0.0,)),
+                np.zeros(1),
+                np.ones(1),
                 np.asarray((True,)),
                 np.asarray((1.0,)),
             ),
@@ -1595,30 +1597,21 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     # panel that has none written down -- and a saved board has none either.
     assert panel.state.selector == {}
 
+    # Zoom and pan are how an operator looks, not what they ask for: with no
+    # region drawn, moving the view leaves the producer exactly where it was.
     before_zoom = dict(presenter.logic[second_id].draft.values)
     _zoom_in(second_editor_host)
-    deadline = time.monotonic() + 2.0
-    while (
-        presenter.logic[second_id].draft.values == before_zoom
-        and time.monotonic() < deadline
-    ):
+    for _ in range(20):
         presenter.beat()
         time.sleep(0.005)
     assert panel.editor_selections.last_error is None
-    zoomed_in = dict(presenter.logic[second_id].draft.values)
-    assert zoomed_in != before_zoom
+    assert presenter.logic[second_id].draft.values == before_zoom
     _zoom_out(second_editor_host)
-    deadline = time.monotonic() + 2.0
-    while (
-        presenter.logic[second_id].draft.values == zoomed_in
-        and time.monotonic() < deadline
-    ):
+    for _ in range(20):
         presenter.beat()
         time.sleep(0.005)
-    zoomed_out = presenter.logic[second_id].draft.values
-    assert zoomed_out != zoomed_in
-    assert zoomed_out["roi_width"] >= zoomed_in["roi_width"]
-    assert zoomed_out["roi_height"] >= zoomed_in["roi_height"]
+    assert presenter.logic[second_id].draft.values == before_zoom
+    # The view itself is still shared by both surfaces.
     editor_viewport = second_editor_host.describe_display().result().value.viewport
     live_viewport = panel.host.describe_display().result().value.viewport
     assert editor_viewport is not None and live_viewport == editor_viewport
@@ -2311,6 +2304,8 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
             ReadoutModel(
                 site_ids,
                 np.asarray((-1.0e20, 0.0)),
+                np.zeros(2),
+                np.ones(2),
                 np.asarray((True, True)),
                 np.asarray((1.0, 1.0)),
             ),

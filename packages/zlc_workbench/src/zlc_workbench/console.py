@@ -159,8 +159,15 @@ class PanelBinding:
     #: here: a zoom is measured in display coordinates of one exact picture,
     #: and pasting yesterday's numbers onto today's data is how a panel opens
     #: showing a range nobody chose.
-    #: Canonical producer range plus display viewport shared by both views.
+    #: The display viewport shared by both views, and the data it was
+    #: measured on.  A range means nothing once the axes underneath it change,
+    #: so it is kept beside the publication it was taken from and dropped when
+    #: that no longer describes what is on screen.
     interaction_viewport: Any = None
+    #: What the producer's fields held before a drawn region first overwrote
+    #: them.  Taking a region away has to put them back, and nothing else in
+    #: the console remembers a value that a gesture replaced.
+    producer_restore: Any = None
     #: What each host was last seen showing.  Whoever CHANGED is the operator;
     #: a host that merely disagrees with the panel is the one still catching
     #: up with the last mirror, and reading that as a second gesture makes the
@@ -866,8 +873,15 @@ class ConsolePresenter:
         if selection is not None:
             _also(_apply_panel_selection(host, selection))
         if binding.interaction_viewport is not None:
-            _selection, viewport = binding.interaction_viewport
-            _also(_apply_panel_viewport(host, viewport))
+            measured_on, viewport = binding.interaction_viewport
+            if measured_on == self._panel_view_identity(binding):
+                _also(_apply_panel_viewport(host, viewport))
+            else:
+                # The data underneath moved: a range measured on the previous
+                # one would paste its limits onto axes that no longer have
+                # them, which is how a restarted producer came back framed by
+                # the picture before it.
+                binding.interaction_viewport = None
         threshold = panel_threshold_from_document(panel_state.classifier_threshold)
         if threshold is not None:
             _also(_apply_panel_threshold(host, threshold))
@@ -3176,20 +3190,20 @@ class ConsolePresenter:
                 self._present_when_done(binding, operation)
 
         if viewport is not _UNCHANGED:
+            # Zoom and pan are how an operator looks, not what they ask for.
+            # A viewport used to be routed to the producer whenever no region
+            # was drawn, so moving the view re-pointed the hardware; and a
+            # region taken away then routed the viewport in its place instead
+            # of putting back what the region had overwritten.
             if (
                 binding.interaction_viewport is not None
                 and binding.interaction_viewport[1] == viewport
             ):
                 return _UNCHANGED
-            binding.interaction_viewport = (selection, viewport)
+            binding.interaction_viewport = (self._panel_view_identity(binding), viewport)
             if other_host is not None:
                 mirror(_apply_panel_viewport(other_host, viewport))
-            area = panel_selection_from_document(binding.state.selector)
-            return (
-                _UNCHANGED
-                if getattr(area, "selector_kind", "") == "area"
-                else selection
-            )
+            return _UNCHANGED
 
         if selection is None:
             previous = panel_selection_from_document(binding.state.selector)
@@ -3198,11 +3212,8 @@ class ConsolePresenter:
             self._remember_panel_view(binding, selector={})
             if other_host is not None:
                 mirror(_remove_panel_selection(other_host, previous))
-            return (
-                _UNCHANGED
-                if binding.interaction_viewport is None
-                else binding.interaction_viewport[0]
-            )
+            self._restore_producer_draft(binding)
+            return _UNCHANGED
 
         remembered = panel_selection_from_document(binding.state.selector)
         if remembered is not None and _same_panel_selection(remembered, selection):
@@ -3330,13 +3341,58 @@ class ConsolePresenter:
             actual = next(iter(snapshots.values()))
             if isinstance(actual, Mapping):
                 context.update(actual)
+        if str(getattr(selection, "selector_kind", "")) != "area":
+            # A region is an area of the data; that is the only gesture whose
+            # coordinates mean a producer's setting.  A threshold line, an
+            # x range or a crosshair say something about the reading, not
+            # about how to take the next one.
+            return
+        draft = dict(producer.draft.values)
         patch = producer.descriptor.selection_patch(
             selection,
-            draft=dict(producer.draft.values),
+            draft=draft,
             context=context,
         )
         if patch is not None:
+            panel = self.panels.get(str(panel_id))
+            if panel is not None and panel.producer_restore is None:
+                panel.producer_restore = (
+                    producer_node_id,
+                    {name: draft.get(name) for name in patch},
+                )
             self.update_logic_draft(producer_node_id, values=patch)
+
+    def _restore_producer_draft(self, binding: PanelBinding) -> None:
+        """Put back what a drawn region overwrote, when the region goes away."""
+
+        remembered = binding.producer_restore
+        binding.producer_restore = None
+        if remembered is None:
+            return
+        node_id, values = remembered
+        if node_id in self.logic:
+            self.update_logic_draft(node_id, values=dict(values))
+
+    def _panel_view_identity(self, binding: PanelBinding) -> object:
+        """What a remembered viewport was measured on.
+
+        The generation and the painted extent together: a range taken on one
+        run means nothing on the next, and a run that changes the camera's
+        geometry changes the axes under the same generation.
+        """
+
+        publication = binding.display_publication
+        value = (
+            None
+            if publication is None
+            else self._publication_value(publication, binding.state.signal)
+        )
+        snapshot = getattr(value, "snapshot", None)
+        block = getattr(snapshot, "block", None)
+        return (
+            None if snapshot is None else getattr(getattr(snapshot, "ref", None), "generation", None),
+            None if block is None else tuple(getattr(block, "values", ()).shape),
+        )
 
     def _report_panel_errors(self) -> None:
         """Say what a gesture could not do, once, where an operator looks.
