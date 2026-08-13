@@ -355,6 +355,21 @@ class _SelectionSubscription:
     selector_kind: SelectorKind | None
 
 
+def _keeps_history(spec: object) -> bool:
+    """Whether this drawing looks back over the session's past shots.
+
+    History is the session's accumulation for one signal, so what decides
+    whether it is kept is whether anything CONSUMES it -- a rolling trace
+    along its x, a distribution pooled into its bins.  Gating retention on
+    "is this a rolling plot" made the shots the property of one kind, and
+    switching a panel to a distribution of the same signal threw them away.
+    """
+
+    from .specs import HistogramPlot, RollingPlot, semantic_spec
+
+    return isinstance(semantic_spec(spec), (RollingPlot, HistogramPlot))
+
+
 class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     """One public plot surface with immutable input snapshots and public APIs.
 
@@ -473,7 +488,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._fit_warm_starts: dict[tuple[int, str, int | None], _WarmSeed] = {}
         self._fit_batch_revision = 0
         self._viewport: RectangleRange | None = None
-        self._rolling_history: tuple[RollingHistoryPoint, ...] = ()
+        self._history: tuple[RollingHistoryPoint, ...] = ()
         self._focused_facet_index: int | None = (
             0 if isinstance(spec, FacetGridPlot) else None
         )
@@ -492,8 +507,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         self._rebuild_projection()
         self._refresh_threshold_classifier()
-        if isinstance(self._spec, RollingPlot):
-            self._rolling_history = self._projection.rolling_history
+        if _keeps_history(self._spec):
+            self._history = self._projection.rolling_history
         self._presentation_epoch = 0
         # Feasibility probes are cached per candidate spec for the current
         # dataset generation; see _semantic_feasibility.
@@ -573,7 +588,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 selector_snapshot=self._selector_controller.snapshot(),
                 viewport=self._viewport,
                 focused_facet_index=self._focused_facet_index,
-                rolling_history=self._rolling_history,
+                rolling_history=self._history,
             )
 
     @property
@@ -1300,12 +1315,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._focused_facet_index,
                 self._facet_focus_index,
                 self._viewport,
-                self._rolling_history,
+                self._history,
                 self._layout_revision,
             )
             self._projection = projection
-            if isinstance(self._spec, RollingPlot):
-                self._rolling_history = projection.rolling_history
+            if _keeps_history(self._spec):
+                self._history = projection.rolling_history
             self._image_overlay = image_overlay
             self._accepted_fit = accepted_fit
             self._refresh_threshold_classifier()
@@ -1340,7 +1355,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._viewport,
-                    self._rolling_history,
+                    self._history,
                     self._layout_revision,
                 ) = previous
             try:
@@ -1389,7 +1404,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 )
                 self._facet_focus_index = presentation.previous_facet_focus_index
                 self._viewport = presentation.previous_viewport
-                self._rolling_history = presentation.previous_rolling_history
+                self._history = presentation.previous_rolling_history
                 self._layout_revision = presentation.previous_layout_revision
             if current_plan != presentation.previous_plan:
                 self._apply_layout_plan(
@@ -1973,17 +1988,24 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             initial_revision=old_state.revision + 1,
         )
         focused = 0 if isinstance(spec, FacetGridPlot) else None
-        # A rolling trace survives a spec replacement when the points still
-        # mean the same thing — same group and reduction.  Anything else
-        # changes what one history point IS, so the trace reseeds.
+        # History belongs to the SIGNAL this session is showing, so it
+        # survives a spec replacement -- switching a panel from a rolling
+        # trace to a distribution of the same shots must not throw the shots
+        # away.  What does not survive is a change to what one history point
+        # IS: a rolling trace whose group or reduction changed reseeds,
+        # because its stored samples were reduced the old way.
         retained_history: tuple[RollingHistoryPoint, ...] = ()
-        if (
-            isinstance(spec, RollingPlot)
-            and isinstance(self._spec, RollingPlot)
-            and spec.group == self._spec.group
-            and spec.reduction == self._spec.reduction
-        ):
-            retained_history = self._rolling_history
+        if _keeps_history(spec) and _keeps_history(self._spec):
+            same_sample = not (
+                isinstance(spec, RollingPlot)
+                and isinstance(self._spec, RollingPlot)
+                and (
+                    spec.group != self._spec.group
+                    or spec.reduction != self._spec.reduction
+                )
+            )
+            if same_sample:
+                retained_history = self._history
         projection = FitProjection(
             data=data,
             revision=self.data_revision,
@@ -2088,7 +2110,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._classifier_results,
                     self._classifier_overlays,
                     self._classifier_thresholds,
-                    self._rolling_history,
+                    self._history,
                     self._layout_revision,
                     self._size,
                 )
@@ -2112,8 +2134,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
                 self._accepted_fit = None
-                self._rolling_history = (
-                    projection.rolling_history if isinstance(spec, RollingPlot) else ()
+                self._history = (
+                    projection.rolling_history if _keeps_history(spec) else ()
                 )
                 self._layout_revision += 1
             try:
@@ -2149,7 +2171,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._classifier_results,
                         self._classifier_overlays,
                         self._classifier_thresholds,
-                        self._rolling_history,
+                        self._history,
                         self._layout_revision,
                         self._size,
                     ) = previous

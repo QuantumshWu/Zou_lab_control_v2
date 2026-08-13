@@ -79,18 +79,106 @@ class FitScope(str, Enum):
     ALL = "all"
 
 
+#: How many history points survive between revisions.  Retention is a memory
+#: bound, deliberately independent of the ``window`` display parameter: the
+#: window selects what is SHOWN, so enlarging it mid-run must immediately
+#: reveal history that was already measured.
+RETAINED_HISTORY_LIMIT = 100_000
+
+#: How many bytes of pooled values the session's history may hold.
+#:
+#: History is what a window looks back over, so it has to keep the VALUES a
+#: revision pooled, not just the scalar a rolling trace plots.  A scoped panel
+#: keeps a handful of numbers per shot; an unscoped image panel would keep a
+#: whole frame, and a hundred of those is gigabytes.  The oldest values are
+#: released first, which is what a window over the LAST n shots wants anyway,
+#: and every point keeps its scalar sample regardless -- those are tiny, and a
+#: rolling trace must not develop holes.
+HISTORY_VALUE_BUDGET_BYTES = 64 << 20
+
+
 @dataclass(frozen=True, slots=True)
 class RollingHistoryPoint:
-    """One successfully projected source revision in rolling history.
+    """One successfully projected source revision in the session's history.
 
     ``shot_index`` is the absolute shot number: the seeded history counts
     0..R-1 and every appended revision takes the next integer.  The point
     owns it because the window cache truncates the history, so position in
     the list cannot recover the absolute axis.
+
+    ``values`` is everything that shot pooled, already restricted by whatever
+    the panel is scoped to, or None once the memory budget has released it.
+    A distribution windowed over the last n shots is the concatenation of
+    these; the rolling trace uses ``sample`` and never needs them.
     """
 
     sample: RollingSample
     shot_index: int
+    values: np.ndarray | None = None
+
+
+def accumulate_history(
+    projection: Any,
+    view: Any,
+    *,
+    group: AxisRef | None,
+    aggregation: Any,
+) -> tuple[RollingHistoryPoint, ...]:
+    """This session's history of the signal, extended by the current revision.
+
+    ONE owner for what history is and when it grows, because both kinds that
+    look back -- a rolling trace and a windowed distribution -- must look back
+    over the same shots.  History is not repeats: repeats are what one
+    publication carries, and a publication that carries R of them contributes
+    R shots to the history exactly once, when it seeds it.
+    """
+
+    history = list(projection._context.rolling_history)
+    if not history:
+        # The first revision seeds the full shot history from the repeat
+        # axis: a static snapshot is a complete record, and a live session
+        # starts with its seed data instead of a single point.
+        pooled = view.pooled_values_by_repeat()
+        history.extend(
+            RollingHistoryPoint(sample, shot_index, values)
+            for shot_index, (sample, values) in enumerate(
+                zip(
+                    view.rolling_history_samples(
+                        group=group,
+                        aggregation=aggregation,
+                    ),
+                    pooled,
+                    strict=True,
+                )
+            )
+        )
+    elif history[-1].sample.revision != projection._revision:
+        history.append(
+            RollingHistoryPoint(
+                view.rolling_sample(group=group, aggregation=aggregation),
+                history[-1].shot_index + 1,
+                view.pooled_values(),
+            )
+        )
+    return _within_value_budget(history[-RETAINED_HISTORY_LIMIT:])
+
+
+def _within_value_budget(
+    history: list[RollingHistoryPoint],
+) -> tuple[RollingHistoryPoint, ...]:
+    """Release the OLDEST pooled values until the retained bytes fit."""
+
+    budget = HISTORY_VALUE_BUDGET_BYTES
+    kept: list[RollingHistoryPoint] = []
+    for point in reversed(history):
+        values = point.values
+        if values is None:
+            kept.append(point)
+            continue
+        budget -= int(values.nbytes)
+        kept.append(point if budget >= 0 else replace(point, values=None))
+    kept.reverse()
+    return tuple(kept)
 
 
 def _broadcast_all_true(mask: np.ndarray) -> bool:
@@ -625,15 +713,26 @@ class FitProjection:
         self,
         view: Any,
         state: DisplayState,
+        *,
+        pooled: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return stable display-unit edges for one histogram projection."""
+        """Return stable display-unit edges for one histogram projection.
+
+        ``pooled`` is the window's pool when there is one: the domain has to
+        cover what is actually being binned, and this revision alone is a
+        different set of numbers from the last hundred shots.
+        """
 
         count = int(state["bin_count"])
         samples = view.samples
-        canonical = np.asarray(samples.value.canonical).reshape(-1)
-        valid = np.asarray(samples.valid_mask, dtype=bool).reshape(-1)
-        finite = valid & np.isfinite(canonical)
-        values = np.asarray(canonical[finite], dtype=float)
+        if pooled is None:
+            canonical = np.asarray(samples.value.canonical).reshape(-1)
+            valid = np.asarray(samples.valid_mask, dtype=bool).reshape(-1)
+            finite = valid & np.isfinite(canonical)
+            values = np.asarray(canonical[finite], dtype=float)
+        else:
+            canonical = np.asarray(pooled, dtype=float).reshape(-1)
+            values = canonical[np.isfinite(canonical)]
         previous = self._histogram_projection
         mode = str(state["relim_mode"])
         retain_domain = (

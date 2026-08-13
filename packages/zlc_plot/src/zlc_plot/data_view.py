@@ -9,7 +9,7 @@ tensor dimension here.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from numbers import Integral
 from typing import Any, TypeAlias
@@ -916,6 +916,66 @@ class DataView:
         """Distribution of every acquired value: the whole box is the pool."""
 
         return self._histogram_from_positions(bins, self._all_positions())
+
+    def pooled_values(self) -> NDArray[Any]:
+        """Every value this revision would pool, in canonical units.
+
+        What a histogram of this revision alone is built from -- and therefore
+        what a window over several revisions accumulates.  Canonical, because
+        two revisions are only comparable in the unit the data is stored in;
+        the display conversion happens once, where the edges are made.
+        """
+
+        positions = self._all_positions()
+        flat_valid = self._samples.valid_mask.reshape(-1)
+        flat_values = self._samples.value.canonical.reshape(-1)
+        return flat_values[positions[flat_valid[positions]]]
+
+    def pooled_values_by_repeat(self) -> tuple[NDArray[Any], ...]:
+        """The values each repeat of this revision would pool, oldest first.
+
+        A publication that carries R repeats carries R shots, and history
+        counts shots -- so a snapshot seeding a window contributes one entry
+        per repeat, exactly as :meth:`rolling_history_samples` reduces one per
+        repeat.  A snapshot without repeats degenerates to the single pool.
+        """
+
+        repeats = schema_repeat_count(self._schema)
+        if repeats <= 1:
+            return (self.pooled_values(),)
+        positions = self._all_positions()
+        flat_valid = self._samples.valid_mask.reshape(-1)
+        flat_values = self._samples.value.canonical.reshape(-1)
+        block = flat_values.size // repeats
+        repeat_of_position = positions // block
+        usable = flat_valid[positions]
+        return tuple(
+            flat_values[positions[usable & (repeat_of_position == repeat)]]
+            for repeat in range(repeats)
+        )
+
+    def histogram_of(
+        self,
+        values: NDArray[Any],
+        *,
+        bins: int | Sequence[float],
+        source_revisions: Sequence[int] = (),
+    ) -> HistogramData:
+        """Distribution of values pooled elsewhere -- a window over revisions.
+
+        The pool is the caller's; the binning, the units and the labels are
+        this revision's, so a windowed distribution is the same picture as an
+        unwindowed one with more in it.  ``source_revisions`` records which
+        revisions actually contributed, so a window that reached fewer shots
+        than it asked for says so rather than looking full.
+        """
+
+        data = self._histogram_from_values(bins, np.asarray(values))
+        if not len(source_revisions):
+            return data
+        return replace(
+            data, source_revisions=tuple(int(item) for item in source_revisions)
+        )
 
     def validate_rolling(self, group: AxisRef | None) -> None:
         """Check a rolling projection without computing it (see validate_curve)."""

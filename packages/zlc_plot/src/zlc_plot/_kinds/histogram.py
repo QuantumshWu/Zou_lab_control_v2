@@ -15,8 +15,46 @@ def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **po
 
 
 def build_payload(projection: Any, view: Any, state: Any) -> None:
-    projection._payload = view.histogram(
-        bins=projection._histogram_bins(view, state),
+    window = int(state["window"])
+    if window <= 1:
+        # One shot: the distribution of what was just measured.  No history is
+        # consulted, and none is kept for it.
+        projection._payload = view.histogram(
+            bins=projection._histogram_bins(view, state),
+        )
+        return
+
+    # A window pools the last n SHOTS -- the session's history of this signal,
+    # not the repeats one publication happens to carry.  Accumulation belongs
+    # to the projection layer, which every kind that looks back shares; the
+    # values it stores are already restricted to whatever the panel is scoped
+    # to, so pooling them needs no second restriction.
+    import numpy as np
+
+    from .._fit_projection import accumulate_history
+    from ..specs import Reduction
+
+    history = accumulate_history(
+        projection, view, group=None, aggregation=Reduction.MEAN
+    )
+    projection._rolling_history_cache = history
+    visible = history[-window:]
+    pooled = [point.values for point in visible if point.values is not None]
+    values = (
+        np.concatenate(pooled) if pooled else np.asarray(view.pooled_values())
+    )
+    projection._payload = view.histogram_of(
+        values,
+        bins=projection._histogram_bins(view, state, pooled=values),
+        # Which shots really went in.  The memory budget releases the oldest
+        # pooled values first, so a window can reach further back than the
+        # values it still has -- and a distribution that quietly pooled fewer
+        # shots than it was asked for would look exactly like one that did.
+        source_revisions=tuple(
+            point.sample.revision
+            for point in visible
+            if point.values is not None
+        ),
     )
 
 

@@ -9,53 +9,27 @@ from zlc_data import DatasetSchema
 from ..specs import Reduction, RollingPlot
 from .base import KindHandler
 
-#: How many history points survive between revisions.  Retention is a memory
-#: bound, deliberately independent of the ``window`` display parameter: the
-#: window selects what is SHOWN, so enlarging it mid-run must immediately
-#: reveal history that was already measured.  At a few hundred bytes per
-#: point this cap holds tens of megabytes at worst.
-RETAINED_HISTORY_LIMIT = 100_000
-
-
 def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> None:
     renderer._update_rolling(axes, payload, state, key)
 
 
 def build_payload(projection: Any, view: Any, state: Any) -> None:
-    # The history record is a projection-layer type.  Importing it lazily keeps
-    # the closed kind registry independent of FitProjection's implementation.
-    from .._fit_projection import RollingHistoryPoint
+    # Accumulation is a projection-layer concern shared with every other kind
+    # that looks back.  Importing it lazily keeps the closed kind registry
+    # independent of FitProjection's implementation.
+    from .._fit_projection import accumulate_history
 
     spec = projection._spec
-    history = list(projection._context.rolling_history)
-    if not history:
-        # The first revision seeds the full shot history from the repeat
-        # axis: a static snapshot is a complete rolling record, and a live
-        # session starts with its seed data instead of a single point.
-        history.extend(
-            RollingHistoryPoint(sample, shot_index)
-            for shot_index, sample in enumerate(
-                view.rolling_history_samples(
-                    group=spec.group,
-                    aggregation=spec.reduction,
-                )
-            )
-        )
-    elif history[-1].sample.revision != projection._revision:
-        history.append(
-            RollingHistoryPoint(
-                view.rolling_sample(
-                    group=spec.group,
-                    aggregation=spec.reduction,
-                ),
-                history[-1].shot_index + 1,
-            )
-        )
     # The retained history is capped by memory policy only; the display
     # window is applied inside ``_rolling_payload``.  Persisting the display
     # slice here once made shrinking the window destructive and enlarging it
     # inert, because the truncated cache doubled as the permanent record.
-    projection._rolling_history_cache = tuple(history[-RETAINED_HISTORY_LIMIT:])
+    projection._rolling_history_cache = accumulate_history(
+        projection,
+        view,
+        group=spec.group,
+        aggregation=spec.reduction,
+    )
     projection._payload = projection._rolling_payload(
         projection._rolling_history_cache,
         window=int(state["window"]),

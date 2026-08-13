@@ -454,6 +454,29 @@ def _bin_count_parameter(
     )
 
 
+def _window_parameter(default: int) -> ParameterSpec[object]:
+    """How many shots of history this panel looks back over.
+
+    Only the two kinds that HAVE a history offer it, and each consumes it its
+    own fixed way: a rolling trace plots the window along x, a distribution
+    pools it.  Which way is not the operator's to choose -- a distribution
+    with a shot axis is not a distribution -- so the parameter carries only
+    the size.
+    """
+
+    return ParameterSpec(
+        "window",
+        int,
+        _ROLLING_WINDOW_EFFECTS,
+        default=default,
+        normalizer=_normalize_integer,
+        label="Window",
+        minimum=1,
+        maximum=1_000_000,
+        step=1,
+    )
+
+
 def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
     return (
         _bin_count_parameter(),
@@ -686,6 +709,11 @@ def _parameter_schema_for_context(
         entries.extend(_curve_parameters())
     if semantic_kind is PlotKind.HISTOGRAM:
         entries.extend(_histogram_parameters())
+        # One shot by default: a distribution of what was just measured.  A
+        # larger window pools that many of the most recent shots into the same
+        # picture, which is how a per-site histogram gets enough counts to
+        # separate two peaks.
+        entries.append(_window_parameter(1))
     if semantic_kind is PlotKind.IMAGE:
         # A FacetGrid whose cell is an image carries the FULL image surface:
         # the focused cell is the standalone Image kind, so its parameters
@@ -705,17 +733,7 @@ def _parameter_schema_for_context(
         entries.extend(
             (
                 _bin_count_parameter(_ROLLING_DISTRIBUTION_BIN_EFFECTS),
-                ParameterSpec(
-                    "window",
-                    int,
-                    _ROLLING_WINDOW_EFFECTS,
-                    default=100,
-                    normalizer=_normalize_integer,
-                    label="Window",
-                    minimum=1,
-                    maximum=1_000_000,
-                    step=1,
-                ),
+                _window_parameter(100),
                 ParameterSpec(
                     "side_distribution",
                     bool,
