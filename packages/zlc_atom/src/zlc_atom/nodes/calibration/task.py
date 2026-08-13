@@ -646,15 +646,9 @@ class CalibrationTask:
         not own, and broke the moment the pulse was somebody else's.
         """
 
-        metadata = pulse.metadata
-        if metadata.get("repeat_forever", False):
-            raise ValueError(
-                f"pulse {pulse.name!r} is repeat_forever and cannot finish calibration"
-            )
         return {
             "name": pulse.name,
             "path": None if pulse.path is None else str(pulse.path),
-            "camera_trigger_channel": metadata.get("camera_trigger_channel"),
             "api_slots": [
                 self.request.reference_before_slot,
                 self.request.readout_slot,
@@ -686,6 +680,7 @@ class CalibrationTask:
     ]:
         count = self.request.repeats * 3
         armed = False
+        firing = False
         try:
             self.camera.arm(
                 count,
@@ -719,19 +714,19 @@ class CalibrationTask:
             cycles: list[
                 tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord]
             ] = []
+            # One pulse for the whole run.  The board repeats the cycle on
+            # its own and the camera is armed for every frame of it, so the
+            # host has nothing to synchronise: it reads cycles until it has
+            # them all and then takes the pulse down.  Firing each shot and
+            # waiting for DONE made every repeat cost a round trip to the
+            # board and a handshake, serialised the sequence against the
+            # camera's own transfer, and could fail a run whose frames were
+            # perfectly fine because a report arrived late.
+            self.sequencer.fire(forever=True)
+            firing = True
             for _ in range(self.request.repeats):
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
-                self.sequencer.fire()
-                report = self.sequencer.wait_done(self.camera.timeout)
-                if report is None:
-                    raise TimeoutError(
-                        "a calibration shot was fired and never reported done within "
-                        f"{self.camera.timeout:g}s"
-                    )
-                fault = str(getattr(report, "fault", ""))
-                if fault:
-                    raise RuntimeError(f"calibration shot: {fault}")
                 records = tuple(
                     self.camera.read_frame_records(
                         3,
@@ -742,13 +737,19 @@ class CalibrationTask:
                 if len(records) != 3 or any(
                     not isinstance(record, CameraFrameRecord) for record in records
                 ):
+                    # The sensor's own answer to "how often can you be
+                    # triggered here" is the number that decides this, so it
+                    # is the number the operator is given.
+                    interval = actual.required_external_trigger_interval_seconds
                     raise RuntimeError(
                         f"the camera returned {len(records)} frame(s) of a "
-                        "three-frame cycle: it integrates for "
-                        f"{actual.exposure_seconds:g}s per trigger, and a "
-                        "trigger that arrives while it is still busy is "
-                        "ignored -- the pulse must space its camera windows "
-                        "by more than that"
+                        f"three-frame cycle: at this working point it "
+                        f"integrates {actual.exposure_seconds:g}s per trigger "
+                        f"and accepts one only every "
+                        f"{'unknown' if interval is None else format(interval, 'g') + 's'}"
+                        ", and a trigger arriving before that is ignored -- "
+                        "the pulse must space its camera windows by more than "
+                        "that, or the exposure must come down"
                     )
                 cycle = (records[0], records[1], records[2])
                 cycles.append(cycle)
@@ -761,6 +762,8 @@ class CalibrationTask:
                     )
             terminal = self.camera.finish_record_capture()
             armed = False
+            self.sequencer.safe()
+            firing = False
             if (
                 terminal.produced_count != count
                 or not terminal.source_stopped
@@ -775,6 +778,8 @@ class CalibrationTask:
         except BaseException:
             if armed:
                 self.camera.finish_record_capture()
+            if firing:
+                self._safe()
             raise
 
     def _frame_contract(

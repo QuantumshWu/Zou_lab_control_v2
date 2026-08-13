@@ -120,7 +120,7 @@ class _RecordingSequencer:
         self.events.append(("describe", None))
         return self.sequencer.describe()  # type: ignore[attr-defined]
 
-    def fire(self) -> None:
+    def fire(self, *, forever: bool = False) -> None:
         """Fire, and nothing else.
 
         This used to wait for the shot as well, which is what the code under
@@ -129,10 +129,10 @@ class _RecordingSequencer:
         test hides whether the real code performs it.
         """
 
-        self.events.append(("fire", None))
+        self.events.append(("fire", forever))
         if self.fail_on_fire:
             raise RuntimeError("recording sequencer fire failure")
-        self.sequencer.fire()  # type: ignore[attr-defined]
+        self.sequencer.fire(forever=forever)  # type: ignore[attr-defined]
 
     def wait_done(self, timeout: float | None = None) -> object:
         self.events.append(("wait_done", timeout))
@@ -417,6 +417,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert calibration_node.camera is camera
         loads_before_task = len([event for event, _ in sequencer.events if event == "load"])
         fires_before_task = len([event for event, _ in sequencer.events if event == "fire"])
+        waits_before_task = len(
+            [event for event, _ in sequencer.events if event == "wait_done"]
+        )
         camera_events_before_task = len(camera.events)
         calibration_host = NodeHost(calibration_node, plane)
         calibration_host.start()
@@ -473,7 +476,16 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         ] * 30
         assert [name for name, _ in task_camera_events].count("finish") == 1
         assert len([event for event, _ in sequencer.events if event == "load"]) - loads_before_task == 1
-        assert len([event for event, _ in sequencer.events if event == "fire"]) - fires_before_task == 30
+        # One pulse for the whole run: the board repeats the cycle itself and
+        # the camera reads all thirty from it.  Thirty fires with a DONE
+        # handshake each was a round trip per repeat, serialised against the
+        # camera's own transfer.
+        assert [
+            value for event, value in sequencer.events if event == "fire"
+        ][fires_before_task:] == [True]
+        assert len(
+            [event for event, _ in sequencer.events if event == "wait_done"]
+        ) == waits_before_task
 
         calibration_path = task_result.artifact_path
         calibration_output = descriptors["calibration"].artifact_outputs[0]
