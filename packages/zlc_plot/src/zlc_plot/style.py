@@ -508,13 +508,11 @@ class RenderPolicyConfig:
     selector_sample_alpha: float = 0.3
     colormap_low_fraction: float = 0.0
     colormap_high_fraction: float = 0.95
-    image_spatial_max_ticks: int = 4
     side_distribution_fill_alpha: float = 1.0
     rolling_distribution_min_bins: int = 3
     image_distribution_min_bins: int = 8
     distribution_max_bins: int = 50
     distribution_bin_divisor: int = 4
-    distribution_axis_max_ticks: int = 1
     distribution_guide_alpha: float = 0.3
     # 50 bins x 1000 samples keeps the rail's shape stable while the strided
     # gather stays ~4x cheaper than the former 200k sweep on megapixel frames.
@@ -580,13 +578,11 @@ class RenderPolicyConfig:
         if self.colormap_low_fraction >= self.colormap_high_fraction:
             raise ValueError("colormap fractions must be strictly increasing")
         for field in (
-            "image_spatial_max_ticks",
             "colorbar_endpoint_label_chars",
             "rolling_distribution_min_bins",
             "image_distribution_min_bins",
             "distribution_max_bins",
             "distribution_bin_divisor",
-            "distribution_axis_max_ticks",
             "image_distribution_sample_target",
             "distribution_count_floor",
             "fit_source_scatter_max_points",

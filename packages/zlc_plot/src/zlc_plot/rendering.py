@@ -2234,9 +2234,7 @@ class MatplotlibRenderer:
             )
             axes.add_collection(collection)
             self._artists[key] = collection
-            axes.xaxis.set_major_locator(
-                MaxNLocator(nbins=policy.distribution_axis_max_ticks, prune="both")
-            )
+            apply_smart_ticks(axes, "x")
             if tick_profile == "image":
                 axes.xaxis.set_major_formatter(ScalarFormatter())
                 axes.tick_params(
@@ -2541,11 +2539,7 @@ class MatplotlibRenderer:
         # With both writing, each frame reinstalled two locators per cell and
         # reset their tick artists, undoing the "install once" guarantee.
         if self._facet_focus_index is not None or self.semantic_spec is self.spec:
-            apply_smart_ticks(
-                axes,
-                max_ticks_x=policy.image_spatial_max_ticks,
-                max_ticks_y=policy.image_spatial_max_ticks,
-            )
+            apply_smart_ticks(axes)
 
     def _update_rolling(
         self,
@@ -2980,18 +2974,24 @@ class MatplotlibRenderer:
             # grows re-fires its label gating.
             label_left = column == 0
             label_bottom = row == rows - 1 or index + columns >= len(cells)
-            y_signature = ("facet-y-major", label_left)
-            if getattr(axis.yaxis, "_zlc_tick_signature", None) != y_signature:
-                axis.yaxis.set_major_locator(MaxNLocator(nbins=3, prune="both"))
-                axis.yaxis.set_major_formatter(ScalarFormatter())
-                axis.tick_params(axis="y", labelleft=label_left)
-                axis.yaxis._zlc_tick_signature = y_signature
-            x_signature = ("facet-x-major", label_bottom)
-            if getattr(axis.xaxis, "_zlc_tick_signature", None) != x_signature:
-                axis.xaxis.set_major_locator(MaxNLocator(nbins=3, prune="both"))
-                axis.xaxis.set_major_formatter(ScalarFormatter())
-                axis.tick_params(axis="x", labelbottom=label_bottom)
-                axis.xaxis._zlc_tick_signature = x_signature
+            # A cell is a small panel, and it gets the same tick policy as a
+            # large one -- which, being measured against the width it is
+            # actually painted at, spends a cell's inch differently from a
+            # panel's six.  A separate MaxNLocator(3) here meant the cells
+            # were the one surface the shared policy never reached: no
+            # compact offset, and three labels whether they fitted or not.
+            # Only WHICH cells show their labels is the grid's business.
+            apply_smart_ticks(axis, prune_edges=True)
+            axis.tick_params(axis="y", labelleft=label_left)
+            axis.tick_params(axis="x", labelbottom=label_bottom)
+            # The cells share one x span and one y span, so they share
+            # whatever offset the tick policy took out of their labels: it is
+            # shown once, by the corner cell that carries both sets of tick
+            # labels.  Shown per cell it appeared once per cell, each copy
+            # printed over the neighbour to its right.
+            corner = label_bottom and label_left
+            axis.xaxis.get_offset_text().set_visible(corner)
+            axis.yaxis.get_offset_text().set_visible(corner)
 
         outer_labels = (("x", outer_x, 0.5, 0.012, 0.0), ("y", outer_y, 0.008, 0.5, 90.0))
         for name, value, x_pos, y_pos, rotation in outer_labels:
@@ -3033,12 +3033,6 @@ class MatplotlibRenderer:
             # The chrome authority already applied the standalone image
             # kind's spatial tick budget; restating it keeps the signature
             # stable instead of re-installing default-budget locators.
-            apply_smart_ticks(
-                selected,
-                max_ticks_x=self.style.render.image_spatial_max_ticks,
-                max_ticks_y=self.style.render.image_spatial_max_ticks,
-            )
-        else:
             apply_smart_ticks(selected)
         selected.tick_params(
             axis="both",

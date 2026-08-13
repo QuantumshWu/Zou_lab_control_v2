@@ -12,7 +12,7 @@ appearing only on the boundary (column 0 for y, bottom row for x) via
 from __future__ import annotations
 
 import numpy as np
-from matplotlib.ticker import MaxNLocator
+from zlc_plot.ticks import SmartOffsetLocator
 
 from data_factory import (
     Axis,
@@ -127,9 +127,10 @@ def _assert_shared_marks_boundary_labels(session: PlotSession) -> None:
     y_values: set[tuple[float, ...]] = set()
     for index, axis in cells:
         row, column = divmod(index, columns)
-        # Marks: every cell, both axes, from the ONE shared locator.
-        assert isinstance(axis.xaxis.get_major_locator(), MaxNLocator)
-        assert isinstance(axis.yaxis.get_major_locator(), MaxNLocator)
+        # Marks: every cell, both axes, from the ONE shared locator -- the
+        # same policy a full-size panel gets, spending the width a cell has.
+        assert isinstance(axis.xaxis.get_major_locator(), SmartOffsetLocator)
+        assert isinstance(axis.yaxis.get_major_locator(), SmartOffsetLocator)
         assert len(_marked_ticks(axis.xaxis)) > 0, f"cell {index} has no x ticks"
         assert len(_marked_ticks(axis.yaxis)) > 0, f"cell {index} has no y ticks"
         x_values.add(tuple(map(float, axis.get_xticks())))

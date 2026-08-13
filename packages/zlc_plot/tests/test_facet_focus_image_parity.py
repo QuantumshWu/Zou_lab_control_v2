@@ -134,15 +134,16 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         focused_colorbar = focused._artists["facet:1:colorbar"]
         assert focused_colorbar.ax.get_ylabel() == alone_colorbar.ax.get_ylabel()
 
-        # The standalone image's spatial tick budget applies to the cell.
-        budget = DEFAULTS.style.render.image_spatial_max_ticks
+        # One tick policy, and the cell is on it: how many labels each axis
+        # carries follows from the width it is painted at, so the signature
+        # says WHICH policy, not how many.
         for axis_obj in (
             focused.primary_axes.xaxis,
             focused.primary_axes.yaxis,
             alone.primary_axes.xaxis,
             alone.primary_axes.yaxis,
         ):
-            assert axis_obj._zlc_tick_signature[1] == budget
+            assert axis_obj._zlc_tick_signature[0].startswith("smart-")
 
         # The parameter surface matches modulo the facet's own axis unit.
         alone_names = set(standalone.describe_display().parameter_schema)
