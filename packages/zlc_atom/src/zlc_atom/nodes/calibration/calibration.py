@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property
+from math import sqrt
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -689,19 +690,48 @@ def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarr
 
 
 def detect_sites(
-    image: object,
+    frames: object,
     *,
     spot_sigma: float = 1.0,
     min_distance: int = 3,
-    detection_sigma: float = 6.0,
+    detection_sigma: float = 4.0,
 ) -> SiteMap:
-    """Discover every resolvable bright site without an authored site count."""
+    """Discover every resolvable site from how often it lights up.
+
+    A site is not a place that is bright on average, and not a place that is
+    bright in a high quantile either: both of those are statements about how
+    OFTEN a trap is loaded as much as about whether a trap is there.  A
+    lattice does not load uniformly -- a corner of it loading a fifth as often
+    as the middle is ordinary -- so any single brightness cut over a run holds
+    either the well-loaded traps or the poorly-loaded ones, never both, and
+    the dim corner of the array simply never appeared.
+
+    What every trap shares, whatever its loading, is that a loaded shot is
+    unmistakable in the shot itself.  So each frame is thresholded on its own
+    noise, which turns it into a map of where an atom was seen, and those maps
+    are added up.  A place with a hundred sightings and a place with eight are
+    then the same kind of evidence, differing only in loading -- and eight is
+    a great many more than the noise of a run produces at one pixel.
+
+    That last number is not a guess: thresholding a frame at k sigma admits a
+    noise pixel with the Gaussian tail probability of k, so the count at a
+    background pixel is binomial with that rate, and the count that a whole
+    image of background will not reach follows from it.  ``detection_sigma``
+    sets k -- how sure a single sighting must be -- and the arithmetic below
+    converts that into how many sightings make a site.
+    """
 
     from scipy import ndimage
+    from scipy.special import erfc
+    from scipy.stats import binom
 
-    array = np.asarray(image.values if hasattr(image, "values") else image, dtype=float)
-    if array.ndim != 2 or 0 in array.shape or not np.isfinite(array).all():
-        raise ValueError("image must be a non-empty finite 2D array")
+    stack = np.asarray(
+        frames.values if hasattr(frames, "values") else frames, dtype=float
+    )
+    if stack.ndim == 2:
+        stack = stack[np.newaxis, ...]
+    if stack.ndim != 3 or 0 in stack.shape or not np.isfinite(stack).all():
+        raise ValueError("frames must be a non-empty finite stack of 2D images")
     spot_sigma = float(spot_sigma)
     detection_sigma = float(detection_sigma)
     min_distance = int(min_distance)
@@ -712,41 +742,79 @@ def detect_sites(
     if min_distance <= 0:
         raise ValueError("min_distance must be positive")
 
-    smooth = ndimage.gaussian_filter(array, sigma=spot_sigma)
-    background = ndimage.gaussian_filter(array, sigma=max(4.0 * spot_sigma, spot_sigma + 2.0))
-    response = smooth - background
-    baseline = float(np.median(response))
-    lower = response[response <= baseline]
-    noise = 1.4826 * float(np.median(np.abs(lower - baseline)))
-    noise = max(
-        noise,
-        np.finfo(float).eps * max(1.0, float(np.max(np.abs(response)))),
-    )
-    cutoff = baseline + detection_sigma * noise
-    local_maxima = response == ndimage.maximum_filter(response, size=3, mode="nearest")
-    candidates = np.argwhere(local_maxima & (response >= cutoff))
+    background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
+    hits = np.zeros(stack.shape[1:], dtype=np.int64)
+    lit_response = np.zeros(stack.shape[1:], dtype=float)
+    for frame in stack:
+        # Each frame is judged against its own noise: an exposure that came out
+        # dim, or a run whose background drifted, changes what "bright" means
+        # in that frame and in no other.
+        smooth = ndimage.gaussian_filter(frame, sigma=spot_sigma)
+        response = smooth - ndimage.gaussian_filter(frame, sigma=background_sigma)
+        baseline = float(np.median(response))
+        lower = response[response <= baseline]
+        noise = 1.4826 * float(np.median(np.abs(lower - baseline)))
+        noise = max(
+            noise,
+            np.finfo(float).eps * max(1.0, float(np.max(np.abs(response)))),
+        )
+        lit = response >= baseline + detection_sigma * noise
+        hits += lit
+        lit_response += np.where(lit, response - baseline, 0.0)
+
+    shots = int(stack.shape[0])
+    pixels = int(hits.size)
+    # How often noise alone clears the per-frame cut, and therefore how many
+    # sightings an image of pure background will not reach anywhere in it.
+    false_rate = max(float(0.5 * erfc(detection_sigma / sqrt(2.0))), 1e-12)
+    expected_false_sites = 0.5
+    required = 1
+    for count in range(1, shots + 1):
+        if pixels * float(binom.sf(count - 1, shots, false_rate)) < expected_false_sites:
+            required = count
+            break
+    else:
+        required = shots
+
+    # Where a site is, refined on how bright the place is WHEN it is lit: the
+    # one image in a run whose contrast does not depend on loading.
+    conditional = lit_response / np.maximum(hits, 1)
+    local_maxima = hits == ndimage.maximum_filter(hits, size=3, mode="nearest")
+    candidates = np.argwhere(local_maxima & (hits >= required))
     ranked = sorted(
         candidates,
-        key=lambda item: (-float(response[tuple(item)]), int(item[0]), int(item[1])),
+        key=lambda item: (
+            -int(hits[tuple(item)]),
+            -float(conditional[tuple(item)]),
+            int(item[0]),
+            int(item[1]),
+        ),
     )
     selected: list[tuple[int, int]] = []
     for row, column in ranked:
         point = (int(row), int(column))
-        if all((point[0] - other[0]) ** 2 + (point[1] - other[1]) ** 2 >= min_distance**2 for other in selected):
+        if all(
+            (point[0] - other[0]) ** 2 + (point[1] - other[1]) ** 2 >= min_distance**2
+            for other in selected
+        ):
             selected.append(point)
     if not selected:
-        raise ValueError("calibration image contains no detectable sites")
+        raise ValueError("calibration frames contain no detectable sites")
 
     refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
     centers = np.asarray(
         [
-            _refine_center_subpixel(array, float(column), float(row), half=refine_half)
+            _refine_center_subpixel(
+                conditional, float(column), float(row), half=refine_half
+            )
             for row, column in selected
         ],
         dtype="<f8",
     )
+    # How far a site's count stands out of the noise count, in its own sigmas.
+    spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
     quality = np.asarray(
-        [(float(response[row, column]) - baseline) / noise for row, column in selected],
+        [(float(hits[row, column]) - shots * false_rate) / spread for row, column in selected],
         dtype="<f8",
     )
     order = _stable_site_order(centers, float(min_distance))
@@ -756,7 +824,7 @@ def detect_sites(
     return SiteMap(
         site_ids,
         centers,
-        quality >= detection_sigma,
+        np.ones(len(centers), dtype=bool),
         quality,
         "image_pixel_xy",
         None,
@@ -873,49 +941,56 @@ def _coerce_short_stack(short_frames: object, frame_contract: FrameContract) -> 
     return np.asarray([frame_contract.assert_image(frame) for frame in frames], dtype=float)
 
 
-def _common_bin_edges(values: np.ndarray, mask: np.ndarray, *, bins: int) -> np.ndarray:
-    samples = np.asarray(values, dtype=float)[np.asarray(mask, dtype=bool)]
-    samples = samples[np.isfinite(samples)]
-    if samples.size < 2:
-        return np.linspace(-1.0, 1.0, int(bins) + 1)
-    lower, upper = np.quantile(samples, (0.001, 0.999))
-    if not np.isfinite([lower, upper]).all() or upper <= lower:
-        lower, upper = float(np.min(samples)), float(np.max(samples))
-    span = max(float(upper - lower), 1.0)
-    return np.linspace(lower - 0.04 * span, upper + 0.04 * span, int(bins) + 1)
-
-
 def _empirical_threshold(
     dark: object,
     bright: object,
-    edges: object,
     *,
     bright_above: bool,
     tie_target: float,
 ) -> float:
+    """The cut that classifies THIS run's labelled shots best.
+
+    The labels come from the long frames, where an atom is unmistakable; the
+    values are the short ones a runtime readout will actually see.  So the
+    best cut is a fact about the data in hand, found by trying every place a
+    cut can go -- between one observed value and the next -- and keeping the
+    one that classifies the labelled shots best, with ties settled towards the
+    fitted Gaussian crossing.
+
+    Every place a cut can go, rather than every histogram bin edge: a cut is
+    not a bin, and rounding it to the display's binning moved the operating
+    point of the readout by up to half a bin for no reason but the picture.
+    """
+
     dark_values = np.asarray(dark, dtype=float).reshape(-1)
     bright_values = np.asarray(bright, dtype=float).reshape(-1)
     dark_values = dark_values[np.isfinite(dark_values)]
     bright_values = bright_values[np.isfinite(bright_values)]
     if not dark_values.size or not bright_values.size:
         return float("nan")
-    edges = np.asarray(edges, dtype=float)
-    dark_histogram, _ = np.histogram(dark_values, bins=edges)
-    bright_histogram, _ = np.histogram(bright_values, bins=edges)
-    dark_cumulative = np.concatenate([[0], np.cumsum(dark_histogram)])
-    bright_cumulative = np.concatenate([[0], np.cumsum(bright_histogram)])
+    values = np.unique(np.concatenate([dark_values, bright_values]))
+    if values.size == 1:
+        return float(values[0])
+    # A cut sits between two observed values, plus one outside each end.
+    cuts = np.concatenate(
+        [
+            [values[0] - 0.5 * float(values[1] - values[0])],
+            0.5 * (values[:-1] + values[1:]),
+            [values[-1] + 0.5 * float(values[-1] - values[-2])],
+        ]
+    )
+    dark_below = np.searchsorted(np.sort(dark_values), cuts, side="left") / dark_values.size
+    bright_below = (
+        np.searchsorted(np.sort(bright_values), cuts, side="left") / bright_values.size
+    )
     if bright_above:
-        dark_fidelity = dark_cumulative / dark_values.size
-        bright_fidelity = (bright_values.size - bright_cumulative) / bright_values.size
+        fidelity = 0.5 * (dark_below + (1.0 - bright_below))
     else:
-        dark_fidelity = (dark_values.size - dark_cumulative) / dark_values.size
-        bright_fidelity = bright_cumulative / bright_values.size
-    fidelity = 0.5 * (dark_fidelity + bright_fidelity)
-    best_value = float(np.nanmax(fidelity))
+        fidelity = 0.5 * ((1.0 - dark_below) + bright_below)
+    best_value = float(np.max(fidelity))
     best = np.flatnonzero(np.isclose(fidelity, best_value, rtol=0.0, atol=1e-12))
-    index = int(best[np.argmin(np.abs(edges[best] - float(tie_target)))]) if best.size > 1 else int(best[0])
-    return float(edges[index])
-
+    index = int(best[np.argmin(np.abs(cuts[best] - float(tie_target)))])
+    return float(cuts[index])
 
 def _seeded_train_test(occupied: np.ndarray, valid: np.ndarray, *, train_fraction: float = 0.9, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     fraction = float(train_fraction)
@@ -952,15 +1027,12 @@ def _train_readout_model(
     train: np.ndarray,
     test: np.ndarray,
     threshold_method: str,
-    histogram_bins: int,
     model_parameters: Mapping[str, Any],
     diagnostics: Mapping[str, Any] | None = None,
 ) -> tuple[ReadoutModel, dict[str, Any]]:
     """Train one feature model against the shared labels and split."""
 
     centers = site_map.centers_xy
-    common_validity = labels_valid & np.isfinite(short_signals)
-    edges = _common_bin_edges(short_signals, common_validity, bins=histogram_bins)
     thresholds = np.full(len(centers), np.nan, dtype=float)
     predictions = np.zeros_like(short_signals, dtype=bool)
     site_model_fidelity = np.full(len(centers), np.nan, dtype=float)
@@ -999,7 +1071,6 @@ def _train_readout_model(
                 threshold = _empirical_threshold(
                     dark,
                     bright_values,
-                    edges,
                     bright_above=True,
                     tie_target=gaussian_threshold,
                 )
@@ -1073,7 +1144,6 @@ def calibrate(
     detection_sigma: float = 6.0,
     train_fraction: float = 0.9,
     split_seed: int = 0,
-    histogram_bins: int = 120,
 ) -> CalibrationResult:
     """Discover sites once and train all readout models from one capture."""
 
@@ -1097,18 +1167,13 @@ def calibrate(
     shorts = _coerce_short_stack(short_frames, frame_contract)
     if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
         raise ValueError("reference and short frames must share non-empty group counts")
-    # Sites are found on a high quantile across the run, not on its mean.
-    # A trap that is loaded a third of the time contributes a third of its
-    # brightness to a mean, so one threshold cannot hold both it and a trap
-    # loaded most of the time -- the dim half of a lattice simply did not
-    # appear.  A quantile asks "how bright is this place when it IS loaded",
-    # which is the same question for every trap whatever its loading.
-    reference_bright = np.quantile(
-        references.reshape(-1, *references.shape[2:]), 0.9, axis=0
-    )
     reference_average = finite_mean(references, axis=(0, 1))
+    # Sites are found from every reference frame of the run, one at a time:
+    # what makes a place a site is being seen there repeatedly, and no summary
+    # of the run keeps that -- an average or a quantile mixes "how bright when
+    # loaded" with "how often loaded", and traps differ in the second.
     site_map = detect_sites(
-        reference_bright,
+        references.reshape(-1, *references.shape[2:]),
         spot_sigma=detection_spot_sigma,
         min_distance=detection_min_distance,
         detection_sigma=detection_sigma,
@@ -1260,7 +1325,6 @@ def calibrate(
             train=train,
             test=test,
             threshold_method=threshold_method,
-            histogram_bins=histogram_bins,
             model_parameters=parameters,
             diagnostics=diagnostics,
         )
