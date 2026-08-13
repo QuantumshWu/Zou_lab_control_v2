@@ -1501,6 +1501,19 @@ class FitEngine:
         seeds = tuple(np.minimum(np.maximum(seed, low_inside), high_inside) for seed in seeds)
         start = time.monotonic()
         invalid_residual = np.finfo(np.float64).max ** 0.25
+        # A histogram's observations are counts, and a count of 500 is known to
+        # about 22 while a count of 3 is known to about 1.7.  Fitted as though
+        # every bin were equally certain, a tall peak outvotes a sparse one by
+        # the ratio of their heights: for two states seen in very different
+        # numbers -- which is every rare event over a common one -- the best
+        # unweighted fit puts BOTH components on the common peak and treats the
+        # rare one as noise, because sculpting the tall peak a little better
+        # pays more than explaining the small cloud at all.  Dividing each
+        # residual by the Poisson uncertainty of its bin makes every bin speak
+        # in units of its own noise, which is what the counts actually mean,
+        # and makes the reported chi-square a chi-square.
+        counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
+        uncertainty = np.sqrt(np.maximum(values, 1.0)) if counted_observations else None
 
         def check() -> None:
             if cancelled is not None and cancelled():
@@ -1513,14 +1526,15 @@ class FitEngine:
             predicted = spec.evaluate(coords, parameters).reshape(-1)
             if predicted.shape != values.shape or not np.all(np.isfinite(predicted)):
                 return np.full(values.shape, invalid_residual)
-            return predicted - values
+            deviation = predicted - values
+            return deviation if uncertainty is None else deviation / uncertainty
 
         def analytic_jacobian(parameters: np.ndarray) -> np.ndarray:
             check()
             jacobian = spec.evaluate_jacobian(coords, parameters)
             if not np.all(np.isfinite(jacobian)):
                 raise FloatingPointError("analytic fit jacobian is non-finite")
-            return jacobian
+            return jacobian if uncertainty is None else jacobian / uncertainty[:, None]
 
         successful: list[tuple[float, Any, np.ndarray, np.ndarray]] = []
         unsuccessful: list[tuple[float, Any, np.ndarray, np.ndarray]] = []
@@ -1545,11 +1559,17 @@ class FitEngine:
                     or bool(np.all(solver_residual == invalid_residual))
                 ):
                     continue
-                fitted_candidate = values + solver_residual
+                data_residual = (
+                    solver_residual
+                    if uncertainty is None
+                    else solver_residual * uncertainty
+                )
+                fitted_candidate = values + data_residual
                 if not np.all(np.isfinite(fitted_candidate)):
                     continue
-                residual_candidate = -solver_residual
-                rss = float(np.dot(residual_candidate, residual_candidate))
+                residual_candidate = -data_residual
+                # Candidates compete on the quantity being minimised.
+                rss = float(np.dot(solver_residual, solver_residual))
                 if not math.isfinite(rss):
                     continue
                 (successful if candidate.success else unsuccessful).append(
@@ -1571,7 +1591,7 @@ class FitEngine:
                 best = candidate
         _rss, solved, fitted, residuals = best
         degrees = max(values.size - solved.x.size, 1)
-        reduced = float(np.dot(residuals, residuals) / degrees)
+        reduced = float(_rss / degrees)
         covariance, covariance_valid = _covariance(solved.jac, reduced)
         errors = (
             np.sqrt(np.maximum(np.diag(covariance), 0.0))
@@ -2134,19 +2154,109 @@ def _init_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     return max(float(np.max(y)), 0.0), center, sigma
 
 
-def _init_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
-    x = coords[0]
-    midpoint = float((np.min(x) + np.max(x)) / 2)
-    left = y[x <= midpoint]
-    right = y[x > midpoint]
-    left_x = x[x <= midpoint]
-    right_x = x[x > midpoint]
+def _bimodal_candidates(
+    coords: ArrayTuple,
+    y: np.ndarray,
+) -> Sequence[Sequence[float]]:
+    """Seed a two-peak histogram fit from cuts through the distribution.
+
+    Least squares finds the minimum it starts next to, so for a two-peak model
+    the starting cut IS the fit.  Cutting the axis in half and taking the
+    tallest bin on each side assumes the two peaks straddle the middle of the
+    plotted range, and they usually do not: a distribution whose second state
+    is rare sits entirely in the left third, and both halves of that cut then
+    describe the same peak, whereupon the solver settles into two overlapping
+    bells over one peak -- a fit that is visibly wrong beside an obviously
+    better one, and stable, because from there no small step improves it.
+
+    Cutting instead at deciles of the distribution itself -- and at the cut
+    that best separates it -- always puts one candidate between the two peaks,
+    wherever in the frame they sit.  The engine solves every candidate and
+    keeps the best, so this costs one extra solve per unused seed and removes
+    the failure entirely.
+    """
+
+    x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
+    counts = np.asarray(y, dtype=np.float64).reshape(-1)
+    order = np.argsort(x, kind="stable")
+    x, counts = x[order], np.clip(counts[order], 0.0, None)
     span = _span(x)
-    lc = float(left_x[np.argmax(left)]) if left.size else midpoint - span / 4
-    rc = float(right_x[np.argmax(right)]) if right.size else midpoint + span / 4
-    la = max(float(np.max(left)) if left.size else float(np.max(y)), 0.0)
-    ra = max(float(np.max(right)) if right.size else float(np.max(y)), 0.0)
-    return (lc + rc) / 2, abs(rc - lc), la, span / 10, ra, span / 10
+    unique_x = np.unique(x)
+    step = (
+        float(np.median(np.abs(np.diff(unique_x))))
+        if unique_x.size > 1
+        else max(span, np.finfo(np.float64).eps)
+    )
+    step = max(step, np.finfo(np.float64).eps)
+    total = float(counts.sum())
+    if x.size < 3 or total <= 0.0:
+        midpoint = float((np.min(x) + np.max(x)) / 2.0) if x.size else 0.0
+        height = max(float(np.max(counts)) if counts.size else 0.0, 0.0)
+        return ((midpoint, span / 2.0, height, span / 10.0, height, span / 10.0),)
+
+    weight = counts / total
+    cumulative = np.cumsum(weight)
+    splits = [
+        float(x[int(np.searchsorted(cumulative, fraction))])
+        for fraction in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+        if int(np.searchsorted(cumulative, fraction)) < x.size
+    ]
+    # ...and at the cut that most separates the distribution's two halves.
+    mass = np.cumsum(counts)[:-1]
+    first_moment = np.cumsum(counts * x)
+    left_mass = np.maximum(mass, np.finfo(np.float64).tiny)
+    right_mass = np.maximum(total - mass, np.finfo(np.float64).tiny)
+    left_mean = first_moment[:-1] / left_mass
+    right_mean = (first_moment[-1] - first_moment[:-1]) / right_mass
+    between = left_mass * right_mass * (right_mean - left_mean) ** 2
+    if between.size and np.any(np.isfinite(between)):
+        splits.append(float(x[int(np.argmax(np.nan_to_num(between, nan=-np.inf)))]))
+
+    seeds: list[tuple[float, ...]] = []
+    for split in dict.fromkeys(splits):
+        left = x <= split
+        right = ~left
+        left_weight, right_weight = float(counts[left].sum()), float(counts[right].sum())
+        if left_weight <= 0.0 or right_weight <= 0.0:
+            continue
+        left_center = float(np.sum(x[left] * counts[left]) / left_weight)
+        right_center = float(np.sum(x[right] * counts[right]) / right_weight)
+        if not right_center > left_center:
+            continue
+        left_sigma = max(
+            math.sqrt(float(np.sum(counts[left] * (x[left] - left_center) ** 2) / left_weight)),
+            step,
+        )
+        right_sigma = max(
+            math.sqrt(
+                float(np.sum(counts[right] * (x[right] - right_center) ** 2) / right_weight)
+            ),
+            step,
+        )
+        seeds.append(
+            (
+                (left_center + right_center) / 2.0,
+                right_center - left_center,
+                max(float(np.max(counts[left])), 0.0),
+                left_sigma,
+                max(float(np.max(counts[right])), 0.0),
+                right_sigma,
+            )
+        )
+    if not seeds:
+        midpoint = float((np.min(x) + np.max(x)) / 2.0)
+        height = max(float(np.max(counts)), 0.0)
+        return ((midpoint, span / 2.0, height, span / 10.0, height, span / 10.0),)
+
+    # The closest seed first, so a single-start caller gets the best of them.
+    seeds.sort(
+        key=lambda seed: float(np.sum((_bimodal_gaussian(x, *seed) - counts) ** 2))
+    )
+    return tuple(seeds)
+
+
+def _init_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
+    return _bimodal_candidates(coords, y)[0]
 
 
 def _init_doublet(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -2566,6 +2676,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 r"+A_R e^{-\frac{1}{2}((x-x_0-\delta/2)/\sigma_R)^2}$"
             ),
             jacobian=_bimodal_gaussian_jacobian,
+            candidate_initializer=_bimodal_candidates,
             presentation=FitPresentationSpec(
                 components=(
                     FitComponentSpec("left", _bimodal_left),
