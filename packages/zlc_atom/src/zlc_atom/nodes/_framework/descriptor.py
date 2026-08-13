@@ -210,9 +210,15 @@ class NodePreviewSpec:
     """UI-neutral request to preview one declared output of this node.
 
     A node with eight outputs knows which one an operator came to watch, and
-    nothing else does.  The KIND is normally left empty: the plotting package
-    reads it off the data, exactly as it does for a hand-added panel, and a
-    node that pins one is claiming its data would otherwise be read wrong.
+    nothing else does.  The same is true of HOW it is watched: the plotting
+    package can see the shape of a dataset but not its physics.  Three frames
+    of a calibration cycle are three point rows of an image to it, and
+    averaging them is a perfectly sensible thing to do with three point rows
+    -- but they are a long reference, a short readout and a long reference,
+    and the only reason to look at them is side by side.  The node states the
+    kind because the node is what knows that.  Left empty, the kind is read
+    off the data, which is the right answer only where a node genuinely has
+    no opinion.
     """
 
     output_name: str

@@ -234,10 +234,12 @@ LOGIC_NODE = LogicNodeDescriptor(
             CAPTURE_PREVIEW_DECLARATION.contract_id,
         ),
     ),
-    # No kind: the frames of a cycle are point rows of an image
-    # signal, and the plotting package reads that for itself --
-    # pinning "image" is what flattened three frames into one.
-    node_previews=(NodePreviewSpec("capture_preview"),),
+    # Long reference, short readout, long reference: three frames whose whole
+    # point is to be compared with each other, so they are faceted rather than
+    # reduced.  Pinned to "image" they were averaged into one picture; left
+    # unpinned they were averaged too, because a plotting package reads shape
+    # and this is physics.
+    node_previews=(NodePreviewSpec("capture_preview", "facet_grid"),),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),
