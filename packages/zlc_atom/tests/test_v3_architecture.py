@@ -240,7 +240,10 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
                 edges.add((source_owner, target_owner))
     node_edges = {edge for edge in edges if edge[1] in node_owners}
     assert node_edges == {
+        ("calibration", "camera_measurement"),
         ("occupancy", "calibration"),
+        ("slm_feedback", "calibration"),
+        ("slm_feedback", "camera_measurement"),
         ("temperature", "calibration"),
         ("temperature", "camera_measurement"),
         ("temperature", "occupancy"),
@@ -411,6 +414,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             sequencer=sequencer,
             sequencer_key="sequencer",
             pulse_resource=IMAGING_PULSE_RESOURCE,
+            signal_plane=plane,
             artifact_directory=tmp_path,
             repeats=30,
         )
@@ -459,9 +463,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert len(task_result.capture.frames) == 90
         assert sum(len(group) for group in task_result.reference) == 60
         assert len(task_result.short) == 30
-        # Calibration states the exposure its own pulse needs and touches
-        # nothing else: an ROI tuned around the traps survives a calibration.
-        assert [event for event, _ in task_camera_events].count("set_roi") == 0
+        # Through the camera measurement, which points the camera at the
+        # geometry this run asks for -- and it asks for the geometry that is
+        # already there, so a tuned ROI survives a calibration.
+        assert [event for event, _ in task_camera_events].count("set_roi") == 1
         assert [event for event, _ in task_camera_events].count(
             "set_exposure_seconds"
         ) == 1
@@ -518,7 +523,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(
             (preview.output_name, preview.plot_kind)
             for preview in descriptors["calibration"].node_previews
-        ) == (("capture_preview", "image"),)
+        ) == (("capture_preview", "facet_grid"),)
         # A preview is not a Task privilege: an ordinary measurement names the
         # output an operator came to watch in exactly the same words -- and
         # names how to draw it, which for a camera is what it was asked to
@@ -616,6 +621,7 @@ def test_calibration_task_safes_sequencer_when_capture_fails(tmp_path: Path) -> 
             request=_calibration_request(repeats=1),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
+            signal_plane=plane,
             artifact_directory=tmp_path,
         )
         with pytest.raises(RuntimeError, match="fire failure"):

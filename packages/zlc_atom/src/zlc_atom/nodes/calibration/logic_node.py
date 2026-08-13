@@ -182,6 +182,7 @@ def _build(
     sequencer: object,
     sequencer_key: str,
     pulse_resource: ResolvedWorkspaceResource,
+    signal_plane: object,
     artifact_directory: object,
     **values: object,
 ) -> CalibrationTask:
@@ -220,6 +221,7 @@ def _build(
         ),
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,
+        signal_plane=signal_plane,
         artifact_directory=artifact_directory,  # type: ignore[arg-type]
     )
 

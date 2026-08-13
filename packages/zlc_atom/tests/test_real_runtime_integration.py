@@ -105,6 +105,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             request=_calibration_request(),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
+            signal_plane=SignalDataPlane(),
             artifact_directory=tmp_path,
         ).run()
         report_directory = task_result.artifact_path.with_suffix("") / "report"

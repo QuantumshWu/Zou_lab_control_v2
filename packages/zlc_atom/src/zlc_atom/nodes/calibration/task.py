@@ -25,6 +25,10 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
+from zlc_atom.nodes.camera_measurement.measurement import (
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+)
 from .pulse import (
     ResolvedPulse,
     arm_sequencer,
@@ -48,6 +52,14 @@ from .outputs import (
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
 _REDUCERS = {"mean", "sum", "median", "max"}
+
+
+def _roi_xywh(point: CameraWorkingPoint) -> tuple[int, int, int, int]:
+    """The working point's rectangle, in the order an operator writes it."""
+
+    roi_y, roi_x = point.roi_origin_yx
+    roi_height, roi_width = point.roi_shape_yx
+    return int(roi_x), int(roi_y), int(roi_width), int(roi_height)
 
 
 def _positive_float(value: object, name: str) -> float:
@@ -555,6 +567,7 @@ class CalibrationTask:
         request: CalibrationRequest,
         pulse_sequence: PulseSequence,
         pulse_path: str | Path,
+        signal_plane: object,
         artifact_directory: str | Path,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
@@ -574,6 +587,9 @@ class CalibrationTask:
         self._request = request
         self.pulse_sequence = pulse_sequence
         self.pulse_path = Path(pulse_path).expanduser().resolve()
+        if signal_plane is None:
+            raise TypeError("signal_plane must be supplied by the runtime owner")
+        self.signal_plane = signal_plane
         self.artifact_directory = directory
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
@@ -698,7 +714,6 @@ class CalibrationTask:
         pulse: ResolvedPulse,
         *,
         context: object | None,
-        actual: CameraWorkingPoint,
         pulse_facts: Mapping[str, object],
     ) -> tuple[
         CalibrationCapture,
@@ -708,13 +723,29 @@ class CalibrationTask:
         armed = False
         firing = False
         try:
-            self.camera.arm(
-                count,
-                source_group_sizes=(3,) * self.request.repeats,
-                buffer_frame_count=count,
-                timeout=self.camera.timeout,
+            # One acquisition implementation for the whole project.  This task
+            # says what it needs of it -- three frames a cycle, this many
+            # cycles, the exposure its own pulse cuts them with, and the
+            # geometry the bench is already set to -- and the camera
+            # measurement performs it.  Written out here a second time, the
+            # arm arguments, the exact read and the timeout drifted from the
+            # ones every other measurement uses.
+            measurement = CameraMeasurementNode(
+                camera=self.camera,
+                request=CameraMeasurementRequest(
+                    camera_key=self.request.camera_key,
+                    exposure_seconds=self.request.reference_exposure_seconds,
+                    roi_xywh=_roi_xywh(self.camera.working_point()),
+                    repeat=self.request.repeats,
+                    frames_per_cycle=3,
+                ),
+                signal_plane=self.signal_plane,
+                producer=f"{self.request.camera_key}:calibration",
             )
+            capture = measurement.prepare(owns_generation=False)
             armed = True
+            actual = measurement.actual_working_point
+            self._actual_working_point = actual
             arm_sequencer(self.sequencer, pulse)
             sequencer_snapshot = _sequencer_snapshot(self.sequencer)
             run_record = self._run_record(
@@ -753,13 +784,7 @@ class CalibrationTask:
             for _ in range(self.request.repeats):
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
-                records = tuple(
-                    self.camera.read_frame_records(
-                        3,
-                        timeout=self.camera.timeout,
-                        exact=True,
-                    )
-                )
+                records = tuple(capture.next_cycle())
                 if len(records) != 3 or any(
                     not isinstance(record, CameraFrameRecord) for record in records
                 ):
@@ -786,7 +811,7 @@ class CalibrationTask:
                         current=len(cycles),
                         total=self.request.repeats,
                     )
-            terminal = self.camera.finish_record_capture()
+            terminal = capture.close()
             armed = False
             self.sequencer.safe()
             firing = False
@@ -803,7 +828,7 @@ class CalibrationTask:
             )
         except BaseException:
             if armed:
-                self.camera.finish_record_capture()
+                capture.close()
             if firing:
                 self._safe()
             raise
@@ -813,8 +838,7 @@ class CalibrationTask:
         actual: CameraWorkingPoint,
         pulse: Mapping[str, object],
     ) -> FrameContract:
-        roi_y, roi_x = actual.roi_origin_yx
-        roi_height, roi_width = actual.roi_shape_yx
+        roi_x, roi_y, roi_width, roi_height = _roi_xywh(actual)
         # The gate is what this run ASKED for, from the request that froze it.
         # Reading it back out of the pulse only asked the same question of a
         # less reliable witness.
@@ -870,27 +894,16 @@ class CalibrationTask:
         try:
             pulse = self._resolve_pulse()
             pulse_facts = self._pulse_facts(pulse)
-            # The exposure is this run's to state: the three frames are cut
-            # by the pulse THIS task plays, and a camera still integrating
-            # when the next trigger arrives simply ignores it -- which is one
-            # frame short of a cycle, every cycle.  The geometry is the
-            # bench's and is not touched: an ROI tuned around the traps has to
-            # survive a calibration, and what was actually used is recorded in
-            # the run record either way.
-            actual = self.camera.set_exposure_seconds(
-                self.request.reference_exposure_seconds
-            )
-            if not isinstance(actual, CameraWorkingPoint):
-                raise TypeError(
-                    "camera set_exposure_seconds must return CameraWorkingPoint"
-                )
-            self._actual_working_point = actual
             capture, run_record = self._capture(
                 pulse,
                 context=context,
-                actual=actual,
                 pulse_facts=pulse_facts,
             )
+            actual = self._actual_working_point
+            if not isinstance(actual, CameraWorkingPoint):
+                raise TypeError(
+                    "the camera measurement must report its working point"
+                )
             contract = self._frame_contract(actual, pulse_facts)
             if context is not None:
                 context.report_progress("Analysing calibration")

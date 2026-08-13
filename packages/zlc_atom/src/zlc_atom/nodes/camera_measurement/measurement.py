@@ -288,10 +288,20 @@ class CameraCycleSource:
             run_record=self.camera_node.run_record,
         )
 
-    def close(self) -> None:
+    def close(self) -> CameraCaptureTerminalRecord | None:
         capture, self._capture = self._capture, None
-        if capture is not None:
-            capture.close()
+        if capture is None:
+            return None
+        terminal = capture.close()
+        request = self.camera_node.request
+        if self._taken == request.repeat and (
+            terminal.produced_count != request.repeat * request.frames_per_cycle
+            or not terminal.source_stopped
+            or not terminal.no_more_frames
+            or not terminal.joined
+        ):
+            raise RuntimeError("camera did not prove exact cycle-source completion")
+        return terminal
 
     def describe(self) -> dict[str, object]:
         request = self.camera_node.request
@@ -374,7 +384,23 @@ class FiniteCapture:
             )
         )
         if len(records) != self.frames_per_cycle:
-            raise RuntimeError("camera returned an incomplete atomic cycle")
+            # The two numbers that decide this, from the sensor rather than
+            # from a guess: how long it integrates per trigger, and how often
+            # it will accept one.  A trigger that arrives while it is still
+            # busy is ignored, which is one frame short of a cycle, every
+            # cycle -- and "an incomplete atomic cycle" named none of that.
+            point = self.node.actual_working_point
+            exposure = "unknown" if point is None else format(point.exposure_seconds, "g")
+            interval = None if point is None else point.required_external_trigger_interval_seconds
+            raise RuntimeError(
+                f"the camera returned {len(records)} frame(s) of a "
+                f"{self.frames_per_cycle}-frame cycle: it integrates {exposure}s "
+                "per trigger and accepts one only every "
+                f"{'unknown' if interval is None else format(interval, 'g') + 's'}"
+                ", and a trigger arriving before that is ignored -- the pulse "
+                "must space its camera windows by more than that, or the "
+                "exposure must come down"
+            )
         return records
 
     def close(self) -> CameraCaptureTerminalRecord:

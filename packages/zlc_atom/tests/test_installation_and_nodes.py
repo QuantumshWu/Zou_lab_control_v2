@@ -178,6 +178,7 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "camera_measurement",
         "occupancy",
         "seamless_scan",
+        "slm_feedback",
         "stepped_scan",
         "temperature",
     )
@@ -248,6 +249,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             request=_calibration_request(),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
+            signal_plane=FakePlane(),
             artifact_directory=tmp_path,
         ).run()
         assert plane.freeze().signals == {}
@@ -257,6 +259,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             request=_calibration_request(),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
+            signal_plane=FakePlane(),
             artifact_directory=tmp_path,
         ).run()
         assert result.artifact_path.name == "calibration.json"
@@ -323,6 +326,7 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             request=_calibration_request(),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
+            signal_plane=FakePlane(),
             artifact_directory=tmp_path,
         ).run()
         frames = camera_cycle_snapshot([(record,) for record in result.short])
