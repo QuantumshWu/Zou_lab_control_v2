@@ -805,10 +805,21 @@ def detect_sites(
     image of background will not reach follows from it.  ``detection_sigma``
     sets k -- how sure a single sighting must be -- and the arithmetic below
     converts that into how many sightings make a site.
+
+    Counting sightings assumes a loaded shot IS unmistakable, and a trap dim
+    enough that its loaded shots land just under that cut leaves no sightings
+    at all -- however often it is loaded.  Such a trap is nonetheless obvious
+    in the AVERAGE of the run, which is where it was measured: half the shots
+    at three sigma is fifteen sigma once they are added up.  So a site is a
+    place that stands out in single shots OR in the average, two independent
+    admissions, each with the multiple-comparison threshold its own statistic
+    needs.  Neither alone is the detector: an average-only cut holds the
+    well-loaded traps and loses the rare ones, and a sightings-only cut holds
+    the bright ones and loses the dim ones.
     """
 
     from scipy import ndimage
-    from scipy.special import erfc
+    from scipy.special import erfc, erfcinv
     from scipy.stats import binom
 
     stack = np.asarray(
@@ -846,6 +857,12 @@ def detect_sites(
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     hits = np.zeros(stack.shape[1:], dtype=np.int64)
     lit_response = np.zeros(stack.shape[1:], dtype=float)
+    #: Every shot added up, lit or not: what a trap too dim to clear the
+    #: per-shot cut still writes into the picture.
+    total_response = np.zeros(stack.shape[1:], dtype=float)
+    #: The per-frame noise, summed, so the average's own noise follows from it
+    #: rather than from a spread measured across a structured picture.
+    total_noise = 0.0
     # Frames are filtered many at a time, in blocks sized by memory rather than
     # by frame count: one SciPy call over a block costs a fraction of one call
     # per frame, and filtering makes two more copies of whatever it is given,
@@ -878,6 +895,8 @@ def detect_sites(
         lit = response >= baseline + detection_sigma * noise
         hits += np.count_nonzero(lit, axis=0)
         lit_response += np.sum(np.where(lit, response - baseline, 0.0), axis=0)
+        total_response += np.sum(response - baseline, axis=0)
+        total_noise += float(np.sum(noise))
 
     shots = int(stack.shape[0])
     pixels = int(hits.size)
@@ -892,6 +911,28 @@ def detect_sites(
             break
     else:
         required = shots
+
+    # The second admission: the run's average, judged the same way.  Its
+    # noise is read the same robust way, and the significance a place must
+    # reach is set by the same rule the sighting count uses -- an image of
+    # pure background must not be expected to produce even half a site
+    # anywhere in it.  Averaging is what makes this sensitive to a trap whose
+    # single shots are unremarkable: N shots of a persistent signal add up as
+    # N while their noise adds up as sqrt(N).
+    average = total_response / float(shots)
+    # The average's noise is the frames' noise, divided by the root of how
+    # many were averaged -- NOT a spread measured across the averaged picture.
+    # Averaging leaves the traps standing while it flattens the noise, so a
+    # quantile spread of the result measures the STRUCTURE: on a lattice of
+    # thirty-five traps it read fourteen times the true noise, which put even
+    # the brightest site at nine sigma and every dim one at nothing.
+    average_baseline = float(np.median(average))
+    average_noise = max(
+        (total_noise / float(shots)) / sqrt(float(shots)),
+        float(np.finfo(float).eps * max(1.0, float(np.max(np.abs(average))))),
+    )
+    average_cut = float(sqrt(2.0) * erfcinv(1.0 / pixels))
+    average_z = (average - average_baseline) / average_noise
 
     # Where a site is, refined on how bright the place is WHEN it is lit: the
     # one image in a run whose contrast does not depend on loading.
@@ -929,12 +970,22 @@ def detect_sites(
     inside = np.zeros(hits.shape, dtype=bool)
     if 2 * margin < min(hits.shape):
         inside[margin:-margin, margin:-margin] = True
-    candidates = np.argwhere(local_maxima & inside & (hits >= required))
+    # A place gets in either way.  The average path needs its own peak test --
+    # a gap between two traps is a maximum of neither map -- and needs no
+    # conditional-brightness check, because a place with no sightings has no
+    # conditional brightness to speak of.
+    persistent = average == ndimage.maximum_filter(
+        average, size=peak_window, mode="nearest"
+    )
+    counted = local_maxima & (hits >= required)
+    averaged = persistent & (average_z >= average_cut)
+    spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
+    count_z = (hits - shots * false_rate) / spread
+    candidates = np.argwhere((counted | averaged) & inside)
     ranked = sorted(
         candidates,
         key=lambda item: (
-            -int(hits[tuple(item)]),
-            -float(conditional[tuple(item)]),
+            -max(float(count_z[tuple(item)]), float(average_z[tuple(item)])),
             int(item[0]),
             int(item[1]),
         ),
@@ -947,8 +998,11 @@ def detect_sites(
     selected: list[tuple[int, int]] = []
     centers_list: list[np.ndarray] = []
     for row, column in ranked:
+        # Refined on the map that SAW it: conditional brightness for a place
+        # with sightings, the average for one admitted without them.
+        surface = conditional if hits[row, column] >= required else average
         centre = _refine_center_subpixel(
-            conditional, float(column), float(row), half=refine_half
+            surface, float(column), float(row), half=refine_half
         )
         if all(
             (float(centre[0]) - float(other[0])) ** 2
@@ -962,10 +1016,14 @@ def detect_sites(
         raise ValueError("calibration frames contain no detectable sites")
 
     centers = np.asarray(centers_list, dtype="<f8")
-    # How far a site's count stands out of the noise count, in its own sigmas.
-    spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
+    # How far a site stands out of the noise, in its own sigmas -- by whichever
+    # evidence admitted it.  Reporting only the count would call a trap that is
+    # certain in the average a marginal one.
     quality = np.asarray(
-        [(float(hits[row, column]) - shots * false_rate) / spread for row, column in selected],
+        [
+            max(float(count_z[row, column]), float(average_z[row, column]))
+            for row, column in selected
+        ],
         dtype="<f8",
     )
     order = _stable_site_order(centers, separation)
