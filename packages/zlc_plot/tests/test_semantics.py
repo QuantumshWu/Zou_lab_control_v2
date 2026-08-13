@@ -44,22 +44,15 @@ def test_describe_semantics_is_registry_derived_and_marks_rebuild() -> None:
     )
     assert PlotKind.CURVE in description.kind_choices
     assert AxisRef.repeat() in description.axis_choices
-    assert description.field("group").value is None
+    assert description.fate(AxisRef.repeat()) == "reduce"
     assert all(field.rebuild for field in description.fields)
     controls = semantic_controls(description)
-    assert tuple(
-        control.name
-        for control in controls
-        if not control.name.startswith("scope:")
-    ) == (
-        "kind",
-        "x",
-        "group",
-        "reduction",
-    )
-    # An axis that already has a role is not offered a coordinate to be
-    # pinned to: one axis, one fate.
-    assert "scope:x" not in {control.name for control in controls}
+    # The editor IS the table: the kind, one row per axis, and how the axes
+    # nobody drew along are collapsed.
+    names = tuple(control.name for control in controls)
+    assert names[0] == "kind" and names[-1] == "reduction"
+    assert tuple(name for _axis, name in description.fate_rows) == names[1:-1]
+    assert description.fate(AxisRef.point("x")) == "x"
     assert all(control.semantic and control.rebuild for control in controls)
 
 
@@ -78,9 +71,9 @@ def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
     row = next(
         field
         for field in describe_semantics(schema, HistogramPlot()).fields
-        if field.name == "scope:row"
+        if field.name == "fate:row"
     )
-    assert (1.0, "1") in row.choices
+    assert (1.0, "= 1") in row.choices
 
     spec = updated_spec(schema, HistogramPlot(), row.name, 1.0)
     assert spec.scope == ((AxisRef.point("row"), 1.0),)
@@ -119,7 +112,12 @@ def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered(
     # Every offered kind is usable; here every admitted kind also has a
     # default, so the offered domain equals the admitted set.
     assert kind_field.choice_values == expected
-    assert description.field("group").choices[0] == (None, "(none)")
+    # Every axis row offers the fate an unassigned axis already has, so
+    # "none of the above" is a fate rather than a null.
+    assert all(
+        "reduce" in description.field(name).choice_values
+        for _axis, name in description.fate_rows
+    )
     assert description.field("reduction").choices[-1][1] == "first"
 
 def test_facet_domain_excludes_cell_axes() -> None:
@@ -138,7 +136,7 @@ def test_facet_domain_excludes_cell_axes() -> None:
         Axis.create("repeat", size=1), points, dtype=np.float64
     )
     description = describe_semantics(schema, spec)
-    facet_values = description.field("facet").choice_values
+    facet_values = description.axes_offering("facet")
     assert AxisRef.point("x") not in facet_values
     assert AxisRef.point("row") in facet_values
 
@@ -179,13 +177,13 @@ def test_series_x_and_group_choices_exclude_degenerate_axes() -> None:
 
     schema = _camera_frame_schema()
     description = describe_semantics(schema, CurvePlot(AxisRef.point("frame")))
-    x_values = description.field("x").choice_values
+    x_values = description.axes_offering("x")
     assert AxisRef.point("frame") in x_values  # the current state stays
     assert AxisRef.point_rows() not in x_values
     assert AxisRef.repeat() not in x_values
     assert AxisRef.data("spatial-y") in x_values
     assert AxisRef.data("spatial-x") in x_values
-    group_values = description.field("group").choice_values
+    group_values = description.axes_offering("group")
     assert AxisRef.point("frame") not in group_values
     assert AxisRef.point_rows() not in group_values
     assert AxisRef.repeat() not in group_values
@@ -200,7 +198,7 @@ def test_non_series_kinds_keep_degenerate_axes_where_legitimate() -> None:
         ImagePlot(AxisRef.data("spatial-x"), AxisRef.data("spatial-y")),
     )
     # An image is not a series; its axis domains stay the schema's own.
-    x_values = description.field("x").choice_values
+    x_values = description.axes_offering("x")
     assert AxisRef.data("spatial-x") in x_values
 
 
@@ -216,7 +214,7 @@ def test_facet_grid_series_cell_filters_its_x_domain_too() -> None:
         schema,
         FacetGridPlot(AxisRef.point("row"), CurvePlot(AxisRef.point("x"))),
     )
-    x_values = description.field("x").choice_values
+    x_values = description.axes_offering("x")
     assert AxisRef.repeat() not in x_values  # size 1 cannot carry a series
     assert AxisRef.point("x") in x_values
 

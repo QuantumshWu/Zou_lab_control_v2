@@ -51,11 +51,12 @@ def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
             labels = tuple(editor.itemText(index) for index in range(editor.count()))
             assert len(labels) == len(set(labels))
             assert all("AxisRef(" not in label for label in labels)
-        group = panel.semantic_editor("group")
-        assert group.itemText(0) == "(none)"
-        x = panel.semantic_editor("x")
-        # Choice labels name axis identities without unit suffixes.
-        assert "scan" in tuple(x.itemText(index) for index in range(x.count()))
+        # One row per axis: the row is NAMED after the axis and its options
+        # are what can become of it, the first being what it already is when
+        # nobody gave it a role.
+        scan = panel.semantic_editor("fate:scan")
+        assert scan.itemText(0) == "(reduced)"
+        assert "X axis" in tuple(scan.itemText(index) for index in range(scan.count()))
     finally:
         if panel is not None:
             panel.deleteLater()

@@ -29,21 +29,24 @@ def test_histogram_pools_the_whole_box() -> None:
 
 
 def test_histogram_spec_needs_no_axis_declaration() -> None:
-    """No axis takes a ROLE here -- but every axis can still be pinned.
+    """No axis takes a ROLE here -- and every axis still has a fate.
 
-    A histogram pools whatever box it is given; which box that is remains the
-    operator's to narrow, so the scope rows are present and the role rows are
-    not.
+    A histogram pools whatever box it is given, so every axis row offers
+    pooling and a coordinate to pin, and none of them offers a role.
     """
 
     spec = HistogramPlot()
     session = PlotSession(_snapshot(), spec)
     try:
-        names = tuple(field.name for field in session.describe_semantics().fields)
-        assert tuple(name for name in names if not name.startswith("scope:")) == (
-            "kind",
+        description = session.describe_semantics()
+        names = tuple(field.name for field in description.fields)
+        assert names[0] == "kind"
+        assert tuple(name for _axis, name in description.fate_rows) == names[1:]
+        assert all(
+            description.field(name).value == "pool"
+            for _axis, name in description.fate_rows
         )
-        assert all(name.startswith("scope:") for name in names[1:])
+        assert description.axes_offering("x") == ()
     finally:
         session.close()
 

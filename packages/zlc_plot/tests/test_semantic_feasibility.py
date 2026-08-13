@@ -123,9 +123,7 @@ def test_axis_identities_are_deduplicated() -> None:
         assert AxisRef.point("row") not in description.axis_choices
         assert AxisRef.point("col") not in description.axis_choices
         assert AxisRef.point_dimension("row") in description.axis_choices
-        labels = [
-            choice[1] for choice in description.field("x").choices
-        ]
+        labels = [description.field(name).label for _axis, name in description.fate_rows]
         assert len(labels) == len(set(labels))
     finally:
         session.close()
@@ -166,9 +164,9 @@ def test_curve_x_repeat_is_not_offered() -> None:
     snapshot = _grid_snapshot()
     session = PlotSession(snapshot, CurvePlot(AxisRef.point_dimension("col")))
     try:
-        field = session.describe_semantics().field("x")
-        assert AxisRef.repeat() not in field.choice_values
-        assert AxisRef.point_dimension("row") in field.choice_values
+        offering = session.describe_semantics().axes_offering("x")
+        assert AxisRef.repeat() not in offering
+        assert AxisRef.point_dimension("row") in offering
     finally:
         session.close()
 
@@ -183,11 +181,11 @@ def test_facet_pair_beyond_cell_cap_is_not_offered() -> None:
         ),
     )
     try:
-        field = session.describe_semantics().field("facet")
+        offering = session.describe_semantics().axes_offering("facet")
         # The single repeat (1 cell) is a usable facet; the col dimension is
         # the cell's x and is excluded from the facet domain.
-        assert AxisRef.repeat() in field.choice_values
-        assert AxisRef.point_dimension("col") not in field.choice_values
+        assert AxisRef.repeat() in offering
+        assert AxisRef.point_dimension("col") not in offering
     finally:
         session.close()
 
@@ -212,12 +210,17 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
     spec = CurvePlot(AxisRef.point("scan"), group=AxisRef.data("site"))
     session = PlotSession(snapshot, spec)
     try:
-        field = session.describe_semantics().field("group")
-        # Ungrouping and regrouping are real options again.
-        assert None in field.choice_values
-        assert AxisRef.repeat() in field.choice_values
+        description = session.describe_semantics()
+        # Ungrouping is saying what the axis becomes INSTEAD, and regrouping
+        # is a real option again.
+        assert "reduce" in description.field(
+            dict(description.fate_rows)[AxisRef.data("site")]
+        ).choice_values
+        assert AxisRef.repeat() in description.axes_offering("group")
 
-        session.replace_spec(updated_spec(schema, spec, "group", None))
+        session.replace_spec(
+            updated_spec(schema, spec, "fate:site", "reduce")
+        )
         assert len(session._payload.series) == 1
         np.testing.assert_allclose(
             np.asarray(session._payload.series[0].y.canonical),

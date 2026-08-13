@@ -599,7 +599,7 @@ def test_panel_save_annotation_roundtrip_keeps_canonical_units(tmp_path) -> None
         size="4x4",
         interval_ms=400,
         title="unit report",
-        semantic={"facet": AxisRef.point("site")},
+        semantic={"fate:site": "facet"},
         display={"value_display_unit": "mV"},
     )
     frozen = PanelFrozenData(state.signal, None, snapshot)

@@ -1793,8 +1793,18 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     semantic = {field["key"]: field for field in surface["semantic"]}
     display = {field["key"]: field for field in surface["display"]}
     assert "kind" not in semantic, "plot kind is fixed at Add Panel"
-    assert {"x", "y", "reduction"}.issubset(semantic)
-    assert semantic["x"]["choices"] and semantic["x"]["value"] is not None
+    # The edit surface is the fate table: one row per axis of the dataset,
+    # plus how the axes nobody drew along are collapsed.
+    assert "reduction" in semantic
+    fate_rows = {key for key in semantic if key.startswith("fate:")}
+    assert fate_rows, semantic
+    assert {"x", "y"} <= {
+        value for key in fate_rows for _label, value in semantic[key]["choices"]
+    }
+    assert all(
+        semantic[key]["choices"] and semantic[key]["value"] is not None
+        for key in fate_rows
+    )
     assert display["colormap"]["kind"] == "choice"
     assert display["colormap"]["choices"]
     assert display["title"]["allow_none"] is True
@@ -1877,10 +1887,12 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         presenter,
         lambda: not first.parameter_surface["semantic_unavailable"],
     )
+    # One row per axis, and the row that says an axis is drawn along y is as
+    # much of the board as a title is.
     semantic_field = next(
         field
         for field in first.parameter_surface["semantic"]
-        if not isinstance(field["value"], (str, bool, int, float, type(None)))
+        if str(field["key"]).startswith("fate:") and field["value"] == "y"
     )
     semantic_key = semantic_field["key"]
     semantic_value = semantic_field["value"]
@@ -2461,6 +2473,18 @@ def _semantic_choice(binding, name: str):
     return None
 
 
+def _fate_row_offering(binding, fate: str) -> str | None:
+    """The name of an axis row that can be given this fate."""
+
+    for entry in binding.parameter_surface["semantic"]:
+        key = str(entry["key"])
+        if not key.startswith("fate:"):
+            continue
+        if any(value == fate for _label, value in tuple(entry["choices"])):
+            return key
+    return None
+
+
 def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
     presenter, session
 ) -> None:
@@ -2486,25 +2510,29 @@ def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
         lambda: binding.state.cell_kind == "curve"
         and bool(binding.parameter_surface.get("semantic")),
     )
-    group = _semantic_choice(binding, "group")
-    assert group is not None, (
+    row = _fate_row_offering(binding, "group")
+    assert row is not None, (
         binding.state.cell_kind,
         binding.parameter_surface.get("semantic_unavailable"),
         tuple(str(entry["key"]) for entry in binding.parameter_surface["semantic"]),
     )
-    assert presenter.update_panel_state(binding.panel_id, {"semantic": {"group": group}})
-    _settle_panel_hosts(presenter, lambda: "group" in binding.state.semantic)
+    assert presenter.update_panel_state(binding.panel_id, {"semantic": {row: "group"}})
+    _settle_panel_hosts(presenter, lambda: row in binding.state.semantic)
 
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "histogram"}), (
         "an assignment authored under curve must not veto the histogram cell"
     )
     _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "histogram")
     assert binding.state.cell_kind == "histogram"
-    # The foreign assignment is kept, not destroyed: switching back restores it.
-    assert binding.state.semantic.get("group") == group
+    # An axis row is a question BOTH kinds answer, so the histogram's answer
+    # for that axis -- pooled, which is what a distribution does to every axis
+    # it is given -- is what the record now holds.  The record says what the
+    # panel IS; it does not carry an answer the current kind contradicts.
+    assert binding.state.semantic.get(row) == "pool"
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
     _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "curve")
-    assert binding.state.semantic.get("group") == group
+    assert binding.state.semantic.get(row) in {"pool", "reduce"}
+    assert binding.reported_error is None
 
 
 def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
@@ -2532,18 +2560,20 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
         lambda: binding.state.cell_kind == "curve"
         and bool(binding.parameter_surface.get("semantic")),
     )
-    vertical = None
-    for entry in binding.parameter_surface["semantic"]:
-        if str(entry["key"]) != "x":
-            continue
-        for _label, value in tuple(entry["choices"]):
-            if "spatial-y" in str(getattr(value, "axis_id", "")):
-                vertical = value
+    vertical = next(
+        (
+            str(entry["key"])
+            for entry in binding.parameter_surface["semantic"]
+            if str(entry["key"]) == "fate:spatial-y"
+            and any(value == "x" for _label, value in tuple(entry["choices"]))
+        ),
+        None,
+    )
     assert vertical is not None, "the curve cell must offer the y pixel axis as x"
     assert presenter.update_panel_state(
-        binding.panel_id, {"semantic": {"x": vertical}}
+        binding.panel_id, {"semantic": {vertical: "x"}}
     )
-    _settle_panel_hosts(presenter, lambda: binding.state.semantic.get("x") == vertical)
+    _settle_panel_hosts(presenter, lambda: binding.state.semantic.get(vertical) == "x")
 
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"}), (
         "an axis authored under curve must not veto the image cell"

@@ -106,6 +106,12 @@ class SemanticDescription:
     reduction: Reduction | None
     facet: AxisRef | None
     facet_max_cells: int
+    #: The table: which row belongs to which axis, in the order the rows are
+    #: offered.  A per-axis editor is asked per-axis questions -- "what became
+    #: of this axis", "which axes could take this role" -- and answering them
+    #: by re-deriving the row name from a label is how a second naming
+    #: convention gets invented.
+    fate_rows: tuple[tuple[AxisRef, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PlotKind):
@@ -300,6 +306,30 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
     return str(axis.name)
 
 
+#: The vocabulary of what can become of one axis.  Exactly one of these is
+#: true of every axis of the dataset at every moment, which is the whole point
+#: of saying it per axis instead of per role: a role picker can leave an axis
+#: unaccounted for, or claim two at once, and then the panel has to invent a
+#: repair the operator never asked for.
+FATE_PREFIX = "fate:"
+ROLE_FATES = ("x", "y", "group", "facet")
+#: The one role a plot can do without.  Vacating it means there is nothing to
+#: split by; vacating a required one means SOMETHING has to be drawn along, so
+#: the kind's own default steps in.
+OPTIONAL_ROLES = frozenset({"group"})
+#: What becomes of an axis nobody gave a role to.  Which of the two it is, is
+#: the KIND's to say and not the operator's: a distribution pools everything
+#: it is given -- that is what a distribution IS -- and every other kind
+#: collapses what it does not draw along.
+_ROLE_LABELS = {
+    "x": "X axis",
+    "y": "Y axis",
+    "group": "Group",
+    "facet": "Facet",
+}
+FATE_REDUCE = "reduce"
+FATE_POOL = "pool"
+
 #: A scope row is named after the axis it pins, so a saved panel restores
 #: the same rows by name even as the kind changes underneath them.
 SCOPE_PREFIX = "scope:"
@@ -315,8 +345,37 @@ def scope_field_name(label: str) -> str:
     return f"{SCOPE_PREFIX}{label}"
 
 
+def fate_field_name(label: str) -> str:
+    return f"{FATE_PREFIX}{label}"
+
+
+def _default_fate(spec: PlotSpec) -> str:
+    return FATE_POOL if semantic_spec(spec).kind is PlotKind.HISTOGRAM else FATE_REDUCE
+
+
+def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
+    """What this specification has already made of one axis."""
+
+    semantic = semantic_spec(spec)
+    for role in ("x", "y", "group"):
+        if getattr(semantic, role, None) == ref:
+            return role
+    if isinstance(spec, FacetGridPlot) and spec.facet == ref:
+        return "facet"
+    scope = _scope_terms(spec)
+    if ref in scope:
+        return float(scope[ref])
+    return _default_fate(spec)
+
+
 def _scope_terms(spec: PlotSpec) -> dict[AxisRef, float]:
     return dict(getattr(spec, "scope", ()))
+
+
+def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
+    if role == "facet":
+        return spec.facet if isinstance(spec, FacetGridPlot) else None
+    return getattr(semantic_spec(spec), role, None)
 
 
 def _scope_axis(schema: DatasetSchema | None, label: str) -> AxisRef:
@@ -454,6 +513,64 @@ def composed_spec(
             scope.pop(axis, None)
         else:
             scope[axis] = float(value)
+    # A fate row says what becomes of ONE axis; the roles are what the plot
+    # kinds are written in.  Translating here means the collision rules, the
+    # facet routing and the labels all stay in one place and the table is a
+    # way of SAYING the edit rather than a second way of composing it.
+    for name in tuple(rest):
+        if not name.startswith(FATE_PREFIX):
+            continue
+        value = rest.pop(name)
+        axis = _scope_axis(schema, name[len(FATE_PREFIX) :])
+        previous = _fate_of(spec, axis)
+        scope.pop(axis, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            scope[axis] = float(value)
+            role_now = previous if previous in ROLE_FATES else None
+        elif value in (FATE_REDUCE, FATE_POOL):
+            role_now = previous if previous in ROLE_FATES else None
+        elif value in ROLE_FATES:
+            role_now = None
+            # Whoever held this role takes what this axis was: two axes
+            # trading places is ONE gesture, and making the operator vacate a
+            # role first would mean passing through a state with no x.
+            displaced = _role_holder(spec, str(value))
+            rest[str(value)] = axis
+            if displaced is not None and displaced != axis:
+                if previous in ROLE_FATES:
+                    rest[str(previous)] = displaced
+                elif isinstance(previous, (int, float)):
+                    scope[displaced] = float(previous)
+        else:
+            raise ValueError(f"unknown fate {value!r} for axis {name!r}")
+        if role_now in OPTIONAL_ROLES:
+            rest[role_now] = None
+        elif role_now is not None:
+            # The axis has left a role the kind still needs filled.  The
+            # repair is the kind's own default for this dataset, which is
+            # deterministic and is what an operator sees when they add the
+            # panel in the first place.
+            fallback = default_spec(schema, candidate.kind)
+            preferred = None if fallback is None else _role_holder(fallback, role_now)
+            taken = {
+                _role_holder(spec, other)
+                for other in ROLE_FATES
+                if other != role_now
+            }
+            taken.add(axis)
+            replacement = next(
+                (
+                    ref
+                    for ref in (preferred, *axis_choices_for_schema(schema))
+                    if ref is not None and ref not in taken
+                ),
+                None,
+            )
+            if replacement is None:
+                raise ValueError(
+                    f"{role_now} cannot be vacated: this dataset offers no other axis for it"
+                )
+            rest[role_now] = replacement
 
     def _settled(candidate: PlotSpec) -> PlotSpec:
         """Attach the scope to the FINISHED candidate and repair the conflict.
@@ -509,6 +626,32 @@ def composed_spec(
     else:
         candidate = replace(candidate, **rest)
     return _settled(candidate)
+
+
+def _description_fate(self: "SemanticDescription", axis: AxisRef) -> object:
+    """What this configuration made of one axis."""
+
+    name = dict(self.fate_rows).get(axis)
+    if name is None:
+        raise KeyError(axis)
+    return self.field(name).value
+
+
+def _description_axes_offering(
+    self: "SemanticDescription",
+    fate: object,
+) -> tuple[AxisRef, ...]:
+    """Every axis whose row offers this fate -- the table read by column."""
+
+    return tuple(
+        axis
+        for axis, name in self.fate_rows
+        if any(value == fate for value in self.field(name).choice_values)
+    )
+
+
+SemanticDescription.fate = _description_fate  # type: ignore[attr-defined]
+SemanticDescription.axes_offering = _description_axes_offering  # type: ignore[attr-defined]
 
 
 SemanticFeasibility = Callable[[str, object], "str | None"]
@@ -639,67 +782,46 @@ def describe_semantics(
             values = (*values, current)
         return _choice_pairs(values, lambda value: _axis_label(schema, value))
 
+    declared = _field_names(spec)
     fields: list[SemanticField] = []
-    for name in _field_names(spec):
-        if name == "kind":
-            fields.append(_field(name, "Plot kind", spec.kind, kind_choices, True))
-        elif name == "x":
-            fields.append(
-                _field(name, "X axis", x, _axes_with_current(x, series_axes), True)
-            )
-        elif name == "y":
-            fields.append(_field(name, "Y axis", y, _axes_with_current(y), True))
-        elif name == "group":
-            fields.append(
-                _field(
-                    name,
-                    "Group",
-                    group,
-                    ((None, "(none)"), *_axes_with_current(group, series_axes)),
-                    False,
-                )
-            )
-        elif name == "reduction":
-            fields.append(
-                _field(
-                    name,
-                    "Reduction",
-                    reduction,
-                    _choice_pairs(tuple(Reduction), lambda value: value.value),
-                    True,
-                )
-            )
-        elif name == "facet":
-            current = spec.facet if isinstance(spec, FacetGridPlot) else None
-            choices = _choice_pairs(
-                (*facet_axes, current) if current is not None else facet_axes,
-                lambda value: _axis_label(schema, value),
-            )
-            fields.append(_field(name, "Facet", current, choices, True))
-        else:
-            raise RuntimeError(f"kind registry declared unknown semantic field {name!r}")
-    # One row per axis that can be pinned, after the rows that give axes their
-    # roles: an axis is either drawn along, grouped by, faceted over or pinned
-    # to one coordinate, and these rows are where the last of those is said.
-    # A scope value cannot make a specification inadmissible -- it names a
-    # coordinate the axis already has -- so these rows are not probed, which
-    # also keeps a forty-site axis from costing forty projections to describe.
-    scope = dict(getattr(spec, "scope", ()))
-    used = {x, y, group, spec.facet if isinstance(spec, FacetGridPlot) else None}
+    fields.append(_field("kind", "Plot kind", spec.kind, kind_choices, True))
+    # ONE ROW PER AXIS.  A role picker asks "which axis is x", which is the
+    # question backwards: it can leave an axis unaccounted for, or be asked to
+    # put two axes in one role, and then the panel repairs something the
+    # operator never said.  Asked per axis, every axis has exactly one answer
+    # at every moment and the table IS the configuration.
+    fate_rows: list[tuple[AxisRef, str]] = []
+    default_fate = _default_fate(spec)
+    default_label = "pooled" if default_fate == FATE_POOL else "reduced"
+    roles = tuple(role for role in ROLE_FATES if role in declared)
     for ref in axes:
-        if ref in used:
-            continue
-        choices = _scope_coordinates(schema, ref)
-        if choices is None:
-            continue
-        current = scope.get(ref)
+        label = _axis_label(schema, ref)
+        name = fate_field_name(label)
+        current = _fate_of(spec, ref)
+        offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
+        for role in roles:
+            if role in ("x", "group") and ref not in series_axes and current != role:
+                # A series is drawn ALONG its x and split BY its group; a
+                # size-one axis carries neither -- one invisible point, or one
+                # redundant split.
+                continue
+            if role == "facet" and ref not in facet_axes and current != "facet":
+                continue
+            if _reason(name, role) is None or current == role:
+                offered.append((role, _ROLE_LABELS[role]))
+        pins = _scope_coordinates(schema, ref)
+        if pins is not None:
+            offered.extend((value, f"= {text}") for value, text in pins)
+        fields.append(SemanticField(name, label, current, tuple(offered), True))
+        fate_rows.append((ref, name))
+    if "reduction" in declared:
         fields.append(
-            SemanticField(
-                scope_field_name(_axis_label(schema, ref)),
-                f"{_axis_label(schema, ref)} =",
-                current,
-                ((None, "(all)"), *choices),
-                False,
+            _field(
+                "reduction",
+                "Reduction",
+                reduction,
+                _choice_pairs(tuple(Reduction), lambda value: value.value),
+                True,
             )
         )
     offered_kinds = next(
@@ -716,6 +838,7 @@ def describe_semantics(
         reduction=reduction,
         facet=spec.facet if isinstance(spec, FacetGridPlot) else None,
         facet_max_cells=layout.facet_max_cells,
+        fate_rows=tuple(fate_rows),
     )
 
 
