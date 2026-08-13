@@ -566,8 +566,24 @@ class DcamCameraAdapter:
         self,
         available: int,
         newest: int,
-        deadline: float,
     ) -> None:
+        """Copy out the frames the sensor has ALREADY produced.
+
+        No deadline governs this.  A read's timeout says how long to wait for
+        a frame; it does not say how long a frame that has already arrived may
+        take to copy -- that is work which must finish, because the ring will
+        overwrite what is not copied out of it.  Enforcing the read deadline
+        here made the two indistinguishable, and a frame arriving near the end
+        of a read window was then reported as a timeout INSTEAD of being
+        returned: with a 50 ms monitor slice and a several-hundred-ms cycle,
+        that is every cycle, which is how "the deadline expired before frame
+        commit" came to greet a measurement that had just started.
+
+        The work is bounded without a clock: the snapshot names how many
+        frames to copy, and the loop stops there.  Cancellation still lands
+        immediately, through the finishing checks between copies.
+        """
+
         if available - self._copied_count > self._ring_size:
             raise RuntimeError("qCMOS ring overrun overwrote an unread frame")
         device = self._require_device()
@@ -575,8 +591,6 @@ class DcamCameraAdapter:
         snapshot_newest = newest
         while self._copied_count < snapshot_available:
             self._check_not_finishing()
-            if time.monotonic() >= deadline:
-                raise TimeoutError("qCMOS read deadline expired while draining the ring")
             ordinal = self._copied_count
             distance = snapshot_available - 1 - ordinal
             ring_index = (snapshot_newest - distance) % self._ring_size
@@ -601,8 +615,6 @@ class DcamCameraAdapter:
                 driver_buffer_index=ring_index,
             )
             self._check_not_finishing()
-            if time.monotonic() >= deadline:
-                raise TimeoutError("qCMOS read deadline expired before frame commit")
             with self._state_lock:
                 self._pending.append(record)
                 self._copied_count += 1
@@ -628,11 +640,7 @@ class DcamCameraAdapter:
             available, newest = self._observe_transfer_on_owner()
             if available > self._copied_count:
                 assert newest is not None
-                self._drain_snapshot_on_owner(
-                    available,
-                    newest,
-                    deadline,
-                )
+                self._drain_snapshot_on_owner(available, newest)
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:

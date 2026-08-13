@@ -278,6 +278,35 @@ def test_every_copy_rechecks_ring_overwrite(exact: bool) -> None:
         adapter.close()
 
 
+def test_a_frame_that_has_arrived_is_never_lost_to_the_read_window() -> None:
+    """The timeout says how long to WAIT, not how long a copy may take.
+
+    A monitor polls with a short window on purpose -- that window is its
+    cancel latency.  When the deadline also governed copying frames out of the
+    ring, a frame that arrived near the end of one poll was reported as
+    "qCMOS read deadline expired before frame commit" instead of being
+    returned, which on a several-hundred-millisecond cycle is every cycle.
+    """
+
+    driver = _FakeDcamDriver()
+    adapter = DcamCameraAdapter(_config(), driver=driver)
+    try:
+        adapter.arm(
+            None,
+            source_group_sizes=(1,),
+            buffer_frame_count=2,
+            timeout=1.0,
+        )
+        driver.device.publish((77,), newest=0)
+        # A window that has already closed: the frame is in the ring, so it
+        # comes back rather than raising.
+        records = adapter.read_frame_records(1, timeout=0.0, exact=False)
+        assert [int(record.image[0, 0]) for record in records] == [77]
+    finally:
+        adapter.finish_record_capture()
+        adapter.close()
+
+
 def test_transfer_count_rollback_fails_loudly() -> None:
     driver = _FakeDcamDriver()
     adapter = DcamCameraAdapter(_config(), driver=driver)
