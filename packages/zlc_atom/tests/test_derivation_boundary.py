@@ -146,8 +146,12 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     # (repeat, point, site): one cycle, `windows` frame POINTS inherited from
     # the camera publication, one site of CELL data per frame.
     assert different_outputs["counts"].snapshot.block.values.shape == (1, windows, 1)
+    # A run may crop the sensor differently from the calibration.  Where a
+    # trap IS, is a fact about the SENSOR, so a crop one pixel to the side
+    # numbers the same places differently and the calibration is read against
+    # it -- it is not a different apparatus.
     x, y, width, height = frame_contract.roi_xywh
-    structurally_incompatible = TrapCalibration(
+    shifted = TrapCalibration(
         calibration.site_map,
         calibration.models,
         calibration.default_model_kind,
@@ -158,13 +162,71 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             binning_yx=frame_contract.binning_yx,
         ),
     )
-    structural_path = structurally_incompatible.save(tmp_path / "structural.json")
-    structural_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(structural_path),
+    shifted_path = shifted.save(tmp_path / "shifted.json")
+    shifted_processor = OCCUPANCY_LOGIC_NODE.instantiate(
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(shifted_path),
         source_signal=source_name,
     )
-    with pytest.raises(ValueError, match="ROI origin"):
-        structural_processor.evaluate(source)
+    shifted_outputs = shifted_processor.evaluate(source)
+    assert shifted_outputs["counts"].snapshot.block.values.shape == (1, windows, 1)
+    assert shifted_processor.readout.site_map.centers_xy[0][0] == (
+        calibration.site_map.centers_xy[0][0] + 1
+    )
+
+    # The bench case: a run that takes a SMALLER crop than the calibration was
+    # measured on.  The frame shape then differs too, and checking it before
+    # the run record had been read compared it against the crop the
+    # calibration was measured on -- "frame shape (h, w) differs from the crop
+    # this readout is placed against (H, W)" -- with the translation that
+    # answers it computed one line too late.
+    height, width = frame_contract.image_shape
+    wider = TrapCalibration(
+        calibration.site_map,
+        calibration.models,
+        calibration.default_model_kind,
+        FrameContract(
+            (height + 4, width + 4),
+            sensor_shape=None,
+            roi_xywh=(x, y, width + 4, height + 4),
+            binning_yx=frame_contract.binning_yx,
+        ),
+    )
+    wider_path = wider.save(tmp_path / "wider.json")
+    wider_processor = OCCUPANCY_LOGIC_NODE.instantiate(
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(wider_path),
+        source_signal=source_name,
+    )
+    wider_outputs = wider_processor.evaluate(source)
+    assert wider_outputs["counts"].snapshot.block.values.shape == (1, windows, 1)
+    assert wider_processor.readout.frame_contract.image_shape == (height, width)
+    # Same origin, so the sites do not move; what changes is how much of the
+    # sensor the run is looking at, and the readout now knows it.
+    assert wider_processor.readout.site_map.centers_xy[0][0] == (
+        calibration.site_map.centers_xy[0][0]
+    )
+
+    # What IS refused is a crop that does not cover the sites: reading a box
+    # that runs off the edge would return a number that looks like a
+    # measurement.  Refused by name, so an operator knows which traps moved
+    # out of the picture.
+    uncovered = TrapCalibration(
+        calibration.site_map,
+        calibration.models,
+        calibration.default_model_kind,
+        FrameContract(
+            frame_contract.image_shape,
+            sensor_shape=None,
+            roi_xywh=(x + width, y, width, height),
+            binning_yx=frame_contract.binning_yx,
+        ),
+    )
+    uncovered_path = uncovered.save(tmp_path / "uncovered.json")
+    uncovered_processor = OCCUPANCY_LOGIC_NODE.instantiate(
+        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(uncovered_path),
+        source_signal=source_name,
+    )
+    with pytest.raises(ValueError, match="does not cover"):
+        uncovered_processor.evaluate(source)
     wake = Event()
     host = NodeHost(processor, plane, wake.set)
 

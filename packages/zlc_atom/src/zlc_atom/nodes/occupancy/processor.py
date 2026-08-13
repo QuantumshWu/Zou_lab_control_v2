@@ -395,8 +395,15 @@ class OccupancyProcessor:
         if not isinstance(signal_value, SignalValue):
             raise TypeError("occupancy evaluate requires zlc_runtime.SignalValue")
         snapshot = signal_value.snapshot
-        self._source_point_column(snapshot)
+        # WHERE the calibration sits comes first.  Every check below is made
+        # against the crop this run is taking, and that crop is a fact carried
+        # by the run record -- so reading it is not a validation step, it is
+        # what the validation is done against.  Checked in the other order,
+        # the frame shape was compared with the crop the calibration was
+        # MEASURED on and a run that had moved its ROI was refused before the
+        # translation it needed had been computed.
         self._validate_source_run_record(signal_value)
+        self._source_point_column(snapshot)
         result = self.process(snapshot, **inherited_stamps(snapshot))
         return self._live_outputs(
             result,
