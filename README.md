@@ -45,6 +45,16 @@ Run them from your experiment folder — the one holding `pulses\`, `data\` and
 `apparatus.json`. They are deliberately not passed a workspace: a
 double-clicked launcher starts in `bin\`, which is nobody's experiment.
 
+They find Python themselves, and print which one they found: PATH first,
+then conda's base and the usual Anaconda / Miniconda / python.org install
+folders. Anaconda in particular recommends staying off PATH, and a machine
+equipped that way is still a machine with Python on it. If yours lives
+somewhere else, say so once and every launcher obeys:
+
+```
+setx ZLC_PY_CMD "C:\Users\you\anaconda3\python.exe"
+```
+
 ## Nothing is installed, and that is deliberate
 
 This checkout is not `pip install`ed.  The code is reached by PATH: every
