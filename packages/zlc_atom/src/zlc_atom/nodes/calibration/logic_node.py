@@ -157,13 +157,6 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             minimum=1e-9,
         ),
         AuthoringField(
-            "detection_min_distance",
-            "int",
-            "Detection minimum distance",
-            3,
-            minimum=1,
-        ),
-        AuthoringField(
             "detection_sigma",
             "float",
             "Detection threshold sigma",
@@ -216,7 +209,6 @@ def _build(
             psf_half_width=int(authored["psf_half_width"]),
             psf_padding=int(authored["psf_padding"]),
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
-            detection_min_distance=int(authored["detection_min_distance"]),
             detection_sigma=float(authored["detection_sigma"]),
         ),
         pulse_sequence=pulse_resource.value,

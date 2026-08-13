@@ -173,7 +173,6 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         psf_half_width=3,
         psf_padding=3,
         detection_spot_sigma=1.0,
-        detection_min_distance=3,
         detection_sigma=6.0,
     )
 
@@ -557,7 +556,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "psf_half_width",
             "psf_padding",
             "detection_spot_sigma",
-            "detection_min_distance",
             "detection_sigma",
         )
         assert descriptors["calibration"].authoring_schema.project_values({})[

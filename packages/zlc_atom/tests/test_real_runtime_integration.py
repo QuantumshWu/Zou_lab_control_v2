@@ -57,7 +57,6 @@ def _calibration_request() -> CalibrationRequest:
         psf_half_width=3,
         psf_padding=3,
         detection_spot_sigma=1.0,
-        detection_min_distance=3,
         detection_sigma=6.0,
     )
 

@@ -693,7 +693,6 @@ def detect_sites(
     frames: object,
     *,
     spot_sigma: float = 1.0,
-    min_distance: int = 3,
     detection_sigma: float = 4.0,
 ) -> SiteMap:
     """Discover every resolvable site from how often it lights up.
@@ -734,13 +733,28 @@ def detect_sites(
         raise ValueError("frames must be a non-empty finite stack of 2D images")
     spot_sigma = float(spot_sigma)
     detection_sigma = float(detection_sigma)
-    min_distance = int(min_distance)
     if spot_sigma <= 0 or not np.isfinite(spot_sigma):
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
-    if min_distance <= 0:
-        raise ValueError("min_distance must be positive")
+    # Two lengths, both the spot's, each for its own job.  They replace an
+    # authored `min_distance` of 3 px: a number with no relation to the
+    # optics, which an operator had no way to choose, and which decided both
+    # of these jobs at once.
+    #
+    # `peak_window` is the scale over which a spot is ONE peak -- its full
+    # width at half maximum, 2.355 sigma, rounded up to an odd pixel count.
+    # `separation` is how far apart two PUBLISHED centres must be to be two
+    # measurements: a sigma, because two boxes closer than that read the same
+    # light.  It is deliberately small.  A lattice whose sites sit four
+    # pixels apart is perfectly resolvable at sigma 1, and an exclusion
+    # chosen for comfort rather than for the optics merges its real sites --
+    # measured: 38 placed, 20 found, when the separation was the full width.
+    # What removes an extra maximum on ONE spot is not distance either: it is
+    # that it refines onto a centre already taken (below), which measured
+    # 0.11 px away from the first.
+    peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
+    separation = max(2.0, float(spot_sigma))
 
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     hits = np.zeros(stack.shape[1:], dtype=np.int64)
@@ -795,7 +809,30 @@ def detect_sites(
     # Where a site is, refined on how bright the place is WHEN it is lit: the
     # one image in a run whose contrast does not depend on loading.
     conditional = lit_response / np.maximum(hits, 1)
-    local_maxima = hits == ndimage.maximum_filter(hits, size=3, mode="nearest")
+    # A candidate must be a peak of BOTH maps, over the same distance.
+    #
+    # The count alone is not enough: in every frame where two neighbouring
+    # traps are both loaded, the pixels between them are lifted by both, clear
+    # that frame's cut, and collect a sighting.  Those sightings are as real
+    # as any other and they accumulate into a genuine local maximum of the
+    # count, sitting in the gap.  What the gap cannot do is be as bright as
+    # its neighbours WHEN LIT -- it is their tails, and they are their peaks.
+    # Conditional brightness is also loading-independent, so requiring it
+    # costs a dim trap nothing: a trap loaded a twentieth of the time is just
+    # as bright on the shots where it is loaded.
+    local_maxima = hits == ndimage.maximum_filter(
+        hits, size=peak_window, mode="nearest"
+    )
+    brightest = conditional == ndimage.maximum_filter(
+        conditional, size=peak_window, mode="nearest"
+    )
+    # Adjacent, not identical: noise puts the count's peak and the
+    # brightness's peak on neighbouring pixels of the same spot often enough
+    # that demanding one pixel lost real sites -- measured, two of thirty-eight
+    # on a dense lattice, each with a brightness peak one pixel from its count
+    # peak.  A spot is one place; a gap between two traps is four or more
+    # pixels from either of their peaks and is excluded either way.
+    local_maxima &= ndimage.binary_dilation(brightest, structure=np.ones((3, 3)))
     # A site has to be a place the picture actually shows: within a spot's
     # reach of the border there is no background to compare against, and the
     # filters invent one by extending the edge, which biases every frame the
@@ -815,34 +852,36 @@ def detect_sites(
             int(item[1]),
         ),
     )
+    # Refine BEFORE separating, so the rule holds on the coordinates that are
+    # published.  Subpixel refinement moves a centre by up to a pixel, and two
+    # centres that were far enough apart as integer peaks could be brought
+    # inside each other -- which is what drew overlapping rings on the report.
+    refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
     selected: list[tuple[int, int]] = []
+    centers_list: list[np.ndarray] = []
     for row, column in ranked:
-        point = (int(row), int(column))
+        centre = _refine_center_subpixel(
+            conditional, float(column), float(row), half=refine_half
+        )
         if all(
-            (point[0] - other[0]) ** 2 + (point[1] - other[1]) ** 2 >= min_distance**2
-            for other in selected
+            (float(centre[0]) - float(other[0])) ** 2
+            + (float(centre[1]) - float(other[1])) ** 2
+            >= separation**2
+            for other in centers_list
         ):
-            selected.append(point)
+            selected.append((int(row), int(column)))
+            centers_list.append(centre)
     if not selected:
         raise ValueError("calibration frames contain no detectable sites")
 
-    refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
-    centers = np.asarray(
-        [
-            _refine_center_subpixel(
-                conditional, float(column), float(row), half=refine_half
-            )
-            for row, column in selected
-        ],
-        dtype="<f8",
-    )
+    centers = np.asarray(centers_list, dtype="<f8")
     # How far a site's count stands out of the noise count, in its own sigmas.
     spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
     quality = np.asarray(
         [(float(hits[row, column]) - shots * false_rate) / spread for row, column in selected],
         dtype="<f8",
     )
-    order = _stable_site_order(centers, float(min_distance))
+    order = _stable_site_order(centers, separation)
     centers = centers[order]
     quality = quality[order]
     site_ids = tuple(f"site_{index:04d}" for index in range(len(centers)))
@@ -1165,7 +1204,6 @@ def calibrate(
     psf_half_width: int = 3,
     psf_padding: int = 3,
     detection_spot_sigma: float = 1.0,
-    detection_min_distance: int = 3,
     detection_sigma: float = 6.0,
     train_fraction: float = 0.9,
     split_seed: int = 0,
@@ -1200,7 +1238,6 @@ def calibrate(
     site_map = detect_sites(
         references.reshape(-1, *references.shape[2:]),
         spot_sigma=detection_spot_sigma,
-        min_distance=detection_min_distance,
         detection_sigma=detection_sigma,
     )
     centers = site_map.centers_xy

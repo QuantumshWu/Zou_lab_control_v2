@@ -110,7 +110,6 @@ class CalibrationRequest:
     psf_half_width: int
     psf_padding: int
     detection_spot_sigma: float
-    detection_min_distance: int
     detection_sigma: float
 
     def __post_init__(self) -> None:
@@ -165,9 +164,6 @@ class CalibrationRequest:
             self.detection_spot_sigma,
             "detection_spot_sigma",
         )
-        detection_min_distance = int(self.detection_min_distance)
-        if detection_min_distance <= 0:
-            raise ValueError("detection_min_distance must be positive")
         detection_sigma = _positive_float(self.detection_sigma, "detection_sigma")
         object.__setattr__(self, "camera_key", camera_key)
         object.__setattr__(self, "sequencer_key", sequencer_key)
@@ -184,7 +180,6 @@ class CalibrationRequest:
         object.__setattr__(self, "psf_half_width", psf_half_width)
         object.__setattr__(self, "psf_padding", psf_padding)
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
-        object.__setattr__(self, "detection_min_distance", detection_min_distance)
         object.__setattr__(self, "detection_sigma", detection_sigma)
 
     def to_dict(self) -> dict[str, object]:
@@ -205,7 +200,6 @@ class CalibrationRequest:
             "psf_half_width": self.psf_half_width,
             "psf_padding": self.psf_padding,
             "detection_spot_sigma": self.detection_spot_sigma,
-            "detection_min_distance": self.detection_min_distance,
             "detection_sigma": self.detection_sigma,
         }
 
@@ -905,7 +899,6 @@ class CalibrationTask:
             psf_half_width=self.request.psf_half_width,
             psf_padding=self.request.psf_padding,
             detection_spot_sigma=self.request.detection_spot_sigma,
-            detection_min_distance=self.request.detection_min_distance,
             detection_sigma=self.request.detection_sigma,
         )
 
