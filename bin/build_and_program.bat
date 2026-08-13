@@ -222,7 +222,12 @@ rem the configured board.  Python was resolved once at the build boundary above.
 if not "%ZLC_PS_FPGA_PART%"=="" goto :zlc_resolve_part_done
 set "ZLC_CFG_JSON=%REPO_ROOT%\fpga\board_config\streamer_config.json"
 if not exist "%ZLC_CFG_JSON%" goto :zlc_resolve_part_done
-for /f "delims=" %%I in ('%ZLC_PY_CMD% -c "import json;print(json.load(open(r'%ZLC_CFG_JSON%'))['fpga_part'])" 2^>nul') do set "ZLC_PS_FPGA_PART=%%I"
+rem Through a file, not for /f: cmd re-parses the command inside for /f and
+rem eats the quotes around an interpreter given as a full path.
+set "ZLC_PART_FILE=%TEMP%\zlc_fpga_part.txt"
+%ZLC_PY_CMD% -c "import json;print(json.load(open(r'%ZLC_CFG_JSON%'))['fpga_part'])" > "%ZLC_PART_FILE%" 2>nul
+if exist "%ZLC_PART_FILE%" set /p ZLC_PS_FPGA_PART=<"%ZLC_PART_FILE%"
+del "%ZLC_PART_FILE%" >nul 2>&1
 :zlc_resolve_part_done
 if not "%ZLC_PS_FPGA_PART%"=="" echo ZLC synthesis part: %ZLC_PS_FPGA_PART% (from streamer_config.json / env)
 exit /b 0

@@ -34,7 +34,15 @@ echo ZOU LAB CONTROL - install requirements
 echo Interpreter: %ZLC_PY_CMD%
 echo ============================================================
 
-for /f "usebackq delims=" %%D in (`%ZLC_PY_CMD% -c "import tomllib;print(' '.join(tomllib.load(open(r'%ZLC_HOME%\pyproject.toml','rb'))['project']['dependencies']))"`) do set "ZLC_DEPS=%%D"
+rem Asked the way every other line here calls Python.  Inside for /f the
+rem command is re-parsed by cmd, which eats the quotes around an
+rem interpreter given as a full path -- and a full path is exactly what a
+rem machine without Python on PATH resolves to.  The capture came back
+rem empty and this said the dependency list could not be read.
+set "ZLC_DEPS_FILE=%TEMP%\zlc_dependencies.txt"
+%ZLC_PY_CMD% -c "import tomllib;print(' '.join(tomllib.load(open(r'%ZLC_HOME%\pyproject.toml','rb'))['project']['dependencies']))" > "%ZLC_DEPS_FILE%"
+if exist "%ZLC_DEPS_FILE%" set /p ZLC_DEPS=<"%ZLC_DEPS_FILE%"
+del "%ZLC_DEPS_FILE%" >nul 2>&1
 
 if not defined ZLC_DEPS (
   echo could not read the dependency list from pyproject.toml
