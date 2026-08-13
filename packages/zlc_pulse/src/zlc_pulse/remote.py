@@ -10,7 +10,13 @@ can use the same connection at any time.
 
 from __future__ import annotations
 
-from .endpoint import DEFAULT_BIND_HOST, DEFAULT_HOST, DEFAULT_PORT
+from .endpoint import (
+    DEFAULT_BIND_HOST,
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_REQUEST_TIMEOUT,
+)
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
@@ -280,11 +286,24 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
             "CLIENT HOST NOTE",
             detail="0.0.0.0 is listen-only; use 127.0.0.1 locally or a listed LAN address remotely",
         )
+        # Said here because this is the machine that can act on it, and said
+        # with the interpreter's own path because a Windows firewall rule is
+        # per-program: a rule made for a previous Python does not cover this
+        # one, which is why the same LAN that worked before starts timing out
+        # after the server moves interpreters.
+        _server_log(
+            "FIREWALL NOTE",
+            detail=_log_fields(
+                allow_inbound_program=sys.executable,
+                port=port,
+                note="another machine timing out is almost always blocked HERE, on the private network",
+            ),
+        )
     _server_log(
         "CLIENT CONNECT EXAMPLE",
         detail=(
             f'same_computer=RemotePulseStreamer("{same_computer_host}", {port}, '
-            "request_timeout=30.0, poll_interval=0.01)"
+            f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g}, poll_interval=0.01)"
         ),
     )
     if other_computer_hosts:
@@ -295,7 +314,7 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
             "CLIENT CONNECT EXAMPLE",
             detail=(
                 f'other_computer=RemotePulseStreamer("{other_computer_hosts[0]}", {port}, '
-                "request_timeout=30.0, poll_interval=0.01)"
+                f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g}, poll_interval=0.01)"
             ),
         )
     else:
@@ -898,7 +917,8 @@ class RemotePulseStreamer:
         host: str,
         port: int,
         *,
-        request_timeout: float = 5.0,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         poll_interval: float = 0.01,
     ) -> None:
         if not host:
@@ -907,11 +927,14 @@ class RemotePulseStreamer:
             raise ValueError("remote port is outside the TCP range")
         if request_timeout <= 0 or not math.isfinite(float(request_timeout)):
             raise ValueError("request_timeout must be finite and positive")
+        if connect_timeout <= 0 or not math.isfinite(float(connect_timeout)):
+            raise ValueError("connect_timeout must be finite and positive")
         if poll_interval <= 0 or not math.isfinite(float(poll_interval)):
             raise ValueError("poll_interval must be finite and positive")
         self.host = str(host)
         self.port = int(port)
         self.request_timeout = float(request_timeout)
+        self.connect_timeout = float(connect_timeout)
         self.poll_interval = float(poll_interval)
         self._socket: socket.socket | None = None
         self._request_id = 0
@@ -1011,7 +1034,27 @@ class RemotePulseStreamer:
     def _connect_locked(self) -> None:
         if self._socket is not None:
             return
-        self._socket = socket.create_connection((self.host, self.port), timeout=self.request_timeout)
+        try:
+            self._socket = socket.create_connection(
+                (self.host, self.port), timeout=self.connect_timeout
+            )
+        except OSError as exc:
+            # Reaching the server and being answered by it are different
+            # failures and an operator acts on them differently, but both
+            # used to arrive as a bare "timed out" -- a description of the
+            # clock rather than of what is wrong.
+            if isinstance(exc, ConnectionRefusedError):
+                reason = "the machine is up but nothing is listening on that port"
+            else:
+                reason = (
+                    "the connection itself was never answered, which is what a firewall "
+                    "does to an inbound port -- on the server machine, allow its python.exe "
+                    "on the private network"
+                )
+            raise ConnectionError(
+                f"could not reach a pulse server at {self.host}:{self.port} "
+                f"within {self.connect_timeout:g}s: {reason}"
+            ) from exc
         self._socket.settimeout(self.request_timeout)
 
     def _disconnect_locked(self) -> None:

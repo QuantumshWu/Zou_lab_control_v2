@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.sequencer.binding import bind_sequencer
+from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
-from zlc_pulse import PulseStreamer, RemotePulseStreamer
+from zlc_pulse import (
+    DEFAULT_REQUEST_TIMEOUT,
+    PulseStreamer,
+    RemotePulseStreamer,
+)
 
 
 #: A real board is reached over the network, by the pulse server that owns it.
@@ -19,9 +23,6 @@ HARDWARE_SEQUENCER_SCHEMA = AuthoringSchema(
         AuthoringField("port", "int", "Pulse server port", 18861, minimum=1, maximum=65535),
     )
 )
-
-
-_INTERNAL_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -48,7 +49,7 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
         streamer = dial(
             str(authored["host"]),
             int(authored["port"]),
-            request_timeout=_INTERNAL_REQUEST_TIMEOUT_SECONDS,
+            request_timeout=DEFAULT_REQUEST_TIMEOUT,
         )
     if not isinstance(streamer, (PulseStreamer, RemotePulseStreamer)):
         raise TypeError("sequencer.hardware needs a zlc_pulse device")
@@ -58,7 +59,14 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
 
 
 DEVICE_TYPES = (
-    DeviceTypeDescriptor("sequencer.hardware", "sequencer", HARDWARE_SEQUENCER_SCHEMA, ("sequencer.streamer",), factory=_hardware_factory),
+    DeviceTypeDescriptor(
+        "sequencer.hardware",
+        "sequencer",
+        HARDWARE_SEQUENCER_SCHEMA,
+        ("sequencer.streamer",),
+        factory=_hardware_factory,
+        control_factory=open_sequencer_control,
+    ),
 )
 
 __all__ = ["DEVICE_TYPES", "HARDWARE_SEQUENCER_SCHEMA"]

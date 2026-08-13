@@ -33,7 +33,12 @@ from .binding import pulse_field_value, resolve_api_parameters  # noqa: E402
 from .wire import load_streamer_config  # noqa: E402
 from .manifest import pulse_target_from_xdc  # noqa: E402
 from .device import PulseStreamer  # noqa: E402
-from .endpoint import DEFAULT_HOST, DEFAULT_PORT  # noqa: E402
+from .endpoint import (  # noqa: E402
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_REQUEST_TIMEOUT,
+)
 from .scan import (  # noqa: E402
     api_parameter_columns_for,
     resolve_scan_point,
@@ -77,8 +82,10 @@ __all__ = [
     "UartRegisterTransport",
     "VivadoAxiRegisterTransport",
     "MemoryRegisterTransport",
+    "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_HOST",
     "DEFAULT_PORT",
+    "DEFAULT_REQUEST_TIMEOUT",
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
     "ANALOG_MODE_CHOICES",
