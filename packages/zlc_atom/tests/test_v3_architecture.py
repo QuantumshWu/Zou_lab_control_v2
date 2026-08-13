@@ -37,7 +37,6 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from tests.fakes import FakePlane, camera_cycle_snapshot
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
-from zlc_atom.nodes.calibration.pulse import DEFAULT_CAMERA_TRIGGER_PORT
 
 
 ROOT = Path(__file__).parents[1]
@@ -166,8 +165,6 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         reference_before_slot=1,
         readout_slot=2,
         reference_after_slot=3,
-        camera_trigger_port=DEFAULT_CAMERA_TRIGGER_PORT,
-        roi_xywh=None,
         default_model_kind=ReadoutModelKind.BOX,
         threshold_method="empirical",
         box_half_width=1,
@@ -332,14 +329,13 @@ def test_pulse_resolver_uses_the_project_json_document(
             api_values=api_values,
         )
         assert resolved.path == asset.resolve()
-        assert set(resolved.metadata) == {"camera_trigger_channel", "repeat_forever"}
+        assert set(resolved.metadata) == {"repeat_forever"}
         assert resolved.program.camera_window_exposures("emCCD") == pytest.approx(
             (0.031, 0.006, 0.031)
         )
         assert resolved.program.slot_count == 0
         assert resolved.program.clock_hz == board.clock_hz
         assert resolved.program.channels == board.target.raw_lanes
-        assert resolved.metadata["camera_trigger_channel"] == "emCCD"
 
         incompatible_board = BoardDescription(
             target=PulseTarget(
@@ -459,14 +455,17 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert len(task_result.capture.frames) == 90
         assert sum(len(group) for group in task_result.reference) == 60
         assert len(task_result.short) == 30
+        # Calibration never re-points the camera: it reads the working point
+        # the bench was tuned to and arms on that.  Reconfiguring on Start
+        # replaced a small, fast ROI with the full sensor every run.
         assert [event for event, _ in task_camera_events].count(
             "configure_measurement"
-        ) == 1
+        ) == 0
         assert next(
             name
             for name, _ in task_camera_events
-            if name in {"configure_measurement", "arm"}
-        ) == "configure_measurement"
+            if name in {"working_point", "arm"}
+        ) == "working_point"
         assert ("arm", (90, (3,) * 30, 90)) in task_camera_events
         assert [value for name, value in task_camera_events if name == "read"] == [
             (3, True)
@@ -533,11 +532,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "reference_before_slot",
             "readout_slot",
             "reference_after_slot",
-            "camera_trigger_port",
-            "roi_x",
-            "roi_y",
-            "roi_width",
-            "roi_height",
             "default_model_kind",
             "threshold_method",
             "box_half_width",
@@ -551,8 +545,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "repeats"
         ] == 300
-        with pytest.raises(ValueError, match="all four fields"):
-            descriptors["calibration"].authoring_schema.project_values({"roi_x": 1})
         with pytest.raises(ValueError, match="cannot exceed"):
             descriptors["calibration"].authoring_schema.project_values(
                 {

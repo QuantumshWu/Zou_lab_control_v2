@@ -18,12 +18,6 @@ from zlc_pulse import (
 from zlc_pulse.device import BoardDescription
 
 
-#: The port a board usually gates its camera from.  A default for an authoring
-#: field, not a fact about anybody's board: a node that wrote it into its own
-#: source could only ever run the one pulse whose author had picked that name.
-DEFAULT_CAMERA_TRIGGER_PORT = "emCCD"
-
-
 @dataclass(frozen=True)
 class ResolvedPulse:
     """One project JSON pulse resolved at the requested calibration point."""
@@ -67,13 +61,17 @@ def _validate_calibration_sequence(sequence: PulseSequence) -> None:
 
 
 def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
-    """Apply and load one resolved pulse, including its inspectable source."""
+    """Apply and load one resolved pulse, including its inspectable source.
+
+    It used to also tell the sequencer which port gates the camera.  Only the
+    SIMULATED board needs that -- its world has to know which edge produces a
+    frame -- and it is a fact about the apparatus, not about a measurement: on
+    a real bench that port is a wire, and nothing in software is told about it.
+    The virtual sequencer owns its own answer.
+    """
 
     if not isinstance(pulse, ResolvedPulse):
         raise TypeError("pulse must be ResolvedPulse")
-    channel = pulse.metadata.get("camera_trigger_channel")
-    if channel is not None and hasattr(sequencer, "camera_trigger_channel"):
-        sequencer.camera_trigger_channel = str(channel)
     sequencer.load(pulse.program, source=pulse.sequence)
 
 
@@ -83,7 +81,6 @@ def resolve_pulse(
     path: str | Path,
     board: BoardDescription,
     api_values: Mapping[str, float],
-    trigger_port: str = DEFAULT_CAMERA_TRIGGER_PORT,
 ) -> ResolvedPulse:
     """Resolve and compile the already-decoded exact workspace resource.
 
@@ -93,19 +90,16 @@ def resolve_pulse(
     parameter keeps the value its author gave it, which is what lets one
     imaging pulse carry a MOT duration nobody here has an opinion about.
 
-    Nothing about the camera is read back out of the compiled program.  What
-    the frames mean is the protocol's own arithmetic on the slots it drove,
-    and a task that re-derived it from windows and exposures made itself
-    depend on the shape of a document the operator writes.
+    Nothing about the camera is said here at all.  What the frames mean is the
+    protocol's own arithmetic on the slots it drove, and a task that re-derived
+    it from windows and exposures made itself depend on the shape of a document
+    the operator writes.
     """
 
     if not isinstance(board, BoardDescription):
         raise TypeError("board must be BoardDescription")
     _validate_calibration_sequence(sequence)
     source = Path(path).expanduser().resolve()
-    port = str(trigger_port).strip()
-    if not port:
-        raise ValueError("a camera trigger port is required")
     declared = authored_api_values(sequence)
     unknown = tuple(name for name in api_values if name not in declared)
     if unknown:
@@ -121,10 +115,7 @@ def resolve_pulse(
             "calibration pulse target is incompatible with the connected board"
         )
     program = compile_sequence(resolved, board.geometry, board.clock_hz)
-    metadata = {
-        "camera_trigger_channel": port,
-        "repeat_forever": program.repeat_forever,
-    }
+    metadata = {"repeat_forever": program.repeat_forever}
     return ResolvedPulse(
         sequence.name,
         source,
@@ -135,7 +126,6 @@ def resolve_pulse(
 
 
 __all__ = [
-    "DEFAULT_CAMERA_TRIGGER_PORT",
     "ResolvedPulse",
     "arm_sequencer",
     "load_calibration_pulse_template",

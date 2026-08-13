@@ -25,7 +25,6 @@ from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.calibration.calibration import FrameContract, calibrate
 from tests.fakes import camera_cycle_snapshot
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
-from zlc_atom.nodes.calibration.pulse import DEFAULT_CAMERA_TRIGGER_PORT
 
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
@@ -51,8 +50,6 @@ def _calibration_request() -> CalibrationRequest:
         reference_before_slot=1,
         readout_slot=2,
         reference_after_slot=3,
-        camera_trigger_port=DEFAULT_CAMERA_TRIGGER_PORT,
-        roi_xywh=None,
         default_model_kind=ReadoutModelKind.BOX,
         threshold_method="empirical",
         box_half_width=1,

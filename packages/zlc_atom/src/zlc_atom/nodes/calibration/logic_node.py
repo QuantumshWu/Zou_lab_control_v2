@@ -19,11 +19,10 @@ from zlc_pulse import PulseSequence
 from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import ReadoutModelKind
 from .outputs import CAPTURE_PREVIEW_DECLARATION
-from .pulse import DEFAULT_CAMERA_TRIGGER_PORT, load_calibration_pulse_template
+from .pulse import load_calibration_pulse_template
 from .task import CalibrationRequest, CalibrationTask
 
 
-_ROI_FIELDS = ("roi_x", "roi_y", "roi_width", "roi_height")
 _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
     "zlc.pulse.v1/calibration",
@@ -35,9 +34,6 @@ _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
 
 
 def _validate_calibration(values: dict[str, object]) -> None:
-    roi = tuple(values[name] for name in _ROI_FIELDS)
-    if any(value is None for value in roi) and not all(value is None for value in roi):
-        raise ValueError("calibration ROI requires all four fields or none")
     if float(values["readout_exposure_seconds"]) > float(
         values["reference_exposure_seconds"]
     ):
@@ -92,21 +88,6 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "Reference exposure slot (after)",
             3,
             minimum=1,
-        ),
-        AuthoringField(
-            "camera_trigger_port",
-            "str",
-            "Camera trigger port",
-            DEFAULT_CAMERA_TRIGGER_PORT,
-            required=True,
-        ),
-        AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
-        AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
-        AuthoringField(
-            "roi_width", "int", "ROI width", None, required=False, minimum=1
-        ),
-        AuthoringField(
-            "roi_height", "int", "ROI height", None, required=False, minimum=1
         ),
         AuthoringField(
             "default_model_kind",
@@ -212,12 +193,6 @@ def _build(
         or not isinstance(pulse_resource.value, PulseSequence)
     ):
         raise TypeError("pulse_resource must be a resolved calibration pulse")
-    roi_means = tuple(authored[name] for name in _ROI_FIELDS)
-    roi = (
-        None
-        if all(value is None for value in roi_means)
-        else tuple(int(value) for value in roi_means)
-    )
     return CalibrationTask(
         camera=camera,  # type: ignore[arg-type]
         sequencer=sequencer,
@@ -233,8 +208,6 @@ def _build(
             reference_before_slot=int(authored["reference_before_slot"]),
             readout_slot=int(authored["readout_slot"]),
             reference_after_slot=int(authored["reference_after_slot"]),
-            camera_trigger_port=str(authored["camera_trigger_port"]),
-            roi_xywh=roi,  # type: ignore[arg-type]
             default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
             threshold_method=str(authored["threshold_method"]),
             box_half_width=int(authored["box_half_width"]),

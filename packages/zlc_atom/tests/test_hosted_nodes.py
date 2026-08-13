@@ -196,7 +196,6 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
         program, metadata = build_calibration_pulse(sequencer.describe())
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
 
@@ -281,7 +280,6 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
         program, metadata = build_calibration_pulse(sequencer.describe())
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 
         node = CameraMeasurementNode(

@@ -53,7 +53,6 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
         program, metadata = build_calibration_pulse(sequencer.describe())
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 
         windows = CALIBRATION_FRAMES_PER_CYCLE
@@ -95,7 +94,7 @@ def test_resolving_a_pulse_says_nothing_about_the_camera() -> None:
         )
     finally:
         installation.close()
-    assert set(metadata) == {"camera_trigger_channel", "repeat_forever"}
+    assert set(metadata) == {"repeat_forever"}
 
 
 def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> None:
@@ -115,7 +114,6 @@ def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> N
         )
     finally:
         installation.close()
-    assert metadata["camera_trigger_channel"] == CAMERA_CHANNEL
     assert CAMERA_CHANNEL == CAMERA_TRIGGER_CHANNEL
 
 
@@ -128,7 +126,6 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
         program, metadata = build_calibration_pulse(sequencer.describe())
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(

@@ -234,9 +234,8 @@ class CameraCycleSource:
     frames the program asked for, so arming IS the moment the old world ends.
     """
 
-    def __init__(self, camera_node: object, *, trigger_channel: str) -> None:
+    def __init__(self, camera_node: object) -> None:
         self.camera_node = camera_node
-        self.trigger_channel = str(trigger_channel)
         self._generation: object | None = None
         self._capture = None
         self._taken = 0

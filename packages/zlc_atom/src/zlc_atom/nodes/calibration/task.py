@@ -48,7 +48,6 @@ from .outputs import (
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
 _REDUCERS = {"mean", "sum", "median", "max"}
-_DEVICE_WAIT_SECONDS = 2.0
 
 
 def _positive_float(value: object, name: str) -> float:
@@ -74,21 +73,6 @@ def _non_empty_key(value: object, name: str) -> str:
     return result
 
 
-def _roi(value: object | None) -> tuple[int, int, int, int] | None:
-    if value is None:
-        return None
-    try:
-        result = tuple(int(item) for item in value)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
-        raise TypeError("roi_xywh must contain four integers or be None") from exc
-    if len(result) != 4:
-        raise ValueError("roi_xywh must contain four integers or be None")
-    x, y, width, height = result
-    if x < 0 or y < 0 or width <= 0 or height <= 0:
-        raise ValueError("roi_xywh must have a non-negative origin and positive size")
-    return x, y, width, height
-
-
 @dataclass(frozen=True)
 class CalibrationRequest:
     """One frozen calibration protocol and analysis request."""
@@ -107,8 +91,6 @@ class CalibrationRequest:
     reference_before_slot: int
     readout_slot: int
     reference_after_slot: int
-    camera_trigger_port: str
-    roi_xywh: tuple[int, int, int, int] | None
     default_model_kind: ReadoutModelKind
     threshold_method: str
     box_half_width: int
@@ -152,9 +134,6 @@ class CalibrationRequest:
                 "the three calibration exposures must be driven by three "
                 "different pulse API slots"
             )
-        camera_trigger_port = _non_empty_key(
-            self.camera_trigger_port, "camera_trigger_port"
-        )
         if not isinstance(self.default_model_kind, ReadoutModelKind):
             raise TypeError("default_model_kind must be ReadoutModelKind")
         threshold_method = str(self.threshold_method).lower()
@@ -187,8 +166,6 @@ class CalibrationRequest:
         object.__setattr__(self, "reference_before_slot", slots[0])
         object.__setattr__(self, "readout_slot", slots[1])
         object.__setattr__(self, "reference_after_slot", slots[2])
-        object.__setattr__(self, "camera_trigger_port", camera_trigger_port)
-        object.__setattr__(self, "roi_xywh", _roi(self.roi_xywh))
         object.__setattr__(self, "threshold_method", threshold_method)
         object.__setattr__(self, "box_half_width", box_half_width)
         object.__setattr__(self, "box_reducer", box_reducer)
@@ -209,8 +186,6 @@ class CalibrationRequest:
             "reference_before_slot": self.reference_before_slot,
             "readout_slot": self.readout_slot,
             "reference_after_slot": self.reference_after_slot,
-            "camera_trigger_port": self.camera_trigger_port,
-            "roi_xywh": None if self.roi_xywh is None else list(self.roi_xywh),
             "default_model_kind": self.default_model_kind.value,
             "threshold_method": self.threshold_method,
             "box_half_width": self.box_half_width,
@@ -635,7 +610,6 @@ class CalibrationTask:
                     strict=True,
                 )
             ),
-            trigger_port=self.request.camera_trigger_port,
         )
 
     def _driven_parameters(self) -> tuple[str, str, str]:
@@ -717,7 +691,7 @@ class CalibrationTask:
                 count,
                 source_group_sizes=(3,) * self.request.repeats,
                 buffer_frame_count=count,
-                timeout=_DEVICE_WAIT_SECONDS,
+                timeout=self.camera.timeout,
             )
             armed = True
             arm_sequencer(self.sequencer, pulse)
@@ -749,11 +723,11 @@ class CalibrationTask:
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
                 self.sequencer.fire()
-                report = self.sequencer.wait_done(_DEVICE_WAIT_SECONDS)
+                report = self.sequencer.wait_done(self.camera.timeout)
                 if report is None:
                     raise TimeoutError(
                         "a calibration shot was fired and never reported done within "
-                        f"{_DEVICE_WAIT_SECONDS:g}s"
+                        f"{self.camera.timeout:g}s"
                     )
                 fault = str(getattr(report, "fault", ""))
                 if fault:
@@ -761,7 +735,7 @@ class CalibrationTask:
                 records = tuple(
                     self.camera.read_frame_records(
                         3,
-                        timeout=_DEVICE_WAIT_SECONDS,
+                        timeout=self.camera.timeout,
                         exact=True,
                     )
                 )
@@ -860,13 +834,16 @@ class CalibrationTask:
         try:
             pulse = self._resolve_pulse()
             pulse_facts = self._pulse_facts(pulse)
-            actual = self.camera.configure_measurement(
-                exposure_seconds=self.request.reference_exposure_seconds,
-                roi_xywh=self.request.roi_xywh,
-            )
+            # The camera as the operator left it.  Calibration has no opinion
+            # about geometry -- it needs the sites in frame, which is what the
+            # bench was already tuned for -- and reconfiguring on Start threw
+            # away a small, fast ROI for the full sensor every single time.
+            # What was actually used is recorded in the run record, so the
+            # answer stays reproducible without being forced.
+            actual = self.camera.capture_working_point()
             if not isinstance(actual, CameraWorkingPoint):
                 raise TypeError(
-                    "camera configure_measurement must return CameraWorkingPoint"
+                    "camera capture_working_point must return CameraWorkingPoint"
                 )
             self._actual_working_point = actual
             capture, run_record = self._capture(

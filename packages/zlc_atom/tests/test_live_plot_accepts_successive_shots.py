@@ -51,7 +51,6 @@ def test_successive_shots_carry_strictly_increasing_revisions() -> None:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
         program, metadata = build_calibration_pulse(sequencer.describe())
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(
@@ -85,7 +84,6 @@ def test_a_live_plot_accepts_the_second_shot() -> None:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
         program, metadata = build_calibration_pulse(sequencer.describe())
-        sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(
