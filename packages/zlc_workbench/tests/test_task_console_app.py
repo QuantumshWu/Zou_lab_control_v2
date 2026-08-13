@@ -693,8 +693,8 @@ session.close()
     assert "CALIBRATION_FILES_WITHOUT_REPORT_UI_OK" in completed.stdout
 
 
-def test_the_experiment_entry_opens_both_work_windows_on_one_session(workspace) -> None:
-    """Device Init lends one session to two initially idle work windows."""
+def test_device_controls_open_on_demand_over_the_one_experiment_session(workspace) -> None:
+    """Init opens only Console; loaded-card Control owns every device window."""
 
     environment = dict(
         os.environ,
@@ -704,8 +704,11 @@ def test_the_experiment_entry_opens_both_work_windows_on_one_session(workspace) 
     )
     script = """import zou_lab_control_v2
 from zlc_workbench.apps import task_console as tested_module
+print(zou_lab_control_v2.__file__)
 print(tested_module.__file__)
+from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
+from zlc_workbench.device_use import DeviceClaim
 application = ensure_qt_app([])
 flow = tested_module.create_experiment_flow(
     workspace=r'%s', template='virtual',
@@ -714,26 +717,79 @@ try:
     assert flow.devices.is_visible()
     assert flow.session is None
     assert flow.console is None
-    assert flow.pulse is None
+    assert flow.device_controls == {}
     assert flow.devices.presenter.toggle_lifecycle() is True
     application.processEvents()
     assert flow.session is flow.devices.presenter.active_session
     assert flow.timer.interval() == flow.console_presenter.board.base_interval_ms == 100
     assert flow.console.is_visible()
-    assert flow.pulse.is_visible()
     assert flow.console.session is flow.session
-    assert flow.pulse.presenter.sequencer is flow.session.sequencer
-    assert flow.pulse.presenter.device_use is flow.session.device_use
+    assert flow.device_controls == {}, 'Init must not open a device GUI'
+
+    sequencer_card = flow.devices._view._loaded_cards['sequencer']
+    QtTest.QTest.mouseClick(sequencer_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    pulse = flow.device_controls['sequencer']
+    assert pulse.is_visible()
+    assert pulse.presenter.sequencer is flow.session.sequencer
+    assert pulse.presenter.device_use is flow.session.device_use
     exact_board = flow.session.sequencer.describe()
-    assert flow.pulse.presenter.board == exact_board
-    assert flow.pulse.presenter._board_target == exact_board.target
-    assert flow.pulse.presenter.sequence is None
+    assert pulse.presenter.board == exact_board
+    assert pulse.presenter._board_target == exact_board.target
+    assert pulse.presenter.sequence is None
+
+    QtTest.QTest.mouseClick(sequencer_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    assert flow.device_controls['sequencer'] is pulse
+
+    pulse.close(); application.processEvents()
+    assert 'sequencer' not in flow.device_controls
+    assert flow.session.sequencer.describe() == exact_board
+    QtTest.QTest.mouseClick(sequencer_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    reopened_pulse = flow.device_controls['sequencer']
+    assert reopened_pulse is not pulse
+    assert reopened_pulse.presenter.sequencer is flow.session.sequencer
+
+    camera_card = flow.devices._view._loaded_cards['camera']
+    QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    camera_control = flow.device_controls['camera']
+    exposure = camera_control._view.form.widget_for('exposure_seconds')
+    exposure.setValue(0.05); application.processEvents()
+    camera = flow.session.installation.device('camera')
+    (field,) = camera.tunable_fields()
+    assert field.default == 0.05
+    flow.session.device_use.assert_idle()
+
+    blocker_owner = object()
+    blocker = flow.session.device_use.acquire_command(
+        blocker_owner,
+        'camera task',
+        (DeviceClaim('camera', 'camera', camera, 'exclusive'),),
+    )
+    try:
+        exposure.setValue(0.06); application.processEvents()
+        (field,) = camera.tunable_fields()
+        assert field.default == 0.05, 'Control must not bypass the session claim'
+        assert camera_control._view.status_strip.current_severity == 'warning'
+        assert 'camera task' in camera_control._view.status_strip.text()
+    finally:
+        blocker.release()
+    flow.session.device_use.assert_idle()
+
+    camera_control.close(); application.processEvents()
+    assert 'camera' not in flow.device_controls
+    assert camera.tunable_fields()[0].default == 0.05, 'GUI close must not close the device'
     first_session = flow.session
 finally:
     flow.close()
+    application.processEvents()
 assert flow.session is None
 assert flow.console is None
-assert flow.pulse is None
+assert flow.device_controls == {}
+assert not camera_control.is_visible()
+assert not reopened_pulse.is_visible()
 again = tested_module.create_experiment_flow(
     workspace=r'%s', template='virtual',
 )
@@ -742,7 +798,12 @@ try:
     application.processEvents()
     assert again.session is again.devices.presenter.active_session
     assert again.session is not first_session
-    assert again.pulse.presenter.sequencer is again.session.sequencer
+    assert again.device_controls == {}
+    again.devices.close(); application.processEvents()
+    assert not again.devices.is_visible()
+    assert again.session is None
+    assert again.console is None
+    assert again.device_controls == {}
 finally:
     again.close()
 print('SHARED_EXPERIMENT_FLOW')

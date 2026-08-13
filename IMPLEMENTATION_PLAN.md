@@ -32,6 +32,7 @@
 
 - Active Goal status（2026-08-12）：`in progress — 全仓审计收敛、独立 Device GUI、SLM 系统及 qCMOS 原子荧光闭环`
 - Active Goal Milestone 1：`complete in this milestone commit`。已精确删除 Camera Remote 的 adapter/endpoint、`camera.remote` descriptor/factory/schema、`camera_server` CLI、回环测试与 W3 文档；DCAM/Pylon/Virtual Camera 及全部 `zlc_pulse`/FPGA remote 保留。直接证据：catalog 守卫 `1 passed`；旧 `camera.remote` 配置明确得到 `KeyError: unknown device types`；`camera_server` CLI 返回 unknown，而 `pulse_server` 仍映射 `zlc_pulse.remote`；`git diff --check` 通过。下一步进入按依赖顺序的全仓审计，并先把新 SLM/独立 Device GUI 裁决迁入两份权威。
+- Active Goal Milestone 3：`complete in this milestone commit`。`Init devices` 只自动打开 TaskConsole；Device Manager 的 loaded cards 提供独立 `Control`。普通 device 复用 `tunable_fields()` / `tune()` form，专用 UI 由 concrete `devices/<plugin>` 通过 descriptor optional lazy callable 提供，foundation 保持 headless且 Workbench 不写 `type_id` 分支。Pulse Editor 只由 sequencer card 按需打开，精确复用同一 named device/workspace/`DeviceUseCoordinator`；每个 device 一个 composition-owned window，重复点击 raise；关 GUI 不关闭 device，但 GUI 自己持有的 command 必须按插件物理语义安全退役并释放 claim（Pulse 回 safe，SLM 保持当前 phase）；session close 先关全部 device GUI。Setting popup 随 owner deactivate/hide/close/minimize 退役，不再悬在被遮挡的 TaskConsole 之上。直接验证：Atom plugin 边界 `3 passed`；zlc_ui popup/device/public surface `12 passed`；Workbench exact-session/device-control/close `5 passed`；用户点名的 Camera Measurement auto plot + 同 revision data/fit 原子 pair 回归 `7 passed`。正式 `zlc_ui.capture_window` 在 Windows real-screen 后端逐窗验收 Device Manager Init 前/后、TaskConsole、Pulse 专用页、Camera 通用页：五窗 target/actual 均为 `1152 x 653` logical，DPR 3 抓图均为 `3456 x 1959`，desktop canvas `3840 x 2400`，结束后 visible top-level 为零；此前 offscreen 直接 `grab()` 的小图全部作废，不构成证据。下一步只进入 M4；不得重开 M2，也不得把 Camera auto plot 删除或把同步 data+fit 改成 data-first。
 - Previous Goal status：`complete — 四条查实项 + 自查三处补丁改根修 + 三条遗留全部清掉`
 - Production HEAD at latest focused verification：`64056c3`
 - Stage set：`6a1641c 一份 PanelState 一个函数 -> 7a25574 scan 框选=下次扫的范围 -> ce01ab0 frozen 图自述过期 -> eba7ea9 Save Fig 走同一投影 + size 校验 + editor configure 写回 -> 77f9c5a relim 只说一遍 -> 37ff283 staleness 改为推导 -> 4d7d61e 记录只由自己的 configure 写回 -> 2e5dc21 阈值是面板的答案`
@@ -320,16 +321,16 @@ P0 在 Guard A 通过且所有受影响 package 现有测试通过时结束。
 
 在空 workspace 中从根 `bin\experiment.bat` 由操作者逐个点击真实可见 controls；不得调用 presenter/private API 替代按钮：
 
-1. Device Manager `Init devices` -> 同一 session 同时出现 Pulse UI 与 TaskConsole；无 calibration pulse 预载、小窗口闪现或第二个 session。
+1. Device Manager `Init devices` -> 同一 session 只自动出现 TaskConsole；loaded device cards 提供 `Control`。点击 sequencer 的 `Control` 才打开借用同一 named sequencer/workspace/`DeviceUseCoordinator` 的 Pulse UI，重复点击只 raise 同一窗口；无 calibration pulse 预载、小窗口闪现或第二个 session。
 2. `Add Calibration` -> 自动 Edit -> 用 project `pulses` file picker 选 JSON，确认 Samples 默认 300，选 virtual camera/sequencer，设 reference/readout exposure + camera ROI + default readout model -> Start；验证 header takeover/progress/唯一 Stop Task、Monitor 唯一循环 preview、35-site result、三模型 JSON artifact 和由同一 result 直接画出的 site-map、fidelity、三模型 classifier grids、PSF kernel grid 六张 report 图片。完成后再次 Start 及 Remove/re-add 均产生新 generation。
 3. `Add Camera Measurement` -> 自动 Edit -> 选 camera -> 设 exposure/ROI -> `Repeat=0` -> Start。
-4. 从同一 Experiment 的 Pulse UI Load readable `imaging_template.json` 并 On Pulse；Camera worker 持续产生 frames，GUI beat 不读 camera。Camera Measurement 按 authored `Frames per cycle` 发布 `frame_0...frame_N` 普通二维 signals，所有 signal selector 分别列出它们并显示 dataset shape；`zlc_plot` 不实现 camera-specific frame selector。
+4. 从 sequencer card 按需打开的 Pulse UI Load readable `imaging_template.json` 并 On Pulse；Camera worker 持续产生 frames，GUI beat 不读 camera。Camera Measurement 按 authored `Frames per cycle` 发布 `frame_0...frame_N` 普通二维 signals，所有 signal selector 分别列出它们并显示 dataset shape；`zlc_plot` 不实现 camera-specific frame selector。
 5. `Add Occupancy` -> 自动 Edit -> 选 frames signal + calibration path；依次验证 default/box/psf/uniform_psf choice -> Start。
 6. 依固定顺序创建全部五种 blank panels；在接 signal 前确认完整 initial schema 和 `100/200/400/800` ComboBox，Setting popup 以正确 card parent 出现在 anchor 旁、可拖动/外部关闭/内部滚动且无额外顶层闪窗，修改 signal/interval/display 后无需 Apply 立即生效，首图及时出现且没有 UI freeze/重复 rebuild。Image 用 SiteMap centers 画 35-site occupancy circles；可选标签最多为小号 ordinal，颜色/透明度与对应圈一致。
 7. Panel Edit 中 Area selector 改 Camera Measurement ROI draft -> 单次 Producer Restart -> 新 measurement 已运行，旧 calibration 不相容时 Occupancy 显示 blocked。
 8. 分别执行 Header Save Layout、Header Save Screenshot、Panel Save Fig；Load Layout 恢复 stopped pipeline。
 9. 启动新 Calibration，验证它只停掉占用同 camera/sequencer 的冲突 nodes，observer/无关 node 仍正常；任务期间所有非 Stop Task 状态改写都确实禁用。
-10. 真实点击 Stop Task/Stop Pulse/close，按 Pulse controller -> TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的所有权顺序有界清理；任一窗口、worker、claim 或项目 Python process 未释放都拒绝伪装成成功退出。
+10. 真实点击 Stop Task/Stop Pulse；先关闭 Pulse GUI 并确认 sequencer/session 不关闭，再从同一 card 重新打开。最终 close session 时由 composition owner 先关闭全部 device control GUI，再按 TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的所有权顺序有界清理；任一窗口、worker、claim 或项目 Python process 未释放都拒绝伪装成成功退出。
 
 Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本节的真实按钮和可见状态验收。
 
@@ -364,10 +365,10 @@ Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本�
 
 1. v1 只用于用户点名的 Device Manager、TaskConsole/运行中 Task surface、Calibration report 和 virtual defaults 行为参考，且只读取 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`；session ownership、logic、runtime 和科学链仍按本文既定 v2 架构。
 2. 把 Device Manager 改为计划第 3.0 节的 domain device cards、Discovered hardware、Loaded session 和底部 `Init devices`；v2 `InstallationConfig` 只做内部 adapter，不出现在可见 UI。
-3. `Init devices` transaction 只验证/打开 devices 并建立 session。成功后同一进程显示 TaskConsole + Pulse UI；删除任何 `session.load_pulse("calibration")` 或 pulse 文件存在性前置条件。
+3. `Init devices` transaction 只验证/打开 devices 并建立 session。成功后同一进程只自动显示 TaskConsole；Pulse UI 由 loaded sequencer card 的 `Control` 按需打开。删除任何 `session.load_pulse("calibration")` 或 pulse 文件存在性前置条件。
 4. 使用 v2 唯一 pulse JSON 规范：顶层 `format` 必须为 `zlc.pulse.v1`，由 `zlc_pulse.sequence_from_tree()` / `sequence_to_tree()` 往返；`slots` 只表示 scan columns，三项 Calibration duration 使用显式 `PulseApiParameter/api_parameters`，由 `resolve_api_parameters()` 绑定。不得新增 `PulseDocument`、用 id 前缀猜 API/scan 或把 API 参数伪装成 scan slot。Calibration Edit 的 template 默认 `imaging_template.json`，Calibration Start 才从 project `pulses` root 加载、参数化，并按连接 sequencer 的 `BoardDescription` 编译。
 5. 产品链删除 `.py` pulse resolver 和测试复制捷径，但不把 Pulse Editor 当前文档、普通 session pulse 操作与 Calibration template 合并成一个全局默认 pulse。
-6. 真实入口测试不得复制 pulse 或注入 package 私有搜索路径：先在无 calibration pulse 的 workspace 初始化并确认双窗/同 session，再单独用真实 JSON template 运行 Calibration -> Camera -> Occupancy。
+6. 真实入口测试不得复制 pulse 或注入 package 私有搜索路径：先在无 calibration pulse 的 workspace 初始化并确认只有 TaskConsole 自动打开，再从 sequencer card 的 `Control` 打开同 session Pulse UI；随后单独用真实 JSON template 运行 Calibration -> Camera -> Occupancy。
 7. 两个阶段都先证明原缺陷下会红，再各自提交可独立运行的纵向切片；可见 GUI 验收后立即关闭所有窗口并确认无残留进程。
 
 本阶段已有若干入口、pulse、device ownership 和 GUI lifecycle 基础提交，但它们只是在当前 correction stages 中复用的历史实现，不构成最新科学/UI 裁决的完成或验收证据。精确最终 HEAD 只能在 Stage D 全部通过后写入 Checkpoint。
@@ -391,7 +392,7 @@ Guard A/B/C 和 package/full-tree tests 只支撑这一流程，不能替代本�
 - Camera Measurement 支持 `Repeat=0` infinite，exposure/ROI 是 request 参数并真正传给所选 camera。
 - Occupancy 只用显式 frames + calibration path + readout-model choice，finite 无损，infinite latest，Image overlay 来自实测 SiteMap。
 - 多个 read-only observer 可并存，一个 device 同时最多一个 exclusive Logic Node，新冲突 node 会停旧 node。
-- TaskConsole/Pulse Editor 使用同一 Experiment/session/sequencer/world，Pulse Editor 不被虚构成长期 device owner。
+- TaskConsole/Pulse Editor 使用同一 Experiment/session/sequencer/world；Pulse Editor 由 sequencer card 按需打开，不随 Init 自动打开，也不被虚构成长期 device owner。
 - Task active 时 header takeover 显示 progress 和唯一 Stop Task，其他状态改变禁用；Monitor preview 和 terminal cleanup 正确。
 - combined `Add Panel` 的 Logic entry 自动进 Edit；没有独立 Add Logic 控件；产品 UI 没有 Apply；Panel Producer Restart 复用同一个 Start/Restart endpoint。
 - combined `Add Panel` 只有规定的五种 Plot entries，可在无 signal 时创建 blank fixed-kind panel；Setting 初始显示完整 schema，以有 card parent 的 Fluent popup 锚定、可拖动/外部关闭/内部滚动且无额外闪窗，interval 只能从 100/200/400/800 ComboBox 选择且修改立即生效。Panel/Edit 共享唯一 `PanelState`，selector 可联动 producer；完整配置一次交给 `zlc_plot`，同一 signal/schema 不重建 host/Figure、无 owner-thread wait且只增加一张同步 front。

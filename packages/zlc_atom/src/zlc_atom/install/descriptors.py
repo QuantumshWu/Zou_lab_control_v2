@@ -52,6 +52,7 @@ class DeviceTypeDescriptor:
     factory: Callable[[InstallationFactoryContext, str, Mapping[str, Any]], InstalledLeaf] | None = None
     world_config: Callable[[Mapping[str, Any]], object] | None = None
     discover: Callable[[], tuple[DeviceInstanceConfig, ...]] | None = None
+    control_factory: Callable[..., object] | None = None
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.domain:
@@ -73,6 +74,8 @@ class DeviceTypeDescriptor:
             raise TypeError("device type world_config must be callable or None")
         if self.discover is not None and not callable(self.discover):
             raise TypeError("device type discover must be callable or None")
+        if self.control_factory is not None and not callable(self.control_factory):
+            raise TypeError("device type control_factory must be callable or None")
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "dependencies", dependencies)
 

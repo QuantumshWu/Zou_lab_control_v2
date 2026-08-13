@@ -12,9 +12,10 @@ Occupancy Processor(frames + calibration path) -> occupancy data
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
 
-TaskConsole and Pulse Editor are two windows on the same `Experiment` session,
-named devices, virtual world, and sequencer; they do not create a second session
-or IPC service. Calibration publishes only its current capture preview while
+TaskConsole and every device Control share the same `Experiment` session,
+named devices, virtual world, and sequencer; Pulse Editor opens on demand from
+the loaded sequencer card and does not create a second session or IPC service.
+Calibration publishes only its current capture preview while
 running; after the loop it computes one result, writes its JSON, and passes that
 same result to `zlc_plot` for six PNG report images. Workbench does not display
 or re-analyse the report. Camera Measurement owns per-run exposure/ROI and uses
@@ -28,7 +29,7 @@ metadata and actual device snapshots.
 
 ```
 bin\install_requirements.bat   once per machine: numpy, matplotlib, PyQt5, ...
-bin\experiment.bat             one experiment flow: Device Manager Init, then TaskConsole + Pulse UI
+bin\experiment.bat             Device Manager Init -> TaskConsole; device Control windows on demand
 bin\pulse_editor.bat           the pulse window on its own
 bin\update.bat                 git pull, re-check dependencies, prove it still imports
 bin\run_server.bat             the pulse server, on the machine wired to the board

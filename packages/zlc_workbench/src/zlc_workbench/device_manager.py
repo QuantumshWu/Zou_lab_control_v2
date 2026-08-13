@@ -24,7 +24,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
     InstallationConfig,
@@ -36,7 +35,6 @@ from zlc_atom.install import (
     discover_device_catalog,
     installation_config_from_template,
     installation_template_names,
-    tunable_devices,
 )
 from .authoring_form import display_value, project_schema
 
@@ -58,6 +56,7 @@ class DeviceManagerPresenter:
         initialize_session: Callable[[InstallationConfig], object] | None = None,
         on_initialized: Callable[[object], None] | None = None,
         shutdown_session: Callable[[object], None] | None = None,
+        on_device_open: Callable[[str], None] | None = None,
     ) -> None:
         if initial_config is not None and not isinstance(initial_config, InstallationConfig):
             raise TypeError("initial_config must be InstallationConfig or None")
@@ -65,6 +64,7 @@ class DeviceManagerPresenter:
             (initialize_session, "initialize_session"),
             (on_initialized, "on_initialized"),
             (shutdown_session, "shutdown_session"),
+            (on_device_open, "on_device_open"),
         ):
             if value is not None and not callable(value):
                 raise TypeError(f"{name} must be callable or None")
@@ -92,6 +92,7 @@ class DeviceManagerPresenter:
         self._initialize_session = initialize_session
         self._on_initialized = on_initialized
         self._shutdown_session = shutdown_session
+        self._on_device_open = on_device_open
         self._active_session: object | None = None
         self._active_config: InstallationConfig | None = None
         self._confirm_overwrite = confirm_overwrite
@@ -114,7 +115,7 @@ class DeviceManagerPresenter:
         self.view.save_as_requested.connect(self.save_as)
         self.view.cancel_requested.connect(self.cancel)
         self.view.lifecycle_requested.connect(self.toggle_lifecycle)
-        self.view.knob_committed.connect(self.tune_device)
+        self.view.device_open_requested.connect(self.open_device)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
@@ -381,61 +382,26 @@ class DeviceManagerPresenter:
 
     # -------------------------------------------------------------- live bench
 
-    def _live_knobs(self) -> dict[str, tuple[object, tuple]]:
-        """Every running device that volunteers knobs, by instance id.
+    def open_device(self, instance_id: str) -> bool:
+        """Forward one loaded-card Control intent to the experiment owner."""
 
-        Read from ``tunable_devices`` -- the same collection a scan axis is
-        built from -- so a knob an operator can turn here is exactly a knob a
-        scan can sweep, and neither list can name a device the other cannot.
-        The values come with it: a device answers for its own current setting,
-        which is why nothing here remembers one.
-        """
-
-        installation = getattr(self._active_session, "installation", None)
-        if installation is None:
-            return {}
-        live: dict[str, tuple[object, tuple]] = {}
-        for key, device in tunable_devices(installation).items():
-            try:
-                fields = tuple(device.tunable_fields())
-            except Exception as error:
-                self._report(f"{key}: {error}", severity="warning")
-                continue
-            if fields:
-                live[str(key)] = (device, fields)
-        return live
-
-    def tune_device(self, instance_id: str, field: str = "") -> bool:
-        """Move one live knob to what its form now says.
-
-        Per field, because that is how a device accepts one: ``tune`` validates
-        and applies a single named knob against the hardware's own limits.  A
-        refusal is the device's sentence, shown as it was written.
-        """
-
-        entry = self._live_knobs().get(str(instance_id))
-        if entry is None:
+        key = str(instance_id)
+        session = self._active_session
+        if session is None:
+            self._report("initialize devices before opening a control", severity="warning")
             return False
-        device, fields = entry
-        wanted = dict(self.view.read_knob_values(str(instance_id)))
-        moved = False
-        for declared in fields:
-            if field and declared.name != str(field):
-                continue
-            value = wanted.get(declared.name)
-            if value is None or float(value) == float(declared.default):
-                continue
-            try:
-                device.tune(declared.name, float(value))
-            except Exception as error:
-                self._report(f"{instance_id}: {error}", severity="warning")
-                self._show()
-                return False
-            moved = True
-        if moved:
-            self._report(f"{instance_id} {field or 'settings'} applied")
-            self._show()
-        return moved
+        if key not in session.installation.devices:
+            self._report(f"no loaded device {key!r}", severity="warning")
+            return False
+        if self._on_device_open is None:
+            self._report("this Device Manager has no control-window owner", severity="warning")
+            return False
+        try:
+            self._on_device_open(key)
+        except Exception as error:
+            self._report(f"{key}: {error}", severity="error")
+            return False
+        return True
 
     # ------------------------------------------------------------ session life
 
@@ -503,10 +469,15 @@ class DeviceManagerPresenter:
 
         self.busy = False
         self._show()
-        roles = ", ".join(item.role for item in candidate.devices)
+        loaded_keys = frozenset(session.installation.devices)
+        roles = ", ".join(
+            item.role for item in candidate.devices if item.instance_id in loaded_keys
+        )
+        failed_count = len(session.installation.failures)
         self._report(
-            f"{len(candidate.devices)} device(s) initialized"
+            f"{len(loaded_keys)} device(s) initialized"
             + (f": {roles}" if roles else "")
+            + (f" · {failed_count} failed" if failed_count else "")
         )
         return True
 
@@ -704,25 +675,17 @@ class DeviceManagerPresenter:
             )
             + f" · {len(self.devices)} named device(s)",
         )
-        active_devices = (
-            ()
-            if self._active_config is None
-            else tuple(
-                (item.instance_id, item.role, item.type_id)
-                for item in self._active_config.devices
-            )
+        loaded_keys = (
+            frozenset()
+            if self._active_session is None
+            else frozenset(self._active_session.installation.devices)
+        )
+        active_devices = tuple(
+            (item.instance_id, item.role, item.type_id)
+            for item in (() if self._active_config is None else self._active_config.devices)
+            if item.instance_id in loaded_keys
         )
         self.view.set_loaded_devices(active_devices)
-        # A running device's knobs are shown through the SAME projection the
-        # configuration forms use: they are declared with the same authoring
-        # fields, so one form machinery edits both -- what an apparatus writes
-        # down, and what the bench is doing right now.
-        for key, (_device, fields) in self._live_knobs().items():
-            self.view.set_knob_spec(
-                key,
-                project_schema(AuthoringSchema(fields)),
-                tuple((item.name, display_value(item.default)) for item in fields),
-            )
         configured = {item.instance_id for item in self.devices}
         self.view.set_discovered_devices(
             tuple(

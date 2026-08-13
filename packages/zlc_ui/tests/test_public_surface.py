@@ -39,6 +39,7 @@ EXPECTED_FACADE = (
     "WINDOW_SCREEN_FRACTION",
     "capture_window",
     "ensure_qt_app",
+    "open_device_control",
     "open_device_manager",
     "open_figure_viewer",
     "open_pulse_editor",
@@ -46,7 +47,7 @@ EXPECTED_FACADE = (
     "use_panel_display_sizes",
 )
 EXPECTED_PUBLIC = frozenset(name for name in EXPECTED_FACADE if not name.startswith("_"))
-MAX_PUBLIC_NAMES = 28
+MAX_PUBLIC_NAMES = 29
 
 #: GUIs still handed out as widget trees rather than opened behind a handle.
 #: Each entry is one window's worth of work, and removing the last one is what
@@ -121,6 +122,7 @@ def test_retained_names_still_point_at_their_implementations() -> None:
         "FormSpec": ("zlc_ui.form", "FormSpec"),
         "FormRuntimeContext": ("zlc_ui.form", "FormRuntimeContext"),
         "BoardMetrics": ("zlc_ui.board", "BoardMetrics"),
+        "open_device_control": ("zlc_ui.windows", "open_device_control"),
     }
     for public_name, (module_name, implementation_name) in implementation_paths.items():
         implementation = getattr(importlib.import_module(module_name), implementation_name)

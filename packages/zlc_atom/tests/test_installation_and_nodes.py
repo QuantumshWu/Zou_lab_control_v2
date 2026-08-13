@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -56,6 +58,55 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "sequencer.virtual",
     )
     assert not any(item.type_id.startswith(("rf", "mot", "temperature")) for item in descriptors)
+
+
+def test_sequencer_control_is_plugin_owned_and_lazily_discovered() -> None:
+    script = r"""
+import zou_lab_control_v2
+import sys
+import zlc_atom.install as tested_module
+print(zou_lab_control_v2.ROOT)
+print(tested_module.__file__)
+assert "zlc_ui" not in sys.modules
+assert "zlc_workbench" not in sys.modules
+items = {item.type_id: item for item in tested_module.discover_device_catalog().available}
+factory = items["sequencer.hardware"].control_factory
+assert factory is not None
+assert items["sequencer.virtual"].control_factory is factory
+assert "zlc_ui" not in sys.modules
+assert "zlc_workbench" not in sys.modules
+import types
+import zlc_workbench.apps.pulse_editor as pulse_editor
+calls = []
+pulse_editor.create_bound_window = lambda **kwargs: calls.append(kwargs) or "window"
+named_device = object()
+workspace = object()
+device_use = object()
+session = types.SimpleNamespace(
+    installation=types.SimpleNamespace(
+        device=lambda key: named_device if key == "named-sequencer" else None
+    ),
+    workspace=workspace,
+    device_use=device_use,
+)
+assert factory(session, "named-sequencer", window_ratio=0.4) == "window"
+assert calls == [{
+    "workspace": workspace,
+    "sequence": None,
+    "sequencer": named_device,
+    "device_use": device_use,
+    "path": "",
+    "window_ratio": 0.4,
+}]
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[3],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_capability_tokens_have_machine_visible_types() -> None:

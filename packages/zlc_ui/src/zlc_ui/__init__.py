@@ -26,6 +26,7 @@ _EXPORTS = {
     # and reaching a submodule for them is how a script ends up sizing its own.
     "capture_window": ("zlc_ui.acceptance", "capture_window"),
     "WINDOW_SCREEN_FRACTION": ("zlc_ui.fluent", "WINDOW_SCREEN_FRACTION"),
+    "open_device_control": ("zlc_ui.windows", "open_device_control"),
     "open_device_manager": ("zlc_ui.windows", "open_device_manager"),
     "open_figure_viewer": ("zlc_ui.windows", "open_figure_viewer"),
     "open_pulse_editor": ("zlc_ui.windows", "open_pulse_editor"),

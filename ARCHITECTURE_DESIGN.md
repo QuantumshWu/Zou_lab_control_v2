@@ -62,9 +62,9 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 
 1. 根目录 `bin\experiment.bat` 就是正式实验入口，等价于权威 v1 树中的 `task_console.bat`：它只启动一个统一的 TaskConsole experiment flow，不能串起多个 Python 进程，也不再增加第二个根入口。
 2. 同一 Qt 进程先显示用户指定的 v1 Device Manager 操作面：`Config` tab 与 `Devices` header；左侧按 device domain 动态生成 Camera/Rf/Sequencer 等分组，每组包含具体 device cards 与 `Add device`；右侧是 `Discovered hardware`/`Scan hardware` 和 `Loaded session`；底部是 `New…`、`Load…`、`Save`、`Save as…`、`Init devices`。不得显示错误的 `Installation`、`Backend`、`Configured devices`、`Available`、`Cancel` 结构，也不得把 v2 内部 `InstallationConfig` 名称泄漏成用户界面。
-3. `Init devices` 只从当前 device draft 创建并持有唯一 `ExperimentSession`；成功后隐藏 Device Manager，并在同一进程中同时显示 TaskConsole 和 Pulse UI。设备初始化不解析、不编译、不预载任何 pulse，也不以 `calibration`/`imaging_template` 是否存在作为成功条件。
-4. 实验入口中的 Pulse UI 借用 session 的 sequencer authority；它不自行 dial 第二个设备，也不拥有或关闭底层 sequencer。Pulse UI 的当前/初始文档是自己的 editor 状态，不是 Device Manager 的初始化前置条件，也不是 Calibration Task 的隐式 pulse。独立 `pulse_editor.bat` 只作为单独的脉冲编辑/连接测试工具，不是正式 Experiment 入口。
-5. 主 TaskConsole 关闭时按 Pulse controller -> TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的顺序有界清理；任何 ownership 尚未释放都不得伪装成成功退出。
+3. `Init devices` 只从当前 device draft 创建并持有唯一 `ExperimentSession`；成功后同一进程只自动显示 TaskConsole，Device Manager 的 loaded cards 继续承担状态、`Control` 和显式 close 入口。设备初始化不打开任何 device control GUI，不解析、不编译、不预载任何 pulse，也不以 `calibration`/`imaging_template` 是否存在作为成功条件。
+4. 每个已初始化 device card 的 `Control` 打开独立窗口；同一 session 的同一 named device 最多一个 control window，重复点击只 raise 已有窗口。普通 device 由 Device Manager 用既有 `tunable_fields()` / `tune()` 与公共 form UI 组合；专用 device 可由自己的 `DeviceTypeDescriptor` 提供一个懒加载 `control_factory`。descriptor 只携带 optional callable，foundation 不导入 Qt/UI；具体 `devices/<plugin>` 拥有自己的 factory，Workbench 只调用它，不按 `type_id` 分支，也不建立另一套 device GUI manager/session owner。
+5. Sequencer 的 `Control` 按需打开现有 Pulse Editor，精确借用该 card 对应的 named sequencer、同一 workspace 与同一 `DeviceUseCoordinator`；它不自行 dial 第二个设备，也不拥有或关闭底层 sequencer。关闭 control GUI 不关闭 device；若该 GUI 自己仍持有 active command，则必须先按本插件的物理语义安全退役并释放 claim（Pulse Editor 回到 sequencer safe，SLM Editor 则按 SLM 明确裁决保持当前 phase），关闭后可再次由同一 card 打开。关闭 session 时，composition owner 先关闭其持有的全部 device control windows，再按 TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的顺序有界清理；任何 window、claim 或 device ownership 尚未释放都不得伪装成成功退出。
 
 ### 3.1 两种访问状态
 
@@ -456,7 +456,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 
 本文不作完成声明。此前基于六个 sites、旧 plot surface 和旧 Calibration artifact/report 的所谓正式 UI 验收已经撤销，不能作为当前树的产品证据；virtual apparatus 的默认验收目标是 `5 x 7 = 35` sites 和 `96 x 128` frames。
 
-最新实现完成后必须从根 `bin\experiment.bat` 重新走一次真实按钮路径，而不是调用 presenter/private API 代替点击：Device Manager `Init devices` -> 同 session 同时出现 Pulse UI 和 TaskConsole -> Calibration Task takeover/progress/唯一 Monitor LIVE preview/Stop Task -> 确认 JSON 和六张 report 图片已写出且 UI 未创建 report panel/tab/window -> `Repeat=0` Camera Measurement -> Pulse JSON Load/On -> Occupancy readout-model choice -> 五种固定 panel kind 的 blank/full-schema/finite interval/即时 Setting commit -> signal/overlay/selector/Producer Restart -> 三种 Save -> Stop Pulse -> close。随后还必须验证窗口、session、workers、claims 和项目 Python 进程归零。当前真实按钮复验、性能复验、受影响测试和全树测试的未完成状态只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
+最新实现完成后必须从根 `bin\experiment.bat` 重新走一次真实按钮路径，而不是调用 presenter/private API 代替点击：Device Manager `Init devices` -> 同 session 只自动出现 TaskConsole -> loaded sequencer card `Control` 按需打开 Pulse UI且重复点击只 raise 同一窗口 -> Calibration Task takeover/progress/唯一 Monitor LIVE preview/Stop Task -> 确认 JSON 和六张 report 图片已写出且 UI 未创建 report panel/tab/window -> `Repeat=0` Camera Measurement -> Pulse JSON Load/On -> Occupancy readout-model choice -> 五种固定 panel kind 的 blank/full-schema/finite interval/即时 Setting commit -> signal/overlay/selector/Producer Restart -> 三种 Save -> Stop Pulse -> 关闭 Pulse GUI 而 device/session 保持 -> 再次由 card 打开 -> close session。随后还必须验证全部 control window、session、workers、claims 和项目 Python 进程归零。当前真实按钮复验、性能复验、受影响测试和全树测试的未完成状态只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
 
 ## 14. 本轮 review 的结论和非问题
 
@@ -476,7 +476,7 @@ Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 Task
 - Setting frame 和 Panel Edit 直接绑定同一 `PanelState`，对应参数天然双向同步；不存在两份 panel config。
 - SiteMap 是 calibration domain data，不是 plot kind；Occupancy 显式发布同-publication typed overlay sibling，固定 `Image` panel 选择 optional Overlay signal，`zlc_plot` 只绘制通用 annotation。
 - 设备可多方只读，只有 exclusive Logic Node 单占；新冲突 node 停旧 node。
-- TaskConsole/Pulse Editor 使用同一 Experiment session，不引入 IPC。
+- TaskConsole/Pulse Editor 使用同一 Experiment session，不引入 IPC；Pulse Editor 只由 loaded sequencer card 的 `Control` 按需打开，不随 Init 自动打开。
 - Header Layout Save、Header Screenshot 和 Panel Save Fig 三者语义分开。
 - Panel archive 不复制 calibration JSON，不增 hash/fingerprint。
 

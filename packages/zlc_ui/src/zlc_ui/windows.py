@@ -20,6 +20,35 @@ from typing import Any
 from .fluent import WINDOW_SCREEN_FRACTION, open_fluent_window
 
 
+def open_device_control(
+    *,
+    title: str,
+    spec: Any,
+    values: tuple[tuple[str, object], ...] = (),
+    window_ratio: float | None = None,
+) -> Any:
+    """Open one generic device form without exposing its QWidget."""
+
+    from .device_manager.handle import DeviceControlHandle
+    from .device_manager.view import DeviceControlView
+
+    held: dict[str, Any] = {}
+
+    def _body() -> DeviceControlView:
+        view = DeviceControlView(spec, values)
+        held["view"] = view
+        return view
+
+    window = open_fluent_window(
+        _body,
+        title=str(title),
+        window_ratio=(
+            WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
+        ),
+    )
+    return DeviceControlHandle(window, held["view"])
+
+
 def open_pulse_editor(
     *,
     title: str = "PulseGUI@Zou lab",
@@ -139,6 +168,7 @@ def open_task_console(
 
 
 __all__ = [
+    "open_device_control",
     "open_device_manager",
     "open_figure_viewer",
     "open_pulse_editor",

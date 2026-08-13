@@ -204,3 +204,77 @@ view.lifecycle_button.click()
 assert events == ['load', 'save-as', 'discover', ('template', 'virtual'), 'lifecycle']
 """
     )
+
+
+def test_loaded_device_opens_one_independent_generic_control_surface() -> None:
+    _run_qt(
+        """import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui import open_device_control
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.device_manager.handle import DeviceControlHandle
+from zlc_ui.fluent import WINDOW_SCREEN_FRACTION, screen_fit_window_size
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.form.qt_form import FluentParameterForm
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-control'])
+
+manager = DeviceManagerView()
+opened = []
+manager.device_open_requested.connect(opened.append)
+manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
+manager.resize(900, 600); manager.show(); app.processEvents()
+card = manager._loaded_cards['camera']
+assert card.role_label.text() == 'qCMOS'
+assert card.control_button.text() == 'Control'
+assert card.findChildren(FluentParameterForm) == []
+QtTest.QTest.mouseClick(card.control_button, QtCore.Qt.LeftButton)
+assert opened == ['camera']
+
+spec = FormSpec((
+    FormFieldProps('gain', 'int', 'Gain', default=2, minimum=0, maximum=20),
+))
+control = open_device_control(
+    title='qCMOS control',
+    spec=spec,
+    values=(('gain', 2),),
+)
+assert isinstance(control, DeviceControlHandle)
+assert not isinstance(control, QtWidgets.QWidget), 'a QWidget escaped zlc_ui'
+target = screen_fit_window_size(WINDOW_SCREEN_FRACTION)
+assert control._window.size() == target, (
+    control._window.size().width(), control._window.size().height(),
+    target.width(), target.height(),
+)
+field_events = []
+control.field_committed.connect(field_events.append)
+form = control._view.form
+widget = form.widget_for('gain')
+widget.setValue(4); app.processEvents()
+assert field_events == ['gain']
+assert control.read_values() == (('gain', 4),)
+
+control.set_form(spec, (('gain', 7),))
+assert control._view.form is form
+assert form.widget_for('gain') is widget
+assert control.read_values() == (('gain', 7),)
+control.show_status('ready', 'idle')
+assert control._view.status_strip.text() == 'ready'
+
+window = control._window
+window.hide(); app.processEvents()
+assert not control.is_visible()
+control.restore(); app.processEvents()
+assert control._window is window
+assert control.is_visible()
+closed = []
+control.closed.connect(lambda: closed.append(True))
+control.close(); app.processEvents()
+assert closed == [True]
+assert not control.is_visible()
+manager.close(); app.processEvents()
+"""
+    )

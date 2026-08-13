@@ -113,76 +113,69 @@ class _DeviceCard(FluentFrame):
 
 
 class _LiveDeviceCard(FluentFrame):
-    """One RUNNING device: what it is, and the knobs it volunteers.
+    """Identity and entry point for one device in the loaded session."""
 
-    Separate from the configuration card beside it because it edits a
-    different thing -- that one writes an apparatus file, this one moves the
-    hardware now -- and because a running device has no role, type or Remove
-    to offer.  The knobs themselves are the ordinary parameter form: they are
-    declared with the same authoring fields, so nothing here knows what a
-    camera or a gain is.
-    """
-
-    knob_committed = QtCore.pyqtSignal(str, str)
+    device_open_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, instance_id: str, parent=None) -> None:
         super().__init__(parent, bordered=True)
         self.instance_id = str(instance_id)
-        self.form: FluentParameterForm | None = None
-        self._expanded = False
-        outer = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QHBoxLayout(self)
         outer.setContentsMargins(
             window_pad(0.45), window_pad(0.35), window_pad(0.45), window_pad(0.35)
         )
         outer.setSpacing(window_pad(0.3))
-        header = QtWidgets.QHBoxLayout()
-        self.expand_button = FluentButton("+", color=GREY)
-        self.expand_button.setFixedWidth(window_pad(2.0))
-        self.expand_button.setEnabled(False)
-        self.expand_button.setToolTip("This device volunteers no runtime settings")
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
-        header.addWidget(self.expand_button)
-        header.addWidget(self.role_label)
-        header.addWidget(self.detail_label, 1)
-        outer.addLayout(header)
-        self.form_host = QtWidgets.QVBoxLayout()
-        outer.addLayout(self.form_host)
-        self.expand_button.clicked.connect(self._toggle)
+        self.control_button = FluentButton("Control", color=ACCENT)
+        outer.addWidget(self.role_label)
+        outer.addWidget(self.detail_label, 1)
+        outer.addWidget(self.control_button)
+        self.control_button.clicked.connect(
+            lambda: self.device_open_requested.emit(self.instance_id)
+        )
 
     def set_record(self, role: str, type_id: str) -> None:
         self.role_label.setText(str(role))
         self.detail_label.setText(f"{type_id} · {self.instance_id}")
         self.setToolTip(self.instance_id)
 
-    def set_knobs(self, spec: FormSpec, values: tuple[tuple[str, object], ...]) -> None:
-        projected = dict(values)
-        self.expand_button.setEnabled(True)
-        self.expand_button.setToolTip("Settings this device accepts while running")
-        if self.form is None:
-            self.form = FluentParameterForm(spec, projected, parent=self)
-            self.form.changed.connect(
-                lambda key: self.knob_committed.emit(self.instance_id, key)
-            )
-            self.form.setVisible(self._expanded)
-            self.form_host.addWidget(self.form)
-            return
-        # Reconcile rather than rebuild: this runs on every projection, and a
-        # form replaced under the pointer takes the operator's focus and their
-        # half-typed number with it.
-        self.form.reconcile(spec, projected)
-        self.form.setVisible(self._expanded)
+
+class DeviceControlView(QtWidgets.QWidget):
+    """One generic device form; hardware ownership stays outside the view."""
+
+    field_committed = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        spec: FormSpec,
+        values: tuple[tuple[str, object], ...] = (),
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        outer = QtWidgets.QVBoxLayout(self)
+        pad = window_pad()
+        outer.setContentsMargins(pad, pad, pad, pad)
+        outer.setSpacing(window_pad(0.5))
+        self.form = FluentParameterForm(spec, dict(values), parent=self)
+        self.form.changed.connect(self.field_committed)
+        outer.addWidget(self.form)
+        outer.addStretch(1)
+        self.status_strip = StatusStrip(self)
+        outer.addWidget(self.status_strip)
+
+    def set_form(
+        self,
+        spec: FormSpec,
+        values: tuple[tuple[str, object], ...],
+    ) -> None:
+        self.form.reconcile(spec, dict(values))
 
     def read_values(self) -> tuple[tuple[str, object], ...]:
-        if self.form is None:
-            return ()
         return tuple(self.form.read_all().items())
 
-    def _toggle(self) -> None:
-        self._expanded = not self._expanded
-        if self.form is not None:
-            self.form.setVisible(self._expanded)
-        self.expand_button.setText("−" if self._expanded else "+")
+    def show_status(self, text: str, severity: str) -> None:
+        self.status_strip.show_status(str(text), str(severity))
 
 
 class DeviceManagerView(QtWidgets.QWidget):
@@ -201,9 +194,9 @@ class DeviceManagerView(QtWidgets.QWidget):
     role_committed = QtCore.pyqtSignal(str, str)
     type_picked = QtCore.pyqtSignal(str, str)
     parameter_committed = QtCore.pyqtSignal(str, str)
-    #: A setting changed on a RUNNING device, which is a different act from
-    #: editing the apparatus above it: it moves the hardware now.
-    knob_committed = QtCore.pyqtSignal(str, str)
+    #: Open the independent control surface for a loaded device.  This view
+    #: neither constructs that surface nor touches the device.
+    device_open_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -298,8 +291,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.loaded_layout.addWidget(self.loaded_empty)
         right.addWidget(self.loaded_group)
         self.runtime_note = muted_note_label(
-            "Live controls belong to Device Viewer; this window authors the "
-            "device graph."
+            "Control opens each loaded device in its own window; this window "
+            "authors the device graph."
         )
         self.runtime_note.setWordWrap(True)
         right.addWidget(self.runtime_note)
@@ -461,29 +454,12 @@ class DeviceManagerView(QtWidgets.QWidget):
             instance_id = str(instance_id)
             card = self._loaded_cards.get(instance_id)
             if card is None:
-                # Kept, not rebuilt: this runs on every projection, and these
-                # cards hold live forms an operator is typing into.
                 card = _LiveDeviceCard(instance_id, self.loaded_group)
-                card.knob_committed.connect(self.knob_committed.emit)
+                card.device_open_requested.connect(self.device_open_requested)
                 self._loaded_cards[instance_id] = card
                 self.loaded_layout.insertWidget(index, card)
             card.set_record(str(role), str(type_id))
         self.loaded_empty.setVisible(not devices)
-
-    def set_knob_spec(
-        self,
-        instance_id: str,
-        spec: FormSpec,
-        values: tuple[tuple[str, object], ...],
-    ) -> None:
-        card = self._loaded_cards.get(str(instance_id))
-        if card is None:
-            raise KeyError(f"no running device {instance_id!r} is shown")
-        card.set_knobs(spec, values)
-
-    def read_knob_values(self, instance_id: str) -> tuple[tuple[str, object], ...]:
-        card = self._loaded_cards.get(str(instance_id))
-        return () if card is None else card.read_values()
 
     def set_discovery_enabled(
         self,
@@ -653,4 +629,4 @@ class DeviceManagerView(QtWidgets.QWidget):
             button.setEnabled(enabled and instance_id not in self._configured_discoveries)
 
 
-__all__ = ["DeviceManagerView"]
+__all__ = ["DeviceControlView", "DeviceManagerView"]

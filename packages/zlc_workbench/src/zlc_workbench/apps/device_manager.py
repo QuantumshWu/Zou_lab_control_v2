@@ -60,6 +60,7 @@ def build(
     initialize_session=None,
     on_initialized=None,
     shutdown_session=None,
+    on_device_open=None,
 ) -> object:
     """One presenter over one apparatus file, with the view it drives."""
 
@@ -74,6 +75,7 @@ def build(
         initialize_session=initialize_session,
         on_initialized=on_initialized,
         shutdown_session=shutdown_session,
+        on_device_open=on_device_open,
     )
 
 
@@ -86,6 +88,7 @@ def create_window(
     initialize_session=None,
     on_initialized=None,
     shutdown_session=None,
+    on_device_open=None,
 ):
     """Open the apparatus editor and return its window."""
 
@@ -94,16 +97,21 @@ def create_window(
     path = apparatus_path(workspace)
     # One call, one handle: this layer never names a widget class.
     window = open_device_manager(title="Devices@Zou lab", window_ratio=window_ratio)
-    window.presenter = build(
-        window,
-        path,
-        catalog=catalog,
-        initial_config=initial_config,
-        initialize_session=initialize_session,
-        on_initialized=on_initialized,
-        shutdown_session=shutdown_session,
-    )
-    window.closed.connect(window.presenter.close)
+    try:
+        window.presenter = build(
+            window,
+            path,
+            catalog=catalog,
+            initial_config=initial_config,
+            initialize_session=initialize_session,
+            on_initialized=on_initialized,
+            shutdown_session=shutdown_session,
+            on_device_open=on_device_open,
+        )
+    except BaseException:
+        window.close()
+        raise
+    window.set_close_guard(window.presenter.close)
     return window
 
 

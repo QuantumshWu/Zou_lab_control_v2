@@ -15,7 +15,57 @@ from PyQt5 import QtCore
 
 from zlc_ui.fluent import fluent_open_path, fluent_save_path
 
-from .view import DeviceManagerView
+from .view import DeviceControlView, DeviceManagerView
+
+
+class DeviceControlHandle(QtCore.QObject):
+    """The outside surface of one independent generic device window."""
+
+    field_committed = QtCore.pyqtSignal(str)
+    closed = QtCore.pyqtSignal()
+
+    def __init__(self, window: Any, view: DeviceControlView) -> None:
+        super().__init__()
+        self._window = window
+        self._view = view
+        view.field_committed.connect(self.field_committed)
+        if window is not None and hasattr(window, "closed"):
+            window.closed.connect(self.closed)
+
+    def restore(self) -> None:
+        target = self._window if self._window is not None else self._view
+        if hasattr(target, "showNormal"):
+            target.showNormal()
+        else:
+            target.show()
+        if hasattr(target, "raise_"):
+            target.raise_()
+        if hasattr(target, "activateWindow"):
+            target.activateWindow()
+
+    def show(self) -> None:
+        self.restore()
+
+    def close(self) -> None:
+        target = self._window if self._window is not None else self._view
+        target.close()
+
+    def is_visible(self) -> bool:
+        target = self._window if self._window is not None else self._view
+        return bool(target.isVisible())
+
+    def set_form(
+        self,
+        spec: object,
+        values: tuple[tuple[str, object], ...],
+    ) -> None:
+        self._view.set_form(spec, values)
+
+    def read_values(self) -> tuple[tuple[str, object], ...]:
+        return self._view.read_values()
+
+    def show_status(self, text: str, severity: str) -> None:
+        self._view.show_status(text, severity)
 
 
 class DeviceManagerHandle(QtCore.QObject):
@@ -31,7 +81,7 @@ class DeviceManagerHandle(QtCore.QObject):
     role_committed = QtCore.pyqtSignal(str, str)
     type_picked = QtCore.pyqtSignal(str, str)
     parameter_committed = QtCore.pyqtSignal(str, str)
-    knob_committed = QtCore.pyqtSignal(str, str)
+    device_open_requested = QtCore.pyqtSignal(str)
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
     discovered_add_requested = QtCore.pyqtSignal(str)
@@ -47,7 +97,7 @@ class DeviceManagerHandle(QtCore.QObject):
         "role_committed",
         "type_picked",
         "parameter_committed",
-        "knob_committed",
+        "device_open_requested",
         "template_selected",
         "discovery_requested",
         "discovered_add_requested",
@@ -76,6 +126,12 @@ class DeviceManagerHandle(QtCore.QObject):
             self._view.finish_close()
         if self._window is not None:
             self._window.close()
+
+    def set_close_guard(self, guard) -> None:
+        """Keep the bench window until its retained session is down."""
+
+        if self._window is not None:
+            self._window.set_close_guard(guard)
 
     def is_visible(self) -> bool:
         target = self._window if self._window is not None else self._view
@@ -151,17 +207,6 @@ class DeviceManagerHandle(QtCore.QObject):
     ) -> None:
         self._view.set_loaded_devices(devices)
 
-    def set_knob_spec(
-        self,
-        instance_id: str,
-        spec: object,
-        values: tuple[tuple[str, object], ...],
-    ) -> None:
-        self._view.set_knob_spec(instance_id, spec, values)
-
-    def read_knob_values(self, instance_id: str) -> tuple[tuple[str, object], ...]:
-        return self._view.read_knob_values(instance_id)
-
     def set_discovery_enabled(
         self,
         enabled: bool,
@@ -211,4 +256,4 @@ class DeviceManagerHandle(QtCore.QObject):
         self._view.show_status(text, severity)
 
 
-__all__ = ["DeviceManagerHandle"]
+__all__ = ["DeviceControlHandle", "DeviceManagerHandle"]

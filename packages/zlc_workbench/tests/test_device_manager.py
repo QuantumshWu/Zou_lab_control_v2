@@ -53,13 +53,11 @@ class _ManagerView:
         self.role_committed = _Signal()
         self.type_picked = _Signal()
         self.parameter_committed = _Signal()
-        self.knob_committed = _Signal()
+        self.device_open_requested = _Signal()
         self.choices: tuple = ()
         self.devices: tuple = ()
         self.forms: dict = {}
         self.values: dict = {}
-        self.knobs: dict = {}
-        self.knob_values: dict = {}
         self.status: list[tuple[str, str]] = []
 
     def set_discovery_enabled(self, enabled, reason="") -> None:
@@ -105,13 +103,6 @@ class _ManagerView:
 
     def read_values(self, instance_id):
         return tuple(self.values.get(str(instance_id), {}).items())
-
-    def set_knob_spec(self, instance_id, spec, values) -> None:
-        self.knobs[str(instance_id)] = spec
-        self.knob_values[str(instance_id)] = dict(values)
-
-    def read_knob_values(self, instance_id):
-        return tuple(self.knob_values.get(str(instance_id), {}).items())
 
     def show_status(self, text: str, severity: str) -> None:
         self.status.append((str(severity), str(text)))
@@ -462,6 +453,8 @@ def test_a_standalone_editor_without_a_session_factory_cannot_fake_init(tmp_path
 def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     """Init is the shared Experiment boundary, not a build-and-release test."""
 
+    from types import SimpleNamespace
+
     from zlc_atom.install import discover_device_catalog
 
     camera = next(
@@ -479,7 +472,9 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
             ),
         )
     )
-    session = object()
+    session = SimpleNamespace(
+        installation=SimpleNamespace(devices={"camera": object()}, failures={})
+    )
     initialized: list[object] = []
     shut_down: list[object] = []
     candidates: list[InstallationConfig] = []
@@ -523,56 +518,63 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     assert shut_down == [session], "shutdown and close are idempotent"
 
 
-def test_a_running_device_offers_the_knobs_it_volunteers_and_takes_them(
-    tmp_path,
-) -> None:
-    """The bench window is where a running device is actually turned.
+def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) -> None:
+    """DeviceManager emits identity; it neither embeds controls nor tunes hardware."""
 
-    The knobs are the ones the DEVICE declares -- the same list a scan axis is
-    built from -- so this window can never offer a setting the hardware does
-    not accept, and a refusal is the device's own sentence.
-    """
+    from types import SimpleNamespace
 
-    from zlc_atom.install import create_installation
+    from zlc_atom.install import discover_device_catalog
 
-    installation = create_installation("virtual")
-
-    class _Session:
-        def __init__(self, installed) -> None:
-            self.installation = installed
-
-    session = _Session(installation)
+    descriptors = {
+        item.type_id: item for item in discover_device_catalog().available
+    }
+    camera = descriptors["camera.virtual"]
+    sequencer = descriptors["sequencer.virtual"]
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={"camera": object()},
+            failures={"sequencer": RuntimeError("not connected")},
+        )
+    )
+    opened: list[str] = []
     view = _ManagerView()
     manager = DeviceManagerPresenter(
         view,
         tmp_path / "apparatus.json",
-        initial_config=installation.config
-        if hasattr(installation, "config")
-        else None,
+        initial_config=InstallationConfig(
+            (
+                DeviceInstanceConfig(
+                    instance_id="camera",
+                    role="camera",
+                    type_id="camera.virtual",
+                    parameters=camera.authoring_schema.project_values({}),
+                ),
+                DeviceInstanceConfig(
+                    instance_id="sequencer",
+                    role="sequencer",
+                    type_id="sequencer.virtual",
+                    parameters=sequencer.authoring_schema.project_values({}),
+                ),
+            )
+        ),
         initialize_session=lambda _candidate: session,
+        on_device_open=opened.append,
     )
-    try:
-        manager._active_session = session
-        manager._show()
 
-        camera = installation.device("camera")
-        (declared,) = camera.tunable_fields()
-        assert declared.name == "exposure_seconds"
-        assert "camera" in view.knobs, "a running camera offered nothing to turn"
-        assert view.knob_values["camera"]["exposure_seconds"] == pytest.approx(
-            float(declared.default)
-        )
+    assert manager.open_device("camera") is False
+    assert opened == []
+    assert manager.toggle_lifecycle() is True
+    assert manager.active_session is session
+    assert view.loaded_devices == (("camera", "camera", "camera.virtual"),)
+    assert "1 device(s) initialized: camera · 1 failed" in view.status[-1][1]
 
-        view.knob_values["camera"]["exposure_seconds"] = 0.05
-        assert manager.tune_device("camera", "exposure_seconds") is True
-        (moved,) = camera.tunable_fields()
-        assert float(moved.default) == pytest.approx(0.05)
-        assert view.knob_values["camera"]["exposure_seconds"] == pytest.approx(0.05)
+    view.device_open_requested.emit("camera")
+    assert opened == ["camera"]
 
-        view.knob_values["camera"]["exposure_seconds"] = 1e9
-        assert manager.tune_device("camera", "exposure_seconds") is False
-        assert "exposure_seconds must lie in" in view.status[-1][1]
-        (unmoved,) = camera.tunable_fields()
-        assert float(unmoved.default) == pytest.approx(0.05)
-    finally:
-        installation.close()
+    view.device_open_requested.emit("sequencer")
+    assert opened == ["camera"], "configured but failed leaves are not loaded"
+    assert "no loaded device" in view.status[-1][1]
+
+    view.device_open_requested.emit("missing")
+    assert opened == ["camera"]
+    assert "no loaded device" in view.status[-1][1]

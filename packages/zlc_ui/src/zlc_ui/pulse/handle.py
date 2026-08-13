@@ -135,11 +135,18 @@ class PulseEditorHandle(QtCore.QObject):
     # ------------------------------------------------------------ the window
 
     def close(self) -> None:
-        """Take the window down, running the body's own close handshake."""
+        """Ask the owning window to close through its lifecycle guard."""
 
-        self._view.finish_close()
+        if self._window is None:
+            self._view.finish_close()
+            return
+        self._window.close()
+
+    def set_close_guard(self, guard) -> None:
+        """Require plugin cleanup to finish before the window disappears."""
+
         if self._window is not None:
-            self._window.close()
+            self._window.set_close_guard(guard)
 
     def finish_close(self) -> None:
         self._view.finish_close()
@@ -147,6 +154,22 @@ class PulseEditorHandle(QtCore.QObject):
     def is_visible(self) -> bool:
         target = self._window if self._window is not None else self._view
         return bool(target.isVisible())
+
+    def restore(self) -> None:
+        """Raise this existing editor; never construct a second window."""
+
+        target = self._window if self._window is not None else self._view
+        if hasattr(target, "showNormal"):
+            target.showNormal()
+        else:
+            target.show()
+        if hasattr(target, "raise_"):
+            target.raise_()
+        if hasattr(target, "activateWindow"):
+            target.activateWindow()
+
+    def show(self) -> None:
+        self.restore()
 
     def window_size(self) -> tuple[int, int]:
         """Width and height of the window, for acceptance to check the rule."""

@@ -180,7 +180,7 @@ def build_console(session, *, window_ratio=None):
 
 
 class ExperimentGuiFlow:
-    """One DeviceManager-owned session shared by TaskConsole and PulseGUI."""
+    """One DeviceManager-owned session and its composition-owned windows."""
 
     def __init__(
         self,
@@ -205,7 +205,7 @@ class ExperimentGuiFlow:
         self.session = None
         self.console = None
         self.console_presenter = None
-        self.pulse = None
+        self.device_controls: dict[str, object] = {}
         self.timer = None
         self._closing_console = False
         self._closing_all = False
@@ -235,7 +235,9 @@ class ExperimentGuiFlow:
             initialize_session=self._initialize_session,
             on_initialized=self._open_work_windows,
             shutdown_session=self._shutdown_session,
+            on_device_open=self.open_device_control,
         )
+        self.devices.set_close_guard(self._device_manager_close_guard)
         return self
 
     def _initialize_session(self, config: object):
@@ -250,35 +252,15 @@ class ExperimentGuiFlow:
 
         if self.session is not None:
             raise RuntimeError("this experiment flow already has an active session")
-        console = pulse = presenter = timer = None
+        console = presenter = timer = None
         try:
             console, presenter = build_console(
                 session,
                 window_ratio=self.window_ratio,
             )
-            try:
-                sequencer = session.sequencer
-            except KeyError:
-                sequencer = None
-            if sequencer is not None:
-                from .pulse_editor import create_bound_window
-
-                pulse = create_bound_window(
-                    workspace=self.space,
-                    sequence=None,
-                    sequencer=sequencer,
-                    device_use=session.device_use,
-                    path="",
-                    window_ratio=self.window_ratio,
-                )
-
-            def beat() -> None:
-                presenter.beat()
-                if pulse is not None:
-                    pulse.presenter.refresh_run_state()
-
             timer = attach_qt(
-                beat, interval_ms=_beat_interval_ms(presenter, self.interval_ms)
+                presenter.beat,
+                interval_ms=_beat_interval_ms(presenter, self.interval_ms),
             )
             console.presenter = presenter
             console.session = session
@@ -286,9 +268,6 @@ class ExperimentGuiFlow:
         except BaseException:
             if timer is not None:
                 timer.stop()
-            if pulse is not None:
-                pulse.presenter.close()
-                pulse.close()
             if presenter is not None:
                 presenter.close()
             if console is not None:
@@ -298,22 +277,123 @@ class ExperimentGuiFlow:
         self.session = session
         self.console = console
         self.console_presenter = presenter
-        self.pulse = pulse
         self.timer = timer
         # The Device Manager stays.  It is not an installer that has served its
         # purpose: it is the bench window -- what is running, and the settings
         # those running devices accept -- so hiding it left an operator with no
         # way to reach a camera's gain without shutting the experiment down.
-        # The work windows come up in front of it.
+        # TaskConsole comes up in front; device controls remain on demand.
         self.devices.send_behind()
 
-    def _retire_pulse(self) -> None:
-        pulse = self.pulse
-        if pulse is None:
-            return
-        pulse.presenter.close()
-        pulse.close()
-        self.pulse = None
+    def open_device_control(self, instance_id: str) -> object:
+        """Open or raise the one control window for a loaded named device."""
+
+        key = str(instance_id)
+        existing = self.device_controls.get(key)
+        if existing is not None:
+            existing.restore()
+            return existing
+        session = self.session
+        if session is None or self.catalog is None:
+            raise RuntimeError("initialize devices before opening a control")
+        try:
+            leaf = session.installation.devices[key]
+        except KeyError as error:
+            raise KeyError(f"no loaded device {key!r}") from error
+        descriptors = {item.type_id: item for item in self.catalog.available}
+        descriptor = descriptors[leaf.type_id]
+        if descriptor.control_factory is not None:
+            control = descriptor.control_factory(
+                session,
+                key,
+                window_ratio=self.window_ratio,
+            )
+        else:
+            control = self._open_generic_control(key, leaf.device)
+        self.device_controls[key] = control
+
+        def released() -> None:
+            if self.device_controls.get(key) is control:
+                self.device_controls.pop(key, None)
+
+        control.closed.connect(released)
+        return control
+
+    def _open_generic_control(self, key: str, device: object) -> object:
+        from zlc_atom.authoring import AuthoringSchema
+        from zlc_ui import open_device_control
+
+        from ..authoring_form import display_value, project_schema
+        from ..device_use import DeviceClaim, DeviceUseBusy
+
+        session = self.session
+        if session is None:
+            raise RuntimeError("initialize devices before opening a control")
+        declare = getattr(device, "tunable_fields", None)
+        tune = getattr(device, "tune", None)
+        fields = tuple(declare()) if callable(declare) and callable(tune) else ()
+        control = open_device_control(
+            title=f"{key} control",
+            spec=project_schema(AuthoringSchema(fields)),
+            values=tuple(
+                (field.name, display_value(field.default)) for field in fields
+            ),
+        )
+
+        def refresh(message: str = "", severity: str = "idle") -> None:
+            current = tuple(declare()) if fields else ()
+            control.set_form(
+                project_schema(AuthoringSchema(current)),
+                tuple(
+                    (field.name, display_value(field.default)) for field in current
+                ),
+            )
+            control.show_status(
+                message or ("ready" if current else "No runtime controls"),
+                severity,
+            )
+
+        def commit(field_name: str) -> None:
+            try:
+                wanted = dict(control.read_values())
+                lease = session.device_use.acquire_command(
+                    control,
+                    f"{key} control",
+                    (DeviceClaim(key, key, device, "exclusive"),),
+                )
+            except DeviceUseBusy as error:
+                try:
+                    refresh(str(error), "warning")
+                except Exception as refresh_error:
+                    control.show_status(str(refresh_error), "error")
+                return
+            except Exception as error:
+                control.show_status(str(error), "error")
+                return
+            try:
+                tune(str(field_name), float(wanted[str(field_name)]))
+            except Exception as error:
+                message, severity = str(error), "error"
+            else:
+                message, severity = f"{field_name} applied", "task"
+            finally:
+                lease.release()
+            try:
+                refresh(message, severity)
+            except Exception as error:
+                control.show_status(str(error), "error")
+
+        control.field_committed.connect(commit)
+        control.show_status("ready" if fields else "No runtime controls", "idle")
+        return control
+
+    def _retire_device_controls(self) -> None:
+        for key, control in tuple(self.device_controls.items()):
+            control.close()
+            if self.device_controls.get(key) is control:
+                if control.is_visible():
+                    raise RuntimeError(f"{key} control refused to close")
+                self.device_controls.pop(key, None)
 
     def _retire_console(self, *, close_window: bool) -> None:
         timer = self.timer
@@ -337,7 +417,7 @@ class ExperimentGuiFlow:
     def _shutdown_session(self, session: object) -> None:
         if self.session is not None and session is not self.session:
             raise RuntimeError("DeviceManager tried to retire another experiment session")
-        self._retire_pulse()
+        self._retire_device_controls()
         self._retire_console(close_window=not self._closing_console)
         session.close()
         self.session = None
@@ -361,8 +441,17 @@ class ExperimentGuiFlow:
         finally:
             self._closing_console = False
 
+    def _device_manager_close_guard(self) -> bool:
+        """Retire the whole composition before its root window disappears."""
+
+        self._closing_all = True
+        try:
+            return self.devices is None or self.devices.presenter.close()
+        except BaseException:
+            return False
+
     def close(self) -> None:
-        """Retire Pulse, Console, the shared session, then DeviceManager."""
+        """Retire device controls, Console, session, then DeviceManager."""
 
         self._closing_all = True
         if self.console is not None:
@@ -385,7 +474,7 @@ def create_experiment_flow(
     interval_ms=None,
     window_ratio=None,
 ) -> ExperimentGuiFlow:
-    """Open the v1-shaped experiment entry without entering Qt's event loop."""
+    """Open Device Manager; Init creates one shared on-demand GUI session."""
 
     return ExperimentGuiFlow(
         workspace=workspace,
@@ -406,7 +495,7 @@ def create_console_window(
 
     This compatibility helper owns the session it creates.  The experiment
     launcher does not use it: ``main`` uses :func:`create_experiment_flow` so
-    DeviceManager creates one session shared by TaskConsole and PulseEditor.
+    DeviceManager creates one session; its cards open controls on demand.
     """
 
     from ..board import attach_qt

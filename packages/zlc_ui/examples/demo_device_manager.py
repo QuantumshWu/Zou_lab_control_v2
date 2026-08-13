@@ -18,6 +18,7 @@ from zlc_ui import (  # noqa: E402
     FormFieldProps,
     FormSpec,
     ensure_qt_app,
+    open_device_control,
     open_device_manager,
 )
 
@@ -44,6 +45,46 @@ def populate(view) -> None:
     )
     view.set_form_spec("sensor-1", spec, (("count", 4), ("enabled", True)))
     view.set_form_spec("camera-1", spec, (("count", 2), ("enabled", True)))
+    view.set_loaded_devices(
+        (
+            ("sensor-1", "input", "sensor.fake"),
+            ("camera-1", "imaging", "camera.fake"),
+        )
+    )
+
+    controls = {}
+
+    def open_control(instance_id: str) -> None:
+        existing = controls.get(instance_id)
+        if existing is not None:
+            existing.restore()
+            return
+        control = open_device_control(
+            title=f"{instance_id} control",
+            spec=spec,
+            values=(
+                ("count", 4 if instance_id == "sensor-1" else 2),
+                ("enabled", True),
+            ),
+        )
+        controls[instance_id] = control
+        control.field_committed.connect(
+            lambda key, name=instance_id, handle=control: print(
+                f"device_control_committed{(name, key, handle.read_values())!r}",
+                flush=True,
+            )
+        )
+        control.closed.connect(lambda name=instance_id: controls.pop(name, None))
+        control.show_status("Offline fake device · controls are local demo data", "idle")
+
+    view.device_open_requested.connect(open_control)
+    view._demo_controls = controls
+
+    def close_controls() -> None:
+        for control in tuple(controls.values()):
+            control.close()
+
+    view.closed.connect(close_controls)
 
     def remember(name: str):
         def handler(*payload) -> None:

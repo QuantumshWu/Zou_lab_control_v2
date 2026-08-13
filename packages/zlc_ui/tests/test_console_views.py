@@ -261,6 +261,97 @@ assert ('state', {'interval_ms': 800}) in events
     )
 
 
+def test_fluent_popup_retires_with_its_owner_window() -> None:
+    _run_qt(
+        """
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from zlc_ui.fluent import fluent as tested_module
+print(tested_module.__file__)
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui import open_task_console
+from zlc_ui.console import PanelCardView
+from zlc_ui.qt import ensure_qt_app
+FluentPopup = tested_module.FluentPopup
+app = ensure_qt_app(['test'])
+top_levels = set(app.topLevelWidgets())
+console = open_task_console(window_ratio=0.4)
+console.set_panel_sizes(('2x2',), '2x2')
+console.set_panel_intervals((100, 200, 400, 800), 100)
+console.add_panel('panel-1', 'Panel')
+console.set_panel_projection('panel-1', {
+    'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
+    'title': 'Panel', 'semantic': {}, 'display': {}, 'fit': {},
+    'overlay_signal': '',
+}, {
+    'semantic': (), 'display': (), 'fit': (),
+    'semantic_unavailable': '', 'display_unavailable': '',
+    'fit_unavailable': '',
+})
+app.processEvents()
+owner = next(
+    widget for widget in set(app.topLevelWidgets()) - top_levels
+    if isinstance(widget, tested_module.FluentWindow)
+)
+card = owner.findChild(PanelCardView)
+assert card is not None
+
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+popup = owner.findChild(FluentPopup)
+assert popup is not None
+assert popup.isVisible()
+assert {
+    widget for widget in app.topLevelWidgets() if widget.isVisible()
+} == top_levels | {owner, popup}
+QtWidgets.QApplication.sendEvent(
+    owner, QtCore.QEvent(QtCore.QEvent.WindowDeactivate)
+)
+app.processEvents()
+assert not popup.isVisible(), 'an inactive owner left its popup above another window'
+
+# Owner activation/restoration must never resurrect an explicitly retired popup.
+QtWidgets.QApplication.sendEvent(
+    owner, QtCore.QEvent(QtCore.QEvent.WindowActivate)
+)
+owner.showNormal()
+app.processEvents()
+assert not popup.isVisible()
+
+QtTest.QTest.qWait(300)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert popup.isVisible()
+owner.setWindowState(owner.windowState() | QtCore.Qt.WindowMinimized)
+app.processEvents()
+assert not popup.isVisible(), 'a minimized owner left its popup visible'
+
+owner.showNormal()
+app.processEvents()
+assert not popup.isVisible()
+QtTest.QTest.qWait(300)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+owner.hide()
+app.processEvents()
+assert not popup.isVisible(), 'a hidden owner left its popup visible'
+
+owner.show()
+app.processEvents()
+QtTest.QTest.qWait(300)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+owner.close()
+app.processEvents()
+assert not popup.isVisible(), 'a closed owner left its popup visible'
+assert not any(
+    widget.isVisible() and isinstance(widget, FluentPopup)
+    for widget in app.topLevelWidgets()
+)
+"""
+    )
+
+
 def test_board_constructs_and_packs_from_metrics() -> None:
     _run_qt(
         """

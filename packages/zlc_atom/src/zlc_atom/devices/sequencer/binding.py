@@ -40,4 +40,19 @@ def bind_sequencer(
     )
 
 
-__all__ = ["bind_sequencer"]
+def open_sequencer_control(session, device_key: str, window_ratio=None):
+    """Open PulseGUI for one named sequencer in an existing experiment."""
+
+    from zlc_workbench.apps.pulse_editor import create_bound_window
+
+    return create_bound_window(
+        workspace=session.workspace,
+        sequence=None,
+        sequencer=session.installation.device(str(device_key)),
+        device_use=session.device_use,
+        path="",
+        window_ratio=window_ratio,
+    )
+
+
+__all__ = ["bind_sequencer", "open_sequencer_control"]

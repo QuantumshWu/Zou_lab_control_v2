@@ -540,6 +540,27 @@ class FluentPopup(QtWidgets.QFrame):
         # the popup was just auto-dismissed so its release does not RE-open it; set
         # this hook to be notified on every hide (auto or explicit).
         self._on_hidden = None
+        self._owner_window = (
+            parent.window() if isinstance(parent, QtWidgets.QWidget) else None
+        )
+        if self._owner_window is not None and self._owner_window is not self:
+            self._owner_window.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
+        if watched is self._owner_window:
+            event_type = event.type()
+            owner_retired = event_type in (
+                QtCore.QEvent.WindowDeactivate,
+                QtCore.QEvent.Hide,
+                QtCore.QEvent.Close,
+            )
+            if event_type == QtCore.QEvent.WindowStateChange:
+                owner_retired = bool(
+                    watched.windowState() & QtCore.Qt.WindowMinimized
+                )
+            if owner_retired and self.isVisible():
+                self.hide()
+        return super().eventFilter(watched, event)
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if callable(self._on_hidden):

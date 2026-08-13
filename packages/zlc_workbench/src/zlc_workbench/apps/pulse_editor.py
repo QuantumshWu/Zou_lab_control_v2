@@ -272,17 +272,35 @@ def create_bound_window(
     window = open_pulse_editor(
         title="PulseGUI@Zou lab", window_ratio=window_ratio
     )
-    window.presenter = build(
-        window,
-        PulseEditorState(sequence=sequence),
-        path=str(path),
-        pulses_directory=str(space.pulses),
-        sequencer=sequencer,
-        device_use=device_use,
-        allow_dial=False,
-        connection_label="Experiment session",
-    )
-    window.closed.connect(window.presenter.close)
+    try:
+        window.presenter = build(
+            window,
+            PulseEditorState(sequence=sequence),
+            path=str(path),
+            pulses_directory=str(space.pulses),
+            sequencer=sequencer,
+            device_use=device_use,
+            allow_dial=False,
+            connection_label="Experiment session",
+        )
+    except BaseException:
+        window.close()
+        raise
+    from ..board import attach_qt
+
+    refresh_timer = attach_qt(window.presenter.refresh_run_state, interval_ms=100)
+    window._device_control_refresh_timer = refresh_timer
+
+    def close_bound_control() -> bool:
+        try:
+            window.presenter.close()
+        except BaseException as error:
+            window.show_warning(str(error))
+            return False
+        refresh_timer.stop()
+        return True
+
+    window.set_close_guard(close_bound_control)
     return window
 
 

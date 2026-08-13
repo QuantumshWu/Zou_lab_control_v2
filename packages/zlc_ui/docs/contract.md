@@ -32,6 +32,7 @@ __all__ = (
     "WINDOW_SCREEN_FRACTION",
     "capture_window",
     "ensure_qt_app",
+    "open_device_control",
     "open_device_manager",
     "open_figure_viewer",
     "open_pulse_editor",
@@ -50,11 +51,14 @@ assemble, and assembling a UI is the one job a composition root does not have.
 
 So the surface is of three kinds, and nothing else:
 
-* **One entry per window.**  `open_pulse_editor` / `open_figure_viewer` / `open_device_manager` /
-  `open_task_console` return a HANDLE: signals to
+* **One entry per window.**  `open_device_control` / `open_pulse_editor` /
+  `open_figure_viewer` / `open_device_manager` / `open_task_console` return a HANDLE: signals to
   hear, methods to call, and no way through to a QWidget.  The window's
   lifecycle -- the launcher, the shared screen-fit size, centring, retention
-  and the close handshake -- belongs here too.
+  and the close handshake -- belongs here too.  A loaded Device Manager card
+  emits `device_open_requested`; its host opens either this independent generic
+  form or a device plugin's own window.  Runtime controls never move back into
+  the Device Manager card.
 * **The wiring vocabulary.**  `ConnectionChoiceVM`, `ConnectionVM`,
   `ScheduleVM`, `PeriodVM`, `FieldVM`,
   `PortRowVM`, `DelayRowVM`, `RepeatVM`, `ScanPageRecord`,
