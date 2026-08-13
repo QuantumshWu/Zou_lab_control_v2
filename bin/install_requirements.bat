@@ -14,8 +14,19 @@ rem The list is read from pyproject.toml, so there is one place that says what
 rem the dependencies are.
 setlocal EnableExtensions EnableDelayedExpansion
 
-if not defined ZLC_PY_CMD set "ZLC_PY_CMD=python"
 set "ZLC_HOME=%~dp0.."
+
+rem Which interpreter runs this product is ONE question, and it has an owner --
+rem the same resolver the FPGA launchers ask.  Answering it here with the bare
+rem name "python" is what made a double-clicked window die with "exited with
+rem code 9009" and nothing else on a machine where that name does not resolve.
+call "%ZLC_HOME%\packages\zlc_pulse\fpga\_resolve_tools.bat" python "%ZLC_HOME%"
+if errorlevel 1 (
+  echo.
+  echo Nothing can be installed until this machine has a Python to install with.
+  if "%ZLC_NO_PAUSE%"=="" pause
+  endlocal & exit /b 1
+)
 
 echo.
 echo ============================================================

@@ -20,8 +20,6 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "APP=%~1"
 shift /1
 
-if not defined ZLC_PY_CMD set "ZLC_PY_CMD=python"
-
 rem The checkout itself, so "python -m zou_lab_control_v2" resolves no matter
 rem which folder the launcher was started from -- and it is started from the
 rem experiment folder on purpose.  Prepended, so this tree wins over anything
@@ -31,6 +29,18 @@ if defined PYTHONPATH (
   set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
 ) else (
   set "PYTHONPATH=%ZLC_HOME%"
+)
+
+rem Which interpreter runs this product is ONE question, and it has an owner --
+rem the same resolver the FPGA launchers ask.  Answering it here with the bare
+rem name "python" is what made a double-clicked window die with "exited with
+rem code 9009" and nothing else on a machine where that name does not resolve.
+call "%ZLC_HOME%\packages\zlc_pulse\fpga\_resolve_tools.bat" python "%ZLC_HOME%"
+if errorlevel 1 (
+  echo.
+  echo %APP% cannot start: this machine has no Python this launcher can run.
+  if "%ZLC_NO_PAUSE%"=="" pause
+  endlocal & exit /b 1
 )
 
 set "FORWARD="

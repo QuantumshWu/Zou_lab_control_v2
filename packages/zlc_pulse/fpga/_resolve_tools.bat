@@ -1,6 +1,10 @@
 @echo off
 
-rem Single owner for the Python and Vivado executables used by FPGA launchers.
+rem Single owner for the Python and Vivado executables every launcher uses --
+rem the windows in bin\ as much as the FPGA scripts.  Which interpreter runs
+rem this product is one question, and a launcher that answered it itself with
+rem the bare name "python" is how a double-clicked window died with nothing
+rem but "exited with code 9009" on a machine where that name is not on PATH.
 rem This file intentionally has no SETLOCAL: resolved variables must return to
 rem the caller, whose launcher already owns the enclosing local environment.
 
@@ -38,18 +42,34 @@ rem one that has them.
 if exist "%ZLC_TOOL_REPO_ROOT%\.zlc_python_path" (
   set /p "ZLC_STORED_PY="<"%ZLC_TOOL_REPO_ROOT%\.zlc_python_path"
   if exist "!ZLC_STORED_PY!" (
-    set "ZLC_PY_PATH=!ZLC_STORED_PY!"
-    goto zlc_python_executable
+    call :zlc_python_try "!ZLC_STORED_PY!"
+    if defined ZLC_PY_PATH goto zlc_python_executable
   )
   echo Ignoring stale .zlc_python_path: !ZLC_STORED_PY!
 )
-for /f "delims=" %%I in ('where python 2^>nul') do if not defined ZLC_PY_PATH set "ZLC_PY_PATH=%%I"
+rem A name on PATH is not an interpreter.  Windows ships a python.exe under
+rem WindowsApps that only opens the Store and answers 9009 -- the very code a
+rem launcher then reports with nothing an operator can act on.  Every candidate
+rem is asked to run before it is believed.
+for /f "delims=" %%I in ('where python 2^>nul') do call :zlc_python_try "%%I"
 if defined ZLC_PY_PATH goto zlc_python_executable
-for /f "delims=" %%I in ('where py 2^>nul') do if not defined ZLC_PY_PATH set "ZLC_PY_PATH=%%I"
+for /f "delims=" %%I in ('where py 2^>nul') do call :zlc_python_try "%%I"
 if defined ZLC_PY_PATH goto zlc_python_executable
-echo ERROR: Python was not found. Run install_requirements.bat or set ZLC_FPGA_PYTHON.
+echo ERROR: no working Python was found on this machine.
+echo        Every python.exe and py.exe on PATH was tried and none of them ran.
+echo        Install Python 3 with "Add python.exe to PATH" ticked, or point
+echo        ZLC_PY_CMD at the interpreter to use, for example:
+echo            set ZLC_PY_CMD=C:\Python313\python.exe
 set "ZLC_TOOL_REPO_ROOT="
 exit /b 1
+
+:zlc_python_try
+rem One candidate: keep it only if it actually starts.
+if defined ZLC_PY_PATH exit /b 0
+"%~1" -c "import sys" >nul 2>&1
+if errorlevel 1 exit /b 0
+set "ZLC_PY_PATH=%~1"
+exit /b 0
 
 :zlc_python_executable
 for %%I in ("%ZLC_PY_PATH%") do set "ZLC_PY_EXT=%%~xI"
