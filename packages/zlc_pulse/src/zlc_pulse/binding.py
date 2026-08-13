@@ -135,6 +135,24 @@ def replace_pulse_field(
     return replace(sequence, periods=tuple(periods))
 
 
+def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
+    """Every API parameter at the value the pulse itself carries.
+
+    What ``On Pulse`` runs, and the starting point for a caller that owns only
+    some of the parameters: it overrides those and leaves the operator's own
+    numbers standing for the rest.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    return {
+        parameter.parameter_id: pulse_field_value(
+            sequence, parameter.field_ref, parameter.unit
+        )
+        for parameter in sequence.api_parameters
+    }
+
+
 def resolve_api_parameters(
     sequence: PulseSequence,
     values: Mapping[str, int | float] | None = None,
@@ -143,21 +161,17 @@ def resolve_api_parameters(
 
     With no explicit mapping, the currently authored field values are used.
     That is the Pulse Editor's ``On Pulse`` meaning: run exactly what is shown.
-    An explicit caller such as Calibration must provide exactly one value for
-    every declared parameter, so misspellings and partially configured runs do
-    not silently execute nominal values.
+    An explicit mapping must name every declared parameter, so misspellings and
+    partially configured runs do not silently execute nominal values.  A caller
+    that owns only some of them starts from :func:`authored_api_values` and
+    overrides its own, which says the same thing at the call site.
     """
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
     expected = tuple(parameter.parameter_id for parameter in sequence.api_parameters)
     if values is None:
-        resolved_values = {
-            parameter.parameter_id: pulse_field_value(
-                sequence, parameter.field_ref, parameter.unit
-            )
-            for parameter in sequence.api_parameters
-        }
+        resolved_values = authored_api_values(sequence)
     else:
         if not isinstance(values, Mapping):
             raise TypeError("API parameter values must be a mapping")
@@ -209,6 +223,7 @@ def _number_for(value: float) -> int | float:
 
 
 __all__ = [
+    "authored_api_values",
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",

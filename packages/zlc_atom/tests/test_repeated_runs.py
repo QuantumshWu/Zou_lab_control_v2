@@ -35,7 +35,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import CAMERA_CHANNEL, build_calibration_pulse
+from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, CAMERA_CHANNEL, build_calibration_pulse
 
 
 def _fire_windows(sequencer, windows: int) -> None:
@@ -56,7 +56,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
 
-        windows = int(metadata["camera_windows"])
+        windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(
             camera=camera,
             request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),
@@ -79,8 +79,14 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         plane.close()
 
 
-def test_the_pulse_declares_its_own_camera_bracket() -> None:
-    """The frame count is a property of the pulse, not a constant in the task."""
+def test_resolving_a_pulse_says_nothing_about_the_camera() -> None:
+    """A resolved pulse is a program to play, not a description of frames.
+
+    It used to report how many camera windows it opened and how long each was,
+    and the measurement believed it -- which made an acquisition depend on the
+    shape of a document the operator writes.  A camera reads the frames it was
+    configured to read.
+    """
 
     installation = create_installation("virtual")
     try:
@@ -89,14 +95,7 @@ def test_the_pulse_declares_its_own_camera_bracket() -> None:
         )
     finally:
         installation.close()
-    assert metadata["camera_windows"] == 3
-    assert len(metadata["frame_exposures"]) == metadata["camera_windows"]
-    assert metadata["reference_frame_indices"] == (0, 2)
-    assert metadata["short_frame_index"] == 1
-    # The long-short-long consensus: both reference frames use the same, longer
-    # exposure, and the short one sits between them.
-    long_before, short, long_after = metadata["frame_exposures"]
-    assert long_before == long_after > short
+    assert set(metadata) == {"camera_trigger_channel", "repeat_forever"}
 
 
 def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> None:
@@ -131,7 +130,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
         program, metadata = build_calibration_pulse(sequencer.describe())
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
-        windows = int(metadata["camera_windows"])
+        windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(
             camera=camera,
             request=CameraMeasurementRequest("camera", 0.02, None, 1, windows),

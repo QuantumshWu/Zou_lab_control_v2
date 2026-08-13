@@ -10,6 +10,7 @@ from typing import Any
 
 from zlc_pulse import (
     PulseSequence,
+    authored_api_values,
     compile_sequence,
     resolve_api_parameters,
     sequence_from_tree,
@@ -17,12 +18,10 @@ from zlc_pulse import (
 from zlc_pulse.device import BoardDescription
 
 
-CALIBRATION_API_PARAMETER_IDS = (
-    "reference_probe_duration_before",
-    "readout_probe_duration",
-    "reference_probe_duration_after",
-)
-CAMERA_TRIGGER_PORT = "emCCD"
+#: The port a board usually gates its camera from.  A default for an authoring
+#: field, not a fact about anybody's board: a node that wrote it into its own
+#: source could only ever run the one pulse whose author had picked that name.
+DEFAULT_CAMERA_TRIGGER_PORT = "emCCD"
 
 
 @dataclass(frozen=True)
@@ -50,18 +49,21 @@ def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
 
 
 def _validate_calibration_sequence(sequence: PulseSequence) -> None:
+    """What calibration needs of ANY pulse, said without naming one.
+
+    It used to demand three API parameters carrying three exact identifiers in
+    one exact order -- the private naming of the template that shipped with the
+    node.  An operator's own imaging pulse could not be used at all, however
+    many API slots it had, because the names were not the ones this file
+    happened to contain.  What the protocol actually requires is timing it can
+    set and camera windows it can read; WHICH parameters those are is the
+    operator's choice, made in the task's own form.
+    """
+
     if not isinstance(sequence, PulseSequence):
         raise TypeError("calibration pulse must be PulseSequence")
     if sequence.slots:
         raise ValueError("calibration pulse cannot declare scan slots")
-    parameter_ids = tuple(
-        parameter.parameter_id for parameter in sequence.api_parameters
-    )
-    if parameter_ids != CALIBRATION_API_PARAMETER_IDS:
-        raise ValueError(
-            "calibration pulse API parameters must be "
-            f"{CALIBRATION_API_PARAMETER_IDS!r}, got {parameter_ids!r}"
-        )
 
 
 def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
@@ -81,45 +83,46 @@ def resolve_pulse(
     path: str | Path,
     board: BoardDescription,
     api_values: Mapping[str, float],
+    trigger_port: str = DEFAULT_CAMERA_TRIGGER_PORT,
 ) -> ResolvedPulse:
-    """Resolve and compile the already-decoded exact workspace resource."""
+    """Resolve and compile the already-decoded exact workspace resource.
+
+    ``api_values`` names the parameters this run owns, by the identifiers the
+    PULSE declares -- a caller that owns slots addresses them by number and
+    reads the identifier off the declaration in that order.  Every other
+    parameter keeps the value its author gave it, which is what lets one
+    imaging pulse carry a MOT duration nobody here has an opinion about.
+
+    Nothing about the camera is read back out of the compiled program.  What
+    the frames mean is the protocol's own arithmetic on the slots it drove,
+    and a task that re-derived it from windows and exposures made itself
+    depend on the shape of a document the operator writes.
+    """
 
     if not isinstance(board, BoardDescription):
         raise TypeError("board must be BoardDescription")
     _validate_calibration_sequence(sequence)
     source = Path(path).expanduser().resolve()
-    values = dict(api_values)
-    if set(values) != set(CALIBRATION_API_PARAMETER_IDS) or len(values) != len(
-        CALIBRATION_API_PARAMETER_IDS
-    ):
+    port = str(trigger_port).strip()
+    if not port:
+        raise ValueError("a camera trigger port is required")
+    declared = authored_api_values(sequence)
+    unknown = tuple(name for name in api_values if name not in declared)
+    if unknown:
         raise ValueError(
-            "calibration API values must contain exactly "
-            f"{CALIBRATION_API_PARAMETER_IDS!r}"
+            f"pulse {sequence.name!r} declares no API parameter "
+            f"{unknown!r}; it offers {tuple(declared)!r}"
         )
-    resolved = resolve_api_parameters(
-        sequence,
-        {
-            parameter_id: float(values[parameter_id])
-            for parameter_id in CALIBRATION_API_PARAMETER_IDS
-        },
-    )
+    values = dict(declared)
+    values.update({name: float(value) for name, value in api_values.items()})
+    resolved = resolve_api_parameters(sequence, values)
     if resolved.target != board.target:
         raise ValueError(
             "calibration pulse target is incompatible with the connected board"
         )
     program = compile_sequence(resolved, board.geometry, board.clock_hz)
-    exposures = program.camera_window_exposures(CAMERA_TRIGGER_PORT)
     metadata = {
-        "camera_trigger_channel": CAMERA_TRIGGER_PORT,
-        "camera_windows": program.camera_window_count(CAMERA_TRIGGER_PORT),
-        "frame_exposures": exposures,
-        "frame_semantics": (
-            "reference_long_before",
-            "short_readout",
-            "reference_long_after",
-        ),
-        "reference_frame_indices": (0, 2),
-        "short_frame_index": 1,
+        "camera_trigger_channel": port,
         "repeat_forever": program.repeat_forever,
     }
     return ResolvedPulse(
@@ -132,8 +135,7 @@ def resolve_pulse(
 
 
 __all__ = [
-    "CALIBRATION_API_PARAMETER_IDS",
-    "CAMERA_TRIGGER_PORT",
+    "DEFAULT_CAMERA_TRIGGER_PORT",
     "ResolvedPulse",
     "arm_sequencer",
     "load_calibration_pulse_template",

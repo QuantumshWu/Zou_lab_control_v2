@@ -37,6 +37,7 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from tests.fakes import FakePlane, camera_cycle_snapshot
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
+from zlc_atom.nodes.calibration.pulse import DEFAULT_CAMERA_TRIGGER_PORT
 
 
 ROOT = Path(__file__).parents[1]
@@ -162,6 +163,10 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         repeats=repeats,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
+        reference_before_slot=1,
+        readout_slot=2,
+        reference_after_slot=3,
+        camera_trigger_port=DEFAULT_CAMERA_TRIGGER_PORT,
         roi_xywh=None,
         default_model_kind=ReadoutModelKind.BOX,
         threshold_method="empirical",
@@ -327,8 +332,8 @@ def test_pulse_resolver_uses_the_project_json_document(
             api_values=api_values,
         )
         assert resolved.path == asset.resolve()
-        assert resolved.metadata["camera_windows"] == 3
-        assert resolved.metadata["frame_exposures"] == pytest.approx(
+        assert set(resolved.metadata) == {"camera_trigger_channel", "repeat_forever"}
+        assert resolved.program.camera_window_exposures("emCCD") == pytest.approx(
             (0.031, 0.006, 0.031)
         )
         assert resolved.program.slot_count == 0
@@ -525,6 +530,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "repeats",
             "reference_exposure_seconds",
             "readout_exposure_seconds",
+            "reference_before_slot",
+            "readout_slot",
+            "reference_after_slot",
+            "camera_trigger_port",
             "roi_x",
             "roi_y",
             "roi_width",

@@ -8,7 +8,7 @@ from zlc_pulse.device import BoardDescription
 
 from zlc_atom.nodes.calibration import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.pulse import (
-    CAMERA_TRIGGER_PORT,
+    DEFAULT_CAMERA_TRIGGER_PORT,
     resolve_pulse,
 )
 
@@ -20,7 +20,11 @@ PULSE_ROOT = (
     / "nodes"
     / "calibration"
 )
-CAMERA_CHANNEL = CAMERA_TRIGGER_PORT
+CAMERA_CHANNEL = DEFAULT_CAMERA_TRIGGER_PORT
+#: How many camera windows the template beside the calibration node plays.
+#: A fact about THIS fixture's pulse, stated here: a measurement is told how
+#: many frames it reads, it does not interrogate a pulse to find out.
+CALIBRATION_FRAMES_PER_CYCLE = 3
 IMAGING_PULSE_RESOURCE = CALIBRATION_LOGIC_NODE.workspace_resources[0].resolve(
     PULSE_ROOT / "imaging_template.json"
 )

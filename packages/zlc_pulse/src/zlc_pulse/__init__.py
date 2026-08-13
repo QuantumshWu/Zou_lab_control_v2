@@ -29,7 +29,11 @@ from .model import (
     RepeatRegion,
 )
 from .compile import compile_sequence  # noqa: E402
-from .binding import pulse_field_value, resolve_api_parameters  # noqa: E402
+from .binding import (  # noqa: E402
+    authored_api_values,
+    pulse_field_value,
+    resolve_api_parameters,
+)
 from .wire import load_streamer_config  # noqa: E402
 from .manifest import pulse_target_from_xdc  # noqa: E402
 from .device import PulseStreamer  # noqa: E402
@@ -92,6 +96,7 @@ __all__ = [
     "align_to_grid",
     "cycle_binding_kind",
     "resolve_scan_point",
+    "authored_api_values",
     "resolve_api_parameters",
     "pulse_field_value",
     "api_parameter_columns_for",

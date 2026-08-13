@@ -19,7 +19,7 @@ from zlc_pulse import PulseSequence
 from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import ReadoutModelKind
 from .outputs import CAPTURE_PREVIEW_DECLARATION
-from .pulse import load_calibration_pulse_template
+from .pulse import DEFAULT_CAMERA_TRIGGER_PORT, load_calibration_pulse_template
 from .task import CalibrationRequest, CalibrationTask
 
 
@@ -67,6 +67,38 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "Readout exposure seconds",
             0.005,
             minimum=1e-9,
+        ),
+        # Which API slot of the chosen pulse carries each exposure, BY NUMBER
+        # -- slot 1 is the first parameter the pulse declares, whatever its
+        # author called it.  That is what lets an operator point this task at
+        # their own imaging pulse: three slots is three slots.
+        AuthoringField(
+            "reference_before_slot",
+            "int",
+            "Reference exposure slot (before)",
+            1,
+            minimum=1,
+        ),
+        AuthoringField(
+            "readout_slot",
+            "int",
+            "Readout exposure slot",
+            2,
+            minimum=1,
+        ),
+        AuthoringField(
+            "reference_after_slot",
+            "int",
+            "Reference exposure slot (after)",
+            3,
+            minimum=1,
+        ),
+        AuthoringField(
+            "camera_trigger_port",
+            "str",
+            "Camera trigger port",
+            DEFAULT_CAMERA_TRIGGER_PORT,
+            required=True,
         ),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
@@ -198,6 +230,10 @@ def _build(
                 authored["reference_exposure_seconds"]
             ),
             readout_exposure_seconds=float(authored["readout_exposure_seconds"]),
+            reference_before_slot=int(authored["reference_before_slot"]),
+            readout_slot=int(authored["readout_slot"]),
+            reference_after_slot=int(authored["reference_after_slot"]),
+            camera_trigger_port=str(authored["camera_trigger_port"]),
             roi_xywh=roi,  # type: ignore[arg-type]
             default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
             threshold_method=str(authored["threshold_method"]),

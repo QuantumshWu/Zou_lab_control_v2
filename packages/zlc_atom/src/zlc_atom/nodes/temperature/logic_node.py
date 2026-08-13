@@ -18,6 +18,7 @@ from __future__ import annotations
 from zlc_pulse import PulseSequence
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.nodes.calibration.pulse import DEFAULT_CAMERA_TRIGGER_PORT
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactInputSpec,
     ArtifactOutputSpec,
@@ -89,6 +90,16 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             20,
             minimum=1,
         ),
+        # The port whose windows this measurement reads, from the board this
+        # bench has.  Borrowing the calibration node's constant tied a second
+        # measurement to one bench's port naming.
+        AuthoringField(
+            "camera_trigger_port",
+            "str",
+            "Camera trigger port",
+            DEFAULT_CAMERA_TRIGGER_PORT,
+            required=True,
+        ),
         AuthoringField(
             "model_kind",
             "choice",
@@ -142,6 +153,7 @@ def _build(
         plan=plan_from_authored(authored["plan"]),
         repeats=int(authored["repeats"]),
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
+        camera_trigger_port=str(authored["camera_trigger_port"]),
         artifact_directory=artifact_directory,
     )
 

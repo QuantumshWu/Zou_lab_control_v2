@@ -54,7 +54,6 @@ from zlc_runtime import (
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
-from zlc_atom.nodes.calibration.pulse import CAMERA_TRIGGER_PORT
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraCycleSource,
     CameraMeasurementNode,
@@ -164,6 +163,7 @@ class TemperatureTask:
         plan: ScanPlan,
         repeats: int,
         model_kind: ReadoutModelKind | None,
+        camera_trigger_port: str,
         artifact_directory: str | Path,
     ) -> None:
         if not isinstance(calibration, TrapCalibration):
@@ -194,6 +194,10 @@ class TemperatureTask:
         self._port = ports[0]
         self._t_off = plan.axes[0].values
         self._repeats = int(repeats)
+        port = str(camera_trigger_port).strip()
+        if not port:
+            raise ValueError("camera_trigger_port must be non-empty")
+        self._camera_trigger_port = port
         if self._repeats < 1:
             raise ValueError("repeats must be at least 1")
         # The readout exposure is the one the CALIBRATION measured its
@@ -231,7 +235,7 @@ class TemperatureTask:
         self._scan = SeamlessScanMeasurement(
             sequencer=sequencer,
             source=CameraCycleSource(
-                self._camera, trigger_channel=CAMERA_TRIGGER_PORT
+                self._camera, trigger_channel=self._camera_trigger_port
             ),
             sequence=sequence,
             plan=plan,

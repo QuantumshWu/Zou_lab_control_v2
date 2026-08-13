@@ -58,6 +58,15 @@ def _positive_float(value: object, name: str) -> float:
     return result
 
 
+def _slot_number(value: object, name: str) -> int:
+    """One 1-based API slot number, as an operator counts them."""
+
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive slot number")
+    return result
+
+
 def _non_empty_key(value: object, name: str) -> str:
     result = str(value).strip()
     if not result:
@@ -90,6 +99,15 @@ class CalibrationRequest:
     repeats: int
     reference_exposure_seconds: float
     readout_exposure_seconds: float
+    #: Which of the pulse's API slots this protocol drives, by number, and the
+    #: port the board gates its camera from.  By NUMBER because a slot's name
+    #: belongs to whoever wrote the pulse: a node that matched names could only
+    #: ever run the one template it shipped with, however many slots an
+    #: operator's own imaging pulse offered.
+    reference_before_slot: int
+    readout_slot: int
+    reference_after_slot: int
+    camera_trigger_port: str
     roi_xywh: tuple[int, int, int, int] | None
     default_model_kind: ReadoutModelKind
     threshold_method: str
@@ -116,8 +134,27 @@ class CalibrationRequest:
             self.readout_exposure_seconds,
             "readout_exposure_seconds",
         )
-        if readout_exposure > reference_exposure:
-            raise ValueError("readout exposure cannot exceed reference exposure")
+        if readout_exposure >= reference_exposure:
+            # Not a rule about numbers: the readout frame is recognised in the
+            # compiled program by being the SHORT one, so a run whose three
+            # windows are the same length has no readout frame to find.
+            raise ValueError("readout exposure must be shorter than the reference exposure")
+        slots = tuple(
+            _slot_number(value, name)
+            for value, name in (
+                (self.reference_before_slot, "reference_before_slot"),
+                (self.readout_slot, "readout_slot"),
+                (self.reference_after_slot, "reference_after_slot"),
+            )
+        )
+        if len(set(slots)) != len(slots):
+            raise ValueError(
+                "the three calibration exposures must be driven by three "
+                "different pulse API slots"
+            )
+        camera_trigger_port = _non_empty_key(
+            self.camera_trigger_port, "camera_trigger_port"
+        )
         if not isinstance(self.default_model_kind, ReadoutModelKind):
             raise TypeError("default_model_kind must be ReadoutModelKind")
         threshold_method = str(self.threshold_method).lower()
@@ -147,6 +184,10 @@ class CalibrationRequest:
         object.__setattr__(self, "repeats", repeats)
         object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
         object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
+        object.__setattr__(self, "reference_before_slot", slots[0])
+        object.__setattr__(self, "readout_slot", slots[1])
+        object.__setattr__(self, "reference_after_slot", slots[2])
+        object.__setattr__(self, "camera_trigger_port", camera_trigger_port)
         object.__setattr__(self, "roi_xywh", _roi(self.roi_xywh))
         object.__setattr__(self, "threshold_method", threshold_method)
         object.__setattr__(self, "box_half_width", box_half_width)
@@ -165,6 +206,10 @@ class CalibrationRequest:
             "repeats": self.repeats,
             "reference_exposure_seconds": self.reference_exposure_seconds,
             "readout_exposure_seconds": self.readout_exposure_seconds,
+            "reference_before_slot": self.reference_before_slot,
+            "readout_slot": self.readout_slot,
+            "reference_after_slot": self.reference_after_slot,
+            "camera_trigger_port": self.camera_trigger_port,
             "roi_xywh": None if self.roi_xywh is None else list(self.roi_xywh),
             "default_model_kind": self.default_model_kind.value,
             "threshold_method": self.threshold_method,
@@ -176,6 +221,14 @@ class CalibrationRequest:
             "detection_min_distance": self.detection_min_distance,
             "detection_sigma": self.detection_sigma,
         }
+
+
+#: The acquisition order this protocol runs in: a long reference frame, the
+#: short readout between them, a long reference after.  THE statement of it --
+#: it used to be repeated in the resolver's metadata, re-checked in the facts,
+#: written back as a literal, and indexed again in two more places.
+REFERENCE_FRAME_INDICES = (0, 2)
+READOUT_FRAME_INDEX = 1
 
 
 @dataclass(frozen=True)
@@ -207,11 +260,12 @@ class CalibrationCapture:
 
     @property
     def reference(self) -> tuple[tuple[CameraFrameRecord, CameraFrameRecord], ...]:
-        return tuple((cycle[0], cycle[2]) for cycle in self.cycles)
+        first, second = REFERENCE_FRAME_INDICES
+        return tuple((cycle[first], cycle[second]) for cycle in self.cycles)
 
     @property
     def short(self) -> tuple[CameraFrameRecord, ...]:
-        return tuple(cycle[1] for cycle in self.cycles)
+        return tuple(cycle[READOUT_FRAME_INDEX] for cycle in self.cycles)
 
 
 @dataclass(frozen=True)
@@ -570,62 +624,76 @@ class CalibrationTask:
             self.pulse_sequence,
             path=self.pulse_path,
             board=self.sequencer.describe(),
-            api_values={
-                "reference_probe_duration_before": self.request.reference_exposure_seconds,
-                "readout_probe_duration": self.request.readout_exposure_seconds,
-                "reference_probe_duration_after": self.request.reference_exposure_seconds,
-            },
+            api_values=dict(
+                zip(
+                    self._driven_parameters(),
+                    (
+                        self.request.reference_exposure_seconds,
+                        self.request.readout_exposure_seconds,
+                        self.request.reference_exposure_seconds,
+                    ),
+                    strict=True,
+                )
+            ),
+            trigger_port=self.request.camera_trigger_port,
         )
 
-    def _pulse_facts(self, pulse: ResolvedPulse) -> dict[str, object]:
-        metadata = pulse.metadata
-        if int(metadata.get("camera_windows", 0)) != 3:
+    def _driven_parameters(self) -> tuple[str, str, str]:
+        """The three API slots this run drives, as the pulse names them.
+
+        Addressed by number, in the acquisition's own order: slot k is the
+        k-th parameter the pulse declares, whatever its author called it.
+        """
+
+        declared = tuple(
+            parameter.parameter_id
+            for parameter in self.pulse_sequence.api_parameters
+        )
+        wanted = (
+            self.request.reference_before_slot,
+            self.request.readout_slot,
+            self.request.reference_after_slot,
+        )
+        if max(wanted) > len(declared):
             raise ValueError(
-                f"calibration pulse {pulse.name!r} must declare exactly three camera windows"
+                f"pulse {self.pulse_sequence.name!r} offers {len(declared)} "
+                f"API slot(s) and this calibration drives slot {max(wanted)}"
             )
+        return tuple(declared[slot - 1] for slot in wanted)
+
+    def _pulse_facts(self, pulse: ResolvedPulse) -> dict[str, object]:
+        """What this run will be remembered by: the pulse it played, and where.
+
+        It does NOT re-read the compiled program to decide what the frames
+        mean.  The three exposures went into three API slots the operator
+        chose by number, and the acquisition reads them back in that same
+        order; a task that re-derived the meaning from window counts and
+        exposure lengths made itself depend on the shape of a document it does
+        not own, and broke the moment the pulse was somebody else's.
+        """
+
+        metadata = pulse.metadata
         if metadata.get("repeat_forever", False):
             raise ValueError(
                 f"pulse {pulse.name!r} is repeat_forever and cannot finish calibration"
             )
-        try:
-            exposures = tuple(float(value) for value in metadata["frame_exposures"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "calibration pulse must declare frame_exposures=(long, readout, long)"
-            ) from exc
-        expected = (
-            self.request.reference_exposure_seconds,
-            self.request.readout_exposure_seconds,
-            self.request.reference_exposure_seconds,
-        )
-        if (
-            len(exposures) != 3
-            or any(not np.isfinite(value) or value <= 0 for value in exposures)
-            or not np.allclose(exposures, expected, rtol=1e-9, atol=1e-12)
-        ):
-            raise ValueError(
-                "calibration pulse frame exposures do not match the frozen request"
-            )
-        semantics = tuple(metadata.get("frame_semantics", ()))
-        if semantics != (
-            "reference_long_before",
-            "short_readout",
-            "reference_long_after",
-        ):
-            raise ValueError("calibration pulse frame_semantics must be long/readout/long")
-        if tuple(metadata.get("reference_frame_indices", ())) != (0, 2):
-            raise ValueError("calibration pulse reference_frame_indices must be (0, 2)")
-        if int(metadata.get("short_frame_index", -1)) != 1:
-            raise ValueError("calibration pulse short_frame_index must be 1")
         return {
             "name": pulse.name,
             "path": None if pulse.path is None else str(pulse.path),
             "camera_trigger_channel": metadata.get("camera_trigger_channel"),
-            "camera_windows": 3,
-            "frame_exposures": list(exposures),
-            "frame_semantics": list(semantics),
-            "reference_frame_indices": [0, 2],
-            "readout_frame_index": 1,
+            "api_slots": [
+                self.request.reference_before_slot,
+                self.request.readout_slot,
+                self.request.reference_after_slot,
+            ],
+            "api_parameters": list(self._driven_parameters()),
+            "frame_exposures": [
+                self.request.reference_exposure_seconds,
+                self.request.readout_exposure_seconds,
+                self.request.reference_exposure_seconds,
+            ],
+            "reference_frame_indices": list(REFERENCE_FRAME_INDICES),
+            "readout_frame_index": READOUT_FRAME_INDEX,
         }
 
     def _safe(self) -> None:
@@ -737,8 +805,10 @@ class CalibrationTask:
     ) -> FrameContract:
         roi_y, roi_x = actual.roi_origin_yx
         roi_height, roi_width = actual.roi_shape_yx
-        frame_exposures = pulse["frame_exposures"]
-        readout_gate = float(frame_exposures[1])  # type: ignore[index]
+        # The gate is what this run ASKED for, from the request that froze it.
+        # Reading it back out of the pulse only asked the same question of a
+        # less reliable witness.
+        readout_gate = self.request.readout_exposure_seconds
         return FrameContract(
             actual.frame_shape_yx,
             sensor_shape=actual.sensor_shape_yx,

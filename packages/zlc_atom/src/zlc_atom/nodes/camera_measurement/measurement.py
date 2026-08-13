@@ -257,27 +257,16 @@ class CameraCycleSource:
             )
 
     def arm(self, program: object, table: object = None) -> None:
-        """Check the cycle, then arm for the whole run.
+        """Arm for the whole run.
 
-        The cycle the board is about to play must open exactly the windows
-        this capture reads, or an exact read waits forever for a frame no
-        trigger will ever produce.  ``table`` is the first row the board will
-        play: a program that carries scan slots has no timing until the table
-        supplies one, so the count is asked about one played cycle.
+        A camera reads frames.  How many arrive per cycle is what this
+        measurement was configured to read, and nothing here opens the pulse
+        to check that against the windows some port happens to declare: a
+        capture that counts a template's triggers is a capture that breaks
+        when the operator writes their own pulse, and it makes the acquisition
+        depend on a document it does not own.
         """
 
-        played = int(
-            program.camera_window_count(
-                self.trigger_channel,
-                None if table is None else table[:1],
-            )
-        )
-        expected = self.camera_node.request.frames_per_cycle
-        if played != expected:
-            raise ValueError(
-                f"the template opens {played} camera windows per cycle and "
-                f"this measurement reads {expected}"
-            )
         if self._capture is None:
             self._capture = self.camera_node.prepare(owns_generation=False)
 

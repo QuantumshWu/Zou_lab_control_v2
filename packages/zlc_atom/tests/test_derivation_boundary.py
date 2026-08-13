@@ -44,7 +44,7 @@ from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import build_calibration_pulse
+from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def bench():
         program, metadata = build_calibration_pulse(sequencer.describe())
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
-        yield plane, camera, sequencer, int(metadata["camera_windows"])
+        yield plane, camera, sequencer, CALIBRATION_FRAMES_PER_CYCLE
     finally:
         installation.close()
         plane.close()

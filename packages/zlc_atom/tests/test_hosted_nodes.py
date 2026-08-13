@@ -30,7 +30,7 @@ from zlc_runtime import SelectionRange, SelectionState
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import build_calibration_pulse
+from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
 class _DetachRecordingPlane(SignalDataPlane):
@@ -198,7 +198,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         program, metadata = build_calibration_pulse(sequencer.describe())
         sequencer.camera_trigger_channel = metadata["camera_trigger_channel"]
         sequencer.load(program)
-        windows = int(metadata["camera_windows"])
+        windows = CALIBRATION_FRAMES_PER_CYCLE
 
         node = CameraMeasurementNode(
             camera=camera,
@@ -291,7 +291,7 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
                 exposure_seconds=0.02,
                 roi_xywh=None,
                 repeat=0,
-                frames_per_cycle=int(metadata["camera_windows"]),
+                frames_per_cycle=CALIBRATION_FRAMES_PER_CYCLE,
             ),
             signal_plane=plane,
             producer="cm-live",
