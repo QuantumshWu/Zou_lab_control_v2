@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 
 from zlc_atom.install.configuration import (
@@ -42,6 +43,23 @@ from .authoring_form import display_value, project_schema
 __all__ = ["DeviceManagerPresenter"]
 
 
+#: How long one hardware family may take to answer a scan.  Generous, because
+#: a network dial legitimately takes seconds; bounded, because an unreachable
+#: one must not hold up the families that ARE there.
+_FAMILY_SCAN_DEADLINE_SECONDS = 20.0
+
+
+def _run_inline(work, deliver, failed) -> None:
+    """Run the work right here: the headless behaviour every test drives."""
+
+    try:
+        result = work()
+    except BaseException as error:  # noqa: BLE001 -- reported, not swallowed
+        failed(error)
+    else:
+        deliver(result)
+
+
 class DeviceManagerPresenter:
     """Wires a device-manager view to one apparatus file."""
 
@@ -57,6 +75,7 @@ class DeviceManagerPresenter:
         on_initialized: Callable[[object], None] | None = None,
         shutdown_session: Callable[[object], None] | None = None,
         on_device_open: Callable[[str], None] | None = None,
+        run_off_thread: Callable[..., None] | None = None,
     ) -> None:
         if initial_config is not None and not isinstance(initial_config, InstallationConfig):
             raise TypeError("initial_config must be InstallationConfig or None")
@@ -65,9 +84,19 @@ class DeviceManagerPresenter:
             (on_initialized, "on_initialized"),
             (shutdown_session, "shutdown_session"),
             (on_device_open, "on_device_open"),
+            (run_off_thread, "run_off_thread"),
         ):
             if value is not None and not callable(value):
                 raise TypeError(f"{name} must be callable or None")
+        #: How the slow, Qt-free half of a button runs.  Synchronously here,
+        #: which is what every headless test drives and what a notebook wants;
+        #: a GUI composition passes one that runs the work on a worker thread
+        #: and delivers the result back on the GUI thread.  Without it, both
+        #: buttons ran vendor bring-up inside their click slot: the event loop
+        #: never turned, so the busy state and the "scanning hardware" line
+        #: below were never painted, and the window was a frozen rectangle for
+        #: however long the hardware took.
+        self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
         self.view = view
         self.path = Path(path)
         # The real catalog, not a copy of it: a window that listed its own
@@ -259,23 +288,71 @@ class DeviceManagerPresenter:
         self.busy = True
         self._show()
         self._report("scanning hardware")
+
+        def deliver(result) -> None:
+            found, failures = result
+            self.discovered = tuple(found)
+            self.busy = False
+            self._show()
+            message = f"discovered {len(found)} device(s)"
+            if failures:
+                message += "; " + "; ".join(failures)
+            self._report(message, severity="warning" if failures else "task")
+
+        def failed(error: BaseException) -> None:
+            self.busy = False
+            self._show()
+            self._report(f"scan failed: {error}", severity="error")
+
+        self._run_off_thread(self._scan_families, deliver, failed)
+        return True
+
+    def _scan_families(self):
+        """Ask every family at once, and let none of them hold the others up.
+
+        One unreachable thing used to cost its whole timeout before the next
+        family was even asked, sequentially, with no way to give up: a dialled
+        sequencer that answers nothing is five seconds, and a vendor
+        enumeration that hangs is forever.  A family that has not answered by
+        the deadline is reported as such and the scan goes on; its thread is
+        left to finish on its own, because a blocked vendor call cannot be
+        cancelled and pretending otherwise would misreport what stopped.
+
+        Nothing here touches the view: this half is what runs off the GUI
+        thread, and the deliver callback above is what runs back on it.
+        """
+
+        descriptors = [
+            descriptor
+            for descriptor in self.types.values()
+            if descriptor.discover is not None
+        ]
         found: list[DeviceInstanceConfig] = []
         failures: list[str] = []
-        for descriptor in self.types.values():
-            if descriptor.discover is None:
-                continue
-            try:
-                found.extend(descriptor.discover())
-            except Exception as error:
-                failures.append(f"{descriptor.type_id}: {error}")
-        self.discovered = tuple(found)
-        self.busy = False
-        self._show()
-        message = f"discovered {len(found)} device(s)"
-        if failures:
-            message += "; " + "; ".join(failures)
-        self._report(message, severity="warning" if failures else "task")
-        return True
+        if not descriptors:
+            return found, failures
+        pool = ThreadPoolExecutor(
+            max_workers=len(descriptors), thread_name_prefix="zlc-scan"
+        )
+        try:
+            pending = {
+                pool.submit(descriptor.discover): descriptor
+                for descriptor in descriptors
+            }
+            for future, descriptor in pending.items():
+                try:
+                    found.extend(future.result(timeout=_FAMILY_SCAN_DEADLINE_SECONDS))
+                except FutureTimeout:
+                    failures.append(
+                        f"{descriptor.type_id}: no answer within "
+                        f"{_FAMILY_SCAN_DEADLINE_SECONDS:g}s"
+                    )
+                except Exception as error:
+                    failures.append(f"{descriptor.type_id}: {error}")
+        finally:
+            pool.shutdown(wait=False)
+        return found, failures
+
 
     def add_discovered(self, instance_id: str) -> str:
         candidate = next(
@@ -433,15 +510,31 @@ class DeviceManagerPresenter:
         self.busy = True
         self._show()
         self._report("initializing devices")
-        try:
+
+        def build() -> object:
+            # Opening devices is where the seconds are -- a dial that answers
+            # nothing, a vendor runtime coming up -- and none of it touches a
+            # window.  Run it off the GUI thread and the "initializing
+            # devices" line above is actually painted while it happens.
             session = self._initialize_session(candidate)
             if session is None:
                 raise RuntimeError("session initializer returned None")
-        except Exception as error:
+            return session
+
+        def failed(error: BaseException) -> None:
             self.busy = False
             self._show()
             self._report(f"devices did not initialize: {error}", severity="error")
-            return False
+
+        self._run_off_thread(
+            build,
+            lambda session: self._session_ready(session, candidate),
+            failed,
+        )
+        return True
+
+    def _session_ready(self, session: object, candidate: InstallationConfig) -> bool:
+        """The half that must happen where the windows are."""
 
         self._active_session = session
         self._active_config = candidate

@@ -66,21 +66,21 @@ PYLON_CAMERA_SCHEMA = AuthoringSchema(
 
 
 def _discover_dcam() -> tuple[DeviceInstanceConfig, ...]:
+    # A count read.  Scanning used to start the whole vendor runtime and tear
+    # it down again per button press, which on a bench with a qCMOS attached
+    # is most of what "scan hardware" cost -- and it collided with any camera
+    # that was open at the time.  The runtime belongs to the process now.
     driver = DcamSdkDriver()
-    owned = driver.initialize()
-    try:
-        return tuple(
-            DeviceInstanceConfig(
-                instance_id=f"dcam_{index}",
-                role=f"dcam_{index}",
-                type_id="camera.dcam",
-                parameters=DCAM_CAMERA_SCHEMA.project_values({"device_index": index}),
-            )
-            for index in range(driver.device_count)
+    driver.initialize()
+    return tuple(
+        DeviceInstanceConfig(
+            instance_id=f"dcam_{index}",
+            role=f"dcam_{index}",
+            type_id="camera.dcam",
+            parameters=DCAM_CAMERA_SCHEMA.project_values({"device_index": index}),
         )
-    finally:
-        if owned:
-            driver.uninitialize()
+        for index in range(driver.device_count)
+    )
 
 
 def _discover_pylon() -> tuple[DeviceInstanceConfig, ...]:

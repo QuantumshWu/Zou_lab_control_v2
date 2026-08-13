@@ -136,7 +136,6 @@ class DcamCameraAdapter:
         self._state_lock = threading.RLock()
         self._finish_requested = threading.Event()
         self._device: object | None = None
-        self._runtime_owned = False
         self._open = False
         self._armed = False
         self._capture_running = False
@@ -164,8 +163,10 @@ class DcamCameraAdapter:
         return self._device
 
     def _open_on_owner(self) -> None:
-        owned = bool(self._driver.initialize())
-        self._runtime_owned = owned
+        # The runtime is the process's and outlives this camera; opening only
+        # makes sure it is up.  Taking it down on the way out is what let one
+        # camera's close pull it from under a scan, or another camera.
+        self._driver.initialize()
         try:
             self._device = self._driver.open_device(self._config.device_index)
             self._open = True
@@ -179,14 +180,6 @@ class DcamCameraAdapter:
                     device.close()
                 except BaseException as secondary:
                     primary.add_note(f"DCAM close after open failure also failed: {secondary}")
-            if owned:
-                try:
-                    self._driver.uninitialize()
-                except BaseException as secondary:
-                    primary.add_note(
-                        f"DCAM uninitialize after open failure also failed: {secondary}"
-                    )
-            self._runtime_owned = False
             raise
 
     @staticmethod
@@ -784,12 +777,7 @@ class DcamCameraAdapter:
                 device.close()
         finally:
             self._device = None
-            try:
-                if self._runtime_owned:
-                    self._driver.uninitialize()
-            finally:
-                self._runtime_owned = False
-                self._open = False
+            self._open = False
 
     def close(self) -> None:
         """Stop the capture, release the handle, retire the lane -- all of them.
@@ -800,7 +788,7 @@ class DcamCameraAdapter:
         could not exit, and the camera stayed claimed until it was power-cycled.
         """
 
-        if not self._open and self._device is None and not self._runtime_owned:
+        if not self._open and self._device is None:
             self._lane.close()
             return
         failures: list[BaseException] = []

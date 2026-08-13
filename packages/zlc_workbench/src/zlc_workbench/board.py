@@ -32,7 +32,13 @@ from zlc_runtime import (
 )
 
 
-__all__ = ["LiveBoard", "OwnerWake", "attach_qt", "attach_qt_owner_turn"]
+__all__ = [
+    "LiveBoard",
+    "OwnerWake",
+    "attach_qt",
+    "attach_qt_owner_turn",
+    "attach_qt_worker",
+]
 
 
 class OwnerWake:
@@ -166,6 +172,49 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     timer.timeout.connect(beat)
     timer.start()
     return timer
+
+
+def attach_qt_worker(name: str = "zlc-worker"):
+    """Run Qt-free work off the GUI thread and deliver the result back on it.
+
+    The other half of the owner turn: a presenter's slow half -- opening
+    devices, scanning a vendor stack -- must not run in a click slot, because
+    while it does the event loop never turns and the busy state and status
+    lines the presenter writes are never painted.  The work goes to one
+    worker; its outcome comes back through the same queued hop the board
+    already uses, so everything that touches a window still happens on the
+    thread that owns them.
+    """
+
+    from concurrent.futures import ThreadPoolExecutor
+    from queue import Empty, SimpleQueue
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=str(name))
+    inbox: SimpleQueue = SimpleQueue()
+
+    def drain() -> None:
+        while True:
+            try:
+                finish = inbox.get_nowait()
+            except Empty:
+                return
+            finish()
+
+    trigger = attach_qt_owner_turn(drain)
+
+    def run(work, deliver, failed) -> None:
+        def task() -> None:
+            try:
+                result = work()
+            except BaseException as error:  # noqa: BLE001 -- delivered, not lost
+                inbox.put(lambda: failed(error))
+            else:
+                inbox.put(lambda: deliver(result))
+            trigger()
+
+        pool.submit(task)
+
+    return run
 
 
 def attach_qt_owner_turn(turn: Callable[[], None]) -> Callable[[], None]:

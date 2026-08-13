@@ -64,6 +64,7 @@ def build(
 ) -> object:
     """One presenter over one apparatus file, with the view it drives."""
 
+    from ..board import attach_qt_worker
     from ..device_manager import DeviceManagerPresenter
 
     return DeviceManagerPresenter(
@@ -76,6 +77,7 @@ def build(
         on_initialized=on_initialized,
         shutdown_session=shutdown_session,
         on_device_open=on_device_open,
+        run_off_thread=attach_qt_worker("zlc-devices"),
     )
 
 
