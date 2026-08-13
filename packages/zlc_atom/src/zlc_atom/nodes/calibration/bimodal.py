@@ -191,24 +191,78 @@ def _exact_otsu_threshold(values: np.ndarray, min_fraction: float = 0.02) -> flo
     )
 
 
-def _one_sided_core_stats(
+def _two_state_mixture(
     samples: np.ndarray,
-    side: str,
+    *,
     sigma_floor: float,
-) -> tuple[float, float, bool]:
-    finite = np.asarray(samples, dtype=float).reshape(-1)
-    finite = finite[np.isfinite(finite)]
-    if finite.size < 4:
-        return float("nan"), float("nan"), False
-    q16, q50, q84 = np.percentile(finite, [15.865525393145708, 50.0, 84.1344746068543])
-    sigma = float(q50 - q16) if side == "low" else float(q84 - q50)
-    alternative = 0.5 * float(q84 - q16)
-    if not isfinite(sigma) or sigma <= 0.0:
-        sigma = alternative
-    if not isfinite(sigma) or sigma <= 0.0:
-        median = float(np.median(finite))
-        sigma = 1.482602218505602 * float(np.median(np.abs(finite - median)))
-    return float(q50), max(float(sigma), sigma_floor, _SIGMA_FLOOR), True
+    iterations: int = 300,
+    tolerance: float = 1e-9,
+) -> tuple[float, float, float, float, float, bool]:
+    """Fit two Gaussians to a sample by maximum likelihood.
+
+    Every sample belongs to both states, weighted by how well each explains
+    it.  That is the whole difference from what this used to do: cut the
+    sample at an Otsu threshold and describe each half on its own.  The cut
+    has to be right for the halves to mean anything, and on a few hundred
+    shots it often is not -- and when it lands inside the dark state, the
+    bright half inherits the dark state's upper tail, so its centre is pulled
+    down between the two peaks and its width is inflated to cover both.  A
+    sample that was cleanly bimodal came back as two overlapping Gaussians,
+    with a threshold and a fidelity computed from them.
+
+    Nothing is truncated here, so nothing is pulled together, and a sample
+    that really is close to single-peaked is fitted as what it is: the
+    separation of the result says so, instead of the estimator inventing it.
+    """
+
+    values = np.asarray(samples, dtype=float).reshape(-1)
+    split = _exact_otsu_threshold(values)
+    low, high = values[values <= split], values[values > split]
+    if low.size < 2 or high.size < 2:
+        return split, float("nan"), float("nan"), float("nan"), float("nan"), False
+    means = np.array([float(np.mean(low)), float(np.mean(high))])
+    spread = float(np.std(values)) or 1.0
+    sigmas = np.array(
+        [max(float(np.std(low)), sigma_floor, 1e-3 * spread),
+         max(float(np.std(high)), sigma_floor, 1e-3 * spread)]
+    )
+    weights = np.array([low.size / values.size, high.size / values.size])
+
+    previous = -np.inf
+    for _ in range(int(iterations)):
+        # E: how much each state explains each sample.
+        scaled = (values[:, None] - means[None, :]) / sigmas[None, :]
+        densities = np.exp(-0.5 * scaled**2) / (sigmas[None, :] * sqrt(2.0 * pi))
+        joint = densities * weights[None, :]
+        total = joint.sum(axis=1)
+        if not np.all(np.isfinite(total)) or np.any(total <= 0.0):
+            return split, float("nan"), float("nan"), float("nan"), float("nan"), False
+        responsibility = joint / total[:, None]
+        # M: each state is the weighted summary of what it explained.
+        counts = responsibility.sum(axis=0)
+        if np.any(counts <= 0.0):
+            return split, float("nan"), float("nan"), float("nan"), float("nan"), False
+        weights = counts / values.size
+        means = (responsibility * values[:, None]).sum(axis=0) / counts
+        variances = (
+            responsibility * (values[:, None] - means[None, :]) ** 2
+        ).sum(axis=0) / counts
+        sigmas = np.maximum(np.sqrt(np.maximum(variances, 0.0)), max(sigma_floor, _SIGMA_FLOOR))
+        likelihood = float(np.sum(np.log(total)))
+        if abs(likelihood - previous) <= tolerance * max(1.0, abs(likelihood)):
+            break
+        previous = likelihood
+
+    order = np.argsort(means)
+    dark, bright = int(order[0]), int(order[1])
+    return (
+        split,
+        float(means[dark]),
+        float(sigmas[dark]),
+        float(means[bright]),
+        float(sigmas[bright]),
+        float(weights[bright]),
+    )
 
 
 @dataclass(frozen=True)
@@ -227,23 +281,35 @@ class BimodalFit:
 
 
 def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> BimodalFit:
-    """Fit robust one-sided Gaussian summaries to a two-state sample."""
+    """Fit the two readout states of one sample by maximum likelihood."""
 
     samples = np.asarray(values, dtype=float).reshape(-1)
     samples = samples[np.isfinite(samples)]
-    split = _exact_otsu_threshold(samples)
-    if samples.size < 8 or not isfinite(split):
+    if samples.size < 8:
+        split = _exact_otsu_threshold(samples) if samples.size else float("nan")
         return BimodalFit(split, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, True, False)
-    low, high = samples[samples <= split], samples[samples > split]
-    minimum = max(4, int(np.ceil(min_component_fraction * samples.size)))
-    if low.size < minimum or high.size < minimum:
-        return BimodalFit(split, np.nan, np.nan, np.nan, np.nan, np.nan, high.size / samples.size, np.nan, np.nan, True, False)
     floor = max(1e-6 * float(np.std(samples)), 1e-12)
-    dark_mean, dark_sigma, dark_ok = _one_sided_core_stats(low, "low", floor)
-    bright_mean, bright_sigma, bright_ok = _one_sided_core_stats(high, "high", floor)
-    fraction = float(high.size / samples.size)
-    if not dark_ok or not bright_ok or not np.isfinite((dark_mean, dark_sigma, bright_mean, bright_sigma)).all() or bright_mean <= dark_mean:
-        return BimodalFit(split, np.nan, dark_mean, dark_sigma, bright_mean, bright_sigma, fraction, np.nan, np.nan, True, False)
+    (
+        split,
+        dark_mean,
+        dark_sigma,
+        bright_mean,
+        bright_sigma,
+        bright_weight,
+    ) = _two_state_mixture(samples, sigma_floor=floor)
+    fraction = float(bright_weight)
+    minimum = max(4.0, float(min_component_fraction) * samples.size) / samples.size
+    if (
+        not np.isfinite((dark_mean, dark_sigma, bright_mean, bright_sigma)).all()
+        or bright_mean <= dark_mean
+        or not np.isfinite(fraction)
+        or fraction < minimum
+        or fraction > 1.0 - minimum
+    ):
+        return BimodalFit(
+            split, np.nan, dark_mean, dark_sigma, bright_mean, bright_sigma,
+            fraction, np.nan, np.nan, True, False,
+        )
     threshold, bright_above = optimal_gaussian_threshold(dark_mean, dark_sigma, bright_mean, bright_sigma)
     dark_fidelity, bright_fidelity, fidelity = gaussian_fidelity(dark_mean, dark_sigma, bright_mean, bright_sigma, threshold, bright_above)
     separation = (bright_mean - dark_mean) / max(dark_sigma + bright_sigma, _SIGMA_FLOOR)
