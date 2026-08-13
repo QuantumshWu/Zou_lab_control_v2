@@ -21,6 +21,7 @@ _INSTALLATION_TEMPLATES = {
         DeviceSpec("camera", "camera.virtual"),
         DeviceSpec("sequencer", "sequencer.virtual"),
         DeviceSpec("mot_camera", "camera.virtual_mot"),
+        DeviceSpec("slm", "slm.virtual"),
     ),
     "hardware": (
         DeviceSpec("camera", "camera.dcam"),

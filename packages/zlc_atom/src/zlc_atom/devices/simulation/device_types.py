@@ -5,10 +5,12 @@ from __future__ import annotations
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
+from zlc_atom.devices.slm import bind_slm
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from .camera import VirtualCamera, VirtualCameraConfig
 from .sequencer import VirtualSequencer
+from .slm import VirtualSLM
 from .world import (
     DEFAULT_SIMULATION_GRID_SHAPE_YX,
     DEFAULT_SIMULATION_IMAGE_SHAPE_YX,
@@ -46,6 +48,9 @@ VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
 
 # A virtual sequencer has no physical endpoint or device-local parameters.
 VIRTUAL_SEQUENCER_SCHEMA = AuthoringSchema(())
+
+# The virtual panel geometry belongs to its one SimulationWorld.
+VIRTUAL_SLM_SCHEMA = AuthoringSchema(())
 
 VIRTUAL_MOT_CAMERA_SCHEMA = AuthoringSchema(
     (
@@ -171,6 +176,23 @@ def _sequencer_world_config(values: dict) -> None:
     return None
 
 
+def _slm_factory(context, key: str, values: dict) -> InstalledLeaf:
+    VIRTUAL_SLM_SCHEMA.project_values(values)
+    if not isinstance(context.world, SimulationWorld):
+        raise TypeError("slm.virtual requires the installation SimulationWorld")
+    return bind_slm(
+        context,
+        key,
+        VirtualSLM(context.world, identity="virtual-slm"),
+        "slm.virtual",
+    )
+
+
+def _slm_world_config(values: dict) -> None:
+    VIRTUAL_SLM_SCHEMA.project_values(values)
+    return None
+
+
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
         "camera.virtual",
@@ -197,6 +219,14 @@ DEVICE_TYPES = (
         factory=_mot_camera_factory,
         world_config=_mot_camera_world_config,
     ),
+    DeviceTypeDescriptor(
+        "slm.virtual",
+        "slm",
+        VIRTUAL_SLM_SCHEMA,
+        ("slm.phase",),
+        factory=_slm_factory,
+        world_config=_slm_world_config,
+    ),
 )
 
 
@@ -205,4 +235,5 @@ __all__ = [
     "VIRTUAL_CAMERA_SCHEMA",
     "VIRTUAL_MOT_CAMERA_SCHEMA",
     "VIRTUAL_SEQUENCER_SCHEMA",
+    "VIRTUAL_SLM_SCHEMA",
 ]

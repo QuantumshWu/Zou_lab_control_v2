@@ -61,6 +61,7 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "camera.virtual_mot",
         "sequencer.hardware",
         "sequencer.virtual",
+        "slm.virtual",
     )
     assert not any(item.type_id.startswith(("rf", "mot", "temperature")) for item in descriptors)
 
@@ -119,8 +120,56 @@ def test_capability_tokens_have_machine_visible_types() -> None:
         "camera.adapter",
         "camera.working_point",
         "sequencer.streamer",
+        "slm.phase",
     }
     assert all(isinstance(value, type) for value in CAPABILITY_TYPES.values())
+
+
+def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
+    from zlc_atom.devices.slm import SlmAdapter
+
+    installation = create_installation("virtual")
+    try:
+        slm = installation.device("slm")
+        assert isinstance(slm, SlmAdapter)
+        assert installation.capability("slm.phase", key="slm") is slm
+        assert slm.identity == "virtual-slm"
+        assert slm.shape_yx == (128, 128)
+
+        before_revision = installation.world.slm_phase_revision
+        authored = np.linspace(
+            -np.pi,
+            5.0 * np.pi,
+            num=np.prod(slm.shape_yx),
+            dtype=np.float32,
+        ).reshape(slm.shape_yx)
+        commanded = slm.apply_phase(authored)
+        assert commanded.shape == slm.shape_yx
+        assert not commanded.flags.writeable
+        assert float(np.min(commanded)) >= 0.0
+        assert float(np.max(commanded)) < 2.0 * np.pi
+        assert installation.world.slm_phase_revision == before_revision + 1
+        np.testing.assert_array_equal(slm.last_commanded_phase, commanded)
+        with pytest.raises(ValueError, match="read-only"):
+            commanded[0, 0] = 0.0
+        slm.close()
+        np.testing.assert_array_equal(slm.last_commanded_phase, commanded)
+        assert installation.world.slm_phase_revision == before_revision + 1
+    finally:
+        installation.close()
+
+    duplicate = create_installation(
+        (
+            {"key": "slm_a", "type_id": "slm.virtual", "config": {}},
+            {"key": "slm_b", "type_id": "slm.virtual", "config": {}},
+        )
+    )
+    try:
+        assert set(duplicate.devices) == {"slm_a"}
+        assert isinstance(duplicate.failures["slm_b"], RuntimeError)
+        assert "already bound" in str(duplicate.failures["slm_b"])
+    finally:
+        duplicate.close()
 
 
 def test_logic_discovery_is_derived_from_leaf_modules() -> None:

@@ -91,14 +91,23 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 
 ### 3.3 Simulation 设备与共同契约
 
-1. 所有 virtual apparatus 实现只位于 `packages/zlc_atom/src/zlc_atom/devices/simulation/`：`camera.py`、`sequencer.py`、`world.py` 和 `device_types.py`。真相机/真 sequencer 目录只保留共同契约、binding 和硬件 leaf，不再寄存 virtual 类或 SimulationWorld。
+1. 所有 virtual apparatus 实现只位于 `packages/zlc_atom/src/zlc_atom/devices/simulation/`：`camera.py`、`sequencer.py`、`slm.py`、`world.py` 和 `device_types.py`。真实 device plugin 目录只保留共同契约、binding 和硬件 leaf，不再寄存 virtual 类或 SimulationWorld。
 2. Camera 的共同契约是 runtime-checkable `CameraAdapter` Protocol，不虚构另一个 `BaseCamera`。`VirtualCamera`、DCAM 和 Pylon 都通过同一 adapter/binding 契约，安装时校验该 Protocol。Sequencer 的共同契约是 nominal `SequencerDevice`，`VirtualSequencer` 必须继承它。
-3. Virtual camera/sequencer 与硬件一样由 `DeviceTypeDescriptor -> InstalledLeaf -> binding` 组成，Logic Node 只按 capability 取设备，不写 `if virtual` 分支。
+3. Virtual camera/sequencer/SLM 与硬件一样由 `DeviceTypeDescriptor -> InstalledLeaf -> binding` 组成，Logic Node 只按 capability 取设备，不写 `if virtual` 分支。
 4. `SimulationWorld` 是 virtual 成像物理、site geometry、seed 和 trigger routing 的唯一所有者。默认 virtual apparatus 是 `5 x 7 = 35` sites 和 `96 x 128` image；这是模拟装置的可测真值，不能倒流成 Calibration request 的 grid/count 输入。
 5. Virtual sequencer 的 finite `fire -> wait_done` 必须尊重 compiled pulse 的 logical duration；不能因为 memory transport 已立即给出 DONE 就把几十到几百次采集压进一个 Monitor refresh interval。`forever` 与 finite 都复用同一个 compiled duration，只是前者持续按 cadence 触发、后者到 logical terminal 才交付一次完成报告。
 6. Virtual 物理只消费真实 sequencer 已 applied 的 `CompiledProgram`。logical output key、lane、DAC bus、delay、repeat 和 scan row 全部来自与真板相同的 `board.xdc -> PulseTarget -> compile` 路径；Simulation 不保存另一份 virtual target、pin map 或 pulse-name 分支。
 7. `cooling` 才能装载/冷却原子；`trap` 关闭的实际时长按寿命丢失原子；`emCCD` 的窗口触发 qCMOS，而原子荧光只积分该相机窗口、camera working exposure 与 `probe` 窗口的交集。`da_bias_x/y/z` 分别表示 MOT 图像 x、y 和光轴磁场：signed `(0,0,0)` 是唯一期望亮度最优点，亮斑位于像素几何中心 `((width-1)/2, (height-1)/2)`；x/y 移动 MOT，三轴离零场的距离共同降低亮度，不得再按 frame ordinal 人为漂移。
 8. 创建 world、Pulse 尚未 On、`safe()` 和 close 后都是同一个物理安全态：全部 TTL low、全部 DAC authored value 为 0、无已装载原子。finite、forever 和 scan 只复用现有 VirtualPulseStreamer/world worker，不新增另一套 simulation scheduler。
+
+### 3.4 SLM phase、target 与 virtual coherent optics
+
+1. SLM 的唯一公共 capability 是 `slm.phase`。共同设备契约是 runtime-checkable `SlmAdapter`：只暴露稳定 identity、二维 phase shape、`apply_phase(radians)`、immutable last-commanded phase snapshot 和 `close()`。Canonical command 永远是 finite wrapped radians `[0, 2π)`；vendor gray/LUT、individual flatness correction、active-raster offset/orientation 与 optical settle 只属于未来取得真实 SDK 后的 Hamamatsu adapter，不能进入 solver、Workbench 或 virtual contract。
+2. SLM concrete plugin 的唯一 target truth 是二维 finite non-negative target-plane intensity。Binary toggle 只是向同一 intensity 写 `0/1`；trap site 是目标焦平面的 spot，不是 SLM pixel 或 qCMOS pixel。NxM grid、ABAB/checkerboard、ring、continuous rectangular/elliptical flat-top 和 array/image import 都只 materialize 成这一份 target，不保留第二份 preset state。
+3. 对外只有一个 `solve_phase`。它根据同一 target 的 support topology 在内部选择 deterministic weighted GS（稀疏 sites）或 MRAF（continuous dense support）；调用方不选择算法。warm start 只传上一次 canonical phase。Target 用 strict JSON 保存，phase 与 plain metadata 用 `allow_pickle=False` 的 NPZ 保存；不得增加 hash/fingerprint、第二 serializer 或 Python object payload。
+4. `VirtualSLM` 只更新 installation-owned `SimulationWorld` 的 commanded phase 与 monotonically increasing phase revision。world 以 pupil illumination、8-bit phase quantization、hidden low-order Zernike、illumination decenter/vignetting和同一 FFT 产生唯一 target-plane trap intensity，并把该局部 trap depth 投影到 atom loading/survival；solver 与 Task 都不能读取 hidden aberration 或 hidden trap truth。
+5. 现有随机逐-site efficiency 不再是 trap-depth 真相。若保留 site-dependent fluorescence factor，它只能是小、固定、可由 calibration 归一化的 detector/readout nuisance。默认 35-site nominal phase 在 hidden coherent plant 下的 `Imax/Imin` 为 `1.8–2.2`，至少 90% 的初始非均匀误差来自可纠正相干项。同一 phase revision 只传播一次；随后多帧只重采 occupancy、photon 与 read noise。
+6. M4 只建立数值、设备与 coherent plant 边界；qCMOS 原子荧光反馈、SLM Editor 和最终约 1% 闭环属于紧随其后的同一 Goal M5。真实 Hamamatsu 型号/SDK/光路资料未取得前，不提交 real descriptor、会 raise 的 stub 或猜测的 SDK signature。
 
 ## 4. Package 责任边界
 

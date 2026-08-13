@@ -1,11 +1,13 @@
 # zlc_atom
 
 `zlc_atom` is the headless atom-device and logic-node package. It contains the
-camera/sequencer contracts and the camera-measurement, occupancy, and
+camera/sequencer/SLM contracts and the camera-measurement, occupancy, and
 calibration nodes. Virtual implementations live only under
 `devices/simulation/`: `VirtualCamera` satisfies the same runtime-checkable
 `CameraAdapter` contract as DCAM/Pylon, and `VirtualSequencer` is a
-`SequencerDevice` over the same pulse-device surface as hardware.
+`SequencerDevice` over the same pulse-device surface as hardware. `VirtualSLM`
+implements the same narrow `SlmAdapter` phase contract that a future real
+Hamamatsu plugin will implement once its actual SDK is available.
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
 Qt dependency. Calibration consumes a project-owned
@@ -28,7 +30,7 @@ files, so the composition framework and UI do not need edits. A device type is
 similarly declared in a discovered `device_types.py` module with a factory and
 authoring schema.
 
-The current device set is deliberately closed to camera and sequencer
+The current device set is deliberately closed to camera, sequencer, and SLM
 capabilities. Virtual, DCAM, and Pylon camera adapters implement the same
 `CameraAdapter` contract; Workbench resolves any compatible named instance such as
 `camera` or `mot_camera` instead of hard-coding an instance name.

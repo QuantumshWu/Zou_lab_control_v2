@@ -29,6 +29,7 @@ from zlc_atom.devices.simulation.device_types import (
     VIRTUAL_CAMERA_SCHEMA,
     VIRTUAL_MOT_CAMERA_SCHEMA,
     VIRTUAL_SEQUENCER_SCHEMA,
+    VIRTUAL_SLM_SCHEMA,
 )
 from zlc_atom.install import create_installation, discover_device_catalog
 
@@ -83,6 +84,7 @@ def test_the_virtual_camera_keeps_its_own_vocabulary() -> None:
 def test_a_real_board_has_an_endpoint_and_a_virtual_one_does_not() -> None:
     assert _fields(HARDWARE_SEQUENCER_SCHEMA) == {"host", "port"}
     assert _fields(VIRTUAL_SEQUENCER_SCHEMA) == set()
+    assert _fields(VIRTUAL_SLM_SCHEMA) == set()
 
 
 def test_every_discovered_type_declares_its_own_parameters() -> None:
@@ -179,9 +181,11 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
         "camera.virtual",
         "sequencer.virtual",
         "camera.virtual_mot",
+        "slm.virtual",
     ]
     assert virtual.devices[1].parameters == {}
     assert virtual.devices[2].instance_id == "mot_camera"
+    assert virtual.devices[3].instance_id == "slm"
     installation = create_installation("virtual")
     try:
         mot_camera = installation.device("mot_camera")

@@ -145,12 +145,13 @@ def test_simulation_devices_are_a_separate_device_family() -> None:
         "camera.py",
         "device_types.py",
         "sequencer.py",
+        "slm.py",
         "world.py",
     } <= {path.name for path in simulation.glob("*.py")}
     assert not (devices / "camera" / "virtual.py").exists()
     assert not (devices / "camera" / "world.py").exists()
     assert not (devices / "sequencer" / "virtual.py").exists()
 
-    for package in (devices / "camera", devices / "sequencer"):
+    for package in (devices / "camera", devices / "sequencer", devices / "slm"):
         for path in package.rglob("*.py"):
             assert "zlc_atom.devices.simulation" not in path.read_text(encoding="utf-8"), path

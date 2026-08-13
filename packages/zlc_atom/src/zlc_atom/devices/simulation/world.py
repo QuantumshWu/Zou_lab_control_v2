@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import threading
 from typing import Any, Callable
@@ -23,6 +24,7 @@ DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
 #: exactly -optimum, making the net field (dac - optimum) / 512 per axis.
 DEFAULT_MOT_FIELD_OPTIMUM_DAC = (96, -144, 48)
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
+DEFAULT_SIMULATION_SLM_SHAPE_YX = (128, 128)
 
 #: 87-Rb, the atom this bench traps: 86.909 180 5 u.
 RB87_MASS_KG = 1.443160648e-25
@@ -59,6 +61,30 @@ def _readonly(values: object) -> np.ndarray:
     array = np.ascontiguousarray(values, dtype=float)
     array.setflags(write=False)
     return array
+
+
+def _immutable(values: object, dtype: object) -> np.ndarray:
+    """Own an array through immutable bytes, so callers cannot re-enable writes."""
+
+    contiguous = np.ascontiguousarray(values, dtype=dtype)
+    return np.frombuffer(contiguous.tobytes(), dtype=contiguous.dtype).reshape(
+        contiguous.shape
+    )
+
+
+@lru_cache(maxsize=None)
+def _nominal_slm_command(
+    shape_yx: tuple[int, int],
+    grid_shape_yx: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve each apparatus geometry once; the nominal target is seed-independent."""
+
+    from zlc_atom.devices.slm.solver import preset_grid, solve_phase
+
+    target = preset_grid(shape_yx, grid_shape_yx)
+    indices = np.argwhere(target > 0.0)
+    phase, _metadata = solve_phase(target, seed=0)
+    return _immutable(indices, np.intp), _immutable(phase, "<f4")
 
 
 @dataclass(frozen=True)
@@ -126,6 +152,7 @@ class SimulationWorld:
         mot_field_optimum_dac: tuple[int, int, int] = DEFAULT_MOT_FIELD_OPTIMUM_DAC,
     ) -> None:
         self.geometry = SimulationGeometry() if geometry is None else geometry
+        seed = int(seed)
         optimum = tuple(int(value) for value in mot_field_optimum_dac)
         if len(optimum) != 3 or any(abs(value) > 511 for value in optimum):
             raise ValueError(
@@ -134,7 +161,7 @@ class SimulationWorld:
         self._mot_field_optimum = dict(
             zip(("da_bias_x", "da_bias_y", "da_bias_z"), optimum)
         )
-        self.rng = np.random.default_rng(int(seed))
+        self.rng = np.random.default_rng(seed)
         self._lock = threading.RLock()
         self._cameras: list[tuple[Any, Callable[..., np.ndarray] | None]] = []
         self._fire_count = 0
@@ -150,13 +177,30 @@ class SimulationWorld:
         self.trap_waist_m = DEFAULT_TRAP_WAIST_M
         self.dark_current_e_per_s = 0.0
         site_count = len(self.geometry.site_centers_xy)
+        self._slm_shape_yx = DEFAULT_SIMULATION_SLM_SHAPE_YX
+        self._slm_site_indices_yx, nominal_phase = _nominal_slm_command(
+            self._slm_shape_yx,
+            self.geometry.grid_shape_yx,
+        )
+        if len(self._slm_site_indices_yx) != site_count:
+            raise RuntimeError("nominal SLM target differs from simulation site geometry")
+        self._commanded_phase = _immutable(nominal_phase, "<f4")
+        self._slm_phase_revision = 0
+        self._propagated_revision = -1
+        self._trap_plane_intensity: np.ndarray | None = None
+        self._site_trap_intensities: np.ndarray | None = None
+        self._propagation_count = 0
+        self._loading_intensity_scale: float | None = None
+        self._slm_pupil_amplitude, self._hidden_slm_aberration = (
+            self._slm_plant(seed)
+        )
         efficiency_log = self.rng.normal(0.0, 1.0, site_count)
         efficiency_log -= float(np.min(efficiency_log))
         span = float(np.ptp(efficiency_log))
         if span:
-            efficiency_log *= np.log(2.0) / span
-        efficiency_log -= 0.5 * np.log(2.0)
-        self._site_efficiency = _readonly(np.exp(efficiency_log))
+            efficiency_log *= np.log(1.02) / span
+        efficiency_log -= 0.5 * np.log(1.02)
+        self._detector_efficiency = _readonly(np.exp(efficiency_log))
         aspect = np.sqrt(1.25)
         base_sigma = np.asarray(
             (self.atom_sigma_px / aspect, self.atom_sigma_px * aspect),
@@ -180,9 +224,128 @@ class SimulationWorld:
         #: shape is a configuration fact, so this holds one or two entries.
         self._mot_axis_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 
+        # Establish the physical intensity scale once from the nominal command.
+        # Later commands are compared against that fixed bench scale, rather
+        # than renormalized per phase (which would erase diffraction loss).
+        self._ensure_slm_propagation()
+        self._loading_intensity_scale = float(np.mean(self._site_trap_intensities))
+
+    def _slm_plant(self, seed: int) -> tuple[np.ndarray, np.ndarray]:
+        """Materialize fixed illumination and hidden low-order wavefront error."""
+
+        height, width = self._slm_shape_yx
+        yy, xx = np.ogrid[
+            -1.0 : 1.0 : height * 1j,
+            -1.0 : 1.0 : width * 1j,
+        ]
+        radius_squared = xx * xx + yy * yy
+        pupil = radius_squared <= 0.9**2
+        # A slightly decentered Gaussian beam plus mild edge vignetting.  These
+        # are fixed apparatus optics, not per-shot gain or solver knowledge.
+        decenter_x, decenter_y = 0.055, -0.04
+        illumination = np.exp(
+            -0.34 * ((xx - decenter_x) ** 2 + 1.12 * (yy - decenter_y) ** 2)
+        )
+        illumination *= np.clip(1.0 - 0.16 * radius_squared, 0.0, None)
+        amplitude = np.where(pupil, illumination, 0.0)
+
+        # Seed changes the hidden bench, not the nominal command.  A fixed
+        # low-order component ensures every supported seed is meaningfully
+        # uncorrected; bounded jitter prevents a one-seed-only simulation.
+        coefficients = np.asarray((2.34, -1.56, 1.885, -1.17), dtype=float)
+        coefficients += np.random.default_rng(seed ^ 0x5A17).uniform(
+            -0.02, 0.02, coefficients.shape
+        )
+        defocus = 2.0 * radius_squared - 1.0
+        astigmatism = xx * xx - yy * yy
+        coma_x = (3.0 * radius_squared - 2.0) * xx
+        coma_y = (3.0 * radius_squared - 2.0) * yy
+        aberration = (
+            coefficients[0] * defocus
+            + coefficients[1] * astigmatism
+            + coefficients[2] * coma_x
+            + coefficients[3] * coma_y
+        )
+        return (
+            _immutable(amplitude, "<f4"),
+            _immutable(np.where(pupil, aberration, 0.0), "<f4"),
+        )
+
     @property
-    def site_efficiency(self) -> np.ndarray:
-        return np.array(self._site_efficiency, copy=True)
+    def slm_shape_yx(self) -> tuple[int, int]:
+        return self._slm_shape_yx
+
+    @property
+    def commanded_phase(self) -> np.ndarray:
+        with self._lock:
+            return self._commanded_phase
+
+    @property
+    def slm_phase_revision(self) -> int:
+        with self._lock:
+            return self._slm_phase_revision
+
+    def apply_slm_phase(self, radians: object) -> np.ndarray:
+        """Atomically accept one explicit command and invalidate propagation."""
+
+        from zlc_atom.devices.slm import canonical_phase
+
+        commanded = canonical_phase(radians, self._slm_shape_yx)
+        with self._lock:
+            self._commanded_phase = commanded
+            self._slm_phase_revision += 1
+            self._propagated_revision = -1
+            return self._commanded_phase
+
+    def _ensure_slm_propagation(self) -> None:
+        if self._propagated_revision == self._slm_phase_revision:
+            return
+        from scipy import fft
+
+        # The simulated panel has 256 phase levels.  Quantization affects the
+        # optical field only; last-commanded remains canonical radians.
+        levels = np.remainder(
+            np.rint(self._commanded_phase * (256.0 / (2.0 * np.pi))),
+            256.0,
+        )
+        phase = levels * (2.0 * np.pi / 256.0)
+        field = self._slm_pupil_amplitude * np.exp(
+            1j * (phase + self._hidden_slm_aberration)
+        )
+        far_field = fft.fftshift(
+            fft.fft2(fft.ifftshift(field), norm="ortho")
+        )
+        intensity = np.abs(far_field) ** 2
+        rows, columns = self._slm_site_indices_yx.T
+        sites = intensity[rows, columns]
+        self._trap_plane_intensity = _immutable(intensity, "<f4")
+        self._site_trap_intensities = _immutable(sites, "<f4")
+        self._propagated_revision = self._slm_phase_revision
+        self._propagation_count += 1
+
+    @property
+    def propagation_count(self) -> int:
+        with self._lock:
+            return self._propagation_count
+
+    def _site_loading_probabilities(self) -> np.ndarray:
+        self._ensure_slm_propagation()
+        scale = self._loading_intensity_scale
+        if scale is None or not np.isfinite(scale) or scale <= 0.0:
+            raise RuntimeError("nominal SLM command produced no site intensity")
+        relative_depth = np.clip(self._site_trap_intensities / scale, 0.0, None)
+        base = float(self.loading_probability)
+        if not 0.0 <= base <= 1.0:
+            raise ValueError("loading_probability must be between zero and one")
+        if base == 1.0:
+            return np.ones_like(relative_depth)
+        return 1.0 - np.power(1.0 - base, relative_depth)
+
+    @property
+    def detector_efficiency(self) -> np.ndarray:
+        """Small fixed fluorescence-readout nuisance, never trap-depth truth."""
+
+        return np.array(self._detector_efficiency, copy=True)
 
     @property
     def site_psf_sigma_xy(self) -> np.ndarray:
@@ -225,12 +388,43 @@ class SimulationWorld:
 
     def _load_shot(self) -> np.ndarray:
         if self._forced_occupancy is None:
-            shot = self.rng.random(len(self.geometry.site_centers_xy)) < self.loading_probability
+            shot = self.rng.random(len(self.geometry.site_centers_xy)) < self._site_loading_probabilities()
         else:
             shot = np.array(self._forced_occupancy, copy=True)
         self._occupancy = shot
         self._mot_population = 1.0
         return np.array(shot, copy=True)
+
+    def _release_survival(self, trap_off_seconds: float, relative_depth: float) -> float:
+        off_time = float(trap_off_seconds)
+        depth_scale = float(relative_depth)
+        if not np.isfinite(off_time) or off_time < 0:
+            raise ValueError("trap_off_seconds must be finite and non-negative")
+        if not np.isfinite(depth_scale) or depth_scale < 0:
+            raise ValueError("relative trap depth must be finite and non-negative")
+        if depth_scale == 0.0:
+            return 0.0
+        most_probable = math.sqrt(
+            2.0 * BOLTZMANN_J_PER_K * self.atom_temperature_k / RB87_MASS_KG
+        )
+        escape = math.sqrt(
+            2.0
+            * BOLTZMANN_J_PER_K
+            * self.trap_depth_k
+            * depth_scale
+            / RB87_MASS_KG
+        )
+        bound = _maxwell_boltzmann_below(escape, most_probable)
+        if bound <= 0.0:
+            return 0.0
+        if off_time == 0.0:
+            return 1.0
+        # A shallower local trap has both a lower escape speed and a smaller
+        # effective recapture reach.  At the nominal depth this is exactly the
+        # established release-recapture curve.
+        reach_speed = self.trap_waist_m * math.sqrt(depth_scale) / off_time
+        recaptured = min(escape, reach_speed)
+        return _maxwell_boltzmann_below(recaptured, most_probable) / bound
 
     def release_survival(self, trap_off_seconds: float) -> float:
         """The chance one trapped atom is still trapped after a release.
@@ -247,31 +441,30 @@ class SimulationWorld:
         nothing else about the bench enters it.
         """
 
-        off_time = float(trap_off_seconds)
-        if not np.isfinite(off_time) or off_time < 0:
-            raise ValueError("trap_off_seconds must be finite and non-negative")
-        most_probable = math.sqrt(
-            2.0 * BOLTZMANN_J_PER_K * self.atom_temperature_k / RB87_MASS_KG
+        return self._release_survival(trap_off_seconds, 1.0)
+
+    def _site_survival_probabilities(self, trap_off_seconds: float) -> np.ndarray:
+        self._ensure_slm_propagation()
+        scale = self._loading_intensity_scale
+        if scale is None or not np.isfinite(scale) or scale <= 0.0:
+            raise RuntimeError("nominal SLM command produced no site intensity")
+        relative_depth = np.clip(self._site_trap_intensities / scale, 0.0, None)
+        return np.asarray(
+            [
+                self._release_survival(trap_off_seconds, float(value))
+                for value in relative_depth
+            ],
+            dtype=float,
         )
-        escape = math.sqrt(
-            2.0 * BOLTZMANN_J_PER_K * self.trap_depth_k / RB87_MASS_KG
-        )
-        bound = _maxwell_boltzmann_below(escape, most_probable)
-        if bound <= 0.0:
-            return 0.0
-        if off_time == 0.0:
-            return 1.0
-        recaptured = min(escape, self.trap_waist_m / off_time)
-        return _maxwell_boltzmann_below(recaptured, most_probable) / bound
 
     def _lose_atoms(self, trap_off_seconds: float) -> None:
         off_time = float(trap_off_seconds)
         if not np.isfinite(off_time) or off_time < 0:
             raise ValueError("trap_off_seconds must be finite and non-negative")
         if off_time:
-            survival = self.release_survival(off_time)
+            survival = self._site_survival_probabilities(off_time)
             self._occupancy &= self.rng.random(self._occupancy.size) < survival
-            self._mot_population *= float(survival)
+            self._mot_population *= float(np.mean(survival))
 
     def safe(self) -> None:
         """Return the simulated apparatus to the board target's safe outputs."""
@@ -310,7 +503,7 @@ class SimulationWorld:
             for occupied, (x, y), gain, sigma_xy, angle, skew in zip(
                 shot_occupancy,
                 self.geometry.site_centers_xy,
-                self._site_efficiency,
+                self._detector_efficiency,
                 self._site_psf_sigma_xy,
                 self._site_psf_angle_radians,
                 self._site_psf_skew,
@@ -536,6 +729,7 @@ __all__ = [
     "DEFAULT_SIMULATION_IMAGE_SHAPE_YX",
     "DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX",
     "DEFAULT_SIMULATION_SITE_SPACING_PIXELS",
+    "DEFAULT_SIMULATION_SLM_SHAPE_YX",
     "SimulationGeometry",
     "SimulationWorld",
     "SimulationWorldConfig",
