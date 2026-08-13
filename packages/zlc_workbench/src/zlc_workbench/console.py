@@ -164,10 +164,6 @@ class PanelBinding:
     #: so it is kept beside the publication it was taken from and dropped when
     #: that no longer describes what is on screen.
     interaction_viewport: Any = None
-    #: What the producer's fields held before a drawn region first overwrote
-    #: them.  Taking a region away has to put them back, and nothing else in
-    #: the console remembers a value that a gesture replaced.
-    producer_restore: Any = None
     #: What each host was last seen showing.  Whoever CHANGED is the operator;
     #: a host that merely disagrees with the panel is the one still catching
     #: up with the last mirror, and reading that as a second gesture makes the
@@ -3212,7 +3208,7 @@ class ConsolePresenter:
             self._remember_panel_view(binding, selector={})
             if other_host is not None:
                 mirror(_remove_panel_selection(other_host, previous))
-            self._restore_producer_draft(binding)
+            self._resync_producer_draft(binding, previous)
             return _UNCHANGED
 
         remembered = panel_selection_from_document(binding.state.selector)
@@ -3330,17 +3326,7 @@ class ConsolePresenter:
         if producer is None:
             return
 
-        record = getattr(publication, "run_record", {})
-        snapshots = (
-            record.get("device_snapshots", {})
-            if isinstance(record, Mapping)
-            else {}
-        )
-        context: dict[str, Any] = {"device_snapshots": snapshots}
-        if isinstance(snapshots, Mapping) and len(snapshots) == 1:
-            actual = next(iter(snapshots.values()))
-            if isinstance(actual, Mapping):
-                context.update(actual)
+        context = self._selection_context(publication)
         if str(getattr(selection, "selector_kind", "")) != "area":
             # A region is an area of the data; that is the only gesture whose
             # coordinates mean a producer's setting.  A threshold line, an
@@ -3354,24 +3340,53 @@ class ConsolePresenter:
             context=context,
         )
         if patch is not None:
-            panel = self.panels.get(str(panel_id))
-            if panel is not None and panel.producer_restore is None:
-                panel.producer_restore = (
-                    producer_node_id,
-                    {name: draft.get(name) for name in patch},
-                )
             self.update_logic_draft(producer_node_id, values=patch)
 
-    def _restore_producer_draft(self, binding: PanelBinding) -> None:
-        """Put back what a drawn region overwrote, when the region goes away."""
+    def _resync_producer_draft(
+        self, binding: PanelBinding, selection: object
+    ) -> None:
+        """Show what the producer is actually set to, once its region is gone.
 
-        remembered = binding.producer_restore
-        binding.producer_restore = None
-        if remembered is None:
+        Not what its fields held before the region overwrote them: those were
+        replaced by a deliberate gesture, and a run has happened since with
+        the values the gesture asked for.  Restoring the earlier ones would
+        mean that cancelling a region silently re-points the hardware on the
+        next Start -- an operator who removes an ROI and presses Start expects
+        nothing to change.  So the fields the region owns are filled from the
+        run's own readback, and the descriptor -- which alone knows which
+        fields those are and how a device reports them -- provides both.
+        """
+
+        publication = binding.display_publication
+        if publication is None:
             return
-        node_id, values = remembered
-        if node_id in self.logic:
-            self.update_logic_draft(node_id, values=dict(values))
+        producer_node_id = self._direct_producer_node_id(binding.state.signal)
+        if producer_node_id is None:
+            return
+        producer = self.logic.get(producer_node_id)
+        if producer is None:
+            return
+        applied = producer.descriptor.applied_selection_values(
+            selection, context=self._selection_context(publication)
+        )
+        if applied:
+            self.update_logic_draft(producer_node_id, values=dict(applied))
+
+    def _selection_context(self, publication: object) -> dict[str, Any]:
+        """Public run-time device readback, as data only."""
+
+        record = getattr(publication, "run_record", {})
+        snapshots = (
+            record.get("device_snapshots", {})
+            if isinstance(record, Mapping)
+            else {}
+        )
+        context: dict[str, Any] = {"device_snapshots": snapshots}
+        if isinstance(snapshots, Mapping) and len(snapshots) == 1:
+            actual = next(iter(snapshots.values()))
+            if isinstance(actual, Mapping):
+                context.update(actual)
+        return context
 
     def _panel_view_identity(self, binding: PanelBinding) -> object:
         """What a remembered viewport was measured on.

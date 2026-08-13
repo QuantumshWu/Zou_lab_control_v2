@@ -154,13 +154,29 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         },
     )
 
+    # A frame's axes carry the sensor pixels it covers, so the region IS the
+    # ROI: x from 2 to just past 5 (one 3-wide sample), y from 0 (the region
+    # reaches off the sensor) to just past 6.  Adding the current origin on top
+    # of coordinates that already include it moved every region by the origin.
     assert patch == {
-        "roi_x": 17,
-        "roi_y": 1,
-        "roi_width": 12,
-        "roi_height": 20,
+        "roi_x": 2,
+        "roi_y": 0,
+        "roi_width": 6,
+        "roi_height": 8,
     }
     assert all(type(value) is int for value in patch.values())
+    # And the same fields, read back from what the run is set to: what an
+    # operator sees in the form once the region is taken away.
+    assert descriptor.applied_selection_values(
+        selection,
+        context={
+            "frame_shape_yx": (10, 30),
+            "sensor_shape_yx": (40, 100),
+            "binning_yx": (2, 3),
+            "roi_origin_yx": (7, 11),
+            "roi_shape_yx": (20, 90),
+        },
+    ) == {"roi_x": 11, "roi_y": 7, "roi_width": 90, "roi_height": 20}
     assert descriptor.authoring_schema.project_values({**draft, **patch}) == {
         **draft,
         **patch,

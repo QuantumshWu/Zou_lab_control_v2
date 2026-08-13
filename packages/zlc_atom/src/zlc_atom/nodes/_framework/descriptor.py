@@ -255,6 +255,14 @@ class SelectionMapping:
         [SelectionState, Mapping[str, Any], Mapping[str, Any]],
         Mapping[str, Any],
     ]
+    #: The same fields, read back from what the run is actually set to.  A
+    #: drawn region overwrites them, so taking the region away has to leave
+    #: something behind, and the honest something is what the hardware is
+    #: doing now: cancel a region and the form agrees with the bench, so
+    #: pressing Start again changes nothing.  (Putting back the values the
+    #: region replaced instead re-points the hardware on the next run, which
+    #: is a strange thing for "cancel" to do.)
+    applied_values: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         fields = tuple(self.draft_fields)
@@ -266,6 +274,8 @@ class SelectionMapping:
             raise ValueError("selection mapping draft fields must be unique")
         if not callable(self.map_patch):
             raise TypeError("selection mapping map_patch must be callable")
+        if self.applied_values is not None and not callable(self.applied_values):
+            raise TypeError("selection mapping applied_values must be callable")
         object.__setattr__(self, "draft_fields", fields)
 
 
@@ -494,6 +504,32 @@ class LogicNodeDescriptor:
                 and selection.selector_kind == mapping.selector_kind
             ):
                 result = dict(mapping.map_patch(selection, draft, context))
+                if set(result) != set(mapping.draft_fields):
+                    raise ValueError(
+                        "selection mapping must return its declared draft fields"
+                    )
+                return result
+        return None
+
+    def applied_selection_values(
+        self,
+        selection: SelectionState,
+        *,
+        context: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """What the fields a selection controls are actually set to now."""
+
+        if not isinstance(selection, SelectionState):
+            raise TypeError("selection must be SelectionState")
+        if not isinstance(context, Mapping):
+            raise TypeError("selection context must be a mapping")
+        for mapping in self.selection_mappings:
+            if (
+                selection.plot_kind == mapping.plot_kind
+                and selection.selector_kind == mapping.selector_kind
+                and mapping.applied_values is not None
+            ):
+                result = dict(mapping.applied_values(context))
                 if set(result) != set(mapping.draft_fields):
                     raise ValueError(
                         "selection mapping must return its declared draft fields"

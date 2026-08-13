@@ -189,22 +189,23 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert visible.x.span > authored_roi[2]
         assert visible.y.span > authored_roi[3]
 
+        # Taking the region away leaves the form saying what the camera is
+        # actually set to -- the ROI the running node was started with -- so
+        # restarting from here changes nothing.  It used to write the zoomed
+        # VIEWPORT into the producer instead, which re-pointed the camera at
+        # whatever happened to be on screen.
         panel.editor_host.remove_selector(plot.SelectorKind.AREA).result()
         _wait_until(lambda: panel.state.selector == {}, presenter)
         _wait_until(
-            lambda: _visible_producer_roi(panel_editor) != selected_roi,
+            lambda: _visible_producer_roi(panel_editor) == authored_roi,
             presenter,
         )
-        viewport_roi = _visible_producer_roi(panel_editor)
-        assert viewport_roi[0] < authored_roi[0]
-        assert viewport_roi[1] < authored_roi[1]
-        assert viewport_roi[0] + viewport_roi[2] > authored_roi[0] + authored_roi[2]
-        assert viewport_roi[1] + viewport_roi[3] > authored_roi[1] + authored_roi[3]
+        assert _visible_producer_roi(panel_editor) == authored_roi
         logic_values = view._logic_editors[node_id].form.read_all()
         assert tuple(
             int(logic_values[name])
             for name in ("roi_x", "roi_y", "roi_width", "roi_height")
-        ) == viewport_roi
+        ) == authored_roi
 
         assert presenter.restart_panel_producer(panel.panel_id) is True
         _wait_until(lambda: presenter.logic[node_id].host is not old_host, presenter)
@@ -212,7 +213,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert replacement is not None and replacement.running
         assert replacement.signal_key("frames") == signal_key
         assert replacement.generation != old_generation
-        assert replacement.node.request.roi_xywh == viewport_roi
+        assert replacement.node.request.roi_xywh == authored_roi
     finally:
         presenter.close()
         view.set_close_guard(lambda: True)

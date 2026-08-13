@@ -51,18 +51,22 @@ def _selected_sensor_interval(
     value: SelectionRange,
     role: str,
     *,
-    origin: int,
     binning: int,
     sensor_size: int,
 ) -> tuple[int, int]:
+    # A frame's axes carry the sensor pixels it covers, so a region drawn on
+    # it is already stated in sensor pixels and needs no conversion: it is the
+    # ROI.  This used to add the current ROI's origin, because the picture was
+    # indexed from zero -- once the frame says where it is, adding the origin
+    # again shifts every region by the origin, which is why a region drawn
+    # after one ROI change landed somewhere else on the next.
     # Producer ROI follows the actual canvas rectangle, including viewport or
     # Area bounds outside the current frame.  Only the physical sensor clips
     # it; data-derived ROI/Fit signals keep their separate data-domain slicing.
-    start = max(0, origin + math.ceil(value.lower) * binning)
-    stop = min(
-        sensor_size,
-        origin + (math.floor(value.upper) + 1) * binning,
-    )
+    # Each coordinate names the FIRST sensor pixel of its (possibly binned)
+    # sample, so the selected rectangle ends one whole sample past the last.
+    start = max(0, math.ceil(value.lower))
+    stop = min(sensor_size, math.floor(value.upper) + binning)
     if stop <= start:
         raise ValueError(f"{role} selection does not intersect the camera sensor")
     return start, stop
@@ -126,20 +130,17 @@ def _image_area_to_roi_patch(
     x_range = _spatial_range(selection, SPATIAL_X.value)
     y_range = _spatial_range(selection, SPATIAL_Y.value)
     del draft
-    origin_x, origin_y = _current_origin(context)
-    binning_y, binning_x = _current_binning(context)
     sensor_height, sensor_width = _current_sensor_shape(context)
+    binning_y, binning_x = _current_binning(context)
     x_start, x_stop = _selected_sensor_interval(
         x_range,
         SPATIAL_X.value,
-        origin=origin_x,
         binning=binning_x,
         sensor_size=sensor_width,
     )
     y_start, y_stop = _selected_sensor_interval(
         y_range,
         SPATIAL_Y.value,
-        origin=origin_y,
         binning=binning_y,
         sensor_size=sensor_height,
     )
@@ -151,11 +152,30 @@ def _image_area_to_roi_patch(
     }
 
 
+def _applied_roi_values(context: Mapping[str, object]) -> dict[str, int]:
+    """The crop of the sensor this run is actually taking."""
+
+    origin_x, origin_y = _current_origin(context)
+    raw = context.get("roi_shape_yx")
+    if raw is None:
+        raise ValueError("camera ROI readback requires current roi_shape_yx")
+    height, width = (int(value) for value in tuple(raw))  # type: ignore[arg-type]
+    if height <= 0 or width <= 0:
+        raise ValueError("roi_shape_yx must contain two positive integers")
+    return {
+        "roi_x": origin_x,
+        "roi_y": origin_y,
+        "roi_width": width,
+        "roi_height": height,
+    }
+
+
 _IMAGE_AREA_TO_ROI = SelectionMapping(
     plot_kind="image",
     selector_kind="area",
     draft_fields=_ROI_FIELDS,
     map_patch=_image_area_to_roi_patch,
+    applied_values=_applied_roi_values,
 )
 
 

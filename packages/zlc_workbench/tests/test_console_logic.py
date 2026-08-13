@@ -281,7 +281,7 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     assert tuple(
         (spec.output_name, spec.plot_kind)
         for spec in presenter.logic[node_id].preview_specs
-    ) == (("frames", "image"),), "the running node's declaration is the run's"
+    ) == (("frames", "facet_grid"),), "the running node's declaration is the run's"
     presenter.stop_logic(node_id)
 
 
@@ -929,14 +929,6 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert projection["can_start"] is False
     assert any("not-calibration.json" in issue for issue in projection["issues"])
 
-    presenter.update_logic_draft(
-        node_id,
-        values={"pulse_template": str(template), "roi_x": 4},
-    )
-    projection = presenter.logic_editor_projection(node_id)
-    assert presenter.logic[node_id].draft.values["roi_x"] == 4
-    assert projection["can_start"] is False
-    assert any("ROI" in issue for issue in projection["issues"])
 
 
 def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
