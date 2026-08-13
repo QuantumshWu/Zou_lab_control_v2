@@ -49,6 +49,20 @@ _CAMERA_FRAME_CONTRACT = "camera.frames.v1"
 #: the point-domain role the data model reserves for exactly this.
 CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT)
 
+#: How often a monitor comes back to see whether it has been asked to stop.
+#:
+#: A monitor's read is a POLL, not a wait for one particular frame: whatever
+#: has arrived is taken and an empty return is a normal answer, discarded by
+#: the loop.  It used to be handed the CAMERA's timeout, which is a device
+#: fact about how long a frame may take (2 s virtual, 10 s on the qCMOS), so
+#: an external-trigger camera whose triggers had stopped sat inside one read
+#: until that deadline -- and Stop, a Start queued behind the camera, and
+#: closing the console all waited for it.  Cancellation is only ever seen
+#: BETWEEN reads, so the read length IS the cancel latency, and it belongs to
+#: the loop rather than to the device.  Fifty milliseconds is also the qCMOS
+#: driver's own wait slice, so its SDK call cadence is unchanged.
+_MONITOR_CANCEL_RESPONSE_SECONDS = 0.05
+
 
 def _frame_point_column(producer: str, frames: int) -> PointColumn:
     """The frame-index point column one cycle publishes."""
@@ -504,13 +518,11 @@ class MonitorCapture:
         camera: CameraAdapter,
         *,
         node: "CameraMeasurementNode",
-        timeout: float,
         owns_generation: bool,
         attach_live_outputs: Callable[[object], None] | None,
     ) -> None:
         self.camera = camera
         self.node = node
-        self.timeout = float(timeout)
         self.owns_generation = bool(owns_generation)
         self.closed = False
         self.latest_record: CameraFrameRecord | None = None
@@ -531,7 +543,9 @@ class MonitorCapture:
     def poll(self) -> CameraFrameRecord | None:
         if self.closed:
             raise RuntimeError("monitor capture is closed")
-        records = self.camera.read_frame_records(1, timeout=self.timeout, exact=False)
+        records = self.camera.read_frame_records(
+            1, timeout=_MONITOR_CANCEL_RESPONSE_SECONDS, exact=False
+        )
         if not records:
             return None
         for record in records:
@@ -795,6 +809,8 @@ class CameraMeasurementNode:
         elif not callable(attach_live_outputs):
             raise TypeError("a hosted monitor requires attach_live_outputs")
         self._configure_for_run()
+        # The camera's own timeout still governs ARMING -- how long the device
+        # may take to become ready is the device's fact.
         timeout = float(self.camera.timeout)
         self.camera.arm(
             None,
@@ -807,7 +823,6 @@ class CameraMeasurementNode:
             return MonitorCapture(
                 self.camera,
                 node=self,
-                timeout=timeout,
                 owns_generation=owns_generation,
                 attach_live_outputs=attach_live_outputs,
             )
