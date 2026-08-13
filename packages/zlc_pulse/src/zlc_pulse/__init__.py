@@ -31,6 +31,7 @@ from .model import (
 from .compile import compile_sequence  # noqa: E402
 from .binding import (  # noqa: E402
     authored_api_values,
+    convert_time,
     pulse_field_value,
     resolve_api_parameters,
 )
@@ -97,6 +98,7 @@ __all__ = [
     "cycle_binding_kind",
     "resolve_scan_point",
     "authored_api_values",
+    "convert_time",
     "resolve_api_parameters",
     "pulse_field_value",
     "api_parameter_columns_for",

@@ -234,7 +234,10 @@ LOGIC_NODE = LogicNodeDescriptor(
             CAPTURE_PREVIEW_DECLARATION.contract_id,
         ),
     ),
-    node_previews=(NodePreviewSpec("capture_preview", "image"),),
+    # No kind: the frames of a cycle are point rows of an image
+    # signal, and the plotting package reads that for itself --
+    # pinning "image" is what flattened three frames into one.
+    node_previews=(NodePreviewSpec("capture_preview"),),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),

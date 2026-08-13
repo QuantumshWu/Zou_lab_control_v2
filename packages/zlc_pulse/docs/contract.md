@@ -45,6 +45,7 @@ __all__ = (
     "cycle_binding_kind",
     "resolve_scan_point",
     "authored_api_values",
+    "convert_time",
     "resolve_api_parameters",
     "pulse_field_value",
     "api_parameter_columns_for",

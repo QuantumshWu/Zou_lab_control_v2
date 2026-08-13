@@ -31,13 +31,13 @@ def pulse_field_value(
         )
         if delay is None:
             return 0
-        return _convert_time(delay.value, delay.unit, unit)
+        return convert_time(delay.value, delay.unit, unit)
 
     period = sequence.period_by_id.get(str(reference.period_id))
     if period is None:
         raise ValueError(f"no period exists with id {reference.period_id!r}")
     if reference.kind == FIELD_DURATION:
-        return _convert_time(period.duration, period.unit, unit)
+        return convert_time(period.duration, period.unit, unit)
     step = next(
         (item for item in period.analog_steps if item.port == reference.port), None
     )
@@ -81,7 +81,7 @@ def replace_pulse_field(
                 ),
             )
         delays = list(sequence.delays)
-        authored = _convert_time(value, unit, delays[index].unit)
+        authored = convert_time(value, unit, delays[index].unit)
         delays[index] = replace(
             delays[index],
             value=_number_for(
@@ -106,7 +106,7 @@ def replace_pulse_field(
     periods = list(sequence.periods)
     period = periods[index]
     if reference.kind == FIELD_DURATION:
-        authored = _convert_time(value, unit, period.unit)
+        authored = convert_time(value, unit, period.unit)
         periods[index] = replace(
             period,
             duration=_number_for(
@@ -211,7 +211,16 @@ def _check_inputs(sequence: PulseSequence, reference: PulseFieldRef) -> None:
         raise TypeError("reference must be PulseFieldRef")
 
 
-def _convert_time(value: int | float, source_unit: str, target_unit: str) -> float:
+def convert_time(value: int | float, source_unit: str, target_unit: str) -> float:
+    """One duration, said in another unit.
+
+    Published because a caller that owns a duration in SI seconds has to write
+    it into a field declared in whatever unit its author chose.  A parameter
+    is written in ITS OWN unit, so a task that passed seconds to a slot
+    declared in microseconds wrote a number a million times too small and
+    nothing said so.
+    """
+
     if source_unit not in TIME_UNIT_TO_NS or target_unit not in TIME_UNIT_TO_NS:
         raise ValueError("time fields require time units")
     return float(value) * TIME_UNIT_TO_NS[source_unit] / TIME_UNIT_TO_NS[target_unit]
@@ -224,6 +233,7 @@ def _number_for(value: float) -> int | float:
 
 __all__ = [
     "authored_api_values",
+    "convert_time",
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",

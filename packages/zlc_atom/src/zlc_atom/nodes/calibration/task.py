@@ -17,7 +17,7 @@ from zlc_data import (
     AxisSpec,
 )
 from zlc_durable import unique_path
-from zlc_pulse import PulseSequence
+from zlc_pulse import PulseSequence, convert_time
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
@@ -599,30 +599,47 @@ class CalibrationTask:
             self.pulse_sequence,
             path=self.pulse_path,
             board=self.sequencer.describe(),
-            api_values=dict(
-                zip(
-                    self._driven_parameters(),
-                    (
-                        self.request.reference_exposure_seconds,
-                        self.request.readout_exposure_seconds,
-                        self.request.reference_exposure_seconds,
-                    ),
-                    strict=True,
-                )
-            ),
+            api_values=self._driven_values(),
         )
 
-    def _driven_parameters(self) -> tuple[str, str, str]:
-        """The three API slots this run drives, as the pulse names them.
+    def _driven_values(self) -> dict[str, float]:
+        """The three exposures, each said in the unit its slot declares.
 
-        Addressed by number, in the acquisition's own order: slot k is the
-        k-th parameter the pulse declares, whatever its author called it.
+        A parameter is written in ITS OWN unit.  This task holds SI seconds --
+        the camera speaks nothing else -- so a slot declared in microseconds
+        used to receive a number a million times too small, silently, and the
+        shipped template only escaped it by declaring seconds itself.
         """
 
-        declared = tuple(
-            parameter.parameter_id
-            for parameter in self.pulse_sequence.api_parameters
-        )
+        values: dict[str, float] = {}
+        for parameter, seconds in zip(
+            self._driven_slots(),
+            (
+                self.request.reference_exposure_seconds,
+                self.request.readout_exposure_seconds,
+                self.request.reference_exposure_seconds,
+            ),
+            strict=True,
+        ):
+            if parameter.unit == "value":
+                raise ValueError(
+                    f"API slot {parameter.parameter_id!r} sets a DAC code, not "
+                    "a duration; calibration drives the three probe lengths"
+                )
+            values[parameter.parameter_id] = convert_time(
+                seconds, "s", parameter.unit
+            )
+        return values
+
+    def _driven_slots(self) -> tuple[object, object, object]:
+        """The three API slots this run drives, as the pulse declares them.
+
+        Addressed by number, in the acquisition's own order: slot k is the
+        k-th parameter the pulse declares, whatever its author called it and
+        whichever unit they wrote it in.
+        """
+
+        declared = tuple(self.pulse_sequence.api_parameters)
         wanted = (
             self.request.reference_before_slot,
             self.request.readout_slot,
@@ -654,7 +671,16 @@ class CalibrationTask:
                 self.request.readout_slot,
                 self.request.reference_after_slot,
             ],
-            "api_parameters": list(self._driven_parameters()),
+            "api_parameters": [
+                parameter.parameter_id for parameter in self._driven_slots()
+            ],
+            # What was actually written to the board, in the units it was
+            # written in: an archive that only records seconds cannot say
+            # whether the run agreed with the pulse.
+            "api_values": self._driven_values(),
+            "api_units": [
+                parameter.unit for parameter in self._driven_slots()
+            ],
             "frame_exposures": [
                 self.request.reference_exposure_seconds,
                 self.request.readout_exposure_seconds,
