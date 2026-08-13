@@ -36,6 +36,7 @@ from typing import Any
 
 import numpy as np
 from zlc_plot import NumericRange, SelectorKind
+from zlc_plot.selectors import SelectorState
 
 from zlc_runtime import (
     FitEventValue,
@@ -171,8 +172,6 @@ def panel_threshold_from_document(document: Mapping[str, Any]) -> Any:
 
     if not document:
         return None
-    from zlc_plot import SelectorState  # noqa: PLC0415 -- only a restore needs it
-
     return SelectorState(
         SelectorKind.THRESHOLD,
         float(document["value"]),
