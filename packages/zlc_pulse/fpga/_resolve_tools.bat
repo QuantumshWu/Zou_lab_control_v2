@@ -55,20 +55,67 @@ for /f "delims=" %%I in ('where python 2^>nul') do call :zlc_python_try "%%I"
 if defined ZLC_PY_PATH goto zlc_python_executable
 for /f "delims=" %%I in ('where py 2^>nul') do call :zlc_python_try "%%I"
 if defined ZLC_PY_PATH goto zlc_python_executable
+
+rem PATH is where an interpreter ANNOUNCES itself, not where it lives.  The
+rem Anaconda installer recommends leaving PATH alone and ships no py.exe, so
+rem on a machine that has Python through conda both searches above come back
+rem empty and the launcher used to report 9009 for a machine that is in fact
+rem fully equipped.  Ask conda where its base is, then look where installers
+rem actually put things.
+if defined CONDA_PREFIX call :zlc_python_try "%CONDA_PREFIX%\python.exe"
+if defined ZLC_PY_PATH goto zlc_python_executable
+if defined CONDA_EXE for %%I in ("%CONDA_EXE%\..\..") do call :zlc_python_try "%%~fI\python.exe"
+if defined ZLC_PY_PATH goto zlc_python_executable
+for /f "delims=" %%I in ('conda info --base 2^>nul') do call :zlc_python_try "%%I\python.exe"
+if defined ZLC_PY_PATH goto zlc_python_executable
+for %%R in (
+  "%USERPROFILE%\anaconda3" "%USERPROFILE%\miniconda3" "%USERPROFILE%\miniforge3"
+  "%LOCALAPPDATA%\anaconda3" "%LOCALAPPDATA%\miniconda3"
+  "%LOCALAPPDATA%\Continuum\anaconda3" "%LOCALAPPDATA%\Continuum\miniconda3"
+  "%ProgramData%\Anaconda3" "%ProgramData%\Miniconda3" "%ProgramData%\miniforge3"
+  "%ProgramFiles%\Anaconda3" "%ProgramFiles%\Miniconda3"
+  "C:\Anaconda3" "C:\Miniconda3"
+) do call :zlc_python_try "%%~R\python.exe"
+if defined ZLC_PY_PATH goto zlc_python_executable
+for /d %%R in (
+  "%LOCALAPPDATA%\Programs\Python\Python3*"
+  "%ProgramFiles%\Python3*" "%ProgramFiles(x86)%\Python3*" "C:\Python3*"
+) do call :zlc_python_try "%%~R\python.exe"
+if defined ZLC_PY_PATH goto zlc_python_executable
+
 echo ERROR: no working Python was found on this machine.
-echo        Every python.exe and py.exe on PATH was tried and none of them ran.
-echo        Install Python 3 with "Add python.exe to PATH" ticked, or point
-echo        ZLC_PY_CMD at the interpreter to use, for example:
-echo            set ZLC_PY_CMD=C:\Python313\python.exe
+echo        PATH was searched (python.exe, py.exe), then conda's base and the
+echo        usual install folders for Anaconda, Miniconda and python.org.
+echo        Install Python 3, or point ZLC_PY_CMD at the interpreter to use:
+echo            setx ZLC_PY_CMD "C:\Users\you\anaconda3\python.exe"
 set "ZLC_TOOL_REPO_ROOT="
 exit /b 1
 
 :zlc_python_try
-rem One candidate: keep it only if it actually starts.
+rem One candidate: keep it only if it actually starts.  A name that exists is
+rem not an interpreter -- Windows ships a python.exe under WindowsApps that
+rem only opens the Store and answers 9009.
 if defined ZLC_PY_PATH exit /b 0
+if not exist "%~1" exit /b 0
 "%~1" -c "import sys" >nul 2>&1
 if errorlevel 1 exit /b 0
 set "ZLC_PY_PATH=%~1"
+exit /b 0
+
+:zlc_python_conda_activate
+rem A conda interpreter found by path still needs its environment: PyQt5 and
+rem numpy load DLLs from Library\bin, which is what activation puts on PATH.
+rem Without this the window dies with "DLL load failed" although python.exe
+rem itself started perfectly.
+if not exist "%ZLC_PY_PATH%" exit /b 0
+for %%I in ("%ZLC_PY_PATH%") do set "ZLC_CONDA_ROOT=%%~dpI"
+if not exist "%ZLC_CONDA_ROOT%conda-meta\" (
+  set "ZLC_CONDA_ROOT="
+  exit /b 0
+)
+set "PATH=%ZLC_CONDA_ROOT%;%ZLC_CONDA_ROOT%Library\mingw-w64\bin;%ZLC_CONDA_ROOT%Library\usr\bin;%ZLC_CONDA_ROOT%Library\bin;%ZLC_CONDA_ROOT%Scripts;%ZLC_CONDA_ROOT%bin;%ZLC_CONDA_ROOT%condabin;%PATH%"
+echo ZLC conda environment: %ZLC_CONDA_ROOT%
+set "ZLC_CONDA_ROOT="
 exit /b 0
 
 :zlc_python_executable
@@ -77,6 +124,7 @@ if /I "%ZLC_PY_EXT%"==".bat" set "ZLC_PY_CMD=call "%ZLC_PY_PATH%""
 if /I not "%ZLC_PY_EXT%"==".bat" set "ZLC_PY_CMD="%ZLC_PY_PATH%""
 
 :zlc_python_found
+call :zlc_python_conda_activate
 echo ZLC Python: %ZLC_PY_PATH%
 set "ZLC_TOOL_REPO_ROOT="
 exit /b 0
