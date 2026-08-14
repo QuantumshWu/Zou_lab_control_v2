@@ -129,10 +129,13 @@ def test_axis_identities_are_deduplicated() -> None:
         session.close()
 
 
-def test_point_row_ordinal_is_not_offered_on_topology_datasets() -> None:
-    """With a declared scan topology the point-row ordinal is just the
-    flattened grid order — not an axis of the data — so it is not listed;
-    the histogram default names the point domain by its dimensions instead.
+def test_the_row_ordinal_is_the_name_of_last_resort() -> None:
+    """It is offered only when nothing declared already names the rows.
+
+    A declared topology names them (they are its grid, in order) and so does
+    any point column whose values are distinct.  Listed beside such a column
+    it is the same axis twice: an operator saw "point (3)" and "frame (3)"
+    and had to guess which of the two was the frames.
     """
 
     registry_default = default_spec
@@ -148,11 +151,14 @@ def test_point_row_ordinal_is_not_offered_on_topology_datasets() -> None:
     histogram = registry_default(snapshot.block.schema, PlotKind.HISTOGRAM)
     assert histogram == registry_default(snapshot.block.schema, PlotKind.HISTOGRAM)
 
-    # Flat point tables keep the ordinal — there it IS the point domain.
+    # A flat table whose one column names every row: the column IS the
+    # point domain, and the ordinal would be a second name for it.
     flat = _flat_snapshot()
     flat_session = PlotSession(flat, CurvePlot(AxisRef.point("scan")))
     try:
-        assert AxisRef.point_rows() in flat_session.describe_semantics().axis_choices
+        choices = flat_session.describe_semantics().axis_choices
+        assert AxisRef.point("scan") in choices
+        assert AxisRef.point_rows() not in choices
     finally:
         flat_session.close()
 

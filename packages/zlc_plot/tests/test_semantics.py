@@ -187,8 +187,9 @@ def test_series_x_and_group_choices_exclude_degenerate_axes() -> None:
     assert AxisRef.point("frame") not in group_values
     assert AxisRef.point_rows() not in group_values
     assert AxisRef.repeat() not in group_values
-    # The axis vocabulary itself is unfiltered; only series roles are.
-    assert AxisRef.point_rows() in description.axis_choices
+    # And the ordinal is not in the vocabulary at all: the frame column
+    # names every row, so the rows ARE the frames.
+    assert AxisRef.point_rows() not in description.axis_choices
 
 
 def test_non_series_kinds_keep_degenerate_axes_where_legitimate() -> None:
@@ -262,3 +263,70 @@ def test_replace_spec_policy_keeps_viewport_for_reduction_only_change() -> None:
         assert session.selectors == ()
     finally:
         session.close()
+
+
+def test_a_camera_cycle_names_its_rows_frames_and_nothing_else() -> None:
+    """What an operator reads for the three shapes a bench produces."""
+
+    from data_factory import PointTopology
+
+    camera = describe_semantics(_camera_frame_schema(), CurvePlot(AxisRef.point("frame")))
+    assert [name.removeprefix('fate:') for _ref, name in camera.fate_rows] == [
+        "repeat",
+        "frame",
+        "spatial-y",
+        "spatial-x",
+    ]
+
+    scan = DatasetSchema.create(
+        Axis.create("repeat", size=2),
+        PointTable.from_columns({"detuning": [0.0, 1.0, 2.0, 3.0]}),
+        dtype=np.float64,
+    )
+    curve = describe_semantics(scan, CurvePlot(AxisRef.point("detuning")))
+    assert [name.removeprefix("fate:") for _ref, name in curve.fate_rows][:2] == [
+        "repeat",
+        "detuning",
+    ]
+
+
+def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
+    """The table said "reduce" for axes the panel was giving cells to.
+
+    It was built from the OFFERING alone, and a facet over the point rows is
+    not in the offering of a dataset whose topology names them -- so the row
+    was missing, `fate()` raised for the spec's own facet, and the two
+    dimensions were reported as reduced while every (x, y) pair had its own
+    cell.
+    """
+
+    import itertools
+
+    from data_factory import PointTopology
+    from zlc_plot import FacetGridPlot
+
+    values = [0.0, 1.0, 2.0]
+    rows = list(itertools.product(values, values))
+    table = PointTable.from_columns(
+        {"coil_x": [row[0] for row in rows], "coil_y": [row[1] for row in rows]}
+    )
+    topology = PointTopology.from_cartesian(
+        (
+            Axis.create("coil_x", values=values),
+            Axis.create("coil_y", values=values),
+        ),
+        point_table=table,
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        table,
+        point_topology=topology,
+        dtype=np.float64,
+    )
+    spec = FacetGridPlot(
+        AxisRef.point_rows(), CurvePlot(AxisRef.point_dimension("coil_y"))
+    )
+    description = describe_semantics(schema, spec)
+    assert description.fate(AxisRef.point_rows()) == "facet"
+    assert [name.removeprefix('fate:') for _ref, name in description.fate_rows][0] == "repeat"
+    assert "fate:coil_x" in [name for _ref, name in description.fate_rows]

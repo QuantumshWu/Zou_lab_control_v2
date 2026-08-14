@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from ._kinds import HANDLERS, default_spec, handler_for
-from zlc_data import AxisId, DatasetSchema
+from zlc_data import AxisId, DatasetSchema, point_ordinal_axis
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -165,6 +165,26 @@ class SemanticDescription:
         return MappingProxyType({field.name: field.value for field in self.fields})
 
 
+def _rows_are_already_named(schema: DatasetSchema) -> bool:
+    """Whether something the producer declared identifies each point row.
+
+    A declared topology does (the rows are its grid, in order), and so does
+    any point column whose values are distinct -- a camera cycle's frame
+    number, a scan's swept parameter.  When one of those exists, the rows ARE
+    it, and offering a generic ordinal beside it puts the same axis in the
+    table twice: an operator saw "point row (3)" and "frame (3)" and had to
+    guess which of the two was the frames.
+    """
+
+    if schema.grid_topology is not None:
+        return True
+    for column in schema.point_table.columns:
+        values = tuple(column.values)
+        if values and len(set(values)) == len(values):
+            return True
+    return False
+
+
 def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
     """Return every declared axis reference, one identity per physical axis.
 
@@ -172,9 +192,9 @@ def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
     physical axis under two names; on a Cartesian grid both group points
     identically, so only the dimension identity is offered — listing both
     made every axis dropdown show duplicates.  The point-row ordinal is the
-    same degenerate case for the whole point domain: with a declared
-    topology it is just the flattened grid order, not an axis of the data,
-    so it is offered only for flat point tables.
+    same case for the whole point domain: it is the NAME OF LAST RESORT for
+    the rows, offered only when nothing the producer declared already names
+    them.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -185,7 +205,7 @@ def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
         else set()
     )
     refs: list[AxisRef] = [AxisRef.repeat()]
-    if not dimension_names:
+    if not _rows_are_already_named(schema):
         refs.append(AxisRef.point_rows())
     refs.extend(
         AxisRef.point(str(axis.coordinate_id))
@@ -283,7 +303,8 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
     """Return the only human label authority for a schema axis reference."""
 
     if ref.domain is AxisDomain.POINT_ROW:
-        return "point row"
+        # The point domain as a whole, under the one name zlc_data gives it.
+        return point_ordinal_axis(schema.point_table.row_count).name
     if ref.domain is AxisDomain.REPEAT:
         axis = schema.repeat_axis
     elif ref.domain is AxisDomain.POINT_COORDINATE:
@@ -291,6 +312,12 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
         axis = schema.point_table.column(AxisId(ref.axis_id))
     elif ref.domain is AxisDomain.POINT_DIMENSION:
         assert ref.axis_id is not None and schema.grid_topology is not None
+        # A dimension and the column that carries it are one axis, and the
+        # column is where its human name lives; the raw id ('scan.coil_x')
+        # is what a producer wires with, not what an operator reads.
+        for column in schema.point_table.columns:
+            if str(column.coordinate_id) == ref.axis_id:
+                return str(column.name)
         return str(ref.axis_id)
     elif ref.domain is AxisDomain.DATA:
         assert ref.axis_id is not None
@@ -351,6 +378,24 @@ def fate_field_name(label: str) -> str:
 
 def _default_fate(spec: PlotSpec) -> str:
     return FATE_POOL if semantic_spec(spec).kind is PlotKind.HISTOGRAM else FATE_REDUCE
+
+
+def _axes_used_by(spec: PlotSpec) -> tuple[AxisRef, ...]:
+    """Every axis this specification names, in any role."""
+
+    semantic = semantic_spec(spec)
+    used = [
+        value
+        for value in (
+            getattr(semantic, "x", None),
+            getattr(semantic, "y", None),
+            getattr(semantic, "group", None),
+            getattr(spec, "facet", None),
+        )
+        if isinstance(value, AxisRef)
+    ]
+    used.extend(term for term in _scope_terms(spec))
+    return tuple(used)
 
 
 def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
@@ -794,7 +839,19 @@ def describe_semantics(
     default_fate = _default_fate(spec)
     default_label = "pooled" if default_fate == FATE_POOL else "reduced"
     roles = tuple(role for role in ROLE_FATES if role in declared)
-    for ref in axes:
+    # Every axis the offering lists, AND every axis this specification is
+    # already using.  The two differ exactly when a spec names something the
+    # offering no longer would -- a facet over the point rows of a topology,
+    # say -- and then a table built from the offering alone does not merely
+    # omit that row: it reports the axis as reduced while the panel gives
+    # every row its own cell, and fate() raises for the spec's own facet.
+    #
+    # Deduplicated by the row each ref would BE, not by the ref: one axis can
+    # be spelled by its id or by its name, and a table is one row per axis.
+    listed: dict[str, AxisRef] = {}
+    for candidate in (*axes, *_axes_used_by(spec)):
+        listed.setdefault(fate_field_name(_axis_label(schema, candidate)), candidate)
+    for ref in listed.values():
         label = _axis_label(schema, ref)
         name = fate_field_name(label)
         current = _fate_of(spec, ref)

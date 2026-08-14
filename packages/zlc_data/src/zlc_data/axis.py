@@ -122,7 +122,6 @@ class AxisSourceRef:
 
     TENSOR: ClassVar[str] = "TENSOR"
     POINT_ROWS: ClassVar[str] = "POINT_ROWS"
-    POINT_ORDINAL: ClassVar[str] = "POINT_ORDINAL"
     POINT_COORDINATE: ClassVar[str] = "POINT_COORDINATE"
     GRID_DIMENSION: ClassVar[str] = "GRID_DIMENSION"
 
@@ -132,7 +131,7 @@ class AxisSourceRef:
             self.POINT_COORDINATE,
             self.GRID_DIMENSION,
         }
-        without_id = {self.POINT_ROWS, self.POINT_ORDINAL}
+        without_id = {self.POINT_ROWS}
         if self.kind in with_id:
             if not isinstance(self.axis_id, AxisId):
                 raise TypeError(f"{self.kind} source requires an AxisId")
@@ -149,10 +148,6 @@ class AxisSourceRef:
     @classmethod
     def point_rows(cls) -> "AxisSourceRef":
         return cls(cls.POINT_ROWS)
-
-    @classmethod
-    def point_ordinal(cls) -> "AxisSourceRef":
-        return cls(cls.POINT_ORDINAL)
 
     @classmethod
     def point_coordinate(cls, coordinate_id: AxisId) -> "AxisSourceRef":
