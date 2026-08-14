@@ -22,7 +22,9 @@ __all__ = [
     "panel_plot_annotations_section",
     "restore_panel_plot_input",
     "restore_panel_plot_annotations",
+    "save_panel_data",
     "save_panel_figure",
+    "save_panel_image",
 ]
 
 
@@ -157,27 +159,34 @@ def _await(operation: object) -> object:
     return operation.result() if hasattr(operation, "result") else operation
 
 
-def save_panel_figure(
-    base_path: str | Path,
-    *,
-    state: PanelState,
-    frozen: PanelFrozenData,
-    make_host: Callable[[object, str, str, str], object],
-    configure_host: Callable[[object, PanelState, ImagePointOverlay | None], None],
-    annotations: PanelPlotAnnotations | None = None,
-) -> PanelFigureFiles:
-    """Save the Edit tab's exact frozen input without asking the plane again."""
-
+def _panel_paths(base_path: str | Path) -> tuple[Path, Path]:
     selected = Path(base_path).expanduser().resolve()
     if not selected.suffix:
         selected = selected.with_suffix(".png")
     if selected.suffix.lower() not in {".png", ".pdf", ".svg"}:
         raise ValueError("panel image format must be PNG, PDF, or SVG")
     selected.parent.mkdir(parents=True, exist_ok=True)
-    archive_path = selected.with_suffix(".npz")
-    image_path = selected
-    plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
+    return selected, selected.with_suffix(".npz")
 
+
+def save_panel_image(
+    base_path: str | Path,
+    *,
+    state: PanelState,
+    frozen: PanelFrozenData,
+    make_host: Callable[[object, str, str, str], object],
+    configure_host: Callable[[object, PanelState, ImagePointOverlay | None], None],
+) -> Path:
+    """Draw one panel's frozen input and write the picture.
+
+    The expensive half.  A producer taking data one shot at a time writes the
+    NUMBERS as they arrive and comes back for the pictures afterwards -- a
+    render costs a few hundred milliseconds, which inside an acquisition loop
+    is long enough for a camera's ring to overrun.
+    """
+
+    image_path, _archive_path = _panel_paths(base_path)
+    plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
     host = make_host(
         frozen.snapshot, state.signal, state.kind, state.cell_kind
     )
@@ -195,7 +204,26 @@ def save_panel_figure(
         close = getattr(host, "close", None)
         if callable(close):
             close()
+    return image_path
 
+
+def save_panel_data(
+    base_path: str | Path,
+    *,
+    state: PanelState,
+    frozen: PanelFrozenData,
+    annotations: PanelPlotAnnotations | None = None,
+) -> Path:
+    """Write one panel's numbers, and everything needed to explain them.
+
+    The cheap half, and the one that cannot be recomputed: the dataset with
+    its axes, the panel it was configured as, the run chain it came out of,
+    the overlay and the annotations.  Drawing needs none of it, so a producer
+    can secure the data the moment it exists.
+    """
+
+    _image_path, archive_path = _panel_paths(base_path)
+    plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
     overlay_arrays, overlay_section = overlay_payload(
         plot_input,
         frozen.overlay,
@@ -215,11 +243,41 @@ def save_panel_figure(
     )
     if annotation_section:
         sections["plot_annotations"] = annotation_section
-    written = write_figure_file(
+    return write_figure_file(
         archive_path,
-        name=selected.name,
+        name=archive_path.with_suffix(".png").name,
         arrays={"data": frozen.snapshot, **overlay_arrays},
         sections=sections,
+    )
+
+
+def save_panel_figure(
+    base_path: str | Path,
+    *,
+    state: PanelState,
+    frozen: PanelFrozenData,
+    make_host: Callable[[object, str, str, str], object],
+    configure_host: Callable[[object, PanelState, ImagePointOverlay | None], None],
+    annotations: PanelPlotAnnotations | None = None,
+) -> PanelFigureFiles:
+    """Save the Edit tab's exact frozen input without asking the plane again.
+
+    Both halves, for the caller that wants them together.  They are separately
+    callable because a producer saving as it acquires wants them apart.
+    """
+
+    image_path = save_panel_image(
+        base_path,
+        state=state,
+        frozen=frozen,
+        make_host=make_host,
+        configure_host=configure_host,
+    )
+    written = save_panel_data(
+        base_path,
+        state=state,
+        frozen=frozen,
+        annotations=annotations,
     )
     return PanelFigureFiles(image_path, written)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +17,10 @@ from zlc_data import (
     AxisSpec,
     OwnedSnapshot,
 )
-from zlc_data.figure_archive import figure_bytes, read_archive, read_dataset
-from zlc_durable import atomic_write_bytes, unique_path
+from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_durable import unique_path
+from zlc_workbench.panel_save import save_panel_data, save_panel_image
+from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_pulse import PulseSequence, convert_time
 
 from zlc_atom.devices.camera.contract import (
@@ -66,6 +68,18 @@ _FRAME_SOURCES = frozenset({FRAMES_FROM_CAMERA, FRAMES_FROM_FOLDER})
 #: the picture and the numbers behind it, in the one format the figure viewer
 #: opens.
 SAVED_SAMPLE_STEM = "sample"
+
+#: How a saved sample is drawn: its three frames side by side, as images.
+#: Stated once, so the picture written beside the numbers and the picture the
+#: viewer draws when the file is reopened are the same picture.
+_SAMPLE_PANEL_STATE = PanelState(
+    signal=CAPTURE_PREVIEW_DECLARATION.name,
+    kind="facet_grid",
+    size="4x4",
+    interval_ms=100,
+    title="calibration sample",
+    cell_kind="image",
+)
 
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
@@ -253,6 +267,19 @@ REFERENCE_FRAME_INDICES = (0, 2)
 READOUT_FRAME_INDEX = 1
 
 
+def _sample_host(plot_input: object, _signal: str, _kind: str, _cell_kind: str) -> object:
+    """The panel host every card mounts through, for a panel nobody mounted.
+
+    The console's own builder: a saved sample must come out looking like the
+    panel it declares itself to be, and a second way of turning a state into
+    a host is a second way for that to be wrong.
+    """
+
+    from zlc_workbench.apps.task_console import build_panel_host
+
+    return build_panel_host(plot_input, _SAMPLE_PANEL_STATE)
+
+
 class SampleWriter:
     """Every acquired sample on disk, written as it arrives.
 
@@ -280,10 +307,26 @@ class SampleWriter:
         self._point = working_point
         self._run_record = dict(run_record)
         self._generation = generation
-        self._written: list[tuple[int, OwnedSnapshot]] = []
+        self._samples: dict[int, tuple[PanelState, OwnedSnapshot]] = {}
+
+    def _panel(self, index: int) -> tuple[Path, PanelState, PanelFrozenData]:
+        name = f"{SAVED_SAMPLE_STEM}_{int(index):04d}"
+        state, snapshot = self._samples[int(index)]
+        return self.folder / f"{name}.png", state, PanelFrozenData(
+            state.signal,
+            None,
+            snapshot,
+            run_chain=(self._run_record,),
+        )
 
     def write(self, index: int, cycle: Sequence[CameraFrameRecord]) -> Path:
-        """Write one sample, and hold its dataset for the picture afterwards."""
+        """Write one sample's numbers, and hold it for its picture afterwards.
+
+        Through the same save Panel Edit uses, so what lands here is the file
+        the figure viewer already opens -- the dataset with its axes, the
+        panel it is configured as, and the run it came out of, which is where
+        the exposure, the ROI and the binning are recorded.
+        """
 
         snapshot = cycle_snapshot(
             cycle,
@@ -294,58 +337,29 @@ class SampleWriter:
             generation=self._generation,
             revision=int(index) + 1,
         )
-        name = f"{SAVED_SAMPLE_STEM}_{int(index):04d}"
-        path = self.folder / f"{name}.npz"
-        atomic_write_bytes(
-            path,
-            figure_bytes(
-                name,
-                arrays={"data": snapshot},
-                # The same sections Panel Edit writes, so the same viewer
-                # opens these: what the panel would be, and the run this came
-                # out of -- which is where the exposure, the ROI and the
-                # binning are recorded, so nothing else has to be.
-                sections={
-                    "panel": {
-                        "dataset": "data",
-                        "state": {
-                            "signal": CAPTURE_PREVIEW_DECLARATION.name,
-                            "kind": "facet_grid",
-                            "cell_kind": "image",
-                            "title": f"calibration {name}",
-                        },
-                    },
-                    "run_chain": [self._run_record],
-                },
+        self._samples[int(index)] = (
+            replace(
+                _SAMPLE_PANEL_STATE,
+                title=f"calibration {SAVED_SAMPLE_STEM}_{int(index):04d}",
             ),
+            snapshot,
         )
-        self._written.append((int(index), snapshot))
-        return path
+        base, state, frozen = self._panel(int(index))
+        return save_panel_data(base, state=state, frozen=frozen)
 
     def render(self) -> int:
         """Draw every written sample, once the camera is no longer waiting."""
 
-        from zlc_plot import AxisRef, ImagePlot, PlotLabels, facet_grid
-
-        for index, snapshot in self._written:
-            name = f"{SAVED_SAMPLE_STEM}_{int(index):04d}"
-            # The frame axis by the identity the dataset gave it, asked of the
-            # dataset: a literal here would be a second naming convention that
-            # only breaks when a sample is drawn.
-            frames = snapshot.block.schema.point_table.columns[0].coordinate_id
-            vertical, horizontal = snapshot.block.schema.cell_schema.data_axes
-            with facet_grid(
-                snapshot,
-                AxisRef.point(str(frames)),
-                ImagePlot(
-                    AxisRef.data(str(horizontal.axis_id)),
-                    AxisRef.data(str(vertical.axis_id)),
-                ),
-                labels=PlotLabels(title=f"calibration {name}"),
-                size="4x4",
-            ) as plot:
-                plot.save(self.folder / f"{name}.png")
-        return len(self._written)
+        for index in sorted(self._samples):
+            base, state, frozen = self._panel(index)
+            save_panel_image(
+                base,
+                state=state,
+                frozen=frozen,
+                make_host=_sample_host,
+                configure_host=lambda _host, _state, _overlay: None,
+            )
+        return len(self._samples)
 
 
 def read_saved_samples(
