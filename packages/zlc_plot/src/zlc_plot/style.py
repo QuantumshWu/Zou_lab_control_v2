@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
+import logging
 import math
 import threading
 from typing import Any, Iterator, Mapping, TypeAlias
@@ -165,7 +166,20 @@ def _installed_font_families() -> frozenset[str]:
 
     from matplotlib import font_manager
 
-    _ensure_canonical_font_registered()
+    try:
+        _ensure_canonical_font_registered()
+    except Exception as error:
+        # The canonical font is SHIPPED, so failing to register it means the
+        # installed package is missing its asset -- an install to look at, not
+        # a reason to stop drawing.  Said once, here, because the alternative
+        # is what the bench actually saw: matplotlib searching for the family
+        # and reporting it missing per text object, thousands of times, with
+        # nothing in the flood explaining why.
+        logging.getLogger(__name__).warning(
+            "the packaged font could not be registered (%s); plots will use "
+            "the first declared fallback this machine has",
+            error,
+        )
     return frozenset(entry.name for entry in font_manager.fontManager.ttflist)
 
 
