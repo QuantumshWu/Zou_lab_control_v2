@@ -453,7 +453,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             sorted(
                 path.name
                 for path in (
-                    task_result.artifact_path.with_suffix("") / "report"
+                    task_result.artifact_path.parent / "report"
                 ).glob("*.png")
             )
         )
@@ -576,7 +576,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         )
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "repeats"
-        ] == 300
+        ] == 200
         with pytest.raises(ValueError, match="cannot exceed"):
             descriptors["calibration"].authoring_schema.project_values(
                 {

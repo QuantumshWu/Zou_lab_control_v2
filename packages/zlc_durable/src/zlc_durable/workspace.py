@@ -58,26 +58,28 @@ def day_folder(save_root: str | os.PathLike[str], when: _date) -> Path:
 
 
 def unique_path(folder: str | os.PathLike[str], stem: str, suffix: str) -> Path:
-    """A path in ``folder`` that no file occupies yet.
+    """A path in ``folder`` that nothing occupies yet.
 
     Returns ``<stem><suffix>`` when free, otherwise ``<stem>-2<suffix>``,
     ``-3`` and so on.  Saving twice in one day must never overwrite the morning's
     data, and asking the caller to invent unique names invites exactly that.
+
+    An EMPTY suffix asks for a directory, and creates it: a run that leaves
+    several files leaves one folder holding them, and the name it takes is
+    taken against files and folders alike so the two can never collide.  One
+    rule for both, because "a name nothing here has" is one question.
     """
 
     directory = Path(folder)
     if not directory.is_dir():
         raise NotADirectoryError(f"not a directory: {directory}")
     safe = _UNSAFE.sub("-", str(stem)).strip("-") or "untitled"
-    if not suffix.startswith("."):
+    if suffix and not suffix.startswith("."):
         raise ValueError("suffix must start with a dot")
 
     candidate = resolve_under(directory, f"{safe}{suffix}")
-    if not candidate.exists():
-        return candidate
     ordinal = 2
-    while True:
+    while candidate.exists():
         candidate = resolve_under(directory, f"{safe}-{ordinal}{suffix}")
-        if not candidate.exists():
-            return candidate
         ordinal += 1
+    return durable_makedirs(candidate) if not suffix else candidate

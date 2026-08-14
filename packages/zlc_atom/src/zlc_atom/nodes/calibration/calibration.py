@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
@@ -57,6 +58,28 @@ def _shape(value: object, field_name: str) -> tuple[int, int]:
     if len(result) != 2 or any(item <= 0 for item in result):
         raise ValueError(f"{field_name} must contain two positive integers")
     return result
+
+
+def reads_photoelectrons(calibration: object) -> bool:
+    """Whether this calibration's thresholds are numbers of photoelectrons.
+
+    Read from the run it was fitted on.  Every node that classifies frames
+    against a calibration has to take its own frames in the SAME numbers --
+    the conversion is affine, so a mismatch does not read a little wrong, it
+    reads every site the same way -- and asking here is how they agree
+    without each keeping its own switch.
+    """
+
+    report = getattr(calibration, "report", None)
+    if not isinstance(report, Mapping):
+        return False
+    record = report.get("run_record")
+    if not isinstance(record, Mapping):
+        return False
+    request = record.get("request")
+    if not isinstance(request, Mapping):
+        return False
+    return bool(request.get("photoelectrons", False))
 
 
 @dataclass(frozen=True)

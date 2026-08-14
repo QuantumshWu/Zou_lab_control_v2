@@ -57,3 +57,21 @@ def test_unique_path_requires_a_dotted_suffix_and_a_real_folder(tmp_path) -> Non
         unique_path(tmp_path, "scan", "npz")
     with pytest.raises(NotADirectoryError):
         unique_path(tmp_path / "absent", "scan", ".npz")
+
+
+def test_a_run_folder_takes_a_free_name_and_is_created(tmp_path) -> None:
+    """An empty suffix asks for the directory a run leaves everything in.
+
+    Names are taken against files and folders alike: a calibration folder and
+    a file somebody saved beside it can never collide, and the second run of
+    a day never writes into the first one's folder.
+    """
+
+    first = unique_path(tmp_path, "calibration", "")
+    assert first.is_dir() and first.name == "calibration"
+    second = unique_path(tmp_path, "calibration", "")
+    assert second.is_dir() and second.name == "calibration-2"
+    # A file of the same stem takes the name too, so neither shadows the other.
+    (tmp_path / "report").write_text("x", encoding="utf-8")
+    assert unique_path(tmp_path, "report", "").name == "report-2"
+    assert unique_path(tmp_path, "calibration", ".json").name == "calibration.json"

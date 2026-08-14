@@ -2949,7 +2949,7 @@ class ConsolePresenter:
                 getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
             )
             self.view.add_logic_row(
-                binding.node_id, kind, bool(binding.descriptor.node_previews)
+                binding.node_id, kind, binding.descriptor.offers_a_preview
             )
         for binding in candidate.panels:
             self.panels[binding.panel_id] = binding
@@ -3734,7 +3734,7 @@ class ConsolePresenter:
         )
         kind = str(getattr(descriptor.kind, "value", descriptor.kind))
         self.view.add_logic_row(
-            selected_id, kind, bool(descriptor.node_previews)
+            selected_id, kind, descriptor.offers_a_preview
         )
         binding = LogicBinding(
             selected_id,
@@ -3863,7 +3863,7 @@ class ConsolePresenter:
             # preference, projected twice; neither widget keeps a default --
             # and no switch at all where the node opens nothing.
             "auto_preview": binding.auto_preview,
-            "preview_offered": bool(binding.descriptor.node_previews),
+            "preview_offered": binding.descriptor.offers_a_preview,
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_label": (
                 source_specs[0].name.replace("_", " ").title()

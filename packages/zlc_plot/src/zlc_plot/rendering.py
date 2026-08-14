@@ -1384,9 +1384,14 @@ class MatplotlibRenderer:
             raise TypeError("kind must be SelectorKind")
         self._selector_gesture_kind = kind
         self._selector_candidate = None
+        # The COMPOSE is inside the style too, not just the artist update.
+        # A frame drawn outside it is drawn under matplotlib's defaults --
+        # its fonts, its sizes -- which is a different picture from every
+        # other frame, and is what made the first drag on an image search
+        # for font families this machine has never had.
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-        self._compose_frame(chrome_stable=True)
+            self._compose_frame(chrome_stable=True)
         return True
 
     def begin_color_limit_gesture(self, candidate: ColorLimitCandidate) -> bool:
@@ -1398,9 +1403,8 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-            if self._paint_gesture_overlay():
-                return True
-        self._compose_frame(chrome_stable=True)
+            if not self._paint_gesture_overlay():
+                self._compose_frame(chrome_stable=True)
         return True
 
     def preview_selector(self, state: SelectorState) -> bool:
@@ -1416,9 +1420,8 @@ class MatplotlibRenderer:
         # and not four times a pointer motion.
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-            if self._paint_gesture_overlay():
-                return True
-        self._compose_frame(chrome_stable=True)
+            if not self._paint_gesture_overlay():
+                self._compose_frame(chrome_stable=True)
         return True
 
     def preview_color_limit_candidate(self, candidate: ColorLimitCandidate) -> bool:
@@ -1431,7 +1434,7 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-        self._compose_frame(chrome_stable=True)
+            self._compose_frame(chrome_stable=True)
         return True
 
     def _update_plot(self, payload: Any, state: DisplayState) -> None:

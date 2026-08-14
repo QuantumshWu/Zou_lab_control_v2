@@ -106,7 +106,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             signal_plane=SignalDataPlane(),
             artifact_directory=tmp_path,
         ).run()
-        report_directory = task_result.artifact_path.with_suffix("") / "report"
+        report_directory = task_result.artifact_path.parent / "report"
         report_images = tuple(sorted(report_directory.glob("*.png")))
         assert tuple(path.name for path in report_images) == (
             "box.png",

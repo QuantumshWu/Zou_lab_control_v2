@@ -632,7 +632,7 @@ for _ in range(20):
 
 artifact_row = presenter.logic['calibration'].artifact_results[0]
 artifact_path = Path(artifact_row['path'])
-report_root = artifact_path.with_suffix('') / 'report'
+report_root = artifact_path.parent / 'report'
 expected_report_files = {
     report_root / f'{stem}.png'
     for stem in (
@@ -681,7 +681,7 @@ pulse_field = next(
 assert pulse_field.kind == 'path'
 assert Path(pulse_field.base_dir).resolve() == space.pulses.resolve()
 assert '*.json' in pulse_field.file_filter
-assert editor.form.read_value('repeats') == 300
+assert editor.form.read_value('repeats') == 200
 assert all('timeout' not in key for key in editor.form.keys)
 editor.form.widget_for('repeats').setValue(30)
 application.processEvents()

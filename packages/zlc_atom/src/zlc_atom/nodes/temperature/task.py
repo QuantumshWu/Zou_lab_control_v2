@@ -51,6 +51,7 @@ from zlc_runtime import (
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
+from zlc_atom.nodes.calibration.calibration import reads_photoelectrons
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraCycleSource,
     CameraMeasurementNode,
@@ -188,6 +189,10 @@ class TemperatureTask:
                 roi_xywh=contract.roi_xywh,
                 repeat=self._repeats * len(self._t_off),
                 frames_per_cycle=PROBE_FRAMES,
+                # The calibration's own numbers, not a choice of this task's:
+                # its thresholds only apply to frames in the unit they were
+                # fitted on, and this node has no reason to differ.
+                photoelectrons=reads_photoelectrons(self._calibration),
             ),
             signal_plane=signal_plane,
             producer=self.instance_id,

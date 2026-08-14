@@ -27,13 +27,19 @@ def photoelectron_switch(
     *,
     enabled_when: tuple[str, tuple[object, ...]] | None = None,
 ) -> AuthoringField:
-    """Read this camera in photoelectrons instead of counts: on or off."""
+    """Read this camera in photoelectrons instead of counts: on or off.
+
+    On by default.  Counts are an artefact of the converter, and every level
+    an operator reads -- a threshold, a histogram, a dark corner -- means
+    something only in electrons; a bench whose camera states no conversion
+    says so on the switch instead of quietly handing over ADU.
+    """
 
     return AuthoringField(
         PHOTOELECTRONS,
         "bool",
         "Photoelectrons",
-        False,
+        True,
         enabled_when=enabled_when,
     )
 

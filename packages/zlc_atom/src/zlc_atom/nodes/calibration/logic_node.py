@@ -59,7 +59,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "imaging_template.json",
             required=True,
         ),
-        AuthoringField("repeats", "int", "Samples", 300, minimum=1),
+        AuthoringField("repeats", "int", "Samples", 200, minimum=1),
         AuthoringField(
             "reference_exposure_seconds",
             "float",
@@ -103,7 +103,11 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "default_model_kind",
             "choice",
             "Default readout model",
-            ReadoutModelKind.BOX.value,
+            # The matched filter, per site: it weights each pixel by how much
+            # signal that pixel actually carries, which is what the readout
+            # is for.  Box stays offered -- it is the one to fall back to
+            # when the PSF fit is in doubt -- but it is not the default.
+            ReadoutModelKind.PER_SITE_PSF.value,
             choices=(
                 AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
                 AuthoringChoice(

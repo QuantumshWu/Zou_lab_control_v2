@@ -303,6 +303,10 @@ class ScriptedScanBench:
             repeat=0,
             frames_per_cycle=1,
             exposure_seconds=exposure_seconds,
+            # These frames ARE the assertions: each carries the ordinal the
+            # scan is checked against, so this bench reads the counts the
+            # scripted camera writes rather than electrons derived from them.
+            photoelectrons=False,
         )
         self.monitor = self._node.monitor()
         self.signal_name = self._node.signal_key("frames")

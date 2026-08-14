@@ -253,6 +253,9 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
             camera_key="mot_camera",
             signal_plane=plane,
             repeat=0,
+            # The MOT monitor is a machine-vision camera: it states no
+            # conversion, so the run that watches it is in counts and says so.
+            photoelectrons=False,
         )
         monitor = monitor_node.monitor()
         signal_name = _seed_the_mot_monitor(sequencer, monitor, plane)
@@ -334,6 +337,9 @@ def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
             camera_key="mot_camera",
             signal_plane=plane,
             repeat=0,
+            # The MOT monitor is a machine-vision camera: it states no
+            # conversion, so the run that watches it is in counts and says so.
+            photoelectrons=False,
         )
         monitor = monitor_node.monitor()
         signal_name = _seed_the_mot_monitor(sequencer, monitor, plane)

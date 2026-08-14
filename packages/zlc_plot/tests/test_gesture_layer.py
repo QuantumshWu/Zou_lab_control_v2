@@ -20,7 +20,7 @@ from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, HistogramPlot, ImagePlot, SelectorKind
 from zlc_plot.raster import RasterPlotHost
-from zlc_plot.selectors import NumericRange, SelectorState
+from zlc_plot.selectors import NumericRange, RectangleRange, SelectorState
 from zlc_plot.session import PlotSession
 
 SIZE = 256
@@ -309,3 +309,46 @@ def test_a_focused_facet_can_be_moved_to_another_cell() -> None:
         assert shown() == 1
     finally:
         host.close(timeout=20)
+
+
+def test_a_gesture_frame_is_composed_under_the_same_style() -> None:
+    """A drag draws the same picture as a data frame, in the same fonts.
+
+    The selector previews entered the style context to UPDATE the artists and
+    left it again to COMPOSE, so the first drag on an image rendered a whole
+    frame under matplotlib's defaults: its font list, not ours.  On this bench
+    that meant a burst of "font family not found" for families nobody here has
+    ever had -- the visible half of a frame drawn in the wrong style.
+    """
+
+    import logging
+
+    session = PlotSession(
+        _image_snapshot(), ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")), size="4x4"
+    )
+    messages: list[str] = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Catch()
+    font_log = logging.getLogger("matplotlib.font_manager")
+    font_log.addHandler(handler)
+    try:
+        session.rgba()
+        messages.clear()
+        renderer = session._renderer
+        renderer.begin_selector_gesture(SelectorKind.AREA)
+        renderer.preview_selector(
+            SelectorState(
+                SelectorKind.AREA,
+                RectangleRange(NumericRange(60.0, 190.0), NumericRange(40.0, 150.0)),
+            )
+        )
+        session.rgba()
+        missing = [text for text in messages if "not found" in text]
+        assert not missing, f"the gesture frame left our style: {missing[:4]}"
+    finally:
+        font_log.removeHandler(handler)
+        session.close()

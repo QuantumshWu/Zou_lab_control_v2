@@ -331,8 +331,10 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
 def test_named_device_options_and_build_resolution_use_compatible_instances() -> None:
     from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE
 
-    default_camera = object()
-    mot_camera = object()
+    # Cameras, so they answer what a camera answers: this draft's units are
+    # decided from the bound device, and a bare object() states nothing.
+    default_camera = SimpleNamespace(photoelectron_conversion=(200.0, 0.107))
+    mot_camera = SimpleNamespace(photoelectron_conversion=(200.0, 0.107))
     sequencer = object()
 
     class _Installation:
@@ -917,7 +919,7 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert Path(pulse.base_dir) == presenter.session.workspace.pulses
     assert pulse.file_filter == "Calibration pulse template (*.json)"
     assert projection["form_values"]["pulse_template"] == str(template.resolve())
-    assert projection["form_values"]["repeats"] == 300
+    assert projection["form_values"]["repeats"] == 200
     assert "timeout_seconds" not in projection["form_values"]
     assert projection["can_start"] is True
 

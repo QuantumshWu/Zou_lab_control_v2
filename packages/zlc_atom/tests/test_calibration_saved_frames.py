@@ -55,7 +55,7 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     request = replace(_calibration_request(repeats=12), save_frames=True)
     first = _task(request, tmp_path).run()
 
-    folder = first.artifact_path.with_suffix("") / "frames"
+    folder = first.artifact_path.parent / "frames"
     archives = sorted(folder.glob("sample_*.npz"))
     pictures = sorted(folder.glob("sample_*.png"))
     assert len(archives) == 12
@@ -125,7 +125,7 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
 
     request = replace(_calibration_request(repeats=6), save_frames=True)
     acquired = _task(request, tmp_path).run()
-    folder = acquired.artifact_path.with_suffix("") / "frames"
+    folder = acquired.artifact_path.parent / "frames"
 
     plane = SignalDataPlane()
     host = None
@@ -165,7 +165,7 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
 
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
     result = _task(_calibration_request(repeats=8), tmp_path).run()
-    assert not (result.artifact_path.with_suffix("") / "frames").exists()
+    assert not (result.artifact_path.parent / "frames").exists()
 
 
 def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:

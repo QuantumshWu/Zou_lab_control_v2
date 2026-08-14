@@ -193,7 +193,12 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         _wait_terminal(calibration_host, phase="done")
         first_calibration = calibration_host.final_result
         assert first_calibration is not None
-        assert first_calibration.artifact_path.parent == tmp_path.resolve()
+        # One run, one folder: the artifact sits in it, beside the report
+        # and the frames it left, so a calibration is a directory an operator
+        # copies or deletes whole.
+        run_folder = first_calibration.artifact_path.parent
+        assert run_folder.parent == tmp_path.resolve()
+        assert run_folder.name == first_calibration.artifact_path.stem
         assert first_calibration.artifact_path.is_file()
         assert set(
             json.loads(first_calibration.artifact_path.read_text(encoding="utf-8"))
@@ -214,7 +219,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert {
             path.name
             for path in (
-                first_calibration.artifact_path.with_suffix("") / "report"
+                first_calibration.artifact_path.parent / "report"
             ).iterdir()
         } == {
             # What it measured, first: a run that cannot draw has still
@@ -251,7 +256,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert {
             path.name
             for path in (
-                second_calibration.artifact_path.with_suffix("") / "report"
+                second_calibration.artifact_path.parent / "report"
             ).iterdir()
         } == {
             "summary.json",
@@ -420,7 +425,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert occupancy_publication.run_record["parameters"] == {
             "frames_signal": frames_signal,
             "calibration_path": str(first_calibration.artifact_path),
-            "model_kind": "box",
+            # The calibration's own default, which is the matched filter.
+            "model_kind": "psf",
         }
         occupancy_host.shutdown()
         finite_host.shutdown()

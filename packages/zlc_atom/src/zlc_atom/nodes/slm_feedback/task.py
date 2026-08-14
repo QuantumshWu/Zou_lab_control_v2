@@ -11,6 +11,7 @@ from zlc_pulse import PulseSequence
 from zlc_atom.devices.slm import SlmAdapter, canonical_phase
 from zlc_atom.devices.slm.solver import save_phase, solve_phase, validate_target
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
+from zlc_atom.nodes.calibration.calibration import reads_photoelectrons
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraCycleSource,
@@ -234,6 +235,9 @@ class SlmFeedbackTask:
                     roi_xywh=contract.roi_xywh,
                     repeat=chunk,
                     frames_per_cycle=3,
+                    # The calibration's own numbers: its thresholds apply to
+                    # frames in the unit they were fitted on.
+                    photoelectrons=reads_photoelectrons(self.calibration),
                 ),
                 signal_plane=self.signal_plane,
                 producer=self.instance_id,

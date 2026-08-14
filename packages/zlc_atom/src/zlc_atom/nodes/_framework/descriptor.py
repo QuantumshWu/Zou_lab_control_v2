@@ -312,6 +312,18 @@ class LogicNodeDescriptor:
         compare=False,
     )
 
+    @property
+    def offers_a_preview(self) -> bool:
+        """Whether Start can put this node's own output on screen.
+
+        Declared either way -- a fixed preview, or one resolved from the
+        authored values -- and asking only about the fixed tuple is why the
+        camera measurement's preview switch was invisible while its preview
+        opened perfectly well.
+        """
+
+        return bool(self.node_previews) or self.resolve_node_previews is not None
+
     def __post_init__(self) -> None:
         if not self.api_name or not isinstance(self.kind, NodeKind):
             raise ValueError("logic node requires api_name and a valid kind")

@@ -498,7 +498,7 @@ def _save_report(result: CalibrationRunResult) -> Path:
     what it measured is what an operator needs.
     """
 
-    report_root = result.artifact_path.with_suffix("") / "report"
+    report_root = result.artifact_path.parent / "report"
     report_root.mkdir(parents=True)
     write_readable_json(report_root / "summary.json", result.summary)
     (report_root / "summary.txt").write_text(
@@ -1232,15 +1232,17 @@ class CalibrationTask:
         self._actual_working_point = None
         self._result = None
         try:
-            # The run's own folder is named BEFORE anything is acquired, so the
-            # frames can be written into it as they arrive rather than after a
-            # result exists.  A run that never produces one still leaves every
-            # sample it paid for.
-            artifact_path = unique_path(
-                self.artifact_directory,
-                "calibration",
-                ".json",
-            )
+            # The run's own folder is named BEFORE anything is acquired, so
+            # the frames can be written into it as they arrive rather than
+            # after a result exists.  A run that never produces one still
+            # leaves every sample it paid for.
+            #
+            # Everything a run leaves lives INSIDE that folder, the artifact
+            # included: one calibration is one directory an operator can
+            # copy, move or delete whole, rather than a file that has to be
+            # kept beside a folder of the same name.
+            run_folder = unique_path(self.artifact_directory, "calibration", "")
+            artifact_path = run_folder / f"{run_folder.name}.json"
             writer: SampleWriter | None = None
             if self.request.frame_source == FRAMES_FROM_FOLDER:
                 if context is not None:
@@ -1257,7 +1259,7 @@ class CalibrationTask:
                     context=context,
                     pulse_facts=pulse_facts,
                     frames_folder=(
-                        artifact_path.with_suffix("") / "frames"
+                        run_folder / "frames"
                         if self.request.save_frames
                         else None
                     ),
