@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
 from math import sqrt
+
+from scipy import ndimage
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -825,27 +827,230 @@ def _fit_gaussian_spot_2d(
         )
 
 
+def _background_scatter(
+    image: np.ndarray,
+    exclusion: int,
+) -> tuple[float, float, np.ndarray]:
+    """The level and the scatter of an image's BACKGROUND.
+
+    Measured where the sources are not.  A robust spread over the whole
+    picture is not the background's: an array of traps contributes its own
+    peaks to the upper half and, once the picture has been band-passed, the
+    dark rings around them to the lower half, so the spread grows with how
+    many traps there are and how bright they got.  On a real run that read
+    fourteen times the true scatter and buried every dim trap; estimated over
+    the whole picture there is no threshold that is right for both a sparse
+    array and a dense one.
+
+    So the sources are found provisionally -- anything standing clear of the
+    picture's own median -- and set aside with a spot's width around them.
+    What is left is background, and its median and MAD are what a candidate is
+    judged against.  If a picture is nothing but sources the estimate falls
+    back to the whole of it rather than to nothing at all.
+    """
+
+    from scipy import ndimage
+
+    finite = np.asarray(image, dtype=float)
+    median = float(np.median(finite))
+    quartile = float(np.quantile(finite, 0.25))
+    provisional = max(1.4826 * (median - quartile), np.finfo(float).tiny)
+    # Three sigma of the provisional estimate: generous, because the point is
+    # to REMOVE sources rather than to detect them, and an over-generous mask
+    # only costs background pixels there are plenty of.
+    sources = finite >= median + 3.0 * provisional
+    if sources.any():
+        # Dilated by the BAND-PASS's reach, not by the spot's.  A source in a
+        # band-passed picture is a peak with a dark ring around it, and the
+        # ring is as fixed as the peak: left in the sample it inflated the
+        # scatter to the per-frame noise itself, so a trap that averaging had
+        # lifted to sixteen sigma measured under two and was refused.
+        sources = ndimage.binary_dilation(
+            sources, structure=np.ones((int(exclusion), int(exclusion)), dtype=bool)
+        )
+    background = finite[~sources]
+    if background.size < max(16, finite.size // 20):
+        background = finite.reshape(-1)
+    level = float(np.median(background))
+    # The LOWER half of what is left.  Masking the sources truncates the upper
+    # tail, and a two-sided spread of a truncated sample understates the
+    # scatter -- which on pure background is enough to lift a noise peak over
+    # the cut and invent a trap.  The lower half is untouched by sources and
+    # by the masking alike.
+    scatter = 1.4826 * (level - float(np.quantile(background, 0.25)))
+    return (
+        level,
+        max(
+            scatter,
+            float(np.finfo(float).eps * max(1.0, float(np.max(np.abs(finite))))),
+        ),
+        sources,
+    )
+
+
+def _seen_in_both_halves(
+    half_hits: Sequence[np.ndarray],
+    half_response: Sequence[np.ndarray],
+    half_frames: Sequence[int],
+    *,
+    source_footprint: int,
+) -> np.ndarray:
+    """Where both halves of the run agree that something is there.
+
+    Each half is judged on its own terms -- its own background level and
+    scatter -- and a place has to stand clear of them in both.  The bar per
+    half is deliberately low: half a run is half the evidence, and the point
+    is not to detect the trap twice over but to refuse the coincidence that
+    happened once.
+
+    A run that cannot be halved -- one frame, or an already-averaged picture
+    handed in as one -- carries no evidence about repetition either way, so
+    this says nothing about it rather than refusing everything.  What admits
+    a site there is the thresholds alone, which is all such a picture can
+    support.
+    """
+
+    from scipy import ndimage
+
+    agreed = np.ones(np.asarray(half_hits[0]).shape, dtype=bool)
+    if min(int(count) for count in half_frames) < 1:
+        return agreed
+    for hits_half, response_half, frames in zip(
+        half_hits, half_response, half_frames
+    ):
+        average_half = np.asarray(response_half, dtype=float) / float(frames)
+        level, scatter, _sources = _background_scatter(
+            average_half, source_footprint
+        )
+        z_half = (average_half - level) / scatter
+        # Either kind of evidence, at half strength: a sighting in this half,
+        # or a place that stands three sigma clear of this half's background.
+        agreed &= (np.asarray(hits_half) > 0) | (z_half >= _HALF_RUN_SIGMA)
+    return agreed
+
+
+#: How far clear of its own background half a run must put a place, when that
+#: half saw no single-shot sighting of it.
+_HALF_RUN_SIGMA = 3.0
+
+
+def _one_hill(
+    evidence: np.ndarray,
+    first: tuple[int, int],
+    second: tuple[int, int],
+    *,
+    saddle_fraction: float,
+) -> bool:
+    """Whether two peaks are two bumps on ONE hill rather than two hills.
+
+    Distance cannot answer this.  A lattice four pixels apart and one nine
+    pixels apart are both perfectly resolvable, while a single wide spot can
+    carry two integer maxima three pixels apart -- so any exclusion radius
+    chosen for one is wrong for the other, and every radius this detector has
+    had was wrong for something (four sigma merged real traps six pixels
+    apart; two pixels left duplicates on one spot).
+
+    What separates two traps is the VALLEY between them.  Walk the segment
+    joining the two peaks and take the lowest evidence on it: two distinct
+    traps have background between them, so the walk drops most of the way to
+    nothing, while two maxima on one spot never leave the spot and the walk
+    barely dips.  This is the persistence criterion, and it needs no length
+    scale at all -- which is why it holds for any spacing and any spot width.
+    """
+
+    (row_a, column_a), (row_b, column_b) = first, second
+    peak = min(float(evidence[row_a, column_a]), float(evidence[row_b, column_b]))
+    if peak <= 0.0:
+        return True
+    steps = max(3, int(np.ceil(np.hypot(row_b - row_a, column_b - column_a))) * 2)
+    rows = np.linspace(row_a, row_b, steps)
+    columns = np.linspace(column_a, column_b, steps)
+    walk = ndimage.map_coordinates(
+        evidence, np.vstack((rows, columns)), order=1, mode="nearest"
+    )
+    return float(np.min(walk)) >= saddle_fraction * peak
+
+
 def _refine_center_subpixel(image: np.ndarray, x: float, y: float, half: int = 2) -> tuple[float, float]:
+    """Where the spot centred on this peak actually is, or the peak itself.
+
+    A peak is an integer pixel; the trap is somewhere inside it.  A fit tells
+    you where -- WHEN it converges on the spot it was given, and a fit is only
+    worth its answer under both conditions:
+
+    * it succeeded.  The solver's own verdict used to be discarded, so a fit
+      that diverged handed back whatever it had reached and that became a
+      published site coordinate.
+    * it stayed home.  A trap cannot be more than a pixel from its own peak --
+      that is what being the peak means -- so a larger move means the fit
+      walked onto a neighbour.  On a lattice whose rows are five pixels apart,
+      a window that reaches two pixels already sees a neighbour's flank, and
+      the answer it gives is that neighbour's.
+
+    Failing either, the integer peak is the honest answer: it is accurate to
+    half a pixel and it is certainly this spot.
+    """
+
     height, width = image.shape
     x_int, y_int = int(round(x)), int(round(y))
+    half = max(1, int(half))
     x0, x1 = max(0, x_int - half), min(width, x_int + half + 1)
     y0, y1 = max(0, y_int - half), min(height, y_int + half + 1)
     cut = image[y0:y1, x0:x1]
     if cut.size < 9 or not np.isfinite(cut).any():
-        return float(x), float(y)
+        return float(x_int), float(y_int)
     yy, xx = np.mgrid[y0:y1, x0:x1]
     background = float(np.nanmedian(cut))
     amplitude = float(np.nanmax(cut) - background)
-    x_fit, y_fit, _sigma_x, _sigma_y, _ok = _fit_gaussian_spot_2d(
+    x_fit, y_fit, _sigma_x, _sigma_y, ok = _fit_gaussian_spot_2d(
         cut,
         yy,
         xx,
-        x0=float(x),
-        y0=float(y),
+        x0=float(x_int),
+        y0=float(y_int),
         offset0=background,
         amplitude=amplitude,
     )
-    return x_fit, y_fit
+    if (
+        ok
+        and np.isfinite(x_fit)
+        and np.isfinite(y_fit)
+        and abs(x_fit - x_int) <= 1.0
+        and abs(y_fit - y_int) <= 1.0
+    ):
+        return float(x_fit), float(y_fit)
+    return _core_centroid(image, x_int, y_int)
+
+
+def _core_centroid(image: np.ndarray, x_int: int, y_int: int) -> tuple[float, float]:
+    """The spot's centre of light over its own core, used when a fit will not.
+
+    A rejected fit does not make the integer peak the best answer available --
+    it only makes the FIT unavailable.  The first moment of the three pixels
+    round the peak, with the patch's own floor taken off, is unbiased for a
+    symmetric spot and costs nothing; measured against it, the integer peak it
+    replaces was up to half a pixel out on a tenth of a real array's sites.
+
+    Bounded to the peak's own pixel for the same reason the fit is: the centre
+    of THIS spot is inside it, and anything further is another spot's light.
+    """
+
+    height, width = image.shape
+    y0, y1 = max(0, y_int - 1), min(height, y_int + 2)
+    x0, x1 = max(0, x_int - 1), min(width, x_int + 2)
+    patch = np.asarray(image[y0:y1, x0:x1], dtype=float)
+    if patch.size < 4 or not np.isfinite(patch).all():
+        return float(x_int), float(y_int)
+    weights = patch - float(np.min(patch))
+    total = float(np.sum(weights))
+    if total <= 0.0:
+        return float(x_int), float(y_int)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    x_centre = float(np.sum(weights * xx) / total)
+    y_centre = float(np.sum(weights * yy) / total)
+    if abs(x_centre - x_int) > 1.0 or abs(y_centre - y_int) > 1.0:
+        return float(x_int), float(y_int)
+    return x_centre, y_centre
 
 
 def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarray:
@@ -861,6 +1066,13 @@ def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarr
         [index for row in rows for index in sorted(row, key=lambda item: centers_xy[item, 0])],
         dtype=int,
     )
+
+
+#: How far the evidence must fall between two peaks for them to be two traps.
+#: A Gaussian pair resolvable at all dips below half its peaks between them --
+#: that is what "resolvable" means -- so half is the threshold that admits
+#: exactly the pairs an eye would call two spots.
+_SADDLE_FRACTION = 0.5
 
 
 def detect_sites(
@@ -906,7 +1118,6 @@ def detect_sites(
     the bright ones and loses the dim ones.
     """
 
-    from scipy import ndimage
     from scipy.special import erfc, erfcinv
     from scipy.stats import binom
 
@@ -923,24 +1134,22 @@ def detect_sites(
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
-    # Two lengths, both the spot's, each for its own job.  They replace an
-    # authored `min_distance` of 3 px: a number with no relation to the
-    # optics, which an operator had no way to choose, and which decided both
-    # of these jobs at once.
+    # The scale over which a spot is ONE peak: its full width at half
+    # maximum, 2.355 sigma, rounded up to an odd pixel count.  It replaces an
+    # authored `min_distance` of 3 px, a number with no relation to the optics
+    # that an operator had no way to choose.
     #
-    # `peak_window` is the scale over which a spot is ONE peak -- its full
-    # width at half maximum, 2.355 sigma, rounded up to an odd pixel count.
-    # `separation` is how far apart two PUBLISHED centres must be to be two
-    # measurements: a sigma, because two boxes closer than that read the same
-    # light.  It is deliberately small.  A lattice whose sites sit four
-    # pixels apart is perfectly resolvable at sigma 1, and an exclusion
-    # chosen for comfort rather than for the optics merges its real sites --
-    # measured: 38 placed, 20 found, when the separation was the full width.
-    # What removes an extra maximum on ONE spot is not distance either: it is
-    # that it refines onto a centre already taken (below), which measured
-    # 0.11 px away from the first.
+    # It is the ONLY length here.  Whether two peaks are two traps is not a
+    # distance question at all -- see the saddle test below -- and every
+    # attempt to answer it with one was wrong in both directions: too small
+    # and one spot is reported twice, too large and a dense lattice loses real
+    # sites (measured: 38 placed, 20 found, when the exclusion was a full
+    # width).
     peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
-    separation = max(2.0, float(spot_sigma))
+    # How near in y two sites must be to be READ as one row of the array.
+    # Ordering only: it decides the order site ids are handed out in, never
+    # which places are sites.
+    row_tolerance = max(2.0, float(spot_sigma))
 
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     hits = np.zeros(stack.shape[1:], dtype=np.int64)
@@ -951,6 +1160,10 @@ def detect_sites(
     #: The per-frame noise, summed, so the average's own noise follows from it
     #: rather than from a spread measured across a structured picture.
     total_noise = 0.0
+    #: The same two quantities over each interleaved half of the run.
+    half_hits = [np.zeros(stack.shape[1:], dtype=np.int64) for _ in range(2)]
+    half_response = [np.zeros(stack.shape[1:], dtype=float) for _ in range(2)]
+    half_frames = [0, 0]
     # Frames are filtered many at a time, in blocks sized by memory rather than
     # by frame count: one SciPy call over a block costs a fraction of one call
     # per frame, and filtering makes two more copies of whatever it is given,
@@ -985,20 +1198,21 @@ def detect_sites(
         lit_response += np.sum(np.where(lit, response - baseline, 0.0), axis=0)
         total_response += np.sum(response - baseline, axis=0)
         total_noise += float(np.sum(noise))
+        # The run, also kept as two interleaved halves.  A trap is in both of
+        # them; a noise peak is in one.  Interleaved rather than split in the
+        # middle so a drift over the run cannot land in one half alone.
+        odd = (start + np.arange(frames.shape[0])) % 2 == 1
+        for half, mask in ((0, ~odd), (1, odd)):
+            if not mask.any():
+                continue
+            half_hits[half] += np.count_nonzero(lit[mask], axis=0)
+            half_response[half] += np.sum(
+                (response - baseline)[mask], axis=0
+            )
+            half_frames[half] += int(np.count_nonzero(mask))
 
     shots = int(stack.shape[0])
     pixels = int(hits.size)
-    # How often noise alone clears the per-frame cut, and therefore how many
-    # sightings an image of pure background will not reach anywhere in it.
-    false_rate = max(float(0.5 * erfc(detection_sigma / sqrt(2.0))), 1e-12)
-    expected_false_sites = 0.5
-    required = 1
-    for count in range(1, shots + 1):
-        if pixels * float(binom.sf(count - 1, shots, false_rate)) < expected_false_sites:
-            required = count
-            break
-    else:
-        required = shots
 
     # The second admission: the run's average, judged the same way.  Its
     # noise is read the same robust way, and the significance a place must
@@ -1008,19 +1222,64 @@ def detect_sites(
     # single shots are unremarkable: N shots of a persistent signal add up as
     # N while their noise adds up as sqrt(N).
     average = total_response / float(shots)
-    # The average's noise is the frames' noise, divided by the root of how
-    # many were averaged -- NOT a spread measured across the averaged picture.
-    # Averaging leaves the traps standing while it flattens the noise, so a
-    # quantile spread of the result measures the STRUCTURE: on a lattice of
-    # thirty-five traps it read fourteen times the true noise, which put even
-    # the brightest site at nine sigma and every dim one at nothing.
-    average_baseline = float(np.median(average))
-    average_noise = max(
-        (total_noise / float(shots)) / sqrt(float(shots)),
-        float(np.finfo(float).eps * max(1.0, float(np.max(np.abs(average))))),
+    # The average's noise, measured on the average ITSELF.  Photon noise over
+    # the root of the frame count is what a perfect sensor would leave, and it
+    # is not what is there: fixed pattern, a warm pixel, the residue of a
+    # background gradient all survive averaging UNCHANGED, so dividing by
+    # sqrt(N) understates the scatter by however many frames were taken.  At
+    # four hundred frames that put eleven patches of empty border above the
+    # cut on a real run -- circles drawn on nothing.
+    #
+    # The robust spread of the averaged picture measures what is actually
+    # there.  Traps occupy a small part of a field and sit above the median,
+    # so the median-to-quartile distance is background either way.
+    # A source's footprint in a band-passed picture is the background kernel's
+    # reach, peak and dark ring together.  Every background estimate in this
+    # function excludes that much, or it is measuring the sources.
+    source_footprint = 2 * int(np.ceil(background_sigma)) + 1
+    average_baseline, average_noise, sources = _background_scatter(
+        average, source_footprint
     )
-    average_cut = float(sqrt(2.0) * erfcinv(1.0 / pixels))
+    background = ~sources
+
+    # How often noise alone clears the per-frame cut -- COUNTED, where the
+    # sources are not, rather than read off the Gaussian tail of the sigma
+    # that was asked for.  A band-passed frame's pixels are correlated and its
+    # robust scatter understates the real spread, so that cut is crossed far
+    # more often than the arithmetic says: measured on pure background, often
+    # enough to put two "traps" on an empty picture.  The theoretical rate
+    # stays as a floor -- a quiet stretch of background must not license a
+    # lower bar than the physics does.
+    background_pixels = int(np.count_nonzero(background))
+    observed_rate = (
+        float(np.sum(hits[background])) / float(shots * background_pixels)
+        if background_pixels
+        else 0.0
+    )
+    false_rate = max(
+        observed_rate,
+        float(0.5 * erfc(detection_sigma / sqrt(2.0))),
+        1e-12,
+    )
+    expected_false_sites = 0.5
+    required = 1
+    for count in range(1, shots + 1):
+        if pixels * float(binom.sf(count - 1, shots, false_rate)) < expected_false_sites:
+            required = count
+            break
+    else:
+        required = shots
+
     average_z = (average - average_baseline) / average_noise
+    # How high a place must stand in the average: the per-pixel Gaussian tail,
+    # for an image of that many pixels.  It is a floor and it is not the whole
+    # guarantee -- this map is BAND-PASSED, so its pixels are correlated and
+    # its local maxima come from a heavier distribution than any single pixel
+    # of it, and pure background does reach past this cut.  What refuses those
+    # is reproducibility across the run's two halves, below: one mechanism
+    # against false positives, not two stacked, because the second one was
+    # strict enough to cost real traps that the first admits correctly.
+    average_cut = float(sqrt(2.0) * erfcinv(1.0 / pixels))
 
     # Where a site is, refined on how bright the place is WHEN it is lit: the
     # one image in a run whose contrast does not depend on loading.
@@ -1064,14 +1323,38 @@ def detect_sites(
     # a gap between two traps is a maximum of neither map -- and needs no
     # conditional-brightness check, because a place with no sightings has no
     # conditional brightness to speak of.
+    spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
+    count_z = (hits - shots * false_rate) / spread
     persistent = average == ndimage.maximum_filter(
         average, size=peak_window, mode="nearest"
     )
+    # ONE significance map for "is there a trap here": both admissions are
+    # already expressed in sigmas of their own null, so the stronger of the
+    # two is the evidence for the place, whichever statistic found it.  It
+    # RANKS candidates -- and it does not answer "one hill or two".
+    #
+    # That question is about LIGHT, and only the average is linear in light.
+    # A sighting count saturates: between two well-loaded traps the pixels are
+    # lifted by both often enough to be counted as often as the traps
+    # themselves, a plateau with no valley in it, which merged a five-pixel
+    # lattice into five sites.  The valley is asked of the average alone.
+    evidence = np.maximum(count_z, average_z)
     counted = local_maxima & (hits >= required)
     averaged = persistent & (average_z >= average_cut)
-    spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
-    count_z = (hits - shots * false_rate) / spread
-    candidates = np.argwhere((counted | averaged) & inside)
+    # A place is a trap only if BOTH halves of the run show it.  Every
+    # threshold before this one is a statement about a distribution -- a
+    # Gaussian tail, a binomial count -- and a band-passed, correlated,
+    # fixed-pattern-carrying picture keeps breaking those statements in the
+    # direction that invents traps.  Reproducibility assumes nothing: a trap
+    # is in the first half of the run and in the second, and a noise peak is a
+    # coincidence that does not repeat.
+    repeated = _seen_in_both_halves(
+        half_hits,
+        half_response,
+        half_frames,
+        source_footprint=source_footprint,
+    )
+    candidates = np.argwhere((counted | averaged) & inside & repeated)
     ranked = sorted(
         candidates,
         key=lambda item: (
@@ -1107,10 +1390,13 @@ def detect_sites(
             dropped_at_border += 1
             continue
         if all(
-            (float(centre[0]) - float(other[0])) ** 2
-            + (float(centre[1]) - float(other[1])) ** 2
-            >= separation**2
-            for other in centers_list
+            not _one_hill(
+                average_z,
+                (int(row), int(column)),
+                other_peak,
+                saddle_fraction=_SADDLE_FRACTION,
+            )
+            for other_peak in selected
         ):
             selected.append((int(row), int(column)))
             centers_list.append(centre)
@@ -1136,7 +1422,7 @@ def detect_sites(
         ],
         dtype="<f8",
     )
-    order = _stable_site_order(centers, separation)
+    order = _stable_site_order(centers, row_tolerance)
     centers = centers[order]
     quality = quality[order]
     site_ids = tuple(f"site_{index:04d}" for index in range(len(centers)))
