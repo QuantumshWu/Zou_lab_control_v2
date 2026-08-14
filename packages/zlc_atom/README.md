@@ -92,6 +92,13 @@ opens those report files, and no calibration object/report blob is put on the
 signal plane.
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
+It owns only each frame's per-site counts, occupied boolean, validity, and
+pooled occupancy rate. The concrete Temperature Task reuses those facts for
+its authored before/trap-off/after cycles: only a valid, initially occupied
+pair is a survival trial. It publishes the binary per-site `survival` dataset
+and pooled `survival_rate` against trap-off time, whose declared preview is an
+ordinary curve. It does not fit a temperature or lifetime and does not derive
+a 1/e crossing.
 
 The `slm_feedback` Task accepts one complete 5 x 7 sparse target aligned to the
 35 calibrated atom sites. It extracts exact grouped qCMOS images with the

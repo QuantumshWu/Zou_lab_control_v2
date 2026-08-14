@@ -22,12 +22,10 @@ a survival special case there would be a temperature experiment hiding inside
 a general classifier.  So the judging IS ``OccupancyProcessor``, asked cycle
 by cycle; only the pairing is written here.
 
-WHAT IT DOES NOT REPORT.  A temperature.  Turning this curve into kelvin needs
-the trap's own reach and depth -- how far an atom may drift and still be
-recaptured -- and nothing on this bench declares them.  A number derived from
-an operator typing a radius into this form would be that radius squared, not a
-measurement, so what is published is the recapture curve and the release time
-at which it has fallen to 1/e: read off the measured points, no model assumed.
+WHAT IT DOES NOT REPORT.  A temperature, fitted lifetime, or crossing derived
+from the curve.  Turning survival into any of those needs a physical model
+this node does not own.  It publishes only the binary recapture observations
+and their pooled fraction against the authored trap-off time.
 
 WHAT IT PUBLISHES.  Survival keeps the SITE axis -- per site, per release
 time, per repeat -- because a trap that never recaptures is a fact about that
@@ -38,7 +36,6 @@ is FINAL: this Task's results outlive its run.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -88,7 +85,7 @@ SURVIVAL_RATE_OUTPUT = DatasetOutputDeclaration(
     "survival_rate", "temperature.survival-rate.v1"
 )
 
-#: The saved result: the survival table and the release time it decays over.
+#: The saved result: the survival table against the authored trap-off time.
 TEMPERATURE_ARTIFACT_CONTRACT = "temperature.release-recapture.v1"
 
 #: How long the pulse stays stopped before the table plays.  Every cycle loads
@@ -111,37 +108,6 @@ def _seconds(values: object, unit: str) -> np.ndarray:
             f"unit; it must be one of {tuple(TIME_UNIT_TO_NS)}"
         ) from None
     return np.asarray(values, dtype=float) * nanoseconds * 1e-9
-
-
-def _one_over_e_crossing(seconds: np.ndarray, fraction: np.ndarray) -> float | None:
-    """The release time where the recapture fraction has fallen to 1/e.
-
-    Read off the measured curve by straight interpolation between the two
-    points that bracket the crossing.  No decay model: ballistic escape is
-    not an exponential, and fitting one would report a lifetime this
-    experiment does not have.  ``None`` when the sweep never gets there --
-    a run that came back with a curve is still a run.
-    """
-
-    order = np.argsort(seconds)
-    x = np.asarray(seconds, dtype=float)[order]
-    y = np.asarray(fraction, dtype=float)[order]
-    keep = np.isfinite(y)
-    x, y = x[keep], y[keep]
-    if x.size < 2 or not y[0] > 0.0:
-        return None
-    target = y[0] / math.e
-    below = np.flatnonzero(y <= target)
-    if not below.size:
-        return None
-    index = int(below[0])
-    if index == 0:
-        return float(x[0])
-    x0, x1 = float(x[index - 1]), float(x[index])
-    y0, y1 = float(y[index - 1]), float(y[index])
-    if y0 == y1:
-        return x1
-    return x0 + (y0 - target) * (x1 - x0) / (y0 - y1)
 
 
 class TemperatureTask:
@@ -250,6 +216,8 @@ class TemperatureTask:
             (self._repeats, len(self._t_off), calibration.n_sites), dtype=bool
         )
         self._after = np.zeros_like(self._before)
+        self._before_valid = np.zeros_like(self._before)
+        self._after_valid = np.zeros_like(self._before)
         #: Which (repeat, release time) cells have been judged, so a growing
         #: publication can say how much of itself is measured.
         self._seen = np.zeros(self._before.shape[:2], dtype=bool)
@@ -275,15 +243,17 @@ class TemperatureTask:
         """
 
         revision = visit * len(self._t_off) + row + 1
-        result = self._occupancy.process(
-            value.snapshot,
-            generation=self._generation,
-            revision=revision,
-        )
-        occupied = np.asarray(result.occupied, dtype=bool)[0]
+        outputs = self._occupancy.evaluate(value)
+        occupied = np.asarray(
+            outputs["occupied"].snapshot.block.values, dtype=bool
+        )[0]
+        valid = np.asarray(outputs["valid"].snapshot.block.values, dtype=bool)[0]
         self._before[visit, row] = occupied[0]
         self._after[visit, row] = occupied[1]
+        self._before_valid[visit, row] = valid[0]
+        self._after_valid[visit, row] = valid[1]
         self._seen[visit, row] = True
+        loaded, _, fraction = self._pooled()
         return {
             SURVIVAL_OUTPUT.name: LiveDatasetOutput(
                 SURVIVAL_OUTPUT,
@@ -295,7 +265,7 @@ class TemperatureTask:
             ),
             SURVIVAL_RATE_OUTPUT.name: LiveDatasetOutput(
                 SURVIVAL_RATE_OUTPUT,
-                self._rate_snapshot(self._pooled()[2], revision),
+                self._rate_snapshot(fraction, loaded > 0, revision),
                 DatasetCoverage(
                     written_cells=int(np.count_nonzero(self._seen.any(axis=0))),
                     total_cells=int(len(self._t_off)),
@@ -311,7 +281,18 @@ class TemperatureTask:
         measured loss that never happened.
         """
 
-        return np.where(self._before, self._after.astype("<f8"), np.nan)
+        eligible = self._survival_validity()
+        return np.where(eligible, self._after.astype("<f8"), np.nan)
+
+    def _survival_validity(self) -> np.ndarray:
+        """Where a loaded atom has two valid readouts and thus one trial."""
+
+        return (
+            self._seen[..., None]
+            & self._before_valid
+            & self._after_valid
+            & self._before
+        )
 
     def _pooled(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Loaded pairs, recaptured pairs, and their fraction per release time.
@@ -320,8 +301,9 @@ class TemperatureTask:
         the artifact at the end.
         """
 
-        loaded = np.sum(self._before, axis=(0, 2), dtype=float)
-        recaptured = np.sum(self._before & self._after, axis=(0, 2), dtype=float)
+        eligible = self._survival_validity()
+        loaded = np.sum(eligible, axis=(0, 2), dtype=float)
+        recaptured = np.sum(eligible & self._after, axis=(0, 2), dtype=float)
         fraction = np.divide(
             recaptured,
             loaded,
@@ -340,9 +322,15 @@ class TemperatureTask:
             point_columns={SCAN_POINT: self._point_column()},
             generation=self._generation,
             revision=int(revision),
+            validity=self._survival_validity(),
         )
 
-    def _rate_snapshot(self, fraction: np.ndarray, revision: int):
+    def _rate_snapshot(
+        self,
+        fraction: np.ndarray,
+        validity: np.ndarray,
+        revision: int,
+    ):
         # One repeat, because pooling IS across the repeats: there is nothing
         # left for a panel to average, so what it draws cannot disagree with
         # what was saved.
@@ -354,6 +342,7 @@ class TemperatureTask:
             point_columns={SCAN_POINT: self._point_column()},
             generation=self._generation,
             revision=int(revision),
+            validity=np.asarray(validity, dtype=bool)[None, :],
         )
 
     def _curve(self) -> dict[str, object]:
@@ -369,18 +358,13 @@ class TemperatureTask:
 
         loaded, recaptured, fraction = self._pooled()
         seconds = _seconds(self._t_off, self._port.unit)
-        crossing = _one_over_e_crossing(seconds, fraction)
         return {
             "t_off_seconds": [float(value) for value in seconds],
             "loaded_pairs": [int(value) for value in loaded],
             "recaptured_pairs": [int(value) for value in recaptured],
-            "survival_rate": [float(value) for value in fraction],
-            "release_time_1e_seconds": crossing,
-            "release_time_model": (
-                "read off the measured curve: the release time where the "
-                "recapture fraction has fallen to 1/e of its shortest-release "
-                "value, interpolated between the two points that bracket it"
-            ),
+            "survival_rate": [
+                float(value) if np.isfinite(value) else None for value in fraction
+            ],
             "atom": "Rb-87",
         }
 
@@ -428,6 +412,7 @@ class TemperatureTask:
         context.report_progress("Reading survival")
         survival = self._survival()
         curve = self._curve()
+        loaded, _, fraction = self._pooled()
         record = self._run_record(curve)
         # The last publication of a run that has been publishing all along,
         # so its revision continues that count rather than restarting it.
@@ -441,12 +426,12 @@ class TemperatureTask:
             ),
             SURVIVAL_RATE_OUTPUT.name: FinalDatasetOutput(
                 SURVIVAL_RATE_OUTPUT,
-                self._rate_snapshot(self._pooled()[2], revision),
+                self._rate_snapshot(fraction, loaded > 0, revision),
                 record,
             ),
         }
         artifact_path = unique_path(self._artifact_directory, "temperature", ".json")
-        context.report_progress("Saving temperature")
+        context.report_progress("Saving survival")
         write_readable_json(
             artifact_path,
             {
@@ -459,10 +444,7 @@ class TemperatureTask:
             },
         )
         context.publish_final(outputs)
-        return {
-            "artifact_path": artifact_path,
-            "release_time_1e_seconds": curve["release_time_1e_seconds"],
-        }
+        return {"artifact_path": artifact_path}
 
 
 __all__ = [

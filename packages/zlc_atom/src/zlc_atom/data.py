@@ -12,17 +12,15 @@ from zlc_data import (
     AxisRoleId,
     AxisSpec,
     BlockId,
-    DataBlock,
-    DatasetRevision,
     DatasetSchema,
     OwnedSnapshot,
     PointColumn,
     PointTable,
     REPEAT,
     StreamGenerationId,
-    VALID,
     ValidityContract,
     ValueSchema,
+    owned_snapshot_from_arrays,
 )
 
 
@@ -63,6 +61,7 @@ def snapshot_from_array(
     value_unit: str | None = None,
     generation: str,
     revision: int,
+    validity: object | None = None,
 ) -> OwnedSnapshot:
     """Materialize a numeric node output as one role-axis ``OwnedSnapshot``.
 
@@ -91,6 +90,11 @@ def snapshot_from_array(
     array = np.asarray(values)
     if array.ndim == 0:
         array = array.reshape(1)
+    validity_array = None
+    if validity is not None:
+        validity_array = np.asarray(validity, dtype=bool)
+        if validity_array.shape != array.shape:
+            raise ValueError("validity must have the same dense shape as values")
     repeat_size = int(array.shape[0])
     if repeat_size <= 0:
         raise ValueError("dataset outputs require at least one repeat")
@@ -153,6 +157,11 @@ def snapshot_from_array(
         tensor = array.reshape((repeat_size, 1, *trailing_shape))
         if not cell_roles:
             tensor = tensor.reshape((repeat_size, 1, 1))
+        validity_tensor = (
+            None
+            if validity_array is None
+            else validity_array.reshape(tensor.shape)
+        )
     else:
         point_size = trailing_shape[point_position]
         if point_size <= 0:
@@ -165,6 +174,13 @@ def snapshot_from_array(
         tensor = tensor.reshape((repeat_size, point_size, *cell_shape))
         if not cell_roles:
             tensor = tensor.reshape((repeat_size, point_size, 1))
+        validity_tensor = (
+            None
+            if validity_array is None
+            else np.moveaxis(validity_array, point_position + 1, 1).reshape(
+                tensor.shape
+            )
+        )
 
     # A schema built purely from generated metadata is a function of this key
     # alone, so one instance is reused for every publication of the shape.
@@ -176,6 +192,7 @@ def snapshot_from_array(
     # cover, which is one fact per working point and not one per frame, and
     # left out of the key it was a fresh tuple of coordinates to validate and
     # SHA-256 into the fingerprint on every publication.
+    has_validity = validity_tensor is not None
     cache_key: tuple | None = None
     if value_unit is None or isinstance(value_unit, str):
         column_key: tuple = ()
@@ -214,6 +231,7 @@ def snapshot_from_array(
             trailing_shape,
             array.dtype.str,
             value_unit,
+            has_validity,
             axis_key,
             column_key,
         )
@@ -256,8 +274,15 @@ def snapshot_from_array(
                 )
             cell_axes_list.append(axis)
         cell_axes = tuple(cell_axes_list)
+        validity_contract = (
+            ValidityContract.components(
+                *(axis.axis_id for axis in cell_axes if has_validity)
+            )
+            if has_validity and cell_axes
+            else ValidityContract.value()
+        )
         cell_schema = (
-            ValueSchema(cell_axes, ValidityContract.value(), array.dtype, value_unit)
+            ValueSchema(cell_axes, validity_contract, array.dtype, value_unit)
             if cell_axes
             else ValueSchema.scalar(array.dtype, value_unit)
         )
@@ -278,14 +303,14 @@ def snapshot_from_array(
                 _SCHEMA_CACHE.move_to_end(cache_key)
                 while len(_SCHEMA_CACHE) > _SCHEMA_CACHE_CAPACITY:
                     _SCHEMA_CACHE.popitem(last=False)
-    block = DataBlock(
-        BlockId(f"{producer}.{signal}"),
-        DatasetRevision(int(revision)),
-        tensor,
-        VALID,
+    return owned_snapshot_from_arrays(
         schema,
+        tensor,
+        int(revision),
+        validity=validity_tensor,
+        block_id=BlockId(f"{producer}.{signal}"),
+        stream_generation=StreamGenerationId(f"{producer}.{generation}"),
     )
-    return OwnedSnapshot(block.ref(StreamGenerationId(f"{producer}.{generation}")), block)
 
 
 __all__ = ["snapshot_from_array"]

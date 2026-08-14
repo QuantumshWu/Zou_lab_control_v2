@@ -9,10 +9,9 @@ the sequencer for itself, plays the release template with the board advancing
 readout the occupancy node runs, pairs the two probe windows, and reports how
 fast the atoms stop coming back.
 
-The virtual world loses atoms the way a trap does -- the fast ones walk out
-while the light is off -- so the curve the Task measures must be the curve the
-world would predict.  That prediction is read from the world itself, never
-written down here.
+The virtual world loses atoms while the trap is off, so the direct observable
+must fall as ``t_off`` grows.  The test does not compare that curve with a
+temperature or escape model: this node owns only the measured survival data.
 
 What this file guards, beyond "it runs":
 
@@ -27,7 +26,7 @@ What this file guards, beyond "it runs":
 * the Task's results are FINAL: they are still on the plane after the run is
   terminal and the host is shut down, which is what keeps a panel alive;
 * the saved artifact's curve is the same curve the dataset published, in
-  SECONDS, and the release time it reports is read off that curve.
+  SECONDS, with no temperature model, fit, or extra crossing conclusion.
 """
 
 import json
@@ -68,12 +67,16 @@ def _wait_terminal(host: object, *, timeout: float) -> None:
     assert observed.terminal, "the host never finished"
 
 
-def test_the_temperature_task_recovers_the_worlds_recapture_curve(
+def test_the_temperature_task_publishes_release_recapture_survival(
     tmp_path: Path,
 ) -> None:
     installation = create_installation("virtual")
     plane = SignalDataPlane()
     descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    assert [
+        (preview.output_name, preview.plot_kind)
+        for preview in descriptors["temperature"].node_previews
+    ] == [("survival_rate", "curve")]
     sequencer = installation.device("sequencer")
     camera = installation.device("camera")
     host = None
@@ -136,6 +139,7 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
         while time.monotonic() < deadline and not host.observation.terminal:
             plane.freeze()
             host.poll()
+            time.sleep(0.005)
         observed = host.observation
         assert observed.error is None, observed.error
         assert observed.terminal
@@ -169,6 +173,10 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
         #     a site that held nothing answers nothing.
         survival = np.asarray(survival_value.block.values, dtype=float)
         assert survival.shape == (REPEATS, len(T_OFF_MS), calibration.value.n_sites)
+        np.testing.assert_array_equal(
+            survival_value.snapshot.expanded_validity(),
+            np.isfinite(survival),
+        )
         judged = survival[np.isfinite(survival)]
         assert judged.size, "no site was loaded anywhere in the run"
         assert set(np.unique(judged).tolist()) <= {0.0, 1.0}, (
@@ -188,16 +196,18 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
         rate = np.asarray(rate_value.block.values, dtype=float).reshape(
             1, len(T_OFF_MS)
         )
+        np.testing.assert_array_equal(
+            rate_value.snapshot.expanded_validity(),
+            np.isfinite(rate).reshape(rate_value.block.values.shape),
+        )
         loaded = np.count_nonzero(np.isfinite(survival), axis=(0, 2))
         recaptured = np.nansum(survival, axis=(0, 2))
         np.testing.assert_allclose(
             rate[0], recaptured / loaded, rtol=0, atol=1e-12
         )
 
-        # --- The physics: the measured curve is the curve THIS WORLD would
-        #     predict for these release times.  The prediction comes from the
-        #     world's own model -- an atom leaves because it is fast enough --
-        #     so this asserts the whole chain, not a formula copied here.
+        # --- The measured observable: survival falls as trap-off grows.  No
+        #     escape/temperature model is evaluated or fitted here.
         pooled = np.nanmean(survival, axis=(0, 2))
         assert np.all(np.isfinite(pooled)), (
             f"a release time recaptured nothing: {pooled.tolist()}"
@@ -205,31 +215,11 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
         assert np.all(np.diff(pooled) < 0), (
             f"survival must fall with t_off: {pooled.round(3).tolist()}"
         )
-        planted = np.asarray(
-            [
-                installation.world.release_survival(value * 1e-3)
-                for value in T_OFF_MS
-            ],
-            dtype=float,
-        )
-        # Two error bars, both measured rather than guessed.  Statistical:
-        # 8 repeats over 35 sites is ~280 labelled shots a point, so a fraction
-        # near a half carries about 0.03, and three of those is 0.09.
-        # Systematic: what the simulated bench RECAPTURES differs from the
-        # analytic curve it was planted from by up to 0.13 at the steepest
-        # point -- measured at 0.116 and 0.127 on two builds whose calibration
-        # output was identical, the difference being three borderline shots
-        # classified the other way.  A tolerance of 0.12 therefore tested
-        # neither: it sat inside the systematic offset, and passed or failed on
-        # which side of a threshold a handful of shots happened to land.
-        assert np.all(np.abs(pooled - planted) <= 0.18), (
-            f"measured {pooled.round(3).tolist()} against the world's own "
-            f"{planted.round(3).tolist()}"
-        )
 
-        # --- The artifact: the same curve, in SECONDS, and a release time read
-        #     off it rather than derived from a number nobody measured.
+        # --- The artifact: the same curve, in SECONDS, and nothing inferred
+        #     beyond the binary recapture observations and their pooled rate.
         result = host.final_result
+        assert set(result) == {"artifact_path"}
         saved = Path(result["artifact_path"])
         assert saved.is_file() and saved.parent == tmp_path
         payload = json.loads(saved.read_text(encoding="utf-8"))
@@ -242,13 +232,8 @@ def test_the_temperature_task_recovers_the_worlds_recapture_curve(
             np.asarray(T_OFF_MS) * 1e-3,
             rtol=1e-12,
         )
-        crossing = curve["release_time_1e_seconds"]
-        assert crossing == result["release_time_1e_seconds"]
-        assert crossing is not None, (
-            "this sweep falls past 1/e, so the release time must be readable: "
-            f"{curve['survival_rate']}"
-        )
-        assert min(T_OFF_MS) * 1e-3 <= crossing <= max(T_OFF_MS) * 1e-3
+        assert "release_time_1e_seconds" not in curve
+        assert "release_time_model" not in curve
         assert "temperature_kelvin" not in curve, (
             "nothing on this bench declares the trap's reach, so a kelvin "
             "number here would be the operator's own input squared"

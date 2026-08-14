@@ -343,6 +343,12 @@ Edit 中的理想参数：
 
 没有 device、finite/infinite extent mode、buffer 或 loss 参数。Readout-model choice 是 Occupancy 必须显式拥有的科学算法模式，不是被删除的 extent mode。Start 时加载 calibration，只拒绝 frame shape、sensor、ROI、binning 等会破坏像素与 site 对齐的结构差异；exposure、camera id 和 readout mode 继续保存在 frame contract 作为 provenance，但不限制同一几何 calibration 的使用。随后按 SiteMap + 所选 readout model 的 feature/threshold 产生 per-site counts/occupied/rate 等 dataset。Finite source 顺序处理/可处理已完成的 frozen dataset；infinite source 只处理 latest。
 
+### 8.5 Temperature survival Task
+
+Occupancy 的唯一职责止于每个 frame、每个 site 的 `counts/occupied/valid` 事实；它不配对 frame，不计算 survival，也不承载 temperature 实验。Temperature concrete Task 自己执行作者写下的 load/probe/trap-off/probe pulse，并逐 cycle 复用同一个 `OccupancyProcessor.evaluate()` 结果。只有 before/after 都 valid 且 before occupied 的 site 才形成一条 survival 事实；before empty、任一 readout invalid 或尚未采到的 cell 都是 invalid，不得写成 loss。
+
+Temperature 只发布两份数据：带 repeat、trap-off scan point 与 SITE 轴的二元 `survival`，以及按每个 trap-off 点联合 pooling repeats/sites 得到的 `survival_rate`。后者用普通 curve preview 显示 survival 对 authored trap-off time。Task 与 artifact 不拟合温度、寿命或衰减模型，也不计算 1/e crossing；这些需要本节点没有声明的物理模型，不能从二元比例额外推断。
+
 ## 9. TaskConsole Logic UI
 
 ### 9.1 Add/Edit 生命周期
