@@ -105,11 +105,6 @@ def site_overlay(
         float(value): _repeats_of(codes[:, index])
         for index, value in enumerate(frames)
     }
-    # A single frame IS the whole picture, so it also answers for a plot that
-    # shows no facet.  Several frames pooled into one image have no per-frame
-    # judgement, and claiming one would be a measurement nobody made.
-    if len(frames) == 1:
-        statuses[None] = statuses[float(frames[0])]
     return ImagePointOverlay(
         revision=revision,
         coordinates=np.asarray(site_map.centers_xy, dtype=float),

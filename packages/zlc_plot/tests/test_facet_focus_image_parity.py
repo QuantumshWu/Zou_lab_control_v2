@@ -464,3 +464,59 @@ def test_frames_on_point_axis_cycle_draws_as_a_standalone_image() -> None:
         )
     finally:
         session.close()
+
+
+def test_a_scoped_image_draws_the_point_it_shows() -> None:
+    """The rings follow the picture, whichever way the picture chose its point.
+
+    A grid cell shows its facet coordinate and drew that cell's judgement.  A
+    flat image shows whatever the SPEC pinned -- and asked the overlay for the
+    whole-picture row instead, which a cycle of several frames does not have,
+    so every site came back UNKNOWN while the frame beneath it was one this
+    node had judged.
+    """
+
+    from zlc_plot.primitives import ImagePointOverlay, PointStatus
+
+    occupied = (PointStatus.OCCUPIED, PointStatus.EMPTY)
+    empty = (PointStatus.EMPTY, PointStatus.OCCUPIED)
+    overlay = ImagePointOverlay(
+        coordinates=((10.0, 12.0), (30.0, 24.0)),
+        revision=1,
+        point_ids=("s0", "s1"),
+        # Per FRAME, exactly as an occupancy node states it, and with no
+        # whole-picture row: several frames pooled have no judgement.
+        statuses={-1.0: occupied, 0.0: empty, 1.0: occupied},
+    )
+    snapshot = _frames_scan_snapshot()
+    scoped = PlotSession(
+        snapshot,
+        ImagePlot(
+            AxisRef.data("sx"),
+            AxisRef.data("sy"),
+            scope=((AxisRef.point_dimension("bias"), 0.0),),
+        ),
+        size="4x4",
+    )
+    try:
+        assert scoped._renderer._painted_point_coordinate(None) == 0.0
+        scoped.update_image_overlay(overlay)
+        scoped.rgba()
+        collection = scoped._renderer._artists["image:points"]
+        assert collection.get_visible()
+        drawn = tuple(
+            tuple(round(float(value), 3) for value in colour)
+            for colour in collection.get_edgecolors()
+        )
+        # The colours of THIS frame's judgement, not of the unknown fallback.
+        expected = scoped._renderer.style.artists
+        assert drawn[0] != drawn[1], "both sites drew the same status"
+    finally:
+        scoped.close()
+
+    faceted = PlotSession(snapshot, _FACET_SPEC, size="4x4")
+    try:
+        assert faceted._renderer._painted_point_coordinate(1.0) == 1.0
+        assert faceted._renderer._painted_point_coordinate(None) is None
+    finally:
+        faceted.close()

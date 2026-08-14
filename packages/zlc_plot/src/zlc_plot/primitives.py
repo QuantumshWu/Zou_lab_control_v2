@@ -81,9 +81,10 @@ class ImagePointOverlay:
     The geometry is ONE fact and the status is one per PICTURE: a grid
     faceted over a camera cycle draws the same rings in every cell, and each
     cell's rings say what that FRAME judged.  ``statuses`` therefore maps the
-    facet coordinate a surface shows to that surface's statuses, with the key
-    ``None`` naming the surface that shows no single coordinate -- a
-    standalone image, or a facet over an axis this overlay does not describe.
+    POINT COORDINATE it judged to that row's statuses -- the same coordinate
+    a surface shows, however it came to show one.  The key ``None`` is for a
+    judgement that is about no point row at all, which is what a hand-placed
+    set of markers is.
     """
 
     revision: int
@@ -168,19 +169,28 @@ class ImagePointOverlay:
 
     def statuses_for(
         self,
-        facet_value: float | None,
+        point_coordinate: float | None,
     ) -> tuple[PointStatus, ...] | None:
         """The statuses one painted surface draws, or None when there are none.
 
-        THE resolution rule, in one place: a surface showing a facet
-        coordinate draws that coordinate's statuses, and falls back to the
-        whole-picture row when this overlay says nothing about it.
+        THE resolution rule, in one place.  A surface that shows one point
+        row draws that row's judgement.  A surface that shows no single row
+        pools them, and pooling ONE row is that row -- while several pooled
+        have no per-site judgement at all, and rings claiming one would be a
+        measurement nobody made.
+
+        A coordinate this overlay says nothing about is that same absence.
+        It used to fall back to a whole-picture row, so a frame outside the
+        judgement drew another frame's rings.
         """
 
         if self.statuses is None:
             return None
-        key = None if facet_value is None else float(facet_value)
-        return self.statuses.get(key, self.statuses.get(None))
+        if point_coordinate is None:
+            if len(self.statuses) == 1:
+                return next(iter(self.statuses.values()))
+            return None
+        return self.statuses.get(float(point_coordinate))
 
     @classmethod
     def empty(cls, revision: int) -> "ImagePointOverlay":

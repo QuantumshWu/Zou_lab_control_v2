@@ -50,6 +50,7 @@ from .selectors import (
     SelectorSnapshot,
     SelectorState,
 )
+from .kinds import AxisDomain
 from .specs import (
     CurvePlot,
     FacetGridPlot,
@@ -3155,6 +3156,35 @@ class MatplotlibRenderer:
             labelleft=True,
         )
 
+    def _painted_point_coordinate(self, facet_value: float | None) -> float | None:
+        """Which point row THIS surface draws, however it came to show one.
+
+        One rule for both presentations, because a picture of one frame is a
+        picture of one frame: a grid cell shows its facet coordinate, and a
+        flat image shows whatever the spec pinned -- the scope is a fate an
+        axis can be given exactly like being faceted by.  Nothing pinned and
+        no facet means the surface pools its points, and an overlay has no
+        per-point judgement to draw on it.
+        """
+
+        if facet_value is not None:
+            return float(facet_value)
+        pinned = {
+            ref.domain: float(value)
+            for ref, value in tuple(getattr(self.spec, "scope", ()))
+        }
+        for domain in (
+            # A frame of a cycle names its own coordinate; a scan point is
+            # named by the dimension it was swept along; a bare row by its
+            # index.  All three answer "which point row is on screen".
+            AxisDomain.POINT_COORDINATE,
+            AxisDomain.POINT_DIMENSION,
+            AxisDomain.POINT_ROW,
+        ):
+            if domain in pinned:
+                return pinned[domain]
+        return None
+
     def _update_image_point_overlay(
         self,
         axis: Any,
@@ -3170,13 +3200,16 @@ class MatplotlibRenderer:
         gates on the SEMANTIC spec, so a FacetGrid of image cells carries the
         site overlay on each cell instead of dropping it at the outer spec.
 
-        ``facet_value`` is the coordinate THIS surface shows: the geometry is
-        one fact for the whole grid, and the statuses are the ones that cell's
-        frame judged.
+        ``facet_value`` is the coordinate THIS surface shows when it is a
+        cell.  A surface that is not a cell shows a point too -- the one the
+        spec PINS -- so which row is painted is resolved once, from the same
+        spec the data came through, instead of the overlay carrying a
+        whole-picture row for the case the renderer could not answer.
         """
 
         if not isinstance(self.semantic_spec, ImagePlot):
             return
+        painted_point = self._painted_point_coordinate(facet_value)
         x_quantity = getattr(payload, "x", None)
         y_quantity = getattr(payload, "y", None)
         if x_quantity is None or y_quantity is None:
@@ -3184,7 +3217,7 @@ class MatplotlibRenderer:
         signature = (
             None if overlay is None else overlay.revision,
             None if overlay is None else id(overlay),
-            None if facet_value is None else float(facet_value),
+            None if painted_point is None else float(painted_point),
             bool(state["show_point_labels"]),
             str(getattr(x_quantity, "display_unit", "")),
             str(getattr(y_quantity, "display_unit", "")),
@@ -3249,7 +3282,7 @@ class MatplotlibRenderer:
 
         radius_x = display_radius(x_quantity)
         radius_y = display_radius(y_quantity)
-        statuses = overlay.statuses_for(facet_value) or (
+        statuses = overlay.statuses_for(painted_point) or (
             PointStatus.UNKNOWN,
         ) * overlay.count
         tokens = {

@@ -330,3 +330,33 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     assert description.fate(AxisRef.point_rows()) == "facet"
     assert [name.removeprefix('fate:') for _ref, name in description.fate_rows][0] == "repeat"
     assert "fate:coil_x" in [name for _ref, name in description.fate_rows]
+
+
+def test_the_semantic_description_says_what_the_panel_is_drawing() -> None:
+    """One line beside the panel's name: structure, then what it hides.
+
+    An axis drawn as x, y or a group is on the picture and says so.  The
+    three ways data disappears without a mark -- faceted, pinned to one
+    value, or collapsed into one -- are what an operator has to be told, and
+    are exactly what this quotes.  It is derived from the same fate rows the
+    semantic table is built from, so the strip and the table cannot disagree.
+    """
+
+    from zlc_plot.semantics import describe_semantics, schema_summary
+
+    schema = _snapshot().block.schema
+
+    def caption(spec) -> str:
+        return describe_semantics(schema, spec).caption
+
+    flat = CurvePlot(AxisRef.point("x"))
+    assert caption(flat).startswith(schema_summary(schema))
+    # The repeat axis has two values and nobody drew it: it is being reduced,
+    # which is the whole reason to say so.  The drawn axis is not repeated.
+    assert "repeat→reduce" in caption(flat) and "→x" not in caption(flat)
+    assert "repeat→facet" in caption(
+        FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.point("x")))
+    )
+    assert "repeat=1" in caption(
+        CurvePlot(AxisRef.point("x"), scope=((AxisRef.repeat(), 1.0),))
+    )

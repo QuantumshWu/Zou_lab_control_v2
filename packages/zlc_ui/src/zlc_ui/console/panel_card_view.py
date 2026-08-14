@@ -289,7 +289,15 @@ class PanelCardView(FluentGroupBox):
         previous_size = str(self._state_projection.get("size") or "")
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
-        self.setTitle(str(self._base_title))
+        # The strip names the panel AND says what it is drawing.  The name is
+        # often the signal key and nothing else -- "@logic/<node>/frames" --
+        # which says where the numbers came from and not what they are; the
+        # rest is composed by the presenter from the shown dataset and this
+        # panel's own use of it.  The editable name stays the name.
+        summary = str(self._parameter_surface.get("data_summary") or "")
+        self.setTitle(
+            f"{self._base_title}  ·  {summary}" if summary else str(self._base_title)
+        )
         with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
             self.title_edit.setText(self._base_title)
             signal_index = self.signal_combo.findData(incoming["signal"])
@@ -603,12 +611,6 @@ class PanelCardView(FluentGroupBox):
                 "Signal",
                 default=current_signal,
                 required=True,
-                # What the signal IS, under its name: the dataset's structure
-                # and what this panel makes of each axis.  Composed by the
-                # presenter from the shown snapshot and the fate rows, so it
-                # follows the signal and the operator's edits; never
-                # re-derived here.
-                description=str(self._parameter_surface.get("data_summary") or ""),
             ),
         ])
         if draws_image_surfaces(state):
