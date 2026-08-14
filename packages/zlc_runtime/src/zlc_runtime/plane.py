@@ -1830,7 +1830,7 @@ class SignalDataPlane:
             if state is None or state.retired or state.node is not node:
                 raise RuntimeError("live owner differs from its active generation")
             publication = state.publication
-            exact = bool(
+            published_exact = bool(
                 publication is not None
                 and publication.signals
                 and all(
@@ -1839,7 +1839,15 @@ class SignalDataPlane:
                 )
             )
             slot = state.slot
-        if not exact:
+            # Changes this slot signalled that no pump has consumed yet.  A
+            # generation whose whole life fell between two polls has them all,
+            # and deciding below from its (absent) publication would count it
+            # as a monitor and detach everything it produced: that is how
+            # calibrating a folder of saved frames -- where there is no camera
+            # to wait for, so the run ends in milliseconds -- finished with an
+            # empty plane and a node that had published nothing.
+            unpumped = owner_id in self._dirty
+        if not published_exact and not unpumped:
             self.detach_live(node)
             return False
         if slot is None:
@@ -1848,11 +1856,18 @@ class SignalDataPlane:
         values, warning = self._freeze_one(state)
         if warning is not None:
             raise RuntimeError(warning)
-        if not all(
-            isinstance(value.coverage, DatasetCoverage)
-            for value in values.values()
-        ):
-            raise RuntimeError("exact live terminal changed its coverage extent")
+        exact = bool(
+            values
+            and all(
+                isinstance(value.coverage, DatasetCoverage)
+                for value in values.values()
+            )
+        )
+        if not exact:
+            if published_exact:
+                raise RuntimeError("exact live terminal changed its coverage extent")
+            self.detach_live(node)
+            return False
         if not cut_short and not all(
             value.coverage.complete for value in values.values()
         ):

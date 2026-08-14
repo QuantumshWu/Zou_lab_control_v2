@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pytest
 
 from zlc_atom.install import create_installation
+from zlc_atom.nodes.calibration.outputs import CAPTURE_PREVIEW_DECLARATION
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
     CalibrationRequest,
@@ -16,6 +19,8 @@ from zlc_atom.nodes.calibration.task import (
     read_saved_samples,
 )
 from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_runtime.host import NodeHost
+from zlc_runtime.plane import SignalDataPlane
 
 from tests.fakes import FakePlane
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
@@ -106,6 +111,56 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
         replayed.calibration.frame_contract.exposure_seconds
         == first.calibration.frame_contract.exposure_seconds
     )
+
+
+def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
+    """Run the folder through the runtime, not just through the function.
+
+    A node that declares Dataset outputs must publish them however it got its
+    frames.  Published only on the camera branch, a replay ran to the end and
+    then died at the runtime -- "declared Dataset outputs but did not publish
+    final outputs" -- which no test that called ``run()`` could see, because
+    that failure lives in the host and ``run()`` has no host.
+    """
+
+    request = replace(_calibration_request(repeats=6), save_frames=True)
+    acquired = _task(request, tmp_path).run()
+    folder = acquired.artifact_path.with_suffix("") / "frames"
+
+    plane = SignalDataPlane()
+    host = None
+    try:
+        task = _task(
+            replace(
+                request,
+                save_frames=False,
+                frame_source=FRAMES_FROM_FOLDER,
+                saved_frames_path=str(folder),
+            ),
+            tmp_path,
+        )
+        task.signal_plane = plane
+        host = NodeHost(task, plane, Event().set)
+        host.start()
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            host.poll()
+            if host.observation.terminal:
+                break
+            time.sleep(0.01)
+        observation = host.observation
+        assert observation.phase == "done", (
+            f"replay ended in {observation.phase}: {observation.error}"
+        )
+        key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
+        publication = plane.latest_publication(key)
+        assert publication is not None, "the frames read back were never published"
+        value = publication.value(key)
+        assert np.asarray(value.snapshot.block.values).shape[:2] == (1, 3)
+    finally:
+        if host is not None:
+            host.shutdown()
+        plane.close()
 
 
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:

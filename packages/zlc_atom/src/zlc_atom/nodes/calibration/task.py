@@ -1071,6 +1071,7 @@ class CalibrationTask:
 
     def _replay_saved_frames(
         self,
+        context: object | None,
     ) -> tuple[CalibrationCapture, dict[str, object], FrameContract]:
         """Calibrate a folder of saved samples, with no bench involved.
 
@@ -1080,6 +1081,13 @@ class CalibrationTask:
         on the wrong pixels the moment an ROI had moved since -- and the point
         of saving frames is that they can be calibrated again later, with
         other detection settings, when the bench has moved on.
+
+        And it publishes the same dataset an acquisition publishes, sample by
+        sample.  A node's declared outputs are a statement about the node, not
+        about where its frames came from: publishing them only on the camera
+        branch left the replay finishing with nothing published, which the
+        runtime refuses -- "declared Dataset outputs but did not publish final
+        outputs" -- so loading a folder could not be made to work at all.
         """
 
         cycles, run_record = read_saved_samples(self.request.saved_frames_path)
@@ -1112,6 +1120,28 @@ class CalibrationTask:
             camera_id=camera_key,
             readout_mode=camera.get("readout_mode"),
         )
+        if context is not None:
+            preview = CalibrationCapturePreviewSlot(
+                repeats=len(cycles),
+                frame_shape=contract.image_shape,
+                origin_yx=(
+                    (0, 0) if roi is None else (int(roi[1]), int(roi[0]))
+                ),
+                binning_yx=contract.binning_yx,
+                dtype=np.asarray(cycles[0][0].image).dtype,
+                generation=context.generation,
+                run_record=dict(run_record),
+            )
+            context.attach_live_outputs(preview)
+            for index, cycle in enumerate(cycles):
+                if context.cancel_requested():
+                    raise RuntimeError("calibration was cancelled")
+                preview.update(cycle)
+                context.report_progress(
+                    "Reading saved frames",
+                    current=index + 1,
+                    total=len(cycles),
+                )
         terminal = CameraCaptureTerminalRecord(len(cycles) * 3, True, True, True)
         return CalibrationCapture(cycles, terminal), dict(run_record), contract
 
@@ -1189,7 +1219,7 @@ class CalibrationTask:
             if self.request.frame_source == FRAMES_FROM_FOLDER:
                 if context is not None:
                     context.report_progress("Reading saved frames")
-                capture, run_record, contract = self._replay_saved_frames()
+                capture, run_record, contract = self._replay_saved_frames(context)
                 pulse_facts: Mapping[str, object] = dict(
                     run_record.get("pulse") or {}
                 )
