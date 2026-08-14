@@ -87,10 +87,11 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
     Frames of a cycle and points of a scan are different measurements and
     get a cell each; repeats are the same measurement again, and pooling
     them is the reduction the operator declared, so they face a grid only
-    when nothing else varies.  When nothing varies at all, the point axis is
-    faced anyway and the grid holds one cell: a grid is never inferred, so
-    reaching here means somebody asked for one, and a cycle of one frame is
-    still a cycle.  ``None`` is kept for data with no point table to face.
+    when nothing else varies.  ``None`` means nothing varies: the flat plot
+    already IS the picture -- and a grid REFUSED here is why a one-frame
+    camera cycle opens as a plain image, which is the only presentation that
+    takes pointer input at all (an unfacetted overview paints no selectors
+    and answers no gesture but the double click that focuses a cell).
     """
 
     live = live_grid_dimensions(schema)
@@ -126,16 +127,7 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
         # measured gets its cell rather than one dimension being folded
         # into the other.
         return AxisRef.point_rows()
-    if repeats:
-        return AxisRef.repeat()
-    # Nothing VARIES -- but a grid was asked for, and this function is only
-    # ever reached by an explicit request (inference never offers a grid).
-    # A cycle of one frame is still a cycle: face its point axis and draw
-    # the one cell, so a camera measurement opens the same way whatever its
-    # frames per cycle, instead of silently becoming a bare image at one.
-    if schema.grid_topology is None and schema.point_table.columns:
-        return AxisRef.point(str(schema.point_table.columns[0].coordinate_id))
-    return None
+    return AxisRef.repeat() if repeats else None
 
 
 def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
