@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import threading
 from typing import Any, Iterator, Mapping, TypeAlias
@@ -125,7 +126,48 @@ class FontStyleConfig:
 
     @property
     def sans_serif(self) -> tuple[str, ...]:
-        return (self.family, *self.fallbacks)
+        """The declared families, best first, minus the ones this machine lacks.
+
+        A family that is not installed is not a preference, it is a failed
+        lookup: matplotlib searches for it, does not find it, falls back, and
+        SAYS SO -- once per text object, which during a running experiment is
+        a log full of "Font family 'Helvetica Light' not found".
+
+        Asking once which of them exist turns that into a decision.  If none
+        of them do, the declaration is passed through untouched: the operator
+        should see matplotlib say what it is falling back to rather than have
+        this quietly pick something they never asked for.
+        """
+
+        declared = (self.family, *self.fallbacks)
+        installed = _installed_font_families()
+        return tuple(name for name in declared if name in installed) or declared
+
+    @property
+    def resolved_family(self) -> str:
+        """The one family to name on a single artist."""
+
+        return self.sans_serif[0]
+
+@lru_cache(maxsize=1)
+def _installed_font_families() -> frozenset[str]:
+    """Every font family matplotlib can resolve here -- ours included.
+
+    The package SHIPS its canonical font, so "what is installed" is only true
+    after that font has been registered; asked before, this would answer that
+    the one font we are sure of is missing and quietly fall back for the rest
+    of the session.  Registering first is what makes the answer stable, and it
+    is idempotent.
+
+    Read once after that: scanning the font list costs milliseconds and the
+    answer does not change while a session runs.
+    """
+
+    from matplotlib import font_manager
+
+    _ensure_canonical_font_registered()
+    return frozenset(entry.name for entry in font_manager.fontManager.ttflist)
+
 
 @dataclass(frozen=True, slots=True)
 class PaletteConfig:

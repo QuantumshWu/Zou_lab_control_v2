@@ -3621,7 +3621,7 @@ class MatplotlibRenderer:
                 annotation_pt=self.style.fonts.annotation_pt,
                 side_distribution_width_pt=visual.side_distribution_linewidth,
                 selector_zorder=visual.selector_zorder,
-                font_family=self.style.fonts.family,
+                font_family=self.style.fonts.resolved_family,
                 label_inset_fraction=policy.axes_text_inset_fraction,
                 label_line_fraction=policy.selector_label_line_fraction,
                 threshold_width_pt=threshold.linewidth,
