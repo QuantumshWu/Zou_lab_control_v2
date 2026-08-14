@@ -267,12 +267,15 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
     raise KeyError(ref.axis_id)
 
 
-def schema_summary(schema: DatasetSchema) -> str:
+def schema_summary(schema: DatasetSchema, *, with_value: bool = True) -> str:
     """One-line human description of a dataset's structure.
 
     This is the single structure-description authority: frontends show it
     verbatim (the embed window's data source line, notebook prints) instead
     of each inventing its own shape text.
+
+    ``with_value`` drops the trailing value clause, for a reader that is
+    looking at the value already -- a panel drawing it, under its own name.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -302,6 +305,8 @@ def schema_summary(schema: DatasetSchema) -> str:
         for axis in schema.cell_schema.data_axes
         if axis.size > 1
     )
+    if not with_value:
+        return " × ".join(parts)
     value = "value"
     if schema.cell_schema.value_unit not in {None, "", "1", "arb"}:
         value = f"{value} ({schema.cell_schema.value_unit})"

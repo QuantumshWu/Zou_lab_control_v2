@@ -2702,13 +2702,12 @@ def test_a_fit_record_naming_a_model_this_data_cannot_use_arms_nothing() -> None
 
 
 def test_a_panel_strip_says_what_kind_of_data_it_is_drawing(presenter, session) -> None:
-    """Beside the name on the card: the structure, and what this panel hides.
+    """Under the name on the card: the shape of what it is showing.
 
     The name says WHERE the numbers came from -- for a node preview it is the
-    signal key and nothing else.  What they ARE, and which axes this panel is
-    collapsing, pinning or faceting, were computed everywhere and stated
-    nowhere, so an operator had to open the semantic table to find out what
-    they were looking at.
+    signal key and nothing else -- and nothing about what they are.  The
+    structure was computed everywhere and stated nowhere, so an operator had
+    to open the semantic table to find out what they were looking at.
     """
 
     from zlc_plot.semantics import schema_summary
@@ -2718,26 +2717,11 @@ def test_a_panel_strip_says_what_kind_of_data_it_is_drawing(presenter, session) 
     binding = presenter.add_panel(signal, snapshot, title="camera", kind="image")
     _settle_panel_hosts(
         presenter,
-        lambda: any(
-            str(field["key"]).startswith("fate:")
-            for field in binding.parameter_surface.get("semantic", ())
-        ),
+        lambda: bool(str(binding.parameter_surface.get("data_summary", ""))),
     )
     summary = str(binding.parameter_surface["data_summary"])
-    # The structure clause, from the one authority that spells a schema.
-    assert summary.startswith(schema_summary(snapshot.block.schema))
-
-    fate = next(
-        field
-        for field in binding.parameter_surface["semantic"]
-        if str(field["key"]).startswith("fate:") and field["value"] == "y"
-    )
-    assert presenter.update_panel_state(
-        binding.panel_id, {"semantic": {str(fate["key"]): "facet"}}
-    )
-    _settle_panel_hosts(
-        presenter,
-        lambda: f"{fate['label']}→facet"
-        in str(binding.parameter_surface.get("data_summary", "")),
-    )
-    assert f"{fate['label']}→facet" in str(binding.parameter_surface["data_summary"])
+    schema = snapshot.block.schema
+    assert summary == schema_summary(schema, with_value=False)
+    # The value is what the picture itself shows; the shape is what it does not.
+    assert "→ value" not in summary
+    assert summary.startswith("repeat ")

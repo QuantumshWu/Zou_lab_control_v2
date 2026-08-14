@@ -332,31 +332,20 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     assert "fate:coil_x" in [name for _ref, name in description.fate_rows]
 
 
-def test_the_semantic_description_says_what_the_panel_is_drawing() -> None:
-    """One line beside the panel's name: structure, then what it hides.
+def test_a_structure_line_can_leave_out_the_value_it_is_drawn_beside() -> None:
+    """For a reader looking at the value already: the shape, and only that.
 
-    An axis drawn as x, y or a group is on the picture and says so.  The
-    three ways data disappears without a mark -- faceted, pinned to one
-    value, or collapsed into one -- are what an operator has to be told, and
-    are exactly what this quotes.  It is derived from the same fate rows the
-    semantic table is built from, so the strip and the table cannot disagree.
+    The panel strip names a signal and says what its numbers ARE; the value
+    is the one thing the picture under it already shows, so it is the one
+    clause that would be noise there.  Same authority either way -- a second
+    shape text is how two places start disagreeing about one dataset.
     """
 
-    from zlc_plot.semantics import describe_semantics, schema_summary
+    from zlc_plot.semantics import schema_summary
 
     schema = _snapshot().block.schema
-
-    def caption(spec) -> str:
-        return describe_semantics(schema, spec).caption
-
-    flat = CurvePlot(AxisRef.point("x"))
-    assert caption(flat).startswith(schema_summary(schema))
-    # The repeat axis has two values and nobody drew it: it is being reduced,
-    # which is the whole reason to say so.  The drawn axis is not repeated.
-    assert "repeat→reduce" in caption(flat) and "→x" not in caption(flat)
-    assert "repeat→facet" in caption(
-        FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.point("x")))
-    )
-    assert "repeat=1" in caption(
-        CurvePlot(AxisRef.point("x"), scope=((AxisRef.repeat(), 1.0),))
-    )
+    full = schema_summary(schema)
+    shape = schema_summary(schema, with_value=False)
+    assert full.startswith(shape)
+    assert full[len(shape) :].startswith(" → value")
+    assert "→" not in shape

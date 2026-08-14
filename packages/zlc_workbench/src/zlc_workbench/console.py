@@ -1891,21 +1891,13 @@ class ConsolePresenter:
                 )
                 fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
             break
-        return {
-            **self._parameter_surface(
-                display_controls,
-                state,
-                semantic=semantic_entries,
-                fit=fit_entries,
-                fit_outputs=fit_outputs,
-            ),
-            # The two halves of what the card's strip says beside the
-            # panel's name.  Kept apart because the row VALUES follow the
-            # operator's edits between descriptions, and the line has to
-            # follow them.
-            "data_structure": str(semantic_description.caption_structure),
-            "data_rows": tuple(semantic_description.caption_rows),
-        }
+        return self._parameter_surface(
+            display_controls,
+            state,
+            semantic=semantic_entries,
+            fit=fit_entries,
+            fit_outputs=fit_outputs,
+        )
 
     @staticmethod
     def _state_with_described_parameters(
@@ -2527,33 +2519,24 @@ class ConsolePresenter:
             snapshot = binding.frozen_data.snapshot
         return snapshot
 
-    @staticmethod
-    def _panel_data_summary(surface: Mapping[str, object]) -> str:
-        """What this panel is drawing, for the strip that names it.
+    def _panel_data_summary(self, binding: PanelBinding) -> str:
+        """The shape of what this panel is showing, for the strip that names it.
 
-        The name on a card says WHERE the numbers came from -- often only
-        "@logic/<node>/frames" -- and nothing about what they are.  This is
-        the other half: the dataset's structure, and every axis holding more
-        than one value that the picture does not show.  Both the rows worth
-        quoting and the way one reads are the plotting package's, so the
-        strip cannot invent a second vocabulary; what belongs here is only
-        that the values are the ones just accepted.
+        The name says WHERE the numbers came from -- for a node preview it is
+        the signal key and nothing else, "@logic/<node>/frames" -- and
+        nothing about what they are.  This is that: the dataset's own
+        structure, from the one authority that spells a schema, without the
+        value clause, which is the one thing the picture already shows.
         """
 
-        from zlc_plot.semantics import caption_clause, caption_line
+        from zlc_plot.semantics import schema_summary
 
-        accepted = {
-            str(field["key"]): field.get("value")
-            for field in tuple(surface.get("semantic", ()))
-        }
-        return caption_line(
-            str(surface.get("data_structure") or ""),
-            (
-                caption_clause(str(label), accepted.get(str(name)))
-                for name, label in tuple(surface.get("data_rows", ()))
-                if str(name) in accepted
-            ),
-        )
+        snapshot = self._shown_snapshot(binding)
+        block = getattr(snapshot, "block", None)
+        schema = getattr(block, "schema", None)
+        if schema is None:
+            return ""
+        return schema_summary(schema, with_value=False)
 
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
@@ -2571,7 +2554,7 @@ class ConsolePresenter:
                 }
                 for field in tuple(surface.get(section, ()))
             )
-        surface["data_summary"] = self._panel_data_summary(surface)
+        surface["data_summary"] = self._panel_data_summary(binding)
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)
