@@ -137,8 +137,14 @@ def test_a_threshold_separates_the_two_populations_it_was_fitted_to() -> None:
         assert 0.0 <= fit.fidelity <= 1.0
 
 
-def test_a_psf_kernel_is_a_normalised_weighting_of_its_own_box() -> None:
-    """Per-site and uniform kernels alike: positive, normalised, centred."""
+def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
+    """Normalised, peaked on the site, and concentrated where the light is.
+
+    Not non-negative: the kernel is a MEASURED difference image, so its wings
+    carry the noise of the shots it was measured from, and a pixel where the
+    atom happened to subtract a little is worth what it is worth.  What must
+    be true is that the weight is where the atom is.
+    """
 
     result, _truth = _calibration()
     per_site = result.calibration.select_model(ReadoutModelKind.PER_SITE_PSF)
@@ -146,12 +152,17 @@ def test_a_psf_kernel_is_a_normalised_weighting_of_its_own_box() -> None:
 
     for kernels in (np.asarray(per_site.psf_weights), np.asarray(uniform.psf_weights)):
         assert kernels.ndim == 3
-        assert np.all(kernels >= 0.0)
         np.testing.assert_allclose(kernels.sum(axis=(1, 2)), 1.0, atol=1e-9)
         for kernel in kernels:
             peak = np.unravel_index(int(np.argmax(kernel)), kernel.shape)
             centre = (kernel.shape[0] // 2, kernel.shape[1] // 2)
             assert abs(peak[0] - centre[0]) <= 1 and abs(peak[1] - centre[1]) <= 1
+            core = kernel[
+                centre[0] - 1 : centre[0] + 2, centre[1] - 1 : centre[1] + 2
+            ]
+            assert float(core.sum()) > 0.5, "most of the weight sits on the spot"
+            edge = float(np.max(np.abs(kernel[0]))), float(np.max(np.abs(kernel[-1])))
+            assert max(edge) < float(kernel[centre]) / 5.0, "the wings are wings"
 
     boxes = np.asarray(per_site.psf_boxes, dtype=int)
     centres = np.asarray(result.calibration.site_map.centers_xy, dtype=float)
