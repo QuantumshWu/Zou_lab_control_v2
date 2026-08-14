@@ -2981,14 +2981,15 @@ class MatplotlibRenderer:
             # were the one surface the shared policy never reached: no
             # compact offset, and three labels whether they fitted or not.
             # Only WHICH cells show their labels is the grid's business.
-            apply_smart_ticks(axis, prune_edges=True)
+            apply_smart_ticks(axis, surface="cell")
             axis.tick_params(axis="y", labelleft=label_left)
             axis.tick_params(axis="x", labelbottom=label_bottom)
             # The cells share one x span and one y span, so they share
             # whatever offset the tick policy took out of their labels: it is
-            # shown once, by the corner cell that carries both sets of tick
-            # labels.  Shown per cell it appeared once per cell, each copy
-            # printed over the neighbour to its right.
+            # written once, by the corner cell that carries both sets of tick
+            # labels, into the FIGURE's corners -- the far end of the shared x
+            # axis and the top of the shared y axis.  (The tick policy places
+            # it; where a cell's own margin is, its neighbour is.)
             corner = label_bottom and label_left
             axis.xaxis.get_offset_text().set_visible(corner)
             axis.yaxis.get_offset_text().set_visible(corner)

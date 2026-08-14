@@ -563,8 +563,16 @@ def _facet_gaps(
 
 
 @lru_cache(maxsize=1024)
+@lru_cache(maxsize=4096)
 def _text_width_pt(text: str, families: tuple[str, ...], size_pt: float) -> float:
-    """Measure one line of text, in points, without a canvas."""
+    """Measure one line of text, in points, without a canvas.
+
+    Cached, because the answer is a property of the glyphs and cannot change
+    while a session runs, and because the tick policy asks it for every
+    candidate label of every unit it considers -- laying out a font and
+    walking its paths, twelve times an axis, for every axis of every cell of
+    a live grid.
+    """
 
     from matplotlib.font_manager import FontProperties
     from matplotlib.textpath import TextToPath

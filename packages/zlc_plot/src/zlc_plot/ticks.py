@@ -22,6 +22,25 @@ import numpy as np
 #: taste decision in this module; everything else is measured.
 TICK_LABEL_GAP_RATIO = 1.3
 
+#: Where the compact offset text is written -- BOTH its parts, the common
+#: scale and the common constant, which modify the same labels and so belong
+#: in the same place.
+#:
+#: In the figure's own corners: the far end of the row of x tick labels, and
+#: the top of the column of y tick labels.  Those are where a reader of a
+#: scientific plot looks, and they are the two corners nothing else uses --
+#: the axis labels are centred on their sides and a title is centred on top.
+#:
+#: Not in axes fractions, which is what this was.  Below a panel's axes,
+#: ``-0.1`` is outside the figure once the tick labels and the axis label have
+#: taken the bottom margin, and the two-line form -- a scale AND a constant --
+#: was printed off the canvas entirely.  Beside a grid CELL, the margin an
+#: axes fraction reaches into is not margin at all: it is the next cell.
+_OFFSET_PLACEMENT = {
+    "x": ((0.995, 0.008), "figure", "right", "bottom"),
+    "y": ((0.008, 0.995), "figure", "left", "top"),
+}
+
 
 def _rendered_width_pt(text: str) -> float:
     """Price one label in points, in the font matplotlib will actually use.
@@ -100,15 +119,14 @@ class SmartOffsetLocator(ticker.Locator):
         self.n_array: list[int] = []
         self.ticks: list[float] = []
 
-    def _unit(self, lower: float, upper: float, budget: int) -> tuple[int, int]:
-        """The finest (step, decade) whose ticks fit the budget.
+    def _unit(self, lower: float, upper: float) -> tuple[int, int]:
+        """The finest (step, decade) whose labels this axis can carry.
 
-        A budget that is not a cap is not a budget: the old search tried three
-        steps at two decades and, when none of them landed inside a min/max
-        window, fell back to step 1 -- which is the FINEST option and produced
-        up to ten labels however few were asked for.  Walking the whole
-        (1, 2, 5) x 10^k lattice from coarse to fine and stopping at the last
-        one that still fits makes the number mean what it says.
+        Walking the (1, 2, 5) x 10^k lattice from coarse to fine: each step
+        adds labels, so the first candidate that does not fit ends the search
+        and the one before it is the answer.  Never fewer than :attr:`FLOOR`
+        labels -- an axis with one names a point, not a scale, and a crowded
+        axis is still readable.
         """
 
         span = upper - lower
@@ -124,67 +142,22 @@ class SmartOffsetLocator(ticker.Locator):
             unit = float(step) * 10.0**decade
             if unit <= 0.0 or not np.isfinite(unit):
                 continue
-            # Counted by the one function that lays ticks out, not by a
-            # second rule beside it.  How many multiples of the unit lie
+            # Laid out by the one function that lays ticks out, not counted by
+            # a second rule beside it.  How many multiples of the unit lie
             # inside a view depends on where the view sits, and in binary
             # floats 1e-6 / 1e-6 is not always 1 -- an arithmetic estimate
             # said two where there was one, and one where there were two.
-            count = len(self._lay_out(lower, upper, step, decade, False)[0])
-            if count > budget:
-                # Finer only adds more, so the previous one is the finest fit.
-                if fitting is not None:
-                    return fitting
-                # ...unless nothing has reached the floor yet, in which case
-                # the floor wins: an axis with one label names a point, not a
-                # scale, and a crowded axis is still readable.
-                if count >= self.FLOOR:
-                    return step, decade
+            ticks, indices, _offset, _exponent, _scale, label_decade = self._lay_out(
+                lower, upper, step, decade, False
+            )
+            if len(ticks) < self.FLOOR:
                 continue
-            if count >= self.FLOOR:
-                fitting = (step, decade)
+            if len(ticks) > self.max_ticks or not self._fits(
+                ticks, indices, step, label_decade
+            ):
+                return fitting if fitting is not None else (step, decade)
+            fitting = (step, decade)
         return fitting if fitting is not None else (min(self.steps), exponent - 4)
-
-    def _budget(self) -> int:
-        """How many labels this axis can afford, from its painted width.
-
-        The count used to be a constant that no code compared against the
-        space it had, which is why eight four-character labels were asked to
-        share a facet cell an inch wide.  ``measure`` prices a label in points
-        and the axis knows its own extent without a draw, so the budget is
-        arithmetic.  Never below :attr:`FLOOR`.
-        """
-
-        if self.measure is None or self.axis is None:
-            return self.max_ticks
-        axes = getattr(self.axis, "axes", None)
-        figure = getattr(axes, "figure", None)
-        if axes is None or figure is None:
-            return self.max_ticks
-        dots_per_point = float(figure.dpi) / 72.0
-        if dots_per_point <= 0.0:
-            return self.max_ticks
-        horizontal = self.axis is getattr(axes, "xaxis", None)
-        extent = float(axes.bbox.width if horizontal else axes.bbox.height)
-        available = extent / dots_per_point
-        # A y label is separated by its line, an x label by its own width; the
-        # widest label is the one that has to fit either way.
-        widest = self._widest_label_pt() if horizontal else self.measure("0")
-        room = available / max(widest * self.gap_ratio, 1e-6)
-        return max(self.FLOOR, min(self.max_ticks, int(room)))
-
-    def _widest_label_pt(self) -> float:
-        """The width of the longest label this layout would print."""
-
-        assert self.measure is not None
-        formatter = getattr(self.axis, "major", None)
-        formatter = getattr(formatter, "formatter", None)
-        widths = []
-        for index, value in enumerate(self.ticks):
-            if formatter is not None:
-                widths.append(self.measure(formatter(value, index)))
-            else:
-                widths.append(self.measure(f"{value:g}"))
-        return max(widths, default=self.measure("0"))
 
     def _lay_out(
         self,
@@ -250,8 +223,43 @@ class SmartOffsetLocator(ticker.Locator):
             scale, decade = decade, 0
         return ticks, indices, offset_int, exponent, scale, decade
 
+    def _carries_a_common_part(self, indices: list[int], step: int) -> bool:
+        """Whether these labels would mostly repeat each other.
+
+        A label should say what distinguishes its tick from the next one.  On
+        a view that sits far from zero in units of its own tick, most of every
+        label is the part they all share -- ``10000000, 10000001, ...`` for a
+        window four tenths wide -- and that shared part belongs in the offset,
+        once, not in every label.
+
+        "Far" is :attr:`oom` decades above the tick unit, the same measure
+        this module already uses to decide when a common SCALE factor comes
+        out; both questions are "do these labels carry more digits than they
+        distinguish".  The alternative in force was whether the labels
+        happened to FIT the axis, which is a different question and answered
+        yes for every y axis there is -- so a y axis never took an offset at
+        all, whatever it was showing.
+        """
+
+        largest = max((abs(index) for index in indices), default=0) * int(step)
+        return largest >= 10**self.oom
+
     def _fits(self, ticks: list[float], indices: list[int], step: int, decade: int) -> bool:
-        """Whether these labels and their gaps fit the axis's painted width."""
+        """Whether these labels and their gaps fit the extent they are drawn in.
+
+        THE width question, asked once.  It used to be asked twice, of two
+        different things: a "budget" that priced the PREVIOUS layout's labels
+        to cap how many this one may have -- so the answer depended on what
+        the axis last showed, and could oscillate between two counts -- and
+        this, which then re-checked the chosen layout and, if it did not fit,
+        took an offset instead.  Taking an offset does not make an axis
+        narrower unless the labels share a leading part, so an image over
+        -0.5..2.5 relabelled itself 0..3 beside a "-0.5", saving one minus
+        sign and moving every coordinate on the picture.
+
+        Fewer labels is what does not fit calls for, and that is what the one
+        caller -- the unit search -- does with the answer.
+        """
 
         if self.measure is None or self.axis is None or not ticks:
             return True
@@ -259,22 +267,27 @@ class SmartOffsetLocator(ticker.Locator):
         figure = getattr(axes, "figure", None)
         if axes is None or figure is None:
             return True
-        if self.axis is not getattr(axes, "xaxis", None):
-            return True  # stacked vertically, a label's width is not the limit
         dots_per_point = float(figure.dpi) / 72.0
         if dots_per_point <= 0.0:
             return True
-        available = float(axes.bbox.width) / dots_per_point
-        widest = max(
-            (
-                self.measure(
-                    SmartOffsetFormatter._fmt_scaled_int(index * step, decade)
-                )
-                for index in indices
-            ),
-            default=0.0,
-        )
-        return len(ticks) * widest * self.gap_ratio <= available
+        horizontal = self.axis is getattr(axes, "xaxis", None)
+        extent = float(axes.bbox.width if horizontal else axes.bbox.height)
+        available = extent / dots_per_point
+        if horizontal:
+            # Side by side: what one label costs is its own width.
+            occupied = max(
+                (
+                    self.measure(
+                        SmartOffsetFormatter._fmt_scaled_int(index * step, decade)
+                    )
+                    for index in indices
+                ),
+                default=0.0,
+            )
+        else:
+            # Stacked: what one label costs is its LINE, whatever it says.
+            occupied = self.measure("0")
+        return len(ticks) * occupied * self.gap_ratio <= available
 
     def tick_values(self, vmin: float, vmax: float) -> list[float]:
         lower, upper = sorted((float(vmin), float(vmax)))
@@ -286,36 +299,36 @@ class SmartOffsetLocator(ticker.Locator):
             self.n_array = []
             return self.ticks
 
-        budget = self._budget()
-        step, decade = self._unit(lower, upper, budget)
-        # Hysteresis: keep the unit already in force while it still fits.
+        step, decade = self._unit(lower, upper)
+        # Hysteresis: keep the unit already in force while it still works.
         #
         # Zoom is continuous and the choice of unit is not, so a view drifting
         # across the boundary between two units would otherwise re-label the
         # whole axis on every jitter of the wheel.  Holding the settled unit
-        # until it genuinely stops fitting means a threshold is crossed once,
-        # in one direction, when the range really has changed.
+        # until it genuinely stops working means a threshold is crossed once,
+        # in one direction, when the range really has changed.  "Works" is the
+        # same admissibility the unit search uses, so a held unit and a chosen
+        # one are judged by one rule.
         settled = self._settled
         if settled is not None:
             held_step, held_decade = settled
-            held = float(held_step) * 10.0**held_decade
-            span = upper - lower
-            if held > 0.0 and self.FLOOR - 1 <= span / held <= budget - 1:
+            held = self._lay_out(lower, upper, held_step, held_decade, False)
+            if (
+                self.FLOOR <= len(held[0]) <= self.max_ticks
+                and self._fits(held[0], held[1], held_step, held[5])
+            ):
                 step, decade = held_step, held_decade
         self._settled = (step, decade)
-        # Plain first: an axis whose labels ARE its coordinates is easier to
-        # read than one carrying a "+2080" in the corner, so the offset is
-        # taken only when the plain labels do not fit the width.
-        chosen = None
-        for use_offset in (False, True):
-            layout = self._lay_out(lower, upper, step, decade, use_offset)
-            if len(layout[0]) < self.FLOOR:
-                continue
-            chosen = layout
-            if self._fits(layout[0], layout[1], step, layout[5]):
-                break
-        if chosen is None:
-            chosen = self._lay_out(lower, upper, step, decade, False)
+        # Plain unless the labels would mostly repeat one another: an axis
+        # whose labels ARE its coordinates is easier to read than one carrying
+        # a "+2080" in the corner, and an offset that shortens nothing is a
+        # second thing to read for no saving at all.
+        plain = self._lay_out(lower, upper, step, decade, False)
+        chosen = plain
+        if self._carries_a_common_part(plain[1], step):
+            offset = self._lay_out(lower, upper, step, decade, True)
+            if len(offset[0]) >= self.FLOOR:
+                chosen = offset
 
         ticks, indices, offset_int, exponent, scale, label_decade = chosen
         if self.prune_edges and len(ticks) > self.FLOOR:
@@ -363,6 +376,8 @@ class SmartOffsetFormatter(ticker.Formatter):
         super().__init__()
         if axis_type not in {"x", "y"}:
             raise ValueError("axis_type must be 'x' or 'y'")
+        if offset_coords not in {"axes", "data", "figure"}:
+            raise ValueError("offset_coords must be 'axes', 'data', or 'figure'")
         self.locator = locator
         self.axis_type = axis_type
         self._offset_xy = offset_xy
@@ -376,11 +391,12 @@ class SmartOffsetFormatter(ticker.Formatter):
         def apply_offset(offset: Any) -> None:
             if self._offset_xy is None:
                 return
-            offset.set_transform(
-                axis.axes.transAxes
-                if self._offset_coords == "axes"
-                else axis.axes.transData
-            )
+            transforms = {
+                "axes": axis.axes.transAxes,
+                "data": axis.axes.transData,
+                "figure": axis.axes.figure.transFigure,
+            }
+            offset.set_transform(transforms[self._offset_coords])
             offset.set_position(self._offset_xy)
             if self._offset_ha is not None:
                 offset.set_ha(self._offset_ha)
@@ -473,13 +489,17 @@ class SmartOffsetFormatter(ticker.Formatter):
             parts.append(constant)
         if not parts:
             return ""
-        if self.axis_type == "x" and len(parts) == 2:
-            return parts[0] + "\n" + parts[1]
+        if len(parts) == 2:
+            # A scale and an offset are two separate statements about the same
+            # labels, and run together -- "x1e4+3.84e11" -- they read as one
+            # arithmetic expression that means nothing.  The x axis has the
+            # width for two lines under it; the y axis has one line above it.
+            return "\n".join(parts) if self.axis_type == "x" else " ".join(parts)
         return "".join(parts)
 
 
 def apply_smart_ticks(
-    axis: Any, which: str = "both", *, prune_edges: bool = False
+    axis: Any, which: str = "both", *, surface: str = "panel"
 ) -> None:
     """Install the shared tick policy on ``axis``.
 
@@ -496,29 +516,40 @@ def apply_smart_ticks(
     which produces labels such as ``200, 400, 600`` at visually logarithmic
     positions.  Log y therefore has its own decade-aware locator/formatter;
     x and all linear axes continue to use the existing compact policy.
+
+    ``surface`` is what this axis is painted on -- a standalone ``panel`` or a
+    grid ``cell`` -- and the one fact both remaining differences follow from:
+    a cell prunes the labels on its very edge, because the room a panel
+    overflows into belongs to its neighbour, and it writes the offset its
+    cells SHARE in the figure's corner rather than in its own.
     """
 
     if which not in {"x", "y", "both"}:
         raise ValueError("which must be 'x', 'y', or 'both'")
+    if surface not in {"panel", "cell"}:
+        raise ValueError("surface must be 'panel' or 'cell'")
+    prune_edges = surface == "cell"
     if which in ("x", "both"):
         # Reinstalling a locator resets the axis' tick artists, which both
         # reallocates them every frame and leaves them unpositioned until the
         # next full Axis draw.  Install once per configuration.
-        signature = ("smart-x", prune_edges)
+        signature = ("smart-x", surface)
         if getattr(axis.xaxis, "_zlc_tick_signature", None) != signature:
             locator = SmartOffsetLocator(
                 measure=_rendered_width_pt,
                 gap_ratio=TICK_LABEL_GAP_RATIO,
                 prune_edges=prune_edges,
             )
+            offset_xy, offset_coords, offset_ha, offset_va = _OFFSET_PLACEMENT["x"]
             axis.xaxis.set_major_locator(locator)
             axis.xaxis.set_major_formatter(
                 SmartOffsetFormatter(
                     locator,
                     axis_type="x",
-                    offset_xy=(0.9, -0.1),
-                    offset_ha="left",
-                    offset_va="top",
+                    offset_xy=offset_xy,
+                    offset_coords=offset_coords,
+                    offset_ha=offset_ha,
+                    offset_va=offset_va,
                 )
             )
             axis.xaxis._zlc_tick_signature = signature
@@ -566,21 +597,23 @@ def apply_smart_ticks(
                 axis.yaxis.get_offset_text().set_visible(False)
                 axis.yaxis._zlc_tick_signature = signature
         else:
-            signature = ("smart-y-lin", prune_edges)
+            signature = ("smart-y-lin", surface)
             if getattr(axis.yaxis, "_zlc_tick_signature", None) != signature:
                 locator = SmartOffsetLocator(
                     measure=_rendered_width_pt,
                     gap_ratio=TICK_LABEL_GAP_RATIO,
                     prune_edges=prune_edges,
                 )
+                offset_xy, offset_coords, offset_ha, offset_va = _OFFSET_PLACEMENT["y"]
                 axis.yaxis.set_major_locator(locator)
                 axis.yaxis.set_major_formatter(
                     SmartOffsetFormatter(
                         locator,
                         axis_type="y",
-                        offset_xy=(0.0, 1.005),
-                        offset_ha="left",
-                        offset_va="bottom",
+                        offset_xy=offset_xy,
+                        offset_coords=offset_coords,
+                        offset_ha=offset_ha,
+                        offset_va=offset_va,
                     )
                 )
                 # Do not retain logarithmic minor ticks after switching back
