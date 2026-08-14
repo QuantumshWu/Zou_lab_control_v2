@@ -2065,34 +2065,25 @@ class RasterPlotHost:
             coalesce_key="viewport",
         )
 
-    def focus_facet(
-        self,
-        identity: RasterIdentity,
-        axes: AxisTransform,
-    ) -> Future[RasterOperation[None]]:
-        """Open one cell from the exact compatible FacetGrid overview."""
+    def focus_facet(self, index: int) -> Future[RasterOperation[None]]:
+        """Open one cell of this FacetGrid, by the thing that identifies it.
 
-        if not isinstance(identity, RasterIdentity):
-            raise TypeError("identity must be RasterIdentity")
-        if not isinstance(axes, AxisTransform):
-            raise TypeError("axes must be AxisTransform")
-        if identity.kind != "facet_grid" or axes.role != "facet_cell":
-            raise TypeError("facet focus requires a FacetGrid cell")
-        if axes.cell_index is None:
-            raise ValueError("facet focus requires a cell index")
+        Its INDEX.  This used to take a pixel-geometry handle (an identity
+        and an AxisTransform) borrowed from the current front -- and a
+        FOCUSED front publishes geometry for no cell except the one already
+        shown, so "show cell j" became inexpressible exactly when a cell was
+        already open, and the caller had nothing to do but drop the request.
+        An index cannot go stale the way a box can: the session clamps it to
+        the cells it has.
+        """
+
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise TypeError("facet focus takes a cell index")
+        if index < 0:
+            raise ValueError("facet focus requires a non-negative cell index")
 
         def apply() -> None:
-            session = self._require_session()
-            revisions = session.revisions
-            if (
-                identity.host_id != self._host_id
-                or revisions.display != identity.display_revision
-                or revisions.layout != identity.layout_revision
-            ):
-                raise RuntimeError(
-                    "the overview display/layout changed before facet focus"
-                )
-            session.focus_facet(axes.cell_index)
+            self._require_session().focus_facet(index)
 
         return self._dispatch_session(
             apply,

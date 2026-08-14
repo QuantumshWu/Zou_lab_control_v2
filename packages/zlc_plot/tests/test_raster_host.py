@@ -315,12 +315,7 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
                 right_text.removesuffix("%")
             ) == pytest.approx(100.0)
 
-        first_cell = next(
-            axes
-            for axes in configured.front.interaction.axes
-            if axes.role == "facet_cell" and axes.cell_index == 0
-        )
-        host.focus_facet(configured.front.identity, first_cell).result(timeout=10)
+        host.focus_facet(0).result(timeout=10)
         optimum = host.selector_state(
             SelectorKind.THRESHOLD,
             display=False,

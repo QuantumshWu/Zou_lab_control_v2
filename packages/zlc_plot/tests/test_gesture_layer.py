@@ -245,3 +245,67 @@ def test_a_pointer_runs_before_data_frames_already_queued_behind_it() -> None:
     finally:
         gate.set()
         host.close(timeout=20)
+
+
+def test_a_focused_facet_can_be_moved_to_another_cell() -> None:
+    """The case a geometry handle could not express.
+
+    A focused front publishes geometry for exactly one cell -- the one it is
+    showing -- so a caller that named a cell by its axes could ask for any
+    cell EXCEPT while one was open, which is precisely when the operator asks.
+    """
+
+    from data_factory import PointTopology
+    from zlc_plot import CurvePlot, FacetGridPlot
+
+    settings = [0.0, 1.0, 2.0]
+    points = [0.0, 1.0, 2.0, 3.0]
+    rows = [(setting, point) for setting in settings for point in points]
+    table = PointTable.from_columns(
+        {
+            "setting": [row[0] for row in rows],
+            "shot": [row[1] for row in rows],
+        }
+    )
+    topology = PointTopology.from_cartesian(
+        (
+            Axis.create("setting", values=settings),
+            Axis.create("shot", values=points),
+        ),
+        point_table=table,
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        table,
+        point_topology=topology,
+        dtype=np.float64,
+    )
+    values = np.asarray(
+        [[10.0 * row[0] + row[1] for row in rows]], dtype=np.float64
+    )
+    host = RasterPlotHost.from_plot(
+        DatasetSnapshot(schema, values, revision=0),
+        FacetGridPlot(
+            AxisRef.point_dimension("setting"), CurvePlot(AxisRef.point_dimension("shot"))
+        ),
+        size="4x4",
+    )
+    try:
+        host.wait_for_front(timeout=20)
+
+        def shown() -> int | None:
+            axes = [
+                item
+                for item in host.front.interaction.axes
+                if item.role == "facet_cell"
+            ]
+            return axes[0].cell_index if len(axes) == 1 else None
+
+        host.focus_facet(0).result(timeout=20)
+        assert shown() == 0
+        host.focus_facet(2).result(timeout=20)
+        assert shown() == 2
+        host.focus_facet(1).result(timeout=20)
+        assert shown() == 1
+    finally:
+        host.close(timeout=20)

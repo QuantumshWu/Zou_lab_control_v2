@@ -890,9 +890,11 @@ class ConsolePresenter:
 
         A cell is named by its INDEX between the two hosts -- they draw the
         same grid over different data, so cell 3 means the same thing to both
-        -- but the plot layer opens a cell from that host's own overview
-        identity and its own axes, which is what makes the focus refuse a
-        surface that has moved underneath it.
+        -- and that is now how the plot layer is asked for it too.  Asked
+        with a pixel-geometry handle taken from the host's CURRENT front, a
+        host already focused on one cell could never be moved to another: a
+        focused front publishes geometry for no other cell, the lookup below
+        found nothing, and the request was dropped without a word.
         """
 
         if focus is None:
@@ -905,22 +907,9 @@ class ConsolePresenter:
             overview = getattr(host, "show_facet_overview", None)
             return overview() if callable(overview) else None
         focus_facet = getattr(host, "focus_facet", None)
-        front = getattr(host, "front", None)
-        interaction = getattr(front, "interaction", None)
-        if not callable(focus_facet) or interaction is None:
+        if not callable(focus_facet):
             return None
-        axes = next(
-            (
-                item
-                for item in interaction.axes
-                if getattr(item, "role", "") == "facet_cell"
-                and getattr(item, "cell_index", None) == int(focus)
-            ),
-            None,
-        )
-        if axes is None:
-            return None
-        return focus_facet(front.identity, axes)
+        return focus_facet(int(focus))
 
     @staticmethod
     def _host_focus(host: object) -> object:

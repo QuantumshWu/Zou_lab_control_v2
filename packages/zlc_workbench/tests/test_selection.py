@@ -566,13 +566,8 @@ def _gesture_area(host, front, transform, *, span=(0.25, 0.25, 0.75, 0.75)) -> N
 def _focused_cell_front(host, cell_index: int):
     """Focus one facet cell the way a double-click does, on the real front."""
 
-    front = host.wait_for_front(20.0)
-    target = next(
-        item
-        for item in front.interaction.axes
-        if item.role == "facet_cell" and item.cell_index == cell_index
-    )
-    host.focus_facet(front.identity, target).result(timeout=15)
+    host.wait_for_front(20.0)
+    host.focus_facet(cell_index).result(timeout=15)
     front = host.wait_for_front(20.0)
     transform = next(
         item for item in front.interaction.axes if item.role == "facet_cell"
