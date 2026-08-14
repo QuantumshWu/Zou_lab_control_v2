@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ from zlc_data import (
     OwnedSnapshot,
 )
 from zlc_data.figure_archive import read_archive, read_dataset
-from zlc_durable import unique_path
+from zlc_durable import unique_path, write_readable_json
 from zlc_workbench.panel_save import save_panel_data, save_panel_image
 from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_pulse import PulseSequence, convert_time
@@ -46,6 +46,7 @@ from .calibration import (
     TrapCalibration,
     calibrate,
 )
+from .summary import readout_summary, summary_lines
 from .outputs import (
     CAPTURE_PREVIEW_DECLARATION,
     cycle_snapshot,
@@ -465,6 +466,10 @@ class CalibrationRunResult:
     short: tuple[CameraFrameRecord, ...]
     pulse: Mapping[str, object]
     run_record: Mapping[str, object]
+    #: The headline numbers -- fidelity, the two error rates, separation --
+    #: model by model.  Carried here so the caller that saves them and the
+    #: caller that prints them are looking at one measurement.
+    summary: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.calibration, TrapCalibration):
@@ -479,7 +484,25 @@ class CalibrationRunResult:
         object.__setattr__(self, "run_record", dict(self.run_record))
 
 
-def _save_report_images(result: CalibrationRunResult) -> Path:
+def _save_report(result: CalibrationRunResult) -> Path:
+    """Everything a calibration leaves for a person: the numbers and the pictures.
+
+    The numbers first.  A run that fails to draw -- a backend that cannot
+    open, a font that cannot load -- has still measured what it measured, and
+    what it measured is what an operator needs.
+    """
+
+    report_root = result.artifact_path.with_suffix("") / "report"
+    report_root.mkdir(parents=True)
+    write_readable_json(report_root / "summary.json", result.summary)
+    (report_root / "summary.txt").write_text(
+        "\n".join(summary_lines(result.summary)) + "\n", encoding="utf-8"
+    )
+    _save_report_images(result, report_root)
+    return report_root
+
+
+def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path:
     """Render the SiteMap and each readout model directly through zlc_plot."""
 
     from zlc_plot import (
@@ -496,8 +519,6 @@ def _save_report_images(result: CalibrationRunResult) -> Path:
 
     calibration = result.calibration
     site_map = calibration.site_map
-    report_root = result.artifact_path.with_suffix("") / "report"
-    report_root.mkdir(parents=True)
     generation = result.artifact_path.stem
     revision = len(result.capture.cycles)
 
@@ -1272,12 +1293,18 @@ class CalibrationTask:
                 capture.short,
                 pulse_facts,
                 run_record,
+                readout_summary(analysis),
             )
             if context is not None:
                 context.report_progress("Saving calibration report")
-            _save_report_images(result)
+            _save_report(result)
             self._result = result
             if context is not None:
+                # What it found, not just that it finished: the operator's
+                # first question is which model to read out with and how well
+                # it does, and the answer is measured by the time we are here.
+                for line in summary_lines(result.summary):
+                    context.report_progress(line)
                 context.report_progress(
                     "Calibration complete",
                     current=self.request.repeats,

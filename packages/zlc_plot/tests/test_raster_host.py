@@ -306,7 +306,9 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         assert all("Threshold" in label for _line_count, label, _font in details)
         assert all("L/R" in label for _line_count, label, _font in details)
         assert all("Fidelity" in label for _line_count, label, _font in details)
-        assert all(font == facet_font for _line_count, _label, font in details)
+        # Every number, and inside the cell: the size is whatever makes the
+        # widest line fit the room, never larger than the planned one.
+        assert all(font <= facet_font for _line_count, _label, font in details)
         for _line_count, label, _font in details:
             left_text, right_text = label.splitlines()[1].removeprefix("L/R ").split("/")
             assert float(left_text.removesuffix("%")) + float(

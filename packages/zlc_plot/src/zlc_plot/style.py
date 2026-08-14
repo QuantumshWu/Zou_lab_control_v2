@@ -304,7 +304,13 @@ class ArtistStyleConfig:
     curve: LineToken
     curve_marker_size_pt: float
     histogram_fill_alpha: float
+    #: The cut, drawn as something an operator can put a mouse on.
     threshold_line: LineToken
+    #: The cut, drawn as a mark on a finished picture.  A different job and
+    #: so a different weight: the grab target is twice the width of the fit
+    #: curves it sits between, which on a facet cell an inch wide covered a
+    #: fifth of the distribution it cuts.
+    classifier_threshold_line: LineToken
     curve_fit_line: LineToken
     bimodal_fit_lines: tuple[LineToken, LineToken, LineToken]
     fit_failure_color: str
@@ -345,6 +351,8 @@ class ArtistStyleConfig:
             raise TypeError("curve must be LineToken")
         if not isinstance(self.threshold_line, LineToken):
             raise TypeError("threshold_line must be LineToken")
+        if not isinstance(self.classifier_threshold_line, LineToken):
+            raise TypeError("classifier_threshold_line must be LineToken")
         if not isinstance(self.curve_fit_line, LineToken):
             raise TypeError("curve_fit_line must be LineToken")
         lines = tuple(self.bimodal_fit_lines)
@@ -790,6 +798,9 @@ def build_plot_style() -> PlotStyleConfig:
         curve_marker_size_pt=2.0,
         histogram_fill_alpha=0.4,
         threshold_line=LineToken(palette.threshold, 1.9, alpha=0.95, zorder=5.0),
+        classifier_threshold_line=LineToken(
+            palette.threshold, 0.9, alpha=0.95, zorder=5.0
+        ),
         curve_fit_line=LineToken(palette.fit_right, 2.0, alpha=0.5, zorder=5.0),
         bimodal_fit_lines=(
             LineToken(palette.fit_left, 1.0, alpha=0.8),

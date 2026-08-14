@@ -4176,6 +4176,49 @@ class MatplotlibRenderer:
             return
         self._update_single_fit(overlays[0] if overlays else None, model_id)
 
+    def _annotation_size_that_fits(self, axis: Any, content: str) -> float:
+        """The size this annotation must shrink to in order to stay inside.
+
+        The classifier writes three numbers into the corner of the surface it
+        annotates.  In a panel they fit; in a facet cell they are fifteen
+        characters against an inch, and at a fixed size they were drawn over
+        the distribution they describe and then clipped by the cell's own
+        edge -- "hreshold 323.2" beside a histogram it hid.  Shortening the
+        text loses numbers an operator asked for; the room is what has to be
+        respected, so the text is measured against it, exactly as a cell
+        title is.
+        """
+
+        from .layout import _text_width_pt
+
+        size = (
+            self.style.fonts.facet_fit_annotation_pt
+            if isinstance(self.spec, FacetGridPlot)
+            else self.style.fonts.annotation_pt
+        )
+        if not content:
+            return size
+        figure = getattr(getattr(axis, "figure", None), "dpi", None)
+        if figure is None or float(figure) <= 0.0:
+            return size
+        inset = 2.0 * self.style.render.axes_text_inset_fraction
+        room = float(axis.bbox.width) / (float(figure) / 72.0) * (1.0 - inset)
+        families = self.style.fonts.sans_serif
+        widest = max(
+            _text_width_pt(line, families, size) for line in content.splitlines()
+        )
+        if widest <= room or widest <= 0.0:
+            return size
+        return max(size * room / widest, self.style.fonts.facet_title_min_pt)
+
+    def _facet_mark_scale(self) -> float:
+        """How much of its full weight a mark keeps inside a facet cell."""
+
+        typography = self.plan.facet_typography
+        if not isinstance(self.spec, FacetGridPlot) or typography is None:
+            return 1.0
+        return float(typography.scale)
+
     def _update_classifier(
         self,
         overlays: tuple[FitOverlay, ...],
@@ -4219,7 +4262,7 @@ class MatplotlibRenderer:
                     (),
                     (),
                     clip_on=True,
-                    **self.style.artists.threshold_line.kwargs(),
+                    **self.style.artists.classifier_threshold_line.kwargs(),
                 )[0]
                 label = axis.text(
                     1.0 - self.style.render.axes_text_inset_fraction,
@@ -4244,12 +4287,21 @@ class MatplotlibRenderer:
                 self._set_fit_line(line, polyline)
             y_low, y_high = axis.get_ylim()
             threshold_line.set_data((threshold, threshold), (y_low, y_high))
+            # A cell's marks are drawn at the cell's scale, like its text.
+            # The threshold's own weight is a GRAB target -- wide enough to
+            # put a mouse on -- and nobody drags a cell of a 35-cell report:
+            # at full weight it covered a fifth of the distribution it cuts.
+            threshold_line.set_linewidth(
+                self.style.artists.classifier_threshold_line.linewidth
+                * self._facet_mark_scale()
+            )
             interactive = (
                 not isinstance(self.spec, FacetGridPlot)
                 or self._facet_focus_index == index
             )
             threshold_line.set_visible(not interactive)
             label.set_text(content)
+            label.set_fontsize(self._annotation_size_that_fits(axis, content))
             label.set_visible(not interactive and bool(content))
 
     def _rgba_buffer(self) -> np.ndarray:
