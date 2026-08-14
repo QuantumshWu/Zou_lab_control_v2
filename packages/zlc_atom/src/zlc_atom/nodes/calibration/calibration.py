@@ -860,11 +860,9 @@ def _background_scatter(
     # only costs background pixels there are plenty of.
     sources = finite >= median + 3.0 * provisional
     if sources.any():
-        # Dilated by the BAND-PASS's reach, not by the spot's.  A source in a
+        # Dilated by the BAND-PASS's reach, not by the spot's: a source in a
         # band-passed picture is a peak with a dark ring around it, and the
-        # ring is as fixed as the peak: left in the sample it inflated the
-        # scatter to the per-frame noise itself, so a trap that averaging had
-        # lifted to sixteen sigma measured under two and was refused.
+        # ring is as fixed as the peak.
         sources = ndimage.binary_dilation(
             sources, structure=np.ones((int(exclusion), int(exclusion)), dtype=bool)
         )
@@ -872,11 +870,9 @@ def _background_scatter(
     if background.size < max(16, finite.size // 20):
         background = finite.reshape(-1)
     level = float(np.median(background))
-    # The LOWER half of what is left.  Masking the sources truncates the upper
+    # The LOWER half of what is left: masking the sources truncates the upper
     # tail, and a two-sided spread of a truncated sample understates the
-    # scatter -- which on pure background is enough to lift a noise peak over
-    # the cut and invent a trap.  The lower half is untouched by sources and
-    # by the masking alike.
+    # scatter.  The lower half is untouched by sources and by masking alike.
     scatter = 1.4826 * (level - float(np.quantile(background, 0.25)))
     return (
         level,
@@ -1236,17 +1232,10 @@ def _admission_thresholds(
     # single shots are unremarkable: N shots of a persistent signal add up as
     # N while their noise adds up as sqrt(N).
     average = total_response / float(shots)
-    # The average's noise, measured on the average ITSELF.  Photon noise over
-    # the root of the frame count is what a perfect sensor would leave, and it
-    # is not what is there: fixed pattern, a warm pixel, the residue of a
-    # background gradient all survive averaging UNCHANGED, so dividing by
-    # sqrt(N) understates the scatter by however many frames were taken.  At
-    # four hundred frames that put eleven patches of empty border above the
-    # cut on a real run -- circles drawn on nothing.
-    #
-    # The robust spread of the averaged picture measures what is actually
-    # there.  Traps occupy a small part of a field and sit above the median,
-    # so the median-to-quartile distance is background either way.
+    # The average's noise, measured on the average itself.  Photon noise over
+    # the root of the frame count is what a perfect sensor would leave; fixed
+    # pattern, warm pixels and background structure survive averaging
+    # unchanged, and they are what a real picture's scatter is made of.
     # A source's footprint in a band-passed picture is the background kernel's
     # reach, peak and dark ring together.  Every background estimate in this
     # function excludes that much, or it is measuring the sources.
@@ -1256,14 +1245,11 @@ def _admission_thresholds(
     )
     background = ~sources
 
-    # How often noise alone clears the per-frame cut -- COUNTED, where the
-    # sources are not, rather than read off the Gaussian tail of the sigma
-    # that was asked for.  A band-passed frame's pixels are correlated and its
-    # robust scatter understates the real spread, so that cut is crossed far
-    # more often than the arithmetic says: measured on pure background, often
-    # enough to put two "traps" on an empty picture.  The theoretical rate
-    # stays as a floor -- a quiet stretch of background must not license a
-    # lower bar than the physics does.
+    # How often noise alone clears the per-frame cut: counted where the
+    # sources are not.  A band-passed frame's pixels are correlated, so its
+    # robust scatter understates the real spread and the Gaussian tail of the
+    # requested sigma understates this rate; that tail stays as a floor, so a
+    # quiet stretch of background cannot license a lower bar than the physics.
     background_pixels = int(np.count_nonzero(background))
     observed_rate = (
         float(np.sum(hits[background])) / float(shots * background_pixels)
@@ -1285,14 +1271,11 @@ def _admission_thresholds(
         required = shots
 
     average_z = (average - average_baseline) / average_noise
-    # How high a place must stand in the average: the per-pixel Gaussian tail,
-    # for an image of that many pixels.  It is a floor and it is not the whole
-    # guarantee -- this map is BAND-PASSED, so its pixels are correlated and
-    # its local maxima come from a heavier distribution than any single pixel
-    # of it, and pure background does reach past this cut.  What refuses those
-    # is reproducibility across the run's two halves, below: one mechanism
-    # against false positives, not two stacked, because the second one was
-    # strict enough to cost real traps that the first admits correctly.
+    # How high a place must stand in the average: the per-pixel Gaussian tail
+    # for an image of this many pixels.  A floor rather than a guarantee --
+    # the map is band-passed, so its local maxima come from a heavier
+    # distribution than any single pixel of it.  False positives are refused
+    # by reproducibility across the run's two halves, below.
     average_cut = float(sqrt(2.0) * erfcinv(1.0 / pixels))
     return _Admission(
         shots,
@@ -1384,13 +1367,9 @@ def _candidate_peaks(
     )
     counted = local_maxima & (hits >= required)
     averaged = persistent & (average_z >= average_cut)
-    # A place is a trap only if BOTH halves of the run show it.  Every
-    # threshold before this one is a statement about a distribution -- a
-    # Gaussian tail, a binomial count -- and a band-passed, correlated,
-    # fixed-pattern-carrying picture keeps breaking those statements in the
-    # direction that invents traps.  Reproducibility assumes nothing: a trap
-    # is in the first half of the run and in the second, and a noise peak is a
-    # coincidence that does not repeat.
+    # A place is a trap only if BOTH halves of the run show it.  This is the
+    # one test that assumes nothing about a distribution: a trap is in the
+    # first half of the run and in the second; a coincidence is not.
     repeated = _seen_in_both_halves(
         half_hits,
         half_response,
@@ -1432,33 +1411,21 @@ def _place_candidates(
     for row, column in ranked:
         # Refined on the AVERAGE, whichever statistic admitted the place.
         # Loading scales a spot; it does not move it, so the map that uses
-        # every photon is the one that says where the trap is.  Conditional
-        # brightness -- the light on the shots where a pixel was lit -- looked
-        # like the loading-independent choice and is a biased picture of the
-        # SHAPE: a skirt pixel crosses the per-frame cut only on the shots
-        # where it happened to be brightest, so its conditional value is
-        # inflated by the very selection that produced it, and the fit is
-        # dragged towards whichever side of the spot has the thinner skirt.
-        # Measured on a real array, that pulled two sites 0.8 px off their own
-        # brightest pixel while the sites with symmetric skirts landed within
-        # 0.03 px.
-        # Starting from the average's OWN maximum.  Admission says a trap is
-        # here; where it is, is answered on one map from end to end.  The
-        # candidate's integer peak comes from whichever statistic admitted it,
-        # and a sighting count saturates -- its argmax can sit a pixel off the
-        # light -- so a fit windowed on that peak sees a lopsided, truncated
-        # spot and lands between the two.  Measured: two sites 0.8 px from
-        # their own brightest pixel.
+        # every photon is the one that says where the trap is.  (Conditional
+        # brightness -- the light on the shots where a pixel was lit -- is a
+        # biased picture of the shape: a skirt pixel is counted only on the
+        # shots where it happened to be brightest.)
+        # Starting from the average's OWN maximum: admission says a trap is
+        # here, and where it is is answered on one map from end to end.  A
+        # sighting count saturates, so its argmax can sit a pixel off the
+        # light, and a fit windowed there sees a lopsided, truncated spot.
         row, column = _brightest_within(average, int(row), int(column))
         centre = _refine_center_subpixel(
             average, float(column), float(row), half=refine_half
         )
-        # Refinement moves a centre by up to a pixel, so the margin the integer
-        # peak passed is not the margin the PUBLISHED centre keeps.  Checked
-        # only before refinement, an edge artefact drawn inward by its own
-        # skew came out at y=1.5 with a radius-3 box -- and the run died at the
-        # readout, with no report at all to say why.  What cannot be measured
-        # is not a site.
+        # Checked on the PUBLISHED centre: refinement moves it by up to a
+        # pixel, so the margin its integer peak passed is not the margin it
+        # keeps.  What cannot be measured is not a site.
         if measurement_radius and not box_fits(
             (float(centre[0]), float(centre[1])), int(measurement_radius), frame_shape
         ):
@@ -1495,40 +1462,33 @@ def detect_sites(
     detection_sigma: float = 4.0,
     measurement_radius: int = 0,
 ) -> SiteMap:
-    """Discover every resolvable site from how often it lights up.
+    """Find the traps in a run of frames, and say where each one is.
 
-    A site is not a place that is bright on average, and not a place that is
-    bright in a high quantile either: both of those are statements about how
-    OFTEN a trap is loaded as much as about whether a trap is there.  A
-    lattice does not load uniformly -- a corner of it loading a fifth as often
-    as the middle is ordinary -- so any single brightness cut over a run holds
-    either the well-loaded traps or the poorly-loaded ones, never both, and
-    the dim corner of the array simply never appeared.
+    A trap announces itself in two independent ways, and a lattice contains
+    both kinds at once, so the detector admits either:
 
-    What every trap shares, whatever its loading, is that a loaded shot is
-    unmistakable in the shot itself.  So each frame is thresholded on its own
-    noise, which turns it into a map of where an atom was seen, and those maps
-    are added up.  A place with a hundred sightings and a place with eight are
-    then the same kind of evidence, differing only in loading -- and eight is
-    a great many more than the noise of a run produces at one pixel.
+    * IN ONE SHOT.  A loaded shot is unmistakable against that frame's own
+      noise, so each frame becomes a map of where an atom was seen and the
+      maps are added up.  This is what finds a trap that loads rarely: a
+      hundred sightings and eight are the same evidence, differing only in
+      loading, and eight is far more than a run's noise puts at one pixel.
+    * IN THE AVERAGE.  A trap too dim for any single shot to clear the cut
+      leaves no sightings at all, however often it loads, and is still plain
+      in the average of the run.
 
-    That last number is not a guess: thresholding a frame at k sigma admits a
-    noise pixel with the Gaussian tail probability of k, so the count at a
-    background pixel is binomial with that rate, and the count that a whole
-    image of background will not reach follows from it.  ``detection_sigma``
-    sets k -- how sure a single sighting must be -- and the arithmetic below
-    converts that into how many sightings make a site.
+    Neither alone is enough: an average-only cut holds the well-loaded traps
+    and loses the rare ones; a sightings-only cut holds the bright ones and
+    loses the dim ones.
 
-    Counting sightings assumes a loaded shot IS unmistakable, and a trap dim
-    enough that its loaded shots land just under that cut leaves no sightings
-    at all -- however often it is loaded.  Such a trap is nonetheless obvious
-    in the AVERAGE of the run, which is where it was measured: half the shots
-    at three sigma is fifteen sigma once they are added up.  So a site is a
-    place that stands out in single shots OR in the average, two independent
-    admissions, each with the multiple-comparison threshold its own statistic
-    needs.  Neither alone is the detector: an average-only cut holds the
-    well-loaded traps and loses the rare ones, and a sightings-only cut holds
-    the bright ones and loses the dim ones.
+    Every threshold either admission uses is measured on this run's own
+    background rather than assumed from a distribution, and a place is
+    admitted only if BOTH interleaved halves of the run show it -- a trap is
+    in the first half and in the second, and a coincidence is not.
+
+    ``spot_sigma`` is the optics: how wide one trap's image is.
+    ``detection_sigma`` is how sure a single sighting must be.
+    ``measurement_radius`` is the box the readout will later ask for round
+    each site, which a published site must be able to carry.
     """
 
     stack = np.asarray(
@@ -1545,16 +1505,9 @@ def detect_sites(
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
     # The scale over which a spot is ONE peak: its full width at half
-    # maximum, 2.355 sigma, rounded up to an odd pixel count.  It replaces an
-    # authored `min_distance` of 3 px, a number with no relation to the optics
-    # that an operator had no way to choose.
-    #
-    # It is the ONLY length here.  Whether two peaks are two traps is not a
-    # distance question at all -- see the saddle test below -- and every
-    # attempt to answer it with one was wrong in both directions: too small
-    # and one spot is reported twice, too large and a dense lattice loses real
-    # sites (measured: 38 placed, 20 found, when the exclusion was a full
-    # width).
+    # maximum, 2.355 sigma, rounded up to an odd pixel count.  The only length
+    # in the detector -- whether two peaks are two traps is decided by the
+    # light between them, not by a distance.
     peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
     # How near in y two sites must be to be READ as one row of the array.
     # Ordering only: it decides the order site ids are handed out in, never
