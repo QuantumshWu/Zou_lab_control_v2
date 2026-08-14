@@ -118,6 +118,12 @@ class SmartOffsetLocator(ticker.Locator):
         self.step = 1
         self.n_array: list[int] = []
         self.ticks: list[float] = []
+        #: An axis too narrow for even one label prints none.  The side
+        #: distribution strip beside an image is thirty-four pixels wide and
+        #: its counts run into the thousands: three four-character labels
+        #: were drawn over each other, which reads as one wrong number.
+        #: Ticks still mark the scale; only the text goes.
+        self.mute = False
 
     def _unit(self, lower: float, upper: float) -> tuple[int, int]:
         """The finest (step, decade) whose labels this axis can carry.
@@ -349,6 +355,12 @@ class SmartOffsetLocator(ticker.Locator):
         self.C = float(Decimal(offset_int).scaleb(exponent))
         self.ticks = ticks
         self.n_array = indices
+        # One tick's worth of room, priced at the WIDEST label this layout
+        # would print: the question is whether the axis can carry a label at
+        # all, and the narrowest one answering yes proves nothing.
+        self.mute = bool(
+            ticks and not self._fits(ticks[:1], indices, step, label_decade)
+        )
         if vmin > vmax:
             self.n_array.reverse()
             self.ticks.reverse()
@@ -448,7 +460,7 @@ class SmartOffsetFormatter(ticker.Formatter):
             numeric = float(value)
         except (TypeError, ValueError):
             return ""
-        if not np.isfinite(numeric) or not self.locator.ticks:
+        if not np.isfinite(numeric) or not self.locator.ticks or self.locator.mute:
             return ""
         index = int(
             np.argmin([abs(numeric - tick) for tick in self.locator.ticks])

@@ -632,18 +632,56 @@ def _facet_typography(
     )
 
 
-def _split_image(data: NormalizedBox, split: ImageSplit) -> tuple[AxesPlan, ...]:
+def _split_image(
+    data: NormalizedBox,
+    split: ImageSplit,
+    *,
+    region_px: tuple[float, float] | None = None,
+    image_aspect: float | None = None,
+) -> tuple[AxesPlan, ...]:
+    """The image and its two strips, measured in units of the IMAGE's width.
+
+    An aspect-locked image does not fill the width it is given: its width is
+    set by the region's HEIGHT, and the two coincide only where the preset is
+    square.  Every width here used to be a fraction of the REGION, so on a
+    wide preset the image drew at the left, the strips sat at the far right,
+    and the surplus became a hole between them.
+
+    ``image_aspect`` is the drawn box's height over its width (1.0 for a
+    square image, ``None`` when nothing locks it).  Where it does not bind,
+    the unit IS the region's width and every box is exactly what it was --
+    the split's five ratios sum to one, so the colorbar still ends at the
+    region's right edge.  Where it binds, the leftover simply stays unused,
+    on the side ``style.image_anchor`` leaves free.
+    """
+
+    span = data.width * split.image
+    # Every other width is a ratio OF the image, not of the region -- and
+    # where the aspect does not bind, the image IS the region's share, so the
+    # unit stays the region's width and every box is arithmetically identical
+    # to what it was.
+    unit = data.width
+    if image_aspect is not None and region_px is not None:
+        width_px, height_px = (float(value) for value in region_px)
+        if width_px > 0.0 and height_px > 0.0 and float(image_aspect) > 0.0:
+            drawn_px = min(width_px * split.image, height_px / float(image_aspect))
+            drawn = data.width * (drawn_px / width_px)
+            if drawn < span:
+                span = drawn
+                unit = span / split.image
     cursor = data.left
-    image = NormalizedBox(cursor, data.top, cursor + data.width * split.image, data.bottom)
-    cursor = image.right + data.width * split.image_distribution_gap
+    image = NormalizedBox(cursor, data.top, cursor + span, data.bottom)
+    cursor = image.right + unit * split.image_distribution_gap
     distribution = NormalizedBox(
         cursor,
         data.top,
-        cursor + data.width * split.distribution,
+        cursor + unit * split.distribution,
         data.bottom,
     )
-    cursor = distribution.right + data.width * split.distribution_colorbar_gap
-    colorbar = NormalizedBox(cursor, data.top, data.right, data.bottom)
+    cursor = distribution.right + unit * split.distribution_colorbar_gap
+    colorbar = NormalizedBox(
+        cursor, data.top, cursor + unit * split.colorbar, data.bottom
+    )
     return (
         AxesPlan("image", image),
         AxesPlan("distribution", distribution),
@@ -716,6 +754,7 @@ def resolve_surface(
     device_pixel_ratio: float = 1.0,
     export_scale: float | None = None,
     rolling_side_distribution: bool | None = None,
+    image_aspect: float | None = None,
     layout: PlotLayoutConfig,
     style: PlotStyleConfig,
 ) -> SurfacePlan:
@@ -740,6 +779,10 @@ def resolve_surface(
         raise ValueError(
             "rolling_side_distribution is accepted only for Rolling surfaces"
         )
+    if image_aspect is not None:
+        if canonical_kind != "image":
+            raise ValueError("image_aspect is accepted only for Image surfaces")
+        image_aspect = _finite(image_aspect, "image_aspect", positive=True)
     if canonical_kind == "facet_grid":
         if not isinstance(facet_topology, FacetTopology):
             raise TypeError("FacetGrid requires facet_topology")
@@ -787,7 +830,12 @@ def resolve_surface(
     show_distribution = False
     facet_focus_axes = None
     if canonical_kind == "image":
-        axes = _split_image(data, layout.image_split)
+        axes = _split_image(
+            data,
+            layout.image_split,
+            region_px=(data_width, data_height),
+            image_aspect=image_aspect,
+        )
     elif canonical_kind == "rolling":
         assert rolling_side_distribution is not None
         show_distribution = rolling_side_distribution
@@ -834,8 +882,15 @@ def resolve_surface(
         )
         # A focused image cell is the standalone Image kind's surface: the
         # SAME _split_image split, applied over the overview's data region.
+        union = _facet_cells_union(axes)
         facet_focus_axes = _split_image(
-            _facet_cells_union(axes), layout.image_split
+            union,
+            layout.image_split,
+            region_px=(
+                union.width * figure_design_width,
+                union.height * figure_design_height,
+            ),
+            image_aspect=facet_topology.cell_aspect,
         )
     else:
         axes = (AxesPlan("main", data),)

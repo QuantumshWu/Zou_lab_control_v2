@@ -2341,9 +2341,12 @@ class MatplotlibRenderer:
             )
             axes.add_collection(collection)
             self._artists[key] = collection
+            # The locator and its formatter are one policy: replacing the
+            # formatter alone left this strip's ticks placed by the compact
+            # locator and LABELLED plainly, which is how a 34-pixel strip
+            # printed "200 400" over its own "0".
             apply_smart_ticks(axes, "x")
             if tick_profile == "image":
-                axes.xaxis.set_major_formatter(ScalarFormatter())
                 axes.tick_params(
                     axis="y", left=True, right=False, labelleft=False, labelright=False
                 )

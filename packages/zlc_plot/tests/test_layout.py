@@ -148,3 +148,53 @@ def test_the_side_panel_splits_are_the_reference_ratios() -> None:
     assert (rolling.history, rolling.gap, rolling.distribution) == (0.825, 0.025, 0.15)
     assert (image.image, image.distribution, image.colorbar) == (0.75, 0.10, 0.10)
     assert (image.image_distribution_gap, image.distribution_colorbar_gap) == (0.025, 0.025)
+
+
+def test_an_aspect_locked_image_keeps_its_strips_beside_it() -> None:
+    """A wide preset must not open a hole between the image and its rails.
+
+    Every width in the image split used to be a fraction of the REGION, but
+    an aspect-locked image's width is set by the region's HEIGHT: the two
+    coincide only where the preset is square, so on 2x4 the image drew at the
+    left, the strips sat at the far right, and the surplus became a gap.
+    """
+
+    def boxes(preset: str, aspect: float | None) -> dict[str, tuple[float, float]]:
+        plan = resolve_surface(
+            preset,
+            "image",
+            image_aspect=aspect,
+            layout=DEFAULTS.layout,
+            style=DEFAULTS.style,
+        )
+        width = plan.raster_size[0]
+        return {
+            axes.role: (axes.box.left * width, axes.box.right * width)
+            for axes in plan.axes
+        }
+
+    square = boxes("2x2", 1.0)
+    wide = boxes("2x4", 1.0)
+    # The same square image, and its strips in the same place beside it.
+    for role, edges in square.items():
+        assert wide[role] == pytest.approx(edges), role
+    # The surplus stays where the image anchor leaves it: on the right.
+    assert wide["colorbar"][1] < boxes("2x4", None)["colorbar"][1]
+
+    # An image nothing locks still fills the region it is given.
+    free = boxes("2x4", None)
+    assert free["image"][1] > square["image"][1]
+    gap = free["distribution"][0] - free["image"][1]
+    assert gap == pytest.approx(
+        (free["image"][1] - free["image"][0])
+        * DEFAULTS.layout.image_split.image_distribution_gap
+        / DEFAULTS.layout.image_split.image,
+        rel=1e-9,
+    )
+
+
+def test_the_image_aspect_belongs_to_image_surfaces_only() -> None:
+    with pytest.raises(ValueError, match="image_aspect"):
+        resolve_surface(
+            "2x2", "curve", image_aspect=1.0, layout=DEFAULTS.layout, style=DEFAULTS.style
+        )

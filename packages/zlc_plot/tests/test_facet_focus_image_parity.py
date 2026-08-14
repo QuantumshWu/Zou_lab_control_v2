@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
 from data_factory import (
     Axis,
@@ -162,8 +163,12 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         # 60x40 frame filled a 3:2 box in the facet and a square one alone --
         # the same picture in two shapes, and the overview slots were shaped
         # by a THIRD rule that agreed with neither.
-        assert tuple(focused.primary_axes.get_window_extent().bounds) == tuple(
-            alone.primary_axes.get_window_extent().bounds
+        # To the pixel, not to the last bit: the focused cell measures its
+        # box from the union of the overview's cells and the standalone from
+        # the data region, and those two arrive at the same rectangle by
+        # slightly different arithmetic.
+        assert tuple(focused.primary_axes.get_window_extent().bounds) == pytest.approx(
+            tuple(alone.primary_axes.get_window_extent().bounds), abs=1e-6
         )
         assert focused.primary_axes.get_xlim() == alone.primary_axes.get_xlim()
         assert focused.primary_axes.get_ylim() == alone.primary_axes.get_ylim()

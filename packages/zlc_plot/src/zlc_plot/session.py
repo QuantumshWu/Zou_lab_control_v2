@@ -1163,7 +1163,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             topology = FacetTopology(
                 cell_count=max(cell_count, 1),
                 cell_aspect=(
-                    self._facet_image_aspect(payload)
+                    self._drawn_image_aspect(payload)
                     if isinstance(semantic_spec(spec), ImagePlot)
                     else None
                 ),
@@ -1177,32 +1177,37 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             topology,
             device_pixel_ratio=self._device_pixel_ratio,
             rolling_side_distribution=side_distribution,
+            image_aspect=(
+                self._drawn_image_aspect(payload)
+                if isinstance(spec, ImagePlot)
+                else None
+            ),
             layout=self._defaults.layout,
             style=self._defaults.style,
         )
 
-    def _facet_image_aspect(self, payload: Any) -> float | None:
-        """Return the shape the renderer will actually DRAW an image cell.
+    def _drawn_image_aspect(self, payload: Any) -> float | None:
+        """Return the shape the renderer will actually DRAW an image at.
 
         ``_image_coordinate_aspect`` is the one rule: when the two axes
         measure the same physical dimension the renderer pads the shorter
-        span and the drawn box is square; when they do not it leaves
-        Matplotlib in ``auto`` and the cell fills whatever slot it is given
-        (``None`` here, which is what the layout reads as "no preference").
+        span and the drawn box is square (1.0 here); when they do not it
+        leaves Matplotlib in ``auto`` and the image fills whatever slot it is
+        given (``None``, which the layout reads as "no preference").
 
         Asking a different question -- the pixel counts -- shaped the
         overview slots for a ratio nothing draws, leaving dead space around
-        every cell.
+        every cell.  One payload-level answer serves both surfaces: a facet
+        of image cells asks it of a cell, a standalone image of itself.
         """
 
         cells = tuple(getattr(payload, "cells", ()))
-        cell_payload = getattr(cells[0], "payload", None) if cells else None
-        if cell_payload is None:
+        if cells:
+            payload = getattr(cells[0], "payload", None)
+        if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
             return 1.0
         return (
-            1.0
-            if _image_coordinate_aspect(cell_payload.x, cell_payload.y) is not None
-            else None
+            1.0 if _image_coordinate_aspect(payload.x, payload.y) is not None else None
         )
 
     def _update_renderer(
