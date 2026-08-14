@@ -68,6 +68,7 @@ from .contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
+from .units import stated_conversion
 
 
 _CAPTURE_STATUS_BUSY = 1
@@ -96,6 +97,13 @@ class DcamCameraConfig:
     timeout_seconds: float = 10.0
     sensor_mode: int | None = None
     trigger_global_exposure: int | None = None
+    #: What one count is worth in photoelectrons, and where zero of them
+    #: sits.  A sensor fact, from the datasheet, configured beside the ROI
+    #: and the exposure: the ORCA-Quest's ultra-quiet readout is 0.107
+    #: electrons per count over an offset of 200.  Both or neither, and
+    #: neither means this camera publishes counts and nothing else.
+    offset_counts: float | None = None
+    electrons_per_count: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -135,6 +143,11 @@ class DcamCameraConfig:
                 assert item is not None
                 normalized.append(item)
             object.__setattr__(self, "roi_xywh", tuple(normalized))
+        stated_conversion(
+            self.offset_counts,
+            self.electrons_per_count,
+            camera="qCMOS camera",
+        )
 
 
 class DcamCameraAdapter:
@@ -179,6 +192,14 @@ class DcamCameraAdapter:
     @property
     def timeout(self) -> float:
         return self._config.timeout_seconds
+
+    @property
+    def photoelectron_conversion(self) -> tuple[float, float] | None:
+        return stated_conversion(
+            self._config.offset_counts,
+            self._config.electrons_per_count,
+            camera="qCMOS camera",
+        )
 
     def _require_device(self) -> object:
         if self._device is None or not self._open:
@@ -402,7 +423,7 @@ class DcamCameraAdapter:
             raise RuntimeError(
                 "qCMOS image geometry differs from ROI/binning readback"
             )
-        conversion = self._conversion_on_owner()
+        conversion = self.photoelectron_conversion
         return CameraWorkingPoint(
             acquisition_mode="EXTERNAL_TRIGGERED",
             frame_shape_yx=frame_shape_yx,
@@ -424,28 +445,6 @@ class DcamCameraAdapter:
             offset_counts=None if conversion is None else conversion[0],
             electrons_per_count=None if conversion is None else conversion[1],
         )
-
-    def _conversion_on_owner(self) -> tuple[float, float] | None:
-        """What one count is worth here, as the camera itself states it.
-
-        Read, never assumed: a qCMOS reports its conversion factor and its
-        offset, and a camera that does not implement those properties is one
-        whose counts nobody may turn into photoelectrons.
-        """
-
-        device = self._require_device()
-        try:
-            offset = float(device.get_property(DcamProperty.CONVERSIONFACTOR_OFFSET))
-            coefficient = float(
-                device.get_property(DcamProperty.CONVERSIONFACTOR_COEFF)
-            )
-        except Exception:
-            return None
-        if not math.isfinite(offset) or not math.isfinite(coefficient):
-            return None
-        if coefficient <= 0.0:
-            return None
-        return (offset, coefficient)
 
     def working_point(self) -> CameraWorkingPoint:
         return self._lane.call(self._read_working_point_on_owner)

@@ -274,7 +274,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
             "roi_xywh": None,
             "repeat": 1,
             "frames_per_cycle": windows,
-            "photoelectrons": False,
+            "frame_units": "counts",
         }
         assert record["named_devices"] == {"camera": "camera"}
         actual = record["device_snapshots"]["camera"]

@@ -13,7 +13,8 @@ and saves a string where the device expected a number.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
@@ -62,18 +63,31 @@ def project_logic_schema(
     descriptor: object,
     *,
     workspace_root: str,
+    field_choices: Mapping[str, Sequence[object]] | None = None,
 ) -> FormSpec:
-    """Project a logic schema, rooting resource pickers in the workspace."""
+    """Project a logic schema, rooting resource pickers in the workspace.
+
+    ``field_choices`` replaces what a field OFFERS with what the devices this
+    draft has bound actually allow -- the same answer Start admission was
+    decided from, so the operator reads the reason in the option rather than
+    discovering it from a refusal.
+    """
 
     schema = getattr(descriptor, "authoring_schema", None)
     if not isinstance(schema, AuthoringSchema):
         raise TypeError("project_logic_schema needs a logic descriptor")
+    resolved = dict(field_choices or {})
+    unknown = set(resolved) - set(schema.field_names)
+    if unknown:
+        raise ValueError(f"resolved choices name no such field: {sorted(unknown)!r}")
     resources = {
         str(spec.field_name): spec
         for spec in getattr(descriptor, "workspace_resources", ())
     }
     fields: list[FormFieldProps] = []
     for field in schema.fields:
+        if field.name in resolved:
+            field = replace(field, choices=tuple(resolved[field.name]))
         if field.value_type == "folder":
             # A folder is chosen from the workspace, so it OPENS there and is
             # pre-filled with the declared place rather than with nothing: an

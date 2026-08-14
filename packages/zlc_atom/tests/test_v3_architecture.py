@@ -72,6 +72,10 @@ class _RecordingCamera:
         self.events.append(("timeout", None))
         return float(self.camera.timeout)  # type: ignore[attr-defined]
 
+    @property
+    def photoelectron_conversion(self):
+        return self.camera.photoelectron_conversion  # type: ignore[attr-defined]
+
     def working_point(self):
         self.events.append(("working_point", None))
         return self.camera.working_point()  # type: ignore[attr-defined]
@@ -565,9 +569,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "frame_source",
             "saved_frames_path",
             "save_frames",
-            # And in which unit the camera is read: the conversion is the
-            # camera's own, so the choice is a run's, not the analysis's.
-            "photoelectrons",
+            # And in which unit the camera is read: the conversion is
+            # configured on the camera, so the choice is a run's, not the
+            # analysis's.
+            "frame_units",
         )
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "repeats"

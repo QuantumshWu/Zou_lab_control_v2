@@ -997,3 +997,59 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
     ]
     assert resolved.path == selected.resolve()
     assert resolved.value == {"format": "probe.v1"}
+
+
+def test_the_unit_a_camera_can_publish_in_is_the_camera_s_answer(presenter) -> None:
+    """The combobox is what the bound device says, and Start obeys it.
+
+    Which units exist is the node's vocabulary; which of them this run may
+    take is a fact about the camera bound to it, and it is READ -- from the
+    device's own configuration -- rather than assumed by the form.  The
+    option that cannot be taken is still shown, with the reason, because one
+    that vanishes when a device is chosen is a moving target.
+    """
+
+    from zlc_atom.devices.camera.units import FRAME_UNITS, FrameUnit
+
+    node_id = presenter.add_logic("camera_measurement")
+    projection = presenter.logic_editor_projection(node_id)
+    field = next(
+        item for item in projection["form_spec"].fields if item.key == FRAME_UNITS
+    )
+    assert tuple(choice.value for choice in field.choices) == (
+        FrameUnit.COUNTS.value,
+        FrameUnit.PHOTOELECTRONS.value,
+    )
+    # The virtual sensor states the world's own numbers, so they are what the
+    # operator reads in the option rather than a word they have to trust.
+    assert "e-/count" in field.choices[1].label
+    presenter.update_logic_draft(
+        node_id, values={FRAME_UNITS: FrameUnit.PHOTOELECTRONS.value}
+    )
+    assert presenter.logic_editor_projection(node_id)["can_start"] is True
+
+    # A bench whose camera has no conversion written down: the same draft is
+    # now unstartable, and says which device and what is missing.
+    camera = presenter.session.installation.device("camera")
+    camera.config = replace(
+        camera.config, offset_counts=None, electrons_per_count=None
+    )
+    presenter.update_logic_draft(
+        node_id, values={FRAME_UNITS: FrameUnit.PHOTOELECTRONS.value}
+    )
+    projection = presenter.logic_editor_projection(node_id)
+    field = next(
+        item for item in projection["form_spec"].fields if item.key == FRAME_UNITS
+    )
+    assert "no conversion" in field.choices[1].label
+    assert projection["can_start"] is False
+    assert any(
+        "states no photoelectron conversion" in issue
+        for issue in projection["issues"]
+    )
+    assert presenter.start_logic(node_id) is False
+
+    presenter.update_logic_draft(
+        node_id, values={FRAME_UNITS: FrameUnit.COUNTS.value}
+    )
+    assert presenter.logic_editor_projection(node_id)["can_start"] is True

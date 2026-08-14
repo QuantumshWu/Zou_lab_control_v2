@@ -28,6 +28,7 @@ from .contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
+from .units import stated_conversion
 
 
 __all__ = ["PylonCameraAdapter", "PylonCameraConfig"]
@@ -74,6 +75,12 @@ class PylonCameraConfig:
     trigger_source: str = "Line1"
     roi_xywh: tuple[int, int, int, int] | None = None
     timeout_seconds: float = 2.0
+    #: What one count is worth in photoelectrons, and where zero of them
+    #: sits, if this sensor's datasheet says.  Left unset it says nothing,
+    #: which is the honest answer for most machine-vision cameras: their
+    #: frames are published as the counts they are.
+    offset_counts: float | None = None
+    electrons_per_count: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.serial, str):
@@ -101,6 +108,11 @@ class PylonCameraConfig:
         object.__setattr__(self, "gain_db", gain_db)
         object.__setattr__(self, "timeout_seconds", timeout)
         object.__setattr__(self, "roi_xywh", _roi_request(self.roi_xywh))
+        stated_conversion(
+            self.offset_counts,
+            self.electrons_per_count,
+            camera="pylon camera",
+        )
 
 
 class PylonCameraAdapter:
@@ -400,6 +412,14 @@ class PylonCameraAdapter:
     def timeout(self) -> float:
         return float(self.config.timeout_seconds)
 
+    @property
+    def photoelectron_conversion(self) -> tuple[float, float] | None:
+        return stated_conversion(
+            self.config.offset_counts,
+            self.config.electrons_per_count,
+            camera="pylon camera",
+        )
+
     def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry."""
 
@@ -468,6 +488,7 @@ class PylonCameraAdapter:
         ):
             raise RuntimeError("pylon trigger source changed outside the adapter")
         exposure = float(camera.ExposureTime.GetValue()) / 1e6
+        conversion = self.photoelectron_conversion
         return CameraWorkingPoint(
             acquisition_mode=(
                 CameraAcquisitionMode.FREE_RUNNING
@@ -500,6 +521,8 @@ class PylonCameraAdapter:
                     "grab=OneByOne"
                 )
             ),
+            offset_counts=None if conversion is None else conversion[0],
+            electrons_per_count=None if conversion is None else conversion[1],
         )
 
     def arm(

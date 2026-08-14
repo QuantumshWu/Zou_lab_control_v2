@@ -183,6 +183,8 @@ def _config(*, roi=(4, 4, 8, 8)) -> DcamCameraConfig:
     return DcamCameraConfig(
         exposure_seconds=0.01,
         roi_xywh=roi,
+        offset_counts=200.0,
+        electrons_per_count=0.107,
     )
 
 
@@ -196,6 +198,12 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
         assert point.sensor_shape_yx == (12, 16)
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (8, 8)
+        # What one count is worth comes from the configuration, not from a
+        # property read: a form has to be able to offer the unit before any
+        # camera is open, and not every model implements those properties.
+        assert adapter.photoelectron_conversion == (200.0, 0.107)
+        assert point.offset_counts == 200.0
+        assert point.electrons_per_count == 0.107
         # A region can only be placed and sized on the steps the sensor
         # declares, so it is snapped OUTWARDS to COVER what was asked for.
         # Rounded inwards, x 5..11 came back as 4..7 and the right of the

@@ -14,14 +14,23 @@ def _typed_equal(left: object, right: object) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class AuthoringChoice:
-    """One owner-declared value and the human label that explains it."""
+    """One owner-declared value and the human label that explains it.
+
+    ``unavailable_reason`` is why this option cannot be taken HERE -- on this
+    bench, with these devices bound -- and it is a reason rather than a
+    removal on purpose: an option that vanishes when a device is chosen is a
+    moving target, and an operator cannot see what a setting would offer
+    before choosing it.  It is shown, refused, and it says why.
+    """
 
     value: Any
     label: str
+    unavailable_reason: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, str) or not self.label.strip():
             raise ValueError("authoring choice label must be non-empty")
+        object.__setattr__(self, "unavailable_reason", str(self.unavailable_reason))
         try:
             hash(self.value)
         except TypeError as error:

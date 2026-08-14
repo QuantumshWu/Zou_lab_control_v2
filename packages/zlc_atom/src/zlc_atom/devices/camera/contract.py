@@ -59,10 +59,10 @@ class CameraWorkingPoint:
     readout_mode: str
     #: What one count is worth in photoelectrons, and where zero of them
     #: sits: photoelectrons = (count - offset_counts) * electrons_per_count.
-    #: The camera's own two numbers -- a qCMOS reports them, a virtual sensor
-    #: knows them exactly, a machine-vision camera states neither -- so
-    #: ``None`` means this sensor does not say, and nothing downstream may
-    #: invent it.  Both or neither.
+    #: The camera's own two numbers, as its configuration states them -- a
+    #: virtual sensor knows them exactly, a real one is told what its
+    #: datasheet says -- so ``None`` means this sensor does not say, and
+    #: nothing downstream may invent it.  Both or neither.
     offset_counts: float | None = None
     electrons_per_count: float | None = None
 
@@ -176,6 +176,13 @@ class CameraCaptureTerminalRecord:
 class CameraAdapter(Protocol):
     @property
     def timeout(self) -> float: ...
+
+    #: ``(offset_counts, electrons_per_count)`` or None when this sensor
+    #: states no conversion.  Answered from the device's own configuration,
+    #: so it can be asked of a camera that is not open -- which is what lets
+    #: a form offer the unit before anything has been armed.
+    @property
+    def photoelectron_conversion(self) -> tuple[float, float] | None: ...
 
     # A camera has a state: how long it integrates, and which part of the
     # sensor it reads.  The two are owned by different people -- the geometry

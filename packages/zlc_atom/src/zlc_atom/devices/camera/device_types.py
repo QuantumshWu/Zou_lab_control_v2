@@ -24,6 +24,28 @@ DCAM_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
         AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
+        # What one count is worth, from this sensor's datasheet: the
+        # ORCA-Quest's ultra-quiet readout is 0.107 electrons per count over
+        # an offset of 200, which is also what the virtual sensor applies
+        # going the other way.  It is authored rather than read back because
+        # it is a property of the SENSOR, not of the session, and a
+        # measurement has to be able to offer the unit before anything is
+        # open.  Cleared, this camera publishes counts and nothing else.
+        AuthoringField(
+            "offset_counts",
+            "float",
+            "Offset (counts)",
+            200.0,
+            required=False,
+        ),
+        AuthoringField(
+            "electrons_per_count",
+            "float",
+            "Electrons per count",
+            0.107,
+            required=False,
+            minimum=1e-12,
+        ),
     )
 )
 
@@ -61,6 +83,23 @@ PYLON_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
         AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
+        # Unset by default, which is the honest answer for most machine-vision
+        # sensors: no conversion stated, so its frames are the counts they are.
+        AuthoringField(
+            "offset_counts",
+            "float",
+            "Offset (counts)",
+            None,
+            required=False,
+        ),
+        AuthoringField(
+            "electrons_per_count",
+            "float",
+            "Electrons per count",
+            None,
+            required=False,
+            minimum=1e-12,
+        ),
     )
 )
 
@@ -116,6 +155,8 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
             gain_db=float(authored["gain_db"]),
             trigger_source=str(authored["trigger_source"]),
             roi_xywh=_roi_xywh(authored),
+            offset_counts=authored["offset_counts"],
+            electrons_per_count=authored["electrons_per_count"],
         ),
         camera=values.get("camera"),
     )
@@ -144,6 +185,8 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
             binning=1,
             roi_xywh=_roi_xywh(authored),
             device_index=int(authored["device_index"]),
+            offset_counts=authored["offset_counts"],
+            electrons_per_count=authored["electrons_per_count"],
         ),
         driver=driver,
     )

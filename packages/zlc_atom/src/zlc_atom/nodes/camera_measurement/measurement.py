@@ -32,6 +32,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
+from zlc_atom.devices.camera.units import FRAME_UNITS, FrameUnit
 from zlc_atom.data import cell_axis_id, snapshot_from_array
 
 
@@ -233,11 +234,11 @@ class CameraMeasurementRequest:
     roi_xywh: tuple[int, int, int, int] | None
     repeat: int
     frames_per_cycle: int
-    #: Publish photoelectrons instead of raw counts, using the conversion the
-    #: CAMERA states.  A camera that states none refuses the request rather
-    #: than inventing one; the numbers ride in the run record, so every later
-    #: reader knows which the frames are.
-    photoelectrons: bool = False
+    #: What the published numbers ARE: the sensor's counts, or photoelectrons
+    #: through the conversion the CAMERA's configuration states.  A camera
+    #: that states none refuses the second rather than inventing it; the unit
+    #: rides in the run record, so every later reader knows which it got.
+    frame_units: FrameUnit = FrameUnit.COUNTS
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
@@ -268,7 +269,7 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "roi_xywh", roi)
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
-        object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
+        object.__setattr__(self, "frame_units", FrameUnit(self.frame_units))
 
 
 class _CameraMonitorSlot:
@@ -713,7 +714,7 @@ class CameraMeasurementNode:
         numbers a physicist can read.
         """
 
-        if not self.request.photoelectrons:
+        if self.request.frame_units is not FrameUnit.PHOTOELECTRONS:
             return records
         point = self._actual_working_point
         assert point is not None and point.electrons_per_count is not None
@@ -730,7 +731,10 @@ class CameraMeasurementNode:
     def _freeze_working_point(self, point: CameraWorkingPoint) -> None:
         if not isinstance(point, CameraWorkingPoint):
             raise TypeError("camera working_point must return CameraWorkingPoint")
-        if self.request.photoelectrons and point.electrons_per_count is None:
+        if (
+            self.request.frame_units is FrameUnit.PHOTOELECTRONS
+            and point.electrons_per_count is None
+        ):
             raise ValueError(
                 f"camera {self.request.camera_key!r} states no photoelectron "
                 "conversion, so its counts cannot be published as electrons"
@@ -742,7 +746,7 @@ class CameraMeasurementNode:
                 "roi_xywh": self.request.roi_xywh,
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
-                "photoelectrons": self.request.photoelectrons,
+                FRAME_UNITS: self.request.frame_units.value,
             },
             "named_devices": {"camera": self.request.camera_key},
             "device_snapshots": {

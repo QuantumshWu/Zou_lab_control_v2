@@ -47,6 +47,11 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
         "roi_y",
         "roi_width",
         "roi_height",
+        # What one count is worth: a sensor fact the operator writes down
+        # once, beside the ROI, because a measurement has to be able to offer
+        # the unit before any camera is open.
+        "offset_counts",
+        "electrons_per_count",
     }
     assert _fields(PYLON_CAMERA_SCHEMA) == {
         "serial",
@@ -59,6 +64,8 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
         "roi_y",
         "roi_width",
         "roi_height",
+        "offset_counts",
+        "electrons_per_count",
     }
     with pytest.raises(ValueError, match="required.*serial"):
         PYLON_CAMERA_SCHEMA.project_values({})

@@ -3850,6 +3850,7 @@ class ConsolePresenter:
             "form_spec": project_logic_schema(
                 binding.descriptor,
                 workspace_root=str(self.session.workspace.root),
+                field_choices=finalization.field_choices,
             ),
             "form_values": form_values,
             "artifact_form_spec": project_artifact_inputs(

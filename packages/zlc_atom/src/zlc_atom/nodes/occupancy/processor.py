@@ -19,6 +19,7 @@ from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime import SignalValue
 
 from zlc_atom.data import snapshot_from_array
+from zlc_atom.devices.camera.units import FRAME_UNITS, FrameUnit
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
 
@@ -246,15 +247,16 @@ class OccupancyProcessor:
         trained = self.calibration.report.get("run_record")
         if not isinstance(trained, Mapping):
             return
-        wanted = bool(
-            (trained.get("request") or {}).get("photoelectrons", False)
+        wanted = FrameUnit(
+            (trained.get("request") or {}).get(FRAME_UNITS, FrameUnit.COUNTS)
         )
-        got = bool((record.get("parameters") or {}).get("photoelectrons", False))
-        if wanted != got:
-            names = {True: "photoelectrons", False: "counts"}
+        got = FrameUnit(
+            (record.get("parameters") or {}).get(FRAME_UNITS, FrameUnit.COUNTS)
+        )
+        if wanted is not got:
             raise ValueError(
-                f"these frames are in {names[got]} and the calibration was "
-                f"trained in {names[wanted]}; its thresholds do not apply"
+                f"these frames are in {got.value} and the calibration was "
+                f"trained in {wanted.value}; its thresholds do not apply"
             )
 
     @property

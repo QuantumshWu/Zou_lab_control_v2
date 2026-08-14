@@ -66,6 +66,10 @@ class LogicDraftFinalization:
     artifact_paths: Mapping[str, str]
     artifacts: Mapping[str, object]
     resources: Mapping[str, object]
+    #: Settings whose legal answers came from the bound devices rather than
+    #: from the schema, as this draft's devices answer them.  The form shows
+    #: these; the issues above are what happens when one is not takeable.
+    field_choices: Mapping[str, tuple[Any, ...]]
     issues: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -76,6 +80,7 @@ class LogicDraftFinalization:
             "artifact_paths",
             "artifacts",
             "resources",
+            "field_choices",
         ):
             object.__setattr__(
                 self,
@@ -233,10 +238,12 @@ def finalize_logic_draft(
     if not isinstance(draft, LogicDraft):
         raise TypeError("finalize_logic_draft needs LogicDraft")
     issues: list[str] = []
+    authored = True
     try:
         values = descriptor.authoring_schema.project_values(draft.values)
     except Exception as error:
         values = {}
+        authored = False
         issues.append(str(error))
 
     options = device_key_options(descriptor, installation=installation)
@@ -280,6 +287,48 @@ def finalize_logic_draft(
                 f"{descriptor.api_name} could not use {selected!r} as its "
                 f"{requirement.capability_token}: {error}"
             )
+
+    # What the bound devices allow, asked once the devices are known.  A
+    # setting whose options are a device fact cannot be checked against the
+    # schema alone: "publish photoelectrons" is a legal answer on a camera
+    # that states its conversion and no answer at all on one that does not,
+    # and an operator finds that out here rather than after Start.
+    field_choices: dict[str, tuple[Any, ...]] = {}
+    resolve_choices = getattr(descriptor, "resolve_field_choices", None)
+    if (
+        resolve_choices is not None
+        and authored
+        and len(devices) == len(declared_device_arguments)
+    ):
+        field_choices = {
+            str(name): tuple(offered)
+            for name, offered in dict(resolve_choices(devices)).items()
+        }
+        unknown_fields = set(field_choices) - set(
+            descriptor.authoring_schema.field_names
+        )
+        if unknown_fields:
+            raise ValueError(
+                f"{descriptor.api_name} resolves choices for undeclared fields "
+                f"{sorted(unknown_fields)!r}"
+            )
+        for name, offered in field_choices.items():
+            chosen = values.get(name)
+            taken = next(
+                (
+                    choice
+                    for choice in offered
+                    if type(choice.value) is type(chosen) and choice.value == chosen
+                ),
+                None,
+            )
+            if taken is None:
+                issues.append(
+                    f"{name!r} must be one of "
+                    f"{[choice.value for choice in offered]!r}"
+                )
+            elif taken.unavailable_reason:
+                issues.append(taken.unavailable_reason)
 
     wants_source = dataset_inputs(descriptor)
     source = str(draft.source_signal).strip()
@@ -370,6 +419,7 @@ def finalize_logic_draft(
         artifact_paths,
         artifacts,
         resources,
+        field_choices,
         tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
     )
 

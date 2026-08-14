@@ -16,6 +16,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
+from zlc_atom.devices.camera.units import stated_conversion
 from .world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
 
 
@@ -91,6 +92,14 @@ class VirtualCamera:
     @property
     def frame_dtype(self) -> np.dtype:
         return self._frame_dtype
+
+    @property
+    def photoelectron_conversion(self) -> tuple[float, float] | None:
+        return stated_conversion(
+            self.config.offset_counts,
+            self.config.electrons_per_count,
+            camera="virtual camera",
+        )
 
     def working_point(self) -> CameraWorkingPoint:
         with self._condition:
