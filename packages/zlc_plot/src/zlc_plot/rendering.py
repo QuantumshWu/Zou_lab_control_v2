@@ -2328,7 +2328,6 @@ class MatplotlibRenderer:
         tick_profile: str,
     ) -> None:
         from matplotlib.collections import PolyCollection
-        from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
         policy = self.style.render
         collection = self._artists.get(key)
@@ -2870,7 +2869,6 @@ class MatplotlibRenderer:
         axes[selected_index].set_position(bounds)
 
     def _update_facets(self, payload: Any, state: DisplayState) -> None:
-        from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
         cells = tuple(getattr(payload, "cells", ()))
         axes = self._axes.get("facet_cell", [])
