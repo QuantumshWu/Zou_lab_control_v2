@@ -646,6 +646,9 @@ until(lambda: all(
 assert {path.name for path in report_root.iterdir()} == {
     'site_map.png', 'fidelity.png', 'box.png', 'psf.png',
     'uniform_psf.png', 'psf_kernels.png',
+    # The report holds the numbers as well as the pictures: which model
+    # won, at what fidelity, and how the two errors split.
+    'summary.json', 'summary.txt',
 }
 
 first_artifact_path = artifact_path
