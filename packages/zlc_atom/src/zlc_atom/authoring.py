@@ -38,10 +38,26 @@ class AuthoringField:
     minimum: float | None = None
     maximum: float | None = None
     choices: tuple[AuthoringChoice, ...] = ()
+    #: ``(field name, values)``: this field is editable only while that field
+    #: holds one of those values.  It is still SHOWN -- an option that appears
+    #: and disappears as another is touched is a moving target, and an
+    #: operator cannot see what a setting would offer before choosing it.
+    enabled_when: tuple[str, tuple[Any, ...]] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
+        if self.enabled_when is not None:
+            controller, values = self.enabled_when
+            if not str(controller).strip():
+                raise ValueError("enabled_when needs the name of a field")
+            if not tuple(values):
+                raise ValueError("enabled_when needs at least one enabling value")
+            object.__setattr__(
+                self,
+                "enabled_when",
+                (str(controller), tuple(values)),
+            )
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             raise ValueError("authoring field minimum exceeds maximum")
         choices = tuple(self.choices)

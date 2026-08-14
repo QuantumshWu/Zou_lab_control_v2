@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,8 +15,10 @@ from zlc_data import (
     SPATIAL_Y,
     AxisId,
     AxisSpec,
+    OwnedSnapshot,
 )
-from zlc_durable import unique_path
+from zlc_data.figure_archive import figure_bytes, read_archive, read_dataset
+from zlc_durable import atomic_write_bytes, unique_path
 from zlc_pulse import PulseSequence, convert_time
 
 from zlc_atom.devices.camera.contract import (
@@ -44,10 +46,26 @@ from .calibration import (
 )
 from .outputs import (
     CAPTURE_PREVIEW_DECLARATION,
+    cycle_snapshot,
     CalibrationCapturePreviewSlot,
     _image_axis_specs,
     _snapshot,
 )
+
+
+#: Where a calibration's frames come from.  Taking them and reading them back
+#: are the same protocol either way: three frames a sample, the long ones
+#: either side of the short one.  What differs is only whether the camera is
+#: asked -- so a folder of saved samples can be calibrated again, with other
+#: detection settings, without holding the bench.
+FRAMES_FROM_CAMERA = "new"
+FRAMES_FROM_FOLDER = "saved"
+_FRAME_SOURCES = frozenset({FRAMES_FROM_CAMERA, FRAMES_FROM_FOLDER})
+
+#: What one saved sample is called, and what it is: the Panel Edit archive --
+#: the picture and the numbers behind it, in the one format the figure viewer
+#: opens.
+SAVED_SAMPLE_STEM = "sample"
 
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
@@ -111,6 +129,12 @@ class CalibrationRequest:
     psf_padding: int
     detection_spot_sigma: float
     detection_sigma: float
+    #: Whether every acquired sample is written to disk as it arrives.
+    save_frames: bool = False
+    #: Where the frames come from: the camera, or a folder of saved samples.
+    frame_source: str = FRAMES_FROM_CAMERA
+    #: That folder, when they come from one.
+    saved_frames_path: str = ""
 
     def __post_init__(self) -> None:
         camera_key = _non_empty_key(self.camera_key, "camera_key")
@@ -165,6 +189,17 @@ class CalibrationRequest:
             "detection_spot_sigma",
         )
         detection_sigma = _positive_float(self.detection_sigma, "detection_sigma")
+        frame_source = str(self.frame_source).strip().lower()
+        if frame_source not in _FRAME_SOURCES:
+            raise ValueError(
+                "frame_source must be "
+                + " or ".join(repr(value) for value in sorted(_FRAME_SOURCES))
+            )
+        saved_frames_path = str(self.saved_frames_path).strip()
+        if frame_source == FRAMES_FROM_FOLDER and not saved_frames_path:
+            raise ValueError(
+                "calibrating from saved frames needs the folder they were saved in"
+            )
         object.__setattr__(self, "camera_key", camera_key)
         object.__setattr__(self, "sequencer_key", sequencer_key)
         object.__setattr__(self, "pulse_template", pulse_template)
@@ -181,6 +216,9 @@ class CalibrationRequest:
         object.__setattr__(self, "psf_padding", psf_padding)
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
         object.__setattr__(self, "detection_sigma", detection_sigma)
+        object.__setattr__(self, "save_frames", bool(self.save_frames))
+        object.__setattr__(self, "frame_source", frame_source)
+        object.__setattr__(self, "saved_frames_path", saved_frames_path)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -201,6 +239,9 @@ class CalibrationRequest:
             "psf_padding": self.psf_padding,
             "detection_spot_sigma": self.detection_spot_sigma,
             "detection_sigma": self.detection_sigma,
+            "save_frames": self.save_frames,
+            "frame_source": self.frame_source,
+            "saved_frames_path": self.saved_frames_path,
         }
 
 
@@ -210,6 +251,155 @@ class CalibrationRequest:
 #: written back as a literal, and indexed again in two more places.
 REFERENCE_FRAME_INDICES = (0, 2)
 READOUT_FRAME_INDEX = 1
+
+
+class SampleWriter:
+    """Every acquired sample on disk, written as it arrives.
+
+    Not at the end.  A run that is cancelled, that loses the bench, or that
+    fails its analysis has still cost the atoms it cost, and the frames are
+    the only part of it that cannot be recomputed -- so sample k is on disk
+    before sample k+1 is asked for.
+
+    The DATA is written in the loop; the pictures are rendered after it.  A
+    matplotlib figure costs a few hundred milliseconds, which inside the read
+    loop is long enough for the camera's ring to overrun and lose a frame,
+    and a picture is derived from numbers that are already safe.
+    """
+
+    def __init__(
+        self,
+        folder: Path,
+        *,
+        working_point: CameraWorkingPoint,
+        run_record: Mapping[str, object],
+        generation: object,
+    ) -> None:
+        self.folder = Path(folder)
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self._point = working_point
+        self._run_record = dict(run_record)
+        self._generation = generation
+        self._written: list[tuple[int, OwnedSnapshot]] = []
+
+    def write(self, index: int, cycle: Sequence[CameraFrameRecord]) -> Path:
+        """Write one sample, and hold its dataset for the picture afterwards."""
+
+        snapshot = cycle_snapshot(
+            cycle,
+            frame_shape=self._point.frame_shape_yx,
+            dtype=self._point.dtype,
+            origin_yx=self._point.roi_origin_yx,
+            binning_yx=self._point.binning_yx,
+            generation=self._generation,
+            revision=int(index) + 1,
+        )
+        name = f"{SAVED_SAMPLE_STEM}_{int(index):04d}"
+        path = self.folder / f"{name}.npz"
+        atomic_write_bytes(
+            path,
+            figure_bytes(
+                name,
+                arrays={"data": snapshot},
+                # The same sections Panel Edit writes, so the same viewer
+                # opens these: what the panel would be, and the run this came
+                # out of -- which is where the exposure, the ROI and the
+                # binning are recorded, so nothing else has to be.
+                sections={
+                    "panel": {
+                        "dataset": "data",
+                        "state": {
+                            "signal": CAPTURE_PREVIEW_DECLARATION.name,
+                            "kind": "facet_grid",
+                            "cell_kind": "image",
+                            "title": f"calibration {name}",
+                        },
+                    },
+                    "run_chain": [self._run_record],
+                },
+            ),
+        )
+        self._written.append((int(index), snapshot))
+        return path
+
+    def render(self) -> int:
+        """Draw every written sample, once the camera is no longer waiting."""
+
+        from zlc_plot import AxisRef, ImagePlot, PlotLabels, facet_grid
+
+        for index, snapshot in self._written:
+            name = f"{SAVED_SAMPLE_STEM}_{int(index):04d}"
+            # The frame axis by the identity the dataset gave it, asked of the
+            # dataset: a literal here would be a second naming convention that
+            # only breaks when a sample is drawn.
+            frames = snapshot.block.schema.point_table.columns[0].coordinate_id
+            vertical, horizontal = snapshot.block.schema.cell_schema.data_axes
+            with facet_grid(
+                snapshot,
+                AxisRef.point(str(frames)),
+                ImagePlot(
+                    AxisRef.data(str(horizontal.axis_id)),
+                    AxisRef.data(str(vertical.axis_id)),
+                ),
+                labels=PlotLabels(title=f"calibration {name}"),
+                size="4x4",
+            ) as plot:
+                plot.save(self.folder / f"{name}.png")
+        return len(self._written)
+
+
+def read_saved_samples(
+    folder: str | Path,
+) -> tuple[
+    tuple[tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord], ...],
+    dict[str, object],
+]:
+    """Every sample saved in a folder, in the order they were taken.
+
+    Returns the cycles and the run record they were acquired under -- the same
+    record the run wrote, which is where the exposure and the crop are, so a
+    replay is calibrated against the geometry it was actually taken with.
+    """
+
+    directory = Path(folder).expanduser().resolve()
+    if not directory.is_dir():
+        raise ValueError(f"saved frames folder does not exist: {directory}")
+    paths = sorted(directory.glob(f"{SAVED_SAMPLE_STEM}_*.npz"))
+    if not paths:
+        raise ValueError(
+            f"{directory} holds no saved calibration samples "
+            f"({SAVED_SAMPLE_STEM}_*.npz)"
+        )
+    cycles: list[
+        tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord]
+    ] = []
+    run_record: dict[str, object] | None = None
+    for ordinal, path in enumerate(paths):
+        info, arrays = read_archive(path)
+        snapshot = read_dataset(info, arrays, "data")
+        values = np.asarray(snapshot.block.values)
+        if values.ndim != 4 or values.shape[0] != 1 or values.shape[1] != 3:
+            raise ValueError(
+                f"{path.name} does not hold one three-frame sample: "
+                f"its data is {values.shape}"
+            )
+        cycles.append(
+            (
+                CameraFrameRecord(values[0, 0], ordinal * 3),
+                CameraFrameRecord(values[0, 1], ordinal * 3 + 1),
+                CameraFrameRecord(values[0, 2], ordinal * 3 + 2),
+            )
+        )
+        if run_record is None:
+            chain = info.get("sections", {}).get("run_chain") or []
+            if not chain:
+                raise ValueError(
+                    f"{path.name} carries no run record, so the crop and "
+                    "exposure it was taken with are unknown"
+                )
+            run_record = dict(chain[0])
+    assert run_record is not None
+    return tuple(cycles), run_record
 
 
 @dataclass(frozen=True)
@@ -728,13 +918,16 @@ class CalibrationTask:
         *,
         context: object | None,
         pulse_facts: Mapping[str, object],
+        frames_folder: Path | None,
     ) -> tuple[
         CalibrationCapture,
         Mapping[str, object],
+        SampleWriter | None,
     ]:
         count = self.request.repeats * 3
         armed = False
         firing = False
+        writer: SampleWriter | None = None
         try:
             # One acquisition implementation for the whole project.  This task
             # says what it needs of it -- three frames a cycle, this many
@@ -819,6 +1012,19 @@ class CalibrationTask:
                     )
                 cycle = (records[0], records[1], records[2])
                 cycles.append(cycle)
+                if frames_folder is not None:
+                    if writer is None:
+                        writer = SampleWriter(
+                            frames_folder,
+                            working_point=actual,
+                            run_record=run_record,
+                            generation=(
+                                context.generation
+                                if context is not None
+                                else self.request.camera_key
+                            ),
+                        )
+                    writer.write(len(cycles) - 1, cycle)
                 if preview is not None:
                     preview.update(cycle)
                     context.report_progress(
@@ -840,6 +1046,7 @@ class CalibrationTask:
             return (
                 CalibrationCapture(tuple(cycles), terminal),
                 run_record,
+                writer,
             )
         except BaseException:
             if armed:
@@ -847,6 +1054,52 @@ class CalibrationTask:
             if firing:
                 self._safe()
             raise
+
+    def _replay_saved_frames(
+        self,
+    ) -> tuple[CalibrationCapture, dict[str, object], FrameContract]:
+        """Calibrate a folder of saved samples, with no bench involved.
+
+        The same protocol read back: three frames a sample, and the geometry
+        they were TAKEN with, which is recorded in the archive beside them.
+        Reading the crop off the current camera instead would place the sites
+        on the wrong pixels the moment an ROI had moved since -- and the point
+        of saving frames is that they can be calibrated again later, with
+        other detection settings, when the bench has moved on.
+        """
+
+        cycles, run_record = read_saved_samples(self.request.saved_frames_path)
+        saved_request = dict(run_record.get("request") or {})
+        camera_key = str(saved_request.get("camera_key") or self.request.camera_key)
+        devices = dict(run_record.get("actual_devices") or {})
+        camera = devices.get(camera_key)
+        if not isinstance(camera, Mapping):
+            raise ValueError(
+                f"the saved frames record no working point for camera "
+                f"{camera_key!r}, so the crop they were taken with is unknown"
+            )
+        frame_shape = tuple(int(value) for value in camera["frame_shape_yx"])
+        sensor_shape = camera.get("sensor_shape_yx")
+        roi = camera.get("roi_xywh")
+        contract = FrameContract(
+            (frame_shape[0], frame_shape[1]),
+            sensor_shape=(
+                None
+                if sensor_shape is None
+                else (int(sensor_shape[0]), int(sensor_shape[1]))
+            ),
+            roi_xywh=(
+                None
+                if roi is None
+                else tuple(int(value) for value in roi)  # type: ignore[arg-type]
+            ),
+            binning_yx=tuple(int(value) for value in camera["binning_yx"]),
+            exposure_seconds=float(camera["exposure_seconds"]),
+            camera_id=camera_key,
+            readout_mode=camera.get("readout_mode"),
+        )
+        terminal = CameraCaptureTerminalRecord(len(cycles) * 3, True, True, True)
+        return CalibrationCapture(cycles, terminal), dict(run_record), contract
 
     def _frame_contract(
         self,
@@ -909,19 +1162,48 @@ class CalibrationTask:
         self._actual_working_point = None
         self._result = None
         try:
-            pulse = self._resolve_pulse()
-            pulse_facts = self._pulse_facts(pulse)
-            capture, run_record = self._capture(
-                pulse,
-                context=context,
-                pulse_facts=pulse_facts,
+            # The run's own folder is named BEFORE anything is acquired, so the
+            # frames can be written into it as they arrive rather than after a
+            # result exists.  A run that never produces one still leaves every
+            # sample it paid for.
+            artifact_path = unique_path(
+                self.artifact_directory,
+                "calibration",
+                ".json",
             )
-            actual = self._actual_working_point
-            if not isinstance(actual, CameraWorkingPoint):
-                raise TypeError(
-                    "the camera measurement must report its working point"
+            writer: SampleWriter | None = None
+            if self.request.frame_source == FRAMES_FROM_FOLDER:
+                if context is not None:
+                    context.report_progress("Reading saved frames")
+                capture, run_record, contract = self._replay_saved_frames()
+                pulse_facts: Mapping[str, object] = dict(
+                    run_record.get("pulse") or {}
                 )
-            contract = self._frame_contract(actual, pulse_facts)
+            else:
+                pulse = self._resolve_pulse()
+                pulse_facts = self._pulse_facts(pulse)
+                capture, run_record, writer = self._capture(
+                    pulse,
+                    context=context,
+                    pulse_facts=pulse_facts,
+                    frames_folder=(
+                        artifact_path.with_suffix("") / "frames"
+                        if self.request.save_frames
+                        else None
+                    ),
+                )
+                actual = self._actual_working_point
+                if not isinstance(actual, CameraWorkingPoint):
+                    raise TypeError(
+                        "the camera measurement must report its working point"
+                    )
+                contract = self._frame_contract(actual, pulse_facts)
+            if writer is not None:
+                # The pictures, now that the camera is no longer waiting on
+                # this thread for its next trigger.
+                if context is not None:
+                    context.report_progress("Drawing saved frames")
+                writer.render()
             if context is not None:
                 context.report_progress("Analysing calibration")
             analysis = self._analyse(capture, contract)
@@ -933,11 +1215,6 @@ class CalibrationTask:
                 analysis.calibration.default_model_kind,
                 analysis.calibration.frame_contract,
                 artifact_report,
-            )
-            artifact_path = unique_path(
-                self.artifact_directory,
-                "calibration",
-                ".json",
             )
             if context is not None:
                 context.report_progress("Saving calibration")

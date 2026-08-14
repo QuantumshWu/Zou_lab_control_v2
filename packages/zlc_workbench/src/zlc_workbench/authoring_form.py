@@ -40,6 +40,8 @@ _FIELD_KINDS = {
     #: because it is one fact -- a frame shape with a half-edited width is not a
     #: state worth being able to reach.
     "pair": "text",
+    #: A directory the operator picks, not a file: saved samples live in one.
+    "folder": "path",
 }
 
 
@@ -141,6 +143,8 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         description=(
             "two integers as y, x" if str(field.value_type) == "pair" else ""
         ),
+        path_mode="dir" if str(field.value_type) == "folder" else "file",
+        enabled_when=field.enabled_when,
     )
 
 

@@ -20,7 +20,12 @@ from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import ReadoutModelKind
 from .outputs import CAPTURE_PREVIEW_DECLARATION
 from .pulse import load_calibration_pulse_template
-from .task import CalibrationRequest, CalibrationTask
+from .task import (
+    FRAMES_FROM_CAMERA,
+    FRAMES_FROM_FOLDER,
+    CalibrationRequest,
+    CalibrationTask,
+)
 
 
 _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
@@ -163,6 +168,34 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             6.0,
             minimum=1e-9,
         ),
+        # Where the frames come from, and whether they are kept.  Detection
+        # settings are the part of a calibration an operator retunes most, and
+        # retuning them used to mean holding the bench for another few hundred
+        # samples; a folder of saved ones is calibrated again in seconds.
+        AuthoringField(
+            "frame_source",
+            "choice",
+            "Frames",
+            FRAMES_FROM_CAMERA,
+            choices=(
+                AuthoringChoice(FRAMES_FROM_CAMERA, "Acquire new frames"),
+                AuthoringChoice(FRAMES_FROM_FOLDER, "Calibrate saved frames"),
+            ),
+        ),
+        AuthoringField(
+            "saved_frames_path",
+            "folder",
+            "Saved frames folder",
+            "",
+            enabled_when=("frame_source", (FRAMES_FROM_FOLDER,)),
+        ),
+        AuthoringField(
+            "save_frames",
+            "bool",
+            "Save every sample",
+            False,
+            enabled_when=("frame_source", (FRAMES_FROM_CAMERA,)),
+        ),
     ),
     validator=_validate_calibration,
 )
@@ -210,6 +243,9 @@ def _build(
             psf_padding=int(authored["psf_padding"]),
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
             detection_sigma=float(authored["detection_sigma"]),
+            save_frames=bool(authored["save_frames"]),
+            frame_source=str(authored["frame_source"]),
+            saved_frames_path=str(authored["saved_frames_path"]),
         ),
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,

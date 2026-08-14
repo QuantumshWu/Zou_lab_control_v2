@@ -193,6 +193,44 @@ def _cycle_array(
     return images.astype(dtype, copy=False)
 
 
+def cycle_snapshot(
+    cycle: Sequence[CameraFrameRecord],
+    *,
+    frame_shape: tuple[int, int],
+    dtype: np.dtype,
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    generation: object,
+    revision: int,
+) -> OwnedSnapshot:
+    """One acquired cycle, as the dataset it is.
+
+    THE translation, for the live preview and for the frames written to disk
+    as they arrive.  Two of them would be two datasets of the same three
+    frames: the picture an operator watched and the picture they reopened
+    would agree about the numbers and disagree about the axes.
+
+    The three frames are POINT ROWS of one publication -- one moment of the
+    pulse each -- and the pixel axes carry the sensor pixels the crop covers,
+    so a reopened file is placed on the sensor exactly as the live panel was.
+    """
+
+    return _snapshot(
+        _cycle_array(cycle, frame_shape, dtype)[None, ...],
+        signal=CAPTURE_PREVIEW_DECLARATION.name,
+        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
+        axis_specs=_image_axis_specs(
+            frame_shape,
+            "sensor_pixel_xy",
+            origin_yx=origin_yx,
+            binning_yx=binning_yx,
+        ),
+        point_columns={READOUT_EVENT: _frame_point_column(_PREVIEW_FRAMES)},
+        generation=generation,
+        revision=revision,
+    )
+
+
 class CalibrationCapturePreviewSlot:
     """The latest complete camera image from one running Calibration."""
 
@@ -218,7 +256,7 @@ class CalibrationCapturePreviewSlot:
         self.dtype = np.dtype(dtype).newbyteorder("<")
         self.generation = generation
         self.run_record = dict(run_record)
-        self._latest: np.ndarray | None = None
+        self._latest_cycle: tuple[CameraFrameRecord, ...] | None = None
         self._written = 0
         self._revision = 0
         self._listener: Callable[[], None] | None = None
@@ -244,29 +282,23 @@ class CalibrationCapturePreviewSlot:
             raise RuntimeError("calibration preview slot is not attached")
         if self._written >= self.repeats:
             raise RuntimeError("calibration preview received too many cycles")
-        self._latest = np.array(
-            _cycle_array(cycle, self.frame_shape, self.dtype),
-            dtype=self.dtype,
-            copy=True,
-        )
+        # Validated here, where the cycle arrives, so a bad one is refused
+        # at the source rather than at the next reader.
+        _cycle_array(cycle, self.frame_shape, self.dtype)
+        self._latest_cycle = tuple(cycle)
         self._written += 1
         self._revision += 1
         self._listener()
 
     def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
-        if self._closed or self._latest is None:
+        if self._closed or self._latest_cycle is None:
             raise RuntimeError("calibration preview has no readable cycle")
-        snapshot = _snapshot(
-            self._latest[None, ...],
-            signal=CAPTURE_PREVIEW_DECLARATION.name,
-            roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-            axis_specs=_image_axis_specs(
-                self.frame_shape,
-                "sensor_pixel_xy",
-                origin_yx=self.origin_yx,
-                binning_yx=self.binning_yx,
-            ),
-            point_columns={READOUT_EVENT: _frame_point_column(_PREVIEW_FRAMES)},
+        snapshot = cycle_snapshot(
+            self._latest_cycle,
+            frame_shape=self.frame_shape,
+            dtype=self.dtype,
+            origin_yx=self.origin_yx,
+            binning_yx=self.binning_yx,
             generation=self.generation,
             revision=self._revision,
         )
@@ -289,4 +321,5 @@ class CalibrationCapturePreviewSlot:
 __all__ = [
     "CAPTURE_PREVIEW_DECLARATION",
     "CalibrationCapturePreviewSlot",
+    "cycle_snapshot",
 ]

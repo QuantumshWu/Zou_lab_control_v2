@@ -153,6 +153,10 @@ class FormFieldProps:
     base_dir: str = ""
     unavailable_reason: str = ""
     automatic: bool = False
+    #: ``(field key, values)``: editable only while that field holds one of
+    #: these.  Unlike ``unavailable_reason`` -- a standing fact about the
+    #: field -- this follows the form's own state as it is edited.
+    enabled_when: tuple[str, tuple[object, ...]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
@@ -173,6 +177,17 @@ class FormFieldProps:
             )
         if not isinstance(self.automatic, bool):
             raise TypeError(f"field {self.key!r} automatic must be bool")
+        if self.enabled_when is not None:
+            controller, values = self.enabled_when
+            if not str(controller).strip() or not tuple(values):
+                raise ValueError(
+                    f"field {self.key!r} enabled_when needs a field and its values"
+                )
+            if str(controller) == self.key:
+                raise ValueError(f"field {self.key!r} cannot enable itself")
+            object.__setattr__(
+                self, "enabled_when", (str(controller), tuple(values))
+            )
         if self.automatic:
             if self.required:
                 raise ValueError(

@@ -872,8 +872,32 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._auto_switches[field.key] = automatic
             self._layout.addWidget(row)
 
+        # A field that depends on another follows it while the form is being
+        # edited, so the operator SEES that a folder belongs to "saved frames"
+        # before choosing it -- rather than the row appearing out of nowhere
+        # once they have.
+        if any(field.enabled_when is not None for field in spec.fields):
+            self.changed.connect(self._follow_dependencies)
         if values is not None:
             self.populate(values)
+        self._follow_dependencies("")
+
+    def _follow_dependencies(self, _key: str) -> None:
+        for field in self._spec.fields:
+            if field.enabled_when is None:
+                continue
+            controller, enabling = field.enabled_when
+            widget = self._widgets.get(controller)
+            if widget is None:
+                raise KeyError(
+                    f"field {field.key!r} is enabled by {controller!r}, "
+                    "which this form does not declare"
+                )
+            current = self._handlers[controller].read(
+                self._fields[controller], widget
+            )
+            enabled = any(current == value for value in enabling)
+            self._widgets[field.key].setEnabled(enabled and not field.unavailable)
 
     def _make_row(self, field, widget, label_width):
         automatic = None
