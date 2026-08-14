@@ -849,6 +849,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._handlers: dict[str, FormWidgetHandler] = {}
         self._rows: dict[str, QtWidgets.QWidget] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
+        self._dependents: dict[str, list[str]] = {}
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -875,29 +876,41 @@ class FluentParameterForm(QtWidgets.QWidget):
         # A field that depends on another follows it while the form is being
         # edited, so the operator SEES that a folder belongs to "saved frames"
         # before choosing it -- rather than the row appearing out of nowhere
-        # once they have.
-        if any(field.enabled_when is not None for field in spec.fields):
-            self.changed.connect(self._follow_dependencies)
-        if values is not None:
-            self.populate(values)
-        self._follow_dependencies("")
-
-    def _follow_dependencies(self, _key: str) -> None:
-        for field in self._spec.fields:
+        # once they have.  Indexed BY the field that decides, so editing
+        # anything else costs nothing: a form of thirty rows would otherwise
+        # re-read every dependency on every keystroke.
+        for field in spec.fields:
             if field.enabled_when is None:
                 continue
-            controller, enabling = field.enabled_when
-            widget = self._widgets.get(controller)
-            if widget is None:
+            controller = field.enabled_when[0]
+            if controller not in self._widgets:
                 raise KeyError(
                     f"field {field.key!r} is enabled by {controller!r}, "
                     "which this form does not declare"
                 )
+            self._dependents.setdefault(controller, []).append(field.key)
+        if self._dependents:
+            # Through the form's own change signal rather than each widget's:
+            # a switch toggles, a combo changes index and a text box finishes
+            # editing, and normalising those three into one is what this
+            # signal is for.
+            self.changed.connect(self._controller_changed)
+        if values is not None:
+            self.populate(values)
+        for controller in self._dependents:
+            self._controller_changed(controller)
+
+    def _controller_changed(self, key: str) -> None:
+        for dependent in self._dependents.get(str(key), ()):
+            field = self._fields[dependent]
+            controller, enabling = field.enabled_when
             current = self._handlers[controller].read(
-                self._fields[controller], widget
+                self._fields[controller], self._widgets[controller]
             )
-            enabled = any(current == value for value in enabling)
-            self._widgets[field.key].setEnabled(enabled and not field.unavailable)
+            self._widgets[dependent].setEnabled(
+                any(current == value for value in enabling)
+                and not field.unavailable
+            )
 
     def _make_row(self, field, widget, label_width):
         automatic = None
