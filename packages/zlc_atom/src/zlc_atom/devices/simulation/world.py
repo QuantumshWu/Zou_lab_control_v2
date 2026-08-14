@@ -216,6 +216,29 @@ class SimulationWorld:
         self._site_psf_skew = _readonly(
             np.clip(0.45 + self.rng.normal(0.0, 0.08, site_count), 0.15, 0.75)
         )
+        height, width = self.geometry.image_shape_yx
+        yy, xx = np.mgrid[:height, :width]
+        site_psf_spots = []
+        for (x, y), gain, sigma_xy, angle, skew in zip(
+            self.geometry.site_centers_xy,
+            self._detector_efficiency,
+            self._site_psf_sigma_xy,
+            self._site_psf_angle_radians,
+            self._site_psf_skew,
+            strict=True,
+        ):
+            sigma_x, sigma_y = (float(value) for value in sigma_xy)
+            cosine, sine = np.cos(angle), np.sin(angle)
+            dx = (xx - x) * cosine + (yy - y) * sine
+            dy = -(xx - x) * sine + (yy - y) * cosine
+            core = np.exp(
+                -0.5 * ((dx / sigma_x) ** 2 + (dy / sigma_y) ** 2)
+            )
+            spot = np.clip(
+                core * (1.0 + float(skew) * dx / sigma_x), 0.0, None
+            )
+            site_psf_spots.append(spot)
+        self._site_psf_spots = _readonly(site_psf_spots)
         self._occupancy = np.zeros(site_count, dtype=bool)
         self._forced_occupancy: np.ndarray | None = None
         self._mot_population = 0.0
@@ -492,7 +515,6 @@ class SimulationWorld:
                 raise ValueError("probe_seconds must be finite and between zero and exposure")
             floor_e = (self.background_rate + self.dark_current_e_per_s) * exposure
             expected_electrons = np.full((height, width), floor_e, dtype=float)
-            yy, xx = np.mgrid[:height, :width]
             if occupancy is None:
                 shot_occupancy = np.array(self._occupancy, copy=True)
             else:
@@ -500,24 +522,15 @@ class SimulationWorld:
                 if shot_occupancy.size != len(self.geometry.site_centers_xy):
                     raise ValueError("occupancy size differs from simulation site map")
             base_area = self.atom_sigma_px**2
-            for occupied, (x, y), gain, sigma_xy, angle, skew in zip(
+            for occupied, gain, sigma_xy, spot in zip(
                 shot_occupancy,
-                self.geometry.site_centers_xy,
                 self._detector_efficiency,
                 self._site_psf_sigma_xy,
-                self._site_psf_angle_radians,
-                self._site_psf_skew,
+                self._site_psf_spots,
                 strict=True,
             ):
                 if occupied:
                     sigma_x, sigma_y = (float(value) for value in sigma_xy)
-                    cosine, sine = np.cos(angle), np.sin(angle)
-                    dx = (xx - x) * cosine + (yy - y) * sine
-                    dy = -(xx - x) * sine + (yy - y) * cosine
-                    core = np.exp(
-                        -0.5 * ((dx / sigma_x) ** 2 + (dy / sigma_y) ** 2)
-                    )
-                    spot = np.clip(core * (1.0 + float(skew) * dx / sigma_x), 0.0, None)
                     expected_electrons += (
                         self.atom_rate
                         * probe

@@ -708,8 +708,18 @@ print(zou_lab_control_v2.__file__)
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
-from zlc_workbench.device_use import DeviceClaim
 application = ensure_qt_app([])
+from zlc_workbench.device_use import DeviceClaim
+import threading
+import zlc_atom.devices.slm.editor as slm_editor
+solve_started = threading.Event()
+solve_release = threading.Event()
+original_slm_solve = slm_editor.solve_phase
+def blocked_slm_solve(_target, **_kwargs):
+    solve_started.set()
+    solve_release.wait(5.0)
+    raise InterruptedError('test released the SLM solver')
+slm_editor.solve_phase = blocked_slm_solve
 flow = tested_module.create_experiment_flow(
     workspace=r'%s', template='virtual',
 )
@@ -719,7 +729,11 @@ try:
     assert flow.console is None
     assert flow.device_controls == {}
     assert flow.devices.presenter.toggle_lifecycle() is True
-    application.processEvents()
+    initialized = QtCore.QDeadlineTimer(5000)
+    while flow.timer is None and not initialized.hasExpired():
+        application.processEvents()
+        QtTest.QTest.qWait(10)
+    assert flow.timer is not None
     assert flow.session is flow.devices.presenter.active_session
     assert flow.timer.interval() == flow.console_presenter.board.base_interval_ms == 100
     assert flow.console.is_visible()
@@ -782,7 +796,30 @@ try:
     assert 'camera' not in flow.device_controls
     assert camera.tunable_fields()[0].default == 0.05, 'GUI close must not close the device'
     first_session = flow.session
+    slm = flow.session.installation.device('slm')
+    slm_phase = slm.last_commanded_phase.copy()
+    slm_card = flow.devices._view._loaded_cards['slm']
+    QtTest.QTest.mouseClick(slm_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    slm_control = flow.device_controls['slm']
+    assert slm_control.is_visible()
+    assert solve_started.wait(2.0)
+    assert flow.devices.presenter.shutdown_active() is False
+    assert flow.session is first_session
+    solve_release.set()
+    deadline = QtCore.QDeadlineTimer(5000)
+    while 'slm' in flow.device_controls and not deadline.hasExpired():
+        application.processEvents()
+        QtTest.QTest.qWait(10)
+    assert 'slm' not in flow.device_controls
+    assert flow.devices.presenter.shutdown_active() is True
+    assert flow.session is None
+    assert flow.device_controls == {}
+    assert not slm_control.is_visible()
+    assert (slm.last_commanded_phase == slm_phase).all()
 finally:
+    solve_release.set()
+    slm_editor.solve_phase = original_slm_solve
     flow.close()
     application.processEvents()
 assert flow.session is None
@@ -790,12 +827,17 @@ assert flow.console is None
 assert flow.device_controls == {}
 assert not camera_control.is_visible()
 assert not reopened_pulse.is_visible()
+assert not slm_control.is_visible()
 again = tested_module.create_experiment_flow(
     workspace=r'%s', template='virtual',
 )
 try:
     assert again.devices.presenter.toggle_lifecycle() is True
-    application.processEvents()
+    initialized_again = QtCore.QDeadlineTimer(5000)
+    while again.timer is None and not initialized_again.hasExpired():
+        application.processEvents()
+        QtTest.QTest.qWait(10)
+    assert again.timer is not None
     assert again.session is again.devices.presenter.active_session
     assert again.session is not first_session
     assert again.device_controls == {}

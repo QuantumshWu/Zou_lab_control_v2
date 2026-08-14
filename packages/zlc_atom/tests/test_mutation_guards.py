@@ -71,6 +71,8 @@ def test_occupancy_rate_inverse_is_rejected_by_frozen_rate() -> None:
             ReadoutModel(
                 site_ids,
                 oracle["thresholds_box"],
+                oracle["site_mu_dark_box"],
+                oracle["site_mu_bright_box"],
                 np.ones(len(site_ids), dtype=bool),
                 np.ones(len(site_ids)),
                 kind=ReadoutModelKind.BOX,

@@ -145,6 +145,28 @@ def test_write_scan_table_changes_only_scan_regions() -> None:
     assert any(address >= bases["scan"] for address in delta)
 
 
+def test_zero_slot_scan_row_is_one_outer_point_per_sweep() -> None:
+    """A pulse with no authored slots can still be replayed as finite shots."""
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    program = compile_sequence(_sequence(), geom, 50e6)
+    assert program.slot_count == 0
+    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer.open()
+    streamer.load(program)
+
+    streamer.write_scan_table(((),), sweeps=5)
+
+    applied = streamer.applied()
+    assert applied is not None
+    assert applied.scan_rows == ((),)
+    assert streamer.snapshot()["scan_count"] == 5
+    assert transport.words[CtrlWords.SCAN_COUNT] == 5
+    streamer.fire()
+    assert streamer.wait_done(1.0) is not None
+
+
 def test_replacing_slots_rearms_new_scan_rows_after_an_existing_table() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)

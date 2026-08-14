@@ -35,12 +35,17 @@ class MemoryRegisterTransport:
         layout_id: int | None = None,
         geom: StreamerParams | None = None,
         auto_done: bool = False,
+        record_history: bool = True,
     ) -> None:
         if layout_id is None:
             layout_id = build_fingerprint(geom or StreamerParams())
         self.words: dict[int, int] = {CtrlWords.LAYOUT_ID: int(layout_id) & 0xFFFFFFFF}
+        # Full list history is the established diagnostic surface.  Product
+        # owners that never inspect it can opt out instead of retaining every
+        # register transaction for their process lifetime.
         self.write_batches: list[tuple[tuple[int, int], ...]] = []
         self.read_log: list[int] = []
+        self._record_history = bool(record_history)
         self.status = 0
         self.cursor_value = 0
         self.auto_done = bool(auto_done)
@@ -83,7 +88,8 @@ class MemoryRegisterTransport:
             raise RuntimeError("memory transport write cancelled")
         batch = tuple((int(address), int(value) & 0xFFFFFFFF) for address, value in rows)
         with self._lock:
-            self.write_batches.append(batch)
+            if self._record_history:
+                self.write_batches.append(batch)
             for address, value in batch:
                 if address == CtrlWords.STATUS:
                     self.status = value
@@ -130,7 +136,8 @@ class MemoryRegisterTransport:
         if stop is not None and stop.is_set():
             raise RuntimeError("memory transport read cancelled")
         with self._lock:
-            self.read_log.append(int(word_offset))
+            if self._record_history:
+                self.read_log.append(int(word_offset))
             if int(word_offset) == CtrlWords.STATUS:
                 return int(self.status) & 0xFFFFFFFF
             if int(word_offset) == CtrlWords.CURSOR:

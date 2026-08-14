@@ -9,12 +9,24 @@ route for virtual and physical adapters:
 Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
+SLM Editor target -> latest background solve -> explicit Send -> phase
+SLM Feedback(calibration + target + pulse) -> grouped qCMOS fluorescence -> accepted phase NPZ
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
 
 TaskConsole and every device Control share the same `Experiment` session,
-named devices, virtual world, and sequencer; Pulse Editor opens on demand from
-the loaded sequencer card and does not create a second session or IPC service.
+named devices, virtual world, and sequencer; Pulse and SLM Editors open on
+demand from their loaded device cards and do not create a second session or IPC
+service. SLM feedback uses multi-shot, detector-normalized atom fluorescence at
+the 35 calibrated qCMOS sites for direct intensity-ratio correction. It neither
+treats a single atom's PSF brightness as trap intensity nor fits a hidden
+wavefront, and it does not claim to observe unmeasured dense-target pixels.
+Its 1% finite-shot gate is intentionally not advertised as a short default
+run: current direct-qCMOS statistics require tens of millions of shots, and
+the two-frame pre/post ratio was rejected because it removes useful loading
+information while adding readout noise. Insufficient authored budgets fail
+without retaining a phase; no hidden virtual truth or relaxed threshold is
+used to manufacture acceptance.
 Calibration publishes only its current capture preview while
 running; after the loop it computes one result, writes its JSON, and passes that
 same result to `zlc_plot` for six PNG report images. Workbench does not display
@@ -94,7 +106,7 @@ above it and must not know the ones below.
 | `zlc_plot` | drawing, fitting, panel layout | scheduling, devices |
 | `zlc_ui` | windows and controls | data, plots, domain — **and no Qt escapes it** |
 | `zlc_pulse` | the sequence model, the compiler, the wire | anything above |
-| `zlc_atom` | physics: nodes, devices, calibration, and a leaf plugin's own report choice | Workbench/Qt; plotting dependencies in the foundation |
+| `zlc_atom` | physics: headless foundation plus concrete node/device plugins and their own report or control surface | Qt/plot dependencies in foundation/common/install/framework; Workbench-owned plugin science |
 | `zlc_workbench` | composition and wiring, and nothing else | inventing domain or UI |
 
 Two rules are mechanically enforced rather than remembered, because both were

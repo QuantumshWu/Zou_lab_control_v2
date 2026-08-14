@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from scipy import fft
 
+import zlc_atom.devices.simulation.world as simulation_world
 from zlc_atom.devices.simulation import SimulationWorld, VirtualPulseStreamer
 from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.devices.slm.solver import (
@@ -128,6 +129,93 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     assert bright.dtype == np.dtype("<u2")
     assert float(np.mean(bright)) > float(np.mean(dark))
     assert float(np.var(dark)) > 0.0
+
+
+def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
+    """Rendering must not rebuild the same 35 fixed optical spots per frame."""
+
+    def uncached_render(
+        world: SimulationWorld,
+        *,
+        exposure: float,
+        probe: float,
+        occupancy: np.ndarray,
+    ) -> np.ndarray:
+        height, width = world.geometry.image_shape_yx
+        floor_e = (world.background_rate + world.dark_current_e_per_s) * exposure
+        expected_electrons = np.full((height, width), floor_e, dtype=float)
+        yy, xx = np.mgrid[:height, :width]
+        base_area = world.atom_sigma_px**2
+        for occupied, (x, y), gain, sigma_xy, angle, skew in zip(
+            occupancy,
+            world.geometry.site_centers_xy,
+            world._detector_efficiency,
+            world._site_psf_sigma_xy,
+            world._site_psf_angle_radians,
+            world._site_psf_skew,
+            strict=True,
+        ):
+            if occupied:
+                sigma_x, sigma_y = (float(value) for value in sigma_xy)
+                cosine, sine = np.cos(angle), np.sin(angle)
+                dx = (xx - x) * cosine + (yy - y) * sine
+                dy = -(xx - x) * sine + (yy - y) * cosine
+                core = np.exp(
+                    -0.5 * ((dx / sigma_x) ** 2 + (dy / sigma_y) ** 2)
+                )
+                spot = np.clip(
+                    core * (1.0 + float(skew) * dx / sigma_x), 0.0, None
+                )
+                expected_electrons += (
+                    world.atom_rate
+                    * probe
+                    * float(gain)
+                    * base_area
+                    / (sigma_x * sigma_y)
+                    * spot
+                )
+        electrons = world.rng.poisson(np.clip(expected_electrons, 0.0, None))
+        counts = electrons / world.conversion_e_per_count + world.offset_counts
+        counts += world.rng.normal(
+            0.0,
+            world.read_noise_e / world.conversion_e_per_count,
+            counts.shape,
+        )
+        return np.clip(counts, 0, np.iinfo(np.uint16).max).astype("<u2")
+
+    world = SimulationWorld(seed=41)
+    reference = SimulationWorld(seed=41)
+    site_count = len(world.geometry.site_centers_xy)
+    occupancies = (
+        np.ones(site_count, dtype=bool),
+        np.arange(site_count) % 3 == 0,
+        np.zeros(site_count, dtype=bool),
+    )
+    for ordinal, occupancy in enumerate(occupancies):
+        actual = world.render_frame(
+            ordinal,
+            exposure_seconds=0.02,
+            probe_seconds=0.005,
+            occupancy=occupancy,
+        )
+        expected = uncached_render(
+            reference,
+            exposure=0.02,
+            probe=0.005,
+            occupancy=occupancy,
+        )
+        np.testing.assert_array_equal(actual, expected)
+
+    def rebuilt_psf(*_args, **_kwargs):
+        raise AssertionError("render_frame rebuilt a fixed site PSF")
+
+    monkeypatch.setattr(simulation_world.np, "exp", rebuilt_psf)
+    world.render_frame(
+        3,
+        exposure_seconds=0.02,
+        probe_seconds=0.005,
+        occupancy=occupancies[0],
+    )
 
 
 def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
@@ -390,6 +478,78 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         assert world.fire_count == stopped_at
     finally:
         streamer.close()
+
+
+def test_zero_slot_scan_sweeps_are_independent_three_frame_shots(monkeypatch) -> None:
+    """Each empty-row point reloads once; its three camera windows share it."""
+
+    installation = create_installation("virtual")
+    world = installation.world
+    camera = installation.device("camera")
+    sequencer = installation.device("sequencer")
+    sweeps = 5
+    loaded: list[np.ndarray] = []
+    rendered: list[np.ndarray] = []
+    original_load = world._load_shot
+    original_render = world.render_frame
+
+    def record_load() -> np.ndarray:
+        occupancy = original_load()
+        loaded.append(np.array(occupancy, copy=True))
+        return occupancy
+
+    def record_render(
+        ordinal: int,
+        *,
+        exposure_seconds: float,
+        probe_seconds: float | None = None,
+        occupancy: object | None = None,
+    ) -> np.ndarray:
+        rendered.append(np.array(occupancy, dtype=bool, copy=True))
+        return original_render(
+            ordinal,
+            exposure_seconds=exposure_seconds,
+            probe_seconds=probe_seconds,
+            occupancy=occupancy,
+        )
+
+    monkeypatch.setattr(world, "_load_shot", record_load)
+    monkeypatch.setattr(world, "render_frame", record_render)
+    try:
+        pulse = resolve_pulse(
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=sequencer.describe(),
+            api_values={
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
+            },
+        )
+        assert pulse.program.slot_count == 0
+        camera.arm(
+            sweeps * 3,
+            source_group_sizes=(3,) * sweeps,
+            buffer_frame_count=sweeps * 3,
+            timeout=1.0,
+        )
+        arm_sequencer(sequencer, pulse)
+        sequencer.write_scan_table(((),), sweeps=sweeps)
+        sequencer.fire()
+        records = camera.read_frame_records(sweeps * 3, timeout=2.0, exact=True)
+        assert sequencer.wait_done(1.0) is not None
+        terminal = camera.finish_record_capture()
+
+        assert len(records) == sweeps * 3
+        assert terminal.produced_count == sweeps * 3
+        assert world.fire_count == sweeps
+        assert len(loaded) == sweeps
+        assert len(rendered) == sweeps * 3
+        for shot, occupancy in enumerate(loaded):
+            for frame_occupancy in rendered[shot * 3 : (shot + 1) * 3]:
+                np.testing.assert_array_equal(frame_occupancy, occupancy)
+    finally:
+        installation.close()
 
 
 def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> None:

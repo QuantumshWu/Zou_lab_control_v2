@@ -1257,7 +1257,10 @@ def _main(argv: list[str] | None = None) -> int:
         )
 
         if resolution.backend == "memory":
-            transport = MemoryRegisterTransport(geom=config["params"])
+            transport = MemoryRegisterTransport(
+                geom=config["params"],
+                record_history=False,
+            )
         elif resolution.backend == "uart":
             if not resolution.uart_port:  # pragma: no cover - resolver guarantees this.
                 raise RuntimeError("UART resolution did not return a port")

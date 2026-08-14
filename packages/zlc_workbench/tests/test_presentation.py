@@ -623,6 +623,8 @@ def test_a_notebook_assembles_the_same_site_overlay_the_console_draws(
             ReadoutModel(
                 site_ids,
                 np.asarray((1.0e20, -1.0e20, 0.0)),
+                np.zeros(3),
+                np.ones(3),
                 np.asarray((True, True, True)),
                 np.asarray((1.0, 1.0, 1.0)),
             ),
@@ -733,7 +735,12 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
             (
                 ReadoutModel(
                     site_ids,
-                    np.full(sites, 280.0),
+                    # The camera integrates for 20 ms in both frames; the
+                    # shorter authored probe overlap still leaves the readout
+                    # frame dimmer, but it is not a zero-exposure picture.
+                    np.full(sites, 300.0),
+                    np.zeros(sites),
+                    np.ones(sites),
                     np.ones(sites, dtype=bool),
                     np.ones(sites),
                 ),

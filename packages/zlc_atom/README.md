@@ -1,13 +1,22 @@
 # zlc_atom
 
-`zlc_atom` is the headless atom-device and logic-node package. It contains the
-camera/sequencer/SLM contracts and the camera-measurement, occupancy, and
-calibration nodes. Virtual implementations live only under
+`zlc_atom` has a headless foundation for atom-device contracts, installation,
+logic-node discovery, and shared science. Concrete device and node plugins may
+own their product-specific Qt or `zlc_plot` surfaces without pulling those
+dependencies back into the foundation. It contains the camera/sequencer/SLM
+contracts and the experiment's measurement, processor, and task leaves.
+Virtual implementations live only under
 `devices/simulation/`: `VirtualCamera` satisfies the same runtime-checkable
 `CameraAdapter` contract as DCAM/Pylon, and `VirtualSequencer` is a
 `SequencerDevice` over the same pulse-device surface as hardware. `VirtualSLM`
 implements the same narrow `SlmAdapter` phase contract that a future real
 Hamamatsu plugin will implement once its actual SDK is available.
+
+The `slm.virtual` leaf opens its concrete SLM Editor lazily from the loaded
+device card. The Editor has one continuous non-negative target, solves its
+latest edit in the background, and leaves the commanded phase unchanged while
+loading or saving targets and phases. Only **Send to SLM** takes a short
+exclusive claim and applies a phase; closing the Editor preserves that phase.
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
 Qt dependency. Calibration consumes a project-owned
@@ -84,11 +93,33 @@ signal plane.
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
 
-The supported headless product path discovers the three logic descriptors and
-hosts them through the real runtime plane: virtual Calibration writes a plain
-workspace JSON, Camera Measurement publishes finite or `Repeat = 0` infinite
-frames, and Occupancy consumes the frames key plus JSON path. Virtual and
-physical cameras differ only below the adapter boundary.
+The `slm_feedback` Task accepts one complete 5 x 7 sparse target aligned to the
+35 calibrated atom sites. It extracts exact grouped qCMOS images with the
+frozen site/PSF model, subtracts the dark response, normalizes by each site's
+dark-to-bright response, and averages occupancy-weighted fluorescence across
+many shots. This is a loading/survival-mediated feedback observable, not a
+claim that one atom's PSF brightness is trap intensity. The Task directly
+updates `w_i *= (GM(F) / F_i) ** 0.45`; it performs no Zernike, modal, hidden
+aberration, or continuous-wavefront fit, and it makes no claim about pixels
+between the qCMOS-observed sites. Success reapplies and saves the independently
+validated phase; Stop or failure restores the incoming phase.
+The shipped defaults are functional acquisition defaults, not evidence that a
+1% finite-shot acceptance is quick: direct qCMOS shot-noise screens place that
+gate at tens of millions of shots. A pre/post ratio is deliberately not used;
+it cancels loading information and adds a second frame's noise. The Task must
+therefore fail honestly when its authored shot budget is insufficient rather
+than lower the criterion or read virtual hidden truth.
+
+The supported product path discovers seven logic descriptors: `calibration`,
+`camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,
+`stepped_scan`, and `temperature`. They are hosted through the real runtime
+plane: virtual Calibration writes a plain workspace JSON, Camera Measurement
+publishes finite or `Repeat = 0` infinite frames, and Occupancy consumes the
+frames key plus JSON path. Camera Measurement retains its per-row Auto preview:
+the cycle's `frames` signal uses `facet_grid`, with one or many readout-event
+rows as authored; switching Auto preview off only prevents the panel from
+opening automatically.
+Virtual and physical cameras differ only below the adapter boundary.
 
 ## Executable integration path
 

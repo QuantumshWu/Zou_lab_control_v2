@@ -169,6 +169,9 @@ class OccupancyProcessor:
     def _validate_source_run_record(self, source: SignalValue) -> None:
         """Check only structural camera facts present on the parent."""
 
+        model_kind = self.model.kind
+        self._runtime = None
+        self.model = self.calibration.select_model(model_kind)
         record = source.run_record
         contract = self.calibration.frame_contract
         snapshots = record.get("device_snapshots")
@@ -223,6 +226,7 @@ class OccupancyProcessor:
                 int(shape[1]) // int(binning[1]),
             )
             self._runtime = self.calibration.rebased(roi, binning, frame)
+            self.model = self._runtime.select_model(model_kind)
         elif tuple(binning) != tuple(contract.binning_yx):
             raise ValueError(
                 f"camera binning {tuple(binning)} differs from calibration "

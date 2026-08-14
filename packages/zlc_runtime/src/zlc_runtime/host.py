@@ -101,7 +101,7 @@ class LogicNodeObservation:
 
 
 class NodeExecutionContext:
-    """What a worker operation is given: seven capabilities and its identity.
+    """What a worker operation is given: nine capabilities and its identity.
 
     ``generation`` is not a capability -- it performs nothing -- but a node that
     stamps its output has to know which run it is in, and the host is the only
@@ -123,6 +123,16 @@ class NodeExecutionContext:
 
     def cancel_requested(self) -> bool:
         return self._host.cancel_requested
+
+    def seal_terminal(self) -> None:
+        """Atomically enter a worker's non-cancellable terminal commit.
+
+        A Stop that was accepted first rejects the seal.  Once the seal
+        returns, later Stop requests cannot relabel the worker's terminal
+        side effects as cancellation; an exception still ends as failure.
+        """
+
+        self._host._seal_worker_terminal()
 
     def start_and_wait(self, starter: Callable[[], RunHandleLike]) -> object:
         return self._host._start_and_wait(starter)
@@ -250,6 +260,7 @@ class NodeHost:
         self._snapshot: object | None = None
         self._stop_event = threading.Event()
         self._start_lock = threading.Lock()
+        self._worker_stop_sealed = False
         self._stop_reason = "Host requested stop"
         self._plane_state = False
         self._live_opened = False
@@ -436,6 +447,8 @@ class NodeHost:
             return
         reason = canonical_text(reason, "cancellation reason")
         with self._start_lock:
+            if self._mode == "worker" and self._worker_stop_sealed:
+                return
             self._stop_reason = reason
             self._stop_event.set()
             handle = self._handle
@@ -509,6 +522,7 @@ class NodeHost:
         self._handle = None
         self._snapshot = None
         self._stop_event.clear()
+        self._worker_stop_sealed = False
         self._stop_reason = "Host requested stop"
         self._live_opened = False
         self._final_published = False
@@ -538,12 +552,16 @@ class NodeHost:
             raise
 
     def _execute_worker(self) -> object:
-        if self._stop_event.is_set():
-            raise _StartSuppressed()
-        execute = getattr(self._node, "execute", None)
-        if not callable(execute):
-            raise TypeError("worker must provide execute(ctx)")
-        return execute(self._execution_context)
+        try:
+            if self._stop_event.is_set():
+                raise _StartSuppressed()
+            execute = getattr(self._node, "execute", None)
+            if not callable(execute):
+                raise TypeError("worker must provide execute(ctx)")
+            return execute(self._execution_context)
+        finally:
+            with self._start_lock:
+                self._worker_stop_sealed = True
 
     def _poll_worker(self) -> None:
         assert self._owner is not None
@@ -646,6 +664,14 @@ class NodeHost:
         with self._start_lock:
             self._warnings.append(message)
         self._request_owner_wake()
+
+    def _seal_worker_terminal(self) -> None:
+        with self._start_lock:
+            if self._mode != "worker" or not self._active:
+                raise RuntimeError("only an active worker can seal its terminal commit")
+            if self._stop_event.is_set():
+                raise _StartSuppressed()
+            self._worker_stop_sealed = True
 
     def _start_and_wait(self, starter: Callable[[], RunHandleLike]) -> object:
         if not callable(starter):

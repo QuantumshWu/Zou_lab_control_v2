@@ -172,6 +172,9 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     assert shifted_processor.readout.site_map.centers_xy[0][0] == (
         calibration.site_map.centers_xy[0][0] + 1
     )
+    assert shifted_processor.model is shifted_processor.readout.select_model(
+        ReadoutModelKind.BOX
+    )
 
     # The bench case: a run that takes a SMALLER crop than the calibration was
     # measured on.  The frame shape then differs too, and checking it before

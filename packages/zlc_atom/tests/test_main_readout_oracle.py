@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from zlc_atom.nodes.calibration.bimodal import fit_bimodal, normal_cdf, per_site_fidelity
 from zlc_atom.nodes.calibration.calibration import (
@@ -169,6 +170,58 @@ def test_main_oracle_psf_window_and_public_padding() -> None:
         ]
     )
     _assert_close(observed, expected)
+
+    # The batched complete-window path must remain byte-for-byte identical to
+    # the public one-window oracle, including a non-finite cut and non-finite
+    # annulus samples.  The final dot product deliberately remains per-site so
+    # its floating-point reduction order cannot change.
+    image = np.arange(30 * 36, dtype="<f8").reshape(30, 36)
+    boxes = np.asarray(((5, 5, 3, 3), (15, 5, 3, 3), (25, 15, 3, 3)))
+    centers = _centers_from_boxes(boxes)
+    kernels = np.broadcast_to(
+        np.asarray(
+            ((0.05, 0.10, 0.05), (0.10, 0.40, 0.10), (0.05, 0.10, 0.05)),
+            dtype="<f8",
+        ),
+        (3, 3, 3),
+    )
+    image[6, 6] = np.nan
+    image[3, 14] = np.nan
+    direct = np.asarray(
+        [
+            np.nan
+            if not np.isfinite(
+                image[box[1] : box[1] + box[3], box[0] : box[0] + box[2]]
+            ).all()
+            else extract_psf_window(
+                image,
+                tuple(box),
+                kernel,
+                background="annulus",
+                padding=2,
+            )
+            for box, kernel in zip(boxes, kernels, strict=True)
+        ],
+        dtype="<f8",
+    )
+    observed = extract_psf_signals(
+        image,
+        centers,
+        kernels=kernels,
+        boxes_xywh=boxes,
+        background="annulus",
+        radius=1,
+        padding=2,
+    )
+    assert observed.tobytes() == direct.tobytes()
+    with pytest.raises(ValueError, match="two-dimensional"):
+        extract_psf_signals(
+            image[None],
+            centers,
+            kernels=kernels,
+            boxes_xywh=boxes,
+            radius=1,
+        )
 
 
 def test_main_oracle_data_driven_psf_fit_and_uniform_sibling() -> None:

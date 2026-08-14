@@ -46,7 +46,11 @@ class VirtualPulseStreamer(PulseStreamer):
         self._world_thread: threading.Thread | None = None
         self._logical_deadline: float | None = None
         super().__init__(
-            MemoryRegisterTransport(geom=geometry, auto_done=True),
+            MemoryRegisterTransport(
+                geom=geometry,
+                auto_done=True,
+                record_history=False,
+            ),
             geometry,
             float(clock_hz),
             target=pulse_target_from_xdc(config_path=config["source"]),

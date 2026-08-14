@@ -208,6 +208,8 @@ def extract_psf_signals(
     """Extract one matched-filter statistic per site."""
 
     array = np.asarray(image.values if hasattr(image, "values") else image)
+    if array.ndim != 2:
+        raise ValueError("image must be two-dimensional")
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     size = 2 * int(radius) + 1
     if kernels is None:
@@ -222,6 +224,70 @@ def extract_psf_signals(
     if boxes.shape != (len(centers), 4):
         raise ValueError("boxes_xywh must have shape (N, 4)")
     output = np.full(len(centers), np.nan, dtype="<f8")
+
+    # The normal calibrated path has equal, complete PSF boxes and complete
+    # annuli.  Gather those windows once instead of rebuilding 35 slices and
+    # annulus masks for every frame.  Keep the final matched-filter reduction
+    # site-by-site: changing that reduction order produces small float64
+    # differences, while window gathering and the median are exactly the same
+    # operations as the scalar path below.
+    pad = int(padding)
+    heights = boxes[:, 3]
+    widths = boxes[:, 2]
+    complete_boxes = bool(
+        len(boxes)
+        and np.all(widths == size)
+        and np.all(heights == size)
+        and np.all(boxes[:, 0] >= 0)
+        and np.all(boxes[:, 1] >= 0)
+        and np.all(boxes[:, 0] + widths <= array.shape[1])
+        and np.all(boxes[:, 1] + heights <= array.shape[0])
+    )
+    complete_annuli = bool(
+        background == "annulus"
+        and pad >= 0
+        and complete_boxes
+        and np.all(boxes[:, 0] >= pad)
+        and np.all(boxes[:, 1] >= pad)
+        and np.all(boxes[:, 0] + widths + pad <= array.shape[1])
+        and np.all(boxes[:, 1] + heights + pad <= array.shape[0])
+    )
+    if (background == "none" and complete_boxes) or complete_annuli:
+        yy = boxes[:, 1, None, None] + np.arange(size)[None, :, None]
+        xx = boxes[:, 0, None, None] + np.arange(size)[None, None, :]
+        cuts = array[yy, xx]
+        finite_cuts = np.isfinite(cuts).all(axis=(1, 2))
+        offsets = np.zeros(len(boxes), dtype="<f8")
+        if complete_annuli and pad:
+            padded_size = size + 2 * pad
+            padded_yy = (
+                boxes[:, 1, None, None]
+                - pad
+                + np.arange(padded_size)[None, :, None]
+            )
+            padded_xx = (
+                boxes[:, 0, None, None]
+                - pad
+                + np.arange(padded_size)[None, None, :]
+            )
+            padded = np.asarray(array[padded_yy, padded_xx], dtype=float)
+            ring_mask = np.ones((padded_size, padded_size), dtype=bool)
+            ring_mask[pad : pad + size, pad : pad + size] = False
+            rings = padded[:, ring_mask]
+            finite_rings = np.isfinite(rings).any(axis=1)
+            if np.any(finite_rings):
+                offsets[finite_rings] = np.nanmedian(
+                    rings[finite_rings], axis=1
+                )
+        for index in np.flatnonzero(finite_cuts):
+            output[index] = float(
+                np.sum(
+                    np.asarray(kernels[index], dtype=float)
+                    * (np.asarray(cuts[index], dtype=float) - offsets[index])
+                )
+            )
+        return output
+
     for index, (box, kernel) in enumerate(zip(boxes, kernels, strict=True)):
         x, y, width, height = (int(value) for value in box)
         if kernel.shape != (height, width):

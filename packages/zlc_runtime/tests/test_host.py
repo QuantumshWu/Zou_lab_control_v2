@@ -141,6 +141,7 @@ def test_worker_without_kind_publishes_final_and_records_context_capabilities() 
                 callable(getattr(context, name))
                 for name in (
                     "cancel_requested",
+                    "seal_terminal",
                     "start_and_wait",
                     "attach_live_outputs",
                     "open_live_dataset",
@@ -264,6 +265,145 @@ def test_worker_cancel_and_shutdown_refuses_pending_worker() -> None:
             _wait_worker(host, wake)
         if not getattr(host, "_closed", False):
             host.shutdown()
+        plane.close()
+
+
+def test_stop_cannot_relabel_an_already_successful_worker_completion() -> None:
+    """Owner polling latency is not a second cancellation boundary."""
+
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        instance_id = "completed-before-stop"
+
+        def execute(self, context):
+            assert not context.cancel_requested()
+            return "committed result"
+
+    host = NodeHost(Node(), plane, wake.set)
+    try:
+        host.start()
+        # The Future and its done callback have both completed, but the owner
+        # has deliberately not polled that mailbox completion yet.  A late
+        # Stop may transiently project "stopping" until that completion is
+        # drained, but it cannot rewrite the successful terminal fact.
+        assert wake.wait(2.0)
+        host.cancel("too late")
+        observation = host.poll()
+        assert observation.phase == "done"
+        assert host.final_result == "committed result"
+    finally:
+        if not host.terminal:
+            _wait_worker(host, wake)
+        host.shutdown()
+        plane.close()
+
+
+def test_stop_just_before_worker_return_remains_a_cooperative_cancel() -> None:
+    """The commit marker is set only after execute has actually returned."""
+
+    wake = Event()
+    ready = Event()
+    release = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        instance_id = "stop-before-return"
+
+        def execute(self, context):
+            ready.set()
+            release.wait(2.0)
+            if context.cancel_requested():
+                raise RuntimeError("cancelled before return")
+            return "unexpected success"
+
+    host = NodeHost(Node(), plane, wake.set)
+    try:
+        host.start()
+        assert ready.wait(2.0)
+        host.cancel("in time")
+        release.set()
+        observation = _wait_worker(host, wake)
+        assert observation.phase == "cancelled"
+        assert not host.final_result_resolved
+    finally:
+        release.set()
+        if not host.terminal:
+            _wait_worker(host, wake)
+        host.shutdown()
+        plane.close()
+
+
+def test_stop_that_wins_the_worker_terminal_seal_remains_cancelled() -> None:
+    wake = Event()
+    ready = Event()
+    release = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        instance_id = "stop-before-terminal-seal"
+
+        def execute(self, context):
+            ready.set()
+            assert release.wait(2.0)
+            context.seal_terminal()
+            return "unexpected success"
+
+    host = NodeHost(Node(), plane, wake.set)
+    try:
+        host.start()
+        assert ready.wait(2.0)
+        host.cancel("before terminal seal")
+        release.set()
+        observation = _wait_worker(host, wake)
+        assert observation.phase == "cancelled"
+        assert not host.final_result_resolved
+    finally:
+        release.set()
+        if not host.terminal:
+            _wait_worker(host, wake)
+        host.shutdown()
+        plane.close()
+
+
+@pytest.mark.parametrize("outcome", ("success", "failure"))
+def test_stop_after_worker_terminal_seal_cannot_relabel_outcome(outcome: str) -> None:
+    wake = Event()
+    sealed = Event()
+    release = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        instance_id = f"terminal-seal-{outcome}"
+
+        def execute(self, context):
+            context.seal_terminal()
+            sealed.set()
+            assert release.wait(2.0)
+            if outcome == "failure":
+                raise ValueError("terminal write failed")
+            return "committed result"
+
+    host = NodeHost(Node(), plane, wake.set)
+    try:
+        host.start()
+        assert sealed.wait(2.0)
+        host.cancel("after terminal seal")
+        assert not host.cancel_requested
+        release.set()
+        observation = _wait_worker(host, wake)
+        assert observation.phase == ("done" if outcome == "success" else "failed")
+        if outcome == "success":
+            assert host.final_result == "committed result"
+        else:
+            assert observation.error == "ValueError: terminal write failed"
+            assert not host.final_result_resolved
+    finally:
+        release.set()
+        if not host.terminal:
+            _wait_worker(host, wake)
+        host.shutdown()
         plane.close()
 
 

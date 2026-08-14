@@ -56,6 +56,8 @@ def _calibration(path: Path) -> TrapCalibration:
             ReadoutModel(
                 site_ids,
                 np.asarray((100.0, 100.0)),
+                np.zeros(2),
+                np.ones(2),
                 np.asarray((True, True)),
                 np.asarray((1.0, 1.0)),
             ),

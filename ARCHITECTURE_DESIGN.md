@@ -109,6 +109,15 @@ Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsol
 5. 现有随机逐-site efficiency 不再是 trap-depth 真相。若保留 site-dependent fluorescence factor，它只能是小、固定、可由 calibration 归一化的 detector/readout nuisance。默认 35-site nominal phase 在 hidden coherent plant 下的 `Imax/Imin` 为 `1.8–2.2`，至少 90% 的初始非均匀误差来自可纠正相干项。同一 phase revision 只传播一次；随后多帧只重采 occupancy、photon 与 read noise。
 6. M4 只建立数值、设备与 coherent plant 边界；qCMOS 原子荧光反馈、SLM Editor 和最终约 1% 闭环属于紧随其后的同一 Goal M5。真实 Hamamatsu 型号/SDK/光路资料未取得前，不提交 real descriptor、会 raise 的 stub 或猜测的 SDK signature。
 
+### 3.5 SLM Editor 与 qCMOS 原子荧光直接反馈
+
+1. SLM Editor 是 `devices/slm` concrete plugin 自己的独立 device window，继续沿用 descriptor lazy `control_factory`、同一 named SLM 与同一 `DeviceUseCoordinator`。左侧只编辑唯一 continuous non-negative target，右侧只显示 computed/loaded canonical phase；target 改动由 capacity-one latest-only 后台 worker 调用唯一 `solve_phase`，Qt owner thread 不做 FFT。Save/Load target、Save/Load phase 都不写硬件；只有显式 `Send to SLM` 取得短命 EXCLUSIVE claim 后调用 `apply_phase`。关闭 Editor 不 apply、restore、blank 或关闭 SLM，当前 commanded phase 原样保留。
+2. 第一版粗调的唯一 observable 是现有 qCMOS 拍到的原子荧光。每个 candidate phase 下执行作者写下的真实 cool/load/probe pulse 与 exact grouped camera cycles；相机沿用 calibration 记录的 sensor integration，而 pulse 的 probe gate 保持其 authored API values，两者不得互相覆盖。逐 frame 的 counts/occupied/valid 复用 `OccupancyProcessor` 的唯一判断，再以冻结的 dark/bright detector response 做多-shot归一化统计。单原子 PSF 亮度不等同 trap intensity；反馈量是 trap depth 经 loading/survival 后形成的 occupancy-weighted normalized fluorescence。loop 内不重新找 site，也不逐 site 做 nonlinear Gaussian fit。
+3. 反馈只做直接强度比例校正，不拟合 Zernike、modal coefficients、hidden aberration 或连续波前。令正 target support 上的逐-site normalized fluorescence 为 `F_i`，每轮只更新 `w_i <- w_i * (GM(F) / F_i)^0.45`，再归一化 target total、以上一 canonical phase warm-start `solve_phase`、apply、复测并独立保留 best。Task production code不得 import SimulationWorld、读取 hidden trap plane/site intensity或按 simulation seed 分支。
+4. qCMOS 只观测 calibration 声明的离散 atom sites。Task 必须如实报告这些 site 的 fluorescence、missing/saturation、shot 数与统计置信度，不得声称它看见 sparse sites 之间或 dense flat-top 的每个 pixel。Dense target 仍复用同一 continuous target 与 `solve_phase`；完整 dense interior 只由验收端在 Task terminal 后用 virtual oracle 检查，不能倒流成 Task 输入，也不能用 qCMOS 离散点伪装成全平面测量。
+5. Task 开始前冻结 target/resources/calibration 并保存 incoming phase；每个候选依次 apply -> exact qCMOS shots -> direct fluorescence update -> warm-start solve。候选若 missing/saturated/non-finite、总校准荧光相对 baseline 低于 90% 或统计证据不足，不得成为 best。成功最后明确 apply best，保存与 device command 逐元素相同的 no-pickle phase artifact并保留 best；Stop 或任何失败都尝试恢复 incoming，恢复失败必须真实报错。Editor close 与 Task lifecycle 相互独立。
+6. `Blank`/`Off`/beam-dump 不是 zero phase。当前公共 `SlmAdapter` 没有已知的真实安全光路能力，因此 Editor 不显示会说谎的 blank 控件；只有取得实验室真实 Hamamatsu 光路、LUT、orientation 与 safety command 后，才以显式物理能力增加并验收。真实 adapter 未取得前，virtual Editor、Task、生命周期和性能仍必须完成。
+
 ## 4. Package 责任边界
 
 `zlc_workbench` 是 composition root，但不拥有科学或绘图规则。

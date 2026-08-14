@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from zlc_atom.nodes.calibration import (
     ReadoutModel,
@@ -29,6 +30,8 @@ def _calibration(
             ReadoutModel(
                 site_ids,
                 [5.0],
+                [1.0],
+                [9.0],
                 [True],
                 [1.0],
                 kind=kind,
@@ -75,7 +78,22 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     loaded = TrapCalibration.load(target)
     assert loaded.frame_contract.binning_yx == (2, 2)
     assert loaded.select_model().threshold_method == "empirical"
+    np.testing.assert_allclose(loaded.select_model().dark_mean, [1.0])
+    np.testing.assert_allclose(loaded.select_model().bright_mean, [9.0])
     np.testing.assert_allclose(loaded.signals(image), [5.0])
+
+
+def test_usable_readout_requires_a_finite_positive_response() -> None:
+    with pytest.raises(ValueError, match="finite bright_mean > dark_mean"):
+        ReadoutModel(("site_0000",), [5.0], [1.0], [np.nan], [True], [1.0])
+    with pytest.raises(ValueError, match="finite bright_mean > dark_mean"):
+        ReadoutModel(("site_0000",), [5.0], [2.0], [2.0], [True], [1.0])
+
+    model = ReadoutModel(
+        ("site_0000",), [np.nan], [np.nan], [np.nan], [False], [np.nan]
+    )
+    assert model.to_dict()["dark_mean"] == [None]
+    assert model.to_dict()["bright_mean"] == [None]
 
 
 def test_psf_dispatch_is_explicit_and_not_a_name_substring() -> None:

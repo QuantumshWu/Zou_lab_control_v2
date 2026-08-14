@@ -5,7 +5,7 @@ from __future__ import annotations
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
-from zlc_atom.devices.slm import bind_slm
+from zlc_atom.devices.slm import bind_slm, open_slm_control
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from .camera import VirtualCamera, VirtualCameraConfig
@@ -226,6 +226,7 @@ DEVICE_TYPES = (
         ("slm.phase",),
         factory=_slm_factory,
         world_config=_slm_world_config,
+        control_factory=open_slm_control,
     ),
 )
 

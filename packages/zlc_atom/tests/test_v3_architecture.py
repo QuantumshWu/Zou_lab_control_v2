@@ -243,6 +243,7 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         ("occupancy", "calibration"),
         ("slm_feedback", "calibration"),
         ("slm_feedback", "camera_measurement"),
+        ("slm_feedback", "occupancy"),
         ("temperature", "calibration"),
         ("temperature", "camera_measurement"),
         ("temperature", "occupancy"),
@@ -262,6 +263,7 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     )
     assert {edge for edge in edges if edge[1] not in node_owners} == {
         ("seamless_scan", "scan"),
+        ("slm_feedback", "scan"),
         ("stepped_scan", "scan"),
         ("temperature", "scan"),
     }

@@ -132,6 +132,41 @@ def test_observer_intervals_are_transport_specific() -> None:
     assert JTAG_AXI_OBSERVER_INTERVAL >= 0.05
 
 
+def test_memory_transport_records_full_list_history_by_default() -> None:
+    transport = MemoryRegisterTransport()
+    transport.start()
+
+    for index in range(5):
+        address = 10_000 + index
+        transport.write_words(((address, index),))
+        assert transport.read_word(address) == index
+
+    assert isinstance(transport.write_batches, list)
+    assert isinstance(transport.read_log, list)
+    assert transport.write_batches[:2] == [
+        ((10_000, 0),),
+        ((10_001, 1),),
+    ]
+    assert transport.write_batches[-2:] == [
+        ((10_003, 3),),
+        ((10_004, 4),),
+    ]
+    assert transport.read_log == [10_000, 10_001, 10_002, 10_003, 10_004]
+
+
+def test_memory_transport_can_disable_diagnostic_history() -> None:
+    transport = MemoryRegisterTransport(record_history=False)
+    transport.start()
+
+    for index in range(10_000):
+        transport.write_words(((10_000, index),))
+        assert transport.read_word(10_000) == index
+
+    assert transport.words[10_000] == 9_999
+    assert transport.write_batches == []
+    assert transport.read_log == []
+
+
 def test_default_vivado_discovers_fake_installed_release(monkeypatch, tmp_path) -> None:
     from zlc_pulse.transport import axi as axi_module
 

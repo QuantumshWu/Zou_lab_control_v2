@@ -86,7 +86,11 @@ def dial(mode: str, endpoint: str):
             )
         geometry = config["params"]
         streamer = PulseStreamer(
-            MemoryRegisterTransport(geom=geometry, auto_done=True),
+            MemoryRegisterTransport(
+                geom=geometry,
+                auto_done=True,
+                record_history=False,
+            ),
             geometry,
             config["clock_hz"],
             target=pulse_target_from_xdc(config_path=config["source"]),
