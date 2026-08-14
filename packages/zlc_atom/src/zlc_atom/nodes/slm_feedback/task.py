@@ -1,4 +1,4 @@
-"""Direct fluorescence feedback; no wavefront or hidden-plant inference."""
+"""Occupied-shot site-brightness feedback; no hidden-plant inference."""
 
 from __future__ import annotations
 
@@ -121,7 +121,7 @@ class SlmFeedbackTask:
         frozen_target = validate_target(target)
         if frozen_target.shape != slm.shape_yx:
             raise ValueError("target shape differs from the selected SLM")
-        model = calibration.select_model(ReadoutModelKind.PER_SITE_PSF)
+        model = calibration.select_model(ReadoutModelKind.BOX)
         response = np.asarray(model.bright_mean) - np.asarray(model.dark_mean)
         valid = calibration.site_map.valid_sites & model.usable_sites
         if not np.all(valid) or not np.all(np.isfinite(response)) or np.any(response <= 0.0):
@@ -152,10 +152,13 @@ class SlmFeedbackTask:
         height, width = contract.image_shape
         site_mask = np.zeros((height, width), dtype=bool)
         windows: list[tuple[slice, slice]] = []
-        padding = int(model.psf_padding or 0) if model.background == "annulus" else 0
-        for x, y, box_width, box_height in np.asarray(model.psf_boxes, dtype=int):
-            y0, y1 = max(0, y - padding), min(height, y + box_height + padding)
-            x0, x1 = max(0, x - padding), min(width, x + box_width + padding)
+        radius = int(model.integration_half_width)
+        for center_x, center_y in np.asarray(
+            calibration.site_map.centers_xy, dtype=float
+        ):
+            x, y = int(round(float(center_x))), int(round(float(center_y)))
+            y0, y1 = max(0, y - radius), min(height, y + radius + 1)
+            x0, x1 = max(0, x - radius), min(width, x + radius + 1)
             site_mask[y0:y1, x0:x1] = True
             windows.append((slice(y0, y1), slice(x0, x1)))
         self._site_mask, self._site_windows = site_mask, tuple(windows)
@@ -221,6 +224,7 @@ class SlmFeedbackTask:
             raise ValueError("qCMOS fluorescence statistics require at least two shots")
         mean = np.zeros(self.calibration.n_sites, dtype=float)
         sum_squared_deviations = np.zeros_like(mean)
+        occupied_counts = np.zeros(self.calibration.n_sites, dtype=np.int64)
         saturated_sites: set[int] = set()
         missing_sites: set[int] = set()
         measured = 0
@@ -271,28 +275,35 @@ class SlmFeedbackTask:
                     valid = np.asarray(
                         occupancy["valid"].snapshot.block.values, dtype=bool
                     )[0, _READOUT_FRAME]
+                    occupied = np.asarray(
+                        occupancy["occupied"].snapshot.block.values, dtype=bool
+                    )[0, _READOUT_FRAME]
                     missing_sites.update(
                         int(index)
                         for index in np.flatnonzero(~valid | ~np.isfinite(counts))
                     )
-                    normalized = (counts - self.model.dark_mean) / (
-                        self.model.bright_mean - self.model.dark_mean
-                    )
-                    # Dark/bright calibration already turns one site's short
-                    # readout into 0 for empty and 1 for one atom.  Thresholding
-                    # this same noisy count and multiplying it back in would
-                    # clip the two tails differently at every site.  The direct
-                    # mean is therefore the occupancy-weighted fluorescence
-                    # observable, without a second classifier-dependent gate.
-                    sample = np.asarray(normalized, dtype=float)
-                    sample[~valid | ~np.isfinite(counts)] = np.nan
+                    # Calibration defines both facts used here: ``occupied``
+                    # says which readouts contain one atom, and ``counts`` is
+                    # the same per-site feature whose occupied training mean
+                    # is persisted as ``bright_mean``.  The feedback observable
+                    # is that feature's mean over occupied shots only.  Dividing
+                    # each site by its own bright response would erase exactly
+                    # the brightness non-uniformity the operator asked to
+                    # correct; treating empty shots as zero would instead turn
+                    # this into a loading-probability measurement.
+                    sample = np.asarray(counts, dtype=float)
+                    usable = valid & np.isfinite(sample) & occupied
+                    if np.any(usable):
+                        next_counts = occupied_counts[usable] + 1
+                        delta = sample[usable] - mean[usable]
+                        mean[usable] += delta / next_counts
+                        sum_squared_deviations[usable] += delta * (
+                            sample[usable] - mean[usable]
+                        )
+                        occupied_counts[usable] = next_counts
                     measured += 1
-                    finite_sample = np.nan_to_num(sample, nan=0.0)
-                    delta = finite_sample - mean
-                    mean += delta / measured
-                    sum_squared_deviations += delta * (finite_sample - mean)
                     context.report_progress(
-                        f"Reading qCMOS fluorescence for candidate {iteration + 1}",
+                        f"Reading occupied-shot qCMOS brightness for candidate {iteration + 1}",
                         current=measured,
                         total=requested,
                     )
@@ -302,14 +313,24 @@ class SlmFeedbackTask:
                     self.sequencer.safe()
                 finally:
                     source.close()
-        variance = sum_squared_deviations / (requested - 1)
+        insufficient = occupied_counts < 2
+        missing_sites.update(int(index) for index in np.flatnonzero(insufficient))
+        variance = np.full_like(mean, np.nan)
+        enough = ~insufficient
+        variance[enough] = (
+            sum_squared_deviations[enough] / (occupied_counts[enough] - 1)
+        )
+        standard_error = np.full_like(mean, np.nan)
+        standard_error[enough] = np.sqrt(
+            variance[enough] / occupied_counts[enough]
+        )
         missing = np.fromiter(missing_sites, dtype=int)
         if missing.size:
             mean[missing] = np.nan
-            variance[missing] = np.nan
+            standard_error[missing] = np.nan
         return (
             mean,
-            np.sqrt(variance / requested),
+            standard_error,
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
         )

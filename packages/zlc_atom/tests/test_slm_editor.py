@@ -12,7 +12,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.install import DeviceSpec, create_installation
 from zlc_ui import ensure_qt_app
@@ -146,6 +146,52 @@ def test_editor_keeps_only_latest_solve_and_clear_does_not_drive_hardware(
         app.processEvents()
 
 
+def test_send_refuses_a_phase_stale_against_the_latest_target(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    device = session.installation.device("slm")
+    incoming = np.array(device.last_commanded_phase, copy=True)
+    started, release = threading.Event(), threading.Event()
+    calls = 0
+    latest_phase = canonical_phase(
+        np.full(device.shape_yx, 0.83), device.shape_yx
+    )
+
+    def controlled_solve(target, *, stop_requested, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait(2.0)
+            if stop_requested():
+                raise InterruptedError("superseded")
+        return latest_phase, {"method": "test", "iterations": 1}
+
+    monkeypatch.setattr(editor, "solve_phase", controlled_solve)
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        assert started.wait(2.0)
+        control.set_target(np.full(control.shape, 0.75, dtype=np.float32))
+        assert control.send() is False
+        assert "latest target" in control.status_text
+        np.testing.assert_array_equal(device.last_commanded_phase, incoming)
+
+        release.set()
+        _pump(app, lambda: control.solver_idle)
+        assert control.send() is True
+        _pump(app, lambda: not control.command_active)
+        np.testing.assert_array_equal(device.last_commanded_phase, latest_phase)
+    finally:
+        release.set()
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
 def test_toggle_is_binary_while_brush_uses_authored_intensity(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -187,6 +233,109 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
         control._mode.setCurrentText("Brush")
         assert control._paint(point)
         assert control._target[row, column] == 7.5
+    finally:
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
+def test_selectors_switch_changes_real_target_events_from_paint_to_plot(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """One visible switch makes zoom/select available without editing target."""
+
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        editor,
+        "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.zeros(target.shape), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        control._body.resize(1100, 650)
+        control._body.show()
+        _pump(app, lambda: control._target_widget.presented_front is not None)
+        assert control._selectors.text() == "Selectors"
+        assert not control._selectors.isChecked()
+        assert not control._target_host.interaction_enabled
+        assert not control._phase_host.interaction_enabled
+
+        axis = next(
+            item
+            for item in control._target_widget.presented_front.interaction.axes
+            if item.role == "image"
+        )
+        left, top, right, bottom = axis.bounds
+        start = QtCore.QPoint(
+            round((left + (right - left) / 3.0) * control._target_widget.width()),
+            round((top + (bottom - top) / 3.0) * control._target_widget.height()),
+        )
+        end = QtCore.QPoint(
+            round((left + 2.0 * (right - left) / 3.0) * control._target_widget.width()),
+            round((top + 2.0 * (bottom - top) / 3.0) * control._target_widget.height()),
+        )
+
+        control.set_target(np.zeros(control.shape, dtype=np.float32))
+        QtTest.QTest.mouseClick(
+            control._target_widget, QtCore.Qt.LeftButton, pos=start
+        )
+        assert np.any(control._target > 0.0), "Selectors off must retain target paint"
+
+        control._selectors.setChecked(True)
+        app.processEvents()
+        assert control._target_host.interaction_enabled
+        assert control._phase_host.interaction_enabled
+        assert not control._mode.isEnabled() and not control._intensity.isEnabled()
+        target_before_selector = np.array(control._target, copy=True)
+        QtTest.QTest.mousePress(
+            control._target_widget, QtCore.Qt.LeftButton, pos=start
+        )
+        QtTest.QTest.mouseMove(control._target_widget, end, delay=10)
+        QtTest.QTest.mouseRelease(
+            control._target_widget, QtCore.Qt.LeftButton, pos=end
+        )
+        _pump(
+            app,
+            lambda: any(
+                state.kind.value == "area"
+                for state in control._target_host.selectors().result(timeout=2).value
+            ),
+        )
+        np.testing.assert_array_equal(control._target, target_before_selector)
+
+        before_viewport = control._target_host.describe_display().result(
+            timeout=2
+        ).value.viewport
+        center = control._target_widget.rect().center()
+        wheel = QtGui.QWheelEvent(
+            QtCore.QPointF(center),
+            QtCore.QPointF(control._target_widget.mapToGlobal(center)),
+            QtCore.QPoint(),
+            QtCore.QPoint(0, -120),
+            QtCore.Qt.NoButton,
+            QtCore.Qt.NoModifier,
+            QtCore.Qt.NoScrollPhase,
+            False,
+        )
+        QtWidgets.QApplication.sendEvent(control._target_widget, wheel)
+        _pump(
+            app,
+            lambda: control._target_host.describe_display().result(
+                timeout=2
+            ).value.viewport != before_viewport,
+        )
+
+        control._selectors.setChecked(False)
+        app.processEvents()
+        assert not control._target_host.interaction_enabled
+        assert not control._phase_host.interaction_enabled
+        assert control._mode.isEnabled() and control._intensity.isEnabled()
     finally:
         _dispose(control, app)
         session.device_use.assert_idle()

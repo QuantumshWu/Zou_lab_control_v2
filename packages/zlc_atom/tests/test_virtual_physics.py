@@ -146,8 +146,15 @@ def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
         expected_electrons = np.full((height, width), floor_e, dtype=float)
         yy, xx = np.mgrid[:height, :width]
         base_area = world.atom_sigma_px**2
-        for occupied, (x, y), gain, sigma_xy, angle, skew in zip(
+        world._ensure_slm_propagation()
+        relative_depths = np.clip(
+            world._site_trap_intensities / world._loading_intensity_scale,
+            0.0,
+            None,
+        )
+        for occupied, depth, (x, y), gain, sigma_xy, angle, skew in zip(
             occupancy,
+            relative_depths,
             world.geometry.site_centers_xy,
             world._detector_efficiency,
             world._site_psf_sigma_xy,
@@ -172,6 +179,7 @@ def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
                     * float(gain)
                     * base_area
                     / (sigma_x * sigma_y)
+                    * float(depth)
                     * spot
                 )
         electrons = world.rng.poisson(np.clip(expected_electrons, 0.0, None))
@@ -415,6 +423,121 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
     assert min(correctable_fractions) >= 0.90
     assert not hasattr(SimulationWorld, "trap_plane_intensity")
     assert not hasattr(SimulationWorld, "site_trap_intensities")
+
+
+def test_occupied_qcmos_box_brightness_tracks_fixed_site_trap_depth() -> None:
+    """An occupied atom's public box mean must report its local trap depth."""
+
+    world = SimulationWorld(seed=23)
+    world.atom_rate = 10_000.0
+    target = np.array(preset_grid(world.slm_shape_yx, (5, 7)), copy=True)
+    sites = np.argwhere(target > 0.0)
+    for index, site in enumerate(sites):
+        target[tuple(site)] = 1.0 if index % 2 == 0 else 0.25
+    phase, _metadata = solve_phase(target, seed=0)
+    world.apply_slm_phase(phase)
+    world.set_occupancy(np.ones(len(sites), dtype=bool))
+
+    frame = world.render_frame(
+        0,
+        exposure_seconds=0.02,
+        probe_seconds=0.005,
+    )
+    extracted = extract_box_signals(
+        frame,
+        (*world.geometry.site_centers_xy, (15.0, 15.0)),
+        radius=1,
+        reducer="mean",
+    )
+    box_means = extracted[:-1] - extracted[-1]
+    depths = world._site_trap_intensities / world._loading_intensity_scale
+
+    assert float(np.mean(depths[::2])) > 3.0 * float(np.mean(depths[1::2]))
+    assert float(np.mean(box_means[::2])) > 2.0 * float(np.mean(box_means[1::2]))
+    assert float(np.corrcoef(depths, box_means)[0, 1]) > 0.98
+
+
+def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
+    """Each public phase command must change the next physical atom image."""
+
+    installation = create_installation("virtual")
+    world = installation.world
+    camera = installation.device("camera")
+    sequencer = installation.device("sequencer")
+    slm = installation.device("slm")
+    try:
+        world.loading_probability = 1.0
+        world.atom_rate = 10_000.0
+        base_target = np.array(preset_grid(slm.shape_yx, (5, 7)), copy=True)
+        nominal_indices = np.argwhere(base_target > 0.0)
+        old_index = nominal_indices[len(nominal_indices) // 2]
+        new_index = np.asarray((32, 24))
+        pulse = resolve_pulse(
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=sequencer.describe(),
+            api_values={},
+        )
+        slm_rows, slm_columns = world._slm_site_indices_yx.T
+        camera_centers = world.geometry.site_centers_xy
+        camera_x = camera_centers[:, 0]
+        camera_y = camera_centers[:, 1]
+        x_scale = (np.max(camera_x) - np.min(camera_x)) / (
+            np.max(slm_columns) - np.min(slm_columns)
+        )
+        y_scale = (np.max(camera_y) - np.min(camera_y)) / (
+            np.max(slm_rows) - np.min(slm_rows)
+        )
+        new_center = (
+            float(np.mean(camera_x) + (new_index[1] - np.mean(slm_columns)) * x_scale),
+            float(np.mean(camera_y) + (new_index[0] - np.mean(slm_rows)) * y_scale),
+        )
+        old_center = tuple(camera_centers[len(camera_centers) // 2])
+        background_center = (15.0, 15.0)
+
+        def capture(target: np.ndarray) -> tuple[float, float]:
+            phase, _metadata = solve_phase(target, seed=0)
+            slm.apply_phase(phase)
+            camera.arm(
+                3,
+                source_group_sizes=(3,),
+                buffer_frame_count=3,
+                timeout=1.0,
+            )
+            arm_sequencer(sequencer, pulse)
+            sequencer.write_scan_table(((),), sweeps=1)
+            sequencer.fire()
+            records = camera.read_frame_records(3, timeout=2.0, exact=True)
+            assert sequencer.wait_done(1.0) is not None
+            terminal = camera.finish_record_capture()
+            assert terminal.produced_count == 3
+            old_signal, new_signal, background = extract_box_signals(
+                records[1].image,
+                (old_center, new_center, background_center),
+                radius=1,
+                reducer="mean",
+            )
+            assert world._propagated_revision == world.slm_phase_revision
+            return old_signal - background, new_signal - background
+
+        add_target = np.array(base_target, copy=True)
+        add_target[tuple(new_index)] = 1.0
+        remove_target = np.array(base_target, copy=True)
+        remove_target[tuple(old_index)] = 0.0
+        move_target = np.array(remove_target, copy=True)
+        move_target[tuple(new_index)] = 1.0
+
+        base_old, base_new = capture(base_target)
+        add_old, add_new = capture(add_target)
+        remove_old, remove_new = capture(remove_target)
+        move_old, move_new = capture(move_target)
+
+        assert base_old > 100.0 and base_new < 0.35 * base_old
+        assert add_old > 100.0 and add_new > 0.60 * add_old
+        assert remove_old < 0.35 * base_old and remove_new < 0.35 * base_old
+        assert move_new > 0.60 * base_old and move_old < 0.35 * move_new
+    finally:
+        installation.close()
 
 
 def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> None:

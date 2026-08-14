@@ -96,20 +96,14 @@ def _calibration(
         np.full(35, 10.0),
         np.ones(35, bool),
         np.ones(35),
-        kind=ReadoutModelKind.PER_SITE_PSF,
+        kind=ReadoutModelKind.BOX,
         integration_half_width=0,
-        reducer=None,
-        psf_weights=np.ones((35, 1, 1)),
-        psf_boxes=np.asarray(
-            [(column, row, 1, 1) for row in range(5) for column in range(7)]
-        ),
-        background="none",
-        psf_padding=1,
+        reducer="mean",
     )
     return TrapCalibration(
         site_map,
         (model,),
-        ReadoutModelKind.PER_SITE_PSF,
+        ReadoutModelKind.BOX,
         # Sensor integration and authored probe gate are deliberately not the
         # same fact: the shipped pulse below keeps its 5 ms readout window.
         FrameContract(shape, exposure_seconds=0.020, camera_id=camera_id),
@@ -289,7 +283,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             pulse, _Context(), 0, shots=10
         )
         assert np.isnan(measured[0]) and np.isnan(error[0])
-        np.testing.assert_allclose(measured[1:], fluorescence[1:] / 10.0)
+        np.testing.assert_allclose(measured[1:], fluorescence[1:])
         np.testing.assert_allclose(error[1:], 0.0, atol=1e-15)
         assert not saturated
         assert missing == (0,)
@@ -308,10 +302,10 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         camera.close()
 
 
-def test_direct_fluorescence_does_not_rethreshold_the_same_noisy_counts(
+def test_feedback_averages_calibration_brightness_only_over_occupied_shots(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Dark/bright-normalized intensity is the feedback observable itself."""
+    """The observable is the Calibration feature mean conditioned on occupied."""
 
     fluorescence = np.arange(6, 11, dtype=np.uint16).repeat(7)
 
@@ -368,23 +362,37 @@ def test_direct_fluorescence_does_not_rethreshold_the_same_noisy_counts(
         finally:
             installation.close()
 
-        original_evaluate = task._occupancy.evaluate
+        expected = np.arange(20.0, 55.0)
+        assert task.model.kind is ReadoutModelKind.BOX
+        assert task.model.reducer == "mean"
+        shot_index = 0
 
-        def deliberately_false_classifier(value):
-            outputs = original_evaluate(value)
-            occupied = np.zeros_like(
-                outputs["occupied"].snapshot.block.values, dtype=bool
-            )
-            outputs["occupied"] = SimpleNamespace(
-                snapshot=SimpleNamespace(block=SimpleNamespace(values=occupied))
-            )
-            return outputs
+        def calibrated_site_facts(_value):
+            nonlocal shot_index
+            occupied_site = (shot_index + np.arange(35)) % 3 != 0
+            counts = np.full((1, 3, 35), 999.0)
+            counts[0, 1, occupied_site] = expected[occupied_site]
+            occupied = np.zeros((1, 3, 35), dtype=bool)
+            occupied[0, 1] = occupied_site
+            valid = np.ones((1, 3, 35), dtype=bool)
+            shot_index += 1
+            return {
+                "counts": SimpleNamespace(
+                    snapshot=SimpleNamespace(block=SimpleNamespace(values=counts))
+                ),
+                "occupied": SimpleNamespace(
+                    snapshot=SimpleNamespace(block=SimpleNamespace(values=occupied))
+                ),
+                "valid": SimpleNamespace(
+                    snapshot=SimpleNamespace(block=SimpleNamespace(values=valid))
+                ),
+            }
 
-        monkeypatch.setattr(task._occupancy, "evaluate", deliberately_false_classifier)
+        monkeypatch.setattr(task._occupancy, "evaluate", calibrated_site_facts)
         measured, error, saturated, missing = task._measure(
             pulse, _Context(), 0, shots=10
         )
-        np.testing.assert_allclose(measured, fluorescence / 10.0)
+        np.testing.assert_allclose(measured, expected)
         np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated and not missing
     finally:

@@ -13,7 +13,7 @@ from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, ImagePlot, PlotLabels, RasterPlotHost
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
-    fluent_open_path, fluent_save_path, open_fluent_window,
+    FluentSwitch, fluent_open_path, fluent_save_path, open_fluent_window,
 )
 
 from zlc_atom.data import snapshot_from_array
@@ -63,6 +63,7 @@ class SlmEditorControl(QtCore.QObject):
         self._phase = canonical_phase(self.device.last_commanded_phase, self.shape)
         self._phase_metadata: dict[str, object] = {"source": "device"}
         self._request_revision = self._target_revision = self._phase_revision = 0
+        self._phase_request_revision: int | None = None
         self._pending: tuple[int, np.ndarray] | None = None
         self._running = self._painting = self._closed = self._cleaned = False
         self._command_active = False
@@ -99,6 +100,12 @@ class SlmEditorControl(QtCore.QObject):
         self._intensity.setDecimals(3)
         self._intensity.setValue(1.0)
         controls.addWidget(self._intensity)
+        self._selectors = FluentSwitch("Selectors", edit)
+        self._selectors.setToolTip(
+            "Enable plot selectors, wheel zoom, and pan; disable to paint the target"
+        )
+        self._selectors.toggled.connect(self._set_selectors_enabled)
+        controls.addWidget(self._selectors)
         self._preset = FluentComboBox(edit)
         self._preset.addItems((
             "5 x 7 grid", "5 x 7 checkerboard", "Flat-top rectangle",
@@ -135,17 +142,29 @@ class SlmEditorControl(QtCore.QObject):
         buttons.addStretch(1)
         self._send = FluentButton("Send to SLM", files)
         self._send.clicked.connect(self.send)
+        self._sync_send_enabled()
         buttons.addWidget(self._send)
         root.addWidget(files)
         self._status = QtWidgets.QLabel("Solving latest target…", body)
         root.addWidget(self._status)
         return body
 
+    def _set_selectors_enabled(self, enabled: bool) -> None:
+        """Choose plot gestures or target painting without rebuilding either host."""
+
+        active = bool(enabled)
+        self._painting = False
+        self._mode.setEnabled(not active)
+        self._intensity.setEnabled(not active)
+        self._target_host.set_interaction_enabled(active)
+        self._phase_host.set_interaction_enabled(active)
+
     def set_target(self, values: object) -> None:
         target = validate_target(values)
         if target.shape != self.shape:
             raise ValueError(f"target shape must be {self.shape!r}")
         self._target, self._request_revision = target, self._request_revision + 1
+        self._sync_send_enabled()
         self._target_revision += 1
         self._target_host.update_data(_snapshot(target, "target", self._target_revision))
         if np.any(target > 0.0):
@@ -158,10 +177,12 @@ class SlmEditorControl(QtCore.QObject):
         self._request_revision += 1
         self._pending = None
         self._phase = canonical_phase(values, self.shape)
+        self._phase_request_revision = self._request_revision
         self._phase_metadata = dict(
             {"source": "loaded"} if metadata is None else metadata
         )
         self._show_phase()
+        self._sync_send_enabled()
         self._status.setText("Phase loaded; hardware unchanged")
 
     @property
@@ -209,8 +230,10 @@ class SlmEditorControl(QtCore.QObject):
         else:
             if revision == self._request_revision and not self._closed:
                 self._phase, self._phase_metadata = phase, dict(metadata)
+                self._phase_request_revision = revision
                 self._show_phase()
                 self._status.setText(f"Solved with {metadata['method']}; hardware unchanged")
+        self._sync_send_enabled()
         self._start_pending()
 
     def _show_phase(self) -> None:
@@ -229,7 +252,7 @@ class SlmEditorControl(QtCore.QObject):
         self.set_target(makers[self._preset.currentText()]())
 
     def eventFilter(self, watched: object, event: object) -> bool:  # noqa: N802
-        if watched is self._target_widget:
+        if watched is self._target_widget and not self._selectors.isChecked():
             kind = event.type()
             if kind == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
                 self._painting = self._mode.currentText() != "Toggle"
@@ -289,15 +312,19 @@ class SlmEditorControl(QtCore.QObject):
         if self._command_active:
             self._status.setText("SLM command already in progress")
             return False
+        if self._phase_request_revision != self._request_revision:
+            self._status.setText("Wait for the latest target solve before Send")
+            self._sync_send_enabled()
+            return False
         expected = canonical_phase(self._phase, self.shape)
         self._command_active = True
-        self._send.setEnabled(False)
+        self._sync_send_enabled()
         self._status.setText("Sending phase to SLM…")
         try:
             future = self._command_executor.submit(self._send_phase, expected)
         except Exception as error:
             self._command_active = False
-            self._send.setEnabled(True)
+            self._sync_send_enabled()
             self._status.setText(str(error))
             return False
         future.add_done_callback(lambda done: self._command_ready.emit(done))
@@ -322,13 +349,22 @@ class SlmEditorControl(QtCore.QObject):
     @QtCore.pyqtSlot(object)
     def _finish_send(self, future: object) -> None:
         self._command_active = False
-        self._send.setEnabled(not self._closed)
+        self._sync_send_enabled()
         try:
             future.result()
         except Exception as error:
             self._status.setText(str(error))
         else:
             self._status.setText("Phase sent to SLM")
+
+    def _sync_send_enabled(self) -> None:
+        send = getattr(self, "_send", None)
+        if send is not None:
+            send.setEnabled(
+                not self._closed
+                and not self._command_active
+                and self._phase_request_revision == self._request_revision
+            )
 
     def _choose(self, action: str) -> None:
         actions = {
