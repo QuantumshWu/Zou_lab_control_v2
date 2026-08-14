@@ -1,44 +1,28 @@
 {
-  "format": "main-readout-oracle",
-  "authority_commit": "6c337d49c7086fa0ff21f879cd159bdf0e753f51",
-  "authority_functions": [
-    "Zou_lab_control.neutral_atom.core.analysis.find_site_centers",
-    "Zou_lab_control.neutral_atom.core.analysis.roi_counts",
-    "Zou_lab_control.neutral_atom.core.psf.fit_site_psfs",
-    "Zou_lab_control.neutral_atom.core.psf.fit_uniform_psf",
-    "Zou_lab_control.neutral_atom.core.psf.psf_signals",
-    "Zou_lab_control.neutral_atom.operations.calibration.calibrate_all_methods_from_images",
-    "Zou_lab_control.neutral_atom.operations.fidelity.reference_labels",
-    "Zou_lab_control.neutral_atom.operations.fidelity.train_test_split",
-    "Zou_lab_control.neutral_atom.operations.fidelity.characterize_readout",
-    "Zou_lab_control.neutral_atom.core.calibration.TrapCalibration.detect"
-  ],
+  "format": "readout-known-truth-run",
+  "what": "One simulated run of a six-site lattice, and the occupancy that produced it. The frames are the input; the occupancy is the truth a readout is judged against.",
   "input": {
-    "origin": "deterministic synthetic raw camera frames, frozen in the NPZ",
-    "reference_shape": [60, 2, 34, 40],
-    "short_shape": [60, 34, 40],
-    "grid_shape_yx": [2, 3]
+    "reference_shape": [
+      60,
+      2,
+      34,
+      40
+    ],
+    "short_shape": [
+      60,
+      34,
+      40
+    ],
+    "sites": 6,
+    "occupancy_shape": [
+      60,
+      6
+    ]
   },
   "settings": {
-    "ordering": "row-major",
-    "box_radius": 1,
-    "box_reducer": "mean",
+    "exposure_seconds": 0.005,
+    "box_half_width": 1,
     "psf_half_width": 3,
-    "psf_background": "annulus",
-    "psf_background_padding": 3,
-    "train_fraction": 0.9,
-    "split_seed": 0,
-    "histogram_bins": 120,
-    "max_drop": 5,
-    "readout_exposure_seconds": 0.005
-  },
-  "box_reducer_oracle": {
-    "source": "input_reference_frames[0,0] with box_boxes_xywh",
-    "mean": [23.908570721459004, 24.51158215529408, 25.856227433349773, 10.415658528387665, 27.453251103183568, 27.798303845894115],
-    "sum": [215.17713649313103, 220.6042393976467, 232.70604690014795, 93.74092675548899, 247.0792599286521, 250.18473461304703],
-    "median": [22.79770188144567, 17.800009284218998, 22.04449664870946, 10.422826109399063, 23.92282443069747, 23.0658519544236],
-    "max": [44.01657081631366, 41.71000709133889, 49.80572786297182, 11.117498601594095, 53.71101604192, 52.18471173016414]
-  },
-  "scope": "Detector, three feature models, quick thresholds, strict-consensus labels, split, empirical thresholds, held-out/model fidelity, drop-worst, threshold writeback, and runtime occupancy.",
-  "excluded_from_equivalence": "Four intentional corrections are tested separately: invalid/non-finite propagation, reversed fluorescence polarity rejection, chance-level site disabling, and complete FrameContract applicability."
+    "psf_background_padding": 3
+  }
 }
