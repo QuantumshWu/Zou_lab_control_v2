@@ -559,6 +559,12 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "psf_padding",
             "detection_spot_sigma",
             "detection_sigma",
+            # Where the frames come from, and whether they are kept: a
+            # calibration can be re-run on samples it saved earlier instead of
+            # holding the bench for another few hundred.
+            "frame_source",
+            "saved_frames_path",
+            "save_frames",
         )
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "repeats"
