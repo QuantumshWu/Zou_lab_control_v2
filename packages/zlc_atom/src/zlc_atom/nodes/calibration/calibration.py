@@ -1175,9 +1175,6 @@ def detect_sites(
     #: Every shot added up, lit or not: what a trap too dim to clear the
     #: per-shot cut still writes into the picture.
     total_response = np.zeros(stack.shape[1:], dtype=float)
-    #: The per-frame noise, summed, so the average's own noise follows from it
-    #: rather than from a spread measured across a structured picture.
-    total_noise = 0.0
     #: The same two quantities over each interleaved half of the run.
     half_hits = [np.zeros(stack.shape[1:], dtype=np.int64) for _ in range(2)]
     half_response = [np.zeros(stack.shape[1:], dtype=float) for _ in range(2)]
@@ -1215,7 +1212,6 @@ def detect_sites(
         hits += np.count_nonzero(lit, axis=0)
         lit_response += np.sum(np.where(lit, response - baseline, 0.0), axis=0)
         total_response += np.sum(response - baseline, axis=0)
-        total_noise += float(np.sum(noise))
         # The run, also kept as two interleaved halves.  A trap is in both of
         # them; a noise peak is in one.  Interleaved rather than split in the
         # middle so a drift over the run cannot land in one half alone.
@@ -1346,17 +1342,6 @@ def detect_sites(
     persistent = average == ndimage.maximum_filter(
         average, size=peak_window, mode="nearest"
     )
-    # ONE significance map for "is there a trap here": both admissions are
-    # already expressed in sigmas of their own null, so the stronger of the
-    # two is the evidence for the place, whichever statistic found it.  It
-    # RANKS candidates -- and it does not answer "one hill or two".
-    #
-    # That question is about LIGHT, and only the average is linear in light.
-    # A sighting count saturates: between two well-loaded traps the pixels are
-    # lifted by both often enough to be counted as often as the traps
-    # themselves, a plateau with no valley in it, which merged a five-pixel
-    # lattice into five sites.  The valley is asked of the average alone.
-    evidence = np.maximum(count_z, average_z)
     counted = local_maxima & (hits >= required)
     averaged = persistent & (average_z >= average_cut)
     # A place is a trap only if BOTH halves of the run show it.  Every
