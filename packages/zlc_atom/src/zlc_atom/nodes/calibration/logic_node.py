@@ -186,7 +186,9 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "saved_frames_path",
             "folder",
             "Saved frames folder",
-            "",
+            # Where runs are filed: saved samples live under the day folder of
+            # the run that took them, so this is the place to start looking.
+            "data",
             enabled_when=("frame_source", (FRAMES_FROM_FOLDER,)),
         ),
         AuthoringField(

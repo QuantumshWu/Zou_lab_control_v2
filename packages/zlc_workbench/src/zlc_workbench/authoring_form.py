@@ -74,6 +74,13 @@ def project_logic_schema(
     }
     fields: list[FormFieldProps] = []
     for field in schema.fields:
+        if field.value_type == "folder":
+            # A folder is chosen from the workspace, so it OPENS there and is
+            # pre-filled with the declared place rather than with nothing: an
+            # empty box makes the operator find a path the workspace already
+            # knows.
+            fields.append(_project_folder_field(field, workspace_root=workspace_root))
+            continue
         if field.value_type != "resource":
             fields.append(_project_field(field))
             continue
@@ -144,6 +151,27 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
             "two integers as y, x" if str(field.value_type) == "pair" else ""
         ),
         path_mode="dir" if str(field.value_type) == "folder" else "file",
+        enabled_when=field.enabled_when,
+    )
+
+
+def _project_folder_field(
+    field: AuthoringField,
+    *,
+    workspace_root: str,
+) -> FormFieldProps:
+    root = Path(workspace_root).expanduser().resolve()
+    declared = str(field.default or "").strip()
+    default = str((root / declared).resolve()) if declared else str(root)
+    return FormFieldProps(
+        key=field.name,
+        kind="path",
+        label=field.label,
+        default=default,
+        required=bool(field.required),
+        description=f"Choose a folder under {root}",
+        path_mode="dir",
+        base_dir=str(root),
         enabled_when=field.enabled_when,
     )
 
