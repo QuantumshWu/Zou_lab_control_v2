@@ -159,6 +159,39 @@ def test_experiment_batch_is_one_task_console_entry_and_forwards_its_arguments(
     assert f"workspace: {workspace}" in completed.stdout
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the product launcher is a Windows batch file")
+def test_figure_viewer_batch_uses_the_product_entry_and_forwards_arguments() -> None:
+    launcher = REPO_ROOT / "bin" / "figure_viewer.bat"
+    source = launcher.read_text(encoding="utf-8").lower()
+    assert 'call "%~dp0_launch.bat" figure_viewer %*' in source
+    assert "start " not in source
+
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+        ZLC_NO_PAUSE="1",
+        ZLC_PY_CMD=sys.executable,
+    )
+    completed = subprocess.run(
+        [
+            os.environ.get("COMSPEC", "cmd.exe"),
+            "/d",
+            "/c",
+            str(launcher),
+            "--check",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPO_ROOT,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "ZLC WORKBENCH - figure_viewer" in completed.stdout
+    assert "figure viewer ready: no archive given" in completed.stdout
+
+
 def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     """The first thing a new user hits must tell them what to do."""
 
