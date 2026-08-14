@@ -141,7 +141,7 @@ def test_an_array_in_device_state_is_refused_with_the_reason() -> None:
     import numpy as np
     import pytest
 
-    from zlc_workbench.archive import _jsonable
+    from zlc_data.figure_archive import _jsonable
 
     with pytest.raises(TypeError, match="arrays belong beside info"):
         _jsonable({"camera": {"lookup": np.arange(4)}})
