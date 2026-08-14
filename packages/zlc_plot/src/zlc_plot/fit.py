@@ -40,6 +40,10 @@ BoundsInitializer = Callable[
 Jacobian = Callable[..., np.ndarray]
 
 _FIT_RSS_TIE_RELATIVE = 1e-10
+#: The smallest expected count a Poisson deviance may be taken at.  A model
+#: that predicts nothing where something was counted is infinitely unlikely;
+#: the floor turns that into "very unlikely" so a solver can walk away from it.
+_COUNT_FLOOR = 1e-9
 
 # Capability bits that route RegularImageFitInput to the separable
 # stripe/BLAS solver in ``_fit_radial`` instead of coordinate expansion.
@@ -1139,11 +1143,27 @@ def _install_lazy_fit_result_fields() -> None:
 _install_lazy_fit_result_fields()
 
 
+#: How many shots a fitted component must hold to be a POPULATION.  Below
+#: this it is a handful of counts that a three-parameter curve can sit on
+#: exactly -- which is what a two-state fit does with the first thirty shots
+#: of a run that has not loaded an atom yet, and it reports a threshold and a
+#: fidelity for it.  Measured: with a rare state at 2%, every fit before ~150
+#: shots put one component on a single bin holding one count.
+_CLASSIFIER_MINIMUM_COMPONENT_SHOTS = 4.0
+
+
 def _bimodal_classifier_metrics(
     result: FitResult,
     threshold: float | None = None,
-) -> tuple[float, float, float, float]:
-    """Return threshold, left/right population fractions, and fidelity."""
+) -> tuple[float | None, float, float, float]:
+    """Return threshold, left/right population fractions, and fidelity.
+
+    The threshold is ``None`` when the fit does not describe two populations:
+    asked where two states separate, the honest answer for one state and a
+    stray count is that there is nowhere.  Every caller already treats a
+    missing threshold as "no classifier", so the line, the label and the
+    fidelity all disappear together until the shots arrive.
+    """
 
     if result.model.model_id != "bimodal_gaussian" or not result.success:
         raise ValueError("threshold classification requires a successful bimodal fit")
@@ -1166,7 +1186,20 @@ def _bimodal_classifier_metrics(
             + cdf(value, right_mean, right_sigma)
         )
 
+    left_area = float(values["left_amplitude"]) * left_sigma
+    right_area = float(values["right_amplitude"]) * right_sigma
+    total_area = left_area + right_area
+    left_weight = left_area / total_area
+    right_weight = 1.0 - left_weight
     if threshold is None:
+        # The fitted curve's own total is the shot count, whatever the bins
+        # are: the model IS counts per bin.
+        shots = float(np.sum(np.asarray(result.fitted_values, dtype=float)))
+        if (
+            min(left_weight, right_weight) * shots
+            < _CLASSIFIER_MINIMUM_COMPONENT_SHOTS
+        ):
+            return (None, float("nan"), float("nan"), float("nan"))
         lower, upper = sorted((left_mean, right_mean))
         if upper <= lower:
             threshold = lower
@@ -1179,11 +1212,6 @@ def _bimodal_classifier_metrics(
         threshold = float(threshold)
     left_correct = cdf(threshold, left_mean, left_sigma)
     right_correct = 1.0 - cdf(threshold, right_mean, right_sigma)
-    left_area = float(values["left_amplitude"]) * left_sigma
-    right_area = float(values["right_amplitude"]) * right_sigma
-    total_area = left_area + right_area
-    left_weight = left_area / total_area
-    right_weight = 1.0 - left_weight
     left_fraction = (
         left_weight * cdf(threshold, left_mean, left_sigma)
         + right_weight * cdf(threshold, right_mean, right_sigma)
@@ -1521,19 +1549,23 @@ class FitEngine:
         seeds = tuple(np.minimum(np.maximum(seed, low_inside), high_inside) for seed in seeds)
         start = time.monotonic()
         invalid_residual = np.finfo(np.float64).max ** 0.25
-        # A histogram's observations are counts, and a count of 500 is known to
-        # about 22 while a count of 3 is known to about 1.7.  Fitted as though
-        # every bin were equally certain, a tall peak outvotes a sparse one by
-        # the ratio of their heights: for two states seen in very different
-        # numbers -- which is every rare event over a common one -- the best
-        # unweighted fit puts BOTH components on the common peak and treats the
-        # rare one as noise, because sculpting the tall peak a little better
-        # pays more than explaining the small cloud at all.  Dividing each
-        # residual by the Poisson uncertainty of its bin makes every bin speak
-        # in units of its own noise, which is what the counts actually mean,
-        # and makes the reported chi-square a chi-square.
+        # A histogram's observations are COUNTS, and counts have their own
+        # likelihood.  Fitted as though every bin were equally certain, a tall
+        # peak outvotes a sparse one by the ratio of their heights, so the
+        # best fit of a rare state over a common one puts BOTH components on
+        # the common peak.  Dividing by sqrt(n) -- the obvious repair, and
+        # what this did -- overshoots the other way: it makes an empty bin the
+        # most certain measurement on the axis, and the cheapest way to
+        # satisfy it is a component one bin wide standing on a single tall
+        # bar.  Measured on a rare state at 2%: that spike beats the true
+        # solution under sqrt(n) weighting (16.21 against 16.55) and loses to
+        # it under the deviance by eight to one (228 against 29).
+        #
+        # The deviance IS the likelihood: 2*(mu - n + n*ln(n/mu)) per bin, the
+        # quantity whose sum is what a Poisson maximum-likelihood fit
+        # minimises, written as a signed square root so an ordinary
+        # least-squares solver minimises it unchanged.
         counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
-        uncertainty = np.sqrt(np.maximum(values, 1.0)) if counted_observations else None
 
         def check() -> None:
             if cancelled is not None and cancelled():
@@ -1541,20 +1573,47 @@ class FitEngine:
             if opts.deadline_seconds is not None and time.monotonic() - start > opts.deadline_seconds:
                 raise FitDeadlineExceeded("fit deadline exceeded")
 
+        def deviance_residual(predicted: np.ndarray) -> np.ndarray:
+            """The Poisson deviance of each bin, signed, as a residual."""
+
+            expected = np.maximum(predicted, _COUNT_FLOOR)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                logarithm = np.where(
+                    values > 0.0, values * np.log(values / expected), 0.0
+                )
+            deviance = 2.0 * np.maximum(expected - values + logarithm, 0.0)
+            return np.copysign(np.sqrt(deviance), expected - values)
+
         def residual(parameters: np.ndarray) -> np.ndarray:
             check()
             predicted = spec.evaluate(coords, parameters).reshape(-1)
             if predicted.shape != values.shape or not np.all(np.isfinite(predicted)):
                 return np.full(values.shape, invalid_residual)
-            deviation = predicted - values
-            return deviation if uncertainty is None else deviation / uncertainty
+            if not counted_observations:
+                return predicted - values
+            return deviance_residual(predicted)
 
         def analytic_jacobian(parameters: np.ndarray) -> np.ndarray:
             check()
             jacobian = spec.evaluate_jacobian(coords, parameters)
             if not np.all(np.isfinite(jacobian)):
                 raise FloatingPointError("analytic fit jacobian is non-finite")
-            return jacobian if uncertainty is None else jacobian / uncertainty[:, None]
+            if not counted_observations:
+                return jacobian
+            # d/dmu of the signed root, by the chain rule on the expression
+            # above: |mu - n| / (mu * root), which is positive everywhere.
+            # Where the model already matches the data both are zero; the
+            # limit there is 1/sqrt(mu), since the root behaves as
+            # (mu - n)/sqrt(n) in that neighbourhood.
+            predicted = spec.evaluate(coords, parameters).reshape(-1)
+            expected = np.maximum(predicted, _COUNT_FLOOR)
+            root = np.abs(deviance_residual(predicted))
+            scale = np.where(
+                root > _COUNT_FLOOR,
+                np.abs(expected - values) / (expected * np.maximum(root, _COUNT_FLOOR)),
+                1.0 / np.sqrt(expected),
+            )
+            return jacobian * scale[:, None]
 
         successful: list[tuple[float, Any, np.ndarray, np.ndarray]] = []
         unsuccessful: list[tuple[float, Any, np.ndarray, np.ndarray]] = []
@@ -1579,15 +1638,17 @@ class FitEngine:
                     or bool(np.all(solver_residual == invalid_residual))
                 ):
                     continue
-                data_residual = (
-                    solver_residual
-                    if uncertainty is None
-                    else solver_residual * uncertainty
-                )
-                fitted_candidate = values + data_residual
-                if not np.all(np.isfinite(fitted_candidate)):
+                # The model and the data residual, as such.  What the
+                # solver minimises is a likelihood, which cannot be inverted
+                # back into counts -- so the reported curve is evaluated, not
+                # reconstructed from the objective.
+                fitted_candidate = spec.evaluate(coords, candidate.x).reshape(-1)
+                if (
+                    fitted_candidate.shape != values.shape
+                    or not np.all(np.isfinite(fitted_candidate))
+                ):
                     continue
-                residual_candidate = -data_residual
+                residual_candidate = values - fitted_candidate
                 # Candidates compete on the quantity being minimised.
                 rss = float(np.dot(solver_residual, solver_residual))
                 if not math.isfinite(rss):

@@ -80,10 +80,16 @@ def test_analytic_and_numeric_fit_results_are_equivalent() -> None:
             rtol=1e-6,
             atol=1e-8,
         )
+        # The errors come from the jacobian ITSELF, so they carry whatever
+        # the numeric one's truncation error is.  A counted model minimises a
+        # signed square root of the Poisson deviance, and a two-point
+        # difference of that is good to about one part in ten thousand, not
+        # one in a million -- which is a statement about finite differences,
+        # not about the analytic derivative beside it.
         assert np.allclose(
             analytic.standard_errors,
             numeric.standard_errors,
-            rtol=1e-6,
+            rtol=1e-3,
             atol=1e-8,
             equal_nan=True,
         )

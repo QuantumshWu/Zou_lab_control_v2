@@ -385,15 +385,17 @@ class FitSessionMixin:
         options: FitOptions | None,
         cancelled: Callable[[], bool] | None,
         request_generation: int | None = None,
-        warm_start_as_initial: bool = False,
         selector_kind: SelectorKind | None = None,
     ) -> tuple[FacetFitBatchResult, tuple[FitSelection | None, ...]]:
         """Fit every projected cell and construct overlays through one path.
 
-        ``warm_start_as_initial`` (classifier refreshes) solves each cell
-        directly from its previous accepted parameters and falls back to the
-        cold initializer when that solve fails; user fits keep the engine's
-        warm-start-as-extra-candidate semantics.
+        A previous result enters as a WARM START -- a candidate that competes
+        with the model's own initializer and wins only by fitting better.  It
+        used to be handed in as ``initial`` for classifier refreshes, which
+        REPLACES the cold seed, with a fallback only if that solve raised.  A
+        wrong-but-converged solve does not raise, so once a live classifier
+        found a degenerate answer on its first thirty shots, every later
+        revision started from it and stayed there for the rest of the run.
         """
 
         if not isinstance(projection._spec, FacetGridPlot):
@@ -430,47 +432,17 @@ class FitSessionMixin:
                 selection = projection.fit_selection(
                     model, selector_kind=selector_kind, facet_index=index
                 )
-                if warm_start_as_initial and warm is not None and initial is None:
-                    try:
-                        result = self._solve_fit_selection(
-                            projection,
-                            model,
-                            selection,
-                            initial=warm,
-                            bounds=bounds,
-                            options=options,
-                            cancelled=cancelled,
-                            request_generation=request_generation,
-                            warm_start=None,
-                        )
-                    except FitCancelled:
-                        raise
-                    except Exception:
-                        result = None
-                    if result is None or not result.success:
-                        result = self._solve_fit_selection(
-                            projection,
-                            model,
-                            selection,
-                            initial=None,
-                            bounds=bounds,
-                            options=options,
-                            cancelled=cancelled,
-                            request_generation=request_generation,
-                            warm_start=None,
-                        )
-                else:
-                    result = self._solve_fit_selection(
-                        projection,
-                        model,
-                        selection,
-                        initial=initial,
-                        bounds=bounds,
-                        options=options,
-                        cancelled=cancelled,
-                        request_generation=request_generation,
-                        warm_start=warm,
-                    )
+                result = self._solve_fit_selection(
+                    projection,
+                    model,
+                    selection,
+                    initial=initial,
+                    bounds=bounds,
+                    options=options,
+                    cancelled=cancelled,
+                    request_generation=request_generation,
+                    warm_start=warm,
+                )
                 overlay = projection._make_fit_overlay(result, selection)
             except FitCancelled:
                 raise
@@ -965,7 +937,6 @@ class FitSessionMixin:
                 options=None,
                 cancelled=None,
                 request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                warm_start_as_initial=True,
             )
             results = batch.results
             overlays = batch.overlays
@@ -977,34 +948,17 @@ class FitSessionMixin:
                 facet_index=None,
                 request_generation=_CLASSIFIER_REQUEST_GENERATION,
             )
-            result = None
-            if warm is not None:
-                try:
-                    result = self._solve_fit_selection(
-                        projection,
-                        model,
-                        selection,
-                        initial=warm,
-                        bounds=None,
-                        options=None,
-                        cancelled=None,
-                        request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                        warm_start=None,
-                    )
-                except (ValueError, RuntimeError, FloatingPointError):
-                    result = None
-            if result is None or not result.success:
-                result = self._solve_fit_selection(
-                    projection,
-                    model,
-                    selection,
-                    initial=None,
-                    bounds=None,
-                    options=None,
-                    cancelled=None,
-                    request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                    warm_start=None,
-                )
+            result = self._solve_fit_selection(
+                projection,
+                model,
+                selection,
+                initial=None,
+                bounds=None,
+                options=None,
+                cancelled=None,
+                request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                warm_start=warm,
+            )
             results = (result,)
             overlays = (projection._make_fit_overlay(result, selection),)
         self._remember_classifier_warm_starts(model, results)
