@@ -857,47 +857,6 @@ class FluentGroupBox(QtWidgets.QGroupBox):
             """
         )
 
-    def set_title_note(self, text: str) -> None:
-        """A second line of the SAME grey title pill, under the title.
-
-        The pill is where a card says what it is; a note is the rest of that
-        sentence -- for a panel, the shape of the data it draws.  It is not
-        folded into the title because a QGroupBox title is a geometry
-        constraint (a long one takes the card's whole minimum width with it,
-        and a board that cannot place its cards has no canvas under the
-        pointer) and because Qt draws only the first line of one anyway.
-
-        One block, not two: the pill painted here is the union of both lines,
-        drawn UNDER Qt's own title pill in the same colour and the same
-        radius, so what a reader sees is one grey shape with two lines in it.
-        """
-
-        value = str(text or "")
-        if getattr(self, "_zlc_title_note", "") != value:
-            self._zlc_title_note = value
-            self.update()
-
-    def title_strip_height(self) -> int:
-        """How much room the pill needs: one line, or two with a note."""
-
-        height = scaled_px(CARD_TITLE_PX)
-        if getattr(self, "_zlc_title_note", ""):
-            height += QtGui.QFontMetrics(self.font()).height()
-        return height
-
-    def _title_pill_rect(self) -> QtCore.QRect:
-        """The one block both title lines live in."""
-
-        metrics = QtGui.QFontMetrics(self.font())
-        note = getattr(self, "_zlc_title_note", "")
-        pad = scaled_px(EDIT_PADDING_H)
-        width = metrics.horizontalAdvance(str(self.title())) + 2 * pad
-        height = metrics.height() + 2 * scaled_px(PADDING_V)
-        if note:
-            width = max(width, metrics.horizontalAdvance(note) + 2 * pad)
-            height += metrics.height()
-        return QtCore.QRect(0, 0, min(width, self.width()), height)
-
     def set_outline(self, color: str | None) -> None:
         """Select (color) or clear (None) this card: its continuous edge border switches to a 2 px
         accent (from the resting 1 px DIVIDER), painted in paintEvent.  Never via stylesheet -- an
@@ -926,38 +885,8 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         painter.setBrush(QtCore.Qt.NoBrush)
         half = width / 2.0
         painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(half, half, -half, -half), radius, radius)
-        note = getattr(self, "_zlc_title_note", "")
-        if note:
-            # The whole pill, before Qt paints its own single-line one on top
-            # of it in the same colour: one shape, two lines.
-            painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(BG))
-            painter.drawRoundedRect(
-                QtCore.QRectF(self._title_pill_rect()), radius, radius
-            )
         painter.end()
         super().paintEvent(event)
-        if not note:
-            return
-        metrics = QtGui.QFontMetrics(self.font())
-        pill = self._title_pill_rect()
-        line = QtCore.QRect(
-            scaled_px(EDIT_PADDING_H),
-            pill.bottom() - metrics.height() - scaled_px(PADDING_V) + 1,
-            max(0, pill.width() - 2 * scaled_px(EDIT_PADDING_H)),
-            metrics.height(),
-        )
-        painter = QtGui.QPainter(self)
-        try:
-            painter.setPen(QtGui.QColor(GREY))
-            painter.setFont(self.font())
-            painter.drawText(
-                line,
-                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter),
-                metrics.elidedText(note, QtCore.Qt.ElideRight, line.width()),
-            )
-        finally:
-            painter.end()
 
 
 class FluentButton(QtWidgets.QPushButton):

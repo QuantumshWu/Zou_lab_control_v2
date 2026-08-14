@@ -112,15 +112,6 @@ class SemanticDescription:
     #: by re-deriving the row name from a label is how a second naming
     #: convention gets invented.
     fate_rows: tuple[tuple[AxisRef, str], ...] = ()
-    #: The two halves of the line that names what a panel is drawing: the
-    #: dataset's structure, and the rows worth quoting beside it as
-    #: ``(row name, label)``.  Published rather than pre-composed because a
-    #: fate changes under the operator's hands and the sentence has to follow
-    #: without waiting for this description to be built again; ``caption``
-    #: is what those halves say about THIS spec.
-    caption_structure: str = ""
-    caption_rows: tuple[tuple[str, str], ...] = ()
-    caption: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PlotKind):
@@ -267,15 +258,12 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
     raise KeyError(ref.axis_id)
 
 
-def schema_summary(schema: DatasetSchema, *, with_value: bool = True) -> str:
+def schema_summary(schema: DatasetSchema) -> str:
     """One-line human description of a dataset's structure.
 
     This is the single structure-description authority: frontends show it
     verbatim (the embed window's data source line, notebook prints) instead
     of each inventing its own shape text.
-
-    ``with_value`` drops the trailing value clause, for a reader that is
-    looking at the value already -- a panel drawing it, under its own name.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -305,8 +293,6 @@ def schema_summary(schema: DatasetSchema, *, with_value: bool = True) -> str:
         for axis in schema.cell_schema.data_axes
         if axis.size > 1
     )
-    if not with_value:
-        return " × ".join(parts)
     value = "value"
     if schema.cell_schema.value_unit not in {None, "", "1", "arb"}:
         value = f"{value} ({schema.cell_schema.value_unit})"
@@ -352,35 +338,6 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
 #: of saying it per axis instead of per role: a role picker can leave an axis
 #: unaccounted for, or claim two at once, and then the panel has to invent a
 #: repair the operator never asked for.
-def caption_clause(label: str, fate: object) -> str:
-    """How one axis's fate reads in the line that names a panel.
-
-    Empty for an axis the picture already shows: drawn as x, as y or as a
-    group, it is on the plot and labelled there.  What remains are the three
-    ways data disappears without a mark -- faceted, pinned to one value, or
-    collapsed into one -- which is what an operator has to be told.
-    """
-
-    if fate in {"x", "y", "group"}:
-        return ""
-    if isinstance(fate, (int, float)) and not isinstance(fate, bool):
-        return f"{label}={_caption_number(float(fate))}"
-    return f"{label}→{fate}"
-
-
-def caption_line(structure: str, clauses: Iterable[str]) -> str:
-    """The whole line: what the data IS, and what this panel does not show."""
-
-    quoted = ", ".join(clause for clause in clauses if clause)
-    return " · ".join(part for part in (structure, quoted) if part)
-
-
-def _caption_number(value: float) -> str:
-    """One pinned coordinate as a person reads it."""
-
-    return f"{int(value)}" if float(value).is_integer() else f"{value:g}"
-
-
 FATE_PREFIX = "fate:"
 ROLE_FATES = ("x", "y", "group", "facet")
 #: The one role a plot can do without.  Vacating it means there is nothing to
@@ -891,8 +848,6 @@ def describe_semantics(
     #
     # Deduplicated by the row each ref would BE, not by the ref: one axis can
     # be spelled by its id or by its name, and a table is one row per axis.
-    hidden: list[str] = []
-    caption_rows: list[tuple[str, str]] = []
     listed: dict[str, AxisRef] = {}
     for candidate in (*axes, *_axes_used_by(spec)):
         listed.setdefault(fate_field_name(_axis_label(schema, candidate)), candidate)
@@ -916,18 +871,6 @@ def describe_semantics(
             offered.extend((value, f"= {text}") for value, text in pins)
         fields.append(SemanticField(name, label, current, tuple(offered), True))
         fate_rows.append((ref, name))
-        # The same row, said in one line.  An axis drawn as x, as y or as a
-        # group is on the picture already and needs no mention; the three
-        # ways data disappears without a mark -- faceted, pinned to one
-        # value, collapsed into one -- are exactly what does.
-        if axis_size(schema, ref) > 1 or pins:
-            # Worth quoting when it holds several values: whatever becomes of
-            # it, something happened to more than one number.  A size-one
-            # axis reduced to itself is provenance, not news.
-            caption_rows.append((name, label))
-            clause = caption_clause(label, current)
-            if clause:
-                hidden.append(clause)
     if "reduction" in declared:
         fields.append(
             _field(
@@ -953,15 +896,10 @@ def describe_semantics(
         facet=spec.facet if isinstance(spec, FacetGridPlot) else None,
         facet_max_cells=layout.facet_max_cells,
         fate_rows=tuple(fate_rows),
-        caption_structure=schema_summary(schema),
-        caption_rows=tuple(caption_rows),
-        caption=caption_line(schema_summary(schema), hidden),
     )
 
 
 __all__ = [
-    "caption_clause",
-    "caption_line",
     "SemanticChoice",
     "SemanticDescription",
     "SemanticFeasibility",

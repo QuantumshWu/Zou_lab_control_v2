@@ -2519,14 +2519,18 @@ class ConsolePresenter:
             snapshot = binding.frozen_data.snapshot
         return snapshot
 
-    def _panel_data_summary(self, binding: PanelBinding) -> str:
-        """The shape of what this panel is showing, for the strip that names it.
+    def _panel_data_summary(
+        self,
+        binding: PanelBinding,
+        surface: Mapping[str, object],
+    ) -> str:
+        """What this panel is drawing, in one line under its signal.
 
-        The name says WHERE the numbers came from -- for a node preview it is
-        the signal key and nothing else, "@logic/<node>/frames" -- and
-        nothing about what they are.  This is that: the dataset's own
-        structure, from the one authority that spells a schema, without the
-        value clause, which is the one thing the picture already shows.
+        Two clauses, from their two owners: the dataset's own structure, as
+        zlc_plot's one structure-description authority spells it, and what
+        this panel is making of each axis -- which is the part that changes
+        under the operator's hands, so it is read from the fate rows rather
+        than restated.
         """
 
         from zlc_plot.semantics import schema_summary
@@ -2536,15 +2540,22 @@ class ConsolePresenter:
         schema = getattr(block, "schema", None)
         if schema is None:
             return ""
-        return schema_summary(schema, with_value=False)
+        clauses = [schema_summary(schema)]
+        fates = [
+            f"{str(field['label'])}→{str(field['value'])}"
+            for field in tuple(surface.get("semantic", ()))
+            if str(field.get("key", "")).startswith("fate:")
+            and str(field.get("value", ""))
+        ]
+        if fates:
+            clauses.append(", ".join(fates))
+        return " · ".join(clauses)
 
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
 
         surface = dict(binding.parameter_surface)
         surface["paints_images"] = self._paints_image_surfaces(binding)
-        # Composed after the sections settle, so the fates it quotes are the
-        # ones just accepted rather than the previous frame's.
         for section in ("semantic", "display", "fit"):
             authored = dict(getattr(binding.state, section))
             surface[section] = tuple(
@@ -2554,7 +2565,8 @@ class ConsolePresenter:
                 }
                 for field in tuple(surface.get(section, ()))
             )
-        surface["data_summary"] = self._panel_data_summary(binding)
+        # After the sections settle: the line quotes the fates as accepted.
+        surface["data_summary"] = self._panel_data_summary(binding, surface)
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)

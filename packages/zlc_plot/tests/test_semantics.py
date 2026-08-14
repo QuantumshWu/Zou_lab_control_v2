@@ -330,22 +330,3 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     assert description.fate(AxisRef.point_rows()) == "facet"
     assert [name.removeprefix('fate:') for _ref, name in description.fate_rows][0] == "repeat"
     assert "fate:coil_x" in [name for _ref, name in description.fate_rows]
-
-
-def test_a_structure_line_can_leave_out_the_value_it_is_drawn_beside() -> None:
-    """For a reader looking at the value already: the shape, and only that.
-
-    The panel strip names a signal and says what its numbers ARE; the value
-    is the one thing the picture under it already shows, so it is the one
-    clause that would be noise there.  Same authority either way -- a second
-    shape text is how two places start disagreeing about one dataset.
-    """
-
-    from zlc_plot.semantics import schema_summary
-
-    schema = _snapshot().block.schema
-    full = schema_summary(schema)
-    shape = schema_summary(schema, with_value=False)
-    assert full.startswith(shape)
-    assert full[len(shape) :].startswith(" → value")
-    assert "→" not in shape

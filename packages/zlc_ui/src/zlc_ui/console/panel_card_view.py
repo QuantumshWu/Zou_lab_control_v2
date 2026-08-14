@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT,
@@ -290,16 +290,6 @@ class PanelCardView(FluentGroupBox):
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
         self.setTitle(str(self._base_title))
-        # What this panel is drawing rides on the same strip, PAINTED rather
-        # than titled: a QGroupBox title is a geometry constraint -- the long
-        # form took the card's minimum width from 149 px to 704, so the
-        # packer could no longer give the plot its rectangle and every
-        # pointer gesture landed on a card with no canvas under it.  Painted,
-        # it fits whatever room is left and constrains nothing.
-        # What the numbers ARE, on the pill's second line: the name says
-        # where they came from and nothing else.
-        self.set_title_note(str(self._parameter_surface.get("data_summary") or ""))
-        self._reserve_title_strip()
         with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
             self.title_edit.setText(self._base_title)
             signal_index = self.signal_combo.findData(incoming["signal"])
@@ -333,17 +323,6 @@ class PanelCardView(FluentGroupBox):
         incoming = self._validated_panel_state(state)
         self._parameter_surface = dict(surface) if isinstance(surface, Mapping) else {}
         self._apply_panel_state(incoming)
-
-    def _reserve_title_strip(self) -> None:
-        """Give the pill whatever room its own lines need, above the plot."""
-
-        margins = self._surface_layout.contentsMargins()
-        self._surface_layout.setContentsMargins(
-            margins.left(),
-            scaled_px(2) + max(0, self.title_strip_height() - scaled_px(CARD_TITLE_PX)),
-            margins.right(),
-            margins.bottom(),
-        )
 
     def _place_settings_button(self) -> None:
         button = getattr(self, "settings_button", None)
@@ -624,6 +603,12 @@ class PanelCardView(FluentGroupBox):
                 "Signal",
                 default=current_signal,
                 required=True,
+                # What the signal IS, under its name: the dataset's structure
+                # and what this panel makes of each axis.  Composed by the
+                # presenter from the shown snapshot and the fate rows, so it
+                # follows the signal and the operator's edits; never
+                # re-derived here.
+                description=str(self._parameter_surface.get("data_summary") or ""),
             ),
         ])
         if draws_image_surfaces(state):
