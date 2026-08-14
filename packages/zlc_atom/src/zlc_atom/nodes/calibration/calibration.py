@@ -1093,81 +1093,35 @@ def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarr
 _SADDLE_FRACTION = 0.5
 
 
-def detect_sites(
-    frames: object,
+@dataclass(frozen=True, slots=True)
+class _RunEvidence:
+    """Everything one pass over the frames can say, before it means anything."""
+
+    hits: np.ndarray
+    lit_response: np.ndarray
+    total_response: np.ndarray
+    half_hits: list
+    half_response: list
+    half_frames: list
+    background_sigma: float
+
+
+def _accumulate_run(
+    stack: np.ndarray,
     *,
-    spot_sigma: float = 1.0,
-    detection_sigma: float = 4.0,
-    measurement_radius: int = 0,
-) -> SiteMap:
-    """Discover every resolvable site from how often it lights up.
+    spot_sigma: float,
+    detection_sigma: float,
+) -> _RunEvidence:
+    """Read the run once, keeping every quantity a later step could want.
 
-    A site is not a place that is bright on average, and not a place that is
-    bright in a high quantile either: both of those are statements about how
-    OFTEN a trap is loaded as much as about whether a trap is there.  A
-    lattice does not load uniformly -- a corner of it loading a fifth as often
-    as the middle is ordinary -- so any single brightness cut over a run holds
-    either the well-loaded traps or the poorly-loaded ones, never both, and
-    the dim corner of the array simply never appeared.
-
-    What every trap shares, whatever its loading, is that a loaded shot is
-    unmistakable in the shot itself.  So each frame is thresholded on its own
-    noise, which turns it into a map of where an atom was seen, and those maps
-    are added up.  A place with a hundred sightings and a place with eight are
-    then the same kind of evidence, differing only in loading -- and eight is
-    a great many more than the noise of a run produces at one pixel.
-
-    That last number is not a guess: thresholding a frame at k sigma admits a
-    noise pixel with the Gaussian tail probability of k, so the count at a
-    background pixel is binomial with that rate, and the count that a whole
-    image of background will not reach follows from it.  ``detection_sigma``
-    sets k -- how sure a single sighting must be -- and the arithmetic below
-    converts that into how many sightings make a site.
-
-    Counting sightings assumes a loaded shot IS unmistakable, and a trap dim
-    enough that its loaded shots land just under that cut leaves no sightings
-    at all -- however often it is loaded.  Such a trap is nonetheless obvious
-    in the AVERAGE of the run, which is where it was measured: half the shots
-    at three sigma is fifteen sigma once they are added up.  So a site is a
-    place that stands out in single shots OR in the average, two independent
-    admissions, each with the multiple-comparison threshold its own statistic
-    needs.  Neither alone is the detector: an average-only cut holds the
-    well-loaded traps and loses the rare ones, and a sightings-only cut holds
-    the bright ones and loses the dim ones.
+    One pass, because it is one pass: a run of two thousand large frames is
+    not walked again for the sake of tidiness.  What it keeps is where an atom
+    was SEEN, the light on the shots where it was, the light on every shot,
+    and all of that again for each interleaved half of the run.
     """
 
-    from scipy.special import erfc, erfcinv
-    from scipy.stats import binom
+    from scipy import ndimage
 
-    stack = np.asarray(
-        frames.values if hasattr(frames, "values") else frames, dtype=float
-    )
-    if stack.ndim == 2:
-        stack = stack[np.newaxis, ...]
-    if stack.ndim != 3 or 0 in stack.shape or not np.isfinite(stack).all():
-        raise ValueError("frames must be a non-empty finite stack of 2D images")
-    spot_sigma = float(spot_sigma)
-    detection_sigma = float(detection_sigma)
-    if spot_sigma <= 0 or not np.isfinite(spot_sigma):
-        raise ValueError("spot_sigma must be positive and finite")
-    if detection_sigma <= 0 or not np.isfinite(detection_sigma):
-        raise ValueError("detection_sigma must be positive and finite")
-    # The scale over which a spot is ONE peak: its full width at half
-    # maximum, 2.355 sigma, rounded up to an odd pixel count.  It replaces an
-    # authored `min_distance` of 3 px, a number with no relation to the optics
-    # that an operator had no way to choose.
-    #
-    # It is the ONLY length here.  Whether two peaks are two traps is not a
-    # distance question at all -- see the saddle test below -- and every
-    # attempt to answer it with one was wrong in both directions: too small
-    # and one spot is reported twice, too large and a dense lattice loses real
-    # sites (measured: 38 placed, 20 found, when the exclusion was a full
-    # width).
-    peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
-    # How near in y two sites must be to be READ as one row of the array.
-    # Ordering only: it decides the order site ids are handed out in, never
-    # which places are sites.
-    row_tolerance = max(2.0, float(spot_sigma))
 
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     hits = np.zeros(stack.shape[1:], dtype=np.int64)
@@ -1224,6 +1178,52 @@ def detect_sites(
                 (response - baseline)[mask], axis=0
             )
             half_frames[half] += int(np.count_nonzero(mask))
+    return _RunEvidence(
+        hits,
+        lit_response,
+        total_response,
+        half_hits,
+        half_response,
+        half_frames,
+        background_sigma,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Admission:
+    """How high a place must stand, in each of the two statistics."""
+
+    shots: int
+    pixels: int
+    average: np.ndarray
+    source_footprint: int
+    sources: np.ndarray
+    false_rate: float
+    required: int
+    average_z: np.ndarray
+    average_cut: float
+
+
+def _admission_thresholds(
+    stack: np.ndarray,
+    evidence: _RunEvidence,
+    *,
+    detection_sigma: float,
+) -> _Admission:
+    """The bars, measured on this run's own background rather than assumed.
+
+    A band-passed picture breaks assumed distributions in the direction that
+    invents traps, so what noise reaches here is counted where the sources
+    are not.
+    """
+
+    from scipy.special import erfc, erfcinv
+    from scipy.stats import binom
+
+    hits = evidence.hits
+    total_response = evidence.total_response
+    background_sigma = evidence.background_sigma
+
 
     shots = int(stack.shape[0])
     pixels = int(hits.size)
@@ -1294,9 +1294,49 @@ def detect_sites(
     # against false positives, not two stacked, because the second one was
     # strict enough to cost real traps that the first admits correctly.
     average_cut = float(sqrt(2.0) * erfcinv(1.0 / pixels))
+    return _Admission(
+        shots,
+        pixels,
+        average,
+        source_footprint,
+        sources,
+        false_rate,
+        required,
+        average_z,
+        average_cut,
+    )
 
-    # Where a site is, refined on how bright the place is WHEN it is lit: the
-    # one image in a run whose contrast does not depend on loading.
+
+def _candidate_peaks(
+    evidence: _RunEvidence,
+    admission: _Admission,
+    *,
+    spot_sigma: float,
+    peak_window: int,
+    measurement_radius: int,
+) -> tuple[list, np.ndarray]:
+    """Every place that both admissions offer and both halves of the run keep.
+
+    Returns the candidates strongest first, and the sighting significance the
+    published quality is read from.
+    """
+
+    from scipy import ndimage
+
+    hits = evidence.hits
+    lit_response = evidence.lit_response
+    half_hits = evidence.half_hits
+    half_response = evidence.half_response
+    half_frames = evidence.half_frames
+    shots = admission.shots
+    average = admission.average
+    average_z = admission.average_z
+    average_cut = admission.average_cut
+    required = admission.required
+    false_rate = admission.false_rate
+    source_footprint = admission.source_footprint
+
+
     conditional = lit_response / np.maximum(hits, 1)
     # A candidate must be a peak of BOTH maps, over the same distance.
     #
@@ -1366,10 +1406,25 @@ def detect_sites(
             int(item[1]),
         ),
     )
-    # Refine BEFORE separating, so the rule holds on the coordinates that are
-    # published.  Subpixel refinement moves a centre by up to a pixel, and two
-    # centres that were far enough apart as integer peaks could be brought
-    # inside each other -- which is what drew overlapping rings on the report.
+    return ranked, count_z
+
+
+def _place_candidates(
+    ranked: list,
+    *,
+    average: np.ndarray,
+    average_z: np.ndarray,
+    frame_shape: tuple,
+    spot_sigma: float,
+    measurement_radius: int,
+) -> tuple[list, list]:
+    """Where each admitted place is, and one answer per trap.
+
+    Both questions are settled on the average -- the only map linear in the
+    light -- and neither is settled by a distance.
+    """
+
+
     refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
     selected: list[tuple[int, int]] = []
     centers_list: list[np.ndarray] = []
@@ -1405,7 +1460,7 @@ def detect_sites(
         # readout, with no report at all to say why.  What cannot be measured
         # is not a site.
         if measurement_radius and not box_fits(
-            (float(centre[0]), float(centre[1])), int(measurement_radius), hits.shape
+            (float(centre[0]), float(centre[1])), int(measurement_radius), frame_shape
         ):
             dropped_at_border += 1
             continue
@@ -1430,6 +1485,104 @@ def detect_sites(
                 else ""
             )
         )
+    return selected, centers_list
+
+
+def detect_sites(
+    frames: object,
+    *,
+    spot_sigma: float = 1.0,
+    detection_sigma: float = 4.0,
+    measurement_radius: int = 0,
+) -> SiteMap:
+    """Discover every resolvable site from how often it lights up.
+
+    A site is not a place that is bright on average, and not a place that is
+    bright in a high quantile either: both of those are statements about how
+    OFTEN a trap is loaded as much as about whether a trap is there.  A
+    lattice does not load uniformly -- a corner of it loading a fifth as often
+    as the middle is ordinary -- so any single brightness cut over a run holds
+    either the well-loaded traps or the poorly-loaded ones, never both, and
+    the dim corner of the array simply never appeared.
+
+    What every trap shares, whatever its loading, is that a loaded shot is
+    unmistakable in the shot itself.  So each frame is thresholded on its own
+    noise, which turns it into a map of where an atom was seen, and those maps
+    are added up.  A place with a hundred sightings and a place with eight are
+    then the same kind of evidence, differing only in loading -- and eight is
+    a great many more than the noise of a run produces at one pixel.
+
+    That last number is not a guess: thresholding a frame at k sigma admits a
+    noise pixel with the Gaussian tail probability of k, so the count at a
+    background pixel is binomial with that rate, and the count that a whole
+    image of background will not reach follows from it.  ``detection_sigma``
+    sets k -- how sure a single sighting must be -- and the arithmetic below
+    converts that into how many sightings make a site.
+
+    Counting sightings assumes a loaded shot IS unmistakable, and a trap dim
+    enough that its loaded shots land just under that cut leaves no sightings
+    at all -- however often it is loaded.  Such a trap is nonetheless obvious
+    in the AVERAGE of the run, which is where it was measured: half the shots
+    at three sigma is fifteen sigma once they are added up.  So a site is a
+    place that stands out in single shots OR in the average, two independent
+    admissions, each with the multiple-comparison threshold its own statistic
+    needs.  Neither alone is the detector: an average-only cut holds the
+    well-loaded traps and loses the rare ones, and a sightings-only cut holds
+    the bright ones and loses the dim ones.
+    """
+
+    stack = np.asarray(
+        frames.values if hasattr(frames, "values") else frames, dtype=float
+    )
+    if stack.ndim == 2:
+        stack = stack[np.newaxis, ...]
+    if stack.ndim != 3 or 0 in stack.shape or not np.isfinite(stack).all():
+        raise ValueError("frames must be a non-empty finite stack of 2D images")
+    spot_sigma = float(spot_sigma)
+    detection_sigma = float(detection_sigma)
+    if spot_sigma <= 0 or not np.isfinite(spot_sigma):
+        raise ValueError("spot_sigma must be positive and finite")
+    if detection_sigma <= 0 or not np.isfinite(detection_sigma):
+        raise ValueError("detection_sigma must be positive and finite")
+    # The scale over which a spot is ONE peak: its full width at half
+    # maximum, 2.355 sigma, rounded up to an odd pixel count.  It replaces an
+    # authored `min_distance` of 3 px, a number with no relation to the optics
+    # that an operator had no way to choose.
+    #
+    # It is the ONLY length here.  Whether two peaks are two traps is not a
+    # distance question at all -- see the saddle test below -- and every
+    # attempt to answer it with one was wrong in both directions: too small
+    # and one spot is reported twice, too large and a dense lattice loses real
+    # sites (measured: 38 placed, 20 found, when the exclusion was a full
+    # width).
+    peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
+    # How near in y two sites must be to be READ as one row of the array.
+    # Ordering only: it decides the order site ids are handed out in, never
+    # which places are sites.
+    row_tolerance = max(2.0, float(spot_sigma))
+
+    evidence = _accumulate_run(
+        stack, spot_sigma=spot_sigma, detection_sigma=detection_sigma
+    )
+    admission = _admission_thresholds(
+        stack, evidence, detection_sigma=detection_sigma
+    )
+    ranked, count_z = _candidate_peaks(
+        evidence,
+        admission,
+        spot_sigma=spot_sigma,
+        peak_window=peak_window,
+        measurement_radius=int(measurement_radius),
+    )
+    selected, centers_list = _place_candidates(
+        ranked,
+        average=admission.average,
+        average_z=admission.average_z,
+        frame_shape=evidence.hits.shape,
+        spot_sigma=spot_sigma,
+        measurement_radius=int(measurement_radius),
+    )
+    average_z = admission.average_z
 
     centers = np.asarray(centers_list, dtype="<f8")
     # How far a site stands out of the noise, in its own sigmas -- by whichever
