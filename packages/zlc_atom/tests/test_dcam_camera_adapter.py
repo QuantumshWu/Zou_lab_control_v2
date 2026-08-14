@@ -75,9 +75,16 @@ class _FakeDcamDevice:
 
     def property_attributes(self, property_id: DcamProperty) -> tuple[float, float]:
         self._sdk(f"attr:{property_id.name}")
+        # Position and size are separate properties with separate steps, as
+        # they are on the sensor: here the subarray is PLACED on a coarser
+        # grid than it is sized, which is what tells the two apart.
         if property_id is DcamProperty.SUBARRAY_HSIZE:
             return 4.0, float(self.sensor_shape[1])
         if property_id is DcamProperty.SUBARRAY_VSIZE:
+            return 4.0, float(self.sensor_shape[0])
+        if property_id is DcamProperty.SUBARRAY_HPOS:
+            return 4.0, float(self.sensor_shape[1])
+        if property_id is DcamProperty.SUBARRAY_VPOS:
             return 4.0, float(self.sensor_shape[0])
         raise AssertionError(property_id)
 
@@ -189,11 +196,29 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
         assert point.sensor_shape_yx == (12, 16)
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (8, 8)
+        # A region can only be placed and sized on the steps the sensor
+        # declares, so it is snapped OUTWARDS to COVER what was asked for.
+        # Rounded inwards, x 5..11 came back as 4..7 and the right of the
+        # region was simply not read -- silently, since the applied ROI is
+        # what everything downstream then measures.
         adapter.set_roi((5, 5, 7, 7))
         point = adapter.set_exposure_seconds(0.015)
         assert point.exposure_seconds == 0.015
         assert point.roi_origin_yx == (4, 4)
-        assert point.roi_shape_yx == (4, 4)
+        assert point.roi_shape_yx == (8, 8)
+        applied_y, applied_x = point.roi_origin_yx
+        applied_height, applied_width = point.roi_shape_yx
+        assert applied_x <= 5 and applied_x + applied_width >= 5 + 7
+        assert applied_y <= 5 and applied_y + applied_height >= 5 + 7
+        # Position and size are separate properties with separate steps, and
+        # each is asked for its own rather than one standing in for both.
+        asked = {name for name, _thread in driver.calls}
+        assert {
+            "attr:SUBARRAY_HPOS",
+            "attr:SUBARRAY_VPOS",
+            "attr:SUBARRAY_HSIZE",
+            "attr:SUBARRAY_VSIZE",
+        } <= asked
         adapter.arm(
             None,
             source_group_sizes=(3,),

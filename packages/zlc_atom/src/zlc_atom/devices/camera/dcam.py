@@ -28,15 +28,38 @@ def _snap_roi_axis(
     origin: int,
     extent: int,
     *,
-    step: int,
+    origin_step: int,
+    extent_step: int,
     sensor_extent: int,
 ) -> tuple[int, int]:
-    snapped_extent = max(step, min(int(extent), sensor_extent))
-    snapped_extent = (snapped_extent // step) * step
-    maximum_origin = sensor_extent - snapped_extent
-    snapped_origin = max(0, min(int(origin), maximum_origin))
-    snapped_origin = (snapped_origin // step) * step
-    return snapped_origin, snapped_extent
+    """The sensor's own grid, snapped so the region asked for is COVERED.
+
+    A subarray can only start and end on the steps the sensor declares, so a
+    region drawn on an image is never exactly the region a qCMOS takes.  Which
+    way it is rounded is a choice, and rounding the SIZE down was the wrong
+    one: the requested region then lost up to a step off its right and bottom
+    edges while its origin moved up and left, so a box drawn round the edge
+    traps cut them off -- silently, because the applied ROI is what everything
+    downstream then measures.
+
+    Selecting a region means covering it.  The origin rounds DOWN to its step
+    and the far edge rounds UP to the size step, so the applied subarray
+    contains what was asked for, clamped only by the sensor itself.
+    """
+
+    origin_step = max(1, int(origin_step))
+    extent_step = max(1, int(extent_step))
+    sensor_extent = int(sensor_extent)
+    start = max(0, min(int(origin), sensor_extent - 1))
+    stop = max(start + 1, min(int(origin) + int(extent), sensor_extent))
+    snapped_origin = (start // origin_step) * origin_step
+    covered = stop - snapped_origin
+    snapped_extent = -(-covered // extent_step) * extent_step
+    if snapped_origin + snapped_extent > sensor_extent:
+        # The far edge cannot be covered without leaving the sensor: take the
+        # largest legal subarray that still starts where it should.
+        snapped_extent = ((sensor_extent - snapped_origin) // extent_step) * extent_step
+    return snapped_origin, max(extent_step, snapped_extent)
 
 from ._dcam_driver import DcamProperty, DcamSdkDriver, DcamValue
 from ._owner_lane import CameraSdkOwnerLane
@@ -201,15 +224,29 @@ class DcamCameraAdapter:
                 f"expected {value!r}"
             )
 
-    def _sensor_grid_on_owner(self) -> tuple[int, int, int, int]:
+    def _sensor_grid_on_owner(self) -> tuple[int, int, int, int, int, int]:
+        """The grid the sensor declares: its size, and the steps it moves in.
+
+        Position and size are separate properties with separate steps -- a
+        sensor may place a subarray on a coarser grid than it sizes one -- so
+        each is asked for its own rather than one standing in for both.
+        """
+
         device = self._require_device()
         h_step, h_max = device.property_attributes(DcamProperty.SUBARRAY_HSIZE)
         v_step, v_max = device.property_attributes(DcamProperty.SUBARRAY_VSIZE)
+        h_pos_step, _h_pos_max = device.property_attributes(DcamProperty.SUBARRAY_HPOS)
+        v_pos_step, _v_pos_max = device.property_attributes(DcamProperty.SUBARRAY_VPOS)
         width = self._integral(h_max, "sensor width", positive=True)
         height = self._integral(v_max, "sensor height", positive=True)
-        horizontal_step = self._integral(h_step, "horizontal ROI step", positive=True)
-        vertical_step = self._integral(v_step, "vertical ROI step", positive=True)
-        return horizontal_step, vertical_step, width, height
+        return (
+            self._integral(h_pos_step, "horizontal ROI origin step", positive=True),
+            self._integral(v_pos_step, "vertical ROI origin step", positive=True),
+            self._integral(h_step, "horizontal ROI size step", positive=True),
+            self._integral(v_step, "vertical ROI size step", positive=True),
+            width,
+            height,
+        )
 
     def _apply_settings_on_owner(self, config: DcamCameraConfig) -> CameraWorkingPoint:
         if self._armed:
@@ -243,20 +280,30 @@ class DcamCameraAdapter:
             )
 
         self._set_exact(device, DcamProperty.SUBARRAY_MODE, int(DcamValue.MODE_OFF))
-        h_step, v_step, sensor_width, sensor_height = self._sensor_grid_on_owner()
+        (
+            h_origin_step,
+            v_origin_step,
+            h_size_step,
+            v_size_step,
+            sensor_width,
+            sensor_height,
+        ) = self._sensor_grid_on_owner()
         roi = config.roi_xywh
         if roi is not None:
-            x, y, width, height = roi
+            requested = tuple(int(value) for value in roi)
+            x, y, width, height = requested
             x, width = _snap_roi_axis(
                 x,
                 width,
-                step=h_step,
+                origin_step=h_origin_step,
+                extent_step=h_size_step,
                 sensor_extent=sensor_width,
             )
             y, height = _snap_roi_axis(
                 y,
                 height,
-                step=v_step,
+                origin_step=v_origin_step,
+                extent_step=v_size_step,
                 sensor_extent=sensor_height,
             )
             self._set_exact(device, DcamProperty.SUBARRAY_HPOS, 0)
@@ -310,7 +357,7 @@ class DcamCameraAdapter:
         binning = self._integral(prop(DcamProperty.BINNING), "binning", positive=True)
         if binning not in (1, 2, 4, 8, 16):
             raise RuntimeError(f"qCMOS returned unsupported binning {binning}")
-        _h_step, _v_step, sensor_width, sensor_height = self._sensor_grid_on_owner()
+        *_steps, sensor_width, sensor_height = self._sensor_grid_on_owner()
         subarray_mode = self._integral(
             prop(DcamProperty.SUBARRAY_MODE), "subarray mode", positive=True
         )

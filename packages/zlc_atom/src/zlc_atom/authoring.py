@@ -165,7 +165,7 @@ def _project_value(field: AuthoringField, value: object) -> object:
             if normalized in {"false", "0", "no", "off"}:
                 return False
         raise TypeError(f"{field.label} must be true or false")
-    if declared in {"str", "text", "choice", "resource"}:
+    if declared in {"str", "text", "choice", "resource", "folder"}:
         if not isinstance(value, str):
             if declared not in {"choice"}:
                 raise TypeError(f"{field.label} must be text")
