@@ -1022,6 +1022,24 @@ def _refine_center_subpixel(image: np.ndarray, x: float, y: float, half: int = 2
     return _core_centroid(image, x_int, y_int)
 
 
+def _brightest_within(
+    image: np.ndarray,
+    row: int,
+    column: int,
+    reach: int = 1,
+) -> tuple[int, int]:
+    """The brightest pixel within a pixel or two of a candidate peak."""
+
+    height, width = image.shape
+    y0, y1 = max(0, row - reach), min(height, row + reach + 1)
+    x0, x1 = max(0, column - reach), min(width, column + reach + 1)
+    patch = np.asarray(image[y0:y1, x0:x1], dtype=float)
+    if not patch.size or not np.isfinite(patch).any():
+        return int(row), int(column)
+    offset_y, offset_x = np.unravel_index(int(np.nanargmax(patch)), patch.shape)
+    return int(y0 + offset_y), int(x0 + offset_x)
+
+
 def _core_centroid(image: np.ndarray, x_int: int, y_int: int) -> tuple[float, float]:
     """The spot's centre of light over its own core, used when a fit will not.
 
@@ -1372,11 +1390,28 @@ def detect_sites(
     centers_list: list[np.ndarray] = []
     dropped_at_border = 0
     for row, column in ranked:
-        # Refined on the map that SAW it: conditional brightness for a place
-        # with sightings, the average for one admitted without them.
-        surface = conditional if hits[row, column] >= required else average
+        # Refined on the AVERAGE, whichever statistic admitted the place.
+        # Loading scales a spot; it does not move it, so the map that uses
+        # every photon is the one that says where the trap is.  Conditional
+        # brightness -- the light on the shots where a pixel was lit -- looked
+        # like the loading-independent choice and is a biased picture of the
+        # SHAPE: a skirt pixel crosses the per-frame cut only on the shots
+        # where it happened to be brightest, so its conditional value is
+        # inflated by the very selection that produced it, and the fit is
+        # dragged towards whichever side of the spot has the thinner skirt.
+        # Measured on a real array, that pulled two sites 0.8 px off their own
+        # brightest pixel while the sites with symmetric skirts landed within
+        # 0.03 px.
+        # Starting from the average's OWN maximum.  Admission says a trap is
+        # here; where it is, is answered on one map from end to end.  The
+        # candidate's integer peak comes from whichever statistic admitted it,
+        # and a sighting count saturates -- its argmax can sit a pixel off the
+        # light -- so a fit windowed on that peak sees a lopsided, truncated
+        # spot and lands between the two.  Measured: two sites 0.8 px from
+        # their own brightest pixel.
+        row, column = _brightest_within(average, int(row), int(column))
         centre = _refine_center_subpixel(
-            surface, float(column), float(row), half=refine_half
+            average, float(column), float(row), half=refine_half
         )
         # Refinement moves a centre by up to a pixel, so the margin the integer
         # peak passed is not the margin the PUBLISHED centre keeps.  Checked
