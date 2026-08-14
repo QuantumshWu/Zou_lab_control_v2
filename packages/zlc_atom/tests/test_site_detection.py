@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from zlc_atom.nodes.calibration.calibration import detect_sites
+from zlc_atom.nodes.calibration.calibration import box_fits, detect_sites
 
 
 def _lattice(
@@ -114,3 +114,37 @@ def test_a_rarely_loaded_trap_is_still_found_by_its_sightings() -> None:
 
     found, missed, spurious = _score(stack, centres)
     assert (found, missed, spurious) == (36, 0, 0)
+
+def test_a_place_that_cannot_be_measured_is_not_published() -> None:
+    """The bench crash: a corner artefact, then no report at all.
+
+    A bright thing against the border is a peak like any other, and sub-pixel
+    refinement pulls its centre further out than the integer peak the margin
+    checked -- measured here at (4.07, 1.92).  The readout then asked for a
+    radius-6 box round it, could not have one, and the run died with
+    "site center ... lies outside image" before writing a single picture.
+
+    What cannot be measured is not a site, so the detector is told which box
+    has to fit and drops the rest.  The four real traps are untouched.
+    """
+
+    rng = np.random.default_rng(4)
+    height = width = 60
+    shots = 80
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    stack = rng.normal(120.0, 7.0, size=(shots, height, width))
+    traps = [(20.0, 20.0), (32.0, 20.0), (20.0, 32.0), (32.0, 32.0)]
+    for x, y in traps:
+        spot = np.exp(-(((grid_x - x) ** 2 + (grid_y - y) ** 2) / 2.0))
+        stack[rng.random(shots) < 0.5] += 1100.0 * spot
+    stack += 900.0 * np.exp(-(((grid_x - 4.0) ** 2 + (grid_y - 2.0) ** 2) / 2.0))
+
+    unguarded = detect_sites(stack, spot_sigma=1.2)
+    assert unguarded.n_sites == len(traps) + 1
+
+    found = detect_sites(stack, spot_sigma=1.2, measurement_radius=6)
+    assert found.n_sites == len(traps)
+    assert all(
+        box_fits((float(x), float(y)), 6, (height, width))
+        for x, y in found.centers_xy
+    )

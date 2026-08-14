@@ -163,13 +163,34 @@ def _immutable_array(value: object, dtype: str, shape: tuple[int, ...] | None = 
     return result
 
 
+def box_fits(
+    center: tuple[float, float],
+    radius: int,
+    image_shape: tuple[int, int],
+) -> bool:
+    """Whether a box of this radius round this centre is wholly in the picture.
+
+    THE rule, asked by the detector before it publishes a centre and by the
+    extractor before it reads one.  Two copies of it is how a run died at the
+    readout for a site the detector had been happy to report.
+    """
+
+    x, y = (int(round(float(center[0]))), int(round(float(center[1]))))
+    radius = int(radius)
+    return (
+        x - radius >= 0
+        and y - radius >= 0
+        and x + radius < int(image_shape[1])
+        and y + radius < int(image_shape[0])
+    )
+
+
 def _box_bounds(center: tuple[float, float], radius: int, image_shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    if not box_fits(center, radius, image_shape):
+        raise ValueError(f"site center {center!r} with radius {radius} lies outside image")
     x, y = (int(round(float(center[0]))), int(round(float(center[1]))))
     width, height = 2 * int(radius) + 1, 2 * int(radius) + 1
-    x0, y0 = x - int(radius), y - int(radius)
-    if x0 < 0 or y0 < 0 or x0 + width > image_shape[1] or y0 + height > image_shape[0]:
-        raise ValueError(f"site center {center!r} with radius {radius} lies outside image")
-    return x0, y0, width, height
+    return x - int(radius), y - int(radius), width, height
 
 
 def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1, reducer: str = "mean") -> np.ndarray:
@@ -847,6 +868,7 @@ def detect_sites(
     *,
     spot_sigma: float = 1.0,
     detection_sigma: float = 4.0,
+    measurement_radius: int = 0,
 ) -> SiteMap:
     """Discover every resolvable site from how often it lights up.
 
@@ -1027,12 +1049,14 @@ def detect_sites(
     # peak.  A spot is one place; a gap between two traps is four or more
     # pixels from either of their peaks and is excluded either way.
     local_maxima &= ndimage.binary_dilation(brightest, structure=np.ones((3, 3)))
-    # A site has to be a place the picture actually shows: within a spot's
-    # reach of the border there is no background to compare against, and the
-    # filters invent one by extending the edge, which biases every frame the
-    # same way -- over a long run those pixels accumulate sightings and a
-    # "site" appears against the frame edge, half of it outside the image.
-    margin = max(2, int(np.ceil(2.0 * spot_sigma)))
+    # A site has to be a place the picture actually shows, and a place that
+    # can be MEASURED: within a spot's reach of the border there is no
+    # background to compare against -- the filters invent one by extending the
+    # edge, which biases every frame the same way -- and within the readout's
+    # own box of the border there is no room to read it.  ``measurement_radius``
+    # is that box, told by whoever will read it; the two reaches are the same
+    # kind of fact and take the larger.
+    margin = max(2, int(np.ceil(2.0 * spot_sigma)), int(measurement_radius))
     inside = np.zeros(hits.shape, dtype=bool)
     if 2 * margin < min(hits.shape):
         inside[margin:-margin, margin:-margin] = True
@@ -1063,6 +1087,7 @@ def detect_sites(
     refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
     selected: list[tuple[int, int]] = []
     centers_list: list[np.ndarray] = []
+    dropped_at_border = 0
     for row, column in ranked:
         # Refined on the map that SAW it: conditional brightness for a place
         # with sightings, the average for one admitted without them.
@@ -1070,6 +1095,17 @@ def detect_sites(
         centre = _refine_center_subpixel(
             surface, float(column), float(row), half=refine_half
         )
+        # Refinement moves a centre by up to a pixel, so the margin the integer
+        # peak passed is not the margin the PUBLISHED centre keeps.  Checked
+        # only before refinement, an edge artefact drawn inward by its own
+        # skew came out at y=1.5 with a radius-3 box -- and the run died at the
+        # readout, with no report at all to say why.  What cannot be measured
+        # is not a site.
+        if measurement_radius and not box_fits(
+            (float(centre[0]), float(centre[1])), int(measurement_radius), hits.shape
+        ):
+            dropped_at_border += 1
+            continue
         if all(
             (float(centre[0]) - float(other[0])) ** 2
             + (float(centre[1]) - float(other[1])) ** 2
@@ -1079,7 +1115,15 @@ def detect_sites(
             selected.append((int(row), int(column)))
             centers_list.append(centre)
     if not selected:
-        raise ValueError("calibration frames contain no detectable sites")
+        raise ValueError(
+            "calibration frames contain no detectable sites"
+            + (
+                f" ({dropped_at_border} candidate(s) were too close to the "
+                "border to be measured)"
+                if dropped_at_border
+                else ""
+            )
+        )
 
     centers = np.asarray(centers_list, dtype="<f8")
     # How far a site stands out of the noise, in its own sigmas -- by whichever
@@ -1450,6 +1494,10 @@ def calibrate(
         references.reshape(-1, *references.shape[2:]),
         spot_sigma=detection_spot_sigma,
         detection_sigma=detection_sigma,
+        # Every box this calibration will read out of a site: the integration
+        # box, and the PSF box with the background ring round it.  A place that
+        # cannot carry all of them is not a site THIS calibration can use.
+        measurement_radius=max(box_half_width, psf_half_width + psf_padding),
     )
     centers = site_map.centers_xy
 
