@@ -14,12 +14,28 @@ here, so there is no second place for it to disagree with.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
 
 from .calibration import CalibrationResult, ReadoutModelKind
+
+
+def _plain(value: Any) -> Any:
+    """One record as JSON holds it, with numpy scalars spelled as numbers."""
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_plain(item) for item in value.tolist()]
+    return str(value)
 
 
 def _numbers(values: object, mask: object | None = None) -> dict[str, float | None]:
@@ -72,8 +88,20 @@ def _separation(
     return separation
 
 
-def readout_summary(result: CalibrationResult) -> dict[str, Any]:
-    """The headline numbers of one calibration, model by model."""
+def readout_summary(
+    result: CalibrationResult,
+    *,
+    run_chain: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """The headline numbers of one calibration, model by model.
+
+    ``run_chain`` is the same provenance a saved panel keeps, in the same
+    shape: the run records of this measurement and everything it was derived
+    from -- the request, the device snapshots, the pulse.  The numbers are
+    only readable beside what produced them, and an operator opening the one
+    file a calibration leaves for a person should not have to go and find
+    the artifact to learn the exposure the camera was actually at.
+    """
 
     if not isinstance(result, CalibrationResult):
         raise TypeError("readout_summary needs a CalibrationResult")
@@ -176,6 +204,7 @@ def readout_summary(result: CalibrationResult) -> dict[str, Any]:
         # the other is worth being told about.
         "default_model": calibration.default_model_kind.value,
         "best_model": ranked[0][-1] if ranked else None,
+        "run_chain": [_plain(record) for record in run_chain],
     }
 
 

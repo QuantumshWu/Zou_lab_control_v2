@@ -1300,7 +1300,7 @@ class CalibrationTask:
                 capture.short,
                 pulse_facts,
                 run_record,
-                readout_summary(analysis),
+                readout_summary(analysis, run_chain=(run_record,)),
             )
             if context is not None:
                 context.report_progress("Saving calibration report")

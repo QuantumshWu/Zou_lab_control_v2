@@ -234,6 +234,24 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "uniform_psf.png",
             "psf_kernels.png",
         }
+        # The numbers are only readable beside what produced them, so the
+        # file a person opens keeps the same provenance a saved panel does:
+        # the run records, with the request, the device snapshots and the
+        # pulse.  It used to hold headline numbers and nothing else, and the
+        # exposure they were measured at lived only in the artifact.
+        summary = json.loads(
+            (
+                first_calibration.artifact_path.parent / "report" / "summary.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert summary["run_chain"], "the summary states no provenance"
+        record = summary["run_chain"][-1]
+        assert set(record) == {"request", "actual_devices", "pulse"}
+        assert record["request"]["repeats"] == first_calibration.run_record[
+            "request"
+        ]["repeats"]
+        assert set(record["actual_devices"]) == {"camera", "sequencer"}
+        assert record["actual_devices"]["camera"]["exposure_seconds"] > 0.0
         # A finished exact generation is KEPT until it is retired: the frames
         # it published are what a panel, an Edit snapshot and a Save read
         # after the run ends.  (This used to be empty here, because a run
