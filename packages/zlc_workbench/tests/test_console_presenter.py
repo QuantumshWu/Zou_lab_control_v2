@@ -2699,3 +2699,42 @@ def test_a_fit_record_naming_a_model_this_data_cannot_use_arms_nothing() -> None
     # Nothing said about what is offered means the record is taken as given.
     unasked = _Host()
     assert apply_panel_fit(unasked, state, live=True) == "armed"
+
+
+def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> None:
+    """Under the signal's name: the dataset's structure, and this panel's use.
+
+    The identifier says WHERE the numbers came from.  What they ARE -- the
+    axes, their sizes, the value's unit -- and what this panel is making of
+    each axis were computed everywhere and stated nowhere, so an operator had
+    to open the semantic table to find out what they were looking at.
+    """
+
+    node, snapshot = _one_shot(session)
+    signal = node.signal_key("frames")
+    binding = presenter.add_panel(signal, snapshot, title="camera", kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: " · " in str(binding.parameter_surface.get("data_summary", "")),
+    )
+    summary = str(binding.parameter_surface["data_summary"])
+    # The structure clause, from the one authority that spells a schema.
+    from zlc_plot.semantics import schema_summary
+
+    assert summary.startswith(schema_summary(snapshot.block.schema))
+    assert "→" in summary.split(" · ", 1)[1]
+
+    fate = next(
+        field
+        for field in binding.parameter_surface["semantic"]
+        if str(field["key"]).startswith("fate:") and field["value"] == "y"
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {str(fate["key"]): "facet"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: f"{fate['label']}→facet"
+        in str(binding.parameter_surface.get("data_summary", "")),
+    )
+    assert f"{fate['label']}→facet" in str(binding.parameter_surface["data_summary"])

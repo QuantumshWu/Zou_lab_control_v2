@@ -2503,15 +2503,53 @@ class ConsolePresenter:
         state = binding.state
         if state.kind != PlotKind.FACET_GRID.value:
             return state.kind == PlotKind.IMAGE.value
-        value = self._publication_value(binding.display_publication, state.signal)
-        snapshot = getattr(value, "snapshot", None)
-        if snapshot is None and binding.frozen_data is not None:
-            snapshot = binding.frozen_data.snapshot
+        snapshot = self._shown_snapshot(binding)
         if snapshot is None:
             # No data yet: the authored choice is all there is to go on.
             return state.cell_kind in {"", PlotKind.IMAGE.value}
         fitting = self._fitting_cell_kind(snapshot, state.kind, state.cell_kind)
         return fitting == PlotKind.IMAGE.value
+
+    def _shown_snapshot(self, binding: PanelBinding) -> object | None:
+        """The dataset this panel is drawing, live or frozen."""
+
+        value = self._publication_value(binding.display_publication, binding.state.signal)
+        snapshot = getattr(value, "snapshot", None)
+        if snapshot is None and binding.frozen_data is not None:
+            snapshot = binding.frozen_data.snapshot
+        return snapshot
+
+    def _panel_data_summary(
+        self,
+        binding: PanelBinding,
+        surface: Mapping[str, object],
+    ) -> str:
+        """What this panel is drawing, in one line under its signal.
+
+        Two clauses, from their two owners: the dataset's own structure, as
+        zlc_plot's one structure-description authority spells it, and what
+        this panel is making of each axis -- which is the part that changes
+        under the operator's hands, so it is read from the fate rows rather
+        than restated.
+        """
+
+        from zlc_plot.semantics import schema_summary
+
+        snapshot = self._shown_snapshot(binding)
+        block = getattr(snapshot, "block", None)
+        schema = getattr(block, "schema", None)
+        if schema is None:
+            return ""
+        clauses = [schema_summary(schema)]
+        fates = [
+            f"{str(field['label'])}→{str(field['value'])}"
+            for field in tuple(surface.get("semantic", ()))
+            if str(field.get("key", "")).startswith("fate:")
+            and str(field.get("value", ""))
+        ]
+        if fates:
+            clauses.append(", ".join(fates))
+        return " · ".join(clauses)
 
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
@@ -2527,6 +2565,8 @@ class ConsolePresenter:
                 }
                 for field in tuple(surface.get(section, ()))
             )
+        # After the sections settle: the line quotes the fates as accepted.
+        surface["data_summary"] = self._panel_data_summary(binding, surface)
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)

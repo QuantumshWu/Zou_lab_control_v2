@@ -603,6 +603,12 @@ class PanelCardView(FluentGroupBox):
                 "Signal",
                 default=current_signal,
                 required=True,
+                # What the signal IS, under its name: the dataset's structure
+                # and what this panel makes of each axis.  Composed by the
+                # presenter from the shown snapshot and the fate rows, so it
+                # follows the signal and the operator's edits; never
+                # re-derived here.
+                description=str(self._parameter_surface.get("data_summary") or ""),
             ),
         ])
         if draws_image_surfaces(state):
