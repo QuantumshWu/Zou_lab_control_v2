@@ -604,6 +604,16 @@ class MatplotlibRenderer:
         #: published.
         self._background_region: Any = None
         self._background_signature: tuple[object, ...] | None = None
+        #: The same cut, one artist deeper: everything a compose paints BELOW
+        #: the gesture's own artists, captured while a gesture is in flight.
+        #: A pointer move then costs a region restore and the handful of
+        #: artists above the cut, instead of the whole figure -- measured on a
+        #: 512x512 live image panel, 0.06 ms against 5.4 ms.  Without it a
+        #: drag is composed like a data frame, and interaction latency is the
+        #: whole scene's cost plus whatever frame is being composed.
+        self._gesture_region: Any = None
+        self._gesture_overlay: tuple[tuple[tuple[int, float, int], Any], ...] = ()
+        self._gesture_selector_ids: frozenset[int] = frozenset()
         #: Per painted surface: the finite range of the image drawn on it, and
         #: the arrays it was measured from.  The range is a function of the
         #: data alone -- it cannot change when the viewport does -- yet it was
@@ -846,6 +856,7 @@ class MatplotlibRenderer:
         self._artists.clear()
         self._selector_artists.clear()
         self._selector_topologies.clear()
+        self._forget_gesture_region()
         self._selector_candidate = None
         self._color_limit_candidate = None
         self._last_selectors = SelectorSnapshot(())
@@ -1052,8 +1063,9 @@ class MatplotlibRenderer:
             self._native_draw(self._figure.canvas)
             self._chrome_dirty_axes.clear()
             # A direct full draw bakes dynamic artists into the buffer, so any
-            # previously captured chrome-only region is no longer current.
+            # previously captured region is no longer current.
             self._background_region = None
+            self._forget_gesture_region()
             self._raster_generation += 1
 
     def _dynamic_artists(self) -> list[tuple[tuple[int, float, int], Any]]:
@@ -1178,6 +1190,24 @@ class MatplotlibRenderer:
             and self._background_signature == signature
             and not self._chrome_dirty_axes
         )
+        ordered = sorted(dynamics, key=lambda entry: entry[0])
+        # Where the gesture's own artists begin, in the one z-order a full
+        # draw uses.  The frame below that point is captured on the way past,
+        # so a pointer move repaints only the tail.  Splitting the SEQUENCE
+        # rather than partitioning by ownership is what keeps the compose
+        # full-draw-exact: anything that legitimately draws above a selector
+        # stays above it, and is simply repainted with it.
+        selector_ids = self._selector_artist_ids()
+        split = None
+        if self._selector_gesture_kind is not None and selector_ids:
+            split = next(
+                (
+                    index
+                    for index, (_key, artist) in enumerate(ordered)
+                    if id(artist) in selector_ids
+                ),
+                None,
+            )
         with style_context(self.style):
             if not reusable:
                 visibility = [
@@ -1195,11 +1225,72 @@ class MatplotlibRenderer:
                 self._chrome_dirty_axes.clear()
             restore(self._background_region)
             renderer = get_renderer()
-            for _key, artist in sorted(dynamics, key=lambda entry: entry[0]):
+            for index, (_key, artist) in enumerate(ordered):
+                if index == split:
+                    self._gesture_region = capture(self._figure.bbox)
+                    self._gesture_overlay = tuple(ordered[split:])
+                    self._gesture_selector_ids = selector_ids
                 if artist.get_visible():
                     if not self._blit_exact_rgba_image(artist, canvas):
                         artist.draw(renderer)
+        if split is None:
+            self._forget_gesture_region()
         self._raster_generation += 1
+
+    def _selector_artist_ids(self) -> frozenset[int]:
+        """Every artist the selector scene owns right now, by identity."""
+
+        ids: set[int] = set()
+
+        def add(value: Any) -> None:
+            if isinstance(value, (tuple, list, set)):
+                for item in value:
+                    add(item)
+                return
+            ids.add(id(value))
+
+        for values in self._selector_artists.values():
+            add(values)
+        return frozenset(ids)
+
+    def _forget_gesture_region(self) -> None:
+        self._gesture_region = None
+        self._gesture_overlay = ()
+        self._gesture_selector_ids = frozenset()
+
+    def _paint_gesture_overlay(self) -> bool:
+        """Repaint only what sits above the captured frame, or refuse.
+
+        The caller holds the style context: this is the pointer-motion path,
+        and rc_context is not free.
+
+        Refuses whenever the capture cannot still be the frame below the
+        gesture: no capture, no gesture, or a selector scene whose artists
+        were rebuilt (the drag changed the scene's shape).  The caller then
+        composes, which recaptures.  Everything else that could invalidate
+        the capture -- a relayout, an axes removed, a full draw, the end of
+        the gesture -- drops it at the source.
+        """
+
+        canvas = self._figure.canvas
+        restore = getattr(canvas, "restore_region", None)
+        get_renderer = getattr(canvas, "get_renderer", None)
+        if (
+            self._gesture_region is None
+            or self._selector_gesture_kind is None
+            or not callable(restore)
+            or not callable(get_renderer)
+            or self._gesture_selector_ids != self._selector_artist_ids()
+        ):
+            return False
+        restore(self._gesture_region)
+        renderer = get_renderer()
+        for _key, artist in self._gesture_overlay:
+            if artist.get_visible():
+                if not self._blit_exact_rgba_image(artist, canvas):
+                    artist.draw(renderer)
+        self._raster_generation += 1
+        return True
 
     def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
         """Copy a 1:1 precomposed RGBA front straight into the Agg buffer.
@@ -1219,9 +1310,17 @@ class MatplotlibRenderer:
         if axes is None or artist.get_alpha() is not None:
             return False
         shown = artist.get_array()
+        # Matplotlib stores EVERY image array as a MaskedArray -- set_data
+        # runs it through safe_masked_invalid -- so refusing the type refused
+        # every image there is, and this copy has never once run since it was
+        # written.  What matters is whether anything is actually masked: a
+        # fully unmasked array's data is the RGBA we composed.
+        if isinstance(shown, np.ma.MaskedArray):
+            if np.ma.getmask(shown) is not np.ma.nomask:
+                return False
+            shown = np.ma.getdata(shown)
         if not (
             isinstance(shown, np.ndarray)
-            and not isinstance(shown, np.ma.MaskedArray)
             and shown.dtype == np.uint8
             and shown.ndim == 3
             and shown.shape[2] == 4
@@ -1299,6 +1398,8 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
+            if self._paint_gesture_overlay():
+                return True
         self._compose_frame(chrome_stable=True)
         return True
 
@@ -1310,8 +1411,13 @@ class MatplotlibRenderer:
         if self._selector_gesture_kind is not state.kind:
             return False
         self._selector_candidate = state
+        # ONE style context for the whole move.  Entering it copies the whole
+        # RcParams mapping (measured 0.4 ms), which is affordable once a frame
+        # and not four times a pointer motion.
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
+            if self._paint_gesture_overlay():
+                return True
         self._compose_frame(chrome_stable=True)
         return True
 
@@ -1335,6 +1441,7 @@ class MatplotlibRenderer:
         self._apply_common_axes(state)
 
     def end_selector_gesture(self) -> None:
+        self._forget_gesture_region()
         self._selector_candidate = None
         self._color_limit_candidate = None
         self._selector_gesture_kind = None
@@ -2710,6 +2817,7 @@ class MatplotlibRenderer:
                 self._chrome_dirty_axes.discard(axis)
                 axis.remove()
             self._background_region = None
+            self._forget_gesture_region()
         if index is not None:
             assert self.plan.facet_focus_axes is not None
             for item in self.plan.facet_focus_axes:
@@ -2719,6 +2827,7 @@ class MatplotlibRenderer:
                 axis.set_gid(item.role)
                 self._axes.setdefault(item.role, []).append(axis)
             self._background_region = None
+            self._forget_gesture_region()
         self._facet_focus_chrome_index = index
 
     def _position_facet_axes_for_frame(self, axes: Sequence[Any]) -> None:
