@@ -565,6 +565,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "frame_source",
             "saved_frames_path",
             "save_frames",
+            # And in which unit the camera is read: the conversion is the
+            # camera's own, so the choice is a run's, not the analysis's.
+            "photoelectrons",
         )
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "repeats"

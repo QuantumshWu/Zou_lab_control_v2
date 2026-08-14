@@ -184,6 +184,7 @@ class OccupancyProcessor:
             return
         if not isinstance(actual, Mapping):
             raise ValueError("camera device snapshot must be a mapping")
+        self._refuse_a_different_unit(record)
 
         def pair(name: str) -> tuple[int, int] | None:
             value = actual.get(name)
@@ -231,6 +232,29 @@ class OccupancyProcessor:
             raise ValueError(
                 f"camera binning {tuple(binning)} differs from calibration "
                 f"{tuple(contract.binning_yx)}"
+            )
+
+    def _refuse_a_different_unit(self, record: Mapping[str, object]) -> None:
+        """A threshold is a number of somethings; the somethings must match.
+
+        Counts and photoelectrons differ by an affine map, so a run read in
+        one and classified by thresholds fitted in the other is not a little
+        wrong -- every site reads the same way.  Both sides record which they
+        are, so the mismatch is refused rather than discovered in the data.
+        """
+
+        trained = self.calibration.report.get("run_record")
+        if not isinstance(trained, Mapping):
+            return
+        wanted = bool(
+            (trained.get("request") or {}).get("photoelectrons", False)
+        )
+        got = bool((record.get("parameters") or {}).get("photoelectrons", False))
+        if wanted != got:
+            names = {True: "photoelectrons", False: "counts"}
+            raise ValueError(
+                f"these frames are in {names[got]} and the calibration was "
+                f"trained in {names[wanted]}; its thresholds do not apply"
             )
 
     @property

@@ -57,6 +57,14 @@ class CameraWorkingPoint:
     external_trigger_integration_start_offset_seconds: float | None
     gain: float
     readout_mode: str
+    #: What one count is worth in photoelectrons, and where zero of them
+    #: sits: photoelectrons = (count - offset_counts) * electrons_per_count.
+    #: The camera's own two numbers -- a qCMOS reports them, a virtual sensor
+    #: knows them exactly, a machine-vision camera states neither -- so
+    #: ``None`` means this sensor does not say, and nothing downstream may
+    #: invent it.  Both or neither.
+    offset_counts: float | None = None
+    electrons_per_count: float | None = None
 
     def __post_init__(self) -> None:
         for name, positive in (
@@ -84,6 +92,20 @@ class CameraWorkingPoint:
             raise ValueError("integration start offset cannot be negative")
         if float(self.gain) < 0:
             raise ValueError("camera gain cannot be negative")
+        if (self.offset_counts is None) != (self.electrons_per_count is None):
+            raise ValueError(
+                "a photoelectron conversion needs both its offset and its scale"
+            )
+        if self.electrons_per_count is not None:
+            offset = float(self.offset_counts)
+            scale = float(self.electrons_per_count)
+            if not np.isfinite(offset) or not np.isfinite(scale) or scale <= 0:
+                raise ValueError(
+                    "electrons_per_count must be finite and positive, and the "
+                    "offset finite"
+                )
+            object.__setattr__(self, "offset_counts", offset)
+            object.__setattr__(self, "electrons_per_count", scale)
 
 
 @dataclass(frozen=True, eq=False)

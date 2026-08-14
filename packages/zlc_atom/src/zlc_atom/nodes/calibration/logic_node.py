@@ -198,6 +198,13 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             False,
             enabled_when=("frame_source", (FRAMES_FROM_CAMERA,)),
         ),
+        AuthoringField(
+            "photoelectrons",
+            "bool",
+            "Read in photoelectrons",
+            False,
+            enabled_when=("frame_source", (FRAMES_FROM_CAMERA,)),
+        ),
     ),
     validator=_validate_calibration,
 )
@@ -246,6 +253,7 @@ def _build(
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
             detection_sigma=float(authored["detection_sigma"]),
             save_frames=bool(authored["save_frames"]),
+            photoelectrons=bool(authored["photoelectrons"]),
             frame_source=str(authored["frame_source"]),
             saved_frames_path=str(authored["saved_frames_path"]),
         ),

@@ -80,6 +80,11 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     config = VirtualCameraConfig(
         frame_shape_yx=tuple(authored["frame_shape_yx"]),
         exposure_seconds=float(authored["exposure_seconds"]),
+        # The world's own numbers, read from it rather than restated here:
+        # it converts electrons to counts to make the frame, and this is the
+        # same conversion said in the direction a reader needs it.
+        offset_counts=world.offset_counts,
+        electrons_per_count=world.conversion_e_per_count,
     )
     if config.frame_shape_yx != geometry.image_shape_yx:
         raise ValueError("virtual camera frame must share SimulationWorld geometry")

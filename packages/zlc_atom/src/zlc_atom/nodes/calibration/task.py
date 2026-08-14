@@ -144,6 +144,11 @@ class CalibrationRequest:
     psf_padding: int
     detection_spot_sigma: float
     detection_sigma: float
+    #: Read the camera in photoelectrons rather than raw counts, using the
+    #: conversion the camera states.  Calibration keeps no conversion of its
+    #: own: it asks the measurement for the frames in the unit it wants, and
+    #: the thresholds it fits are in that unit.
+    photoelectrons: bool = False
     #: Whether every acquired sample is written to disk as it arrives.
     save_frames: bool = False
     #: Where the frames come from: the camera, or a folder of saved samples.
@@ -231,6 +236,7 @@ class CalibrationRequest:
         object.__setattr__(self, "psf_padding", psf_padding)
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
         object.__setattr__(self, "detection_sigma", detection_sigma)
+        object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
         object.__setattr__(self, "save_frames", bool(self.save_frames))
         object.__setattr__(self, "frame_source", frame_source)
         object.__setattr__(self, "saved_frames_path", saved_frames_path)
@@ -254,6 +260,7 @@ class CalibrationRequest:
             "psf_padding": self.psf_padding,
             "detection_spot_sigma": self.detection_spot_sigma,
             "detection_sigma": self.detection_sigma,
+            "photoelectrons": self.photoelectrons,
             "save_frames": self.save_frames,
             "frame_source": self.frame_source,
             "saved_frames_path": self.saved_frames_path,
@@ -979,6 +986,7 @@ class CalibrationTask:
                     roi_xywh=_roi_xywh(self.camera.working_point()),
                     repeat=self.request.repeats,
                     frames_per_cycle=3,
+                    photoelectrons=self.request.photoelectrons,
                 ),
                 signal_plane=self.signal_plane,
                 producer=f"{self.request.camera_key}:calibration",

@@ -190,6 +190,12 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
         AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
         AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1),
+        AuthoringField(
+            "photoelectrons",
+            "bool",
+            "Publish photoelectrons",
+            False,
+        ),
     ),
     validator=_validate_measurement,
 )
@@ -219,6 +225,7 @@ def _build(
             roi_xywh=roi,  # type: ignore[arg-type]
             repeat=int(authored["repeat"]),
             frames_per_cycle=int(authored["frames_per_cycle"]),
+            photoelectrons=bool(authored["photoelectrons"]),
         ),
         signal_plane=signal_plane,
     )

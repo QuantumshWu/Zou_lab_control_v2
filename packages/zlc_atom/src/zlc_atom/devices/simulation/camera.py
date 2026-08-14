@@ -31,6 +31,11 @@ class VirtualCameraConfig:
     frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
     exposure_seconds: float = 0.02
     frame_dtype: str = "<u2"
+    #: What one count is worth, as this sensor's own world applies it going
+    #: the other way.  ``None`` for a sensor that states no conversion, which
+    #: is how the MOT monitor stands in for a machine-vision camera.
+    offset_counts: float | None = None
+    electrons_per_count: float | None = None
 
 
 class VirtualCamera:
@@ -109,6 +114,8 @@ class VirtualCamera:
                 if self._free_running
                 else "virtual-external-trigger"
             ),
+            self.config.offset_counts,
+            self.config.electrons_per_count,
         )
 
     def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:

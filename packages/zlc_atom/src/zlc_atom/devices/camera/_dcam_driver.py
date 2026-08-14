@@ -49,6 +49,12 @@ class DcamProperty(IntEnum):
     SUBARRAY_MODE = 4_202_832
     TIMING_MIN_TRIGGER_INTERVAL = 4_206_672
     TIMING_GLOBAL_EXPOSURE_DELAY = 4_206_736
+    # DCAM_IDPROP_CONVERSIONFACTOR_COEFF / _OFFSET (0x00E00110 / 0x00E00120):
+    # what one count is worth in photoelectrons, and where zero of them sits.
+    # A camera that does not implement them fails the read, which is the
+    # answer "this sensor does not state a conversion".
+    CONVERSIONFACTOR_COEFF = 14_680_336
+    CONVERSIONFACTOR_OFFSET = 14_680_352
     IMAGE_PIXEL_TYPE = 4_326_000
     IMAGE_WIDTH = 4_325_904
     IMAGE_HEIGHT = 4_325_920
