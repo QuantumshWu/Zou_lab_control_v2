@@ -187,7 +187,9 @@ def summary_lines(summary: Mapping[str, Any]) -> tuple[str, ...]:
         f"loading {_percent(summary['run']['loading_rate']['median'])}"
     ]
     for name, entry in summary["models"].items():
-        mark = "*" if name == summary.get("best_model") else " "
+        # A leading space is not allowed here: these lines are also reported
+        # as node progress, and a progress message is canonical text.
+        mark = "*" if name == summary.get("best_model") else "-"
         lines.append(
             f"{mark} {name:11s} fidelity {_percent(entry['fidelity']['mean'])} "
             f"(worst site {_percent(entry['fidelity']['min'])}), "

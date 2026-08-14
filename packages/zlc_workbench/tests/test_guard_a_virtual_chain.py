@@ -217,6 +217,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
                 first_calibration.artifact_path.with_suffix("") / "report"
             ).iterdir()
         } == {
+            # What it measured, first: a run that cannot draw has still
+            # measured it, and these are the numbers an operator judges the
+            # calibration by.
+            "summary.json",
+            "summary.txt",
             "site_map.png",
             "fidelity.png",
             "box.png",
@@ -224,7 +229,12 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "uniform_psf.png",
             "psf_kernels.png",
         }
-        assert plane.freeze().signals == {}
+        # A finished exact generation is KEPT until it is retired: the frames
+        # it published are what a panel, an Edit snapshot and a Save read
+        # after the run ends.  (This used to be empty here, because a run
+        # that began and ended between two polls lost its publication.)
+        preview_signal = calibration_host.signal_key("capture_preview")
+        assert set(plane.freeze().signals) == {preview_signal}
 
         plane.retire(calibration_host)
         assert plane.freeze().signals == {}
@@ -244,6 +254,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
                 second_calibration.artifact_path.with_suffix("") / "report"
             ).iterdir()
         } == {
+            "summary.json",
+            "summary.txt",
             "site_map.png",
             "fidelity.png",
             "box.png",
@@ -251,6 +263,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "uniform_psf.png",
             "psf_kernels.png",
         }
+        assert set(plane.freeze().signals) == {preview_signal}
+        plane.retire(calibration_host)
         assert plane.freeze().signals == {}
 
         one_window_program = _one_camera_window_program()
