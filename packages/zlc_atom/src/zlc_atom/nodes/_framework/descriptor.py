@@ -299,13 +299,12 @@ class LogicNodeDescriptor:
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
     workspace_resources: tuple[WorkspaceResourceSpec, ...] = ()
-    #: ``{field name: choices}`` for the settings whose legal answers are a
-    #: fact about the DEVICES this draft has bound, not about the node -- the
-    #: unit a camera can publish in, and what its conversion actually is.
-    #: Called with the resolved devices by argument name, once every draft is
-    #: finalized, so one answer serves both the form and Start admission.
-    resolve_field_choices: (
-        Callable[[Mapping[str, object]], Mapping[str, tuple[object, ...]]] | None
+    #: ``{field name: why not}`` for the settings this bench cannot take --
+    #: a fact about the DEVICES this draft has bound, not about the node.
+    #: Called with the resolved devices by argument name once a draft is
+    #: finalized, so one answer disables the control and refuses Start.
+    resolve_field_availability: (
+        Callable[[Mapping[str, object]], Mapping[str, str]] | None
     ) = None
     build_argument_names: tuple[str, ...] = field(
         init=False,
@@ -339,10 +338,10 @@ class LogicNodeDescriptor:
             self.resolve_node_previews
         ):
             raise TypeError("resolve_node_previews must be callable or None")
-        if self.resolve_field_choices is not None and not callable(
-            self.resolve_field_choices
+        if self.resolve_field_availability is not None and not callable(
+            self.resolve_field_availability
         ):
-            raise TypeError("resolve_field_choices must be callable or None")
+            raise TypeError("resolve_field_availability must be callable or None")
         if node_previews and self.resolve_node_previews is not None:
             raise ValueError("static and resolved node previews are exclusive")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):

@@ -63,31 +63,33 @@ def project_logic_schema(
     descriptor: object,
     *,
     workspace_root: str,
-    field_choices: Mapping[str, Sequence[object]] | None = None,
+    field_availability: Mapping[str, str] | None = None,
 ) -> FormSpec:
     """Project a logic schema, rooting resource pickers in the workspace.
 
-    ``field_choices`` replaces what a field OFFERS with what the devices this
-    draft has bound actually allow -- the same answer Start admission was
-    decided from, so the operator reads the reason in the option rather than
+    ``field_availability`` disables the settings this draft's bound devices
+    cannot take, with the reason on the control -- the same answer Start
+    admission was decided from, so an operator reads it there rather than
     discovering it from a refusal.
     """
 
     schema = getattr(descriptor, "authoring_schema", None)
     if not isinstance(schema, AuthoringSchema):
         raise TypeError("project_logic_schema needs a logic descriptor")
-    resolved = dict(field_choices or {})
-    unknown = set(resolved) - set(schema.field_names)
+    unavailable = dict(field_availability or {})
+    unknown = set(unavailable) - set(schema.field_names)
     if unknown:
-        raise ValueError(f"resolved choices name no such field: {sorted(unknown)!r}")
+        raise ValueError(f"resolved availability names no such field: {sorted(unknown)!r}")
     resources = {
         str(spec.field_name): spec
         for spec in getattr(descriptor, "workspace_resources", ())
     }
     fields: list[FormFieldProps] = []
     for field in schema.fields:
-        if field.name in resolved:
-            field = replace(field, choices=tuple(resolved[field.name]))
+        reason = str(unavailable.get(field.name, ""))
+        if reason:
+            fields.append(replace(_project_field(field), unavailable_reason=reason))
+            continue
         if field.value_type == "folder":
             # A folder is chosen from the workspace, so it OPENS there and is
             # pre-filled with the declared place rather than with nothing: an

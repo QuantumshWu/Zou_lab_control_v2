@@ -28,7 +28,7 @@ from .contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from .units import stated_conversion
+from .photoelectrons import stated_conversion
 
 
 __all__ = ["PylonCameraAdapter", "PylonCameraConfig"]

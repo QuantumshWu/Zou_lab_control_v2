@@ -66,10 +66,10 @@ class LogicDraftFinalization:
     artifact_paths: Mapping[str, str]
     artifacts: Mapping[str, object]
     resources: Mapping[str, object]
-    #: Settings whose legal answers came from the bound devices rather than
-    #: from the schema, as this draft's devices answer them.  The form shows
-    #: these; the issues above are what happens when one is not takeable.
-    field_choices: Mapping[str, tuple[Any, ...]]
+    #: ``{field name: why not}`` for settings this draft's bound devices
+    #: cannot take.  The form disables those controls and shows the reason;
+    #: the issues above are what happens when one is switched on anyway.
+    field_availability: Mapping[str, str]
     issues: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -80,7 +80,7 @@ class LogicDraftFinalization:
             "artifact_paths",
             "artifacts",
             "resources",
-            "field_choices",
+            "field_availability",
         ):
             object.__setattr__(
                 self,
@@ -288,47 +288,35 @@ def finalize_logic_draft(
                 f"{requirement.capability_token}: {error}"
             )
 
-    # What the bound devices allow, asked once the devices are known.  A
-    # setting whose options are a device fact cannot be checked against the
-    # schema alone: "publish photoelectrons" is a legal answer on a camera
-    # that states its conversion and no answer at all on one that does not,
-    # and an operator finds that out here rather than after Start.
-    field_choices: dict[str, tuple[Any, ...]] = {}
-    resolve_choices = getattr(descriptor, "resolve_field_choices", None)
+    # What the bound devices cannot do, asked once the devices are known.  A
+    # setting like "read this camera in photoelectrons" cannot be checked
+    # against the schema alone: it is legal on a camera whose conversion is
+    # configured and impossible on one whose is not, and an operator finds
+    # that out here -- with the switch disabled and Start refused -- rather
+    # than after pressing Start.
+    field_availability: dict[str, str] = {}
+    resolve_availability = getattr(descriptor, "resolve_field_availability", None)
     if (
-        resolve_choices is not None
+        resolve_availability is not None
         and authored
         and len(devices) == len(declared_device_arguments)
     ):
-        field_choices = {
-            str(name): tuple(offered)
-            for name, offered in dict(resolve_choices(devices)).items()
+        field_availability = {
+            str(name): str(reason)
+            for name, reason in dict(resolve_availability(devices)).items()
+            if str(reason).strip()
         }
-        unknown_fields = set(field_choices) - set(
+        unknown_fields = set(field_availability) - set(
             descriptor.authoring_schema.field_names
         )
         if unknown_fields:
             raise ValueError(
-                f"{descriptor.api_name} resolves choices for undeclared fields "
-                f"{sorted(unknown_fields)!r}"
+                f"{descriptor.api_name} resolves availability for undeclared "
+                f"fields {sorted(unknown_fields)!r}"
             )
-        for name, offered in field_choices.items():
-            chosen = values.get(name)
-            taken = next(
-                (
-                    choice
-                    for choice in offered
-                    if type(choice.value) is type(chosen) and choice.value == chosen
-                ),
-                None,
-            )
-            if taken is None:
-                issues.append(
-                    f"{name!r} must be one of "
-                    f"{[choice.value for choice in offered]!r}"
-                )
-            elif taken.unavailable_reason:
-                issues.append(taken.unavailable_reason)
+        for name, reason in field_availability.items():
+            if values.get(name):
+                issues.append(reason)
 
     wants_source = dataset_inputs(descriptor)
     source = str(draft.source_signal).strip()
@@ -419,7 +407,7 @@ def finalize_logic_draft(
         artifact_paths,
         artifacts,
         resources,
-        field_choices,
+        field_availability,
         tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
     )
 

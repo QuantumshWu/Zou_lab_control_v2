@@ -29,7 +29,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from zlc_atom.devices.camera.units import FRAME_UNITS, FrameUnit
+from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -145,11 +145,10 @@ class CalibrationRequest:
     psf_padding: int
     detection_spot_sigma: float
     detection_sigma: float
-    #: What the frames it reads ARE: counts, or photoelectrons through the
-    #: conversion the camera's configuration states.  Calibration keeps no
-    #: conversion of its own -- it asks the measurement for the frames in the
-    #: unit it wants -- and the thresholds it fits are in that unit.
-    frame_units: FrameUnit = FrameUnit.COUNTS
+    #: Read the camera in photoelectrons instead of counts.  Calibration
+    #: keeps no conversion of its own -- it asks the measurement for the
+    #: frames it wants -- and the thresholds it fits are in whatever it got.
+    photoelectrons: bool = False
     #: Whether every acquired sample is written to disk as it arrives.
     save_frames: bool = False
     #: Where the frames come from: the camera, or a folder of saved samples.
@@ -237,7 +236,7 @@ class CalibrationRequest:
         object.__setattr__(self, "psf_padding", psf_padding)
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
         object.__setattr__(self, "detection_sigma", detection_sigma)
-        object.__setattr__(self, "frame_units", FrameUnit(self.frame_units))
+        object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
         object.__setattr__(self, "save_frames", bool(self.save_frames))
         object.__setattr__(self, "frame_source", frame_source)
         object.__setattr__(self, "saved_frames_path", saved_frames_path)
@@ -261,7 +260,7 @@ class CalibrationRequest:
             "psf_padding": self.psf_padding,
             "detection_spot_sigma": self.detection_spot_sigma,
             "detection_sigma": self.detection_sigma,
-            FRAME_UNITS: self.frame_units.value,
+            PHOTOELECTRONS: self.photoelectrons,
             "save_frames": self.save_frames,
             "frame_source": self.frame_source,
             "saved_frames_path": self.saved_frames_path,
@@ -340,7 +339,6 @@ class SampleWriter:
         snapshot = cycle_snapshot(
             cycle,
             frame_shape=self._point.frame_shape_yx,
-            dtype=self._point.dtype,
             origin_yx=self._point.roi_origin_yx,
             binning_yx=self._point.binning_yx,
             generation=self._generation,
@@ -987,7 +985,7 @@ class CalibrationTask:
                     roi_xywh=_roi_xywh(self.camera.working_point()),
                     repeat=self.request.repeats,
                     frames_per_cycle=3,
-                    frame_units=self.request.frame_units,
+                    photoelectrons=self.request.photoelectrons,
                 ),
                 signal_plane=self.signal_plane,
                 producer=f"{self.request.camera_key}:calibration",
@@ -1010,7 +1008,6 @@ class CalibrationTask:
                     frame_shape=actual.frame_shape_yx,
                     origin_yx=actual.roi_origin_yx,
                     binning_yx=actual.binning_yx,
-                    dtype=actual.dtype,
                     generation=context.generation,
                     run_record=run_record,
                 )
@@ -1158,7 +1155,6 @@ class CalibrationTask:
                     (0, 0) if roi is None else (int(roi[1]), int(roi[0]))
                 ),
                 binning_yx=contract.binning_yx,
-                dtype=np.asarray(cycles[0][0].image).dtype,
                 generation=context.generation,
                 run_record=dict(run_record),
             )

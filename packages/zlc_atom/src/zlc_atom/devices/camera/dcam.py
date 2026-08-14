@@ -68,7 +68,7 @@ from .contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from .units import stated_conversion
+from .photoelectrons import stated_conversion
 
 
 _CAPTURE_STATUS_BUSY = 1

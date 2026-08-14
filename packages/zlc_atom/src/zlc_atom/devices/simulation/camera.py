@@ -16,7 +16,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from zlc_atom.devices.camera.units import stated_conversion
+from zlc_atom.devices.camera.photoelectrons import stated_conversion
 from .world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
 
 

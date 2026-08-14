@@ -10,11 +10,10 @@ from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_runtime import SelectionRange, SelectionState
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.camera.units import (
-    FRAME_UNITS,
-    FrameUnit,
-    frame_unit_field,
-    resolve_frame_unit_choices,
+from zlc_atom.devices.camera.photoelectrons import (
+    PHOTOELECTRONS,
+    photoelectron_switch,
+    resolve_photoelectron_availability,
 )
 from zlc_atom.nodes._framework.descriptor import (
     DeviceAccess,
@@ -196,7 +195,7 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
         AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
         AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1),
-        frame_unit_field(),
+        photoelectron_switch(),
     ),
     validator=_validate_measurement,
 )
@@ -226,7 +225,7 @@ def _build(
             roi_xywh=roi,  # type: ignore[arg-type]
             repeat=int(authored["repeat"]),
             frames_per_cycle=int(authored["frames_per_cycle"]),
-            frame_units=FrameUnit(authored[FRAME_UNITS]),
+            photoelectrons=bool(authored[PHOTOELECTRONS]),
         ),
         signal_plane=signal_plane,
     )
@@ -260,10 +259,10 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     build=_build,
     selection_mappings=(_IMAGE_AREA_TO_ROI,),
-    # Which units this camera can publish in is the camera's answer, not
+    # Whether this camera can be read that way is the camera's answer, not
     # this node's: the conversion is configured on the device, and a bench
-    # that has not written it down may not be offered photoelectrons.
-    resolve_field_choices=resolve_frame_unit_choices,
+    # that has not written it down cannot switch this on.
+    resolve_field_availability=resolve_photoelectron_availability,
 )
 
 __all__ = ["CAMERA_MEASUREMENT_SCHEMA", "LOGIC_NODE"]

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
-from zlc_atom.devices.camera.units import (
-    FRAME_UNITS,
-    FrameUnit,
-    frame_unit_field,
-    resolve_frame_unit_choices,
+from zlc_atom.devices.camera.photoelectrons import (
+    PHOTOELECTRONS,
+    photoelectron_switch,
+    resolve_photoelectron_availability,
 )
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactOutputSpec,
@@ -204,7 +203,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             False,
             enabled_when=("frame_source", (FRAMES_FROM_CAMERA,)),
         ),
-        frame_unit_field(enabled_when=("frame_source", (FRAMES_FROM_CAMERA,))),
+        photoelectron_switch(enabled_when=("frame_source", (FRAMES_FROM_CAMERA,))),
     ),
     validator=_validate_calibration,
 )
@@ -253,7 +252,7 @@ def _build(
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
             detection_sigma=float(authored["detection_sigma"]),
             save_frames=bool(authored["save_frames"]),
-            frame_units=FrameUnit(authored[FRAME_UNITS]),
+            photoelectrons=bool(authored[PHOTOELECTRONS]),
             frame_source=str(authored["frame_source"]),
             saved_frames_path=str(authored["saved_frames_path"]),
         ),
@@ -291,10 +290,10 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     build=_build,
     workspace_resources=(_CALIBRATION_PULSE_RESOURCE,),
-    # The unit it can read in is the camera's answer: calibration keeps no
-    # conversion of its own, so a bench that has not configured one is not
-    # offered photoelectrons here either.
-    resolve_field_choices=resolve_frame_unit_choices,
+    # Whether it can read that way is the camera's answer: calibration keeps
+    # no conversion of its own, so a bench that has not configured one cannot
+    # switch this on here either.
+    resolve_field_availability=resolve_photoelectron_availability,
 )
 
 

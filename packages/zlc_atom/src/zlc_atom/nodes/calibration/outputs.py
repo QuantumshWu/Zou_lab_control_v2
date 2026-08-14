@@ -180,8 +180,16 @@ def _snapshot(
 def _cycle_array(
     cycle: Sequence[CameraFrameRecord],
     frame_shape: tuple[int, int],
-    dtype: np.dtype,
 ) -> np.ndarray:
+    """Three frames as one array, in whatever the frames themselves are.
+
+    It used to be cast to the WORKING POINT's dtype, which is the sensor's
+    pixel format -- true of what the camera reads out, and false of what this
+    node was handed the moment a run asked for photoelectrons: 0.535 e- came
+    back as 0, and a pixel below the sensor's offset came back as 65535.  A
+    frame's dtype is the frame's own fact.
+    """
+
     records = tuple(cycle)
     if len(records) != _PREVIEW_FRAMES or any(
         not isinstance(record, CameraFrameRecord) for record in records
@@ -190,14 +198,13 @@ def _cycle_array(
     images = np.stack([np.asarray(record.image) for record in records], axis=0)
     if images.shape != (_PREVIEW_FRAMES, *frame_shape):
         raise ValueError("calibration preview frame shape changed during capture")
-    return images.astype(dtype, copy=False)
+    return images
 
 
 def cycle_snapshot(
     cycle: Sequence[CameraFrameRecord],
     *,
     frame_shape: tuple[int, int],
-    dtype: np.dtype,
     origin_yx: tuple[int, int],
     binning_yx: tuple[int, int],
     generation: object,
@@ -216,7 +223,7 @@ def cycle_snapshot(
     """
 
     return _snapshot(
-        _cycle_array(cycle, frame_shape, dtype)[None, ...],
+        _cycle_array(cycle, frame_shape)[None, ...],
         signal=CAPTURE_PREVIEW_DECLARATION.name,
         roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
         axis_specs=_image_axis_specs(
@@ -241,7 +248,6 @@ class CalibrationCapturePreviewSlot:
         frame_shape: tuple[int, int],
         origin_yx: tuple[int, int],
         binning_yx: tuple[int, int],
-        dtype: object,
         generation: object,
         run_record: Mapping[str, object],
     ) -> None:
@@ -253,7 +259,6 @@ class CalibrationCapturePreviewSlot:
             raise ValueError("calibration preview frame_shape must be positive Y,X")
         self.origin_yx = tuple(int(value) for value in origin_yx)
         self.binning_yx = tuple(max(1, int(value)) for value in binning_yx)
-        self.dtype = np.dtype(dtype).newbyteorder("<")
         self.generation = generation
         self.run_record = dict(run_record)
         self._latest_cycle: tuple[CameraFrameRecord, ...] | None = None
@@ -284,7 +289,7 @@ class CalibrationCapturePreviewSlot:
             raise RuntimeError("calibration preview received too many cycles")
         # Validated here, where the cycle arrives, so a bad one is refused
         # at the source rather than at the next reader.
-        _cycle_array(cycle, self.frame_shape, self.dtype)
+        _cycle_array(cycle, self.frame_shape)
         self._latest_cycle = tuple(cycle)
         self._written += 1
         self._revision += 1
@@ -296,7 +301,6 @@ class CalibrationCapturePreviewSlot:
         snapshot = cycle_snapshot(
             self._latest_cycle,
             frame_shape=self.frame_shape,
-            dtype=self.dtype,
             origin_yx=self.origin_yx,
             binning_yx=self.binning_yx,
             generation=self.generation,

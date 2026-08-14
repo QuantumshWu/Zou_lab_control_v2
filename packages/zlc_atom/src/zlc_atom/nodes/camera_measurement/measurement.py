@@ -32,7 +32,7 @@ from zlc_atom.devices.camera.contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from zlc_atom.devices.camera.units import FRAME_UNITS, FrameUnit
+from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
 
 
@@ -234,11 +234,11 @@ class CameraMeasurementRequest:
     roi_xywh: tuple[int, int, int, int] | None
     repeat: int
     frames_per_cycle: int
-    #: What the published numbers ARE: the sensor's counts, or photoelectrons
-    #: through the conversion the CAMERA's configuration states.  A camera
-    #: that states none refuses the second rather than inventing it; the unit
-    #: rides in the run record, so every later reader knows which it got.
-    frame_units: FrameUnit = FrameUnit.COUNTS
+    #: Read the camera in photoelectrons instead of counts, through the
+    #: conversion the CAMERA's configuration states.  A camera that states
+    #: none refuses rather than inventing one; the choice rides in the run
+    #: record, so every later reader knows which numbers it got.
+    photoelectrons: bool = False
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
@@ -269,7 +269,7 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "roi_xywh", roi)
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
-        object.__setattr__(self, "frame_units", FrameUnit(self.frame_units))
+        object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
 
 
 class _CameraMonitorSlot:
@@ -491,14 +491,10 @@ class FiniteCapture:
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
-        records = self.node._in_requested_units(
-            tuple(
-                self.camera.read_frame_records(
-                    self.frames_per_cycle,
-                    timeout=self.timeout,
-                    exact=True,
-                )
-            )
+        records = self.node.read_records(
+            self.frames_per_cycle,
+            timeout=self.timeout,
+            exact=True,
         )
         if len(records) != self.frames_per_cycle:
             # The two numbers that decide this, from the sensor rather than
@@ -560,7 +556,7 @@ class MonitorCapture:
     def poll(self) -> CameraFrameRecord | None:
         if self.closed:
             raise RuntimeError("monitor capture is closed")
-        records = self.camera.read_frame_records(
+        records = self.node.read_records(
             1, timeout=_MONITOR_CANCEL_RESPONSE_SECONDS, exact=False
         )
         if not records:
@@ -697,15 +693,20 @@ class CameraMeasurementNode:
             raise TypeError("camera set_exposure_seconds must return CameraWorkingPoint")
         return point
 
-    def _in_requested_units(
+    def read_records(
         self,
-        records: tuple[CameraFrameRecord, ...],
+        count: int,
+        *,
+        timeout: float,
+        exact: bool,
     ) -> tuple[CameraFrameRecord, ...]:
-        """Every frame this node hands on, in the units the request asked for.
+        """Take frames from the camera, in the unit this run publishes.
 
-        THE conversion point.  Frames reach a publication, a saved sample, a
-        calibration and a live panel through this one read, so a run is in
-        one unit everywhere or in none.
+        THE read.  A capture never touches the adapter itself, and that is
+        the whole point of this method existing: when the finite read did the
+        conversion and the monitor read did not, a live panel showed counts
+        while the same run's saved samples were electrons, and nothing on
+        screen said which was which.  One intake cannot disagree with itself.
 
         Counts stay the sensor's own integers -- the pipeline is built on
         that, and a 2048x2048 frame costs 9.6 ms and twice the memory to
@@ -714,7 +715,10 @@ class CameraMeasurementNode:
         numbers a physicist can read.
         """
 
-        if self.request.frame_units is not FrameUnit.PHOTOELECTRONS:
+        records = tuple(
+            self.camera.read_frame_records(int(count), timeout=timeout, exact=exact)
+        )
+        if not self.request.photoelectrons:
             return records
         point = self._actual_working_point
         assert point is not None and point.electrons_per_count is not None
@@ -731,10 +735,7 @@ class CameraMeasurementNode:
     def _freeze_working_point(self, point: CameraWorkingPoint) -> None:
         if not isinstance(point, CameraWorkingPoint):
             raise TypeError("camera working_point must return CameraWorkingPoint")
-        if (
-            self.request.frame_units is FrameUnit.PHOTOELECTRONS
-            and point.electrons_per_count is None
-        ):
+        if self.request.photoelectrons and point.electrons_per_count is None:
             raise ValueError(
                 f"camera {self.request.camera_key!r} states no photoelectron "
                 "conversion, so its counts cannot be published as electrons"
@@ -746,7 +747,7 @@ class CameraMeasurementNode:
                 "roi_xywh": self.request.roi_xywh,
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
-                FRAME_UNITS: self.request.frame_units.value,
+                PHOTOELECTRONS: self.request.photoelectrons,
             },
             "named_devices": {"camera": self.request.camera_key},
             "device_snapshots": {

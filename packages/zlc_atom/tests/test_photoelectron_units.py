@@ -25,10 +25,9 @@ import pytest
 
 from zlc_atom.devices.camera.dcam import DcamCameraConfig
 from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA
-from zlc_atom.devices.camera.units import (
-    FRAME_UNITS,
-    FrameUnit,
-    frame_unit_choices,
+from zlc_atom.devices.camera.photoelectrons import (
+    PHOTOELECTRONS,
+    resolve_photoelectron_availability,
     stated_conversion,
 )
 from zlc_atom.install import create_installation
@@ -102,28 +101,19 @@ def test_the_camera_states_its_own_conversion() -> None:
         installation.close()
 
 
-def test_the_offered_units_are_what_the_bound_camera_says() -> None:
-    """The option carries the camera's numbers, or the reason it cannot be taken."""
+def test_the_switch_is_available_only_when_the_camera_states_a_conversion() -> None:
+    """A device fact, answered with the camera shut, with the reason it is not."""
 
     installation = create_installation("virtual")
     try:
-        offered = frame_unit_choices(installation.device("camera"))
+        camera = installation.device("camera")
+        assert resolve_photoelectron_availability({"camera": camera}) == {}
     finally:
         installation.close()
-    assert tuple(choice.value for choice in offered) == (
-        FrameUnit.COUNTS.value,
-        FrameUnit.PHOTOELECTRONS.value,
-    )
-    assert not any(choice.unavailable_reason for choice in offered)
-    assert "0.107 e-/count" in offered[1].label
-    assert "offset 200" in offered[1].label
 
-    # A camera that states nothing still SHOWS the option -- one that vanishes
-    # when a device is chosen is a moving target -- and says why not.
-    silent = frame_unit_choices(None)
-    assert not silent[0].unavailable_reason
-    assert "states no photoelectron conversion" in silent[1].unavailable_reason
-    assert "no conversion" in silent[1].label
+    refused = resolve_photoelectron_availability({"camera": None})
+    assert set(refused) == {PHOTOELECTRONS}
+    assert "states no photoelectron conversion" in refused[PHOTOELECTRONS]
 
 
 def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) -> None:
@@ -137,7 +127,7 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
     request = _calibration_request(repeats=10)
     counts = _task(request, tmp_path).run()
     electrons = _task(
-        replace(request, frame_units=FrameUnit.PHOTOELECTRONS), tmp_path
+        replace(request, photoelectrons=True), tmp_path
     ).run()
 
     assert electrons.capture.frames[0].image.dtype == np.float32
@@ -184,7 +174,7 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
     """Not discovered in the data: refused where the two records meet."""
 
     calibration = _task(
-        replace(_calibration_request(repeats=8), frame_units=FrameUnit.PHOTOELECTRONS),
+        replace(_calibration_request(repeats=8), photoelectrons=True),
         tmp_path,
     ).run()
     processor = OccupancyProcessor(calibration.calibration)
@@ -195,7 +185,7 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
 
     class _Source:
         run_record = {
-            "parameters": {FRAME_UNITS: FrameUnit.COUNTS.value},
+            "parameters": {PHOTOELECTRONS: False},
             "device_snapshots": {"camera": {}},
         }
         snapshot = None
@@ -204,7 +194,7 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
         processor._validate_source_run_record(_Source())
 
     _Source.run_record = {
-        "parameters": {FRAME_UNITS: FrameUnit.PHOTOELECTRONS.value},
+        "parameters": {PHOTOELECTRONS: True},
         "device_snapshots": {"camera": {}},
     }
     processor._validate_source_run_record(_Source())
@@ -234,7 +224,7 @@ def test_the_conversion_is_refused_when_the_camera_states_none() -> None:
                 roi_xywh=None,
                 repeat=1,
                 frames_per_cycle=1,
-                frame_units=FrameUnit.PHOTOELECTRONS,
+                photoelectrons=True,
             ),
             signal_plane=FakePlane(),
             producer="units",
@@ -247,3 +237,144 @@ def test_the_conversion_is_refused_when_the_camera_states_none() -> None:
             )
     finally:
         installation.close()
+
+
+def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
+    """The picture an operator watches, not just the one a run files away.
+
+    The finite read converted and the monitor read did not, so a live panel
+    showed counts while the same run's saved samples were electrons -- and a
+    dark corner still read a few hundred, which is how this was found.  The
+    two reads are one method now; this drives the monitor the way the console
+    does and reads what reached the slot.
+    """
+
+    import time
+
+    from zlc_atom.nodes.camera_measurement.measurement import (
+        CameraMeasurementNode,
+        CameraMeasurementRequest,
+    )
+
+    dark = 205  # counts: an ordinary dark corner, above the sensor's offset
+
+    def _published(units: bool) -> np.ndarray:
+        installation = create_installation("virtual")
+        try:
+            node = CameraMeasurementNode(
+                camera=installation.device("camera"),
+                request=CameraMeasurementRequest(
+                    camera_key="camera",
+                    exposure_seconds=0.02,
+                    roi_xywh=(0, 0, 16, 12),
+                    repeat=0,
+                    frames_per_cycle=1,
+                    photoelectrons=units,
+                ),
+                signal_plane=FakePlane(),
+                producer="monitor-units",
+            )
+            capture = node.monitor()
+            camera = installation.device("camera")
+            sensor = camera.working_point().sensor_shape_yx
+            camera.trigger(4, frame=np.full(sensor, dark, dtype=np.uint16))
+            deadline = time.monotonic() + 5.0
+            while capture.slot.latest is None and time.monotonic() < deadline:
+                capture.poll()
+            latest = capture.slot.latest
+            capture.close()
+            assert latest is not None, "the monitor published nothing"
+            return np.asarray(latest[0].image)
+        finally:
+            installation.close()
+
+    counts = _published(False)
+    assert counts.dtype == np.uint16
+    assert counts.min() == counts.max() == dark
+
+    installation = create_installation("virtual")
+    try:
+        offset = installation.world.offset_counts
+        scale = installation.world.conversion_e_per_count
+    finally:
+        installation.close()
+    electrons = _published(True)
+    assert electrons.dtype == np.float32
+    np.testing.assert_allclose(
+        electrons, np.float32((dark - offset) * scale), rtol=1e-6
+    )
+
+
+def test_the_camera_is_read_in_exactly_one_place() -> None:
+    """One intake, mechanically: a capture may not reach the adapter itself.
+
+    Both captures used to call ``read_frame_records`` directly and only one
+    of them converted.  Nothing about that was visible in a review -- the
+    conversion was there, in a method with a docstring calling itself THE
+    conversion point -- so the rule is enforced on the source instead.
+    """
+
+    import ast
+    from pathlib import Path
+
+    import zlc_atom.nodes.camera_measurement.measurement as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "read_frame_records"
+    ]
+    assert len(reads) == 1, (
+        "every frame this node takes must come through read_records; "
+        f"found {len(reads)} calls to read_frame_records"
+    )
+    owner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "read_records"
+        and any(read in ast.walk(node) for read in reads)
+    )
+    assert owner.name == "read_records"
+
+
+def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
+    tmp_path: Path,
+) -> None:
+    """The file on disk is the numbers the fits ran on, not a re-quantised copy.
+
+    The preview slot and the sample writer were handed the WORKING POINT's
+    dtype -- the sensor's pixel format -- and cast every frame to it.  True of
+    what a camera reads out; false of what this node holds once a run asks for
+    photoelectrons: 0.535 e- was written as 0, and a pixel below the sensor's
+    offset wrapped to 65535, so a saved folder could not reproduce the run it
+    came from while the analysis it was saved beside was correct.
+    """
+
+    from zlc_data.figure_archive import read_archive, read_dataset
+
+    result = _task(
+        replace(
+            _calibration_request(repeats=4),
+            photoelectrons=True,
+            save_frames=True,
+        ),
+        tmp_path,
+    ).run()
+
+    analysed = np.asarray(result.capture.frames[0].image)
+    assert analysed.dtype == np.float32
+    assert analysed.min() < 0.0, "a dark pixel below the offset is negative in electrons"
+
+    samples = sorted((tmp_path / "calibration" / "frames").glob("sample_*.npz"))
+    assert samples, "save_frames must leave the samples it paid for"
+    for path in samples:
+        info, arrays = read_archive(path)
+        values = np.asarray(read_dataset(info, arrays, "data").block.values)
+        assert values.dtype == np.float32, f"{path.name} was re-quantised"
+        assert values.min() < 0.0
+        assert not np.any(values == 65535), f"{path.name} wrapped a negative pixel"
