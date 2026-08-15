@@ -836,6 +836,7 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
                 and control._wavefront_host.logical_size == (826, 609)
                 and control._target_widget.size() == QtCore.QSize(826, 609)
                 and control._phase_widget.size() == QtCore.QSize(826, 609)
+                and control._wavefront_widget.size() == QtCore.QSize(826, 609)
                 and not control._target_widget.geometry().intersects(
                     control._phase_widget.geometry()
                 )
@@ -862,6 +863,7 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
                 and control._wavefront_host.logical_size == (490, 357)
                 and control._target_widget.size() == QtCore.QSize(490, 357)
                 and control._phase_widget.size() == QtCore.QSize(490, 357)
+                and control._wavefront_widget.size() == QtCore.QSize(490, 357)
                 and not control._target_widget.geometry().intersects(
                     control._phase_widget.geometry()
                 )
