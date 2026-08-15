@@ -63,7 +63,7 @@ from .specs import (
 )
 from .state import DisplayState
 from .style import PlotStyleConfig, style_context
-from .ticks import apply_smart_ticks
+from .ticks import apply_declared_ticks, apply_smart_ticks
 from ._validation import readonly_copy
 
 
@@ -1757,7 +1757,7 @@ class MatplotlibRenderer:
             axes.get_legend().remove()
         axes.set_xlabel(x_label)
         axes.set_ylabel(y_label)
-        apply_smart_ticks(axes)
+        apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
 
     def _histogram_arrays(
         self, payload: Any, state: DisplayState
@@ -1873,7 +1873,7 @@ class MatplotlibRenderer:
         if y_label is None:
             y_label = "density" if bool(state["density"]) else "Shots"
         axes.set_ylabel(y_label)
-        apply_smart_ticks(axes)
+        apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
 
     def _resolve_histogram_y_limits(
         self,
@@ -2357,11 +2357,16 @@ class MatplotlibRenderer:
             )
             axes.add_collection(collection)
             self._artists[key] = collection
-            # The locator and its formatter are one policy: replacing the
-            # formatter alone left this strip's ticks placed by the compact
-            # locator and LABELLED plainly, which is how a 34-pixel strip
-            # printed "200 400" over its own "0".
-            apply_smart_ticks(axes, "x")
+            # This rail's numbers are a bound, not a coordinate: counts per
+            # bin, always from zero.  Two ticks say all of it, at every
+            # preset -- the crowding ladder gave it two on a wide panel and
+            # none on a narrow one, which is a layout accident.
+            apply_declared_ticks(
+                axes,
+                "x",
+                policy.distribution_tick_count,
+                label_pt=self.style.fonts.tick_pt,
+            )
             if tick_profile == "image":
                 axes.tick_params(
                     axis="y", left=True, right=False, labelleft=False, labelright=False
@@ -2665,7 +2670,14 @@ class MatplotlibRenderer:
         # With both writing, each frame reinstalled two locators per cell and
         # reset their tick artists, undoing the "install once" guarantee.
         if self._facet_focus_index is not None or self.semantic_spec is self.spec:
-            apply_smart_ticks(axes)
+            # An image's data axes has the distribution rail beside it, not a
+            # margin: an x edge label would print over the rail's own first
+            # one.  Above and below it there is only the figure's margin, so
+            # the y axis keeps the ends of its range.
+            apply_smart_ticks(
+                axes, "x", label_pt=self.style.fonts.tick_pt, prune_edges=True
+            )
+            apply_smart_ticks(axes, "y", label_pt=self.style.fonts.tick_pt)
 
     def _update_rolling(
         self,
@@ -3075,15 +3087,10 @@ class MatplotlibRenderer:
                 fontsize=title_pt,
                 pad=self.style.render.compact_axes_title_pad_pt,
             )
-            axis.tick_params(
-                axis="both",
-                labelsize=(
-                    typography.tick_pt
-                    if typography is not None
-                    else self.style.fonts.tick_pt
-                ),
-                length=2,
-            )
+            # The tick MARKS are the grid's; their label SIZE belongs to the
+            # tick policy below, which may shrink it to keep two labels
+            # apart and must be the last writer.
+            axis.tick_params(axis="both", length=2)
             row, column = divmod(index, columns)
             if focused:
                 # The focused cell's ticks belong to the standalone-kind
@@ -3108,7 +3115,15 @@ class MatplotlibRenderer:
             # were the one surface the shared policy never reached: no
             # compact offset, and three labels whether they fitted or not.
             # Only WHICH cells show their labels is the grid's business.
-            apply_smart_ticks(axis, surface="cell")
+            apply_smart_ticks(
+                axis,
+                prune_edges=True,
+                label_pt=(
+                    typography.tick_pt
+                    if typography is not None
+                    else self.style.fonts.tick_pt
+                ),
+            )
             axis.tick_params(axis="y", labelleft=label_left)
             axis.tick_params(axis="x", labelbottom=label_bottom)
             # The cells share one x span and one y span, so they share
@@ -3161,10 +3176,12 @@ class MatplotlibRenderer:
             # The chrome authority already applied the standalone image
             # kind's spatial tick budget; restating it keeps the signature
             # stable instead of re-installing default-budget locators.
-            apply_smart_ticks(selected)
+            apply_smart_ticks(
+                selected, "x", label_pt=self.style.fonts.tick_pt, prune_edges=True
+            )
+            apply_smart_ticks(selected, "y", label_pt=self.style.fonts.tick_pt)
         selected.tick_params(
             axis="both",
-            labelsize=self.style.fonts.tick_pt,
             labelbottom=True,
             labelleft=True,
         )

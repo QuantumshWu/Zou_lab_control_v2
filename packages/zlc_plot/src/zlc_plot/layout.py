@@ -563,7 +563,11 @@ def _facet_gaps(
 
 
 @lru_cache(maxsize=1024)
-def _text_width_pt(text: str, families: tuple[str, ...], size_pt: float) -> float:
+def _text_size_pt(
+    text: str,
+    families: tuple[str, ...],
+    size_pt: float,
+) -> tuple[float, float]:
     """Measure one line of text, in points, without a canvas.
 
     Cached: the answer is a property of the glyphs and cannot change while a
@@ -575,12 +579,16 @@ def _text_width_pt(text: str, families: tuple[str, ...], size_pt: float) -> floa
     from matplotlib.font_manager import FontProperties
     from matplotlib.textpath import TextToPath
 
-    width, _height, _descent = TextToPath().get_text_width_height_descent(
+    width, height, _descent = TextToPath().get_text_width_height_descent(
         text,
         FontProperties(family=list(families), size=size_pt),
         False,
     )
-    return float(width)
+    return float(width), float(height)
+
+
+def _text_width_pt(text: str, families: tuple[str, ...], size_pt: float) -> float:
+    return _text_size_pt(text, families, size_pt)[0]
 
 
 def fitted_facet_cell_title(

@@ -578,6 +578,11 @@ class RenderPolicyConfig:
     distribution_max_bins: int = 50
     distribution_bin_divisor: int = 4
     distribution_guide_alpha: float = 0.3
+    #: How many ticks the distribution rail labels.  Its numbers are a bound
+    #: rather than a coordinate -- counts per bin, always from zero -- so the
+    #: floor and the top say all of it; this is the one place to say
+    #: otherwise.
+    distribution_tick_count: int = 2
     # 50 bins x 1000 samples keeps the rail's shape stable while the strided
     # gather stays ~4x cheaper than the former 200k sweep on megapixel frames.
     image_distribution_sample_target: int = 50_000
@@ -647,6 +652,7 @@ class RenderPolicyConfig:
             "image_distribution_min_bins",
             "distribution_max_bins",
             "distribution_bin_divisor",
+            "distribution_tick_count",
             "image_distribution_sample_target",
             "distribution_count_floor",
             "fit_source_scatter_max_points",
