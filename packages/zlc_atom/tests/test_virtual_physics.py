@@ -553,6 +553,83 @@ def test_nominal_and_extra_traps_share_raw_local_peak_depths() -> None:
     )
 
 
+def test_slm_topology_rejects_blind_sidelobes_across_hidden_plants() -> None:
+    """Only dominant off-grid peaks become new traps across hidden benches."""
+
+    reference = SimulationWorld(seed=0)
+    nominal = np.asarray(reference._slm_site_indices_yx)
+    shape_yx = reference.slm_shape_yx
+    base = np.array(preset_grid(shape_yx, (5, 7)), copy=True)
+    checker = np.array(base, copy=True)
+    for index, site in enumerate(nominal):
+        checker[tuple(site)] = 1.0 if index % 2 == 0 else 0.25
+    removed = len(nominal) // 2
+    new_site = np.asarray((32, 24))
+    add = np.array(base, copy=True)
+    add[tuple(new_site)] = 1.0
+    remove = np.array(base, copy=True)
+    remove[tuple(nominal[removed])] = 0.0
+    move = np.array(remove, copy=True)
+    move[tuple(new_site)] = 1.0
+    three_extra = np.zeros(shape_yx, dtype=np.float32)
+    extra_sites = np.asarray(((32, 24), (64, 72), (96, 104)))
+    three_extra[tuple(extra_sites.T)] = 1.0
+    three_nominal = np.zeros(shape_yx, dtype=np.float32)
+    selected = np.asarray((0, len(nominal) // 2, len(nominal) - 1))
+    three_nominal[tuple(nominal[selected].T)] = 1.0
+
+    phases = [
+        solve_phase(target, seed=0)[0]
+        for target in (checker, remove, add, move, three_extra, three_nominal)
+    ]
+    expected_nominal = [
+        np.ones(len(nominal), dtype=bool),
+        np.arange(len(nominal)) != removed,
+        np.ones(len(nominal), dtype=bool),
+        np.arange(len(nominal)) != removed,
+        np.zeros(len(nominal), dtype=bool),
+        np.isin(np.arange(len(nominal)), selected),
+    ]
+    no_extra = np.empty((0, 2), dtype=np.intp)
+    expected_extra_sites = (
+        no_extra,
+        no_extra,
+        new_site.reshape(1, 2),
+        new_site.reshape(1, 2),
+        extra_sites,
+        no_extra,
+    )
+
+    for seed in range(256):
+        world = SimulationWorld(seed=seed)
+        assert np.all(np.asarray(world._slm_nominal_peak_indices_yx) >= 0)
+        assert len(world._extra_slm_site_indices_yx) == 0
+        for phase, active, expected_extra in zip(
+            phases, expected_nominal, expected_extra_sites, strict=True
+        ):
+            world.apply_slm_phase(phase)
+            world._ensure_slm_propagation()
+            np.testing.assert_array_equal(
+                np.all(world._slm_nominal_peak_indices_yx >= 0, axis=1),
+                active,
+            )
+            actual_extra = world._extra_slm_site_indices_yx
+            assert len(actual_extra) == len(expected_extra)
+            if len(expected_extra):
+                squared_distance = np.sum(
+                    (actual_extra[:, None, :] - expected_extra[None, :, :]) ** 2,
+                    axis=2,
+                )
+                np.testing.assert_array_equal(
+                    np.sum(squared_distance <= 9, axis=0),
+                    np.ones(len(expected_extra), dtype=np.intp),
+                )
+                np.testing.assert_array_equal(
+                    np.sum(squared_distance <= 9, axis=1),
+                    np.ones(len(actual_extra), dtype=np.intp),
+                )
+
+
 def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
     installation = create_installation("virtual")
     world = installation.world

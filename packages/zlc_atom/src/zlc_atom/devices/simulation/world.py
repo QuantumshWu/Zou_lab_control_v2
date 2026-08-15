@@ -21,7 +21,11 @@ DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
 DEFAULT_MOT_FIELD_OPTIMUM_DAC = (0, 0, 0)
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
 DEFAULT_SIMULATION_SLM_SHAPE_YX = (128, 128)
-_DOMINANT_TRAP_PEAK_FRACTION = 0.15
+# Calibrated nominal anchors remain recognizable at lower depth than a blind
+# off-grid candidate.  The latter must clear the stronger dominance gate so a
+# coherent sidelobe is not promoted into a new atom trap.
+_NOMINAL_TRAP_PEAK_FRACTION = 0.10
+_EXTRA_TRAP_PEAK_FRACTION = 0.20
 _TRAP_PEAK_NEIGHBORHOOD = 7
 
 #: 87-Rb, the atom this bench traps: 86.909 180 5 u.
@@ -305,9 +309,7 @@ class SimulationWorld:
         )
         # Physical trap depths are local maxima, not values at authored target
         # pixels.  This mild fixed wavefront error and the planted illumination
-        # together give the apparatus its correctable twofold depth spread
-        # without promoting diffraction sidelobes into atom traps.
-        coefficients *= 1.25
+        # together give the apparatus its correctable twofold depth spread.
         defocus = 2.0 * radius_squared - 1.0
         astigmatism = xx * xx - yy * yy
         coma_x = (3.0 * radius_squared - 2.0) * xx
@@ -353,12 +355,13 @@ class SimulationWorld:
         self,
         intensity: np.ndarray,
         local_peak_plane: np.ndarray,
-        cutoff: float,
+        nominal_cutoff: float,
+        extra_cutoff: float,
     ) -> tuple[np.ndarray, ...]:
-        """Match each dominant physical peak to at most one nominal trap."""
+        """Match calibrated anchors, then admit only dominant blind peaks."""
 
         peaks = np.argwhere(
-            (intensity == local_peak_plane) & (intensity >= cutoff)
+            (intensity == local_peak_plane) & (intensity >= nominal_cutoff)
         )
         nominal_indices = np.full(
             self._slm_site_indices_yx.shape, -1, dtype=np.intp
@@ -397,8 +400,10 @@ class SimulationWorld:
             # A split coherent spot can contain two local maxima inside one
             # calibrated trap's matching neighborhood.  Only the one-to-one
             # match is physical topology; the residual lobe is not an extra
-            # atom site.
+            # atom site.  A blind off-grid candidate also needs the stronger
+            # dominant-peak gate used for an uncalibrated location.
             extra_mask &= np.min(squared_distance, axis=1) > 9
+            extra_mask &= intensity[peaks[:, 0], peaks[:, 1]] >= extra_cutoff
         extra_indices = peaks[extra_mask]
         if not extra_indices.size:
             empty = np.empty(0, dtype=float)
@@ -502,9 +507,11 @@ class SimulationWorld:
             mode="constant",
             cval=-np.inf,
         )
-        cutoff = _DOMINANT_TRAP_PEAK_FRACTION * max(
+        peak_reference = max(
             float(np.max(intensity)), self._loading_intensity_scale or 0.0
         )
+        nominal_cutoff = _NOMINAL_TRAP_PEAK_FRACTION * peak_reference
+        extra_cutoff = _EXTRA_TRAP_PEAK_FRACTION * peak_reference
         (
             nominal_indices,
             sites,
@@ -513,7 +520,12 @@ class SimulationWorld:
             extra_centers,
             extra_efficiency,
             extra_sigma,
-        ) = self._resolved_trap_geometry(intensity, local_peak_plane, cutoff)
+        ) = self._resolved_trap_geometry(
+            intensity,
+            local_peak_plane,
+            nominal_cutoff,
+            extra_cutoff,
+        )
         if self._loading_intensity_scale is None:
             active_sites = sites[sites > 0.0]
             if not len(active_sites):
