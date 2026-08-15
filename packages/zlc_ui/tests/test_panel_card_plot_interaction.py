@@ -362,8 +362,7 @@ card.set_panel_projection(dict(projection), dict(surface))
 app.processEvents()
 
 band = card._title_band
-hint = card.sizeHint()
-card.setGeometry(QtCore.QRect(0, 0, hint.width(), hint.height()))
+reserved = card.size()
 app.processEvents()
 
 # The picture keeps every pixel the plotting package planned for it: the
@@ -381,8 +380,8 @@ assert 'x=1' in card._title_label.toolTip()
 long_name = '@logic/' + 'a-very-long-node-name/' * 6 + 'frames'
 card.set_panel_projection({**projection, 'title': long_name}, dict(surface))
 app.processEvents()
-assert card.sizeHint() == hint, (card.sizeHint(), hint)
-assert card.minimumSizeHint().width() <= hint.width()
+assert card.size() == reserved, (card.size(), reserved)
+assert card.minimumSizeHint().width() <= reserved.width()
 
 # The command sits on the strip, right-padded the same as top and bottom.
 right_pad = band.width() - (card.settings_button.x() + card.settings_button.width())
@@ -397,19 +396,24 @@ host.close(timeout=10)
     )
 
 
-def test_a_card_follows_its_picture_when_the_preset_changes() -> None:
-    """A new preset resizes the PICTURE, and the card has to follow it.
+def test_a_card_takes_the_new_presets_room_the_moment_it_is_picked() -> None:
+    """A preset is a size the plotting package already knows.
 
-    The new size arrives a frame or more later, from the renderer -- so at the
-    moment the operator picks it, every answer the card could give is the old
-    one.  Measured before this: growing left the card 241 px short of its own
-    plot, which Qt clipped until a drag re-packed the board, and shrinking
-    left 263 px of blank above the strip.
+    It plans the canvas, and its answer does not depend on the kind or the
+    cell count -- so the card asks, and is right at once, instead of waiting
+    for a picture to be drawn at the new size and being wrong until then.
+    The card's own half -- its strip and its margins -- it measures.
+
+    Measured before this: the card kept the old rectangle, so growing clipped
+    241 px of plot until a drag re-packed the board, and shrinking left 263 px
+    of blank under the strip.
     """
 
     _run_qt(
         _PROLOGUE
         + """
+from zlc_ui.board import panel_display_size
+
 schema = DatasetSchema.create(
     Axis.create('repeat', size=1),
     PointTable.from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
@@ -419,36 +423,47 @@ snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
 host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')), size='2x2')
 card, widget = mounted_card(host)
 card.set_interval_choices((100,), 100)
-pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
+card.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
 band = card._title_band
+pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
 packed = []
-card.geometry_changed.connect(lambda: packed.append(card.sizeHint()))
+card.geometry_changed.connect(lambda: packed.append(card.size()))
 
 
-def settled(size):
-    card.setGeometry(QtCore.QRect(0, 0, card.sizeHint().width(), card.sizeHint().height()))
-    app.processEvents()
+def framed(size):
+    # Whatever this context can say a preset's picture measures: with the
+    # Workbench present that IS the plotting package's plan, and in this
+    # package alone it is zlc_ui's own cell.  Either way the card asks and
+    # is right at once, and the picture corrects it if the two differ.
+    planned = panel_display_size(size)
     return (
-        widget.presented_front is not None
-        and widget.presented_front.identity.preset == size
-        and card.height() - band.height() - widget.height() == pad
-        and card.width() - widget.width() == 2 * tested_module.CARD_PAD
-        and card.sizeHint().height() == card.height()
+        card.width() == planned[0] + 2 * tested_module.CARD_PAD
+        and card.height() == planned[1] + band.height() + pad
     )
 
 
-first = card.sizeHint()
 for size in ('4x4', '2x2'):
+    packed.clear()
+    card.set_panel_size(size)
+    app.processEvents()
+    # At once -- not one front later.
+    assert framed(size), (size, card.size(), panel_display_size(size))
+    assert packed, 'the card resized without telling the board'
+    # And when the picture arrives it fits the room exactly.
     host.set_size(size).result(timeout=20)
     wait_until(
-        lambda size=size: settled(size),
-        message=f'the card never followed its picture to {size}',
+        lambda size=size: (
+            widget.presented_front is not None
+            and widget.presented_front.identity.preset == size
+        ),
+        message=f'the plot never redrew at {size}',
     )
-    # And the board was told, so it re-packs rather than waiting for a drag.
-    assert packed, 'the card resized without announcing it'
-    packed.clear()
+    app.processEvents()
+    # The picture landed, and the card frames THAT: a preset's planned size
+    # and a drawn picture's size are the same number wherever both are known.
+    assert card.height() - band.height() - widget.height() == pad, size
+    assert card.width() - widget.width() == 2 * tested_module.CARD_PAD, size
 
-assert card.sizeHint() == first, (card.sizeHint(), first)
 card.set_surface(None)
 widget.close_adapter()
 host.close(timeout=10)

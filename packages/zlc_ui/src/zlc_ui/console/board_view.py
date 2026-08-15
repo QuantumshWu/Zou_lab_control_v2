@@ -90,17 +90,21 @@ class ConsoleBoardView(QtWidgets.QWidget):
     def _proxy(self, card: PanelCardView, *, placed: bool = False) -> GeomProxy:
         """One card's rectangle, asked of the card itself.
 
-        A card is its title strip plus the picture mounted in it plus its own
-        padding, and its layout is what adds those up.  The packer used to be
-        handed a preset NAME and a formula that restated the same arithmetic:
-        two answers to keep in step by hand, and one of them could not follow
-        a card whose strip grew a line.
+        The card has already RESERVED it -- the picture its preset plans plus
+        its own strip and margins -- so this is what it will occupy, not what
+        happens to be inside it at this instant.  Its layout's own hint is the
+        latter, and lags by however long the renderer takes to deliver a
+        picture of the new size.
+
+        The packer used to be handed a preset NAME and a formula restating the
+        same arithmetic: two answers kept in step by hand, and one of them
+        could not follow a card whose strip grew a line.
         """
 
-        hint = card.sizeHint()
+        size = card.size()
         if placed:
-            return GeomProxy(hint.width(), hint.height(), int(card.x()), int(card.y()))
-        return GeomProxy(hint.width(), hint.height())
+            return GeomProxy(size.width(), size.height(), int(card.x()), int(card.y()))
+        return GeomProxy(size.width(), size.height())
 
     def _board_width(self, order: tuple[str, ...]) -> int:
         proxies = [self._proxy(self._cards[panel_id]) for panel_id in order]

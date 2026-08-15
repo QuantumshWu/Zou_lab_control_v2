@@ -421,7 +421,9 @@ card = PanelCardView('panel-1')
 # The card's own rectangle is the packer's input, so the expectation is
 # derived from it -- a number typed here would be a second answer to the
 # question this change exists to give one answer to.
-hint = card.sizeHint()
+# The rectangle the card RESERVED -- the picture its preset plans plus its
+# own strip and margins -- is what the packer is given.
+hint = card.size()
 board = ConsoleBoardView(metrics=BoardMetrics(12))
 board.set_cards((card,))
 board.resize(hint.width() + 40, hint.height() + 40); board.show(); app.processEvents()
@@ -458,7 +460,7 @@ from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
 metrics = BoardMetrics(10)
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-w, h = cards[0].sizeHint().width(), cards[0].sizeHint().height()
+w, h = cards[0].size().width(), cards[0].size().height()
 board = ConsoleBoardView(metrics=metrics)
 board.resize(3 * w + 4 * 10, 2 * h + 3 * 10)
 board.set_cards(cards); board.show(); app.processEvents()
@@ -502,7 +504,7 @@ from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
 metrics = BoardMetrics(10)
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(4))
-w, h = cards[0].sizeHint().width(), cards[0].sizeHint().height()
+w, h = cards[0].size().width(), cards[0].size().height()
 board = ConsoleBoardView(metrics=metrics)
 board.resize(2 * w + 3 * 10, 2 * h + 3 * 10)
 board.set_cards(cards); board.show(); app.processEvents()
@@ -543,7 +545,7 @@ from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['drag-stack'])
 metrics = BoardMetrics(10)
 first, second = PanelCardView('first'), PanelCardView('second')
-w, h = first.sizeHint().width(), first.sizeHint().height()
+w, h = first.size().width(), first.size().height()
 board = ConsoleBoardView(metrics=metrics); board.resize(w + 20, 2 * h + 30)
 board.set_cards((first, second)); board.show(); app.processEvents()
 first.move(second.pos())
@@ -571,7 +573,7 @@ from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
 metrics = BoardMetrics(10)
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-w, h = cards[0].sizeHint().width(), cards[0].sizeHint().height()
+w, h = cards[0].size().width(), cards[0].size().height()
 board = ConsoleBoardView(metrics=metrics); board.resize(2 * w + 3 * 10, 2 * h + 3 * 10)
 board.set_cards(cards); board.show(); app.processEvents()
 identities = tuple(board._cards.values())
