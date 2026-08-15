@@ -80,6 +80,19 @@ def _display_array(value: Any) -> np.ndarray:
     return np.asarray(raw)
 
 
+def _names_axis(ref: Any, axis_id: str) -> bool:
+    """Whether an axis reference is the axis a producer named by id.
+
+    A point column and the scan dimension it carries are one physical axis
+    under two identities, and both spell it with the same coordinate id --
+    which is why this compares the id and not the domain.  Repeat and
+    point-row references name no column at all and can never be it.
+    """
+
+    candidate = getattr(ref, "axis_id", None)
+    return candidate is not None and str(candidate) == str(axis_id)
+
+
 def _valid_array(value: Any, shape: tuple[int, ...]) -> np.ndarray:
     raw = getattr(value, "valid", None)
     if raw is None:
@@ -3156,33 +3169,31 @@ class MatplotlibRenderer:
             labelleft=True,
         )
 
-    def _painted_point_coordinate(self, facet_value: float | None) -> float | None:
-        """Which point row THIS surface draws, however it came to show one.
+    def _painted_axis_value(
+        self,
+        axis_id: str,
+        facet_value: float | None,
+    ) -> float | None:
+        """What value THIS surface pins ONE named axis to, or None.
 
-        One rule for both presentations, because a picture of one frame is a
-        picture of one frame: a grid cell shows its facet coordinate, and a
-        flat image shows whatever the spec pinned -- the scope is a fate an
-        axis can be given exactly like being faceted by.  Nothing pinned and
-        no facet means the surface pools its points, and an overlay has no
-        per-point judgement to draw on it.
+        The question an overlay's rings need answered, asked about the axis
+        the overlay itself names.  A surface pins an axis in exactly two ways:
+        it is the axis this grid facets over -- then the cell's coordinate IS
+        the value -- or the spec scopes it, which is the same fate given by
+        hand.  Neither means the surface shows every value of that axis at
+        once, and a judgement per value has nothing to say about that.
+
+        Asking "which point row is on screen" instead is what drew frame
+        zero's rings on every cell of a grid faceted over repeats: the cell's
+        coordinate was a repeat index, and an index is not a frame.
         """
 
-        if facet_value is not None:
+        facet = getattr(self.spec, "facet", None)
+        if facet_value is not None and _names_axis(facet, axis_id):
             return float(facet_value)
-        pinned = {
-            ref.domain: float(value)
-            for ref, value in tuple(getattr(self.spec, "scope", ()))
-        }
-        for domain in (
-            # A frame of a cycle names its own coordinate; a scan point is
-            # named by the dimension it was swept along; a bare row by its
-            # index.  All three answer "which point row is on screen".
-            AxisDomain.POINT_COORDINATE,
-            AxisDomain.POINT_DIMENSION,
-            AxisDomain.POINT_ROW,
-        ):
-            if domain in pinned:
-                return pinned[domain]
+        for ref, value in tuple(getattr(self.spec, "scope", ())):
+            if _names_axis(ref, axis_id):
+                return float(value)
         return None
 
     def _update_image_point_overlay(
@@ -3201,15 +3212,20 @@ class MatplotlibRenderer:
         site overlay on each cell instead of dropping it at the outer spec.
 
         ``facet_value`` is the coordinate THIS surface shows when it is a
-        cell.  A surface that is not a cell shows a point too -- the one the
-        spec PINS -- so which row is painted is resolved once, from the same
-        spec the data came through, instead of the overlay carrying a
-        whole-picture row for the case the renderer could not answer.
+        cell.  Which judgement it draws is resolved from the axis the OVERLAY
+        names -- the cell's coordinate counts only when the grid faces that
+        same axis, and a scope pin on it counts wherever it is -- so a grid
+        faceted over anything else can no longer hand a repeat index to a map
+        keyed by frames.
         """
 
         if not isinstance(self.semantic_spec, ImagePlot):
             return
-        painted_point = self._painted_point_coordinate(facet_value)
+        painted_point = (
+            None
+            if overlay is None or overlay.status_axis is None
+            else self._painted_axis_value(overlay.status_axis, facet_value)
+        )
         x_quantity = getattr(payload, "x", None)
         y_quantity = getattr(payload, "y", None)
         if x_quantity is None or y_quantity is None:

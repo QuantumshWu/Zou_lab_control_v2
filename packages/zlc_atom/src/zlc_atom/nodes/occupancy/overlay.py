@@ -77,8 +77,9 @@ def site_overlay(
     spells them, so a notebook passes its result straight through.
 
     The returned overlay carries one geometry and one status row per FRAME
-    coordinate of the cycle, keyed by the camera's own point column, plus the
-    whole-picture row a standalone image draws.
+    coordinate of the cycle, keyed by the camera's own point column and
+    naming that column, so a picture can tell whether its own coordinates
+    are the ones judged here.
     """
 
     if not isinstance(node, OccupancyProcessor):
@@ -100,10 +101,14 @@ def site_overlay(
     # no occupancy to report, and a ring that said EMPTY there would be a
     # measurement claim nobody made.
     codes = np.where(~valid, 3, np.where(occupied, 2, 1))
-    frames = tuple(outputs[_OCCUPIED].block.schema.point_table.columns[0].values)
+    # The rings are keyed by the coordinate of the frame they judged, so the
+    # column that carries those coordinates is named with them: a bare number
+    # is not a coordinate, and a picture pinned to some OTHER axis must be
+    # able to tell that this judgement is not about it.
+    column = outputs[_OCCUPIED].block.schema.point_table.columns[0]
     statuses: dict[float | None, tuple[PointStatus, ...]] = {
         float(value): _repeats_of(codes[:, index])
-        for index, value in enumerate(frames)
+        for index, value in enumerate(tuple(column.values))
     }
     return ImagePointOverlay(
         revision=revision,
@@ -111,6 +116,7 @@ def site_overlay(
         point_ids=tuple(site_map.site_ids),
         labels=tuple(str(index) for index in range(1, sites + 1)),
         statuses=statuses,
+        status_axis=str(column.coordinate_id),
     )
 
 

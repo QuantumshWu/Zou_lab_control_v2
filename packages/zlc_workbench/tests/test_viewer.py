@@ -472,6 +472,10 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             None: (PointStatus.EMPTY, PointStatus.OCCUPIED),
             0.0: (PointStatus.OCCUPIED, PointStatus.INVALID),
         },
+        # Those keys are coordinates OF an axis, so the archive has to carry
+        # its name: without it a reopened figure holds numbers it cannot
+        # match to any picture, and draws no rings at all.
+        "frame",
     )
     frozen = PanelFrozenData(
         signal=state.signal,
@@ -542,6 +546,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert frame.overlay.point_ids == overlay.point_ids
         assert frame.overlay.labels == overlay.labels
         assert frame.overlay.statuses == overlay.statuses
+        assert frame.overlay.status_axis == overlay.status_axis
 
         host = seen["host"]
         assert seen["state"].semantic == {"reduction": "mean"}

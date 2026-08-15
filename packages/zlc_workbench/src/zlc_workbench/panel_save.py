@@ -125,6 +125,10 @@ def overlay_payload(
         ).reshape((len(keys), overlay.count))
         section["status_facets"] = "overlay.status_facets"
         section["statuses"] = "overlay.statuses"
+        if overlay.status_axis is not None:
+            # The keys above are coordinates OF an axis; without its name a
+            # reopened figure holds numbers it cannot match to any picture.
+            section["status_axis"] = str(overlay.status_axis)
     return arrays, section
 
 
@@ -314,11 +318,13 @@ def restore_panel_plot_input(
             )
             for facet, row in zip(facets, rows, strict=True)
         }
+    status_axis = section.get("status_axis")
     overlay = ImagePointOverlay(
         int(section.get("revision", 0)),
         coordinates,
         point_ids,
         labels,
         statuses,
+        None if status_axis is None else str(status_axis),
     )
     return ImageFrame(snapshot, overlay)
