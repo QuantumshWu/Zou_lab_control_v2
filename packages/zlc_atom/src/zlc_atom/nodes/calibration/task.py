@@ -990,7 +990,14 @@ class CalibrationTask:
                 signal_plane=self.signal_plane,
                 producer=f"{self.request.camera_key}:calibration",
             )
-            capture = measurement.prepare(owns_generation=False)
+            capture = measurement.prepare(
+                owns_generation=False,
+                # The capture asks this between reads, which is the only
+                # place a blocking one can be interrupted: checking it
+                # between CYCLES leaves the operator waiting out the
+                # camera's whole timeout after pressing Stop.
+                should_stop=None if context is None else context.cancel_requested,
+            )
             armed = True
             actual = measurement.actual_working_point
             self._actual_working_point = actual
@@ -1033,7 +1040,10 @@ class CalibrationTask:
             for _ in range(self.request.repeats):
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
-                records = tuple(capture.next_cycle())
+                cycle_records = capture.next_cycle()
+                if cycle_records is None:
+                    raise RuntimeError("calibration was cancelled")
+                records = tuple(cycle_records)
                 if len(records) != 3 or any(
                     not isinstance(record, CameraFrameRecord) for record in records
                 ):

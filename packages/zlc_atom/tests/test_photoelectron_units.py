@@ -284,7 +284,9 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
             latest = capture.slot.latest
             capture.close()
             assert latest is not None, "the monitor published nothing"
-            return np.asarray(latest[0].image)
+            # The slot holds CYCLES; a monitor's is always the single latest.
+            assert len(latest) == 1
+            return np.asarray(latest[0][0].image)
         finally:
             installation.close()
 

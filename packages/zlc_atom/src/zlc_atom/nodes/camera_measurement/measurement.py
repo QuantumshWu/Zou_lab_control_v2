@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
+from time import monotonic
 
 import numpy as np
 from zlc_data import (
@@ -17,7 +18,7 @@ from zlc_data import (
     SPATIAL_X,
     SPATIAL_Y,
 )
-from zlc_runtime import MonitorCoverage
+from zlc_runtime import DatasetCoverage, MonitorCoverage
 from zlc_runtime import (
     DatasetOutputDeclaration,
     FinalDatasetOutput,
@@ -50,19 +51,22 @@ _CAMERA_FRAME_CONTRACT = "camera.frames.v1"
 #: the point-domain role the data model reserves for exactly this.
 CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT)
 
-#: How often a monitor comes back to see whether it has been asked to stop.
+#: How often a capture comes back to see whether it has been asked to stop.
 #:
-#: A monitor's read is a POLL, not a wait for one particular frame: whatever
-#: has arrived is taken and an empty return is a normal answer, discarded by
-#: the loop.  It used to be handed the CAMERA's timeout, which is a device
-#: fact about how long a frame may take (2 s virtual, 10 s on the qCMOS), so
-#: an external-trigger camera whose triggers had stopped sat inside one read
-#: until that deadline -- and Stop, a Start queued behind the camera, and
-#: closing the console all waited for it.  Cancellation is only ever seen
-#: BETWEEN reads, so the read length IS the cancel latency, and it belongs to
-#: the loop rather than to the device.  Fifty milliseconds is also the qCMOS
-#: driver's own wait slice, so its SDK call cadence is unchanged.
-_MONITOR_CANCEL_RESPONSE_SECONDS = 0.05
+#: Cancellation is only ever seen BETWEEN reads, so the read length IS the
+#: cancel latency, and it belongs to the LOOP rather than to the device.  It
+#: used to be the CAMERA's timeout, which is a device fact about how long a
+#: frame may take (2 s virtual, 10 s on the qCMOS), so an external-trigger
+#: camera whose triggers had stopped sat inside one read until that deadline
+#: -- and Stop, a Start queued behind the camera, and closing the console all
+#: waited for it.  Fifty milliseconds is also the qCMOS driver's own wait
+#: slice, so its SDK call cadence is unchanged.
+#:
+#: A monitor read is a POLL and takes whatever has arrived; a finite read
+#: waits for a COMPLETE cycle and so must keep the camera's own timeout as
+#: its deadline -- but it waits in slices of this, which is the difference
+#: between a Stop that lands now and one that lands ten seconds from now.
+_CANCEL_RESPONSE_SECONDS = 0.05
 
 
 def _frame_point_column(producer: str, frames: int) -> PointColumn:
@@ -272,55 +276,92 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
 
 
-class _CameraMonitorSlot:
-    """Application-owned live slot consumed by the runtime plane."""
+class _CameraLiveSlot:
+    """What this node has taken so far, for whoever is watching it take it.
 
-    def __init__(self, node: "CameraMeasurementNode") -> None:
+    One live vocabulary, and one honest distinction: does this run have an
+    end.  A monitor does not -- it replaces its single latest cycle forever,
+    and what it shows IS all there is of it, which is a MonitorCoverage.  A
+    finite run does: its dataset is every cycle it will take, filling up, so
+    it states the whole geometry and counts the cells actually measured in a
+    DatasetCoverage.
+
+    That distinction is not cosmetic.  A generation whose live output is
+    monitor-shaped is DETACHED when it ends -- there is nothing to keep --
+    so a finite run that published its live cycles that way lost its final
+    dataset the moment it finished.
+    """
+
+    def __init__(
+        self,
+        node: "CameraMeasurementNode",
+        *,
+        total_cycles: int | None = None,
+    ) -> None:
         self.node = node
-        self.latest: tuple[CameraFrameRecord, ...] | None = None
+        self.total_cycles = None if total_cycles is None else int(total_cycles)
+        self.latest: tuple[tuple[CameraFrameRecord, ...], ...] | None = None
         self.revision = 0
         self.closed = False
         self._change_listener: Callable[[], None] | None = None
 
     def set_change_listener(self, listener: Callable[[], None]) -> None:
         if self.closed:
-            raise RuntimeError("camera monitor slot is closed")
+            raise RuntimeError("camera live slot is closed")
         if not callable(listener):
-            raise TypeError("camera monitor change listener must be callable")
+            raise TypeError("camera live slot change listener must be callable")
         if self._change_listener is not None:
-            raise RuntimeError("camera monitor slot already has a change listener")
+            raise RuntimeError("camera live slot already has a change listener")
         self._change_listener = listener
 
-    def update(self, records: tuple[CameraFrameRecord, ...]) -> None:
+    def update(self, cycles: "Sequence[Sequence[CameraFrameRecord]]") -> None:
         if self.closed:
-            raise RuntimeError("camera monitor slot is closed")
+            raise RuntimeError("camera live slot is closed")
         listener = self._change_listener
         if listener is None:
-            raise RuntimeError("camera monitor slot is not attached")
-        if len(records) != self.node.frames_per_cycle:
-            raise ValueError("camera monitor update must contain one complete cycle")
-        self.latest = records
+            raise RuntimeError("camera live slot is not attached")
+        taken = tuple(tuple(cycle) for cycle in cycles)
+        if not taken or any(
+            len(cycle) != self.node.frames_per_cycle for cycle in taken
+        ):
+            raise ValueError("a camera live update must be complete cycles")
+        if self.total_cycles is not None and len(taken) > self.total_cycles:
+            raise ValueError("a finite run cannot take more cycles than it armed")
+        self.latest = taken
         self.revision += 1
         listener()
 
     def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
         if self.closed:
-            raise RuntimeError("camera monitor slot is closed")
-        records = self.latest
-        if records is None:
-            raise RuntimeError("camera monitor slot has no accepted cycle")
+            raise RuntimeError("camera live slot is closed")
+        taken = self.latest
+        if taken is None:
+            raise RuntimeError("camera live slot has no accepted cycle")
         generation, revision = self.node._next_publication_stamp()
-        # Cells are repeat x point rows; a cycle's frames ARE its point rows,
-        # and a monitor publication is always one COMPLETE cycle.
-        coverage = MonitorCoverage(
-            written_cells=len(records),
-            total_cells=len(records),
-        )
+        # Cells are repeat x point rows; a cycle's frames ARE its point rows.
+        written = sum(len(cycle) for cycle in taken)
+        if self.total_cycles is None:
+            cycles = taken[-1:]
+            coverage = MonitorCoverage(written_cells=written, total_cells=written)
+        else:
+            # The geometry a finite run will HAVE, so a panel keeps one
+            # dataset filling up instead of replacing it every cycle.  The
+            # cells not yet measured are blank, and the coverage is what says
+            # they are not measurements.
+            blank = np.zeros_like(np.asarray(taken[0][0].image))
+            cycles = taken + tuple(
+                tuple(replace(record, image=blank) for record in taken[0])
+                for _ in range(self.total_cycles - len(taken))
+            )
+            coverage = DatasetCoverage(
+                written_cells=written,
+                total_cells=self.total_cycles * self.node.frames_per_cycle,
+            )
         return {
             CAMERA_FRAMES_OUTPUT.name: LiveDatasetOutput(
                 CAMERA_FRAMES_OUTPUT,
                 frames_snapshot(
-                    (records,),
+                    cycles,
                     producer=self.node.instance_id,
                     generation=generation,
                     revision=revision,
@@ -353,11 +394,16 @@ class CameraCycleSource:
         self._generation: object | None = None
         self._capture = None
         self._taken = 0
+        self._should_stop: Callable[[], bool] | None = None
 
     def open(self, context: object, *, cycles: int) -> None:
         # The frames belong to the run that opened this source, so they are
         # stamped with its generation -- not with one this source invented.
         self._generation = context.generation
+        # ... and so does its cancel: the capture asks it between reads,
+        # which is where a scan waiting on a trigger that never came can
+        # actually be stopped.
+        self._should_stop = context.cancel_requested
         # The camera was built for a definite acquisition; if the plan plays a
         # different number of cycles, one of the two is wrong about what this
         # run is, and an exact capture would deadlock waiting for frames that
@@ -381,7 +427,10 @@ class CameraCycleSource:
         """
 
         if self._capture is None:
-            self._capture = self.camera_node.prepare(owns_generation=False)
+            self._capture = self.camera_node.prepare(
+                owns_generation=False,
+                should_stop=self._should_stop,
+            )
 
     def next_value(self, context: object) -> SignalValue:
         if self._capture is None:
@@ -389,6 +438,8 @@ class CameraCycleSource:
         if context.cancel_requested():
             raise RuntimeError("the scan was cancelled")
         records = self._capture.next_cycle()
+        if records is None:
+            raise RuntimeError("the scan was cancelled")
         self._taken += 1
         return SignalValue(
             CAMERA_FRAMES_OUTPUT.name,
@@ -447,21 +498,39 @@ class FiniteCapture:
         repeat: int,
         frames_per_cycle: int,
         timeout: float,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.node = node
         self.camera = node.camera
         self.repeat = int(repeat)
         self.frames_per_cycle = int(frames_per_cycle)
         self.timeout = float(timeout)
+        #: Asked between reads, and only by a caller that has someone to ask
+        #: -- a hosted run has the host's cancel, a notebook has nobody.
+        self.should_stop = should_stop
         self.closed = False
         self.collected: MeasurementResult | None = None
 
-    def collect(self, *, publish: object | None = None) -> MeasurementResult:
+    def collect(
+        self,
+        *,
+        publish: object | None = None,
+        on_cycle: Callable[
+            [tuple[tuple[CameraFrameRecord, ...], ...]], None
+        ] | None = None,
+    ) -> MeasurementResult | None:
         """Read the armed cycles and publish them.
 
         ``publish`` is the host's context publisher when hosted, and None when
         the caller owns the plane directly.  Only the destination differs; the
         acquisition is one implementation.
+
+        ``on_cycle`` is handed the cycles taken SO FAR as each one lands,
+        which is what puts a finite run on screen while it runs instead of at
+        the end of it.  A run
+        that is asked to stop keeps the cycles it took -- they were measured
+        -- and publishes those; one stopped before its first cycle has nothing
+        to publish and returns None.
         """
 
         if self.closed:
@@ -471,31 +540,58 @@ class FiniteCapture:
         cycles: list[tuple[CameraFrameRecord, ...]] = []
         try:
             for _repeat in range(self.repeat):
-                cycles.append(self.next_cycle())
+                cycle = self.next_cycle()
+                if cycle is None:
+                    break
+                cycles.append(cycle)
+                if on_cycle is not None:
+                    on_cycle(tuple(cycles))
             terminal = self.camera.finish_record_capture()
         except BaseException:
             self.camera.finish_record_capture()
             self.closed = True
             raise
         self.closed = True
+        if not cycles:
+            return None
         self.collected = self.node._publish_finite(tuple(cycles), terminal, publish=publish)
         return self.collected
 
-    def next_cycle(self) -> tuple[CameraFrameRecord, ...]:
-        """The next complete cycle of this capture.
+    def next_cycle(self) -> tuple[CameraFrameRecord, ...] | None:
+        """The next complete cycle of this capture, or None if asked to stop.
 
         A scan takes its cycles one at a time -- that is what lets the dataset
-        grow on screen while the board is still playing -- and a finite
-        measurement takes them all before publishing.  Same read.
+        grow on screen while the board is still playing -- and so does a
+        finite measurement.  Same read.
+
+        The wait is sliced.  A cycle is complete only when all of its frames
+        have arrived, and how long that may take is the CAMERA's timeout (2 s
+        virtual, 10 s on the qCMOS) -- but a Stop is only ever seen between
+        reads, so waiting that out in one call is a Stop the operator watches
+        the console refuse for ten seconds.  The deadline is unchanged; only
+        the granularity is.
         """
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
-        records = self.node.read_records(
-            self.frames_per_cycle,
-            timeout=self.timeout,
-            exact=True,
-        )
+        records: tuple[CameraFrameRecord, ...] = ()
+        deadline = monotonic() + self.timeout
+        while len(records) < self.frames_per_cycle:
+            if self.should_stop is not None and self.should_stop():
+                return None
+            arrived = self.node.read_records(
+                self.frames_per_cycle - len(records),
+                timeout=min(_CANCEL_RESPONSE_SECONDS, max(0.0, deadline - monotonic())),
+                exact=False,
+            )
+            if arrived:
+                records += tuple(arrived)
+                # A frame arrived, so the camera is delivering: the deadline
+                # is how long a FRAME may take, not how long a cycle may.
+                deadline = monotonic() + self.timeout
+                continue
+            if monotonic() >= deadline:
+                break
         if len(records) != self.frames_per_cycle:
             # The two numbers that decide this, from the sensor rather than
             # from a guess: how long it integrates per trigger, and how often
@@ -540,7 +636,7 @@ class MonitorCapture:
         self.closed = False
         self.latest_record: CameraFrameRecord | None = None
         self._pending_records: list[CameraFrameRecord] = []
-        self.slot = _CameraMonitorSlot(node)
+        self.slot = _CameraLiveSlot(node)
         if self.owns_generation:
             if attach_live_outputs is not None:
                 raise ValueError("a direct monitor cannot use a host live-output attachment")
@@ -557,7 +653,7 @@ class MonitorCapture:
         if self.closed:
             raise RuntimeError("monitor capture is closed")
         records = self.node.read_records(
-            1, timeout=_MONITOR_CANCEL_RESPONSE_SECONDS, exact=False
+            1, timeout=_CANCEL_RESPONSE_SECONDS, exact=False
         )
         if not records:
             return None
@@ -584,7 +680,7 @@ class MonitorCapture:
                     return
             pending.append(record)
         if len(pending) == cycle_size:
-            self.slot.update(tuple(pending))
+            self.slot.update((tuple(pending),))
             pending.clear()
 
     def close(self) -> CameraCaptureTerminalRecord:
@@ -773,12 +869,19 @@ class CameraMeasurementNode:
         self._revision += 1
         return str(getattr(generation, "value", generation)), self._revision
 
-    def prepare(self, *, owns_generation: bool = True) -> FiniteCapture:
+    def prepare(
+        self,
+        *,
+        owns_generation: bool = True,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> FiniteCapture:
         """Arm the camera for one acquisition.
 
         The frozen request is the acquisition this node performs.
         ``owns_generation`` is False when a NodeHost has already begun the
-        generation for us.
+        generation for us, and ``should_stop`` is that host's cancel: a
+        capture asks it between reads, which is the only place a blocking
+        read can be interrupted.
         """
 
         if self.request.repeat <= 0:
@@ -802,6 +905,7 @@ class CameraMeasurementNode:
                 repeat=self.request.repeat,
                 frames_per_cycle=self.request.frames_per_cycle,
                 timeout=timeout,
+                should_stop=should_stop,
             )
         except BaseException:
             self.camera.finish_record_capture()
@@ -839,10 +943,24 @@ class CameraMeasurementNode:
                     for value in self.dataset_output_declarations
                 )
             }
-        capture = self.prepare(owns_generation=False)
-        result = capture.collect(publish=context.publish_final)
+        capture = self.prepare(
+            owns_generation=False,
+            should_stop=context.cancel_requested,
+        )
+        # The same live channel a monitor publishes through: an operator
+        # watching a finite run had nothing on screen at all until its LAST
+        # cycle had been taken, and a run of two hundred repeats is a blank
+        # panel for as long as it takes.
+        slot = _CameraLiveSlot(self, total_cycles=self.request.repeat)
+        context.attach_live_outputs(slot)
+        # The host owns the slot's lifetime from here: it is what finishes the
+        # live generation and keeps the final dataset attached to it.
+        result = capture.collect(
+            publish=context.publish_final,
+            on_cycle=slot.update,
+        )
         return {
-            "cycles": len(result.cycles),
+            "cycles": 0 if result is None else len(result.cycles),
             "signals": tuple(
                 self.signal_key(value.name)
                 for value in self.dataset_output_declarations
