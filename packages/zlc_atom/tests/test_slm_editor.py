@@ -199,14 +199,16 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
 
     app = ensure_qt_app()
     session = _session(tmp_path)
-    monkeypatch.setattr(
-        editor,
-        "solve_phase",
-        lambda target, **_kwargs: (
+    objectives: list[object] = []
+
+    def solved(target, **kwargs):
+        objectives.append(kwargs.get("objective_kind"))
+        return (
             canonical_phase(np.zeros(target.shape), target.shape),
             {"method": "test", "iterations": 1},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(editor, "solve_phase", solved)
     control = editor.SlmEditorControl(session, "slm")
     try:
         control._body.resize(1100, 650)
@@ -225,10 +227,13 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
             round(ny * control._target_widget.height()),
         )
 
+        _pump(app, lambda: control.solver_idle)
         control.set_target(np.zeros(control.shape, dtype=np.float32))
         control._intensity.setValue(7.5)
         control._mode.setCurrentText("Toggle")
         assert control._paint(point)
+        _pump(app, lambda: control.solver_idle)
+        assert objectives[-1] == "spots"
         np.testing.assert_array_equal(
             np.unique(control._target[control._target > 0.0]),
             np.array([1.0], dtype=np.float32),
@@ -238,6 +243,9 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
         assert not np.any(control._target)
 
         control._mode.setCurrentText("Brush")
+        assert control._paint(point)
+        _pump(app, lambda: control.solver_idle)
+        assert objectives[-1] == "spots"
         assert control._paint(point)
         assert np.any(control._target == 7.5)
         assert np.max(control._target) == 7.5
@@ -719,14 +727,17 @@ def test_target_solve_updates_mask_then_recomposes_without_weakening_stale_send(
         control._carrier_x.setValue(0.75)
         control.set_target(np.full(control.shape, 0.8, dtype=np.float32))
         assert started.wait(2.0)
+        control._carrier_y.setValue(0.25)
+        assert control.status_text == "Solving latest target…"
         assert control.send() is False
         assert "latest target" in control.status_text
         release.set()
         _pump(app, lambda: control.solver_idle)
 
         xx = np.linspace(-1.0, 1.0, control.shape[1])[None, :]
+        yy = np.linspace(-1.0, 1.0, control.shape[0])[:, None]
         expected = canonical_phase(
-            solved_mask + np.pi * 0.75 * xx,
+            solved_mask + np.pi * (0.75 * xx + 0.25 * yy),
             control.shape,
         )
         np.testing.assert_array_equal(control._mask_phase, solved_mask)

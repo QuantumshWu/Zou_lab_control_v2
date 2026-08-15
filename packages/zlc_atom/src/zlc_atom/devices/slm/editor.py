@@ -85,9 +85,10 @@ class SlmEditorControl(QtCore.QObject):
         self._mask_phase = self._phase
         self._mask_metadata: dict[str, object] = {"source": "device"}
         self._phase_metadata: dict[str, object] = {"source": "device"}
+        self._objective_kind = "spots"
         self._request_revision = self._target_revision = self._phase_revision = 0
         self._phase_request_revision: int | None = None
-        self._pending: tuple[int, np.ndarray] | None = None
+        self._pending: tuple[int, np.ndarray, str] | None = None
         self._running = self._painting = self._closed = self._cleaned = False
         self._command_active = False
         self._window = None
@@ -216,7 +217,10 @@ class SlmEditorControl(QtCore.QObject):
         selected = self._plot_size.currentText()
         self._target_host.set_size(selected)
         self._phase_host.set_size(selected)
-        self._status.setText(f"Plot size {selected}; hardware unchanged")
+        if self._running or self._pending is not None:
+            self._status.setText("Solving latest target…")
+        else:
+            self._status.setText(f"Plot size {selected}; hardware unchanged")
 
     @staticmethod
     def _settings_page(
@@ -380,7 +384,11 @@ class SlmEditorControl(QtCore.QObject):
         self._sync_send_enabled()
         status = getattr(self, "_status", None)
         if status is not None:
-            status.setText("Final composite updated; hardware unchanged")
+            status.setText(
+                "Solving latest target…"
+                if self._running or self._pending is not None
+                else "Final composite updated; hardware unchanged"
+            )
 
     def _compose_phase(self) -> None:
         height, width = self.shape
@@ -457,10 +465,13 @@ class SlmEditorControl(QtCore.QObject):
         self._target_host.set_interaction_enabled(active)
         self._phase_host.set_interaction_enabled(active)
 
-    def set_target(self, values: object) -> None:
+    def set_target(self, values: object, *, objective_kind: str = "auto") -> None:
         target = validate_target(values)
         if target.shape != self.shape:
             raise ValueError(f"target shape must be {self.shape!r}")
+        if objective_kind not in {"auto", "spots", "image"}:
+            raise ValueError("objective_kind must be 'auto', 'spots', or 'image'")
+        self._objective_kind = objective_kind
         self._target, self._request_revision = target, self._request_revision + 1
         self._sync_send_enabled()
         self._target_revision += 1
@@ -525,7 +536,11 @@ class SlmEditorControl(QtCore.QObject):
         return self._command_active
 
     def _queue_solve(self) -> None:
-        self._pending = (self._request_revision, np.array(self._target, copy=True))
+        self._pending = (
+            self._request_revision,
+            np.array(self._target, copy=True),
+            self._objective_kind,
+        )
         self._status.setText("Solving latest target…")
         if not self._running:
             self._start_pending()
@@ -533,10 +548,11 @@ class SlmEditorControl(QtCore.QObject):
     def _start_pending(self) -> None:
         if self._closed or self._pending is None:
             return
-        revision, target = self._pending
+        revision, target, objective_kind = self._pending
         self._pending, self._running = None, True
         future = self._executor.submit(
             solve_phase, target, initial_phase=np.array(self._mask_phase, copy=True),
+            objective_kind=objective_kind,
             stop_requested=lambda: (
                 self._stop.is_set() or revision != self._request_revision
             ),
@@ -571,13 +587,14 @@ class SlmEditorControl(QtCore.QObject):
     def apply_preset(self) -> None:
         height, width = self.shape
         makers = {
-            "5 x 7 grid": lambda: preset_grid(self.shape, (5, 7)),
-            "5 x 7 checkerboard": lambda: preset_checkerboard(self.shape, (5, 7), intensity_b=0.25),
-            "Flat-top rectangle": lambda: preset_rectangle(self.shape, (height // 3, width // 2), edge=max(2, min(self.shape) // 32)),
-            "Flat-top ellipse": lambda: preset_ellipse(self.shape, (height // 6, width // 4), edge=max(2, min(self.shape) // 32)),
-            "Ring": lambda: preset_ring(self.shape, radius=min(self.shape) // 4, width=max(2, min(self.shape) // 12), edge=2),
+            "5 x 7 grid": ("spots", lambda: preset_grid(self.shape, (5, 7))),
+            "5 x 7 checkerboard": ("spots", lambda: preset_checkerboard(self.shape, (5, 7), intensity_b=0.25)),
+            "Flat-top rectangle": ("image", lambda: preset_rectangle(self.shape, (height // 3, width // 2), edge=max(2, min(self.shape) // 32))),
+            "Flat-top ellipse": ("image", lambda: preset_ellipse(self.shape, (height // 6, width // 4), edge=max(2, min(self.shape) // 32))),
+            "Ring": ("image", lambda: preset_ring(self.shape, radius=min(self.shape) // 4, width=max(2, min(self.shape) // 12), edge=2)),
         }
-        self.set_target(makers[self._preset.currentText()]())
+        objective_kind, make = makers[self._preset.currentText()]
+        self.set_target(make(), objective_kind=objective_kind)
 
     def eventFilter(self, watched: object, event: object) -> bool:  # noqa: N802
         if watched is self._target_widget and not self._selectors.isChecked():
@@ -612,7 +629,8 @@ class SlmEditorControl(QtCore.QObject):
             target[row, column] = 0.0 if target[row, column] > 0.0 else 1.0
         else:
             target[mask] = 0.0 if mode == "Erase" else self._intensity.value()
-        self.set_target(target)
+        objective_kind = self._objective_kind if mode == "Erase" else "spots"
+        self.set_target(target, objective_kind=objective_kind)
         return True
 
     def import_target(self, path: object) -> None:

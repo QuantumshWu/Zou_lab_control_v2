@@ -182,87 +182,222 @@ def _pupil(shape: tuple[int, int]) -> np.ndarray:
     yy, xx = np.ogrid[-1.0:1.0:shape[0] * 1j, -1.0:1.0:shape[1] * 1j]
     return (xx * xx + yy * yy <= 0.9**2).astype(np.float32)
 
-def _forward(field: np.ndarray) -> np.ndarray:
-    return fft.fftshift(fft.fft2(fft.ifftshift(field), norm="ortho"))
+def _unit_phase(values: np.ndarray, epsilon: float) -> np.ndarray:
+    magnitude = np.abs(values).astype(np.float32)
+    return np.divide(
+        values,
+        magnitude,
+        out=np.ones_like(values, dtype=np.complex64),
+        where=magnitude > epsilon,
+    )
 
+def _support_intensity_ratio(
+    magnitude: np.ndarray,
+    desired: np.ndarray,
+    epsilon: float,
+) -> float:
+    relative = np.square(magnitude, dtype=np.float32) / desired
+    return float(np.max(relative) / max(float(np.min(relative)), epsilon))
 
-def _backward(field: np.ndarray) -> np.ndarray:
-    return fft.fftshift(fft.ifft2(fft.ifftshift(field), norm="ortho"))
+def _cartesian_support(
+    support: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    rows, columns = np.nonzero(support)
+    unique_rows = np.unique(rows)
+    unique_columns = np.unique(columns)
+    if (
+        rows.size > 256
+        or unique_rows.size * unique_columns.size != rows.size
+        or not np.all(support[np.ix_(unique_rows, unique_columns)])
+    ):
+        return None
+    return unique_rows, unique_columns
 
 def solve_phase(
     target: object,
     *,
     initial_phase: object | None = None,
+    objective_kind: str = "auto",
     iterations: int | None = None,
     seed: int = 0,
     stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, dict[str, object]]:
-    """Solve one target; support topology privately selects weighted GS/MRAF."""
+    """Solve one full-resolution target as authored spots or a continuous image."""
 
     desired = validate_target(target)
     if float(np.max(desired)) <= 0.0:
         raise ValueError("target must contain positive intensity")
+    if not isinstance(objective_kind, str) or objective_kind not in {
+        "auto",
+        "spots",
+        "image",
+    }:
+        raise ValueError("objective_kind must be 'auto', 'spots', or 'image'")
     if stop_requested is not None and not callable(stop_requested):
         raise TypeError("stop_requested must be callable or None")
+    support = desired > 0.0
+    if objective_kind == "auto":
+        labels, components = ndimage.label(support)
+        sizes = np.bincount(labels.ravel(), minlength=components + 1)[1:]
+        largest = int(np.max(sizes, initial=0))
+        continuous_component = max(64, int(np.ceil(0.001 * desired.size)))
+        resolved_kind = (
+            "image"
+            if (
+                largest > continuous_component
+                or np.count_nonzero(support) > 0.02 * desired.size
+            )
+            else "spots"
+        )
+    else:
+        resolved_kind = objective_kind
+    method = "wgs-kim" if resolved_kind == "spots" else "mraf"
+    if iterations is None:
+        count = 80 if method == "wgs-kim" else 300
+    else:
+        if isinstance(iterations, bool) or int(iterations) <= 0:
+            raise ValueError("iterations must be a positive integer or None")
+        count = int(iterations)
+
     pupil = _pupil(desired.shape)
     if initial_phase is None:
         phase = np.random.default_rng(int(seed)).uniform(0.0, 2.0 * np.pi, desired.shape).astype(np.float32)
     else:
         phase = np.array(canonical_phase(initial_phase, desired.shape), copy=True)
-    field = pupil.astype(np.complex64) * np.exp(1j * phase).astype(np.complex64)
-    support = desired > 0.0
-    labels, components = ndimage.label(support)
-    component_sizes = np.bincount(labels.ravel(), minlength=components + 1)[1:]
-    largest = int(np.max(component_sizes, initial=0))
-    method = "mraf" if largest > 4 or np.count_nonzero(support) > 0.02 * desired.size else "weighted-gs"
-    if iterations is None:
-        count = 300 if method == "mraf" else 80
-    else:
-        if isinstance(iterations, bool) or int(iterations) <= 0:
-            raise ValueError("iterations must be a positive integer or None")
-        count = int(iterations)
-    amplitude = np.sqrt(desired).astype(np.float32)
-    amplitude /= np.linalg.norm(amplitude[support])
-    weights = np.array(amplitude[support], copy=True)
+    pupil_unshifted = fft.ifftshift(pupil)
+    field = fft.ifftshift(
+        pupil.astype(np.complex64) * np.exp(1j * phase).astype(np.complex64)
+    )
+    desired_unshifted = fft.ifftshift(desired)
+    support_unshifted = desired_unshifted > 0.0
+    amplitude = np.sqrt(desired_unshifted).astype(np.float32)
+    amplitude /= np.linalg.norm(amplitude[support_unshifted])
     epsilon = np.finfo(np.float32).eps
 
-    for _iteration in range(count):
-        if stop_requested is not None and stop_requested():
-            raise InterruptedError("SLM phase solve stopped")
-        far = _forward(field)
-        phases = np.exp(1j * np.angle(far)).astype(np.complex64)
-        if method == "weighted-gs":
-            measured = np.abs(far[support]).astype(np.float32)
-            measured /= max(float(np.linalg.norm(measured)), epsilon)
-            ratio = amplitude[support] / np.maximum(measured, epsilon)
-            weights *= np.sqrt(np.clip(ratio, 0.2, 5.0))
-            weights /= max(float(np.linalg.norm(weights)), epsilon)
-            constrained = np.zeros_like(far)
-            constrained[support] = weights * phases[support]
+    transform = "fft"
+    quality_streak = 0
+    early_stopped = False
+    iterations_run = 0
+    if method == "wgs-kim":
+        cartesian = _cartesian_support(support_unshifted)
+        if cartesian is None:
+            desired_spots = desired_unshifted[support_unshifted]
+            amplitude_spots = amplitude[support_unshifted]
+            constrained = np.zeros_like(field)
         else:
-            measured = np.abs(far[support]).astype(np.float32)
-            measured /= max(float(np.linalg.norm(measured)), epsilon)
-            ratio = amplitude[support] / np.maximum(measured, epsilon)
-            weights *= np.sqrt(np.clip(ratio, 0.2, 5.0))
-            weights /= max(float(np.linalg.norm(weights)), epsilon)
-            current_power = float(np.sum(np.abs(far[support]) ** 2))
-            constrained = far * np.complex64(0.9)
-            constrained[support] = (
-                weights * np.sqrt(max(current_power, epsilon)) * phases[support]
+            rows, columns = cartesian
+            desired_spots = desired_unshifted[np.ix_(rows, columns)].ravel()
+            amplitude_spots = amplitude[np.ix_(rows, columns)].ravel()
+            row_angles = (
+                (-2.0 * np.pi / desired.shape[0])
+                * rows.astype(np.float64)[:, None]
+                * np.arange(desired.shape[0], dtype=np.float64)[None, :]
             )
-        back = _backward(constrained)
-        field = pupil.astype(np.complex64) * np.exp(1j * np.angle(back)).astype(np.complex64)
+            row_forward = (
+                np.exp(1j * row_angles) / np.sqrt(desired.shape[0])
+            ).astype(np.complex64)
+            row_backward = np.ascontiguousarray(row_forward.conj().T)
+            constrained = np.zeros_like(field)
+            transform = "selected-dft"
+        weights = np.array(amplitude_spots, copy=True)
+        fixed_phase: np.ndarray | None = None
 
-    result = canonical_phase(np.angle(field), desired.shape)
-    final = _forward(pupil.astype(np.complex64) * np.exp(1j * result).astype(np.complex64))
-    measured = np.abs(final[support]) ** 2
+        while iterations_run < count:
+            if stop_requested is not None and stop_requested():
+                raise InterruptedError("SLM phase solve stopped")
+            if transform == "selected-dft":
+                far_x = fft.fft(field, axis=1, norm="ortho")
+                selected = (row_forward @ far_x[:, columns]).ravel()
+            else:
+                far = fft.fft2(field, norm="ortho")
+                selected = far[support_unshifted]
+            magnitude = np.abs(selected).astype(np.float32)
+            support_ratio = _support_intensity_ratio(
+                magnitude, desired_spots, epsilon
+            )
+            if iterations is None and iterations_run >= 12:
+                quality_streak = quality_streak + 1 if support_ratio <= 1.01 else 0
+                if quality_streak >= 3:
+                    early_stopped = True
+                    break
+            measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
+            weights *= np.clip(
+                amplitude_spots / np.maximum(measured, epsilon), 0.2, 5.0
+            ) ** np.float32(0.8)
+            weights /= max(float(np.linalg.norm(weights)), epsilon)
+            current_phase = _unit_phase(selected, epsilon)
+            if fixed_phase is None:
+                selected_phase = current_phase
+                if iterations_run + 1 == 12:
+                    fixed_phase = np.array(current_phase, copy=True)
+            else:
+                selected_phase = fixed_phase
+            constrained_values = (weights * selected_phase).reshape(
+                selected.shape if transform == "fft" else (len(rows), len(columns))
+            )
+            constrained.fill(0.0)
+            if transform == "selected-dft":
+                constrained[:, columns] = row_backward @ constrained_values
+                back = fft.ifft(constrained, axis=1, norm="ortho")
+            else:
+                constrained[support_unshifted] = constrained_values
+                back = fft.ifft2(constrained, norm="ortho")
+            field = pupil_unshifted * _unit_phase(back, epsilon)
+            iterations_run += 1
+    else:
+        amplitude_spots = amplitude[support_unshifted]
+        weights = np.array(amplitude_spots, copy=True)
+        for _iteration in range(count):
+            if stop_requested is not None and stop_requested():
+                raise InterruptedError("SLM phase solve stopped")
+            far = fft.fft2(field, norm="ortho")
+            selected = far[support_unshifted]
+            magnitude = np.abs(selected).astype(np.float32)
+            measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
+            weights *= np.sqrt(
+                np.clip(amplitude_spots / np.maximum(measured, epsilon), 0.2, 5.0)
+            )
+            weights /= max(float(np.linalg.norm(weights)), epsilon)
+            current_power = float(np.sum(np.square(magnitude, dtype=np.float32)))
+            constrained = far * np.complex64(0.9)
+            constrained[support_unshifted] = (
+                weights
+                * np.sqrt(max(current_power, epsilon))
+                * _unit_phase(selected, epsilon)
+            )
+            back = fft.ifft2(constrained, norm="ortho")
+            field = pupil_unshifted * _unit_phase(back, epsilon)
+            iterations_run += 1
+
+    result = canonical_phase(fft.fftshift(np.angle(field)), desired.shape)
+    final_field = pupil_unshifted * np.exp(
+        np.complex64(1j) * fft.ifftshift(result)
+    ).astype(np.complex64)
+    final = fft.fft2(final_field, norm="ortho")
+    final_magnitude = np.abs(final[support_unshifted]).astype(np.float32)
+    support_ratio = _support_intensity_ratio(
+        final_magnitude, desired_unshifted[support_unshifted], epsilon
+    )
+    measured = np.square(final_magnitude, dtype=np.float32)
     measured /= max(float(np.sum(measured)), epsilon)
-    expected = desired[support] / float(np.sum(desired[support]))
+    expected = desired_unshifted[support_unshifted]
+    expected /= float(np.sum(expected))
     error = float(np.sqrt(np.mean((measured - expected) ** 2)))
-    efficiency = float(np.sum(np.abs(final[support]) ** 2) / np.sum(np.abs(final) ** 2))
+    efficiency = float(
+        np.sum(np.square(final_magnitude, dtype=np.float32))
+        / np.sum(np.square(np.abs(final), dtype=np.float32))
+    )
     return result, {
         "method": method,
-        "iterations": count,
+        "objective_kind": resolved_kind,
+        "transform": transform,
+        "iterations": iterations_run,
+        "iterations_run": iterations_run,
+        "max_iterations": count,
+        "early_stopped": early_stopped,
+        "stop_reason": "support-ratio" if early_stopped else "iteration-limit",
+        "quality_streak": quality_streak,
+        "support_intensity_ratio": support_ratio,
         "seed": int(seed),
         "rms_intensity_error": error,
         "diffraction_efficiency": efficiency,

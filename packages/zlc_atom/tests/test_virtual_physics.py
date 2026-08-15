@@ -1305,13 +1305,186 @@ def _ideal_slm_intensity(phase: np.ndarray) -> np.ndarray:
     return np.abs(far) ** 2
 
 
+def _shifted_wgs_kim_reference(
+    target: np.ndarray,
+    *,
+    iterations: int,
+    seed: int,
+) -> np.ndarray:
+    """The direct full-frame/shifted formulation used as a quality oracle."""
+
+    desired = np.asarray(target, dtype=np.float32)
+    support = desired > 0.0
+    height, width = desired.shape
+    yy, xx = np.ogrid[-1.0:1.0:height * 1j, -1.0:1.0:width * 1j]
+    pupil = (xx * xx + yy * yy <= 0.9**2).astype(np.float32)
+    phase = np.random.default_rng(seed).uniform(
+        0.0, 2.0 * np.pi, desired.shape
+    ).astype(np.float32)
+    field = pupil.astype(np.complex64) * np.exp(1j * phase).astype(np.complex64)
+    target_amplitude = np.sqrt(desired[support]).astype(np.float32)
+    target_amplitude /= np.linalg.norm(target_amplitude)
+    weights = np.array(target_amplitude, copy=True)
+    fixed_phase: np.ndarray | None = None
+    epsilon = np.finfo(np.float32).eps
+
+    for iteration in range(iterations):
+        far = fft.fftshift(fft.fft2(fft.ifftshift(field), norm="ortho"))
+        selected = far[support]
+        magnitude = np.abs(selected).astype(np.float32)
+        measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
+        weights *= np.clip(
+            target_amplitude / np.maximum(measured, epsilon), 0.2, 5.0
+        ) ** np.float32(0.8)
+        weights /= max(float(np.linalg.norm(weights)), epsilon)
+        current_phase = np.divide(
+            selected,
+            magnitude,
+            out=np.ones_like(selected),
+            where=magnitude > epsilon,
+        )
+        if fixed_phase is None:
+            selected_phase = current_phase
+            if iteration + 1 == 12:
+                fixed_phase = np.array(current_phase, copy=True)
+        else:
+            selected_phase = fixed_phase
+        constrained = np.zeros_like(far)
+        constrained[support] = weights * selected_phase
+        back = fft.fftshift(
+            fft.ifft2(fft.ifftshift(constrained), norm="ortho")
+        )
+        back_magnitude = np.abs(back).astype(np.float32)
+        field = pupil.astype(np.complex64) * np.divide(
+            back,
+            back_magnitude,
+            out=np.ones_like(back),
+            where=back_magnitude > epsilon,
+        )
+    return canonical_phase(np.angle(field), desired.shape)
+
+
+def _support_quality(
+    phase: np.ndarray,
+    target: np.ndarray,
+) -> tuple[np.ndarray, float, float]:
+    intensity = _ideal_slm_intensity(phase)
+    support = target > 0.0
+    measured = intensity[support]
+    measured /= np.sum(measured)
+    expected = target[support] / np.sum(target[support])
+    normalized = measured / expected
+    ratio = float(np.max(normalized) / np.min(normalized))
+    efficiency = float(np.sum(intensity[support]) / np.sum(intensity))
+    return normalized, ratio, efficiency
+
+
+def test_slm_solver_uses_authored_spot_or_image_objective() -> None:
+    adjacent = np.zeros((64, 64), dtype=np.float32)
+    adjacent[32, 30:35] = 1.0
+    grid = preset_grid((64, 64), (5, 7), spacing_yx=(7, 6))
+    for target in (adjacent, grid):
+        _phase, metadata = solve_phase(
+            target,
+            objective_kind="spots",
+            iterations=4,
+            seed=17,
+        )
+        assert metadata["method"] == "wgs-kim"
+    _auto_phase, auto_metadata = solve_phase(
+        adjacent,
+        objective_kind="auto",
+        iterations=4,
+        seed=17,
+    )
+    assert auto_metadata["method"] == "wgs-kim"
+
+    dense = preset_rectangle((64, 64), (22, 26), edge=4)
+    _dense_phase, dense_metadata = solve_phase(
+        dense,
+        objective_kind="image",
+        iterations=4,
+        seed=9,
+    )
+    assert dense_metadata["method"] == "mraf"
+    with pytest.raises(ValueError, match="objective_kind"):
+        solve_phase(grid, objective_kind="unknown", iterations=1)
+
+
+@pytest.mark.parametrize("cartesian", [True, False])
+def test_sparse_solver_matches_full_shifted_wgs_kim_quality(cartesian: bool) -> None:
+    target = np.array(
+        preset_grid((64, 80), (3, 4), spacing_yx=(12, 13)), copy=True
+    )
+    if not cartesian:
+        row, column = np.argwhere(target > 0.0)[-1]
+        target[row, column] = 0.0
+    phase, metadata = solve_phase(
+        target,
+        objective_kind="spots",
+        iterations=30,
+        seed=23,
+    )
+    reference = _shifted_wgs_kim_reference(target, iterations=30, seed=23)
+    normalized, ratio, efficiency = _support_quality(phase, target)
+    reference_normalized, reference_ratio, reference_efficiency = _support_quality(
+        reference, target
+    )
+
+    assert metadata["transform"] == ("selected-dft" if cartesian else "fft")
+    np.testing.assert_allclose(
+        normalized,
+        reference_normalized,
+        rtol=0.01,
+        atol=1e-4,
+    )
+    assert ratio == pytest.approx(reference_ratio, rel=0.01)
+    assert efficiency == pytest.approx(reference_efficiency, rel=0.01)
+
+
+def test_sparse_solver_only_early_stops_after_consecutive_one_percent_quality() -> None:
+    target = preset_grid((64, 64), (2, 3), spacing_yx=(14, 13))
+    calls = 0
+
+    def keep_running() -> bool:
+        nonlocal calls
+        calls += 1
+        return False
+
+    _exact, exact_metadata = solve_phase(
+        target,
+        objective_kind="spots",
+        iterations=24,
+        seed=31,
+        stop_requested=keep_running,
+    )
+    assert calls == 24
+    assert exact_metadata["iterations"] == 24
+    assert exact_metadata["iterations_run"] == 24
+    assert exact_metadata["early_stopped"] is False
+    assert exact_metadata["stop_reason"] == "iteration-limit"
+
+    phase, metadata = solve_phase(target, objective_kind="spots", seed=31)
+    _normalized, ratio, _efficiency = _support_quality(phase, target)
+    assert metadata["early_stopped"] is True
+    assert metadata["stop_reason"] == "support-ratio"
+    assert metadata["quality_streak"] >= 3
+    assert metadata["support_intensity_ratio"] <= 1.01
+    assert ratio <= 1.01
+    assert metadata["iterations"] < metadata["max_iterations"]
+
+
 def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
     sparse = preset_grid((64, 64), (3, 5), spacing_yx=(10, 9))
-    phase, metadata = solve_phase(sparse, iterations=80, seed=17)
-    repeated, repeated_metadata = solve_phase(sparse, iterations=80, seed=17)
+    phase, metadata = solve_phase(
+        sparse, objective_kind="spots", iterations=80, seed=17
+    )
+    repeated, repeated_metadata = solve_phase(
+        sparse, objective_kind="spots", iterations=80, seed=17
+    )
     np.testing.assert_array_equal(phase, repeated)
     assert metadata == repeated_metadata
-    assert metadata["method"] == "weighted-gs"
+    assert metadata["method"] == "wgs-kim"
     assert phase.dtype == np.dtype("<f4")
     assert np.all((phase >= 0.0) & (phase < 2.0 * np.pi))
     site_values = _ideal_slm_intensity(phase)[sparse > 0.0]
@@ -1324,8 +1497,10 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
         intensity_a=1.0,
         intensity_b=0.25,
     )
-    graded_phase, graded_metadata = solve_phase(graded, iterations=80, seed=17)
-    assert graded_metadata["method"] == "weighted-gs"
+    graded_phase, graded_metadata = solve_phase(
+        graded, objective_kind="spots", iterations=80, seed=17
+    )
+    assert graded_metadata["method"] == "wgs-kim"
     graded_intensity = _ideal_slm_intensity(graded_phase)
     measured_ratio = float(
         np.mean(graded_intensity[graded == 1.0])
@@ -1334,7 +1509,9 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
     assert measured_ratio == pytest.approx(4.0, rel=0.01)
 
     dense = preset_rectangle((64, 64), (22, 26), edge=4)
-    dense_phase, dense_metadata = solve_phase(dense, seed=9)
+    dense_phase, dense_metadata = solve_phase(
+        dense, objective_kind="image", seed=9
+    )
     assert dense_metadata["method"] == "mraf"
     assert dense_metadata["iterations"] == 300
     intensity = _ideal_slm_intensity(dense_phase)
@@ -1345,10 +1522,11 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
     warmed, warm_metadata = solve_phase(
         sparse,
         initial_phase=phase,
+        objective_kind="spots",
         iterations=8,
         seed=999,
     )
-    assert warm_metadata["method"] == "weighted-gs"
+    assert warm_metadata["method"] == "wgs-kim"
     assert warmed.shape == sparse.shape
     calls = 0
 
@@ -1358,7 +1536,12 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
         return calls == 3
 
     with pytest.raises(InterruptedError):
-        solve_phase(sparse, iterations=80, stop_requested=stop_requested)
+        solve_phase(
+            sparse,
+            objective_kind="spots",
+            iterations=80,
+            stop_requested=stop_requested,
+        )
     with pytest.raises(ValueError, match="positive intensity"):
         solve_phase(np.zeros((16, 16), dtype=np.float32))
 
