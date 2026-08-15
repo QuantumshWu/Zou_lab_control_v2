@@ -352,3 +352,103 @@ def test_a_gesture_frame_is_composed_under_the_same_style() -> None:
     finally:
         font_log.removeHandler(handler)
         session.close()
+
+
+def _cycle_snapshot(frames: int = 3, revision: int = 0) -> DatasetSnapshot:
+    """One camera cycle: its frames are the point rows a grid faces."""
+
+    side = 32
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"frame": [float(i) for i in range(frames)]}),
+        data_axes=(
+            Axis.create(
+                "sy", values=tuple(float(v) for v in range(side)), role=SPATIAL_Y
+            ),
+            Axis.create(
+                "sx", values=tuple(float(v) for v in range(side)), role=SPATIAL_X
+            ),
+        ),
+        dtype=np.uint16,
+    )
+    values = (
+        np.random.default_rng(revision)
+        .integers(180, 900, (1, frames, side, side))
+        .astype(np.uint16)
+    )
+    return DatasetSnapshot(schema, values, revision=revision)
+
+
+def _cell_transform(session: PlotSession, index: int):
+    """The painted geometry of one grid cell, as a frontend sees it."""
+
+    return next(
+        axis
+        for axis in session._raster_axes_snapshot()
+        if axis.role == "facet_cell" and axis.cell_index == index
+    )
+
+
+def _inside(transform, fraction_x: float, fraction_y: float) -> tuple[float, float]:
+    left, top, right, bottom = transform.bounds
+    return (
+        left + (right - left) * fraction_x,
+        1.0 - (top + (bottom - top) * fraction_y),
+    )
+
+
+@pytest.mark.parametrize("cell", (0, 1, 2))
+def test_an_overview_grid_answers_the_pointer_on_the_cell_it_landed_on(
+    cell: int,
+) -> None:
+    """A grid is a plot, not a picture of plots.
+
+    Every cell of an unfocused grid takes the wheel and the drag, and the
+    press NAMES the cell: the selector it starts belongs to that cell, and
+    the frontend can see it, so it can be grabbed again.  An overview used to
+    refuse both and publish no selectors at all, which is why a camera panel
+    defaulting to a grid had no interaction whatsoever.
+    """
+
+    from zlc_plot import FacetGridPlot
+
+    session = PlotSession(
+        _cycle_snapshot(),
+        FacetGridPlot(
+            AxisRef.point("frame"),
+            ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+        ),
+        size="4x4",
+    )
+    try:
+        session.rgba()
+        transform = _cell_transform(session, cell)
+        before = session.viewport
+        session._raster_pointer_event(
+            "scroll", *_inside(transform, 0.5, 0.5), step=-1.0,
+            axes_snapshot=transform,
+        )
+        assert session.viewport != before, "the wheel did nothing over a cell"
+        assert session._focused_facet_index == cell
+
+        transform = _cell_transform(session, cell)
+        session._raster_pointer_event(
+            "press", *_inside(transform, 0.3, 0.3), button=1,
+            axes_snapshot=transform,
+        )
+        assert session._focused_facet_index == cell
+        session._raster_pointer_event(
+            "move", *_inside(transform, 0.7, 0.7), button=1,
+            axes_snapshot=transform,
+        )
+        session._raster_pointer_event(
+            "release", *_inside(transform, 0.7, 0.7), button=1,
+            axes_snapshot=transform,
+        )
+        committed = tuple(session.selectors)
+        assert [state.facet_index for state in committed] == [cell]
+        assert committed[0].kind is SelectorKind.AREA
+        painted = session._raster_interaction_snapshot()
+        assert [state.facet_index for state in painted] == [cell]
+    finally:
+        session.close()

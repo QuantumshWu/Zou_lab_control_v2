@@ -487,6 +487,7 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
         # Per FRAME, exactly as an occupancy node states it, and with no
         # whole-picture row: several frames pooled have no judgement.
         statuses={-1.0: occupied, 0.0: empty, 1.0: occupied},
+        status_axis="bias",
     )
     snapshot = _frames_scan_snapshot()
     scoped = PlotSession(
@@ -499,7 +500,7 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
         size="4x4",
     )
     try:
-        assert scoped._renderer._painted_point_coordinate(None) == 0.0
+        assert scoped._renderer._painted_axis_value("bias", None) == 0.0
         scoped.update_image_overlay(overlay)
         scoped.rgba()
         collection = scoped._renderer._artists["image:points"]
@@ -516,7 +517,104 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
 
     faceted = PlotSession(snapshot, _FACET_SPEC, size="4x4")
     try:
-        assert faceted._renderer._painted_point_coordinate(1.0) == 1.0
-        assert faceted._renderer._painted_point_coordinate(None) is None
+        assert faceted._renderer._painted_axis_value("bias", 1.0) == 1.0
+        assert faceted._renderer._painted_axis_value("bias", None) is None
     finally:
         faceted.close()
+
+
+def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
+    """Which judgement one painted surface's rings actually say."""
+
+    from matplotlib.colors import to_rgba
+
+    from zlc_plot.primitives import PointStatus
+
+    tokens = session._renderer.style.artists
+    by_colour = {
+        tuple(round(value, 5) for value in to_rgba(token.color, token.alpha)): status
+        for status, token in (
+            (PointStatus.UNKNOWN, tokens.point_unknown),
+            (PointStatus.EMPTY, tokens.point_empty),
+            (PointStatus.OCCUPIED, tokens.point_occupied),
+            (PointStatus.INVALID, tokens.point_invalid),
+        )
+    }
+    collection = session._renderer._artists[key]
+    return tuple(
+        by_colour[tuple(round(float(value), 5) for value in colour)].name
+        for colour in collection.get_edgecolors()
+    )
+
+
+def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None:
+    """An overlay's keys are coordinates OF an axis, and it says which.
+
+    Four presentations of one judged cycle.  The one that used to lie is the
+    last: a grid faceted over REPEATS handed each cell's repeat index to a
+    map keyed by the scan coordinate, matched 0 against 0, and drew the first
+    point's judgement on every cell -- while the picture underneath was the
+    point the operator had scoped to.
+    """
+
+    from zlc_plot.primitives import ImagePointOverlay, PointStatus
+
+    first = (PointStatus.OCCUPIED, PointStatus.EMPTY)
+    middle = (PointStatus.EMPTY, PointStatus.OCCUPIED)
+    last = (PointStatus.INVALID, PointStatus.INVALID)
+    overlay = ImagePointOverlay(
+        coordinates=((10.0, 12.0), (30.0, 24.0)),
+        revision=1,
+        point_ids=("s0", "s1"),
+        statuses={-1.0: first, 0.0: middle, 1.0: last},
+        status_axis="bias",
+    )
+    snapshot = _frames_scan_snapshot(repeats=2)
+    unknown = ("UNKNOWN", "UNKNOWN")
+
+    cases = (
+        (
+            "a flat image pooling every point has no judgement to draw",
+            ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+            {"image:points": unknown},
+        ),
+        (
+            "a flat image scoped to one point draws that point",
+            ImagePlot(
+                AxisRef.data("sx"),
+                AxisRef.data("sy"),
+                scope=((AxisRef.point_dimension("bias"), 1.0),),
+            ),
+            {"image:points": ("INVALID", "INVALID")},
+        ),
+        (
+            "a grid faceted over the judged axis draws each cell's own",
+            _FACET_SPEC,
+            {
+                "facet:0:points": ("OCCUPIED", "EMPTY"),
+                "facet:1:points": ("EMPTY", "OCCUPIED"),
+                "facet:2:points": ("INVALID", "INVALID"),
+            },
+        ),
+        (
+            "a grid faceted over another axis follows the scope, not the cell",
+            FacetGridPlot(
+                AxisRef.repeat(),
+                ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+                scope=((AxisRef.point_dimension("bias"), 1.0),),
+            ),
+            {
+                "facet:0:points": ("INVALID", "INVALID"),
+                "facet:1:points": ("INVALID", "INVALID"),
+            },
+        ),
+    )
+    for title, spec, expected in cases:
+        session = PlotSession(snapshot, spec, size="4x4")
+        try:
+            session.update_image_overlay(overlay)
+            session.rgba()
+            for key, statuses in expected.items():
+                assert _drawn_statuses(session, key) == statuses, title
+        finally:
+            session.close()

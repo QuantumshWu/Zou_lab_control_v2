@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT,
+    AXIS_GROUP_COLORS,
+    BG,
     CARD_PAD,
-    CARD_TITLE_PX,
+    CARD_TITLE_PAD,
     FluentButton,
     FluentComboBox,
     FluentGroupBox,
@@ -28,6 +30,7 @@ from zlc_ui.fluent import (
     GREY,
     ORANGE,
     popup_gap,
+    RADIUS,
     RED,
     scaled_px,
     show_fluent_popup_for_anchor,
@@ -46,6 +49,25 @@ from ._panel_projection import (
     parameter_form_values,
     signal_form_runtime,
 )
+
+
+def _coordinate_text(value: object) -> str:
+    """One pinned coordinate, as short as it can be said."""
+
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def _escaped(text: str) -> str:
+    """Plain text as rich text: the strip quotes names it does not control."""
+
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace(" ", "&nbsp;")
+    )
 
 
 def _set_interaction(surface: object | None, enabled: bool) -> None:
@@ -82,7 +104,13 @@ class PanelCardView(FluentGroupBox):
     plot_error = QtCore.pyqtSignal(str)
 
     def __init__(self, panel_id: str, title: str = "Panel", parent=None) -> None:
-        super().__init__(str(title), parent)
+        # No Qt title: this card paints its own strip, two lines tall, as the
+        # first row of its layout.  A QGroupBox title is a GEOMETRY
+        # constraint -- what it says decides how wide the widget must be --
+        # and a strip that names a signal and its shape took the card's
+        # minimum width from 149 px to 704, so the board packed cards that
+        # Qt then refused to shrink, and they overlapped.
+        super().__init__("", parent, title_strip_px=0)
         self.panel_id = str(panel_id)
         self._base_title = str(title)
         self._surface: QtWidgets.QWidget | None = None
@@ -123,10 +151,64 @@ class PanelCardView(FluentGroupBox):
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
 
-        # This is copied from v1 PanelCard: the title strip is supplied by
-        # FluentGroupBox; the body is exactly CARD_PAD / 2 px / CARD_PAD with
-        # no invented header, footer, status row, or stretch spacer.
-        holder = QtWidgets.QVBoxLayout(self)
+        #: Whether what this card shows will deliver again.  A live panel
+        #: redraws on a beat and can be taken off the board; a saved figure
+        #: does neither, and must not offer controls for both.
+        self._live = True
+        self._editing_enabled = True
+        self.settings_button = FluentButton("Setting", color=GREY)
+        self.settings_button.setFixedSize(
+            scaled_px(74, minimum=64),
+            scaled_px(26, minimum=22),
+        )
+        self.settings_button.clicked.connect(self._open_settings)
+
+        # The presenter marks the card a board-wide error line is about.  The
+        # card body reserves no status row, so the dot rides the title strip
+        # beside Setting and the full message travels as its tooltip.
+        self.status_dot = FluentStatusDot(size=12)
+        self.status_dot.hide()
+
+        # The strip: one grey band across the whole top of the card, two
+        # lines of text on the left and the card's one command on the right,
+        # padded equally above, below and to the right.  It is a layout row
+        # and not an overlay, so the card's height is the sum of what is in
+        # it and the packer can simply ask.
+        self._title_label = FluentLabel("")
+        self._title_label.setTextFormat(QtCore.Qt.RichText)
+        self._title_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self._title_label.setStyleSheet("background: transparent; border: none;")
+        # A strip may not decide how big a card is: it consumes whatever width
+        # the card has and elides what does not fit.
+        self._title_label.setMinimumWidth(0)
+        self._title_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        self._title_band = QtWidgets.QWidget(self)
+        self._title_band.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self._title_band.setStyleSheet(
+            f"background: {BG};"
+            f"border-top-left-radius: {RADIUS}px;"
+            f"border-top-right-radius: {RADIUS}px;"
+        )
+        band_layout = QtWidgets.QHBoxLayout(self._title_band)
+        band_layout.setContentsMargins(
+            CARD_PAD, CARD_TITLE_PAD, CARD_TITLE_PAD, CARD_TITLE_PAD
+        )
+        band_layout.setSpacing(CARD_PAD)
+        band_layout.addWidget(self._title_label, 1)
+        band_layout.addWidget(self.status_dot, 0, QtCore.Qt.AlignVCenter)
+        band_layout.addWidget(self.settings_button, 0, QtCore.Qt.AlignVCenter)
+        self._title_band.setFixedHeight(self._band_height())
+
+        # The body is exactly CARD_PAD / 2 px / CARD_PAD around the surface,
+        # with no invented header, footer, status row, or stretch spacer.
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._title_band)
+        holder = QtWidgets.QVBoxLayout()
         holder.setContentsMargins(
             CARD_PAD,
             scaled_px(2),
@@ -134,33 +216,11 @@ class PanelCardView(FluentGroupBox):
             CARD_PAD,
         )
         holder.setSpacing(0)
+        outer.addLayout(holder)
         self._surface_layout = holder
         self._placeholder = FluentLabel("Pick a signal in Setting")
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         holder.addWidget(self._placeholder)
-
-        # The v1 card has one visible command on its title strip.  It is a
-        # child overlay rather than a layout item, so it never changes the
-        # panel data rectangle or the packer's card size.
-        #: Whether what this card shows will deliver again.  A live panel
-        #: redraws on a beat and can be taken off the board; a saved figure
-        #: does neither, and must not offer controls for both.
-        self._live = True
-        self._editing_enabled = True
-        self.settings_button = FluentButton("Setting", color=GREY)
-        self.settings_button.setParent(self)
-        self.settings_button.setFixedSize(
-            scaled_px(74, minimum=64),
-            scaled_px(26, minimum=22),
-        )
-        self.settings_button.clicked.connect(self._open_settings)
-
-        # The presenter marks the card a board-wide error line is about.  v1
-        # reserves no status row in the card body, so the dot overlays the
-        # title strip beside Setting -- geometry never changes -- and the full
-        # message travels as the dot's tooltip.
-        self.status_dot = FluentStatusDot(size=12, parent=self)
-        self.status_dot.hide()
         # FigureViewer also embeds this card and exposes these lightweight
         # handles through its own port. TaskConsole state never reads them.
         self.title_edit = FluentLineEdit(str(title), parent=self)
@@ -181,28 +241,51 @@ class PanelCardView(FluentGroupBox):
         self._surface_error_connected = False
         self.set_status("", error=False)
         self.set_selectors_enabled(False)
+        # An empty card still has a size: the frame it is.  Settle it now, so
+        # a board can pack this card before anything is mounted in it.
+        self._apply_card_size(str(self._state_projection["size"]))
+        self._refresh_title_band()
 
-    @staticmethod
-    def card_size(size: str) -> tuple[int, int]:
-        """Return the v1 outer card size for a named panel preset."""
+    def _band_height(self) -> int:
+        """Two lines of text, or the command beside them, plus its padding.
 
-        from zlc_ui.board import panel_display_size
+        Two LINES, whatever they say: a card whose height followed its text
+        would reflow the whole board every time a signal was renamed.
+        """
 
-        panel_width, panel_height = panel_display_size(size)
-        return (
-            panel_width + 2 * CARD_PAD,
-            scaled_px(CARD_TITLE_PX) + scaled_px(2) + panel_height + CARD_PAD,
-        )
+        lines = 2 * QtGui.QFontMetrics(self._title_label.font()).lineSpacing()
+        return max(lines, self.settings_button.height()) + 2 * CARD_TITLE_PAD
 
     def _apply_card_size(self, size: str) -> None:
-        width, height = self.card_size(str(size))
-        # The real v1 card is fixed by its board geometry.  Keep the standalone
-        # size as the initial hint while allowing an injected BoardMetrics in
-        # tests/embedded hosts to place an arbitrary rectangle.
+        """Take the size the mounted picture asks for, plus this card's chrome.
+
+        The card is exactly what is in it.  It used to be a FORMULA -- the
+        picture's size plus a title constant plus paddings -- restated here
+        and in the board's packer, kept in step by hand; the moment the strip
+        grew a second line the two answers disagreed and Qt clipped the
+        picture to a rectangle the packer had already reserved.
+        """
+
+        if self._surface is None:
+            from zlc_ui.board import (
+                PLACEHOLDER_CELL_PX,
+                panel_display_size,
+                panel_size_cells,
+            )
+
+            if self._size_choices:
+                width, height = panel_display_size(str(size))
+            else:
+                # Nobody has said which sizes exist yet, so there is no
+                # picture to be the size of: this card is the empty frame it
+                # is, measured in this package's own cell.
+                rows, columns = panel_size_cells(str(size))
+                width = columns * PLACEHOLDER_CELL_PX[0]
+                height = rows * PLACEHOLDER_CELL_PX[1]
+            self._placeholder.setFixedSize(width, height)
         self.setMinimumSize(0, 0)
         self.setMaximumSize(QtWidgets.QWIDGETSIZE_MAX, QtWidgets.QWIDGETSIZE_MAX)
-        self.resize(width, height)
-        self._place_settings_button()
+        self.adjustSize()
 
     def set_live(self, live: bool) -> None:
         """Whether what this card shows will ever deliver again.
@@ -289,7 +372,7 @@ class PanelCardView(FluentGroupBox):
         previous_size = str(self._state_projection.get("size") or "")
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
-        self.setTitle(str(self._base_title))
+        self._refresh_title_band()
         with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
             self.title_edit.setText(self._base_title)
             signal_index = self.signal_combo.findData(incoming["signal"])
@@ -324,26 +407,82 @@ class PanelCardView(FluentGroupBox):
         self._parameter_surface = dict(surface) if isinstance(surface, Mapping) else {}
         self._apply_panel_state(incoming)
 
-    def _place_settings_button(self) -> None:
-        button = getattr(self, "settings_button", None)
-        if button is None:
-            return
-        button.move(
-            max(0, self.width() - button.width() - CARD_PAD),
-            max(0, scaled_px(2)),
-        )
-        button.raise_()
-        dot = getattr(self, "status_dot", None)
-        if dot is not None:
-            dot.move(
-                max(0, button.x() - dot.width() - CARD_PAD),
-                max(0, button.y() + (button.height() - dot.height()) // 2),
+    def _band_fragments(self) -> tuple[tuple, tuple]:
+        """The strip's two lines as coloured fragments: sizes, then names.
+
+        One line of numbers over one line of the axes they count, group by
+        group in the same colour, so a reader matches "83x60" to
+        "spatial-y x spatial-x" by eye instead of by counting brackets.  What
+        the panel has PINNED closes the second line, because that is the part
+        that changes under the operator's hands.
+        """
+
+        structure = tuple(self._parameter_surface.get("data_structure") or ())
+        scope = tuple(self._parameter_surface.get("data_scope") or ())
+        sizes: list[tuple[str, str | None]] = [(str(self._base_title), None)]
+        names: list[tuple[str, str | None]] = []
+        for index, group in enumerate(structure):
+            colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
+            if names:
+                sizes.append(("x", None))
+                names.append(("x", None))
+            elif sizes:
+                sizes.append((" ", None))
+            sizes.append(
+                ("(" + "x".join(str(int(size)) for _name, size in group) + ")", colour)
             )
-            dot.raise_()
+            names.append(
+                ("(" + " x ".join(str(name) for name, _size in group) + ")", colour)
+            )
+        for label, value in scope:
+            axis_colour = next(
+                (
+                    AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
+                    for index, group in enumerate(structure)
+                    if any(str(name) == str(label) for name, _size in group)
+                ),
+                None,
+            )
+            names.append((", " if names else "", None))
+            names.append((f"{label}={_coordinate_text(value)}", axis_colour))
+        return tuple(sizes), tuple(names)
+
+    def _refresh_title_band(self) -> None:
+        """Repaint the strip for the current state, projection and width."""
+
+        band = getattr(self, "_title_band", None)
+        if band is None:
+            return
+        label = self._title_label
+        available = max(0, label.width())
+        metrics = QtGui.QFontMetrics(label.font())
+        lines = []
+        plain_lines = []
+        for fragments in self._band_fragments():
+            plain = "".join(text for text, _colour in fragments)
+            plain_lines.append(plain)
+            if available and metrics.horizontalAdvance(plain) > available:
+                # Too narrow to say it all: shorten the LINE rather than let
+                # it decide how wide the card must be.  The colours pair the
+                # two lines up and an elided line has no pairs left to show.
+                lines.append(
+                    _escaped(metrics.elidedText(plain, QtCore.Qt.ElideMiddle, available))
+                )
+                continue
+            lines.append(
+                "".join(
+                    _escaped(text)
+                    if colour is None
+                    else f'<span style="color:{colour}">{_escaped(text)}</span>'
+                    for text, colour in fragments
+                )
+            )
+        label.setText("<br>".join(lines))
+        label.setToolTip("\n".join(line for line in plain_lines if line.strip()))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
-        self._place_settings_button()
+        self._refresh_title_band()
 
     @property
     def surface(self) -> QtWidgets.QWidget | None:
@@ -392,7 +531,11 @@ class PanelCardView(FluentGroupBox):
             self._surface_error_connected = True
         self._surface_layout.addWidget(widget)
         widget.show()
-        self._place_settings_button()
+        # A mounted picture states its own size, so the card's is now known:
+        # take it, and tell the board its rectangle changed.
+        self._placeholder.setFixedSize(0, 0)
+        self.adjustSize()
+        self.geometry_changed.emit()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
         popup = self._settings_popup
@@ -518,17 +661,15 @@ class PanelCardView(FluentGroupBox):
 
         These widgets existed hidden and nothing ever showed them, so a panel
         named in a red strip line could not be told apart by looking at the
-        board.  The dot rides the title strip as an overlay, like the Setting
-        button, so the v1 card body still reserves no status row; hovering it
-        reads the full message.  An empty text clears the mark.
+        board.  The dot rides the title strip beside the Setting button, so
+        the card body still reserves no status row; hovering it reads the
+        full message.  An empty text clears the mark.
         """
 
         value = str(text)
         self.status_dot.set_color(RED if error else GREY)
         self.status_dot.setToolTip(value)
         self.status_dot.setVisible(bool(value))
-        if value:
-            self._place_settings_button()
 
     def set_selectors_enabled(self, enabled: bool) -> None:
         """Allow or suspend STARTING selectors on this panel's plot.
@@ -609,12 +750,6 @@ class PanelCardView(FluentGroupBox):
                 "Signal",
                 default=current_signal,
                 required=True,
-                # What the signal IS, under its name: the dataset's structure
-                # and what this panel makes of each axis.  Composed by the
-                # presenter from the shown snapshot and the fate rows, so it
-                # follows the signal and the operator's edits; never
-                # re-derived here.
-                description=str(self._parameter_surface.get("data_summary") or ""),
             ),
         ])
         if draws_image_surfaces(state):

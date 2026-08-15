@@ -160,12 +160,15 @@ def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
     assert inferred_facet.cell.y == AxisRef.point_dimension("x")
 
 
-def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_no_grid() -> None:
-    """The scan grid IS the cell, and nothing is left to facet it over.
+def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_one_cell() -> None:
+    """The scan grid IS the cell, and the grid that holds it has one cell.
 
-    The plain image kind already draws that exact heatmap, so the facet
-    default refuses instead of wrapping one cell in a grid; the kind stays
-    admitted for authored layouts.
+    FACET_GRID is absent from the inference order, so this default is only
+    ever reached because someone ASKED for a grid -- an operator picking the
+    kind, or a node declaring it for its own preview.  The honest answer to
+    "show me this as a grid" when nothing varies is the grid with one cell in
+    it, over the degenerate repeat axis; refusing is how an asked-for grid
+    silently became a different kind.
     """
 
     points = PointTable.from_columns(
@@ -189,22 +192,27 @@ def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_no_grid() -> No
     )
     facet = next(h for h in HANDLERS if h.kind is PlotKind.FACET_GRID)
     image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
+    curve = next(h for h in HANDLERS if h.kind is PlotKind.CURVE)
     assert facet.admits(schema)
-    assert facet.default_spec(schema) is None
+    grid = facet.default_spec(schema)
+    assert grid.facet == AxisRef.repeat()
     heatmap = image.default_spec(schema)
     assert heatmap.x == AxisRef.point_dimension("y")
     assert heatmap.y == AxisRef.point_dimension("x")
+    # The one cell shows exactly the picture the image kind would have drawn.
+    assert grid.cell == heatmap
 
-    # A flat point table with a single repeat has no unambiguous facet axis:
-    # the kind stays admitted (renderable with an authored layout) but must
-    # not invent a default.
+    # A flat point table with a single repeat has nothing to face either: the
+    # curve IS the picture, and the grid asked for holds it in one cell.
     flat = DatasetSchema.create(
         Axis.create("repeat", size=1),
         PointTable.from_columns({"x": np.arange(4.0)}),
         generation="facet-default-flat",
     )
     assert facet.admits(flat)
-    assert facet.default_spec(flat) is None
+    flat_grid = facet.default_spec(flat)
+    assert flat_grid.facet == AxisRef.repeat()
+    assert flat_grid.cell == curve.default_spec(flat)
 
 
 def test_a_default_spec_names_axes_the_data_view_can_actually_resolve() -> None:

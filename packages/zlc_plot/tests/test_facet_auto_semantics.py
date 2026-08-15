@@ -82,11 +82,19 @@ def test_a_scalar_two_dimension_scan_with_repeats_facets_them() -> None:
     assert spec.cell.y == AxisRef.point_dimension("a")
 
 
-def test_a_scalar_two_dimension_scan_without_repeats_is_no_grid() -> None:
-    """The plain image kind already IS that picture; a grid adds nothing."""
+def test_a_scalar_two_dimension_scan_without_repeats_is_one_cell() -> None:
+    """Nothing varying is not a refusal: a grid is only ever ASKED for.
+
+    The heatmap already IS the picture, so the grid holds exactly one cell --
+    the degenerate repeat axis.  Refusing instead is what silently replaced an
+    asked-for grid with another kind.
+    """
 
     schema = _scan_schema({"a": 3, "b": 4})
-    assert facet_default(schema) is None
+    spec = facet_default(schema)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet == AxisRef.repeat()
+    assert isinstance(spec.cell, ImagePlot)
     image = image_default(schema)
     assert isinstance(image, ImagePlot)
     assert image.x == AxisRef.point_dimension("b")

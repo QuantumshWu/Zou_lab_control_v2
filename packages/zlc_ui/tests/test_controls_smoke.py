@@ -79,10 +79,10 @@ assert form.read_all() == {'name': 'changed', 'count': 4}
 
 
 def test_board_graph_and_shape_values() -> None:
-    metrics = BoardMetrics(4, lambda size: (40, 30) if size == "small" else (60, 30))
+    metrics = BoardMetrics(4)
     cards = [
-        SimpleNamespace(size="small", col=0, row=0),
-        SimpleNamespace(size="small", col=0, row=0),
+        SimpleNamespace(width=40, height=30, col=0, row=0),
+        SimpleNamespace(width=40, height=30, col=0, row=0),
     ]
     assert pack(cards, metrics, board_w=100)
     assert cards[0].col <= cards[1].col
@@ -90,10 +90,12 @@ def test_board_graph_and_shape_values() -> None:
 
 
 def test_nearest_anchor_uses_probe_position_without_mutating_layout_record() -> None:
-    metrics = BoardMetrics(8, lambda size: (500, 275))
-    others = [SimpleNamespace(size="small", col=0, row=0) for _ in range(3)]
+    metrics = BoardMetrics(8)
+    others = [
+        SimpleNamespace(width=500, height=275, col=0, row=0) for _ in range(3)
+    ]
     pack(others, metrics, board_w=1200)
-    probe = SimpleNamespace(size="small", col=600, row=0)
+    probe = SimpleNamespace(width=500, height=275, col=600, row=0)
     assert nearest_anchor(probe, others, metrics, 1200) == (516, 8)
     assert (probe.col, probe.row) == (600, 0)
 
@@ -111,10 +113,12 @@ def test_nearest_anchor_uses_probe_position_without_mutating_layout_record() -> 
 
 
 def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
-    metrics = BoardMetrics(10, lambda size: (100, 80))
-    others = [SimpleNamespace(size="small", col=0, row=0) for _ in range(2)]
+    metrics = BoardMetrics(10)
+    others = [
+        SimpleNamespace(width=100, height=80, col=0, row=0) for _ in range(2)
+    ]
     pack(others, metrics, board_w=350)
-    probe = SimpleNamespace(size="small", col=12, row=96)
+    probe = SimpleNamespace(width=100, height=80, col=12, row=96)
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 100)
     probe.col, probe.row = 12, 14
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)

@@ -161,7 +161,7 @@ class _GalleryBody(QtWidgets.QWidget):
         super().__init__()
 
         self.binding_examples: dict[str, _InteractiveBindingField] = {}
-        self._board_metrics = BoardMetrics(12, lambda _size: (300, 260))
+        self._board_metrics = BoardMetrics(12)
         self.scroll = FluentScrollArea()
         self.scroll.set_width_bounded_widget(self._build_body())
         shell = QtWidgets.QVBoxLayout(self)

@@ -81,10 +81,19 @@ class ImagePointOverlay:
     The geometry is ONE fact and the status is one per PICTURE: a grid
     faceted over a camera cycle draws the same rings in every cell, and each
     cell's rings say what that FRAME judged.  ``statuses`` therefore maps the
-    POINT COORDINATE it judged to that row's statuses -- the same coordinate
-    a surface shows, however it came to show one.  The key ``None`` is for a
-    judgement that is about no point row at all, which is what a hand-placed
-    set of markers is.
+    POINT COORDINATE it judged to that row's statuses, and ``status_axis``
+    names the axis those coordinates belong to -- the point column's id, as
+    the producer's own schema spells it.
+
+    The axis is not optional decoration.  A bare number is not a coordinate:
+    a grid faceted over REPEATS asked an overlay keyed by frames what it says
+    at "0" and got frame zero's rings, on every cell, for every frame the
+    operator was actually looking at.  With the axis named, the renderer asks
+    what value THIS surface pins THAT axis to, and a surface that pins no
+    single value draws nothing rather than someone else's judgement.
+
+    The key ``None`` is a judgement about no point row at all, which is what
+    a hand-placed set of markers is; those carry no axis.
     """
 
     revision: int
@@ -92,6 +101,7 @@ class ImagePointOverlay:
     point_ids: tuple[str, ...] | None = None
     labels: tuple[str | None, ...] | None = None
     statuses: Mapping[float | None, tuple[PointStatus, ...]] | None = None
+    status_axis: str | None = None
 
     CONTRACT_ID: ClassVar[str] = "zlc_plot.image-point-overlay.v1"
 
@@ -157,11 +167,21 @@ class ImagePointOverlay:
                 resolved[facet_value] = row
             statuses = MappingProxyType(resolved)
 
+        status_axis = self.status_axis
+        if status_axis is not None:
+            status_axis = _text(status_axis, "status_axis")
+        if statuses is not None and status_axis is None:
+            if any(key is not None for key in statuses):
+                raise ValueError(
+                    "statuses keyed by a coordinate must name their status_axis"
+                )
+
         object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "coordinates", frozen)
         object.__setattr__(self, "point_ids", point_ids)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "statuses", statuses)
+        object.__setattr__(self, "status_axis", status_axis)
 
     @property
     def count(self) -> int:

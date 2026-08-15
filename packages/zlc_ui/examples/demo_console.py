@@ -68,17 +68,9 @@ class FakePresenter:
             getattr(console, name).connect(callback)
 
 
-def _surface(text: str, color: str) -> QtWidgets.QWidget:
-    widget = QtWidgets.QLabel(text)
-    widget.setAlignment(QtCore.Qt.AlignCenter)
-    widget.setMinimumHeight(120)
-    widget.setStyleSheet(
-        f"background: {color}; color: #323130; border: 1px solid #E1DFDD;"
-    )
-    return widget
-
-
 def populate(console, *, wire_intents: bool = True) -> None:
+    from zlc_ui.board import panel_display_size
+
     demo_sizes = ("1x4", "2x2", "4x2")
     console.set_panel_sizes(demo_sizes, "2x2")
     console.set_summary("3 fake cards · mixed 1x4 / 2x2 / 4x2 · 2 fake logic rows")
@@ -113,9 +105,12 @@ def populate(console, *, wire_intents: bool = True) -> None:
         # The host, not its widget: this side never holds one.  The widget
         # inside is a third party's -- the extension proof: anything that is a
         # QWidget can be what a host draws with.
-        console.show_panel(
-            panel_id, _FakeHost(SyntheticCardView(f"Synthetic surface {index}"))
-        )
+        # A card is as big as what is mounted in it, so the stand-in is
+        # sized like the plot it stands in for -- otherwise every demo card
+        # comes out the same size and the mixed-size board shows nothing.
+        synthetic = SyntheticCardView(f"Synthetic surface {index}")
+        synthetic.setFixedSize(*panel_display_size(demo_sizes[index - 1]))
+        console.show_panel(panel_id, _FakeHost(synthetic))
         console.set_panel_status(panel_id, "waiting for fake data", error=False)
 
     console.add_logic_row("measurement-1", "measurement")

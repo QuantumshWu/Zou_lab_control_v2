@@ -2702,39 +2702,49 @@ def test_a_fit_record_naming_a_model_this_data_cannot_use_arms_nothing() -> None
 
 
 def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> None:
-    """Under the signal's name: the dataset's structure, and this panel's use.
+    """Under the signal's name: the dataset's shape, and what this panel pinned.
 
     The identifier says WHERE the numbers came from.  What they ARE -- the
-    axes, their sizes, the value's unit -- and what this panel is making of
-    each axis were computed everywhere and stated nowhere, so an operator had
-    to open the semantic table to find out what they were looking at.
+    axes and their sizes -- and which coordinate this panel is pinned to were
+    computed everywhere and stated nowhere, so an operator had to open the
+    semantic table to find out what they were looking at.  Both halves are
+    projected as FACTS: the strip lays them out, and nobody formats a
+    sentence here that the strip would have to take apart again.
     """
+
+    from zlc_plot.semantics import schema_structure
 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
     binding = presenter.add_panel(signal, snapshot, title="camera", kind="image")
     _settle_panel_hosts(
         presenter,
-        lambda: " · " in str(binding.parameter_surface.get("data_summary", "")),
+        lambda: any(
+            str(field["key"]).startswith("fate:")
+            for field in tuple(binding.parameter_surface.get("semantic", ()))
+        ),
     )
-    summary = str(binding.parameter_surface["data_summary"])
-    # The structure clause, from the one authority that spells a schema.
-    from zlc_plot.semantics import schema_summary
+    assert binding.parameter_surface["data_structure"] == schema_structure(
+        snapshot.block.schema
+    )
+    assert binding.parameter_surface["data_scope"] == ()
 
-    assert summary.startswith(schema_summary(snapshot.block.schema))
-    assert "→" in summary.split(" · ", 1)[1]
-
-    fate = next(
-        field
+    # Pinning an axis to one of its coordinates is a fate the operator gives
+    # it, and the strip has to follow that edit.
+    fate, pinned = next(
+        (field, value)
         for field in binding.parameter_surface["semantic"]
-        if str(field["key"]).startswith("fate:") and field["value"] == "y"
+        if str(field["key"]).startswith("fate:")
+        for _label, value in tuple(field["choices"])
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
     )
     assert presenter.update_panel_state(
-        binding.panel_id, {"semantic": {str(fate["key"]): "facet"}}
+        binding.panel_id, {"semantic": {str(fate["key"]): pinned}}
     )
     _settle_panel_hosts(
         presenter,
-        lambda: f"{fate['label']}→facet"
-        in str(binding.parameter_surface.get("data_summary", "")),
+        lambda: bool(binding.parameter_surface.get("data_scope")),
     )
-    assert f"{fate['label']}→facet" in str(binding.parameter_surface["data_summary"])
+    assert binding.parameter_surface["data_scope"] == (
+        (str(fate["label"]), float(pinned)),
+    )

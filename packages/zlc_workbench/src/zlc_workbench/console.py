@@ -2519,37 +2519,41 @@ class ConsolePresenter:
             snapshot = binding.frozen_data.snapshot
         return snapshot
 
-    def _panel_data_summary(
+    def _panel_data_shape(
         self,
         binding: PanelBinding,
         surface: Mapping[str, object],
-    ) -> str:
-        """What this panel is drawing, in one line under its signal.
+    ) -> dict[str, object]:
+        """What this panel is drawing, as facts a strip can lay out.
 
-        Two clauses, from their two owners: the dataset's own structure, as
-        zlc_plot's one structure-description authority spells it, and what
-        this panel is making of each axis -- which is the part that changes
-        under the operator's hands, so it is read from the fate rows rather
-        than restated.
+        Two halves from their two owners, neither pre-formatted: the shape of
+        the dataset, as zlc_plot's one structure authority spells it, and the
+        axes this panel has PINNED to a coordinate -- the part that changes
+        under the operator's hands, read from the fate rows where the edit is
+        made rather than restated here.
+
+        A pinned axis is a fate row holding a number; every other fate is a
+        role the picture already shows.
         """
 
-        from zlc_plot.semantics import schema_summary
+        from zlc_plot.semantics import schema_structure
 
         snapshot = self._shown_snapshot(binding)
         block = getattr(snapshot, "block", None)
         schema = getattr(block, "schema", None)
         if schema is None:
-            return ""
-        clauses = [schema_summary(schema)]
-        fates = [
-            f"{str(field['label'])}→{str(field['value'])}"
+            return {"data_structure": (), "data_scope": ()}
+        pinned = tuple(
+            (str(field["label"]), float(field["value"]))
             for field in tuple(surface.get("semantic", ()))
             if str(field.get("key", "")).startswith("fate:")
-            and str(field.get("value", ""))
-        ]
-        if fates:
-            clauses.append(", ".join(fates))
-        return " · ".join(clauses)
+            and isinstance(field.get("value"), (int, float))
+            and not isinstance(field.get("value"), bool)
+        )
+        return {
+            "data_structure": schema_structure(schema),
+            "data_scope": pinned,
+        }
 
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
@@ -2565,8 +2569,8 @@ class ConsolePresenter:
                 }
                 for field in tuple(surface.get(section, ()))
             )
-        # After the sections settle: the line quotes the fates as accepted.
-        surface["data_summary"] = self._panel_data_summary(binding, surface)
+        # After the sections settle: the strip quotes the fates as accepted.
+        surface.update(self._panel_data_shape(binding, surface))
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)
@@ -3611,7 +3615,11 @@ class ConsolePresenter:
             panel = self.add_panel(
                 signal,
                 value.snapshot,
-                title=output_name.replace("_", " ").title(),
+                # The card's name says WHERE the numbers came from, and for a
+                # preview the node opened that is the signal key itself.  A
+                # prettified output name ("Frames") names the same thing twice
+                # over and says neither which node nor which run.
+                title=signal,
                 kind=kind,
                 initial_publication=publication,
             )

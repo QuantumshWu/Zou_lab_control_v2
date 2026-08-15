@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
 from zlc_data import AxisId, DatasetSchema, point_ordinal_axis
@@ -258,6 +258,48 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
     raise KeyError(ref.axis_id)
 
 
+#: One dataset's shape, grouped the way a reader reads it: the repeats, then
+#: what was measured at each point, then the data each point holds.  Each
+#: group is ``(axis name, size)`` pairs in declaration order.
+SchemaStructure: TypeAlias = tuple[tuple[tuple[str, int], ...], ...]
+
+
+def schema_structure(schema: DatasetSchema) -> SchemaStructure:
+    """The dataset's declared shape, as named axes with their sizes.
+
+    THE structure authority, in the form a caller can lay out.  Both the
+    one-line text below and a panel's title strip are arrangements of this
+    same tuple, so a frontend can put the names and the numbers on separate
+    lines without inventing a second vocabulary for either.
+
+    Degenerate axes (size one) stay in: a shape is provenance, and "which
+    axes does this dataset have" is not the same question as "which axes
+    have structure to draw", which is inference's and is answered elsewhere.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("schema must be DatasetSchema")
+    repeats = ((str(schema.repeat_axis.name), int(schema.repeat_axis.size)),)
+    if schema.grid_topology is not None and schema.grid_topology.dimension_ids:
+        points = tuple(
+            (str(axis_id), int(len(domain)))
+            for axis_id, domain in zip(
+                schema.grid_topology.dimension_ids,
+                schema.grid_topology.coordinate_domains,
+                strict=True,
+            )
+        )
+    else:
+        points = tuple(
+            (str(column.name), int(schema.point_table.row_count))
+            for column in schema.point_table.columns
+        )
+    data = tuple(
+        (str(axis.name), int(axis.size)) for axis in schema.cell_schema.data_axes
+    )
+    return tuple(group for group in (repeats, points, data) if group)
+
+
 def schema_summary(schema: DatasetSchema) -> str:
     """One-line human description of a dataset's structure.
 
@@ -266,33 +308,14 @@ def schema_summary(schema: DatasetSchema) -> str:
     of each inventing its own shape text.
     """
 
-    if not isinstance(schema, DatasetSchema):
-        raise TypeError("schema must be DatasetSchema")
-
-    def _axis_name(axis: Any) -> str:
-        return str(axis.name)
-
-    parts: list[str] = [f"repeat {schema.repeat_axis.size}"]
-    if schema.grid_topology is not None and schema.grid_topology.dimension_ids:
-        grid = " × ".join(
-            f"{axis_id} {len(domain)}"
-            for axis_id, domain in zip(
-                schema.grid_topology.dimension_ids,
-                schema.grid_topology.coordinate_domains,
-                strict=True,
-            )
-        )
-        parts.append(f"scan ({grid})")
-    elif schema.point_table.columns:
-        names = ", ".join(_axis_name(axis) for axis in schema.point_table.columns)
-        parts.append(f"points {schema.point_table.row_count} ({names})")
-    else:  # pragma: no cover - DatasetSchema requires a point column
-        parts.append(f"points {schema.point_table.row_count}")
-    parts.extend(
-        f"{_axis_name(axis)} {axis.size}"
-        for axis in schema.cell_schema.data_axes
-        if axis.size > 1
-    )
+    groups = schema_structure(schema)
+    parts = []
+    for group in groups:
+        text = " × ".join(f"{name} {size}" for name, size in group)
+        # A group of several axes is bracketed, so the reader can still see
+        # that the two data axes are one picture and the scan's two
+        # dimensions are one sweep.
+        parts.append(text if len(group) == 1 else f"({text})")
     value = "value"
     if schema.cell_schema.value_unit not in {None, "", "1", "arb"}:
         value = f"{value} ({schema.cell_schema.value_unit})"
@@ -907,6 +930,7 @@ __all__ = [
     "axis_choices_for_schema",
     "axis_size",
     "describe_semantics",
+    "schema_structure",
     "schema_summary",
     "updated_spec",
 ]

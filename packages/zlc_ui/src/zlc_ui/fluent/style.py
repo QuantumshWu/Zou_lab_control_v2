@@ -29,6 +29,14 @@ MUTED_LABEL_STYLE = f"color: {GREY}; background: transparent; border: none;"
 
 RADIUS = 4
 CARD_TITLE_PX = 32
+#: Clear space above, below and to the right of a panel card's title band --
+#: one number, because the operator sees one inset all the way round the
+#: band's contents.
+CARD_TITLE_PAD = 4
+#: Colours that pair a shape's numbers with the axis names under them: group
+#: i of the structure is written in colour i on both lines, so the eye can
+#: match "83x60" to "spatial-y x spatial-x" without counting brackets.
+AXIS_GROUP_COLORS = ("#5A4A8A", "#8A4B1F", "#004578")
 CARD_PAD = 10
 FONT = "Segoe UI"
 FONT_SIZE = 12
@@ -61,7 +69,9 @@ __all__ = [
     "API_VIOLET",
     "API_VIOLET_DARK",
     "BG",
+    "AXIS_GROUP_COLORS",
     "CARD_PAD",
+    "CARD_TITLE_PAD",
     "CARD_TITLE_PX",
     "COMBO_TRI_SIZE",
     "COMBO_WIDTH",

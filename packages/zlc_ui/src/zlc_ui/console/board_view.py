@@ -11,8 +11,6 @@ from zlc_ui.board import (
     min_board_width,
     pack,
 )
-from zlc_ui.fluent import CARD_PAD, CARD_TITLE_PX, scaled_px
-
 from .panel_card_view import PanelCardView
 
 
@@ -34,30 +32,13 @@ class ConsoleBoardView(QtWidgets.QWidget):
         super().__init__(parent)
         self.setMinimumSize(0, 0)
         self.setStyleSheet("background: transparent;")
-        self._metrics = metrics or BoardMetrics(
-            gap=8,
-            card_size=self._default_card_size,
-        )
+        self._metrics = metrics or BoardMetrics(gap=8)
         self._cards: dict[str, PanelCardView] = {}
         self._order: tuple[str, ...] = ()
         self._anchor_id: str | None = None
         self._anchor: tuple[int, int] | None = None
         self._wired_cards: set[PanelCardView] = set()
         self._active_card: PanelCardView | None = None
-
-    @staticmethod
-    def _default_card_size(size: str) -> tuple[int, int]:
-        """How big a card of this preset is -- asked of the card.
-
-        The formula was written here as well, so the packer and the card could
-        disagree about the size of the same card: cards laid out to one
-        geometry and drawn to another, overlapping or leaving gaps.
-        """
-
-        value = str(size)
-        if not value:
-            raise ValueError("panel size was not projected")
-        return PanelCardView.card_size(value)
 
     def set_cards(self, cards: tuple[PanelCardView, ...]) -> None:
         incoming = tuple(cards)
@@ -106,14 +87,23 @@ class ConsoleBoardView(QtWidgets.QWidget):
         if self._active_card is None:
             self._pack_current()
 
-    def _size_key(self, card: PanelCardView) -> str:
-        value = str(card.panel_size)
-        if not value:
-            raise ValueError("panel size was not projected")
-        return value
+    def _proxy(self, card: PanelCardView, *, placed: bool = False) -> GeomProxy:
+        """One card's rectangle, asked of the card itself.
+
+        A card is its title strip plus the picture mounted in it plus its own
+        padding, and its layout is what adds those up.  The packer used to be
+        handed a preset NAME and a formula that restated the same arithmetic:
+        two answers to keep in step by hand, and one of them could not follow
+        a card whose strip grew a line.
+        """
+
+        hint = card.sizeHint()
+        if placed:
+            return GeomProxy(hint.width(), hint.height(), int(card.x()), int(card.y()))
+        return GeomProxy(hint.width(), hint.height())
 
     def _board_width(self, order: tuple[str, ...]) -> int:
-        proxies = [GeomProxy(self._size_key(self._cards[panel_id])) for panel_id in order]
+        proxies = [self._proxy(self._cards[panel_id]) for panel_id in order]
         if not proxies:
             return 0
         return max(self.width(), min_board_width(proxies, self._metrics))
@@ -126,8 +116,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
 
     def _apply_packed(self, order: tuple[str, ...]) -> dict[str, GeomProxy]:
         proxies = {
-            panel_id: GeomProxy(self._size_key(self._cards[panel_id]))
-            for panel_id in order
+            panel_id: self._proxy(self._cards[panel_id]) for panel_id in order
         }
         pinned = None
         if self._anchor_id in proxies and self._anchor is not None:
@@ -147,8 +136,9 @@ class ConsoleBoardView(QtWidgets.QWidget):
             for panel_id in order:
                 proxy = proxies[panel_id]
                 by_id[panel_id] = proxy
-                width, height = self._metrics.card_size(proxy.size)
-                rect = QtCore.QRect(int(proxy.col), int(proxy.row), int(width), int(height))
+                rect = QtCore.QRect(
+                    int(proxy.col), int(proxy.row), proxy.width, proxy.height
+                )
                 right = max(right, rect.right() + 1)
                 bottom = max(bottom, rect.bottom() + 1)
                 card = self._cards[panel_id]
@@ -190,15 +180,10 @@ class ConsoleBoardView(QtWidgets.QWidget):
             self._active_card = card
         others = tuple(panel_id for panel_id in self._order if panel_id != card.panel_id)
         other_proxies = [
-            GeomProxy(
-                self._size_key(self._cards[panel_id]),
-                int(self._cards[panel_id].x()),
-                int(self._cards[panel_id].y()),
-            )
-            for panel_id in others
+            self._proxy(self._cards[panel_id], placed=True) for panel_id in others
         ]
         anchor = nearest_anchor(
-            GeomProxy(self._size_key(card), int(card.x()), int(card.y())),
+            self._proxy(card, placed=True),
             other_proxies,
             self._metrics,
             self._board_width(self._order),
