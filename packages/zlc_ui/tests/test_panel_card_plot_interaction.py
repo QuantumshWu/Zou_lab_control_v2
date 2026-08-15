@@ -322,3 +322,76 @@ assert events == [
 ], events
 """
     )
+
+
+def test_a_cards_size_is_its_picture_plus_its_chrome_whatever_it_says() -> None:
+    """The strip may not decide how big a card is.
+
+    A card is its title strip plus the picture mounted in it plus its own
+    padding, and the board packs it by asking.  Two things follow, and both
+    are what broke when the strip was put in the Qt title: the picture keeps
+    every pixel the plot planned for it, and a long signal name changes
+    nothing about the rectangle -- otherwise renaming a signal reflows the
+    whole board, and a card clamped to a smaller rectangle than its layout
+    demands clips the figure it was opened to show.
+    """
+
+    _run_qt(
+        _PROLOGUE
+        + """
+schema = DatasetSchema.create(
+    Axis.create('repeat', size=1),
+    PointTable.from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
+    dtype=np.float64,
+)
+snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
+host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')), size='2x2')
+card, widget = mounted_card(host)
+projection = {
+    'signal': '@logic/cm/frames', 'kind': 'curve', 'cell_kind': '', 'size': '2x2',
+    'interval_ms': 100, 'title': '@logic/cm/frames', 'semantic': {}, 'display': {},
+    'fit': {}, 'overlay_signal': '',
+}
+surface = {
+    'data_structure': ((('repeat', 1),), (('x', 4),)),
+    'data_scope': (('x', 1.0),),
+    'semantic': (), 'display': (), 'fit': (),
+}
+card.set_interval_choices((100,), 100)
+card.set_panel_projection(dict(projection), dict(surface))
+app.processEvents()
+
+band = card._title_band
+hint = card.sizeHint()
+card.setGeometry(QtCore.QRect(0, 0, hint.width(), hint.height()))
+app.processEvents()
+
+# The picture keeps every pixel the plotting package planned for it: the
+# card is the strip plus that picture plus its own padding, exactly.
+planned = widget.presented_front.logical_size
+assert (widget.width(), widget.height()) == planned, (widget.size(), planned)
+body_pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
+assert card.height() - band.height() - widget.height() == body_pad
+assert card.width() - widget.width() == 2 * tested_module.CARD_PAD
+
+# Two lines, and what they say does not move the rectangle.
+assert '<br>' in card._title_label.text()
+assert '(1)x(4)' in card._title_label.toolTip()
+assert 'x=1' in card._title_label.toolTip()
+long_name = '@logic/' + 'a-very-long-node-name/' * 6 + 'frames'
+card.set_panel_projection({**projection, 'title': long_name}, dict(surface))
+app.processEvents()
+assert card.sizeHint() == hint, (card.sizeHint(), hint)
+assert card.minimumSizeHint().width() <= hint.width()
+
+# The command sits on the strip, right-padded the same as top and bottom.
+right_pad = band.width() - (card.settings_button.x() + card.settings_button.width())
+top_pad = card.settings_button.y()
+assert right_pad == tested_module.CARD_TITLE_PAD, (right_pad, top_pad)
+assert abs((band.height() - card.settings_button.height()) // 2 - top_pad) <= 1
+
+card.set_surface(None)
+widget.close_adapter()
+host.close(timeout=10)
+"""
+    )

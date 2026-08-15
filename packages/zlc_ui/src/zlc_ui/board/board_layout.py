@@ -1,16 +1,19 @@
 """Pure north-west-gravity placement for a panel board.
 
-The packer depends only on rectangle geometry.  Qt chrome and renderer size
-policy enter through :class:`BoardMetrics`; this module imports neither UI nor
-rendering backends.  ``card_size`` remains callable because the answer depends
-on the current display scale and must not be captured as stale construction
-state.
+The packer depends only on rectangle geometry: it is GIVEN each card's
+rectangle and the clear gap between them, and imports neither UI nor
+rendering backends.
+
+It used to be given a preset NAME per card and a callable that turned one
+into a size, which made "how big is a card" a second answer beside the
+card's own layout -- and one that cannot be right, since two cards of the
+same preset differ by whatever is mounted in them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Sequence
 
 __all__ = ["BoardMetrics", "GeomProxy", "board_width", "nearest_anchor",
            "first_free_slot", "min_board_width", "pack"]
@@ -18,38 +21,37 @@ __all__ = ["BoardMetrics", "GeomProxy", "board_width", "nearest_anchor",
 
 @dataclass(frozen=True)
 class BoardMetrics:
-    """The two facts the packer cannot derive: the clear gap, and how big a card is.
-
-    ``card_size`` maps a panel-size preset to the card's outer ``(width, height)`` in
-    pixels.  It stays a callable so the answer always reflects the CURRENT display
-    scale; see the module docstring for why a mapping would be wrong.
-    """
+    """The one fact the packer cannot derive: the clear gap between cards."""
 
     gap: int
-    card_size: Callable[[str], "tuple[int, int]"]
 
     def __post_init__(self) -> None:
         if int(self.gap) != self.gap or self.gap < 0:
             raise ValueError("gap must be a non-negative whole number of pixels")
-        if not callable(self.card_size):
-            raise TypeError("card_size must be callable: a snapshot would go stale")
 
 
 class GeomProxy:
-    """A placement-only stand-in, so a trial pack never mutates a real card."""
+    """A placement-only stand-in, so a trial pack never mutates a real card.
 
-    __slots__ = ("size", "col", "row")
+    It carries the card's own rectangle.  Whoever builds one asks the card
+    how big it is, which is the only answer there is.
+    """
 
-    def __init__(self, size: str, col: int = 0, row: int = 0) -> None:
-        self.size = size
+    __slots__ = ("width", "height", "col", "row")
+
+    def __init__(self, width: int, height: int, col: int = 0, row: int = 0) -> None:
+        if int(width) <= 0 or int(height) <= 0:
+            raise ValueError("a card rectangle must be positive")
+        self.width = int(width)
+        self.height = int(height)
         self.col = col
         self.row = row
 
 
 def _aabb(cfg, metrics: BoardMetrics) -> tuple[int, int, int, int]:
     """The card's pixel AABB ``(x0, y0, x1, y1)`` -- top-left ``(col, row)`` plus its size."""
-    w, h = metrics.card_size(cfg.size)
-    return (cfg.col, cfg.row, cfg.col + w, cfg.row + h)
+    del metrics
+    return (cfg.col, cfg.row, cfg.col + cfg.width, cfg.row + cfg.height)
 
 
 def _overlaps_with_gap(box: tuple[int, int, int, int], placed, metrics: BoardMetrics) -> bool:
@@ -74,7 +76,7 @@ def first_free_slot(cfg, placed, board_w: int, metrics: BoardMetrics) -> tuple[i
     right/bottom edge (``+gap``) and its left/top edge (so a card can tuck under a wider one); swept
     by y then x, first feasible wins."""
     gap = metrics.gap
-    w, _h = metrics.card_size(cfg.size)
+    w, _h = cfg.width, cfg.height
     xs = {gap}
     ys = {gap}
     for p in placed:
@@ -100,8 +102,7 @@ def min_board_width(configs: Sequence, metrics: BoardMetrics) -> int:
     right-extent: clamping to the extent would RATCHET (once cards spread wide the board could never
     pack narrower), so narrowing the window would never reflow into a single column.  At one-card
     width the gravity packer simply stacks every card in one column, which is the correct reflow."""
-    widest = max((metrics.card_size(c.size)[0] for c in configs),
-                 default=metrics.card_size("1x2")[0])
+    widest = max((c.width for c in configs), default=0)
     return widest + 2 * metrics.gap
 
 
@@ -109,8 +110,7 @@ def board_width(configs: Sequence, metrics: BoardMetrics) -> int:
     """A fallback packing width for callers without a live viewport (the pure-function tests): two
     of the WIDEST card side by side plus the gap margins, so cards CAN pack side by side.  The real
     GUI passes the scroll viewport width to :func:`pack` instead, so the board wraps at the edge."""
-    widest = max((metrics.card_size(c.size)[0] for c in configs),
-                 default=metrics.card_size("1x2")[0])
+    widest = max((c.width for c in configs), default=0)
     return max(2 * widest + 3 * metrics.gap, min_board_width(configs, metrics))
 
 
@@ -143,7 +143,7 @@ def pack(
     if pinned is not None:
         if not any(cfg is pinned for cfg in order):
             raise ValueError("the pinned card must belong to the packed board")
-        width, _height = metrics.card_size(pinned.size)
+        width = pinned.width
         col = min(
             max(int(pinned.col), metrics.gap),
             max(metrics.gap, board_w - metrics.gap - width),
@@ -184,7 +184,7 @@ def nearest_anchor(
     board_w = board_width(configs, metrics) if board_w is None else board_w
     board_w = max(board_w, min_board_width(configs, metrics))
     drop_x, drop_y = int(round(cfg.col)), int(round(cfg.row))
-    width, _height = metrics.card_size(cfg.size)
+    width = cfg.width
     xs = {metrics.gap}
     ys = {metrics.gap}
     for other in others:

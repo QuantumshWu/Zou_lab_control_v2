@@ -70,7 +70,11 @@ card.set_status('the renderer refused this frame', error=True)
 assert not card.status_dot.isHidden()
 assert card.status_dot.toolTip() == 'the renderer refused this frame'
 assert RED in card.status_dot.styleSheet()
+# Geometry is only true once the layout has run: the dot and the Setting
+# button are items in the title strip's row, not free-floating overlays.
+card.show(); app.processEvents()
 assert card.status_dot.x() < card.settings_button.x(), 'the dot must sit beside Setting'
+assert card.status_dot.y() >= 0 and card.status_dot.y() < card._title_band.height()
 card.set_status('', error=False)
 assert card.status_dot.isHidden(), 'clearing the status must clear the mark'
 card.set_status('ready', error=False)
@@ -205,7 +209,11 @@ assert popup.mapToGlobal(popup.rect().bottomRight()).y() <= card.mapToGlobal(
 assert card._settings_scroll.geometry().right() == popup.rect().right()
 assert not hasattr(card, 'apply_button')
 app.processEvents()
-assert card._settings_scroll.verticalScrollBar().maximum() > 0
+# Whatever the form's length, all of it is reachable inside the popup the
+# card clamps: the scrollbar's range is exactly the overflow.
+scroll = card._settings_scroll
+overflow = max(0, scroll.widget().sizeHint().height() - scroll.viewport().height())
+assert scroll.verticalScrollBar().maximum() == overflow
 title = card._settings_form.widget_for('title')
 title.setText('Card changed')
 title.editingFinished.emit()
@@ -360,10 +368,14 @@ from zlc_ui.board import BoardMetrics
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1')
-board = ConsoleBoardView(metrics=BoardMetrics(12, lambda size: (240, 160)))
+# The card's own rectangle is the packer's input, so the expectation is
+# derived from it -- a number typed here would be a second answer to the
+# question this change exists to give one answer to.
+hint = card.sizeHint()
+board = ConsoleBoardView(metrics=BoardMetrics(12))
 board.set_cards((card,))
-board.resize(300, 220); board.show(); app.processEvents()
-assert card.geometry().getRect() == (12, 12, 240, 160)
+board.resize(hint.width() + 40, hint.height() + 40); board.show(); app.processEvents()
+assert card.geometry().getRect() == (12, 12, hint.width(), hint.height())
 assert not board.grab_board().isNull()
 """
     )
@@ -394,12 +406,16 @@ from zlc_ui.board import BoardMetrics
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
-metrics = BoardMetrics(10, lambda size: (100, 80))
+metrics = BoardMetrics(10)
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-board = ConsoleBoardView(metrics=metrics); board.resize(350, 260); board.set_cards(cards); board.show(); app.processEvents()
+w, h = cards[0].sizeHint().width(), cards[0].sizeHint().height()
+board = ConsoleBoardView(metrics=metrics)
+board.resize(3 * w + 4 * 10, 2 * h + 3 * 10)
+board.set_cards(cards); board.show(); app.processEvents()
 events = []
 board.order_committed.connect(events.append)
-assert tuple(card.geometry().getRect()[:2] for card in cards) == ((10, 10), (120, 10), (230, 10))
+row = ((10, 10), (20 + w, 10), (30 + 2 * w, 10))
+assert tuple(card.geometry().getRect()[:2] for card in cards) == row
 
 def drop_top_left_at(card, top_left):
     grab = QtCore.QPoint(18, 18)
@@ -409,18 +425,19 @@ def drop_top_left_at(card, top_left):
     QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=target)
     app.processEvents()
 
-drop_top_left_at(cards[2], (12, 96))
+drop_top_left_at(cards[2], (12, h + 16))
 assert board._order == ('panel-0', 'panel-1', 'panel-2')
-assert tuple(card.geometry().getRect()[:2] for card in cards) == ((10, 10), (120, 10), (10, 100))
+second_row = ((10, 10), (20 + w, 10), (10, 20 + h))
+assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
 
-board.resize(120, 400); app.processEvents()
+board.resize(w + 20, 4 * h); app.processEvents()
 assert all(card.geometry().x() == 10 for card in cards)
-board.resize(350, 260); app.processEvents()
-assert tuple(card.geometry().getRect()[:2] for card in cards) == ((10, 10), (120, 10), (10, 100))
+board.resize(3 * w + 4 * 10, 2 * h + 3 * 10); app.processEvents()
+assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
 
 drop_top_left_at(cards[2], (12, 14))
 assert board._order == ('panel-2', 'panel-0', 'panel-1')
-assert tuple(board._cards[panel_id].geometry().getRect()[:2] for panel_id in board._order) == ((10, 10), (120, 10), (230, 10))
+assert tuple(board._cards[panel_id].geometry().getRect()[:2] for panel_id in board._order) == row
 """
     )
 
@@ -433,9 +450,12 @@ from zlc_ui.board import BoardMetrics
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
-metrics = BoardMetrics(10, lambda size: (100, 80))
+metrics = BoardMetrics(10)
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(4))
-board = ConsoleBoardView(metrics=metrics); board.resize(350, 260); board.set_cards(cards); board.show(); app.processEvents()
+w, h = cards[0].sizeHint().width(), cards[0].sizeHint().height()
+board = ConsoleBoardView(metrics=metrics)
+board.resize(2 * w + 3 * 10, 2 * h + 3 * 10)
+board.set_cards(cards); board.show(); app.processEvents()
 before = tuple(card.geometry().getRect() for card in cards[1:])
 assert not hasattr(board, '_ghost')
 
@@ -447,15 +467,15 @@ def drag_to(card, board_point):
     app.processEvents()
     return local_target
 
-first_target = drag_to(cards[0], (275, 150))
-assert cards[0].pos() == QtCore.QPoint(257, 132)
+first_target = drag_to(cards[0], (w + 60, h + 60))
+assert cards[0].pos() == QtCore.QPoint(w + 42, h + 42)
 assert tuple(card.geometry().getRect() for card in cards[1:]) == before
 QtTest.QTest.mouseRelease(cards[0], QtCore.Qt.LeftButton, pos=first_target)
 app.processEvents()
 assert board._order != ('panel-0', 'panel-1', 'panel-2', 'panel-3')
 
-second_target = drag_to(cards[0], (35, 215))
-assert cards[0].pos() == QtCore.QPoint(17, 197)
+second_target = drag_to(cards[0], (35, 2 * h))
+assert cards[0].pos() == QtCore.QPoint(17, 2 * h - 18)
 QtTest.QTest.mouseRelease(cards[0], QtCore.Qt.LeftButton, pos=second_target)
 app.processEvents()
 assert board._order == ('panel-1', 'panel-2', 'panel-3', 'panel-0')
@@ -471,9 +491,11 @@ from zlc_ui.board import BoardMetrics
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['drag-stack'])
-metrics = BoardMetrics(10, lambda size: (100, 80))
+metrics = BoardMetrics(10)
 first, second = PanelCardView('first'), PanelCardView('second')
-board = ConsoleBoardView(metrics=metrics); board.resize(240, 180); board.set_cards((first, second)); board.show(); app.processEvents()
+w, h = first.sizeHint().width(), first.sizeHint().height()
+board = ConsoleBoardView(metrics=metrics); board.resize(w + 20, 2 * h + 30)
+board.set_cards((first, second)); board.show(); app.processEvents()
 first.move(second.pos())
 second.raise_()
 def top_card_at(point):
@@ -497,14 +519,16 @@ from zlc_ui.qt import ensure_qt_app
 from zlc_ui.board import BoardMetrics
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 app = ensure_qt_app(['test'])
-metrics = BoardMetrics(10, lambda size: (100, 80))
+metrics = BoardMetrics(10)
 cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-board = ConsoleBoardView(metrics=metrics); board.resize(260, 220); board.set_cards(cards); board.show(); app.processEvents()
+w, h = cards[0].sizeHint().width(), cards[0].sizeHint().height()
+board = ConsoleBoardView(metrics=metrics); board.resize(2 * w + 3 * 10, 2 * h + 3 * 10)
+board.set_cards(cards); board.show(); app.processEvents()
 identities = tuple(board._cards.values())
-assert cards[0].geometry().x() == 10 and cards[1].geometry().x() == 120
+assert cards[0].geometry().x() == 10 and cards[1].geometry().x() == 20 + w
 board.set_cards(cards); app.processEvents()
 assert tuple(board._cards.values()) == identities
-board.resize(120, 400); app.processEvents()
+board.resize(w + 20, 4 * h); app.processEvents()
 assert all(card.geometry().x() == 10 for card in cards)
 """
     )
@@ -1218,7 +1242,7 @@ assert ('save', 'panel-1', str(Path(save_directory) / 'manual-name.svg')) in eve
 changed = dict(state, title='Retitled', interval_ms=800)
 handle.set_panel_projection('panel-1', changed, surface)
 handle.update_panel_editor('panel-1', dict(projection, state=changed, stale=True))
-assert card.title() == 'Retitled'
+assert 'Retitled' in card._title_label.toolTip()
 assert editor.panel_form.read_all()['title'] == 'Retitled'
 assert not editor.save_button.isEnabled()
 view.editor_close_requested.emit(editor)

@@ -826,8 +826,13 @@ class FluentSettingsPopupAnchor:
 
 
 class FluentGroupBox(QtWidgets.QGroupBox):
-    def __init__(self, title: str = "", parent=None):
+    def __init__(self, title: str = "", parent=None, *, title_strip_px: int = CARD_TITLE_PX):
         super().__init__(title, parent)
+        # How much room the strip above the body takes.  A card that draws its
+        # OWN strip -- because it has more to say than one line of plain text
+        # -- passes zero and lays that strip out as an ordinary first row, so
+        # the card's height stays the sum of what is in it.
+        strip_px = scaled_px(int(title_strip_px)) if title_strip_px else 0
         # Flat card delineated by a CONTINUOUS 1 px DIVIDER border painted in ``paintEvent`` (below) --
         # NOT Qt's own ``QGroupBox`` frame, which cuts a NOTCH in the top border where the title sits
         # (the "border broken at the rounded title corner" look).  The stylesheet keeps ONLY a
@@ -841,7 +846,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
                 border: none;
                 border-radius: {_radius()}px;
                 margin-top: 0px;
-                padding-top: {scaled_px(CARD_TITLE_PX)}px;
+                padding-top: {strip_px}px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
