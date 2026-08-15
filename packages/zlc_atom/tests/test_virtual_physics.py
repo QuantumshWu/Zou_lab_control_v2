@@ -1294,10 +1294,16 @@ def test_slm_presets_are_one_continuous_target_truth() -> None:
             canonical_phase(invalid_phase, (1, 2))
 
 
-def _ideal_slm_intensity(phase: np.ndarray) -> np.ndarray:
+def _ideal_slm_intensity(
+    phase: np.ndarray,
+    pupil_amplitude: np.ndarray | None = None,
+) -> np.ndarray:
     height, width = phase.shape
-    yy, xx = np.ogrid[-1.0:1.0:height * 1j, -1.0:1.0:width * 1j]
-    pupil = (xx * xx + yy * yy <= 0.9**2).astype(np.float32)
+    if pupil_amplitude is None:
+        yy, xx = np.ogrid[-1.0:1.0:height * 1j, -1.0:1.0:width * 1j]
+        pupil = (xx * xx + yy * yy <= 0.9**2).astype(np.float32)
+    else:
+        pupil = np.asarray(pupil_amplitude, dtype=np.float32)
     field = pupil * np.exp(1j * phase).astype(np.complex64)
     far = fft.fftshift(
         fft.fft2(fft.ifftshift(field), norm="ortho")
@@ -1367,8 +1373,9 @@ def _shifted_wgs_kim_reference(
 def _support_quality(
     phase: np.ndarray,
     target: np.ndarray,
+    pupil_amplitude: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float, float]:
-    intensity = _ideal_slm_intensity(phase)
+    intensity = _ideal_slm_intensity(phase, pupil_amplitude)
     support = target > 0.0
     measured = intensity[support]
     measured /= np.sum(measured)
@@ -1377,6 +1384,128 @@ def _support_quality(
     ratio = float(np.max(normalized) / np.min(normalized))
     efficiency = float(np.sum(intensity[support]) / np.sum(intensity))
     return normalized, ratio, efficiency
+
+
+def test_slm_solver_validates_authored_pupil_amplitude() -> None:
+    target = preset_grid((32, 40), (2, 3), spacing_yx=(9, 8))
+    invalid = (
+        (np.ones((31, 40), dtype=np.float32), "shape"),
+        (np.full(target.shape, np.nan, dtype=np.float32), "finite"),
+        (-np.ones(target.shape, dtype=np.float32), "non-negative"),
+        (np.zeros(target.shape, dtype=np.float32), "positive"),
+    )
+    for pupil, message in invalid:
+        with pytest.raises(ValueError, match=message):
+            solve_phase(
+                target,
+                pupil_amplitude=pupil,
+                objective_kind="spots",
+                iterations=1,
+            )
+
+
+def test_slm_solver_uses_authored_pupil_in_every_full_resolution_path() -> None:
+    shape = (48, 64)
+    cartesian = preset_grid(shape, (3, 4), spacing_yx=(11, 12))
+    irregular = np.array(cartesian, copy=True)
+    irregular[tuple(np.argwhere(irregular > 0.0)[-1])] = 0.0
+    image = preset_rectangle(shape, (18, 24), edge=3)
+    yy, xx = np.ogrid[-1.0:1.0:shape[0] * 1j, -1.0:1.0:shape[1] * 1j]
+    pupil = (
+        ((xx / 0.72) ** 2 + (yy / 0.86) ** 2 <= 1.0)
+        * (0.35 + 0.65 * (xx + 1.0) * 0.5)
+    ).astype(np.float32)
+
+    for target, objective_kind, method, transform in (
+        (cartesian, "spots", "wgs-kim", "selected-dft"),
+        (irregular, "spots", "wgs-kim", "fft"),
+        (image, "image", "mraf", "fft"),
+    ):
+        default_phase, default_metadata = solve_phase(
+            target,
+            objective_kind=objective_kind,
+            iterations=20,
+            seed=41,
+        )
+        phase, metadata = solve_phase(
+            target,
+            pupil_amplitude=pupil,
+            objective_kind=objective_kind,
+            iterations=20,
+            seed=41,
+        )
+        repeated, repeated_metadata = solve_phase(
+            target,
+            pupil_amplitude=pupil,
+            objective_kind=objective_kind,
+            iterations=20,
+            seed=41,
+        )
+
+        assert not np.array_equal(phase, default_phase)
+        np.testing.assert_array_equal(phase, repeated)
+        assert metadata == repeated_metadata
+        assert default_metadata["pupil_source"] == "default"
+        assert metadata["pupil_source"] == "provided"
+        assert metadata["method"] == method
+        assert metadata["transform"] == transform
+        _normalized, ratio, efficiency = _support_quality(phase, target, pupil)
+        assert metadata["support_intensity_ratio"] == pytest.approx(
+            ratio, rel=2e-5
+        )
+        assert metadata["diffraction_efficiency"] == pytest.approx(
+            efficiency, rel=2e-5
+        )
+
+    default_pupil = (
+        xx * xx + yy * yy <= 0.9**2
+    ).astype(np.float32)
+    default_phase, default_metadata = solve_phase(
+        cartesian,
+        objective_kind="spots",
+        iterations=20,
+        seed=41,
+    )
+    explicit_phase, explicit_metadata = solve_phase(
+        cartesian,
+        pupil_amplitude=default_pupil,
+        objective_kind="spots",
+        iterations=20,
+        seed=41,
+    )
+    np.testing.assert_array_equal(explicit_phase, default_phase)
+    assert {
+        key: value
+        for key, value in explicit_metadata.items()
+        if key != "pupil_source"
+    } == {
+        key: value
+        for key, value in default_metadata.items()
+        if key != "pupil_source"
+    }
+
+
+def test_slm_solver_keeps_one_percent_gate_with_authored_pupil() -> None:
+    target = preset_grid((48, 64), (2, 3), spacing_yx=(13, 15))
+    yy, xx = np.ogrid[-1.0:1.0:48j, -1.0:1.0:64j]
+    pupil = (
+        ((xx / 0.76) ** 2 + (yy / 0.84) ** 2 <= 1.0)
+        * (0.6 + 0.4 * (xx + 1.0) * 0.5)
+    ).astype(np.float32)
+    phase, metadata = solve_phase(
+        target,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        seed=31,
+    )
+    _normalized, ratio, _efficiency = _support_quality(phase, target, pupil)
+
+    if metadata["early_stopped"]:
+        assert metadata["quality_streak"] >= 3
+        assert metadata["support_intensity_ratio"] <= 1.01
+        assert ratio <= 1.01
+    else:
+        assert metadata["iterations_run"] == metadata["max_iterations"]
 
 
 def test_slm_solver_uses_authored_spot_or_image_objective() -> None:

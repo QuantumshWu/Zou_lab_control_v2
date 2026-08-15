@@ -216,17 +216,36 @@ def _cartesian_support(
 def solve_phase(
     target: object,
     *,
+    pupil_amplitude: object | None = None,
     initial_phase: object | None = None,
     objective_kind: str = "auto",
     iterations: int | None = None,
     seed: int = 0,
     stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, dict[str, object]]:
-    """Solve one full-resolution target as authored spots or a continuous image."""
+    """Solve one target using the authored full-resolution near-field amplitude."""
 
     desired = validate_target(target)
     if float(np.max(desired)) <= 0.0:
         raise ValueError("target must contain positive intensity")
+    if pupil_amplitude is None:
+        pupil = _pupil(desired.shape)
+        pupil_source = "default"
+    else:
+        try:
+            pupil = np.asarray(pupil_amplitude, dtype=np.float32)
+        except (TypeError, ValueError) as error:
+            raise TypeError("pupil_amplitude must be a numeric array") from error
+        if pupil.shape != desired.shape:
+            raise ValueError("pupil_amplitude shape must match the target shape")
+        if not np.all(np.isfinite(pupil)):
+            raise ValueError("pupil_amplitude must be finite")
+        if np.any(pupil < 0.0):
+            raise ValueError("pupil_amplitude must be non-negative")
+        if not np.any(pupil > 0.0):
+            raise ValueError("pupil_amplitude must contain positive amplitude")
+        pupil = _readonly(pupil)
+        pupil_source = "provided"
     if not isinstance(objective_kind, str) or objective_kind not in {
         "auto",
         "spots",
@@ -259,7 +278,6 @@ def solve_phase(
             raise ValueError("iterations must be a positive integer or None")
         count = int(iterations)
 
-    pupil = _pupil(desired.shape)
     if initial_phase is None:
         phase = np.random.default_rng(int(seed)).uniform(0.0, 2.0 * np.pi, desired.shape).astype(np.float32)
     else:
@@ -390,6 +408,7 @@ def solve_phase(
     return result, {
         "method": method,
         "objective_kind": resolved_kind,
+        "pupil_source": pupil_source,
         "transform": transform,
         "iterations": iterations_run,
         "iterations_run": iterations_run,
