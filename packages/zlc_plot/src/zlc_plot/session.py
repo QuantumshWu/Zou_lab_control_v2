@@ -785,14 +785,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         with self._render_lock:
             with self._lock:
                 self._assert_open()
-            if (
-                isinstance(self._spec, FacetGridPlot)
-                and self._facet_focus_index is None
-            ):
-                return ()
             # Gesture candidates are baked into the raster alongside the
             # committed states, so the painted snapshot is always complete
-            # and expressed in the same space as the painted axes.
+            # and expressed in the same space as the painted axes.  An
+            # overview used to answer with nothing, which is what left a
+            # frontend unable to see -- and therefore unable to grab -- the
+            # very selectors the grid had just painted in its cells.
             return self._painted_selector_snapshot().states
 
     def _raster_color_limits_snapshot(self) -> NumericRange | None:

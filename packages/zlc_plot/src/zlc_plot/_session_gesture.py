@@ -135,19 +135,35 @@ class GestureSessionMixin:
         event.inaxes = event_axes
         is_double = self._is_double_click(event, button)
         self._cancel_gesture()
+        # The surface this gesture acts on.  The renderer's own answer is a
+        # MIRROR of the session's selection, refreshed once per present, so it
+        # is one frame stale for the press that changes the selection -- which
+        # is why the active surface is resolved here, from the session's own
+        # state, and every check below compares against this one name.
+        active_axes = self._renderer.primary_axes
         if isinstance(self._spec, FacetGridPlot):
-            focus_index = self._facet_focus_index
-            if focus_index is None:
+            if self._facet_focus_index is None:
+                cell_index = self._renderer.facet_index_for_axes(event_axes)
+                if cell_index is None:
+                    # The pointer is on the figure but not on a cell.
+                    return
                 if button == 1 and is_double:
-                    facet_index = self._renderer.facet_index_for_axes(event_axes)
-                    if facet_index is not None:
-                        self.focus_facet(facet_index)
-                return
-            if button == 1 and is_double and event_axes is self._renderer.primary_axes:
+                    self.focus_facet(cell_index)
+                    return
+                # A press names the cell it landed on, and the gesture then
+                # runs on that cell exactly as it would on a standalone plot.
+                # Which cell is active already has ONE spelling; the pointer
+                # simply gets to write it, instead of every check below being
+                # taught to carry a cell index of its own.  This is not
+                # OPENING the cell: the grid shares one viewport and one fit
+                # context, so neither is disturbed.
+                self._focused_facet_index = cell_index
+                active_axes = event_axes
+            elif button == 1 and is_double and event_axes is active_axes:
                 self.show_facet_overview()
                 return
         if button == 2:
-            if event_axes is not self._renderer.primary_axes:
+            if event_axes is not active_axes:
                 return
             if is_double:
                 self._zoom_to_selection_or_reset()
@@ -173,7 +189,7 @@ class GestureSessionMixin:
         if point is None:
             return
         if button == 3:
-            if event_axes is not self._renderer.primary_axes:
+            if event_axes is not active_axes:
                 return
             self._update_pointer_crosshair(
                 point,
@@ -195,7 +211,7 @@ class GestureSessionMixin:
             transform=interaction_transform,
         )
         if hit is None:
-            state = self._start_pointer_selection(point, event_axes)
+            state = self._start_pointer_selection(point, event_axes, active_axes)
             if state is None:
                 return
             handle = DragHandle.NEW
@@ -232,9 +248,10 @@ class GestureSessionMixin:
         self,
         point: CrosshairPoint,
         event_axes: Any,
+        active_axes: Any,
     ) -> SelectorState | None:
         assert self._renderer is not None
-        if event_axes is not self._renderer.primary_axes:
+        if event_axes is not active_axes:
             return None
         value = RectangleRange(
             NumericRange(point.x, point.x),
@@ -368,13 +385,22 @@ class GestureSessionMixin:
             return
         self._cancel_gesture()
         assert self._renderer is not None
+        axes = self._axis_for_transform(interaction_transform)
+        active_axes = self._renderer.primary_axes
         if (
             isinstance(self._spec, FacetGridPlot)
             and self._facet_focus_index is None
         ):
-            return
-        axes = self._axis_for_transform(interaction_transform)
-        if axes is not self._renderer.primary_axes:
+            # Same rule as a press: the wheel names the cell it turned over.
+            # The cells share one viewport, so the zoom is the grid's -- what
+            # the cell decides is only whether this wheel event is on the
+            # picture at all.
+            cell_index = self._renderer.facet_index_for_axes(axes)
+            if cell_index is None:
+                return
+            self._focused_facet_index = cell_index
+            active_axes = axes
+        if axes is not active_axes:
             return
         # Zoom against the axes' CURRENT limits, not the painted snapshot the
         # frontend sampled: a queued tick must compound onto the previous one

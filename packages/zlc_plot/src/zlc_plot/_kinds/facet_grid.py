@@ -75,7 +75,7 @@ def _data_axes_cell(schema: DatasetSchema) -> ImagePlot | None:
     )
 
 
-def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
+def _facet_axis(schema: Any, cell: Any) -> AxisRef:
     """What varies from cell to cell: the thing one plot would have to pool.
 
     One rule, and it depends on what the CELL already consumes, because a
@@ -87,15 +87,19 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
     Frames of a cycle and points of a scan are different measurements and
     get a cell each; repeats are the same measurement again, and pooling
     them is the reduction the operator declared, so they face a grid only
-    when nothing else varies.  ``None`` means nothing varies: the flat plot
-    already IS the picture -- and a grid REFUSED here is why a one-frame
-    camera cycle opens as a plain image, which is the only presentation that
-    takes pointer input at all (an unfacetted overview paints no selectors
-    and answers no gesture but the double click that focuses a cell).
+    when nothing else varies.
+
+    Nothing varying is not a refusal.  Inference never asks this question --
+    FACET_GRID is deliberately absent from the inference order, so the only
+    callers are an operator picking the kind and a node declaring it for its
+    own preview.  Both have already decided they want a grid, and the honest
+    answer for a one-frame cycle is the grid they asked for with one cell in
+    it: the repeat axis, which every dataset has and which is one value wide
+    exactly when nothing else varies.  Refusing here is what made a camera
+    panel silently open as a plain image whenever the cycle held one frame.
     """
 
     live = live_grid_dimensions(schema)
-    repeats = schema.repeat_axis.size > 1
     dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
     # No scan topology and several point rows: the point axis IS the thing
     # measured several times -- the frames of a camera cycle, the frames
@@ -117,7 +121,7 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
             # The curve walks the innermost dimension; the grid takes the
             # outermost.
             return AxisRef.point_dimension(live[0])
-        return AxisRef.repeat() if repeats else None
+        return AxisRef.repeat()
     if point_axis is not None:
         return point_axis
     if len(live) == 1:
@@ -127,7 +131,7 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
         # measured gets its cell rather than one dimension being folded
         # into the other.
         return AxisRef.point_rows()
-    return AxisRef.repeat() if repeats else None
+    return AxisRef.repeat()
 
 
 def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
@@ -189,13 +193,14 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
     thirty-five points, instead of a panel that refuses to draw at all.
 
     Degenerate axes (one value) are real provenance but not structure, so
-    inference never sees them.
+    they never decide what a cell holds.  They can still BE the facet: this
+    kind is only ever asked for, so a dataset with nothing varying gets the
+    grid of one cell it was asked for rather than a refusal.
     """
 
     if not isinstance(schema, DatasetSchema):
         return None
     live = live_grid_dimensions(schema)
-    repeats = schema.repeat_axis.size > 1
     cell = _data_axes_cell(schema)
     if cell is None:
         live_data_axes = tuple(
@@ -213,15 +218,11 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
             )
             if len(live) >= 3:
                 return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
-            if repeats:
-                return FacetGridPlot(AxisRef.repeat(), heatmap)
-            return None
+            return FacetGridPlot(AxisRef.repeat(), heatmap)
         cell = curve_default_spec(schema)
     if cell is None:
         return None
     facet = _facet_axis(schema, cell)
-    if facet is None:
-        return None
     cell = cell_within_one_cell(schema, facet, cell)
     return None if cell is None else FacetGridPlot(facet, cell)
 
