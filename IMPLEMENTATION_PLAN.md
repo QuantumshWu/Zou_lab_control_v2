@@ -30,6 +30,8 @@
 
 > 该区块在 Goal 启动后由执行者持续更新，是续跑的磁盘事实，不是用户需要维护的表单。
 
+- Active Goal end-gate panel popup retirement（2026-08-15）：`complete in this milestone commit`。repository-wide gate的最后一个失败不是form schema/value mismatch，而是测试循环覆盖仍打开parentless Qt popup/card并在native teardown得到`0xC0000409`；诊断同时发现公开`remove_panel()`在Setting正开时会留下可见popup，board的`_wired_cards`也会永久强持removed card。现有owner内的最小根修让card统一retire popup，board在移除时hide/detach/discard wiring并`deleteLater()`，handle不再抢先拆parent；从Remove按钮signal stack删除也不会同步销毁sender。旧红明确看到popup visible与card retained；修后public remove、Setting/Edit重开/Remove、owner retirement和原8种form逐轮退役均通过，完整`test_console_views.py`为`30 passed in 22.84 s`，Workbench presenter删除链与独立review也通过。下一步只重跑一次repository-wide end gate；不再新增功能。
+
 - Active Goal end-gate per-frame overlay reconciliation（2026-08-15）：`complete in this milestone commit`。repository-wide gate暴露一个从fresh Bernoulli loading落地后就存在的presentation测试假设：测试用`world.occupancy`这份hidden plant truth预测固定阈值classifier必然给出同一occupied状态；当前与旧`4add9b5`中site 30的长帧BOX值都低于该测试自造的300阈值，因此public `OccupancyResult`正确报告EMPTY，overlay没有错位。修复只让该presentation测试从processor公开的逐frame/site `occupied + valid`事实构造期望，再继续逐cell核对overlay和实际painted rings；不调threshold、不改world/processor/renderer。精确纵向节点`1 passed in 1.74 s`。下一项只收口同一次full-tree gate剩余的Qt test-process lifecycle失败。
 
 - Active Goal end-gate TaskConsole catalog reconciliation（2026-08-15）：`complete in this milestone commit`。repository-wide gate暴露一个自`slm_feedback` descriptor加入后就存在的旧测试期望：产品 catalog 通过稳定discovery骨架正确列出12项，测试仍硬编码11项并漏掉`Task: Slm Feedback`。本切片只把该正式Task补入既有期望，不隐藏descriptor、不维护第二份产品菜单；精确人类Add Panel流程节点`1 passed in 1.63 s`。下一项继续收口同一次full-tree gate剩余两个独立旧失败。

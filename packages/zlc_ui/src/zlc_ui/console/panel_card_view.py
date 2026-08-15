@@ -548,7 +548,13 @@ class PanelCardView(FluentGroupBox):
 
         self._editing_enabled = bool(enabled)
         self.settings_button.setEnabled(self._editing_enabled)
-        if not self._editing_enabled and self._settings_popup is not None:
+        if not self._editing_enabled:
+            self.retire_settings_popup()
+
+    def retire_settings_popup(self) -> None:
+        """Hide the card-owned top-level popup before its owner is retired."""
+
+        if self._settings_popup is not None:
             self._settings_popup.hide()
 
     def _commit_title(self) -> None:
@@ -851,11 +857,11 @@ class PanelCardView(FluentGroupBox):
         )
 
     def _request_edit(self) -> None:
-        self._settings_popup.hide()
+        self.retire_settings_popup()
         self.edit_requested.emit()
 
     def _request_remove(self) -> None:
-        self._settings_popup.hide()
+        self.retire_settings_popup()
         self.remove_requested.emit()
 
     def _setting_changed(self, key: str) -> None:

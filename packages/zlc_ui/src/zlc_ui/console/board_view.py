@@ -69,8 +69,11 @@ class ConsoleBoardView(QtWidgets.QWidget):
         wanted_ids = {card.panel_id for card in incoming}
         for panel_id, card in tuple(self._cards.items()):
             if panel_id not in wanted_ids:
-                card.setParent(None)
+                card.retire_settings_popup()
                 card.hide()
+                card.setParent(None)
+                self._wired_cards.discard(card)
+                card.deleteLater()
         self._cards = {card.panel_id: card for card in incoming}
         if self._anchor_id not in self._cards:
             self._anchor_id = None

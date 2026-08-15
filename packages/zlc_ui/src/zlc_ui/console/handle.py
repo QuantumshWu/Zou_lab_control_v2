@@ -315,9 +315,7 @@ class TaskConsoleHandle(QtCore.QObject):
     def remove_panel(self, panel_id: str) -> None:
         key = str(panel_id)
         self.close_panel_editor(key)
-        card = self._cards.pop(key, None)
-        if card is not None:
-            card.setParent(None)
+        self._cards.pop(key, None)
         self._view.set_cards(tuple(self._cards.values()))
 
     def panel_ids(self) -> tuple[str, ...]:

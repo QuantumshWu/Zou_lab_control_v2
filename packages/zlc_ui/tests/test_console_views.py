@@ -352,6 +352,56 @@ assert not any(
     )
 
 
+def test_public_panel_removal_retires_its_popup_and_card() -> None:
+    _run_qt(
+        """
+import zou_lab_control_v2
+print(zou_lab_control_v2.__file__)
+from PyQt5 import QtCore, sip
+from zlc_ui import open_task_console
+from zlc_ui.console import board_view as board_module
+from zlc_ui.console import handle as handle_module
+print(board_module.__file__)
+print(handle_module.__file__)
+from zlc_ui.qt import ensure_qt_app
+
+app = ensure_qt_app(['panel-remove'])
+console = open_task_console(window_ratio=0.4)
+console.set_panel_sizes(('2x2',), '2x2')
+console.set_panel_intervals((100,), 100)
+console.add_panel('panel-1', 'Panel')
+console.set_panel_projection('panel-1', {
+    'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
+    'title': 'Panel', 'semantic': {}, 'display': {}, 'fit': {},
+    'overlay_signal': '',
+}, {
+    'semantic': (), 'display': (), 'fit': (),
+    'semantic_unavailable': '', 'display_unavailable': '',
+    'fit_unavailable': '',
+})
+card = console._cards['panel-1']
+card._open_settings()
+app.processEvents()
+popup = card._settings_popup
+assert popup is not None and popup.isVisible()
+
+try:
+    console.remove_panel('panel-1')
+    assert not popup.isVisible(), 'public remove_panel left Setting visible'
+    assert console.panel_ids() == ()
+    assert not console._view.board._wired_cards
+    QtCore.QCoreApplication.sendPostedEvents(
+        None, QtCore.QEvent.DeferredDelete
+    )
+    app.processEvents()
+    assert sip.isdeleted(card), 'removed card was not deferred-deleted'
+finally:
+    console.close()
+    app.processEvents()
+"""
+    )
+
+
 def test_board_constructs_and_packs_from_metrics() -> None:
     _run_qt(
         """
@@ -1700,6 +1750,7 @@ def test_every_panel_kind_opens_its_setting_form_with_exact_keys() -> None:
         """
 import zou_lab_control_v2
 print(zou_lab_control_v2.__file__)
+from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import panel_card_view as tested_module
 from zlc_ui.console import panel_editor_view as editor_module
@@ -1710,54 +1761,82 @@ app = ensure_qt_app(['test'])
 surface = {'semantic': (), 'display': (), 'fit': ()}
 groups = (('camera', (('frames', '@logic/cm/frames'),)),)
 overlays = (('occupancy', (('sites', '@logic/occ/occupied'),)),)
+owner = QtWidgets.QWidget()
+owner.show()
+app.processEvents()
 
-for kind, cell_kind, overlay_signal in (
-    ('image', '', '@logic/occ/occupied'),
-    ('image', '', ''),
-    ('facet_grid', '', '@logic/occ/occupied'),
-    ('facet_grid', 'image', '@logic/occ/occupied'),
-    ('facet_grid', 'curve', ''),
-    ('facet_grid', 'histogram', ''),
-    ('curve', '', ''),
-    ('histogram', '', ''),
-):
-    state = {
-        'signal': '@logic/cm/frames', 'kind': kind, 'cell_kind': cell_kind,
-        'size': '2x2', 'interval_ms': 100, 'title': 'Card',
-        'semantic': {}, 'display': {}, 'fit': {},
-        'overlay_signal': overlay_signal,
-    }
-    card = tested_module.PanelCardView('panel-1', 'Card')
-    card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
-    card.set_cell_kind_choices(('curve', 'image', 'histogram'))
-    card.set_signal_choices(
-        groups, current=state['signal'],
-        overlay_groups=overlays, overlay_current=overlay_signal,
-    )
-    card.set_panel_projection(state, surface)
-    spec_keys = set(card._form_spec().keys)
-    value_keys = set(card._form_values())
-    assert spec_keys == value_keys, (
-        kind, cell_kind, sorted(spec_keys ^ value_keys)
-    )
-    # The real crash path: this is what pressing Setting runs.
-    card._open_settings()
-    assert card._settings_form is not None
-    assert set(card._settings_form.spec.keys) == value_keys
+try:
+    for kind, cell_kind, overlay_signal in (
+        ('image', '', '@logic/occ/occupied'),
+        ('image', '', ''),
+        ('facet_grid', '', '@logic/occ/occupied'),
+        ('facet_grid', 'image', '@logic/occ/occupied'),
+        ('facet_grid', 'curve', ''),
+        ('facet_grid', 'histogram', ''),
+        ('curve', '', ''),
+        ('histogram', '', ''),
+    ):
+        card = None
+        editor = None
+        try:
+            state = {
+                'signal': '@logic/cm/frames', 'kind': kind,
+                'cell_kind': cell_kind, 'size': '2x2',
+                'interval_ms': 100, 'title': 'Card', 'semantic': {},
+                'display': {}, 'fit': {}, 'overlay_signal': overlay_signal,
+            }
+            card = tested_module.PanelCardView('panel-1', 'Card', owner)
+            card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
+            card.set_cell_kind_choices(('curve', 'image', 'histogram'))
+            card.set_signal_choices(
+                groups, current=state['signal'],
+                overlay_groups=overlays, overlay_current=overlay_signal,
+            )
+            card.set_panel_projection(state, surface)
+            card.show()
+            app.processEvents()
+            spec_keys = set(card._form_spec().keys)
+            value_keys = set(card._form_values())
+            assert spec_keys == value_keys, (
+                kind, cell_kind, sorted(spec_keys ^ value_keys)
+            )
+            # The real crash path: this is what pressing Setting runs.
+            card._open_settings()
+            assert card._settings_form is not None
+            assert set(card._settings_form.spec.keys) == value_keys
 
-    editor = editor_module.PanelEditorView('panel-1', {
-        'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
-        'overlay_signal_options': overlays,
-        'interval_choices': (100, 200, 400, 800),
-        'size_choices': ('1x2', '2x2', '1x4'),
-        'parameter_surface': surface, 'save_directory': '.',
-        'kind_read_only': True, 'frozen_signal': state['signal'],
-        'frozen_publication': None, 'frozen_snapshot': None,
-        'stale': False, 'producer_node_id': '', 'producer_logic': None,
-    })
-    assert ('overlay_signal' in editor.panel_form.spec.keys) == (
-        'overlay_signal' in spec_keys
+            editor = editor_module.PanelEditorView('panel-1', {
+                'panel_id': 'panel-1', 'state': state,
+                'signal_options': groups,
+                'overlay_signal_options': overlays,
+                'interval_choices': (100, 200, 400, 800),
+                'size_choices': ('1x2', '2x2', '1x4'),
+                'parameter_surface': surface, 'save_directory': '.',
+                'kind_read_only': True, 'frozen_signal': state['signal'],
+                'frozen_publication': None, 'frozen_snapshot': None,
+                'stale': False, 'producer_node_id': '',
+                'producer_logic': None,
+            }, owner)
+            assert ('overlay_signal' in editor.panel_form.spec.keys) == (
+                'overlay_signal' in spec_keys
+            )
+        finally:
+            if card is not None:
+                card.retire_settings_popup()
+                card.deleteLater()
+            if editor is not None:
+                editor.deleteLater()
+            QtCore.QCoreApplication.sendPostedEvents(
+                None, QtCore.QEvent.DeferredDelete
+            )
+            app.processEvents()
+finally:
+    owner.close()
+    owner.deleteLater()
+    QtCore.QCoreApplication.sendPostedEvents(
+        None, QtCore.QEvent.DeferredDelete
     )
+    app.processEvents()
 """
     )
 
