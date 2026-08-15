@@ -380,3 +380,137 @@ def test_the_hosted_and_direct_paths_share_one_acquisition() -> None:
     assert "collect(" in execute
     assert "read_frame_records" not in execute
     assert "snapshot_from_array" not in execute
+
+
+def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
+    """Two things an operator does with a repeat=N run: watch it, and stop it.
+
+    WATCH: the dataset is every cycle the run will take, filling up -- so the
+    live output states that whole geometry and counts the cells measured so
+    far.  It used to publish nothing at all until the last cycle had been
+    taken, which for a long run is a blank panel for as long as it runs.
+
+    STOP: a cancel is only ever seen BETWEEN reads, and the read was the
+    camera's whole timeout (2 s virtual, 10 s on the qCMOS), so Stop was
+    refused for that long while the console said the node was still stopping.
+    """
+
+    plane = SignalDataPlane()
+    installation = create_installation("virtual")
+    host = None
+    try:
+        camera = installation.capability("camera.adapter")
+        sequencer = installation.device("sequencer")
+        program, _metadata = build_calibration_pulse(sequencer.describe())
+        sequencer.load(program)
+        repeats = 4
+        windows = CALIBRATION_FRAMES_PER_CYCLE
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=repeats,
+                frames_per_cycle=windows,
+            ),
+            signal_plane=plane,
+            producer="cm-live",
+        )
+        wake = Event()
+        host = NodeHost(node, plane, wake.set)
+        host.start()
+        signal = host.signal_key("frames")
+
+        # One cycle at a time, watching what the plane holds mid-run.
+        seen: list[tuple[tuple[int, ...], int, int]] = []
+        deadline = time.monotonic() + 20.0
+        fired = 0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            if fired < repeats:
+                sequencer.fire()
+                sequencer.wait_done(2.0)
+                fired += 1
+            host.poll()
+            value = plane.freeze().value(signal)
+            if value is not None and getattr(value, "coverage", None) is not None:
+                frames = np.asarray(value.snapshot.block.values)
+                seen.append(
+                    (
+                        tuple(frames.shape[:2]),
+                        int(value.coverage.written_cells),
+                        int(value.coverage.total_cells),
+                    )
+                )
+            time.sleep(0.01)
+
+        assert seen, "a finite run published nothing while it ran"
+        # Every live view is the whole run's geometry, filling up.
+        assert {shape for shape, _written, _total in seen} == {(repeats, windows)}
+        assert {total for _shape, _written, total in seen} == {repeats * windows}
+        written = [written for _shape, written, _total in seen]
+        assert written == sorted(written)
+        assert written[0] < repeats * windows, written
+        assert host.observation.phase == "done", host.observation.error
+
+        # ... and the final publication is still there when it ends.
+        publication = plane.latest_publication(signal)
+        assert publication is not None
+        final = publication.value(signal)
+        assert final is not None
+        assert np.asarray(final.snapshot.block.values).shape[:2] == (repeats, windows)
+    finally:
+        if host is not None:
+            host.shutdown()
+        installation.close()
+        plane.close()
+
+
+def test_a_finite_run_stops_within_a_read_slice_not_a_camera_timeout() -> None:
+    """The cancel latency is the loop's slice, not the device's deadline."""
+
+    plane = SignalDataPlane()
+    installation = create_installation("virtual")
+    host = None
+    try:
+        camera = installation.capability("camera.adapter")
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=32,
+                frames_per_cycle=1,
+            ),
+            signal_plane=plane,
+            producer="cm-stop",
+        )
+        wake = Event()
+        host = NodeHost(node, plane, wake.set)
+        host.start()
+        # Wait until the run is inside its first read, waiting for a trigger
+        # that will never come.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and node.actual_working_point is None:
+            host.poll()
+            time.sleep(0.005)
+        assert node.actual_working_point is not None, "the camera never armed"
+
+        started = time.monotonic()
+        host.cancel("the operator pressed Stop")
+        while time.monotonic() - started < 30.0:
+            host.poll()
+            if host.observation.terminal:
+                break
+            time.sleep(0.005)
+        latency = time.monotonic() - started
+        assert host.observation.terminal, "the run never stopped"
+        # Generous against a loaded machine, and still far below the camera's
+        # own timeout, which is what this used to wait out.
+        assert latency < float(camera.timeout) / 2.0, latency
+    finally:
+        if host is not None:
+            host.shutdown()
+        installation.close()
+        plane.close()
