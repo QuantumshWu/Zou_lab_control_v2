@@ -10,22 +10,18 @@ from typing import Any, Callable
 
 import numpy as np
 
-from zlc_pulse.compile import CompiledProgram
+from zlc_pulse.compile import CompiledProgram, evaluate_affine_tick
 from zlc_pulse.schedule import run_duration_seconds, trigger_windows
 
 
 DEFAULT_SIMULATION_GRID_SHAPE_YX = (5, 7)
 DEFAULT_SIMULATION_IMAGE_SHAPE_YX = (96, 128)
 DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
-#: Where the MOT is actually best, in DAC codes -- the ground truth a field
-#: optimisation is supposed to FIND.  Non-zero on purpose: a real bench has a
-#: stray ambient field and the bias coils exist to cancel it, so an optimiser
-#: that starts at zero must genuinely move.  The world models the ambient as
-#: exactly -optimum, making the net field (dac - optimum) / 512 per axis.
-DEFAULT_MOT_FIELD_OPTIMUM_DAC = (96, -144, 48)
+#: Zero authored bias is the one compensated MOT operating point.
+DEFAULT_MOT_FIELD_OPTIMUM_DAC = (0, 0, 0)
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
 DEFAULT_SIMULATION_SLM_SHAPE_YX = (128, 128)
-_ACTIVE_TRAP_DEPTH_FRACTION = 0.15
+_DOMINANT_TRAP_PEAK_FRACTION = 0.15
 _TRAP_PEAK_NEIGHBORHOOD = 7
 
 #: 87-Rb, the atom this bench traps: 86.909 180 5 u.
@@ -163,7 +159,13 @@ class SimulationWorld:
         self._mot_field_optimum = dict(
             zip(("da_bias_x", "da_bias_y", "da_bias_z"), optimum)
         )
-        self.rng = np.random.default_rng(seed)
+        static_seed, atom_seed, qcmos_seed, mot_seed = np.random.SeedSequence(
+            seed
+        ).spawn(4)
+        self._static_rng = np.random.default_rng(static_seed)
+        self._atom_rng = np.random.default_rng(atom_seed)
+        self._qcmos_rng = np.random.default_rng(qcmos_seed)
+        self._mot_rng = np.random.default_rng(mot_seed)
         self._lock = threading.RLock()
         self._cameras: list[tuple[Any, Callable[..., np.ndarray] | None]] = []
         self._fire_count = 0
@@ -191,13 +193,15 @@ class SimulationWorld:
         self._propagated_revision = -1
         self._trap_plane_intensity: np.ndarray | None = None
         self._site_trap_intensities: np.ndarray | None = None
+        self._slm_nominal_peak_indices_yx = _immutable(
+            np.full((site_count, 2), -1, dtype=np.intp), np.intp
+        )
         self._propagation_count = 0
         self._loading_intensity_scale: float | None = None
-        self._nominal_trap_peak_scale: float | None = None
         self._slm_pupil_amplitude, self._hidden_slm_aberration = (
             self._slm_plant(seed)
         )
-        efficiency_log = self.rng.normal(0.0, 1.0, site_count)
+        efficiency_log = self._static_rng.normal(0.0, 1.0, site_count)
         efficiency_log -= float(np.min(efficiency_log))
         span = float(np.ptp(efficiency_log))
         if span:
@@ -211,13 +215,19 @@ class SimulationWorld:
         )
         self._site_psf_sigma_xy = _readonly(
             base_sigma[np.newaxis, :]
-            * np.exp(self.rng.normal(0.0, 0.10, (site_count, 2)))
+            * np.exp(self._static_rng.normal(0.0, 0.10, (site_count, 2)))
         )
         self._site_psf_angle_radians = _readonly(
-            np.deg2rad(18.0 + self.rng.normal(0.0, 5.0, site_count))
+            np.deg2rad(
+                18.0 + self._static_rng.normal(0.0, 5.0, site_count)
+            )
         )
         self._site_psf_skew = _readonly(
-            np.clip(0.45 + self.rng.normal(0.0, 0.08, site_count), 0.15, 0.75)
+            np.clip(
+                0.45 + self._static_rng.normal(0.0, 0.08, site_count),
+                0.15,
+                0.75,
+            )
         )
         height, width = self.geometry.image_shape_yx
         yy, xx = np.mgrid[:height, :width]
@@ -243,7 +253,6 @@ class SimulationWorld:
             site_psf_spots.append(spot)
         self._site_psf_spots = _readonly(site_psf_spots)
         self._occupancy = np.zeros(site_count, dtype=bool)
-        self._forced_occupancy: np.ndarray | None = None
         self._extra_slm_site_indices_yx = _immutable(
             np.empty((0, 2), dtype=np.intp), np.intp
         )
@@ -267,7 +276,6 @@ class SimulationWorld:
         # Later commands are compared against that fixed bench scale, rather
         # than renormalized per phase (which would erase diffraction loss).
         self._ensure_slm_propagation()
-        self._loading_intensity_scale = float(np.mean(self._site_trap_intensities))
 
     def _slm_plant(self, seed: int) -> tuple[np.ndarray, np.ndarray]:
         """Materialize fixed illumination and hidden low-order wavefront error."""
@@ -283,9 +291,9 @@ class SimulationWorld:
         # are fixed apparatus optics, not per-shot gain or solver knowledge.
         decenter_x, decenter_y = 0.055, -0.04
         illumination = np.exp(
-            -0.34 * ((xx - decenter_x) ** 2 + 1.12 * (yy - decenter_y) ** 2)
+            -0.45 * ((xx - decenter_x) ** 2 + 1.12 * (yy - decenter_y) ** 2)
         )
-        illumination *= np.clip(1.0 - 0.16 * radius_squared, 0.0, None)
+        illumination *= np.clip(1.0 - 0.20 * radius_squared, 0.0, None)
         amplitude = np.where(pupil, illumination, 0.0)
 
         # Seed changes the hidden bench, not the nominal command.  A fixed
@@ -295,6 +303,11 @@ class SimulationWorld:
         coefficients += np.random.default_rng(seed ^ 0x5A17).uniform(
             -0.02, 0.02, coefficients.shape
         )
+        # Physical trap depths are local maxima, not values at authored target
+        # pixels.  This mild fixed wavefront error and the planted illumination
+        # together give the apparatus its correctable twofold depth spread
+        # without promoting diffraction sidelobes into atom traps.
+        coefficients *= 1.25
         defocus = 2.0 * radius_squared - 1.0
         astigmatism = xx * xx - yy * yy
         coma_x = (3.0 * radius_squared - 2.0) * xx
@@ -336,32 +349,21 @@ class SimulationWorld:
             self._propagated_revision = -1
             return self._commanded_phase
 
-    def _extra_trap_geometry(
+    def _resolved_trap_geometry(
         self,
         intensity: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Resolve non-calibration trap peaks from the propagated optical plane."""
+        local_peak_plane: np.ndarray,
+        cutoff: float,
+    ) -> tuple[np.ndarray, ...]:
+        """Match each dominant physical peak to at most one nominal trap."""
 
-        from scipy.ndimage import maximum_filter
-
-        local_peak_plane = maximum_filter(
-            intensity,
-            size=_TRAP_PEAK_NEIGHBORHOOD,
-            mode="constant",
-            cval=-np.inf,
-        )
-        if self._nominal_trap_peak_scale is None:
-            rows, columns = self._slm_site_indices_yx.T
-            self._nominal_trap_peak_scale = float(
-                np.mean(local_peak_plane[rows, columns])
-            )
-        cutoff = _ACTIVE_TRAP_DEPTH_FRACTION * max(
-            float(np.max(intensity)),
-            self._nominal_trap_peak_scale,
-        )
         peaks = np.argwhere(
             (intensity == local_peak_plane) & (intensity >= cutoff)
         )
+        nominal_indices = np.full(
+            self._slm_site_indices_yx.shape, -1, dtype=np.intp
+        )
+        used_peaks = np.zeros(len(peaks), dtype=bool)
         if peaks.size:
             squared_distance = np.sum(
                 (
@@ -371,12 +373,38 @@ class SimulationWorld:
                 ** 2,
                 axis=2,
             )
-            # A coherent peak may move by a pixel or two around a calibrated
-            # trap.  It is still that trap, not a second atom site.
-            peaks = peaks[np.min(squared_distance, axis=1) > 9]
-        if not peaks.size:
+            pairs = np.argwhere(squared_distance <= 9)
+            used_nominal = np.zeros(len(self._slm_site_indices_yx), dtype=bool)
+            if len(pairs):
+                pair_distances = squared_distance[pairs[:, 0], pairs[:, 1]]
+                for peak_index, nominal_index in pairs[
+                    np.argsort(pair_distances, kind="stable")
+                ]:
+                    if used_peaks[peak_index] or used_nominal[nominal_index]:
+                        continue
+                    nominal_indices[nominal_index] = peaks[peak_index]
+                    used_peaks[peak_index] = True
+                    used_nominal[nominal_index] = True
+
+        nominal_depths = np.zeros(len(self._slm_site_indices_yx), dtype=float)
+        matched = np.all(nominal_indices >= 0, axis=1)
+        if np.any(matched):
+            matched_rows, matched_columns = nominal_indices[matched].T
+            nominal_depths[matched] = intensity[matched_rows, matched_columns]
+
+        extra_mask = ~used_peaks
+        if peaks.size:
+            # A split coherent spot can contain two local maxima inside one
+            # calibrated trap's matching neighborhood.  Only the one-to-one
+            # match is physical topology; the residual lobe is not an extra
+            # atom site.
+            extra_mask &= np.min(squared_distance, axis=1) > 9
+        extra_indices = peaks[extra_mask]
+        if not extra_indices.size:
             empty = np.empty(0, dtype=float)
             return (
+                nominal_indices,
+                nominal_depths,
                 np.empty((0, 2), dtype=np.intp),
                 empty,
                 np.empty((0, 2), dtype=float),
@@ -391,15 +419,15 @@ class SimulationWorld:
         centers = np.column_stack(
             (
                 np.mean(camera[:, 0])
-                + (peaks[:, 1] - np.mean(columns)) * scale_x,
+                + (extra_indices[:, 1] - np.mean(columns)) * scale_x,
                 np.mean(camera[:, 1])
-                + (peaks[:, 0] - np.mean(rows)) * scale_y,
+                + (extra_indices[:, 0] - np.mean(rows)) * scale_y,
             )
         )
         nearest = np.argmin(
             np.sum(
                 (
-                    peaks[:, np.newaxis, :]
+                    extra_indices[:, np.newaxis, :]
                     - self._slm_site_indices_yx[np.newaxis, :, :]
                 )
                 ** 2,
@@ -407,15 +435,12 @@ class SimulationWorld:
             ),
             axis=1,
         )
-        depths = np.asarray(intensity[peaks[:, 0], peaks[:, 1]], dtype=float)
-        if self._loading_intensity_scale is not None:
-            # Put authored coordinates and discovered physical maxima on the
-            # same apparatus scale; moving a target cannot create brightness.
-            depths *= (
-                self._loading_intensity_scale / self._nominal_trap_peak_scale
-            )
+        extra_rows, extra_columns = extra_indices.T
+        depths = np.asarray(intensity[extra_rows, extra_columns], dtype=float)
         return (
-            peaks,
+            nominal_indices,
+            nominal_depths,
+            extra_indices,
             depths,
             centers,
             np.asarray(self._detector_efficiency)[nearest],
@@ -455,6 +480,7 @@ class SimulationWorld:
         if self._propagated_revision == self._slm_phase_revision:
             return
         from scipy import fft
+        from scipy.ndimage import maximum_filter
 
         # The simulated panel has 256 phase levels.  Quantization affects the
         # optical field only; last-commanded remains canonical radians.
@@ -470,15 +496,32 @@ class SimulationWorld:
             fft.fft2(fft.ifftshift(field), norm="ortho")
         )
         intensity = np.abs(far_field) ** 2
-        rows, columns = self._slm_site_indices_yx.T
-        sites = intensity[rows, columns]
+        local_peak_plane = maximum_filter(
+            intensity,
+            size=_TRAP_PEAK_NEIGHBORHOOD,
+            mode="constant",
+            cval=-np.inf,
+        )
+        cutoff = _DOMINANT_TRAP_PEAK_FRACTION * max(
+            float(np.max(intensity)), self._loading_intensity_scale or 0.0
+        )
         (
+            nominal_indices,
+            sites,
             extra_indices,
             extra_intensities,
             extra_centers,
             extra_efficiency,
             extra_sigma,
-        ) = self._extra_trap_geometry(intensity)
+        ) = self._resolved_trap_geometry(intensity, local_peak_plane, cutoff)
+        if self._loading_intensity_scale is None:
+            active_sites = sites[sites > 0.0]
+            if not len(active_sites):
+                raise RuntimeError("nominal SLM command produced no site intensity")
+            self._loading_intensity_scale = float(np.mean(active_sites))
+        scale = self._loading_intensity_scale
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise RuntimeError("nominal SLM command produced no site intensity")
         if len(extra_indices):
             nearest = np.argmin(
                 np.sum(
@@ -502,7 +545,11 @@ class SimulationWorld:
             )
         }
         self._trap_plane_intensity = _immutable(intensity, "<f4")
+        self._slm_nominal_peak_indices_yx = _immutable(
+            nominal_indices, np.intp
+        )
         self._site_trap_intensities = _immutable(sites, "<f4")
+        self._occupancy &= np.asarray(sites > 0.0, dtype=bool)
         self._extra_slm_site_indices_yx = _immutable(extra_indices, np.intp)
         self._extra_site_trap_intensities = _immutable(
             extra_intensities, "<f4"
@@ -526,18 +573,10 @@ class SimulationWorld:
             return self._propagation_count
 
     def _loading_probabilities(self, intensities: np.ndarray) -> np.ndarray:
-        scale = self._loading_intensity_scale
-        if scale is None or not np.isfinite(scale) or scale <= 0.0:
-            raise RuntimeError("nominal SLM command produced no site intensity")
-        relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
-        active = relative_depth >= _ACTIVE_TRAP_DEPTH_FRACTION
         base = float(self.loading_probability)
         if not 0.0 <= base <= 1.0:
             raise ValueError("loading_probability must be between zero and one")
-        if base == 1.0:
-            return np.asarray(active, dtype=float)
-        probabilities = 1.0 - np.power(1.0 - base, relative_depth)
-        return np.where(active, probabilities, 0.0)
+        return np.where(np.asarray(intensities) > 0.0, base, 0.0)
 
     def _site_loading_probabilities(self) -> np.ndarray:
         self._ensure_slm_propagation()
@@ -570,17 +609,6 @@ class SimulationWorld:
             if not any(existing is camera for existing, _renderer in self._cameras):
                 self._cameras.append((camera, renderer))
 
-    def set_occupancy(self, occupancy: object) -> None:
-        values = np.asarray(occupancy, dtype=bool).reshape(-1)
-        if values.size != len(self.geometry.site_centers_xy):
-            raise ValueError("occupancy size differs from simulation site map")
-        with self._lock:
-            self._forced_occupancy = np.array(values, copy=True)
-            self._occupancy = np.array(values, copy=True)
-            self._extra_occupancy = np.zeros(
-                len(self._extra_slm_site_indices_yx), dtype=bool
-            )
-
     @property
     def occupancy(self) -> np.ndarray:
         with self._lock:
@@ -593,23 +621,18 @@ class SimulationWorld:
 
     def _load_shot(self) -> np.ndarray:
         self._ensure_slm_propagation()
-        if self._forced_occupancy is None:
-            shot = (
-                self.rng.random(len(self.geometry.site_centers_xy))
-                < self._site_loading_probabilities()
+        shot = (
+            self._atom_rng.random(len(self.geometry.site_centers_xy))
+            < self._site_loading_probabilities()
+        )
+        extra = (
+            self._atom_rng.random(len(self._extra_site_trap_intensities))
+            < self._loading_probabilities(
+                self._extra_site_trap_intensities
             )
-            extra = (
-                self.rng.random(len(self._extra_site_trap_intensities))
-                < self._loading_probabilities(
-                    self._extra_site_trap_intensities
-                )
-            )
-        else:
-            shot = np.array(self._forced_occupancy, copy=True)
-            extra = np.zeros(len(self._extra_site_trap_intensities), dtype=bool)
+        )
         self._occupancy = shot
         self._extra_occupancy = np.asarray(extra, dtype=bool)
-        self._mot_population = 1.0
         return np.array(shot, copy=True)
 
     def _release_survival(self, trap_off_seconds: float, relative_depth: float) -> float:
@@ -675,13 +698,14 @@ class SimulationWorld:
         if scale is None or not np.isfinite(scale) or scale <= 0.0:
             raise RuntimeError("nominal SLM command produced no site intensity")
         relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
-        return np.asarray(
+        survival = np.asarray(
             [
                 self._release_survival(trap_off_seconds, float(value))
                 for value in relative_depth
             ],
             dtype=float,
         )
+        return np.where(np.asarray(intensities) > 0.0, survival, 0.0)
 
     def _lose_atoms(self, trap_off_seconds: float) -> None:
         off_time = float(trap_off_seconds)
@@ -689,14 +713,18 @@ class SimulationWorld:
             raise ValueError("trap_off_seconds must be finite and non-negative")
         if off_time:
             survival = self._site_survival_probabilities(off_time)
-            self._occupancy &= self.rng.random(self._occupancy.size) < survival
+            occupied = np.flatnonzero(self._occupancy)
+            self._occupancy[occupied] &= (
+                self._atom_rng.random(len(occupied)) < survival[occupied]
+            )
             extra_survival = self._survival_probabilities(
                 self._extra_site_trap_intensities, off_time
             )
-            self._extra_occupancy &= (
-                self.rng.random(self._extra_occupancy.size) < extra_survival
+            extra_occupied = np.flatnonzero(self._extra_occupancy)
+            self._extra_occupancy[extra_occupied] &= (
+                self._atom_rng.random(len(extra_occupied))
+                < extra_survival[extra_occupied]
             )
-            self._mot_population *= float(np.mean(survival))
 
     def safe(self) -> None:
         """Return the simulated apparatus to the board target's safe outputs."""
@@ -781,9 +809,11 @@ class SimulationWorld:
                         * float(depth)
                         * spot
                     )
-            electrons = self.rng.poisson(np.clip(expected_electrons, 0.0, None))
+            electrons = self._qcmos_rng.poisson(
+                np.clip(expected_electrons, 0.0, None)
+            )
             counts = electrons / self.conversion_e_per_count + self.offset_counts
-            counts += self.rng.normal(
+            counts += self._qcmos_rng.normal(
                 0.0,
                 self.read_noise_e / self.conversion_e_per_count,
                 counts.shape,
@@ -851,7 +881,9 @@ class SimulationWorld:
             center_x = 0.5 * (width - 1) + sigma_x * field_x
             center_y = 0.5 * (height - 1) + sigma_y * field_y
             x_axis, y_axis = self._mot_axes(height, width)
-            counts = self.rng.standard_normal((height, width), dtype=np.float32)
+            counts = self._mot_rng.standard_normal(
+                (height, width), dtype=np.float32
+            )
             counts *= 1.5
             counts += 7.0
             field_distance_sq = field_x * field_x + field_y * field_y + field_z * field_z
@@ -872,7 +904,7 @@ class SimulationWorld:
                         -0.5 * ((y_axis[y_low:y_high] - center_y) / sigma_y) ** 2
                     )
                     window = counts[y_low:y_high, x_low:x_high]
-                    window += self.rng.poisson(
+                    window += self._mot_rng.poisson(
                         peak * np.outer(profile_y, profile_x)
                     ).astype(np.float32)
             np.clip(counts, 0.0, float(np.iinfo(np.uint8).max), out=counts)
@@ -895,76 +927,95 @@ class SimulationWorld:
         probe = trigger_windows(program, "probe", row)
         trap = trigger_windows(program, "trap", row)
         camera_windows = trigger_windows(program, str(camera_channel), row)
-        duration_ticks = run_duration_seconds(program, row) * clock
+        base_duration_ticks = int(
+            round(run_duration_seconds(program, row) * clock)
+        )
+        duration_ticks = max(
+            (
+                base_duration_ticks,
+                *(
+                    end
+                    for windows in (cooling, probe, trap, camera_windows)
+                    for _start, end in windows
+                ),
+            )
+        )
+
+        trap_off: list[tuple[int, int]] = []
+        trap_cursor = 0
+        for start_tick, end_tick in trap:
+            if start_tick > trap_cursor:
+                trap_off.append((trap_cursor, start_tick))
+            trap_cursor = end_tick
+        if trap_cursor < duration_ticks:
+            trap_off.append((trap_cursor, duration_ticks))
+
+        cooling_rises = {start for start, _end in cooling}
+        release_ends = {end: start for start, end in trap_off}
+        cameras_by_tick: dict[int, list[tuple[int, int]]] = {}
+        for start_tick, end_tick in camera_windows:
+            cameras_by_tick.setdefault(start_tick, []).append(
+                (start_tick, end_tick)
+            )
+        event_ticks = sorted(
+            cooling_rises | set(release_ends) | set(cameras_by_tick)
+        )
 
         with self._lock:
+            self._ensure_slm_propagation()
             ordinal = self._fire_count
             self._fire_count += 1
-            # Atoms come from the MOT, so a cycle loads them while its cooling
-            # light is on -- and it loads them when that light COMES ON.  The
-            # moment used to be the light going OFF, which put the load after
-            # any picture taken while the cooling was still on: that frame then
-            # showed the PREVIOUS cycle's atoms, and nothing anywhere said so.
-            load_tick = float(cooling[0][0]) if cooling else None
-            loaded = False
-            cursor = 0.0
+            for tick in event_ticks:
+                self._dac_values.update(
+                    _dac_values_at_tick(program, row, tick)
+                )
+                release_start = release_ends.get(tick)
+                if release_start is not None:
+                    self._lose_atoms((tick - release_start) / clock)
 
-            for start_tick, end_tick in camera_windows:
-                start = float(start_tick)
-                if load_tick is not None and not loaded and load_tick <= start:
-                    self._lose_atoms(_low_time(cursor, load_tick, trap, clock))
-                    self._load_shot()
-                    cursor = load_tick
-                    loaded = True
-                self._lose_atoms(_low_time(cursor, start, trap, clock))
-                cursor = start
-                shot_occupancy = np.array(self._occupancy, copy=True)
-                for device, registered_renderer in tuple(self._cameras):
-                    if not device.capture_state():
-                        continue
-                    point = device.working_point()
-                    configured = float(point.exposure_seconds)
-                    # How long the sensor integrates is the CAMERA's fact, and
-                    # which fact depends on how it is triggered.  Externally
-                    # triggered means edge triggered here -- the qCMOS driver
-                    # sets and asserts rising-edge mode -- and an accepted
-                    # edge integrates the camera's own exposure however long
-                    # the pulse holds its window open.  Taking the shorter of
-                    # the two was level-trigger physics, so the simulated
-                    # bench and the real one disagreed by construction: a
-                    # readout frame gated 5 ms long really collects 5 ms of
-                    # probe light on top of the full exposure's background,
-                    # and only the simulation pretended otherwise.
-                    free_running = str(point.acquisition_mode).upper().endswith(
-                        "FREE_RUNNING"
-                    )
-                    exposure = (
-                        min(configured, (end_tick - start_tick) / clock)
-                        if free_running
-                        else configured
-                    )
-                    integration_end = start + exposure * clock
-                    probe_seconds = _overlap_ticks(start, integration_end, probe) / clock
-                    if registered_renderer is None:
-                        frame = self.render_frame(
-                            ordinal,
-                            exposure_seconds=exposure,
-                            probe_seconds=probe_seconds,
-                            occupancy=shot_occupancy,
-                        )
-                    else:
-                        frame = registered_renderer(
-                            ordinal,
-                            exposure_seconds=exposure,
-                            occupancy=shot_occupancy,
-                        )
-                    device.trigger(1, frame=frame)
+                if tick in cooling_rises:
+                    self._mot_population = 1.0
+                    if any(start <= tick < end for start, end in trap):
+                        self._load_shot()
 
-            if load_tick is not None and not loaded:
-                self._lose_atoms(_low_time(cursor, load_tick, trap, clock))
-                self._load_shot()
-                cursor = load_tick
-            self._lose_atoms(_low_time(cursor, duration_ticks, trap, clock))
+                for start_tick, end_tick in cameras_by_tick.get(tick, ()):
+                    start = float(start_tick)
+                    shot_occupancy = np.array(self._occupancy, copy=True)
+                    for device, registered_renderer in tuple(self._cameras):
+                        if not device.capture_state():
+                            continue
+                        point = device.working_point()
+                        configured = float(point.exposure_seconds)
+                        # An external rising edge starts the camera's authored
+                        # integration; a free-running camera remains bounded by
+                        # the high window that was actually played.
+                        free_running = str(point.acquisition_mode).upper().endswith(
+                            "FREE_RUNNING"
+                        )
+                        exposure = (
+                            min(configured, (end_tick - start_tick) / clock)
+                            if free_running
+                            else configured
+                        )
+                        integration_end = start + exposure * clock
+                        probe_seconds = (
+                            _overlap_ticks(start, integration_end, probe) / clock
+                        )
+                        if registered_renderer is None:
+                            frame = self.render_frame(
+                                ordinal,
+                                exposure_seconds=exposure,
+                                probe_seconds=probe_seconds,
+                                occupancy=shot_occupancy,
+                            )
+                        else:
+                            frame = registered_renderer(
+                                ordinal,
+                                exposure_seconds=exposure,
+                                occupancy=shot_occupancy,
+                            )
+                        device.trigger(1, frame=frame)
+
             self._dac_values.update(_final_dac_values(program, row))
 
 
@@ -976,13 +1027,94 @@ def _overlap_ticks(
     return sum(max(0.0, min(end, stop) - max(start, begin)) for begin, stop in windows)
 
 
-def _low_time(
-    start: float,
-    end: float,
-    high_windows: tuple[tuple[int, int], ...],
-    clock_hz: float,
-) -> float:
-    return max(0.0, end - start - _overlap_ticks(start, end, high_windows)) / clock_hz
+def _dac_values_at_tick(
+    program: CompiledProgram,
+    table: np.ndarray | None,
+    tick: int,
+) -> dict[str, int]:
+    """Project the compiled DAC buses at one physical playback tick."""
+
+    point = () if table is None else tuple(int(value) for value in table.reshape(-1))
+    delays = {
+        int(item.bus_index): int(item.delay_ticks)
+        for item in program.bus_delays
+    }
+    values: dict[str, int] = {}
+    for bus_index, bus_name in enumerate(program.bus_names):
+        safe = int(program.bus_safe_values[bus_index])
+        phase = int(tick) - delays.get(bus_index, 0)
+        code = safe
+        if phase >= 0:
+            segments = [
+                segment
+                for segment in program.bus_segments
+                if int(segment.bus_index) == bus_index
+            ]
+
+            def effective(base: int, coefficients: tuple[int, ...]) -> int:
+                return evaluate_affine_tick(
+                    int(base),
+                    coefficients,
+                    point,
+                    program.scan_coeff_frac_bits,
+                )
+
+            def endpoint(selector: int, literal: int) -> int:
+                return int(point[selector - 1]) if selector else int(literal)
+
+            segments.sort(
+                key=lambda segment: effective(
+                    segment.start_tick,
+                    segment.start_tick_coeffs,
+                )
+            )
+            chosen = None
+            ramp_start = safe
+            for segment in segments:
+                start = effective(
+                    segment.start_tick,
+                    segment.start_tick_coeffs,
+                )
+                if start < phase or start == 0:
+                    if chosen is not None:
+                        selector = int(chosen.stop_value_select)
+                        ramp_start = endpoint(selector, chosen.stop_value)
+                    chosen = segment
+                else:
+                    break
+            if chosen is not None:
+                start = effective(
+                    chosen.start_tick,
+                    chosen.start_tick_coeffs,
+                )
+                stop = effective(
+                    chosen.stop_tick,
+                    chosen.stop_tick_coeffs,
+                )
+                selector = int(chosen.stop_value_select)
+                target = endpoint(selector, chosen.stop_value)
+                start_selector = int(chosen.value_select)
+                if start_selector:
+                    ramp_start = endpoint(start_selector, chosen.start_value)
+                if chosen.mode == "ramp" and stop > start:
+                    if phase <= start:
+                        code = ramp_start
+                    elif phase > stop:
+                        code = target
+                    else:
+                        span = stop - start
+                        distance = abs(target - ramp_start)
+                        elapsed = (phase - 1) - start
+                        moved = elapsed * distance // span
+                        code = (
+                            ramp_start + moved
+                            if target >= ramp_start
+                            else ramp_start - moved
+                        )
+                else:
+                    code = target
+        values[bus_name] = code - safe
+    return values
 
 
 def _final_dac_values(

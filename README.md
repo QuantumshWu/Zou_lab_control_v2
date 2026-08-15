@@ -9,7 +9,7 @@ route for virtual and physical adapters:
 Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
-SLM Editor target -> latest background solve -> explicit Send -> phase
+SLM Editor target -> Mask + ROI/Wavefront -> Final -> explicit Send -> phase
 SLM Feedback(calibration + target + pulse) -> grouped qCMOS fluorescence -> accepted phase NPZ
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
@@ -17,16 +17,41 @@ Image/other Plot Panel -> Panel Edit Save Fig
 TaskConsole and every device Control share the same `Experiment` session,
 named devices, virtual world, and sequencer; Pulse and SLM Editors open on
 demand from their loaded device cards and do not create a second session or IPC
-service. SLM feedback uses multi-shot, detector-normalized atom fluorescence at
-the 35 calibrated qCMOS sites for direct intensity-ratio correction. It neither
-treats a single atom's PSF brightness as trap intensity nor fits a hidden
-wavefront, and it does not claim to observe unmeasured dense-target pixels.
-Its 1% finite-shot gate is intentionally not advertised as a short default
-run: current direct-qCMOS statistics require tens of millions of shots, and
-the two-frame pre/post ratio was rejected because it removes useful loading
-information while adding readout noise. Insufficient authored budgets fail
-without retaining a phase; no hidden virtual truth or relaxed threshold is
-used to manufacture acceptance.
+service. SLM feedback uses the raw occupied-shot site BOX brightness at the 35
+calibrated qCMOS sites for direct intensity-ratio correction; empty shots do
+not enter the mean and no per-site dark/bright normalization is applied. It
+neither treats a single atom's PSF brightness as trap intensity nor fits a
+hidden wavefront, and it does not claim to observe unmeasured dense-target pixels.
+Its 1% finite-shot gate is not claimed complete until the current raw-BOX,
+fresh-loading implementation passes exact qCMOS multi-seed validation.
+Insufficient authored budgets fail without retaining a phase; no hidden
+virtual truth or relaxed threshold is used to manufacture acceptance. Earlier
+shot-count estimates based on depth-dependent loading are obsolete.
+
+The real SLM device type is `slm.hamamatsu_x15213`. **Scan hardware** uses the
+same descriptor route as every other device: it can find an official USB SDK
+controller and head serial, or offer attached `1280 x 1024 @ approximately 60
+Hz` displays as DVI candidates. A DVI candidate is not an identity proof; the
+operator confirms which display is physically connected. The Editor's default
+**Mask** page keeps the two established `490 x 357` logical target/Final plots.
+Mask ROI, the common Wavefront controls (Steering X/Y and Z4-Z6), and Advanced
+Z2/Z3/Z7-Z11 live on separate scrollable pages, so phase controls never shrink
+the plots. It solves a Mask, optionally limits it to a rectangular ROI, adds
+full-raster carrier and unit-pupil Noll Zernike terms, and previews the wrapped
+Final. Loading/saving
+target, Mask or Final and importing a raw 8-bit phase mask do not write the
+SLM; only **Send to SLM** applies Final. The vendor correction BMP stays on the
+experiment computer and is read by the adapter from its configured path, with
+bench-authored sign/offset/orientation, measured `two_pi_gray`, active-raster
+offset and settle. Development-machine readback tests are not optical proof;
+the experiment machine can directly Scan/configure/Send for final bring-up.
+
+Virtual loading follows the same shot logic the experiment expects: every
+cooling rise while the trap output is high independently redraws each active
+trap at one base loading probability. Coherent local depth controls active
+topology, occupied qCMOS brightness and release survival, but never
+exponentially boosts loading; a removed trap loses its atom and cannot
+resurrect it merely by reappearing.
 Calibration publishes only its current capture preview while
 running; after the loop it computes one result, writes its JSON, and passes that
 same result to `zlc_plot` for six PNG report images. Workbench does not display

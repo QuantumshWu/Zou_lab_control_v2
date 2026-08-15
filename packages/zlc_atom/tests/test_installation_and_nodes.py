@@ -57,6 +57,7 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "camera.virtual_mot",
         "sequencer.hardware",
         "sequencer.virtual",
+        "slm.hamamatsu_x15213",
         "slm.virtual",
     )
     assert not any(item.type_id.startswith(("rf", "mot", "temperature")) for item in descriptors)

@@ -9,14 +9,40 @@ Virtual implementations live only under
 `devices/simulation/`: `VirtualCamera` satisfies the same runtime-checkable
 `CameraAdapter` contract as DCAM/Pylon, and `VirtualSequencer` is a
 `SequencerDevice` over the same pulse-device surface as hardware. `VirtualSLM`
-implements the same narrow `SlmAdapter` phase contract that a future real
-Hamamatsu plugin will implement once its actual SDK is available.
+and the real Hamamatsu LCOS-SLM X15213 leaf implement the same narrow
+`SlmAdapter` canonical-radians contract.
 
-The `slm.virtual` leaf opens its concrete SLM Editor lazily from the loaded
-device card. The Editor has one continuous non-negative target, solves its
-latest edit in the background, and leaves the commanded phase unchanged while
-loading or saving targets and phases. Only **Send to SLM** takes a short
-exclusive claim and applies a phase; closing the Editor preserves that phase.
+Both `slm.virtual` and `slm.hamamatsu_x15213` open the concrete SLM Editor
+lazily from the loaded device card. The Editor has one continuous non-negative
+target and solves only its latest edit into a Mask/base phase in the background.
+The default **Mask** page retains two `490 x 357` logical target/Final plots.
+Mask ROI, common Wavefront controls (Steering X/Y, Z4-Z6 and Reset), and
+Advanced Z2/Z3/Z7-Z11 controls are separate scrollable pages; the Advanced tab
+also reports how many hidden coefficients are active. The Mask can be limited
+to an authored ROI; full-raster X/Y carrier and unit-pupil Noll coefficients
+are then added to make the displayed Final canonical phase. Target JSON and
+Mask/Final NPZ load/save never write hardware.
+An imported raw phase-mask image must be two-dimensional 8-bit grayscale and is
+mapped as `gray * 2*pi/256`; it may match the complete device or an enabled ROI
+and is explicitly not the vendor correction/LUT. Loading Final resets the
+layers for an exact roundtrip. Only **Send to SLM** takes a short exclusive
+claim and applies Final; closing the Editor preserves the currently commanded
+phase.
+
+The X15213 leaf supports the series' `1272 x 1024` active LCOS raster through
+either official USB frame memory or a `1280 x 1024 @ approximately 60 Hz` DVI
+display. Generic **Scan hardware** reports a USB candidate only when the local
+official `hpkSLMdaLV.dll` and `hpkSLMda.dll` can open a controller and read its
+head serial. It reports attached displays with the required raster/timing as
+DVI candidates, but display enumeration cannot prove which one is the SLM, so
+the operator must confirm it. Scan does not send a phase. USB performs byte
+readback; DVI requires an exact unscaled full-raster presenter. Radians-to-gray
+uses the bench-measured `two_pi_gray`; wavelength is record-only and no LUT is
+inferred. The vendor correction BMP stays on the experiment machine and is
+loaded by path as either `1272 x 1024` active or `1280 x 1024` full-raster
+8-bit grayscale, with authored sign/offset, active-X, flips, and settle. These
+paths are ready for experiment-machine bring-up, while development-machine
+mock/readback tests are not optical acceptance.
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
 Qt dependency. Calibration consumes a project-owned
@@ -101,21 +127,22 @@ ordinary curve. It does not fit a temperature or lifetime and does not derive
 a 1/e crossing.
 
 The `slm_feedback` Task accepts one complete 5 x 7 sparse target aligned to the
-35 calibrated atom sites. It extracts exact grouped qCMOS images with the
-frozen site/PSF model, subtracts the dark response, normalizes by each site's
-dark-to-bright response, and averages occupancy-weighted fluorescence across
-many shots. This is a loading/survival-mediated feedback observable, not a
-claim that one atom's PSF brightness is trap intensity. The Task directly
+35 calibrated atom sites. It extracts the same per-site BOX feature as
+Calibration and averages the raw finite values only for shots that the shared
+`OccupancyProcessor` marks occupied; empty shots never enter the denominator,
+and the loop does not divide by each site's dark/bright response. This is the
+direct qCMOS observable requested by the experiment, not a claim that one
+atom's PSF brightness is hidden trap truth. The Task directly
 updates `w_i *= (GM(F) / F_i) ** 0.45`; it performs no Zernike, modal, hidden
 aberration, or continuous-wavefront fit, and it makes no claim about pixels
 between the qCMOS-observed sites. Success reapplies and saves the independently
 validated phase; Stop or failure restores the incoming phase.
-The shipped defaults are functional acquisition defaults, not evidence that a
-1% finite-shot acceptance is quick: direct qCMOS shot-noise screens place that
-gate at tens of millions of shots. A pre/post ratio is deliberately not used;
-it cancels loading information and adds a second frame's noise. The Task must
-therefore fail honestly when its authored shot budget is insufficient rather
-than lower the criterion or read virtual hidden truth.
+The shipped defaults are functional acquisition defaults, not evidence of 1%
+finite-shot acceptance. Earlier shot-count screens depended on a rejected
+depth-dependent loading model and are not current evidence. The raw occupied
+BOX observable must pass fresh exact-qCMOS, multi-seed validation; until then
+the Task fails honestly when its authored budget is insufficient rather than
+lowering the criterion or reading virtual hidden truth.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,
@@ -127,6 +154,15 @@ the cycle's `frames` signal uses `facet_grid`, with one or many readout-event
 rows as authored; switching Auto preview off only prevents the panel from
 opening automatically.
 Virtual and physical cameras differ only below the adapter boundary.
+
+In the shared virtual world, every cooling rising edge while `trap` is high is
+a fresh shot: each currently active trap receives an independent draw at the
+same authored base loading probability, while an inactive/missing trap has
+probability zero.
+Local coherent trap depth does not exponentially or otherwise raise loading;
+it affects occupied-atom qCMOS brightness and release survival. Changing the
+SLM topology therefore removes atoms from vanished traps, and restoring a trap
+does not resurrect its old atom without a later cooling load.
 
 ## Executable integration path
 

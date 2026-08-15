@@ -674,7 +674,9 @@ def _two_camera_window_pulse(workspace) -> str:
     return two_window.name
 
 
-def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
+def test_a_facet_of_frames_shows_each_frames_own_site_states(
+    tmp_path,
+) -> None:
     """THE picture: frame_0 | frame_1, each cell carrying its OWN judgement.
 
     A camera cycle's frames are point rows, and a grid faceted over them is
@@ -699,10 +701,6 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
         world = installation.world
         centers = np.asarray(world.geometry.site_centers_xy, dtype=float)
         sites = len(centers)
-        loaded = np.zeros(sites, dtype=bool)
-        loaded[::2] = True
-        world.set_occupancy(loaded)
-
         name = _two_camera_window_pulse(tmp_path)
         sequence = read_pulse(tmp_path / "pulses" / f"{name}.json").sequence
         config = load_streamer_config()
@@ -722,6 +720,8 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(tmp_path) -> None:
         capture = node.prepare()
         sequencer.fire()
         sequencer.wait_done(2.0)
+        loaded = world.occupancy
+        assert np.any(loaded) and np.any(~loaded)
         frames = capture.collect().publication.value(node.signal_key("frames"))
         assert frames is not None
         cycle = np.asarray(frames.snapshot.block.values)
