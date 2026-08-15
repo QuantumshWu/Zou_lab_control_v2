@@ -10,7 +10,9 @@ import threading
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 from zlc_data import SPATIAL_X, SPATIAL_Y
-from zlc_plot import AxisRef, ImagePlot, PlotLabels, RasterPlotHost
+from zlc_plot import (
+    PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels, RasterPlotHost,
+)
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
     FluentScrollArea, FluentSpinBox, FluentSwitch, FluentTabWidget,
@@ -38,6 +40,7 @@ _ZERNIKE = (
     ("trefoil_x", "Noll Z10 · X trefoil", "√8x(x²−3y²)"),
     ("spherical", "Noll Z11 · Spherical", "√5(6r⁴−6r²+1)"),
 )
+_DEFAULT_PLOT_SIZE = "2x2"
 
 
 def _snapshot(values: np.ndarray, signal: str, revision: int):
@@ -59,7 +62,7 @@ def _host(values: np.ndarray, signal: str, title: str) -> RasterPlotHost:
         # One plot occupies half of the Editor row.  ``2x2`` is the standing
         # 490 x 357 logical viewport users had before phase-layer controls;
         # settings live on separate tabs instead of shrinking this surface.
-        size="2x2",
+        size=_DEFAULT_PLOT_SIZE,
     )
 
 
@@ -135,6 +138,13 @@ class SlmEditorControl(QtCore.QObject):
         )
         self._selectors.toggled.connect(self._set_selectors_enabled)
         controls.addWidget(self._selectors)
+        controls.addWidget(QtWidgets.QLabel("Size"))
+        self._plot_size = FluentComboBox(edit)
+        self._plot_size.addItems(PANEL_SIZE_NAMES)
+        self._plot_size.setCurrentText(_DEFAULT_PLOT_SIZE)
+        self._plot_size.setMinimumWidth(76)
+        self._plot_size.activated[int].connect(self._plot_size_picked)
+        controls.addWidget(self._plot_size)
         self._preset = FluentComboBox(edit)
         self._preset.addItems((
             "5 x 7 grid", "5 x 7 checkerboard", "Flat-top rectangle",
@@ -153,17 +163,21 @@ class SlmEditorControl(QtCore.QObject):
         root.addWidget(edit)
 
         self._plot_panel = QtWidgets.QWidget(page)
-        self._plot_panel.setMinimumHeight(350)
         panes = QtWidgets.QHBoxLayout(self._plot_panel)
         panes.setContentsMargins(0, 0, 0, 0)
+        panes.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
         self._target_widget = self._target_host.qt_widget()
-        self._target_widget.setMinimumHeight(350)
         self._target_widget.installEventFilter(self)
         panes.addWidget(self._target_widget, 1)
         self._phase_widget = self._phase_host.qt_widget()
-        self._phase_widget.setMinimumHeight(350)
         panes.addWidget(self._phase_widget, 1)
-        root.addWidget(self._plot_panel, 1)
+        self._plot_scroll = FluentScrollArea(page)
+        self._plot_scroll.setWidgetResizable(False)
+        self._plot_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self._plot_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self._plot_scroll.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self._plot_scroll.setWidget(self._plot_panel)
+        root.addWidget(self._plot_scroll, 1)
 
         files, buttons = FluentFrame(page), QtWidgets.QHBoxLayout()
         files.setLayout(buttons)
@@ -195,6 +209,14 @@ class SlmEditorControl(QtCore.QObject):
         self._status = QtWidgets.QLabel("Solving latest target…", page)
         root.addWidget(self._status)
         return page
+
+    def _plot_size_picked(self, _index: int) -> None:
+        """Resize both independent plot surfaces through zlc_plot's presets."""
+
+        selected = self._plot_size.currentText()
+        self._target_host.set_size(selected)
+        self._phase_host.set_size(selected)
+        self._status.setText(f"Plot size {selected}; hardware unchanged")
 
     @staticmethod
     def _settings_page(

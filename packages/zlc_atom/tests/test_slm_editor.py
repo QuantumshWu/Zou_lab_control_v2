@@ -557,7 +557,7 @@ def test_mask_wavefront_roi_compose_and_final_load_roundtrip(
         session.installation.close()
 
 
-def test_editor_keeps_the_original_large_plot_page_and_scrolls_settings(
+def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surfaces(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import zlc_atom.devices.slm.editor as editor
@@ -590,13 +590,71 @@ def test_editor_keeps_the_original_large_plot_page_and_scrolls_settings(
             lambda: (
                 control._target_host.logical_size == (490, 357)
                 and control._phase_host.logical_size == (490, 357)
+                and control._target_widget.size() == QtCore.QSize(490, 357)
+                and control._phase_widget.size() == QtCore.QSize(490, 357)
+                and not control._target_widget.geometry().intersects(
+                    control._phase_widget.geometry()
+                )
             ),
         )
         assert control._plot_panel.height() >= 350
+        assert isinstance(control._plot_scroll, FluentScrollArea)
+        assert not control._plot_scroll.widgetResizable()
+        assert control._plot_scroll.widget() is control._plot_panel
+        assert control._plot_size.currentText() == "2x2"
+        assert tuple(
+            control._plot_size.itemText(index)
+            for index in range(control._plot_size.count())
+        ) == editor.PANEL_SIZE_NAMES
         assert control._target_widget.size() == QtCore.QSize(490, 357)
         assert control._phase_widget.size() == QtCore.QSize(490, 357)
+        assert control._target_widget is not control._phase_widget
+        assert control._target_host is not control._phase_host
+        assert not control._target_widget.geometry().intersects(
+            control._phase_widget.geometry()
+        )
         assert control._plot_panel.layout().stretch(0) == 1
         assert control._plot_panel.layout().stretch(1) == 1
+
+        large_index = control._plot_size.findText("4x4")
+        control._plot_size.setCurrentIndex(large_index)
+        control._plot_size.activated[int].emit(large_index)
+        _pump(
+            app,
+            lambda: (
+                control._target_host.logical_size == (826, 609)
+                and control._phase_host.logical_size == (826, 609)
+                and control._target_widget.size() == QtCore.QSize(826, 609)
+                and control._phase_widget.size() == QtCore.QSize(826, 609)
+                and not control._target_widget.geometry().intersects(
+                    control._phase_widget.geometry()
+                )
+                and control._plot_scroll.horizontalScrollBar().maximum() > 0
+                and control._plot_scroll.verticalScrollBar().maximum() > 0
+            ),
+        )
+        assert control._target_widget.size() == QtCore.QSize(826, 609)
+        assert control._phase_widget.size() == QtCore.QSize(826, 609)
+        assert not control._target_widget.geometry().intersects(
+            control._phase_widget.geometry()
+        )
+        assert control.status_text == "Plot size 4x4; hardware unchanged"
+
+        default_index = control._plot_size.findText("2x2")
+        control._plot_size.setCurrentIndex(default_index)
+        control._plot_size.activated[int].emit(default_index)
+        _pump(
+            app,
+            lambda: (
+                control._target_host.logical_size == (490, 357)
+                and control._phase_host.logical_size == (490, 357)
+                and control._target_widget.size() == QtCore.QSize(490, 357)
+                and control._phase_widget.size() == QtCore.QSize(490, 357)
+                and not control._target_widget.geometry().intersects(
+                    control._phase_widget.geometry()
+                )
+            ),
+        )
 
         for index in (1, 2, 3):
             tabs.setCurrentIndex(index)

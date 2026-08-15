@@ -33,7 +33,7 @@ same descriptor route as every other device: it can find an official USB SDK
 controller and head serial, or offer attached `1280 x 1024 @ approximately 60
 Hz` displays as DVI candidates. A DVI candidate is not an identity proof; the
 operator confirms which display is physically connected. The Editor's default
-**Mask** page keeps the two established `490 x 357` logical target/Final plots.
+**Mask** defaults both independent target/Final plots to the established `2x2 = 490 x 357` logical size. Its shared **Size** selector applies any standing `zlc_plot` preset to both, and the plot row scrolls when the chosen canvases exceed the window.
 Mask ROI, the common Wavefront controls (Steering X/Y and Z4-Z6), and Advanced
 Z2/Z3/Z7-Z11 live on separate scrollable pages, so phase controls never shrink
 the plots. It solves a Mask, optionally limits it to a rectangular ROI, adds

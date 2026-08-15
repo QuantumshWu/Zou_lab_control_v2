@@ -15,7 +15,7 @@ and the real Hamamatsu LCOS-SLM X15213 leaf implement the same narrow
 Both `slm.virtual` and `slm.hamamatsu_x15213` open the concrete SLM Editor
 lazily from the loaded device card. The Editor has one continuous non-negative
 target and solves only its latest edit into a Mask/base phase in the background.
-The default **Mask** page retains two `490 x 357` logical target/Final plots.
+The default **Mask** page retains two independent `2x2 = 490 x 357` logical target/Final plots. A shared **Size** selector applies the standing `zlc_plot` presets to both; the plot row scrolls rather than overlapping or clipping larger canvases.
 Mask ROI, common Wavefront controls (Steering X/Y, Z4-Z6 and Reset), and
 Advanced Z2/Z3/Z7-Z11 controls are separate scrollable pages; the Advanced tab
 also reports how many hidden coefficients are active. The Mask can be limited
