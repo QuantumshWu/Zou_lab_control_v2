@@ -114,7 +114,10 @@ class SlmEditorControl(QtCore.QObject):
         )
         self._request_revision = self._target_revision = self._phase_revision = 0
         self._phase_request_revision: int | None = None
-        self._pending: tuple[int, np.ndarray, str, np.ndarray] | None = None
+        self._spot_optimizer_state: dict[str, object] | None = None
+        self._pending: tuple[
+            int, np.ndarray, str, np.ndarray, dict[str, object] | None
+        ] | None = None
         self._running = self._painting = self._closed = self._cleaned = False
         self._command_active = False
         self._window = None
@@ -519,6 +522,7 @@ class SlmEditorControl(QtCore.QObject):
                 self._pupil_type.setCurrentText(kind)
             amplitude = support
             description = "assumed ellipse · configured unit ellipse"
+        self._spot_optimizer_state = None
         self._pupil_support = support.astype(bool)
         self._pupil_amplitude = amplitude
         self._pupil_applied_description = description
@@ -763,6 +767,13 @@ class SlmEditorControl(QtCore.QObject):
             raise ValueError(f"target shape must be {self.shape!r}")
         if objective_kind not in {"auto", "spots", "image"}:
             raise ValueError("objective_kind must be 'auto', 'spots', or 'image'")
+        keep_optimizer = (
+            self._objective_kind == objective_kind == "spots"
+            and np.any(target > 0.0)
+            and np.array_equal(target > 0.0, self._target > 0.0)
+        )
+        if not keep_optimizer:
+            self._spot_optimizer_state = None
         self._objective_kind = objective_kind
         self._target, self._request_revision = target, self._request_revision + 1
         self._sync_send_enabled()
@@ -778,6 +789,7 @@ class SlmEditorControl(QtCore.QObject):
         self._request_revision += 1
         self._pending = None
         self._phase = canonical_phase(values, self.shape)
+        self._spot_optimizer_state = None
         self._mask_phase = self._phase
         self._phase_request_revision = self._request_revision
         self._phase_metadata = dict(
@@ -817,6 +829,7 @@ class SlmEditorControl(QtCore.QObject):
         self._request_revision += 1
         self._pending = None
         self._mask_phase = canonical_phase(values, self.shape)
+        self._spot_optimizer_state = None
         self._mask_metadata = dict(
             {"source": "loaded mask"} if metadata is None else metadata
         )
@@ -838,11 +851,16 @@ class SlmEditorControl(QtCore.QObject):
         return self._command_active
 
     def _queue_solve(self) -> None:
+        optimizer_state = (
+            dict(self._spot_optimizer_state or {})
+            if self._objective_kind == "spots" else None
+        )
         self._pending = (
             self._request_revision,
             np.array(self._target, copy=True),
             self._objective_kind,
             np.array(self._pupil_amplitude, copy=True),
+            optimizer_state,
         )
         self._status.setText("Solving latest target…")
         if not self._running:
@@ -851,21 +869,26 @@ class SlmEditorControl(QtCore.QObject):
     def _start_pending(self) -> None:
         if self._closed or self._pending is None:
             return
-        revision, target, objective_kind, pupil_amplitude = self._pending
+        revision, target, objective_kind, pupil_amplitude, optimizer_state = (
+            self._pending
+        )
         self._pending, self._running = None, True
         future = self._executor.submit(
             solve_phase, target, initial_phase=np.array(self._mask_phase, copy=True),
             objective_kind=objective_kind,
             pupil_amplitude=pupil_amplitude,
+            spot_optimizer_state=optimizer_state,
             stop_requested=lambda: (
                 self._stop.is_set() or revision != self._request_revision
             ),
         )
-        future.add_done_callback(lambda done: self._solve_ready.emit((revision, done)))
+        future.add_done_callback(
+            lambda done: self._solve_ready.emit((revision, optimizer_state, done))
+        )
 
     @QtCore.pyqtSlot(object)
     def _finish_solve(self, payload: object) -> None:
-        revision, future = payload
+        revision, optimizer_state, future = payload
         self._running = False
         try:
             phase, metadata = future.result()
@@ -878,6 +901,9 @@ class SlmEditorControl(QtCore.QObject):
             if revision == self._request_revision and not self._closed:
                 self._mask_phase = canonical_phase(phase, self.shape)
                 self._mask_metadata = dict(metadata)
+                self._spot_optimizer_state = (
+                    None if optimizer_state is None else dict(optimizer_state)
+                )
                 self._phase_request_revision = revision
                 self._compose_phase()
                 self._status.setText(f"Solved with {metadata['method']}; hardware unchanged")
@@ -1070,6 +1096,7 @@ class SlmEditorControl(QtCore.QObject):
             return True
         if not self._closed:
             self._closed, self._pending = True, None
+            self._spot_optimizer_state = None
             self._stop.set()
             self._body.setEnabled(False)
             self._status.setText("Stopping SLM Editor…")

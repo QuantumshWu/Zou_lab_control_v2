@@ -9,6 +9,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -147,6 +148,161 @@ def test_editor_keeps_only_latest_solve_and_clear_does_not_drive_hardware(
         session.installation.close()
         del control, session
         app.processEvents()
+
+
+def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    calls: list[tuple[str, dict[str, object] | None, bool]] = []
+
+    def controlled_solve(
+        target, *, objective_kind, spot_optimizer_state=None,
+        pupil_amplitude=None, **_kwargs,
+    ):
+        incoming = (
+            None if spot_optimizer_state is None else dict(spot_optimizer_state)
+        )
+        calls.append((objective_kind, incoming, pupil_amplitude is not None))
+        if objective_kind == "spots":
+            assert spot_optimizer_state is not None
+            spot_optimizer_state.clear()
+            spot_optimizer_state.update({
+                "token": f"accepted-{len(calls)}",
+                "workspace": np.array([len(calls)], dtype=np.float32),
+            })
+        return canonical_phase(np.zeros(target.shape), target.shape), {
+            "method": "test", "iterations": 1,
+        }
+
+    monkeypatch.setattr(editor, "solve_phase", controlled_solve)
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1] == ("spots", {}, True)
+        accepted_workspace = control._spot_optimizer_state["workspace"]
+
+        same_support = np.where(control._target > 0.0, 3.0, 0.0).astype(np.float32)
+        control.set_target(same_support, objective_kind="spots")
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1][1]["workspace"] is accepted_workspace
+
+        mask_path, phase_path = tmp_path / "mask.npz", tmp_path / "phase.npz"
+        control.save_mask(mask_path)
+        control.save_phase(phase_path)
+        for path in (mask_path, phase_path):
+            with np.load(path, allow_pickle=False) as archive:
+                assert set(archive.files) == {"phase", "metadata"}
+            _phase, metadata = editor.load_phase(path)
+            assert "spot_optimizer_state" not in repr(metadata)
+            assert "workspace" not in repr(metadata)
+
+        control._apply_pupil()
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1] == ("spots", {}, True)
+        control._apply_pupil()
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1] == ("spots", {}, True)
+
+        changed_support = np.array(control._target, copy=True)
+        changed_support[0, 0] = 1.0
+        control.set_target(changed_support, objective_kind="spots")
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1][1] == {}
+
+        control.set_target(changed_support * 2.0, objective_kind="image")
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1][0:2] == ("image", None)
+        assert control._spot_optimizer_state is None
+        control.set_target(changed_support * 3.0, objective_kind="spots")
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1][1] == {}
+
+        control.set_mask_phase(np.full(control.shape, 0.2), {"source": "mask"})
+        assert control._spot_optimizer_state is None
+        control.set_target(changed_support * 4.0, objective_kind="spots")
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1][1] == {}
+
+        control.set_phase(np.full(control.shape, 0.3), {"source": "science"})
+        assert control._spot_optimizer_state is None
+        control.set_target(changed_support * 5.0, objective_kind="spots")
+        _pump(app, lambda: control.solver_idle)
+        assert calls[-1][1] == {}
+
+        count = len(calls)
+        control.set_target(np.zeros(control.shape), objective_kind="spots")
+        assert control._spot_optimizer_state is None
+        assert len(calls) == count
+        control.set_target(changed_support, objective_kind="spots")
+        _pump(app, lambda: control.solver_idle)
+        assert control._spot_optimizer_state is not None
+        control._finish_close()
+        assert control._spot_optimizer_state is None
+    finally:
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
+@pytest.mark.parametrize("outcome", ("success", "interrupted", "error"))
+def test_editor_discards_nonlatest_spot_optimizer_state(
+    tmp_path: Path, monkeypatch, outcome: str,
+) -> None:
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    inputs: list[dict[str, object]] = []
+    phases = [0.1, 0.2, 0.7]
+
+    def controlled_solve(target, *, spot_optimizer_state=None, **_kwargs):
+        assert spot_optimizer_state is not None
+        inputs.append(dict(spot_optimizer_state))
+        index = len(inputs) - 1
+        spot_optimizer_state.clear()
+        spot_optimizer_state["token"] = ("accepted", "stale", "latest")[index]
+        if index == 1:
+            started.set()
+            release.wait(2.0)
+            if outcome == "interrupted":
+                raise InterruptedError("superseded")
+            if outcome == "error":
+                raise RuntimeError("stale failure")
+        return canonical_phase(np.full(target.shape, phases[index]), target.shape), {
+            "method": "test", "iterations": 1,
+        }
+
+    monkeypatch.setattr(editor, "solve_phase", controlled_solve)
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        _pump(app, lambda: control.solver_idle)
+        accepted = dict(control._spot_optimizer_state)
+        first = np.where(control._target > 0.0, 2.0, 0.0).astype(np.float32)
+        latest = np.where(control._target > 0.0, 3.0, 0.0).astype(np.float32)
+        control.set_target(first, objective_kind="spots")
+        assert started.wait(2.0)
+        control.set_target(latest, objective_kind="spots")
+        release.set()
+        _pump(app, lambda: control.solver_idle)
+
+        assert len(inputs) == 3
+        assert inputs[1] == accepted
+        assert inputs[2] == accepted
+        assert control._spot_optimizer_state == {"token": "latest"}
+        np.testing.assert_array_equal(
+            control._mask_phase,
+            canonical_phase(np.full(control.shape, phases[-1]), control.shape),
+        )
+    finally:
+        release.set()
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
 
 
 def test_send_refuses_a_phase_stale_against_the_latest_target(

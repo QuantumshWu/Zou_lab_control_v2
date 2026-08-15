@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
 
@@ -1386,6 +1387,29 @@ def _support_quality(
     return normalized, ratio, efficiency
 
 
+def _full_fft_returned_quality(
+    phase: np.ndarray,
+    target: np.ndarray,
+    pupil_amplitude: np.ndarray,
+) -> tuple[float, float]:
+    desired = fft.ifftshift(target)
+    support = desired > 0.0
+    field = fft.ifftshift(
+        pupil_amplitude.astype(np.complex64)
+        * np.exp(np.complex64(1j) * phase).astype(np.complex64)
+    )
+    selected = fft.fft2(field, norm="ortho")[support]
+    magnitude = np.abs(selected).astype(np.float32)
+    desired_spots = desired[support]
+    relative = np.square(magnitude, dtype=np.float32) / desired_spots
+    ratio = float(np.max(relative) / np.min(relative))
+    efficiency = float(
+        np.sum(np.square(magnitude, dtype=np.float32))
+        / np.sum(np.square(pupil_amplitude, dtype=np.float32))
+    )
+    return ratio, efficiency
+
+
 def test_slm_solver_validates_authored_pupil_amplitude() -> None:
     target = preset_grid((32, 40), (2, 3), spacing_yx=(9, 8))
     invalid = (
@@ -1501,11 +1525,252 @@ def test_slm_solver_keeps_one_percent_gate_with_authored_pupil() -> None:
     _normalized, ratio, _efficiency = _support_quality(phase, target, pupil)
 
     if metadata["early_stopped"]:
-        assert metadata["quality_streak"] >= 3
         assert metadata["support_intensity_ratio"] <= 1.01
         assert ratio <= 1.01
     else:
         assert metadata["iterations_run"] == metadata["max_iterations"]
+
+
+def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
+    target = preset_grid((64, 80), (3, 4), spacing_yx=(13, 14))
+    yy, xx = np.ogrid[-1.0:1.0:64j, -1.0:1.0:80j]
+    pupil = (
+        (xx * xx + yy * yy <= 0.82**2) * (0.75 + 0.25 * (xx + 1.0) * 0.5)
+    ).astype(np.float32)
+    state: dict[str, object] = {}
+    _base_phase, base_metadata = solve_phase(
+        target,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        iterations=30,
+        seed=23,
+        spot_optimizer_state=state,
+    )
+    assert base_metadata["optimizer_state_status"] == "created"
+    assert state["shape_yx"] == [64, 80]
+    assert len(state["support_yx"]) == 12
+    assert len(state["fixed_farfield_phase"]) == 12
+    assert len(state["site_weights"]) == 12
+    assert len(state["target_amplitudes"]) == 12
+    encoded_state = json.dumps(state, allow_nan=False)
+    assert "optimizer_state" not in base_metadata
+
+    changed = np.zeros_like(target)
+    changed[target > 0.0] = np.linspace(0.8, 1.2, 12, dtype=np.float32)
+    candidate_state = json.loads(encoded_state)
+    candidate, candidate_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        spot_optimizer_state=candidate_state,
+        iterations=1,
+        seed=999,
+    )
+    repeated_state = json.loads(encoded_state)
+    repeated, repeated_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        spot_optimizer_state=repeated_state,
+        iterations=1,
+        seed=1,
+    )
+    np.testing.assert_array_equal(candidate, repeated)
+    assert {
+        key: value for key, value in candidate_metadata.items() if key != "seed"
+    } == {
+        key: value for key, value in repeated_metadata.items() if key != "seed"
+    }
+    assert candidate_state == repeated_state
+    assert candidate_metadata["optimizer_state_status"] == "reused"
+    assert candidate_metadata["hot_start_used"] is True
+    assert candidate_metadata["iterations_run"] == 1
+    assert candidate_metadata["early_stopped"] is False
+    assert candidate_metadata["support_intensity_ratio"] > 1.01
+    candidate_ratio, candidate_efficiency = _full_fft_returned_quality(
+        candidate, changed, pupil
+    )
+    assert candidate_metadata["transform"] == "selected-dft"
+    assert candidate_metadata["support_intensity_ratio"] == pytest.approx(
+        candidate_ratio, rel=2e-5
+    )
+    assert candidate_metadata["diffraction_efficiency"] == pytest.approx(
+        candidate_efficiency, rel=2e-5
+    )
+    old_amplitudes = np.asarray(
+        json.loads(encoded_state)["target_amplitudes"], dtype=np.float32
+    )
+    new_amplitudes = np.sqrt(
+        np.asarray(
+            [changed[tuple(yx)] for yx in candidate_state["support_yx"]],
+            dtype=np.float32,
+        )
+    )
+    new_amplitudes /= np.linalg.norm(new_amplitudes)
+    initialized_weights = np.asarray(
+        json.loads(encoded_state)["site_weights"], dtype=np.float32
+    ) * (new_amplitudes / old_amplitudes)
+    initialized_weights /= np.linalg.norm(initialized_weights)
+    assert not np.allclose(
+        candidate_state["site_weights"], initialized_weights, rtol=1e-6, atol=1e-7
+    )
+    continued_state = json.loads(json.dumps(candidate_state, allow_nan=False))
+    continued, continued_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        spot_optimizer_state=continued_state,
+        iterations=1,
+    )
+    assert continued_metadata["iterations_run"] == 1
+    assert not np.array_equal(continued, candidate)
+
+    accepted_state = json.loads(encoded_state)
+    accepted, accepted_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        spot_optimizer_state=accepted_state,
+    )
+    _normalized, ratio, _efficiency = _support_quality(accepted, changed, pupil)
+    assert accepted_metadata["optimizer_state_status"] == "reused"
+    assert accepted_metadata["hot_start_used"] is True
+    assert accepted_metadata["early_stopped"] is True
+    assert accepted_metadata["iterations_run"] >= 1
+    assert accepted_metadata["support_intensity_ratio"] <= 1.01
+    assert ratio <= 1.01
+
+    stopped_state = json.loads(encoded_state)
+    unchanged = json.dumps(stopped_state, sort_keys=True)
+    stop_calls = 0
+
+    def stop_during_hot_update() -> bool:
+        nonlocal stop_calls
+        stop_calls += 1
+        return stop_calls == 3
+
+    with pytest.raises(InterruptedError):
+        solve_phase(
+            changed,
+            pupil_amplitude=pupil,
+            objective_kind="spots",
+            spot_optimizer_state=stopped_state,
+            stop_requested=stop_during_hot_update,
+        )
+    assert json.dumps(stopped_state, sort_keys=True) == unchanged
+
+
+def test_slm_selected_dft_hot_gate_matches_full_fft_returned_phase() -> None:
+    target = preset_grid((64, 80), (3, 4), spacing_yx=(13, 14))
+    yy, xx = np.ogrid[-1.0:1.0:64j, -1.0:1.0:80j]
+    pupil = (
+        (xx * xx + yy * yy <= 0.82**2) * (0.75 + 0.25 * (xx + 1.0) * 0.5)
+    ).astype(np.float32)
+    state: dict[str, object] = {}
+    solve_phase(
+        target,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        iterations=30,
+        seed=23,
+        spot_optimizer_state=state,
+    )
+    encoded_state = json.dumps(state, allow_nan=False)
+    changed = np.zeros_like(target)
+    changed[target > 0.0] = np.linspace(0.8, 1.2, 12, dtype=np.float32)
+    accepted_state = json.loads(encoded_state)
+    accepted, metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        spot_optimizer_state=accepted_state,
+    )
+    ratio, efficiency = _full_fft_returned_quality(accepted, changed, pupil)
+    assert metadata["transform"] == "selected-dft"
+    assert metadata["support_intensity_ratio"] == pytest.approx(
+        ratio, rel=2e-5
+    )
+    assert metadata["diffraction_efficiency"] == pytest.approx(
+        efficiency, rel=2e-5
+    )
+    assert metadata["early_stopped"] is True
+
+    accepted_iteration = metadata["iterations_run"]
+    exact_state = json.loads(encoded_state)
+    exact, exact_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        iterations=accepted_iteration,
+        spot_optimizer_state=exact_state,
+    )
+    assert exact_metadata["iterations_run"] == accepted_iteration
+    np.testing.assert_array_equal(exact, accepted)
+    if accepted_iteration > 1:
+        previous_state = json.loads(encoded_state)
+        previous, _previous_metadata = solve_phase(
+            changed,
+            pupil_amplitude=pupil,
+            objective_kind="spots",
+            iterations=accepted_iteration - 1,
+            spot_optimizer_state=previous_state,
+        )
+        assert _full_fft_returned_quality(previous, changed, pupil)[0] > 1.01
+
+
+def test_slm_optimizer_state_explicitly_invalidates_on_changed_physics() -> None:
+    target = preset_grid((64, 80), (3, 4), spacing_yx=(13, 14))
+    state: dict[str, object] = {}
+    _phase, metadata = solve_phase(
+        target,
+        objective_kind="spots",
+        iterations=30,
+        seed=23,
+        spot_optimizer_state=state,
+    )
+    assert metadata["optimizer_state_status"] == "created"
+    encoded_state = json.dumps(state, allow_nan=False)
+
+    moved = preset_grid((64, 80), (3, 4), spacing_yx=(12, 15))
+    moved_state = json.loads(encoded_state)
+    _moved_phase, moved_metadata = solve_phase(
+        moved,
+        objective_kind="spots",
+        spot_optimizer_state=moved_state,
+        iterations=20,
+        seed=23,
+    )
+    assert moved_metadata["optimizer_state_status"] == "support-changed"
+    assert moved_metadata["hot_start_used"] is False
+
+    yy, xx = np.ogrid[-1.0:1.0:64j, -1.0:1.0:80j]
+    changed_pupil = (
+        (xx * xx + yy * yy <= 0.75**2) * (0.7 + 0.3 * (xx + 1.0) * 0.5)
+    ).astype(np.float32)
+    pupil_state = json.loads(encoded_state)
+    _pupil_phase, pupil_metadata = solve_phase(
+        target,
+        pupil_amplitude=changed_pupil,
+        objective_kind="spots",
+        spot_optimizer_state=pupil_state,
+        iterations=20,
+        seed=23,
+    )
+    assert pupil_metadata["optimizer_state_status"] == "pupil-changed"
+    assert pupil_metadata["hot_start_used"] is False
+
+    image_state = json.loads(encoded_state)
+    _image_phase, image_metadata = solve_phase(
+        target,
+        objective_kind="image",
+        spot_optimizer_state=image_state,
+        iterations=1,
+        seed=23,
+    )
+    assert image_metadata["optimizer_state_status"] == "objective-changed"
+    assert image_metadata["hot_start_used"] is False
+    assert "optimizer_state" not in image_metadata
+    assert image_state == {}
 
 
 def test_slm_solver_uses_authored_spot_or_image_objective() -> None:
@@ -1571,8 +1836,14 @@ def test_sparse_solver_matches_full_shifted_wgs_kim_quality(cartesian: bool) -> 
     assert efficiency == pytest.approx(reference_efficiency, rel=0.01)
 
 
-def test_sparse_solver_only_early_stops_after_consecutive_one_percent_quality() -> None:
+@pytest.mark.parametrize("irregular", (False, True))
+def test_sparse_solver_early_stops_only_after_exact_returned_phase_quality(
+    irregular: bool,
+) -> None:
     target = preset_grid((64, 64), (2, 3), spacing_yx=(14, 13))
+    if irregular:
+        target = np.array(target, copy=True)
+        target[tuple(np.argwhere(target > 0.0)[-1])] = 0.0
     calls = 0
 
     def keep_running() -> bool:
@@ -1597,7 +1868,7 @@ def test_sparse_solver_only_early_stops_after_consecutive_one_percent_quality() 
     _normalized, ratio, _efficiency = _support_quality(phase, target)
     assert metadata["early_stopped"] is True
     assert metadata["stop_reason"] == "support-ratio"
-    assert metadata["quality_streak"] >= 3
+    assert metadata["transform"] == ("fft" if irregular else "selected-dft")
     assert metadata["support_intensity_ratio"] <= 1.01
     assert ratio <= 1.01
     assert metadata["iterations"] < metadata["max_iterations"]
