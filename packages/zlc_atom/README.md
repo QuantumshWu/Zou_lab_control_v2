@@ -14,23 +14,23 @@ and the real Hamamatsu LCOS-SLM X15213 leaf implement the same narrow
 
 Both `slm.virtual` and `slm.hamamatsu_x15213` open the concrete SLM Editor
 lazily from the loaded device card. The Editor has one continuous non-negative
-target and solves only its latest edit into a Mask/base phase in the background.
-The Editor has only **Mask** and **Wavefront** pages. **Mask** retains two
+target and solves only its latest edit into a Pattern/base phase in the
+background. It has only **Pattern** and **Wavefront** pages. Pattern retains two
 independent `2x2 = 490 x 357` logical target and pre-correction science-phase
 plots. A shared **Size** selector also controls the independent Wavefront
-preview; scrollable canvases avoid overlap or clipping at larger presets. The
-main page exposes the applied input pupil, CGH crop, zero-order steering,
-system Zernike layer, and vendor-correction state. The pupil is either an
-authored ellipse or measured intensity clipped to that same ellipse, and the
-same support drives both solve and Zernike coordinates. Wavefront places the
-full-raster X/Y carrier and Noll Z2-Z11 controls beside its own phase preview.
-Target JSON and Mask/science-phase NPZ load/save never write hardware.
-An imported raw phase-mask image must be two-dimensional 8-bit grayscale and is
-mapped as `gray * 2*pi/256`; it may match the complete device or an enabled ROI
-and is explicitly not the vendor correction/LUT. Loading science phase resets the
-layers for an exact roundtrip. Only **Send to SLM** takes a short exclusive
-claim and applies the science phase; closing the Editor preserves the currently commanded
-phase.
+preview; scrollable canvases avoid overlap or clipping at larger presets.
+
+The main page exposes only Input pupil, Zernike, and vendor correction. Input
+pupil defaults to a centered Gaussian whose `1/e^2` intensity diameter is 70%
+of the SLM height; its center and X/Y diameters are editable, and Off means
+uniform full-raster solver illumination. Wavefront puts full-raster Steering
+X/Y and Noll Z4-Z11 under the same Zernike switch. Pattern authoring offers
+exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
+and English/Chinese Text with both minimum site spacing and atom budget.
+Target JSON and science-phase NPZ load/save never write hardware. Loading a
+science phase resets the Zernike layer for an exact roundtrip. Only **Send to
+SLM** takes a short exclusive claim and applies the science phase; closing the
+Editor preserves the currently commanded phase.
 
 The X15213 leaf supports the series' `1272 x 1024` active LCOS raster through
 either official USB frame memory or a `1280 x 1024 @ approximately 60 Hz` DVI
@@ -39,13 +39,19 @@ official `hpkSLMdaLV.dll` and `hpkSLMda.dll` can open a controller and read its
 head serial. It reports attached displays with the required raster/timing as
 DVI candidates, but display enumeration cannot prove which one is the SLM, so
 the operator must confirm it. Scan does not send a phase. USB performs byte
-readback; DVI requires an exact unscaled full-raster presenter. Radians-to-gray
-uses the bench-measured `two_pi_gray`; wavelength is record-only and no LUT is
-inferred. The vendor correction BMP stays on the experiment machine and is
-loaded by path as either `1272 x 1024` active or `1280 x 1024` full-raster
-8-bit grayscale, with authored sign/offset, active-X, flips, and settle. These
-paths are ready for experiment-machine bring-up, while development-machine
-mock/readback tests are not optical acceptance.
+readback; DVI requires an exact unscaled full-raster presenter and places the
+active image in the left 1272 columns, leaving the right eight columns zero.
+
+Each supported head has a small profile under `devices/slm/profiles/` with its
+serial, readout wavelength, and full 256-point phase calibration curve.
+Authored wavelength builds the nonlinear phase-code-to-drive LUT from that
+curve; it is not record-only and `two_pi_gray` is a computed readout (for
+LSH0804382 at 852 nm it is 225), not an editable constant. A local native
+`L 1272 x 1024` correction BMP is added to the phase code modulo 256 before the
+LUT. A filename containing its source wavelength is unwrapped and converted to
+the authored wavelength without resizing or interpolation. These paths are
+ready for experiment-machine bring-up, while development-machine mock/readback
+tests prove frame bytes rather than controller state or optical acceptance.
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
 Qt dependency. Calibration consumes a project-owned

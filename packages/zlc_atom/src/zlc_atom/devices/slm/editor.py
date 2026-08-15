@@ -15,8 +15,8 @@ from zlc_plot import (
 )
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
-    FluentPopup, FluentScrollArea, FluentSettingsPopupAnchor, FluentSpinBox,
-    FluentSwitch, FluentTabWidget, fluent_open_path, fluent_save_path,
+    FluentLineEdit, FluentPopup, FluentScrollArea, FluentSettingsPopupAnchor,
+    FluentSpinBox, FluentSwitch, FluentTabWidget, fluent_open_path, fluent_save_path,
     open_fluent_window,
 )
 
@@ -24,14 +24,12 @@ from zlc_atom.data import snapshot_from_array
 from .device import SlmAdapter, canonical_phase
 from .solver import (
     imported_target, load_phase, load_target, preset_checkerboard,
-    preset_ellipse, preset_grid, preset_rectangle, preset_ring, save_phase,
+    preset_flat_top, preset_gaussian, preset_grid, preset_text, save_phase,
     save_target, solve_phase, validate_target,
 )
 
 
 _ZERNIKE = (
-    ("tilt_x", "Noll Z2 · X tilt", "2x"),
-    ("tilt_y", "Noll Z3 · Y tilt", "2y"),
     ("defocus", "Noll Z4 · Defocus", "√3(2r²−1)"),
     ("astig_oblique", "Noll Z5 · Oblique astig", "2√6xy"),
     ("astig_vertical", "Noll Z6 · Vertical astig", "√6(x²−y²)"),
@@ -95,20 +93,18 @@ class SlmEditorControl(QtCore.QObject):
         self.shape = tuple(self.device.shape_yx)
         self._target = preset_grid(self.shape, (5, 7))
         self._phase = canonical_phase(self.device.last_commanded_phase, self.shape)
-        self._mask_phase = self._phase
-        self._mask_metadata: dict[str, object] = {"source": "device"}
+        self._pattern_phase = self._phase
+        self._pattern_metadata: dict[str, object] = {"source": "device"}
         self._phase_metadata: dict[str, object] = {"source": "device"}
         self._objective_kind = "spots"
         height, width = self.shape
         self._pupil_center_xy = (0.5 * (width - 1), 0.5 * (height - 1))
-        self._pupil_radius_xy = (0.45 * (width - 1), 0.45 * (height - 1))
-        self._pupil_measured: np.ndarray | None = None
-        self._pupil_measured_name = ""
-        self._pupil_support = self._assumed_pupil(
-            self._pupil_center_xy, self._pupil_radius_xy
-        ).astype(bool)
-        self._pupil_amplitude = self._pupil_support.astype(np.float32)
-        self._pupil_applied_description = "assumed ellipse · configured unit ellipse"
+        default_diameter = 0.70 * height
+        self._pupil_diameter_xy = (default_diameter, default_diameter)
+        self._pupil_support, self._pupil_amplitude = self._pupil_arrays(
+            self._pupil_center_xy, self._pupil_diameter_xy, enabled=True
+        )
+        self._pupil_applied_description = self._pupil_description(True)
         self._wavefront_phase = canonical_phase(
             np.zeros(self.shape, dtype=np.float32), self.shape
         )
@@ -207,53 +203,39 @@ class SlmEditorControl(QtCore.QObject):
         layer_layout.setHorizontalSpacing(8)
         layer_layout.setVerticalSpacing(4)
 
-        self._pupil_title = QtWidgets.QLabel("Input pupil", layers)
-        self._pupil_status = QtWidgets.QLabel("Assumed ellipse", layers)
+        self._pupil_enabled = FluentSwitch("Input pupil", layers)
+        self._pupil_enabled.setChecked(True)
+        self._pupil_enabled.setToolTip(
+            "On uses the configured Gaussian for solver illumination. Off uses "
+            "uniform full-raster illumination; center and diameter still define "
+            "the Zernike unit disk."
+        )
+        self._pupil_status = QtWidgets.QLabel(
+            self._pupil_applied_description, layers
+        )
         self._pupil_edit = FluentButton("Edit…", layers)
         self._build_pupil_popup(page)
         self._pupil_edit.clicked.connect(
             lambda: self._pupil_anchor.toggle(
-                self._pupil_body, minimum_width=430, minimum_height=330,
+                self._pupil_body, minimum_width=430, minimum_height=270,
             )
         )
+        self._pupil_enabled.toggled.connect(self._pupil_toggled)
 
-        self._crop_enabled = FluentSwitch("CGH crop", layers)
-        self._crop_status = QtWidgets.QLabel("Off", layers)
-        self._crop_edit = FluentButton("Edit…", layers)
-        self._build_crop_popup(page)
-        self._crop_edit.clicked.connect(
-            lambda: self._crop_anchor.toggle(
-                self._crop_body, minimum_width=390, minimum_height=260,
-            )
-        )
-
-        self._steering_enabled = FluentSwitch("Zero-order steering", layers)
-        self._steering_enabled.setChecked(True)
-        self._steering_enabled.setToolTip(
-            "Moves the modulated order; a physical Fourier-plane stop/aperture "
-            "is still required to reject zero order."
-        )
-        self._steering_status = QtWidgets.QLabel("On · 0, 0 waves", layers)
-        steering_edit = FluentButton("Edit…", layers)
-        steering_edit.clicked.connect(
-            lambda: self._layer_tabs.setCurrentIndex(self._wavefront_tab_index)
-        )
-
-        self._zernike_enabled = FluentSwitch("Zernike / system wavefront", layers)
-        self._zernike_enabled.setChecked(True)
-        self._zernike_status = QtWidgets.QLabel("On · 0 active", layers)
+        self._zernike_enabled = FluentSwitch("Zernike", layers)
+        self._zernike_enabled.setChecked(False)
+        self._zernike_status = QtWidgets.QLabel("Off", layers)
         zernike_edit = FluentButton("Edit…", layers)
         zernike_edit.clicked.connect(
             lambda: self._layer_tabs.setCurrentIndex(self._wavefront_tab_index)
         )
-        for row, column, widgets in (
-            (0, 0, (self._pupil_title, self._pupil_status, self._pupil_edit)),
-            (0, 3, (self._crop_enabled, self._crop_status, self._crop_edit)),
-            (1, 0, (self._steering_enabled, self._steering_status, steering_edit)),
-            (1, 3, (self._zernike_enabled, self._zernike_status, zernike_edit)),
+        for row, widgets in (
+            (0, (self._pupil_enabled, self._pupil_status, self._pupil_edit)),
+            (1, (self._zernike_enabled, self._zernike_status, zernike_edit)),
         ):
-            for offset, widget in enumerate(widgets):
-                layer_layout.addWidget(widget, row, column + offset)
+            layer_layout.addWidget(widgets[0], row, 0)
+            layer_layout.addWidget(widgets[1], row, 1, 1, 4)
+            layer_layout.addWidget(widgets[2], row, 5)
 
         self._correction_enabled = FluentSwitch("Vendor correction", layers)
         self._correction_status = QtWidgets.QLabel("Unavailable", layers)
@@ -270,8 +252,7 @@ class SlmEditorControl(QtCore.QObject):
         self._correction_load.clicked.connect(partial(self._choose, "correction"))
         self._correction_enabled.toggled.connect(self._set_correction_enabled)
         self._sync_correction_controls()
-        for column in (1, 4):
-            layer_layout.setColumnStretch(column, 1)
+        layer_layout.setColumnStretch(1, 1)
         root.addWidget(layers)
 
         self._plot_panel = QtWidgets.QWidget(page)
@@ -297,21 +278,12 @@ class SlmEditorControl(QtCore.QObject):
             ("Load target", "load_target"),
             ("Import target", "import"),
             ("Save target", "save_target"),
-            ("Load mask", "load_mask"),
-            ("Save mask", "save_mask"),
             ("Load science phase", "load_phase"),
             ("Save science phase", "save_phase"),
         ):
             button = FluentButton(label, files)
             button.clicked.connect(partial(self._choose, action))
             buttons.addWidget(button)
-        self._import_mask = FluentButton("Import mask", files)
-        self._import_mask.setToolTip(
-            "Import an 8-bit grayscale phase mask: gray × 2π/256. This is not "
-            "a correction pattern and does not apply a vendor LUT."
-        )
-        self._import_mask.clicked.connect(partial(self._choose, "import_mask"))
-        buttons.addWidget(self._import_mask)
         buttons.addStretch(1)
         self._send = FluentButton("Send to SLM", files)
         self._send.clicked.connect(self.send)
@@ -349,7 +321,7 @@ class SlmEditorControl(QtCore.QObject):
         form.addWidget(QtWidgets.QLabel("Pattern", body), 0, 0)
         self._preset_type = FluentComboBox(body)
         self._preset_type.addItems(
-            ("Grid", "Checkerboard", "Rectangle", "Ellipse", "Ring")
+            ("Grid", "Checkerboard", "Gaussian", "Flat Top", "Text")
         )
         form.addWidget(self._preset_type, 0, 1)
         specs = (
@@ -358,15 +330,11 @@ class SlmEditorControl(QtCore.QObject):
             ("spacing_y", "Spacing Y", True, max(1, self.shape[0] // 6), 1, self.shape[0]),
             ("spacing_x", "Spacing X", True, max(1, self.shape[1] // 8), 1, self.shape[1]),
             ("intensity", "Intensity", False, 1.0, 0.0, 1000.0),
-            ("intensity_a", "Intensity A", False, 1.0, 0.0, 1000.0),
-            ("intensity_b", "Intensity B", False, 0.25, 0.0, 1000.0),
-            ("height", "Height", True, max(2, self.shape[0] // 3), 1, self.shape[0]),
-            ("width", "Width", True, max(2, self.shape[1] // 2), 1, self.shape[1]),
             ("edge", "Edge", False, max(2, min(self.shape) // 32), 0.0, min(self.shape)),
-            ("radius_y", "Radius Y", True, max(1, self.shape[0] // 6), 1, self.shape[0] // 2),
-            ("radius_x", "Radius X", True, max(1, self.shape[1] // 4), 1, self.shape[1] // 2),
-            ("radius", "Radius", True, max(1, min(self.shape) // 4), 1, min(self.shape) // 2),
-            ("ring_width", "Ring width", True, max(1, min(self.shape) // 12), 1, min(self.shape)),
+            ("radius_y", "Radius Y", False, max(1, self.shape[0] // 8), 1, self.shape[0]),
+            ("radius_x", "Radius X", False, max(1, self.shape[1] // 8), 1, self.shape[1]),
+            ("text_spacing", "Minimum atom spacing (target px)", True, 4, 1, min(self.shape)),
+            ("atom_budget", "Atom budget", True, 256, 1, min(4096, int(np.prod(self.shape)))),
         )
         self._preset_fields: dict[str, QtWidgets.QAbstractSpinBox] = {}
         self._preset_field_rows: dict[str, tuple[QtWidgets.QWidget, QtWidgets.QWidget]] = {}
@@ -381,28 +349,56 @@ class SlmEditorControl(QtCore.QObject):
             form.addWidget(spin, row, 1)
             self._preset_fields[key] = spin
             self._preset_field_rows[key] = (title, spin)
+        text_row = len(specs) + 1
+        self._preset_text_title = QtWidgets.QLabel("Text", body)
+        self._preset_text = FluentLineEdit("USTC", body)
+        self._preset_text.setPlaceholderText("Chinese and English text")
+        form.addWidget(self._preset_text_title, text_row, 0)
+        form.addWidget(self._preset_text, text_row, 1)
         apply_button = FluentButton("Apply", body)
         apply_button.clicked.connect(self._apply_preset_popup)
-        form.addWidget(apply_button, len(specs) + 1, 0, 1, 2)
+        form.addWidget(apply_button, text_row + 1, 0, 1, 2)
         self._preset_popup, self._preset_body = popup, body
         self._preset_anchor = anchor
         self._preset_type.currentTextChanged.connect(self._sync_preset_popup)
         self._sync_preset_popup()
 
     def _sync_preset_popup(self) -> None:
+        kind = self._preset_type.currentText()
         visible = {
             "Grid": {"rows", "columns", "spacing_y", "spacing_x", "intensity"},
             "Checkerboard": {
-                "rows", "columns", "spacing_y", "spacing_x",
-                "intensity_a", "intensity_b",
+                "rows", "columns", "spacing_y", "spacing_x", "intensity",
             },
-            "Rectangle": {"height", "width", "edge", "intensity"},
-            "Ellipse": {"radius_y", "radius_x", "edge", "intensity"},
-            "Ring": {"radius", "ring_width", "edge", "intensity"},
-        }[self._preset_type.currentText()]
+            "Gaussian": {"radius_y", "radius_x", "intensity"},
+            "Flat Top": {"radius_y", "radius_x", "edge", "intensity"},
+            "Text": {"text_spacing", "atom_budget", "intensity"},
+        }[kind]
         for key, widgets in self._preset_field_rows.items():
             for widget in widgets:
                 widget.setVisible(key in visible)
+        self._preset_text_title.setVisible(kind == "Text")
+        self._preset_text.setVisible(kind == "Text")
+        self._preset_field_rows["columns"][0].setText(
+            "Sites in long row" if kind == "Checkerboard" else "M columns"
+        )
+        spacing_x_title, spacing_x = self._preset_field_rows["spacing_x"]
+        spacing_x_title.setText(
+            "Checker cell spacing X" if kind == "Checkerboard" else "Spacing X"
+        )
+        checker_hint = (
+            "Base checker-cell spacing; long-row sites are 2× this distance."
+            if kind == "Checkerboard" else ""
+        )
+        spacing_x_title.setToolTip(checker_hint)
+        spacing_x.setToolTip(checker_hint)
+        radius_prefix = "1/e² " if kind == "Gaussian" else ""
+        self._preset_field_rows["radius_y"][0].setText(
+            f"{radius_prefix}radius Y"
+        )
+        self._preset_field_rows["radius_x"][0].setText(
+            f"{radius_prefix}radius X"
+        )
         self._preset_popup.adjustSize()
 
     def _apply_preset_popup(self) -> None:
@@ -410,17 +406,40 @@ class SlmEditorControl(QtCore.QObject):
         kind = self._preset_type.currentText()
         grid = (value("rows"), value("columns"))
         spacing = (value("spacing_y"), value("spacing_x"))
-        makers = {
-            "Grid": ("spots", preset_grid, (grid,), {"spacing_yx": spacing, "intensity": value("intensity")}),
-            "Checkerboard": ("spots", preset_checkerboard, (grid,), {"spacing_yx": spacing, "intensity_a": value("intensity_a"), "intensity_b": value("intensity_b")}),
-            "Rectangle": ("image", preset_rectangle, ((value("height"), value("width")),), {"edge": value("edge"), "intensity": value("intensity")}),
-            "Ellipse": ("image", preset_ellipse, ((value("radius_y"), value("radius_x")),), {"edge": value("edge"), "intensity": value("intensity")}),
-            "Ring": ("image", preset_ring, (), {"radius": value("radius"), "width": value("ring_width"), "edge": value("edge"), "intensity": value("intensity")}),
-        }
-        objective, make, args, kwargs = makers[kind]
         try:
-            target = make(self.shape, *args, **kwargs)
-        except (TypeError, ValueError) as error:
+            if kind == "Grid":
+                objective = "spots"
+                target = preset_grid(
+                    self.shape, grid, spacing_yx=spacing,
+                    intensity=value("intensity"),
+                )
+            elif kind == "Checkerboard":
+                objective = "spots"
+                target = preset_checkerboard(
+                    self.shape, grid, spacing_yx=spacing,
+                    intensity=value("intensity"),
+                )
+            elif kind == "Gaussian":
+                objective = "image"
+                target = preset_gaussian(
+                    self.shape, (value("radius_y"), value("radius_x")),
+                    intensity=value("intensity"),
+                )
+            elif kind == "Flat Top":
+                objective = "image"
+                target = preset_flat_top(
+                    self.shape, (value("radius_y"), value("radius_x")),
+                    edge=value("edge"), intensity=value("intensity"),
+                )
+            else:
+                objective = "spots"
+                target = preset_text(
+                    self.shape, self._preset_text.text(),
+                    spacing=value("text_spacing"),
+                    atom_budget=value("atom_budget"),
+                    intensity=value("intensity"),
+                )
+        except (FileNotFoundError, TypeError, ValueError) as error:
             self._status.setText(str(error))
             return
         self._preset_popup.hide()
@@ -428,106 +447,67 @@ class SlmEditorControl(QtCore.QObject):
 
     def _build_pupil_popup(self, parent: QtWidgets.QWidget) -> None:
         popup, body, form, anchor = self._popup_form(parent, self._pupil_edit)
-        self._pupil_type = FluentComboBox(body)
-        self._pupil_type.addItems(("Assumed ellipse", "Measured"))
-        form.addWidget(QtWidgets.QLabel("Source", body), 0, 0)
-        form.addWidget(self._pupil_type, 0, 1)
         cx, cy = self._pupil_center_xy
-        rx, ry = self._pupil_radius_xy
+        dx, dy = self._pupil_diameter_xy
         fields = (
             ("_pupil_center_x", "Center X", cx, 0.0, self.shape[1] - 1),
             ("_pupil_center_y", "Center Y", cy, 0.0, self.shape[0] - 1),
-            ("_pupil_radius_x", "Radius / half-width X", rx, 1.0, self.shape[1]),
-            ("_pupil_radius_y", "Radius / half-height Y", ry, 1.0, self.shape[0]),
+            ("_pupil_diameter_x", "1/e² intensity diameter X", dx, 1.0, 2.0 * self.shape[1]),
+            ("_pupil_diameter_y", "1/e² intensity diameter Y", dy, 1.0, 2.0 * self.shape[0]),
         )
-        for row, (name, label, value, minimum, maximum) in enumerate(fields, start=1):
+        for row, (name, label, value, minimum, maximum) in enumerate(fields):
             spin = _number_spin(body, value, minimum, maximum, decimals=2)
             setattr(self, name, spin)
             form.addWidget(QtWidgets.QLabel(label, body), row, 0)
             form.addWidget(spin, row, 1)
-        load = FluentButton("Load measured intensity…", body)
-        load.clicked.connect(partial(self._choose, "load_pupil"))
         apply_button = FluentButton("Apply pupil", body)
         apply_button.clicked.connect(self._apply_pupil)
-        form.addWidget(load, 5, 0, 1, 2)
-        form.addWidget(apply_button, 6, 0, 1, 2)
+        form.addWidget(apply_button, len(fields), 0, 1, 2)
         self._pupil_popup, self._pupil_body = popup, body
         self._pupil_anchor = anchor
 
-    def _build_crop_popup(self, parent: QtWidgets.QWidget) -> None:
-        popup, body, form, anchor = self._popup_form(parent, self._crop_edit)
-        side, height, width = min(self.shape), self.shape[0], self.shape[1]
-        values = (
-            ("_crop_x", "X", 0, width - 1, (width - side) // 2),
-            ("_crop_y", "Y", 0, height - 1, (height - side) // 2),
-            ("_crop_width", "Width", 1, width, side),
-            ("_crop_height", "Height", 1, height, side),
-        )
-        for row, (name, label, minimum, maximum, value) in enumerate(values):
-            spin = _number_spin(
-                body, value, minimum, maximum, integral=True
-            )
-            setattr(self, name, spin)
-            spin.valueChanged.connect(self._crop_changed)
-            form.addWidget(QtWidgets.QLabel(label, body), row, 0)
-            form.addWidget(spin, row, 1)
-        self._crop_popup, self._crop_body = popup, body
-        self._crop_anchor = anchor
-
-    def _assumed_pupil(self, center_xy: tuple[float, float],
-                       radius_xy: tuple[float, float]) -> np.ndarray:
+    def _pupil_arrays(self, center_xy: tuple[float, float],
+                      diameter_xy: tuple[float, float], *, enabled: bool
+                      ) -> tuple[np.ndarray, np.ndarray]:
         yy, xx = np.ogrid[:self.shape[0], :self.shape[1]]
         cx, cy = center_xy
-        rx, ry = radius_xy
-        pupil = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2 <= 1.0
-        return np.asarray(pupil, dtype=np.float32)
-
-    def _load_pupil_path(self, path: object) -> None:
-        source = Path(path)
-        if source.suffix.lower() == ".npy":
-            intensity = np.load(source, allow_pickle=False)
+        dx, dy = diameter_xy
+        scaled = ((xx - cx) / (dx / 2.0)) ** 2 + ((yy - cy) / (dy / 2.0)) ** 2
+        support = np.asarray(scaled <= 1.0, dtype=bool)
+        if enabled:
+            amplitude = np.exp(-scaled).astype(np.float32)
         else:
-            from PIL import Image
-            with Image.open(source) as image:
-                intensity = np.asarray(image.convert("F"), dtype=np.float32)
-        intensity = np.asarray(intensity, dtype=np.float32)
-        if intensity.shape != self.shape:
-            raise ValueError(f"measured pupil intensity shape must be {self.shape!r}")
-        if not np.all(np.isfinite(intensity)) or np.any(intensity < 0.0):
-            raise ValueError("measured pupil intensity must be finite and non-negative")
-        if not np.any(intensity > 0.0):
-            raise ValueError("measured pupil intensity must contain positive values")
-        self._pupil_measured = np.sqrt(intensity).astype(np.float32)
-        self._pupil_measured_name = source.name
-        self._pupil_type.setCurrentText("Measured")
-        self._pupil_status.setText(f"Draft · measured {source.name} · Apply")
+            amplitude = np.ones(self.shape, dtype=np.float32)
+        return support, amplitude
+
+    def _pupil_description(self, enabled: bool) -> str:
+        if not enabled:
+            return "Off · uniform full raster"
+        dx, dy = self._pupil_diameter_xy
+        return f"On · Gaussian · 1/e² intensity diameter {dx:g} × {dy:g} px"
 
     def _apply_pupil(self, *_args: object) -> None:
         self._pupil_center_xy = (
             self._pupil_center_x.value(), self._pupil_center_y.value(),
         )
-        self._pupil_radius_xy = (
-            self._pupil_radius_x.value(), self._pupil_radius_y.value(),
+        self._pupil_diameter_xy = (
+            self._pupil_diameter_x.value(), self._pupil_diameter_y.value(),
         )
-        kind = self._pupil_type.currentText()
-        support = self._assumed_pupil(
-            self._pupil_center_xy, self._pupil_radius_xy
-        )
-        if kind == "Measured" and self._pupil_measured is not None:
-            amplitude = self._pupil_measured * support
-            description = f"measured {self._pupil_measured_name} · configured unit ellipse"
-        else:
-            if kind == "Measured":
-                kind = "Assumed ellipse"
-                self._pupil_type.setCurrentText(kind)
-            amplitude = support
-            description = "assumed ellipse · configured unit ellipse"
-        self._spot_optimizer_state = None
-        self._pupil_support = support.astype(bool)
-        self._pupil_amplitude = amplitude
-        self._pupil_applied_description = description
-        self._pupil_status.setText(description)
+        self._resolve_pupil(self._pupil_enabled.isChecked())
         self._pupil_popup.hide()
+
+    def _pupil_toggled(self, enabled: bool) -> None:
+        self._resolve_pupil(bool(enabled))
+
+    def _resolve_pupil(self, enabled: bool) -> None:
+        support, amplitude = self._pupil_arrays(
+            self._pupil_center_xy, self._pupil_diameter_xy, enabled=enabled
+        )
+        self._spot_optimizer_state = None
+        self._pupil_support = support
+        self._pupil_amplitude = amplitude
+        self._pupil_applied_description = self._pupil_description(enabled)
+        self._pupil_status.setText(self._pupil_applied_description)
         self._request_revision += 1
         self._phase_request_revision = None
         self._compose_phase()
@@ -553,7 +533,14 @@ class SlmEditorControl(QtCore.QObject):
         self._correction_enabled.setChecked(enabled)
         self._correction_enabled.blockSignals(previous)
         state = "On" if enabled else "Off"
-        self._correction_status.setText(f"{state} · {name}" if name else state)
+        details = [state]
+        if name:
+            details.append(name)
+        wavelength = getattr(self.device, "wavelength_nm", None)
+        two_pi_gray = getattr(self.device, "two_pi_gray", None)
+        if wavelength is not None and two_pi_gray is not None:
+            details.extend((f"{float(wavelength):g} nm", f"2π gray {float(two_pi_gray):g}"))
+        self._correction_status.setText(" · ".join(details))
 
     def _set_correction_enabled(self, enabled: bool) -> None:
         try:
@@ -566,7 +553,7 @@ class SlmEditorControl(QtCore.QObject):
         tabs = FluentTabWidget(parent)
         self._layer_tabs = tabs
         self._editor_tab_index = tabs.add_permanent_tab(
-            self._build_editor_page(tabs), "Mask"
+            self._build_editor_page(tabs), "Pattern"
         )
 
         wave_page = QtWidgets.QWidget(tabs)
@@ -583,9 +570,9 @@ class SlmEditorControl(QtCore.QObject):
         wave_layout.setVerticalSpacing(6)
         wave_layout.setAlignment(QtCore.Qt.AlignTop)
         note = QtWidgets.QLabel(
-            "Zero-order steering moves the modulated order. A physical "
+            "Steering X/Y adds a full-raster carrier. A physical "
             "Fourier-plane stop/aperture is still required to reject zero order. "
-            "Coefficients are Noll-normalized waves RMS on the applied pupil.",
+            "Coefficients are Noll-normalized waves RMS on the configured unit disk.",
             parameter_page,
         )
         note.setWordWrap(True)
@@ -597,7 +584,7 @@ class SlmEditorControl(QtCore.QObject):
             ("_carrier_y", "Steering Y", "Full-raster edge-to-edge waves across device height."),
         )
         zernike_specs = tuple(
-            (key, label, f"{label}: {polynomial}; Noll-normalized waves RMS on the pupil.")
+            (key, label, f"{label}: {polynomial}; Noll-normalized waves RMS on the configured unit disk.")
             for key, label, polynomial in _ZERNIKE
         )
         for index, (key, label, tooltip) in enumerate(carrier_specs + zernike_specs):
@@ -628,8 +615,6 @@ class SlmEditorControl(QtCore.QObject):
         self._wavefront_tab_index = tabs.add_permanent_tab(wave_page, "Wavefront")
         tabs.setCurrentIndex(self._editor_tab_index)
 
-        self._crop_enabled.toggled.connect(self._crop_changed)
-        self._steering_enabled.toggled.connect(self._layer_changed)
         self._zernike_enabled.toggled.connect(self._layer_changed)
         for spin in (self._carrier_x, self._carrier_y, *self._zernike.values()):
             spin.valueChanged.connect(self._layer_changed)
@@ -646,27 +631,10 @@ class SlmEditorControl(QtCore.QObject):
                 widget.blockSignals(previous)
         self._layer_changed()
 
-    def _crop_changed(self, *_args: object) -> None:
-        self._crop_width.setMaximum(self.shape[1] - self._crop_x.value())
-        self._crop_height.setMaximum(self.shape[0] - self._crop_y.value())
-        if self._crop_enabled.isChecked():
-            self._crop_status.setText(
-                f"On · {self._crop_x.value()},{self._crop_y.value()} · "
-                f"{self._crop_width.value()}×{self._crop_height.value()}"
-            )
-        else:
-            self._crop_status.setText("Off")
-        self._layer_changed()
-
     def _layer_changed(self, *_args: object) -> None:
-        if self._steering_enabled.isChecked():
-            self._steering_status.setText(
-                f"On · {self._carrier_x.value():g}, "
-                f"{self._carrier_y.value():g} waves"
-            )
-        else:
-            self._steering_status.setText("Off")
-        active = sum(bool(spin.value()) for spin in self._zernike.values())
+        active = sum(bool(spin.value()) for spin in (
+            self._carrier_x, self._carrier_y, *self._zernike.values()
+        ))
         self._zernike_status.setText(
             f"On · {active} active"
             if self._zernike_enabled.isChecked()
@@ -688,65 +656,51 @@ class SlmEditorControl(QtCore.QObject):
             -1.0:1.0:height * 1j, -1.0:1.0:width * 1j
         ]
         phase = np.zeros(self.shape, dtype=np.float64)
-        if self._steering_enabled.isChecked():
+        coefficients = {key: self._zernike[key].value() for key, *_ in _ZERNIKE}
+        if self._zernike_enabled.isChecked():
             phase += np.pi * (
                 self._carrier_x.value() * full_x
                 + self._carrier_y.value() * full_y
             )
-        coefficients = {key: self._zernike[key].value() for key, *_ in _ZERNIKE}
-        if self._zernike_enabled.isChecked() and any(coefficients.values()):
-            yy, xx = np.ogrid[:height, :width]
-            center_x, center_y = self._pupil_center_xy
-            radius_x, radius_y = self._pupil_radius_xy
-            zx = (xx - center_x) / radius_x
-            zy = (yy - center_y) / radius_y
-            r2 = zx * zx + zy * zy
-            pupil = self._pupil_support
-            modes = {
-                "tilt_x": lambda: 2.0 * zx,
-                "tilt_y": lambda: 2.0 * zy,
-                "defocus": lambda: np.sqrt(3.0) * (2.0 * r2 - 1.0),
-                "astig_oblique": lambda: 2.0 * np.sqrt(6.0) * zx * zy,
-                "astig_vertical": lambda: np.sqrt(6.0) * (zx * zx - zy * zy),
-                "coma_y": lambda: np.sqrt(8.0) * zy * (3.0 * r2 - 2.0),
-                "coma_x": lambda: np.sqrt(8.0) * zx * (3.0 * r2 - 2.0),
-                "trefoil_y": lambda: np.sqrt(8.0) * zy * (3.0 * zx * zx - zy * zy),
-                "trefoil_x": lambda: np.sqrt(8.0) * zx * (zx * zx - 3.0 * zy * zy),
-                "spherical": lambda: np.sqrt(5.0) * (6.0 * r2 * r2 - 6.0 * r2 + 1.0),
-            }
-            for key, coefficient in coefficients.items():
-                if not coefficient:
-                    continue
-                values = modes[key]()
-                phase[pupil] += (
-                    2.0 * np.pi * coefficient
-                    * np.broadcast_to(values, self.shape)[pupil]
-                )
+            if any(coefficients.values()):
+                yy, xx = np.ogrid[:height, :width]
+                center_x, center_y = self._pupil_center_xy
+                diameter_x, diameter_y = self._pupil_diameter_xy
+                zx = (xx - center_x) / (diameter_x / 2.0)
+                zy = (yy - center_y) / (diameter_y / 2.0)
+                r2 = zx * zx + zy * zy
+                support = self._pupil_support
+                modes = {
+                    "defocus": lambda: np.sqrt(3.0) * (2.0 * r2 - 1.0),
+                    "astig_oblique": lambda: 2.0 * np.sqrt(6.0) * zx * zy,
+                    "astig_vertical": lambda: np.sqrt(6.0) * (zx * zx - zy * zy),
+                    "coma_y": lambda: np.sqrt(8.0) * zy * (3.0 * r2 - 2.0),
+                    "coma_x": lambda: np.sqrt(8.0) * zx * (3.0 * r2 - 2.0),
+                    "trefoil_y": lambda: np.sqrt(8.0) * zy * (3.0 * zx * zx - zy * zy),
+                    "trefoil_x": lambda: np.sqrt(8.0) * zx * (zx * zx - 3.0 * zy * zy),
+                    "spherical": lambda: np.sqrt(5.0) * (6.0 * r2 * r2 - 6.0 * r2 + 1.0),
+                }
+                for key, coefficient in coefficients.items():
+                    if not coefficient:
+                        continue
+                    values = modes[key]()
+                    phase[support] += (
+                        2.0 * np.pi * coefficient
+                        * np.broadcast_to(values, self.shape)[support]
+                    )
         self._wavefront_phase = canonical_phase(phase, self.shape)
-        if self._crop_enabled.isChecked():
-            x, y = self._crop_x.value(), self._crop_y.value()
-            width, height = self._crop_width.value(), self._crop_height.value()
-            phase[y:y + height, x:x + width] += self._mask_phase[
-                y:y + height, x:x + width
-            ]
-        else:
-            phase += self._mask_phase
+        phase += self._pattern_phase
         self._phase = canonical_phase(phase, self.shape)
         self._phase_metadata = {
             "source": "composite",
             "hardware_correction": "excluded",
-            "mask": dict(self._mask_metadata),
+            "pattern": dict(self._pattern_metadata),
             "input_pupil": self._pupil_applied_description,
-            "steering_enabled": self._steering_enabled.isChecked(),
             "carrier_waves_xy": [
                 self._carrier_x.value(), self._carrier_y.value(),
             ],
             "zernike_enabled": self._zernike_enabled.isChecked(),
             "zernike_noll_waves_rms": coefficients,
-            "cgh_crop_xywh": [
-                self._crop_x.value(), self._crop_y.value(),
-                self._crop_width.value(), self._crop_height.value(),
-            ] if self._crop_enabled.isChecked() else None,
         }
         self._show_phase()
         self._show_wavefront()
@@ -790,15 +744,15 @@ class SlmEditorControl(QtCore.QObject):
         self._pending = None
         self._phase = canonical_phase(values, self.shape)
         self._spot_optimizer_state = None
-        self._mask_phase = self._phase
+        self._pattern_phase = self._phase
         self._phase_request_revision = self._request_revision
         self._phase_metadata = dict(
             {"source": "loaded"} if metadata is None else metadata
         )
-        self._mask_metadata = dict(self._phase_metadata)
+        self._pattern_metadata = dict(self._phase_metadata)
         widgets = (
             self._carrier_x, self._carrier_y, *self._zernike.values(),
-            self._crop_enabled, self._steering_enabled, self._zernike_enabled,
+            self._zernike_enabled,
         )
         blocked = tuple(widget.blockSignals(True) for widget in widgets)
         try:
@@ -806,8 +760,6 @@ class SlmEditorControl(QtCore.QObject):
             self._carrier_y.setValue(0.0)
             for spin in self._zernike.values():
                 spin.setValue(0.0)
-            self._crop_enabled.setChecked(False)
-            self._steering_enabled.setChecked(False)
             self._zernike_enabled.setChecked(False)
         finally:
             for widget, previous in zip(widgets, blocked):
@@ -815,28 +767,13 @@ class SlmEditorControl(QtCore.QObject):
         self._wavefront_phase = canonical_phase(
             np.zeros(self.shape, dtype=np.float32), self.shape
         )
-        self._crop_status.setText("Off")
-        self._steering_status.setText("Off")
         self._zernike_status.setText("Off")
         self._show_phase()
         self._show_wavefront()
         self._sync_send_enabled()
         self._status.setText(
-            "Science phase loaded; composition layers reset; hardware unchanged"
+            "Science phase loaded; wavefront reset; hardware unchanged"
         )
-
-    def set_mask_phase(self, values: object, metadata: object = None) -> None:
-        self._request_revision += 1
-        self._pending = None
-        self._mask_phase = canonical_phase(values, self.shape)
-        self._spot_optimizer_state = None
-        self._mask_metadata = dict(
-            {"source": "loaded mask"} if metadata is None else metadata
-        )
-        self._phase_request_revision = self._request_revision
-        self._compose_phase()
-        self._sync_send_enabled()
-        self._status.setText("Mask loaded; final recomposed; hardware unchanged")
 
     @property
     def solver_idle(self) -> bool:
@@ -874,7 +811,7 @@ class SlmEditorControl(QtCore.QObject):
         )
         self._pending, self._running = None, True
         future = self._executor.submit(
-            solve_phase, target, initial_phase=np.array(self._mask_phase, copy=True),
+            solve_phase, target, initial_phase=np.array(self._pattern_phase, copy=True),
             objective_kind=objective_kind,
             pupil_amplitude=pupil_amplitude,
             spot_optimizer_state=optimizer_state,
@@ -899,8 +836,8 @@ class SlmEditorControl(QtCore.QObject):
                 self._status.setText(str(error))
         else:
             if revision == self._request_revision and not self._closed:
-                self._mask_phase = canonical_phase(phase, self.shape)
-                self._mask_metadata = dict(metadata)
+                self._pattern_phase = canonical_phase(phase, self.shape)
+                self._pattern_metadata = dict(metadata)
                 self._spot_optimizer_state = (
                     None if optimizer_state is None else dict(optimizer_state)
                 )
@@ -946,12 +883,12 @@ class SlmEditorControl(QtCore.QObject):
             return False
         target = np.array(self._target, copy=True)
         yy, xx = np.ogrid[:self.shape[0], :self.shape[1]]
-        mask = (yy - row) ** 2 + (xx - column) ** 2 <= 4
+        brush = (yy - row) ** 2 + (xx - column) ** 2 <= 4
         mode = self._mode.currentText()
         if mode == "Toggle":
             target[row, column] = 0.0 if target[row, column] > 0.0 else 1.0
         else:
-            target[mask] = 0.0 if mode == "Erase" else self._intensity.value()
+            target[brush] = 0.0 if mode == "Erase" else self._intensity.value()
         objective_kind = self._objective_kind if mode == "Erase" else "spots"
         self.set_target(target, objective_kind=objective_kind)
         return True
@@ -971,39 +908,6 @@ class SlmEditorControl(QtCore.QObject):
 
     def save_phase(self, path: object) -> Path:
         return save_phase(path, self._phase, self._phase_metadata)
-
-    def save_mask(self, path: object) -> Path:
-        return save_phase(path, self._mask_phase, self._mask_metadata)
-
-    def import_mask_image(self, path: object) -> None:
-        from PIL import Image
-
-        source = Path(path)
-        with Image.open(source) as image:
-            if image.mode != "L":
-                raise ValueError("phase mask image must be two-dimensional 8-bit grayscale")
-            gray = np.asarray(image)
-        if gray.ndim != 2 or gray.dtype != np.uint8:
-            raise ValueError("phase mask image must be two-dimensional 8-bit grayscale")
-        if gray.shape == self.shape:
-            values = gray.astype(np.float64) * (2.0 * np.pi / 256.0)
-        elif self._crop_enabled.isChecked() and gray.shape == (
-            self._crop_height.value(), self._crop_width.value(),
-        ):
-            values = np.zeros(self.shape, dtype=np.float64)
-            x, y = self._crop_x.value(), self._crop_y.value()
-            values[
-                y:y + gray.shape[0], x:x + gray.shape[1]
-            ] = gray.astype(np.float64) * (2.0 * np.pi / 256.0)
-        else:
-            raise ValueError(
-                "phase mask image shape must match the device or enabled CGH crop"
-            )
-        self.set_mask_phase(values, {
-            "source": "8-bit phase mask image",
-            "mapping": "gray * 2*pi/256 (no correction or vendor LUT)",
-            "file": source.name,
-        })
 
     def send(self) -> bool:
         """Queue the clicked canonical phase; return whether it was accepted."""
@@ -1072,13 +976,9 @@ class SlmEditorControl(QtCore.QObject):
         actions = {
             "load_target": (False, "target.json", "SLM target (*.json)", lambda path: self.set_target(load_target(path))),
             "save_target": (True, "target.json", "SLM target (*.json)", lambda path: save_target(path, self._target)),
-            "load_mask": (False, "mask.npz", "SLM mask phase (*.npz)", lambda path: self.set_mask_phase(*load_phase(path))),
-            "save_mask": (True, "mask.npz", "SLM mask phase (*.npz)", lambda path: self.save_mask(path)),
             "load_phase": (False, "final.npz", "SLM final phase (*.npz)", lambda path: self.set_phase(*load_phase(path))),
             "save_phase": (True, "final.npz", "SLM final phase (*.npz)", lambda path: self.save_phase(path)),
             "import": (False, "", "Array or image (*.npy *.png *.tif *.tiff *.bmp)", self.import_target),
-            "import_mask": (False, "", "8-bit mask image (*.bmp *.png *.tif *.tiff)", self.import_mask_image),
-            "load_pupil": (False, "", "Array or image (*.npy *.png *.tif *.tiff *.bmp)", self._load_pupil_path),
             "correction": (False, "correction_Pattern.bmp", "8-bit correction BMP (*.bmp)", lambda path: (self.device.load_correction(path), self._sync_correction_controls())),
         }
         saving, name, filters, callback = actions[action]

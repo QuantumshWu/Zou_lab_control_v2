@@ -10,6 +10,7 @@ from scipy import fft
 from scipy.ndimage import maximum_filter
 
 import zlc_atom.devices.simulation.world as simulation_world
+import zlc_atom.devices.slm.solver as slm_solver
 from zlc_atom.devices.simulation import (
     SimulationWorld,
     VirtualCamera,
@@ -22,10 +23,10 @@ from zlc_atom.devices.slm.solver import (
     load_phase,
     load_target,
     preset_checkerboard,
-    preset_ellipse,
+    preset_flat_top,
+    preset_gaussian,
     preset_grid,
-    preset_rectangle,
-    preset_ring,
+    preset_text,
     save_phase,
     save_target,
     solve_phase,
@@ -1315,28 +1316,58 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
 
 def test_slm_presets_are_one_continuous_target_truth() -> None:
     shape = (64, 80)
-    grid = preset_grid(shape, (3, 4), spacing_yx=(12, 14), intensity=0.7)
+    grid = preset_grid(shape, (3, 4), spacing_yx=(5, 7), intensity=0.7)
     checkerboard = preset_checkerboard(
         shape,
-        (3, 4),
-        spacing_yx=(12, 14),
-        intensity_a=1.0,
-        intensity_b=0.25,
+        (4, 4),
+        spacing_yx=(10, 6),
+        intensity=0.75,
     )
-    rectangle = preset_rectangle(shape, (20, 28), intensity=0.8, edge=3)
-    ellipse = preset_ellipse(shape, (10, 16), intensity=0.6, edge=2)
-    ring = preset_ring(shape, radius=14, width=4, intensity=0.9, edge=2)
+    gaussian = preset_gaussian(shape, (6, 10), intensity=0.9)
+    flat_top = preset_flat_top(shape, (10, 16), intensity=0.6, edge=2)
 
-    for target in (grid, checkerboard, rectangle, ellipse, ring):
+    for target in (grid, checkerboard, gaussian, flat_top):
         assert target.shape == shape
         assert target.dtype == np.dtype("<f4")
         assert np.all(np.isfinite(target))
         assert np.all(target >= 0.0)
     assert np.count_nonzero(grid) == 12
-    assert set(np.unique(checkerboard)) == {0.0, 0.25, 1.0}
-    assert np.any((rectangle > 0.0) & (rectangle < 0.8))
-    assert np.any((ellipse > 0.0) & (ellipse < 0.6))
-    assert np.any((ring > 0.0) & (ring < 0.9))
+    grid_rows = np.unique(np.argwhere(grid > 0.0)[:, 0])
+    grid_columns = np.unique(np.argwhere(grid > 0.0)[:, 1])
+    np.testing.assert_array_equal(np.diff(grid_rows), [5, 5])
+    np.testing.assert_array_equal(np.diff(grid_columns), [7, 7, 7])
+    assert grid_rows[0] == (shape[0] - 2 * 5) // 2
+    assert grid_columns[0] == (shape[1] - 3 * 7) // 2
+
+    checker_rows = np.unique(np.argwhere(checkerboard > 0.0)[:, 0])
+    checker_columns = [
+        np.flatnonzero(checkerboard[row] > 0.0) for row in checker_rows
+    ]
+    assert [len(columns) for columns in checker_columns] == [4, 3, 4, 3]
+    np.testing.assert_array_equal(np.diff(checker_rows), [10, 10, 10])
+    np.testing.assert_array_equal(np.diff(checker_columns[0]), [12, 12, 12])
+    np.testing.assert_array_equal(np.diff(checker_columns[1]), [12, 12])
+    np.testing.assert_array_equal(
+        checker_columns[1],
+        (checker_columns[0][:-1] + checker_columns[0][1:]) // 2,
+    )
+    np.testing.assert_array_equal(checker_columns[2], checker_columns[0])
+    np.testing.assert_array_equal(checker_columns[3], checker_columns[1])
+    np.testing.assert_array_equal(
+        np.unique(checkerboard), np.asarray([0.0, 0.75], dtype=np.float32)
+    )
+
+    center_y, center_x = shape[0] // 2, shape[1] // 2
+    assert gaussian[center_y, center_x] == pytest.approx(0.9)
+    assert gaussian[center_y + 6, center_x] == pytest.approx(
+        0.9 * np.exp(-2.0), rel=1e-6
+    )
+    assert gaussian[center_y, center_x + 10] == pytest.approx(
+        0.9 * np.exp(-2.0), rel=1e-6
+    )
+    assert flat_top[center_y, center_x] == pytest.approx(0.6)
+    assert flat_top[0, 0] == 0.0
+    assert np.any((flat_top > 0.0) & (flat_top < 0.6))
 
     imported = imported_target([[0.0, 2.0], [1.0, 4.0]])
     np.testing.assert_allclose(imported, [[0.0, 0.5], [0.25, 1.0]])
@@ -1370,6 +1401,89 @@ def test_slm_presets_are_one_continuous_target_truth() -> None:
     ):
         with pytest.raises(ValueError, match="finite"):
             canonical_phase(invalid_phase, (1, 2))
+
+
+def test_slm_text_preset_is_centered_budgeted_spaced_and_byte_deterministic(
+    monkeypatch,
+) -> None:
+    font_root = Path(r"C:\Windows\Fonts")
+    fonts = tuple(
+        font_root / name
+        for name in ("msyhbd.ttc", "Dengb.ttf", "simhei.ttf", "msyh.ttc", "simsun.ttc")
+    )
+    font = next((path for path in fonts if path.is_file()), None)
+    if font is None:
+        pytest.skip("no supported Windows CJK font is installed")
+
+    shape, spacing = (256, 384), 3
+    text = "USTC 中科大"
+    target = preset_text(
+        shape, text, spacing=spacing, atom_budget=200, font_path=font
+    )
+    repeated = preset_text(
+        shape, text, spacing=spacing, atom_budget=200, font_path=font
+    )
+    np.testing.assert_array_equal(repeated, target)
+    assert repeated.tobytes() == target.tobytes()
+    assert target.dtype == np.dtype("<f4")
+    coordinates = np.argwhere(target > 0.0)
+    assert 0 < len(coordinates) <= 200
+    assert np.all(np.diff(np.unique(coordinates[:, 0])) % spacing == 0)
+    assert np.all(np.diff(np.unique(coordinates[:, 1])) % spacing == 0)
+    assert abs(int(coordinates[:, 0].min() + coordinates[:, 0].max()) - shape[0]) <= 1
+    assert abs(int(coordinates[:, 1].min() + coordinates[:, 1].max()) - shape[1]) <= 1
+    _text_phase, text_metadata = solve_phase(
+        target, objective_kind="spots", iterations=1
+    )
+    assert text_metadata["transform"] == "selected-dft"
+
+    smaller = preset_text(
+        shape, text, spacing=spacing, atom_budget=80, font_path=font
+    )
+    assert 0 < np.count_nonzero(smaller) <= 80
+    assert np.count_nonzero(target) >= np.count_nonzero(smaller)
+
+    monkeypatch.setenv("WINDIR", r"C:\Windows")
+    discovered = preset_text(shape, text, spacing=spacing, atom_budget=200)
+    np.testing.assert_array_equal(discovered, target)
+
+    with pytest.raises(ValueError, match="text"):
+        preset_text(shape, "   ", spacing=spacing, atom_budget=20, font_path=font)
+    with pytest.raises(ValueError, match="letters, digits, CJK"):
+        preset_text(shape, "USTC!", spacing=spacing, atom_budget=20, font_path=font)
+    with pytest.raises(FileNotFoundError, match="font"):
+        preset_text(
+            shape,
+            "USTC",
+            spacing=spacing,
+            atom_budget=20,
+            font_path=font_root / "definitely-missing-font.ttf",
+        )
+    with pytest.raises(ValueError, match="does not contain"):
+        preset_text(
+            shape,
+            "\U00020000",
+            spacing=spacing,
+            atom_budget=20,
+            font_path=font,
+        )
+    with pytest.raises(ValueError, match="does not fit"):
+        preset_text(
+            (8, 8), "中科大中科大", spacing=4, atom_budget=1, font_path=font
+        )
+
+    def nonmonotonic_mask(_text: str, _font: Path, size: int) -> np.ndarray:
+        if size == 1:
+            return np.ones((1, 2), dtype=bool)
+        if size == 2:
+            return np.ones((1, 1), dtype=bool)
+        return np.ones((9, 1), dtype=bool)
+
+    monkeypatch.setattr(slm_solver, "_rasterized_text", nonmonotonic_mask)
+    recovered = preset_text(
+        (8, 8), "A", spacing=1, atom_budget=1, font_path=font
+    )
+    assert np.count_nonzero(recovered) == 1
 
 
 def _ideal_slm_intensity(
@@ -1510,7 +1624,7 @@ def test_slm_solver_uses_authored_pupil_in_every_full_resolution_path() -> None:
     cartesian = preset_grid(shape, (3, 4), spacing_yx=(11, 12))
     irregular = np.array(cartesian, copy=True)
     irregular[tuple(np.argwhere(irregular > 0.0)[-1])] = 0.0
-    image = preset_rectangle(shape, (18, 24), edge=3)
+    image = preset_flat_top(shape, (9, 12), edge=3)
     yy, xx = np.ogrid[-1.0:1.0:shape[0] * 1j, -1.0:1.0:shape[1] * 1j]
     pupil = (
         ((xx / 0.72) ** 2 + (yy / 0.86) ** 2 <= 1.0)
@@ -1519,7 +1633,7 @@ def test_slm_solver_uses_authored_pupil_in_every_full_resolution_path() -> None:
 
     for target, objective_kind, method, transform in (
         (cartesian, "spots", "wgs-kim", "selected-dft"),
-        (irregular, "spots", "wgs-kim", "fft"),
+        (irregular, "spots", "wgs-kim", "selected-dft"),
         (image, "image", "mraf", "fft"),
     ):
         default_phase, default_metadata = solve_phase(
@@ -1870,7 +1984,7 @@ def test_slm_solver_uses_authored_spot_or_image_objective() -> None:
     )
     assert auto_metadata["method"] == "wgs-kim"
 
-    dense = preset_rectangle((64, 64), (22, 26), edge=4)
+    dense = preset_flat_top((64, 64), (11, 13), edge=4)
     _dense_phase, dense_metadata = solve_phase(
         dense,
         objective_kind="image",
@@ -1902,7 +2016,7 @@ def test_sparse_solver_matches_full_shifted_wgs_kim_quality(cartesian: bool) -> 
         reference, target
     )
 
-    assert metadata["transform"] == ("selected-dft" if cartesian else "fft")
+    assert metadata["transform"] == "selected-dft"
     np.testing.assert_allclose(
         normalized,
         reference_normalized,
@@ -1911,6 +2025,56 @@ def test_sparse_solver_matches_full_shifted_wgs_kim_quality(cartesian: bool) -> 
     )
     assert ratio == pytest.approx(reference_ratio, rel=0.01)
     assert efficiency == pytest.approx(reference_efficiency, rel=0.01)
+
+
+def test_selected_dft_active_mask_preserves_spot_order_and_hot_state() -> None:
+    target = np.array(
+        preset_checkerboard(
+            (48, 64), (3, 4), spacing_yx=(9, 5), intensity=1.0
+        ),
+        copy=True,
+    )
+    authored_sites = np.argwhere(target > 0.0)
+    target[tuple(authored_sites.T)] = np.linspace(
+        0.6, 1.4, len(authored_sites), dtype=np.float32
+    )
+    state: dict[str, object] = {}
+    _phase, metadata = solve_phase(
+        target,
+        objective_kind="spots",
+        iterations=12,
+        seed=29,
+        spot_optimizer_state=state,
+    )
+    assert metadata["transform"] == "selected-dft"
+    support_yx = np.asarray(state["support_yx"], dtype=np.intp)
+    expected_amplitudes = np.sqrt(target[tuple(support_yx.T)])
+    expected_amplitudes /= np.linalg.norm(expected_amplitudes)
+    np.testing.assert_allclose(
+        state["target_amplitudes"], expected_amplitudes, rtol=1e-6, atol=1e-7
+    )
+
+    changed = np.zeros_like(target)
+    changed[tuple(authored_sites.T)] = np.linspace(
+        1.4, 0.6, len(authored_sites), dtype=np.float32
+    )
+    _hot, hot_metadata = solve_phase(
+        changed,
+        objective_kind="spots",
+        iterations=1,
+        spot_optimizer_state=state,
+    )
+    assert hot_metadata["transform"] == "selected-dft"
+    assert hot_metadata["optimizer_state_status"] == "reused"
+    assert hot_metadata["hot_start_used"] is True
+
+    diagonal = np.zeros((320, 320), dtype=np.float32)
+    indices = np.arange(256)
+    diagonal[indices, indices] = 1.0
+    _fallback, fallback_metadata = solve_phase(
+        diagonal, objective_kind="spots", iterations=1
+    )
+    assert fallback_metadata["transform"] == "fft"
 
 
 @pytest.mark.parametrize("irregular", (False, True))
@@ -1945,7 +2109,7 @@ def test_sparse_solver_early_stops_only_after_exact_returned_phase_quality(
     _normalized, ratio, _efficiency = _support_quality(phase, target)
     assert metadata["early_stopped"] is True
     assert metadata["stop_reason"] == "support-ratio"
-    assert metadata["transform"] == ("fft" if irregular else "selected-dft")
+    assert metadata["transform"] == "selected-dft"
     assert metadata["support_intensity_ratio"] <= 1.01
     assert ratio <= 1.01
     assert metadata["iterations"] < metadata["max_iterations"]
@@ -1967,25 +2131,21 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
     site_values = _ideal_slm_intensity(phase)[sparse > 0.0]
     assert float(np.max(site_values) / np.min(site_values)) <= 1.01
 
-    graded = preset_checkerboard(
+    checkerboard = preset_checkerboard(
         (64, 64),
         (3, 4),
         spacing_yx=(10, 9),
-        intensity_a=1.0,
-        intensity_b=0.25,
+        intensity=0.7,
     )
-    graded_phase, graded_metadata = solve_phase(
-        graded, objective_kind="spots", iterations=80, seed=17
+    checker_phase, checker_metadata = solve_phase(
+        checkerboard, objective_kind="spots", iterations=80, seed=17
     )
-    assert graded_metadata["method"] == "wgs-kim"
-    graded_intensity = _ideal_slm_intensity(graded_phase)
-    measured_ratio = float(
-        np.mean(graded_intensity[graded == 1.0])
-        / np.mean(graded_intensity[graded == 0.25])
-    )
-    assert measured_ratio == pytest.approx(4.0, rel=0.01)
+    assert checker_metadata["method"] == "wgs-kim"
+    assert checker_metadata["transform"] == "selected-dft"
+    checker_values = _ideal_slm_intensity(checker_phase)[checkerboard > 0.0]
+    assert float(np.max(checker_values) / np.min(checker_values)) <= 1.01
 
-    dense = preset_rectangle((64, 64), (22, 26), edge=4)
+    dense = preset_flat_top((64, 64), (11, 13), edge=4)
     dense_phase, dense_metadata = solve_phase(
         dense, objective_kind="image", seed=9
     )
@@ -2024,7 +2184,7 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
 
 
 def test_slm_target_json_and_phase_npz_are_strict_plain_artifacts(tmp_path: Path) -> None:
-    target = preset_ellipse((24, 32), (7, 11), edge=2)
+    target = preset_flat_top((24, 32), (7, 11), edge=2)
     target_path = save_target(tmp_path / "target.json", target)
     np.testing.assert_array_equal(load_target(target_path), target)
 

@@ -190,15 +190,13 @@ def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
         _pump(app, lambda: control.solver_idle)
         assert calls[-1][1]["workspace"] is accepted_workspace
 
-        mask_path, phase_path = tmp_path / "mask.npz", tmp_path / "phase.npz"
-        control.save_mask(mask_path)
+        phase_path = tmp_path / "phase.npz"
         control.save_phase(phase_path)
-        for path in (mask_path, phase_path):
-            with np.load(path, allow_pickle=False) as archive:
-                assert set(archive.files) == {"phase", "metadata"}
-            _phase, metadata = editor.load_phase(path)
-            assert "spot_optimizer_state" not in repr(metadata)
-            assert "workspace" not in repr(metadata)
+        with np.load(phase_path, allow_pickle=False) as archive:
+            assert set(archive.files) == {"phase", "metadata"}
+        _phase, metadata = editor.load_phase(phase_path)
+        assert "spot_optimizer_state" not in repr(metadata)
+        assert "workspace" not in repr(metadata)
 
         control._apply_pupil()
         _pump(app, lambda: control.solver_idle)
@@ -221,15 +219,9 @@ def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
         _pump(app, lambda: control.solver_idle)
         assert calls[-1][1] == {}
 
-        control.set_mask_phase(np.full(control.shape, 0.2), {"source": "mask"})
-        assert control._spot_optimizer_state is None
-        control.set_target(changed_support * 4.0, objective_kind="spots")
-        _pump(app, lambda: control.solver_idle)
-        assert calls[-1][1] == {}
-
         control.set_phase(np.full(control.shape, 0.3), {"source": "science"})
         assert control._spot_optimizer_state is None
-        control.set_target(changed_support * 5.0, objective_kind="spots")
+        control.set_target(changed_support * 4.0, objective_kind="spots")
         _pump(app, lambda: control.solver_idle)
         assert calls[-1][1] == {}
 
@@ -295,7 +287,7 @@ def test_editor_discards_nonlatest_spot_optimizer_state(
         assert inputs[2] == accepted
         assert control._spot_optimizer_state == {"token": "latest"}
         np.testing.assert_array_equal(
-            control._mask_phase,
+            control._pattern_phase,
             canonical_phase(np.full(control.shape, phases[-1]), control.shape),
         )
     finally:
@@ -605,7 +597,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         app.processEvents()
 
 
-def test_mask_wavefront_crop_compose_and_science_phase_roundtrip(
+def test_pattern_wavefront_compose_and_science_phase_roundtrip(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import zlc_atom.devices.slm.editor as editor
@@ -628,24 +620,19 @@ def test_mask_wavefront_crop_compose_and_science_phase_roundtrip(
         full_y, full_x = np.ogrid[
             -1.0:1.0:height * 1j, -1.0:1.0:width * 1j,
         ]
-        mask = canonical_phase(
+        pattern = canonical_phase(
             0.2 + 0.7 * (full_x + 1.0) + 0.3 * (full_y + 1.0),
             control.shape,
         )
-        control.set_mask_phase(mask, {"source": "authored mask"})
-        control._steering_enabled.setChecked(True)
+        control.set_phase(pattern, {"source": "authored pattern"})
         control._zernike_enabled.setChecked(True)
         control._carrier_x.setValue(1.25)
         control._carrier_y.setValue(-0.5)
         control._zernike["defocus"].setValue(0.125)
-        control._crop_x.setValue(2)
-        control._crop_y.setValue(3)
-        control._crop_width.setValue(width - 5)
-        control._crop_height.setValue(height - 7)
-        control._crop_enabled.setChecked(True)
 
         center_x, center_y = control._pupil_center_xy
-        radius_x, radius_y = control._pupil_radius_xy
+        diameter_x, diameter_y = control._pupil_diameter_xy
+        radius_x, radius_y = diameter_x / 2.0, diameter_y / 2.0
         zx = (xx - center_x) / radius_x
         zy = (yy - center_y) / radius_y
         r2 = zx * zx + zy * zy
@@ -660,37 +647,31 @@ def test_mask_wavefront_crop_compose_and_science_phase_roundtrip(
             rtol=0.0,
             atol=5e-6,
         )
-        expected = np.array(expected_wavefront, copy=True)
-        expected[3:height - 4, 2:width - 3] += mask[3:height - 4, 2:width - 3]
-        expected = canonical_phase(expected, control.shape)
+        expected = canonical_phase(expected_wavefront + pattern, control.shape)
         np.testing.assert_allclose(control._phase, expected, rtol=0.0, atol=5e-6)
         assert control._phase_request_revision == control._request_revision
 
-        mask_path = tmp_path / "mask.npz"
         final_path = tmp_path / "final.npz"
-        control.save_mask(mask_path)
         control.save_phase(final_path)
-        loaded_mask, mask_metadata = editor.load_phase(mask_path)
         loaded_final, final_metadata = editor.load_phase(final_path)
-        np.testing.assert_array_equal(loaded_mask, mask)
-        assert mask_metadata == {"source": "authored mask"}
         np.testing.assert_array_equal(loaded_final, expected)
         assert final_metadata["source"] == "composite"
         assert final_metadata["hardware_correction"] == "excluded"
+        assert final_metadata["pattern"] == {"source": "authored pattern"}
+        assert "cgh_crop_xywh" not in final_metadata
+        assert "steering_enabled" not in final_metadata
 
         control.set_phase(loaded_final, {"loaded": "final"})
-        np.testing.assert_array_equal(control._mask_phase, loaded_final)
+        np.testing.assert_array_equal(control._pattern_phase, loaded_final)
         np.testing.assert_array_equal(control._phase, loaded_final)
         assert control._carrier_x.value() == 0.0
         assert control._carrier_y.value() == 0.0
         assert all(spin.value() == 0.0 for spin in control._zernike.values())
-        assert not control._crop_enabled.isChecked()
-        assert not control._steering_enabled.isChecked()
         assert not control._zernike_enabled.isChecked()
         assert control._phase_metadata == {"loaded": "final"}
 
-        control.set_mask_phase(np.zeros(control.shape), {})
-        control._steering_enabled.setChecked(True)
+        control.set_phase(np.zeros(control.shape), {})
+        control._zernike_enabled.setChecked(True)
         control._carrier_x.setValue(1.0)
         pixel_step = np.remainder(
             float(control._phase[0, 1]) - float(control._phase[0, 0]),
@@ -698,19 +679,17 @@ def test_mask_wavefront_crop_compose_and_science_phase_roundtrip(
         )
         np.testing.assert_allclose(pixel_step, 2.0 * np.pi / (width - 1), atol=1e-6)
         control._carrier_x.setValue(0.0)
-        control._steering_enabled.setChecked(False)
-        control._zernike_enabled.setChecked(True)
         control._zernike["defocus"].setValue(0.25)
         np.testing.assert_array_equal(control._phase[~pupil], 0.0)
 
-        assert editor._ZERNIKE[:2] == (
-            ("tilt_x", "Noll Z2 · X tilt", "2x"),
-            ("tilt_y", "Noll Z3 · Y tilt", "2y"),
+        assert tuple(key for key, *_ in editor._ZERNIKE) == (
+            "defocus", "astig_oblique", "astig_vertical", "coma_y",
+            "coma_x", "trefoil_y", "trefoil_x", "spherical",
         )
+        assert "tilt_x" not in control._zernike
+        assert "tilt_y" not in control._zernike
         control._zernike["defocus"].setValue(0.0)
         terms = {
-            "tilt_x": 2.0 * zx,
-            "tilt_y": 2.0 * zy,
             "defocus": np.sqrt(3.0) * (2.0 * r2 - 1.0),
             "astig_oblique": 2.0 * np.sqrt(6.0) * zx * zy,
             "astig_vertical": np.sqrt(6.0) * (zx * zx - zy * zy),
@@ -746,7 +725,7 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
     tmp_path: Path, monkeypatch,
 ) -> None:
     import zlc_atom.devices.slm.editor as editor
-    from zlc_ui.fluent import FluentScrollArea, FluentTabWidget
+    from zlc_ui.fluent import FluentScrollArea, FluentSwitch, FluentTabWidget
 
     app = ensure_qt_app()
     session = _session(tmp_path)
@@ -764,15 +743,30 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
         tabs = control._layer_tabs
         assert isinstance(tabs, FluentTabWidget)
         assert [tabs.tabText(index) for index in range(tabs.count())] == [
-            "Mask", "Wavefront",
+            "Pattern", "Wavefront",
         ]
         assert tabs.currentIndex() == control._editor_tab_index
-        assert not any(
-            text in {"Mask ROI", "Advanced"}
-            for text in (
-                tabs.tabText(index) for index in range(tabs.count())
+        authored_text = {
+            widget.text()
+            for kind in (
+                QtWidgets.QLabel, QtWidgets.QAbstractButton,
             )
-        )
+            for widget in control._body.findChildren(kind)
+        }
+        for retired in (
+            "Mask", "Mask ROI", "Advanced", "CGH crop",
+            "Zero-order steering", "Measured", "Rectangle", "Ellipse", "Ring",
+        ):
+            assert retired not in authored_text
+        assert {"Input pupil", "Zernike", "Vendor correction"} <= authored_text
+        assert {
+            switch.text()
+            for switch in control._pupil_enabled.parent().findChildren(FluentSwitch)
+        } == {"Input pupil", "Zernike", "Vendor correction"}
+        assert not hasattr(control, "_crop_enabled")
+        assert not hasattr(control, "_steering_enabled")
+        assert not hasattr(control, "_import_mask")
+        assert not hasattr(control, "set_mask_phase")
 
         control._body.resize(1024, 577)
         control._body.show()
@@ -890,6 +884,7 @@ def test_preset_popup_materializes_each_authored_target_only_on_apply(
     app = ensure_qt_app()
     session = _session(tmp_path)
     calls: list[tuple[np.ndarray, object]] = []
+    text_calls: list[tuple[object, ...]] = []
 
     def controlled_solve(target, **kwargs):
         calls.append((np.array(target, copy=True), kwargs.get("objective_kind")))
@@ -898,9 +893,20 @@ def test_preset_popup_materializes_each_authored_target_only_on_apply(
         }
 
     monkeypatch.setattr(editor, "solve_phase", controlled_solve)
+    def text_target(shape, text, *, spacing, atom_budget, intensity):
+        text_calls.append((shape, text, spacing, atom_budget, intensity))
+        target = np.zeros(shape, dtype=np.float32)
+        target[shape[0] // 2, shape[1] // 2] = intensity
+        return editor.validate_target(target)
+
+    monkeypatch.setattr(editor, "preset_text", text_target)
     control = editor.SlmEditorControl(session, "slm")
     try:
         _pump(app, lambda: control.solver_idle)
+        assert tuple(
+            control._preset_type.itemText(index)
+            for index in range(control._preset_type.count())
+        ) == ("Grid", "Checkerboard", "Gaussian", "Flat Top", "Text")
         before = len(calls)
         control._preset_type.setCurrentText("Grid")
         for key, value in {
@@ -923,34 +929,26 @@ def test_preset_popup_materializes_each_authored_target_only_on_apply(
             (
                 "Checkerboard",
                 {"rows": 3, "columns": 4, "spacing_y": 12,
-                 "spacing_x": 14, "intensity_a": 1.0, "intensity_b": 0.25},
+                 "spacing_x": 7, "intensity": 0.75},
                 lambda: editor.preset_checkerboard(
-                    control.shape, (3, 4), spacing_yx=(12, 14),
-                    intensity_a=1.0, intensity_b=0.25,
+                    control.shape, (3, 4), spacing_yx=(12, 7),
+                    intensity=0.75,
                 ),
                 "spots",
             ),
             (
-                "Rectangle", {"height": 20, "width": 28, "edge": 3,
-                              "intensity": 0.8},
-                lambda: editor.preset_rectangle(
-                    control.shape, (20, 28), edge=3, intensity=0.8,
+                "Gaussian", {"radius_y": 10, "radius_x": 16,
+                             "intensity": 0.6},
+                lambda: editor.preset_gaussian(
+                    control.shape, (10, 16), intensity=0.6,
                 ),
                 "image",
             ),
             (
-                "Ellipse", {"radius_y": 10, "radius_x": 16, "edge": 2,
-                            "intensity": 0.6},
-                lambda: editor.preset_ellipse(
-                    control.shape, (10, 16), edge=2, intensity=0.6,
-                ),
-                "image",
-            ),
-            (
-                "Ring", {"radius": 14, "ring_width": 4, "edge": 2,
-                         "intensity": 0.9},
-                lambda: editor.preset_ring(
-                    control.shape, radius=14, width=4, edge=2, intensity=0.9,
+                "Flat Top", {"radius_y": 10, "radius_x": 16, "edge": 2,
+                             "intensity": 0.9},
+                lambda: editor.preset_flat_top(
+                    control.shape, (10, 16), edge=2, intensity=0.9,
                 ),
                 "image",
             ),
@@ -963,6 +961,49 @@ def test_preset_popup_materializes_each_authored_target_only_on_apply(
             _pump(app, lambda: control.solver_idle)
             np.testing.assert_array_equal(control._target, expected())
             assert calls[-1][1] == objective
+
+        control._preset_type.setCurrentText("Checkerboard")
+        assert control._preset_field_rows["columns"][0].text() == (
+            "Sites in long row"
+        )
+        assert control._preset_field_rows["spacing_x"][0].text() == (
+            "Checker cell spacing X"
+        )
+        assert "long-row sites are 2×" in (
+            control._preset_fields["spacing_x"].toolTip()
+        )
+
+        control._preset_type.setCurrentText("Text")
+        assert not control._preset_text.isHidden()
+        control._preset_text.setText("USTC 中国科大")
+        control._preset_fields["text_spacing"].setValue(4)
+        control._preset_fields["atom_budget"].setValue(240)
+        control._preset_fields["intensity"].setValue(0.8)
+        text_calls_before, solves_before = len(text_calls), len(calls)
+        assert len(text_calls) == text_calls_before
+        assert len(calls) == solves_before
+        control._apply_preset_popup()
+        _pump(app, lambda: control.solver_idle)
+        assert text_calls[-1] == (
+            control.shape, "USTC 中国科大", 4, 240, 0.8,
+        )
+        assert calls[-1][1] == "spots"
+        assert np.count_nonzero(control._target) == 1
+
+        def missing_font(*_args, **_kwargs):
+            raise FileNotFoundError("text font missing")
+
+        monkeypatch.setattr(editor, "preset_text", missing_font)
+        target_before = np.array(control._target, copy=True)
+        revision_before, calls_before = control._request_revision, len(calls)
+        control._preset_popup.show()
+        app.processEvents()
+        control._apply_preset_popup()
+        np.testing.assert_array_equal(control._target, target_before)
+        assert control._request_revision == revision_before
+        assert len(calls) == calls_before
+        assert control._preset_popup.isVisible()
+        assert control.status_text == "text font missing"
 
         control._preset_type.setCurrentText("Grid")
         control._preset_fields["rows"].setValue(control.shape[0])
@@ -1003,53 +1044,61 @@ def test_input_pupil_is_draft_until_apply_and_reaches_the_solver_as_amplitude(
     control = editor.SlmEditorControl(session, "slm")
     try:
         _pump(app, lambda: control.solver_idle)
-        assert not hasattr(control, "_pupil_enabled")
-        assert [control._pupil_type.itemText(i) for i in range(control._pupil_type.count())] == [
-            "Assumed ellipse", "Measured",
-        ]
+        assert control._pupil_enabled.isChecked()
+        height, width = control.shape
+        assert control._pupil_center_xy == (
+            0.5 * (width - 1), 0.5 * (height - 1),
+        )
+        assert control._pupil_diameter_xy == pytest.approx(
+            (0.70 * height, 0.70 * height)
+        )
+        yy, xx = np.ogrid[:height, :width]
+        default_cx, default_cy = control._pupil_center_xy
+        default_dx, default_dy = control._pupil_diameter_xy
+        default_amplitude = np.exp(
+            -((xx - default_cx) / (default_dx / 2.0)) ** 2
+            -((yy - default_cy) / (default_dy / 2.0)) ** 2
+        ).astype(np.float32)
+        np.testing.assert_allclose(pupils[-1], default_amplitude, atol=1e-7)
         before = len(pupils)
         control._pupil_center_x.setValue(61.0)
         control._pupil_center_y.setValue(63.0)
-        control._pupil_radius_x.setValue(42.0)
-        control._pupil_radius_y.setValue(38.0)
+        control._pupil_diameter_x.setValue(84.0)
+        control._pupil_diameter_y.setValue(76.0)
         assert len(pupils) == before
         control._apply_pupil()
         _pump(app, lambda: control.solver_idle)
-        yy, xx = np.ogrid[:control.shape[0], :control.shape[1]]
-        expected = (
+        expected = np.exp(
+            -((xx - 61.0) / 42.0) ** 2
+            -((yy - 63.0) / 38.0) ** 2
+        ).astype(np.float32)
+        np.testing.assert_allclose(pupils[-1], expected, rtol=0.0, atol=1e-7)
+        assert control._pupil_center_xy == (61.0, 63.0)
+        assert control._pupil_diameter_xy == (84.0, 76.0)
+        assert "Gaussian" in control._pupil_status.text()
+        support = (
             ((xx - 61.0) / 42.0) ** 2
             + ((yy - 63.0) / 38.0) ** 2
             <= 1.0
-        ).astype(np.float32)
-        np.testing.assert_array_equal(pupils[-1], expected)
-        assert control._pupil_center_xy == (61.0, 63.0)
-        assert control._pupil_radius_xy == (42.0, 38.0)
-        assert "assumed ellipse" in control._pupil_status.text().lower()
-        applied_description = control._pupil_applied_description
-
-        intensity = np.linspace(
-            0.0, 1.0, num=np.prod(control.shape), dtype=np.float32,
-        ).reshape(control.shape)
-        path = tmp_path / "measured_pupil.npy"
-        np.save(path, intensity)
-        control._load_pupil_path(path)
-        assert "measured_pupil.npy" in control._pupil_status.text()
-        control._carrier_x.setValue(0.25)
-        assert control._phase_metadata["input_pupil"] == applied_description
-        control._apply_pupil()
-        _pump(app, lambda: control.solver_idle)
-        support = expected.astype(bool)
-        np.testing.assert_allclose(
-            pupils[-1], np.sqrt(intensity) * support, rtol=0.0, atol=1e-7,
         )
-        assert "measured_pupil.npy" in control._pupil_applied_description
+        np.testing.assert_array_equal(control._pupil_support, support)
+
+        control._pupil_enabled.setChecked(False)
+        _pump(app, lambda: control.solver_idle)
+        np.testing.assert_array_equal(pupils[-1], np.ones(control.shape))
+        assert control._pupil_status.text() == "Off · uniform full raster"
+        np.testing.assert_array_equal(control._pupil_support, support)
+
+        control._pupil_enabled.setChecked(True)
+        _pump(app, lambda: control.solver_idle)
+        np.testing.assert_allclose(pupils[-1], expected, rtol=0.0, atol=1e-7)
     finally:
         _dispose(control, app)
         session.device_use.assert_idle()
         session.installation.close()
 
 
-def test_measured_pupil_and_zernike_share_the_configured_unit_ellipse(
+def test_gaussian_pupil_and_zernike_share_the_configured_ellipse(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import zlc_atom.devices.slm.editor as editor
@@ -1070,29 +1119,30 @@ def test_measured_pupil_and_zernike_share_the_configured_unit_ellipse(
         _pump(app, lambda: control.solver_idle)
         control._pupil_center_x.setValue(61.0)
         control._pupil_center_y.setValue(43.0)
-        control._pupil_radius_x.setValue(27.0)
-        control._pupil_radius_y.setValue(19.0)
-        intensity = np.full(control.shape, 4.0, dtype=np.float32)
-        path = tmp_path / "beam.npy"
-        np.save(path, intensity)
-        control._load_pupil_path(path)
+        control._pupil_diameter_x.setValue(54.0)
+        control._pupil_diameter_y.setValue(38.0)
         control._apply_pupil()
         _pump(app, lambda: control.solver_idle)
 
         yy, xx = np.ogrid[:control.shape[0], :control.shape[1]]
         support = ((xx - 61.0) / 27.0) ** 2 + ((yy - 43.0) / 19.0) ** 2 <= 1.0
-        np.testing.assert_array_equal(pupils[-1] > 0.0, support)
-        np.testing.assert_array_equal(pupils[-1][support], 2.0)
-        np.testing.assert_array_equal(pupils[-1][~support], 0.0)
+        expected = np.exp(
+            -((xx - 61.0) / 27.0) ** 2
+            -((yy - 43.0) / 19.0) ** 2
+        ).astype(np.float32)
+        np.testing.assert_allclose(pupils[-1], expected, rtol=0.0, atol=1e-7)
+        np.testing.assert_array_equal(control._pupil_support, support)
 
-        control._steering_enabled.setChecked(False)
         control._zernike_enabled.setChecked(True)
         control._zernike["defocus"].setValue(0.25)
         assert np.any(control._wavefront_phase[support] > 0.0)
         np.testing.assert_array_equal(control._wavefront_phase[~support], 0.0)
-        assert control._phase_metadata["input_pupil"] == (
-            "measured beam.npy · configured unit ellipse"
-        )
+        assert "Gaussian" in control._phase_metadata["input_pupil"]
+
+        control._carrier_x.setValue(0.5)
+        assert np.any(control._wavefront_phase[~support] > 0.0)
+        control._zernike_enabled.setChecked(False)
+        np.testing.assert_array_equal(control._wavefront_phase, 0.0)
     finally:
         _dispose(control, app)
         session.device_use.assert_idle()
@@ -1184,7 +1234,7 @@ def test_editor_exposes_x15213_correction_load_and_enable_without_sending(
         session.installation.close()
 
 
-def test_target_solve_updates_mask_then_recomposes_without_weakening_stale_send(
+def test_target_solve_updates_pattern_then_recomposes_without_weakening_stale_send(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import zlc_atom.devices.slm.editor as editor
@@ -1193,7 +1243,7 @@ def test_target_solve_updates_mask_then_recomposes_without_weakening_stale_send(
     session = _session(tmp_path)
     started, release = threading.Event(), threading.Event()
     calls = 0
-    solved_mask = canonical_phase(
+    solved_pattern = canonical_phase(
         np.full(session.installation.device("slm").shape_yx, 0.4),
         session.installation.device("slm").shape_yx,
     )
@@ -1209,12 +1259,13 @@ def test_target_solve_updates_mask_then_recomposes_without_weakening_stale_send(
         release.wait(2.0)
         if stop_requested():
             raise InterruptedError("superseded")
-        return solved_mask, {"method": "test", "iterations": 1}
+        return solved_pattern, {"method": "test", "iterations": 1}
 
     monkeypatch.setattr(editor, "solve_phase", controlled_solve)
     control = editor.SlmEditorControl(session, "slm")
     try:
         _pump(app, lambda: control.solver_idle)
+        control._zernike_enabled.setChecked(True)
         control._carrier_x.setValue(0.75)
         control.set_target(np.full(control.shape, 0.8, dtype=np.float32))
         assert started.wait(2.0)
@@ -1228,10 +1279,10 @@ def test_target_solve_updates_mask_then_recomposes_without_weakening_stale_send(
         xx = np.linspace(-1.0, 1.0, control.shape[1])[None, :]
         yy = np.linspace(-1.0, 1.0, control.shape[0])[:, None]
         expected = canonical_phase(
-            solved_mask + np.pi * (0.75 * xx + 0.25 * yy),
+            solved_pattern + np.pi * (0.75 * xx + 0.25 * yy),
             control.shape,
         )
-        np.testing.assert_array_equal(control._mask_phase, solved_mask)
+        np.testing.assert_array_equal(control._pattern_phase, solved_pattern)
         np.testing.assert_allclose(control._phase, expected, rtol=0.0, atol=5e-6)
         assert control._phase_request_revision == control._request_revision
         assert control.send() is True
@@ -1242,54 +1293,6 @@ def test_target_solve_updates_mask_then_recomposes_without_weakening_stale_send(
         )
     finally:
         release.set()
-        _dispose(control, app)
-        session.device_use.assert_idle()
-        session.installation.close()
-
-
-def test_import_8bit_mask_image_is_raw_phase_not_target_or_correction(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    from PIL import Image
-    import zlc_atom.devices.slm.editor as editor
-
-    app = ensure_qt_app()
-    session = _session(tmp_path)
-    monkeypatch.setattr(
-        editor,
-        "solve_phase",
-        lambda target, **_kwargs: (
-            canonical_phase(np.zeros(target.shape), target.shape),
-            {"method": "test", "iterations": 1},
-        ),
-    )
-    control = editor.SlmEditorControl(session, "slm")
-    try:
-        _pump(app, lambda: control.solver_idle)
-        target_before = np.array(control._target, copy=True)
-        control._crop_x.setValue(4)
-        control._crop_y.setValue(5)
-        control._crop_width.setValue(6)
-        control._crop_height.setValue(7)
-        control._crop_enabled.setChecked(True)
-        gray = np.arange(42, dtype=np.uint8).reshape(7, 6)
-        path = tmp_path / "phase_mask.bmp"
-        Image.fromarray(gray, mode="L").save(path)
-        control.import_mask_image(path)
-
-        expected_mask = np.zeros(control.shape, dtype=np.float64)
-        expected_mask[5:12, 4:10] = gray * (2.0 * np.pi / 256.0)
-        expected_mask = canonical_phase(expected_mask, control.shape)
-        np.testing.assert_array_equal(control._mask_phase, expected_mask)
-        np.testing.assert_array_equal(control._phase, expected_mask)
-        np.testing.assert_array_equal(control._target, target_before)
-        assert "not a correction" in control._import_mask.toolTip().lower()
-
-        bad = tmp_path / "rgb.png"
-        Image.fromarray(np.zeros((7, 6, 3), dtype=np.uint8), mode="RGB").save(bad)
-        with np.testing.assert_raises_regex(ValueError, "8-bit grayscale"):
-            control.import_mask_image(bad)
-    finally:
         _dispose(control, app)
         session.device_use.assert_idle()
         session.installation.close()

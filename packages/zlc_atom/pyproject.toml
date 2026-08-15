@@ -30,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "zlc_atom.nodes.calibration" = ["imaging_template.json"]
+"zlc_atom.devices.slm" = ["profiles/*.json"]
 
 # pytest configuration deliberately does NOT live here any more.
 #

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,7 +31,7 @@ class _UsbSdk:
         close_results: tuple[int, ...] = (),
     ) -> None:
         self.mode = mode
-        self.serial = b"X15213-SN"
+        self.serial = b"LSH0804382"
         self.serial_result = serial_result
         self.mode_result = mode_result
         self.display = np.zeros((1024, 1272), dtype=np.uint8)
@@ -125,16 +126,12 @@ def _patch_dvi_without_controller(monkeypatch) -> None:
 def _config(**changes):
     values = {
         "transport": "dvi",
-        "model": "X15213",
         "display_name": r"\\.\DISPLAY2",
         "sdk_directory": "",
         "serial": "",
-        "wavelength_nm": 1064.0,
-        "two_pi_gray": 255.0,
+        "device_profile": "LSH0804382",
+        "wavelength_nm": 852.0,
         "correction_path": "",
-        "correction_offset_gray": 0,
-        "correction_sign": 1,
-        "active_x": 4,
         "flip_x": False,
         "flip_y": False,
         "settle_seconds": 0.0,
@@ -152,8 +149,45 @@ def test_x15213_descriptor_is_one_plugin_owned_usb_or_dvi_device() -> None:
     assert descriptor.discover is _discover_x15213
     assert descriptor.control_factory is not None
     assert set(HAMAMATSU_X15213_SCHEMA.field_names) == set(_config())
+    assert {
+        "model", "two_pi_gray", "correction_offset_gray", "correction_sign",
+        "active_x",
+    }.isdisjoint(HAMAMATSU_X15213_SCHEMA.field_names)
     with pytest.raises(ValueError, match="transport"):
         HAMAMATSU_X15213_SCHEMA.project_values(_config(transport="serial"))
+
+
+def test_x15213_profile_derives_wavelength_lut_without_a_hard_coded_level(
+    monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    _patch_dvi_without_controller(monkeypatch)
+    adapter = X15213Adapter(_config())
+    try:
+        assert adapter.wavelength_nm == 852.0
+        assert adapter.two_pi_gray == 225.0
+    finally:
+        adapter.close()
+
+    at_readout = X15213Adapter(_config(wavelength_nm=785.0))
+    try:
+        assert at_readout.two_pi_gray == 207.0
+    finally:
+        at_readout.close()
+
+    profile_path = Path(module.__file__).resolve().parent / "profiles" / "LSH0804382.json"
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert len(profile["phase_pi_by_gray"]) == 256
+    assert "wavelength_levels" not in profile
+    assert "two_pi_gray" not in profile
+
+    with pytest.raises(ValueError, match="wavelength.*phase-curve range"):
+        X15213Adapter(_config(wavelength_nm=1000.0))
+    with pytest.raises((FileNotFoundError, ValueError), match="profile"):
+        X15213Adapter(_config(device_profile="not-a-device"))
+    with pytest.raises(ValueError, match="serial.*profile"):
+        X15213Adapter(_config(serial="ANOTHER-HEAD"))
 
 
 def test_win32_display_structures_match_the_complete_unicode_abi() -> None:
@@ -264,8 +298,8 @@ def test_scan_reports_dvi_candidates_without_claiming_edid_identity(monkeypatch)
     assert candidate.type_id == "slm.hamamatsu_x15213"
     assert candidate.parameters["transport"] == "dvi"
     assert candidate.parameters["display_name"] == r"\\.\DISPLAY2"
-    assert candidate.parameters["model"] == "X15213"
-    assert candidate.parameters["wavelength_nm"] == 1064.0
+    assert candidate.parameters["device_profile"] == "LSH0804382"
+    assert candidate.parameters["wavelength_nm"] == 852.0
     assert "candidate" in candidate.role
 
 
@@ -283,7 +317,9 @@ def test_scan_reads_usb_serial_and_always_closes_the_probe(monkeypatch, tmp_path
 
     assert len(found) == 1
     assert found[0].parameters["transport"] == "usb"
-    assert found[0].parameters["serial"] == "X15213-SN"
+    assert found[0].parameters["serial"] == "LSH0804382"
+    assert found[0].parameters["device_profile"] == "LSH0804382"
+    assert found[0].parameters["wavelength_nm"] == 852.0
     assert sdk.closed
     assert sdk.close_count == 1
     assert handle.close_count == 1
@@ -360,8 +396,20 @@ def test_runtime_correction_status_and_failed_load_are_atomic(
 
         bad_path = tmp_path / "wrong-shape.bmp"
         Image.fromarray(np.zeros((12, 13), dtype=np.uint8), mode="L").save(bad_path)
-        with pytest.raises(ValueError, match="1272 x 1024 or 1280 x 1024"):
+        with pytest.raises(ValueError, match="1272 x 1024"):
             adapter.load_correction(bad_path)
+        full_raster = tmp_path / "full-raster.bmp"
+        Image.fromarray(np.zeros((1024, 1280), dtype=np.uint8), mode="L").save(
+            full_raster
+        )
+        with pytest.raises(ValueError, match="1272 x 1024"):
+            adapter.load_correction(full_raster)
+        rgb = tmp_path / "rgb.bmp"
+        Image.fromarray(np.zeros((1024, 1272, 3), dtype=np.uint8), mode="RGB").save(
+            rgb
+        )
+        with pytest.raises(ValueError, match="8-bit grayscale"):
+            adapter.load_correction(rgb)
 
         assert adapter.correction_path == str(correction_path)
         assert adapter.correction_name == correction_path.name
@@ -371,7 +419,8 @@ def test_runtime_correction_status_and_failed_load_are_atomic(
         assert frames == []
 
         adapter.apply_phase(np.zeros(adapter.shape_yx))
-        assert np.all(frames[-1][:, 4:1276] == 7)
+        assert np.all(frames[-1][:, :1272] == 6)
+        assert np.all(frames[-1][:, 1272:] == 0)
     finally:
         adapter.close()
 
@@ -398,7 +447,8 @@ def test_runtime_correction_enable_only_changes_the_next_apply(
     try:
         adapter.load_correction(correction_path)
         adapter.apply_phase(np.zeros(adapter.shape_yx))
-        assert np.all(frames[-1][:, 4:1276] == 9)
+        assert np.all(frames[-1][:, :1272] == 8)
+        assert np.all(frames[-1][:, 1272:] == 0)
         commanded = adapter.last_commanded_phase.copy()
 
         adapter.set_correction_enabled(False)
@@ -406,28 +456,28 @@ def test_runtime_correction_enable_only_changes_the_next_apply(
         assert len(frames) == 1
         np.testing.assert_array_equal(adapter.last_commanded_phase, commanded)
         adapter.apply_phase(np.zeros(adapter.shape_yx))
-        assert np.all(frames[-1][:, 4:1276] == 0)
+        assert np.all(frames[-1] == 0)
 
         adapter.set_correction_enabled(True)
         assert adapter.correction_enabled is True
         assert len(frames) == 2
         np.testing.assert_array_equal(adapter.last_commanded_phase, commanded)
         adapter.apply_phase(np.zeros(adapter.shape_yx))
-        assert np.all(frames[-1][:, 4:1276] == 9)
+        assert np.all(frames[-1][:, :1272] == 8)
+        assert np.all(frames[-1][:, 1272:] == 0)
     finally:
         adapter.close()
 
 
-@pytest.mark.parametrize("correction_width", (1272, 1280))
 def test_dvi_applies_orientation_correction_and_active_raster(
     monkeypatch,
     tmp_path: Path,
-    correction_width: int,
 ) -> None:
     import zlc_atom.devices.slm.device_types as module
 
     _patch_dvi_without_controller(monkeypatch)
-    correction = np.ones((1024, correction_width), dtype=np.uint8)
+    correction = np.zeros((1024, 1272), dtype=np.uint8)
+    correction[0, 0] = 255
     correction_path = tmp_path / "correction.bmp"
     Image.fromarray(correction, mode="L").save(correction_path)
     frames: list[np.ndarray] = []
@@ -443,7 +493,6 @@ def test_dvi_applies_orientation_correction_and_active_raster(
     adapter = X15213Adapter(
         _config(
             correction_path=str(correction_path),
-            correction_offset_gray=2,
             flip_x=True,
         )
     )
@@ -461,12 +510,83 @@ def test_dvi_applies_orientation_correction_and_active_raster(
     frame = frames[0]
     assert frame.shape == (1024, 1280)
     assert frame.dtype == np.uint8
-    assert np.all(frame[:, :4] == 0)
-    assert np.all(frame[:, 1276:] == 0)
-    assert frame[0, 1275] == 131
-    assert frame[0, 4] == 3
+    assert frame[0, 0] == 224
+    assert frame[0, 1271] == 113
+    assert np.all(frame[:, 1272:] == 0)
     adapter.close()
     assert closed == [True]
+
+
+def test_phase_image_codes_then_correction_wrap_then_852_drive_quantization(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    _patch_dvi_without_controller(monkeypatch)
+    frames: list[np.ndarray] = []
+    monkeypatch.setattr(
+        module,
+        "_open_dvi_presenter",
+        lambda _name: (lambda frame: frames.append(frame.copy()), lambda: None),
+    )
+    adapter = X15213Adapter(_config())
+    phase = np.zeros(adapter.shape_yx, dtype=np.float64)
+    codes = np.array((0, 64, 128, 192, 255), dtype=np.float64)
+    phase[0, : codes.size] = codes * (2.0 * np.pi / 256.0)
+
+    try:
+        adapter.apply_phase(phase)
+        np.testing.assert_array_equal(
+            frames[-1][0, : codes.size], np.array((0, 57, 113, 169, 224))
+        )
+
+        correction = np.zeros(adapter.shape_yx, dtype=np.uint8)
+        correction[0, 0] = 255
+        correction_path = tmp_path / "wrap-at-256.bmp"
+        Image.fromarray(correction, mode="L").save(correction_path)
+        adapter.load_correction(correction_path)
+
+        adapter.apply_phase(np.zeros(adapter.shape_yx))
+        assert frames[-1][0, 0] == 224
+        one_code = np.zeros(adapter.shape_yx, dtype=np.float64)
+        one_code[0, 0] = 2.0 * np.pi / 256.0
+        adapter.apply_phase(one_code)
+        assert frames[-1][0, 0] == 0
+    finally:
+        adapter.close()
+
+
+def test_correction_filename_scales_unwrapped_785_phase_for_852_and_checks_serial(
+    tmp_path: Path,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    x = np.arange(1272, dtype=np.uint16)
+    correction = np.broadcast_to(x % 256, (1024, 1272)).astype(np.uint8)
+    correction_path = tmp_path / "CAL_LSH0804382_785nm.bmp"
+    Image.fromarray(correction, mode="L").save(correction_path)
+
+    converted = module._load_correction(
+        str(correction_path),
+        expected_serial="LSH0804382",
+        wavelength_nm=852.0,
+    )
+    probes = np.array((0, 1, 64, 255, 256, 512, 1271))
+    expected = np.mod(
+        np.floor(probes.astype(np.float64) * (785.0 / 852.0) + 0.5),
+        256.0,
+    ).astype(np.uint8)
+    np.testing.assert_array_equal(converted[0, probes], expected)
+
+    wrong_head = tmp_path / "CAL_ANOTHER_HEAD_785nm.bmp"
+    Image.fromarray(correction, mode="L").save(wrong_head)
+    with pytest.raises(ValueError, match="serial.*profile serial"):
+        module._load_correction(
+            str(wrong_head),
+            expected_serial="LSH0804382",
+            wavelength_nm=852.0,
+        )
 
 
 def test_usb_writes_active_gray_reads_it_back_and_keeps_science_phase(
@@ -482,15 +602,14 @@ def test_usb_writes_active_gray_reads_it_back_and_keeps_science_phase(
         _config(
             transport="usb",
             display_name="",
-            serial="  X15213-SN  ",
-            correction_offset_gray=99,
+            serial="  LSH0804382  ",
         )
     )
     phase = np.full(adapter.shape_yx, np.pi, dtype=np.float64)
 
     commanded = adapter.apply_phase(phase)
 
-    assert np.all(sdk.display == 128)
+    assert np.all(sdk.display == 113)
     np.testing.assert_array_equal(commanded, adapter.last_commanded_phase)
     assert np.allclose(commanded, np.float32(np.pi))
     sdk.bad_readback = True
@@ -512,7 +631,7 @@ def test_usb_close_failure_retains_board_sdk_and_handle_for_retry(
     monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": tmp_path)
     monkeypatch.setattr(module, "_load_sdk", lambda _directory: (sdk, handle))
     adapter = X15213Adapter(
-        _config(transport="usb", display_name="", serial="X15213-SN")
+        _config(transport="usb", display_name="", serial="LSH0804382")
     )
 
     with pytest.raises(RuntimeError, match="Close_Dev"):
@@ -545,7 +664,7 @@ def test_usb_handle_close_failure_retries_handle_without_reclosing_board(
     monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": tmp_path)
     monkeypatch.setattr(module, "_load_sdk", lambda _directory: (sdk, handle))
     adapter = X15213Adapter(
-        _config(transport="usb", display_name="", serial="X15213-SN")
+        _config(transport="usb", display_name="", serial="LSH0804382")
     )
 
     with pytest.raises(RuntimeError, match="handle close failed"):
@@ -577,11 +696,11 @@ def test_usb_dvi_mode_switch_reboots_and_reopens_in_one_initialization(
     monkeypatch.setattr(module, "_load_sdk", lambda _directory: (sdk, None))
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
     adapter = X15213Adapter(
-        _config(transport="usb", display_name="", serial="X15213-SN")
+        _config(transport="usb", display_name="", serial="LSH0804382")
     )
     assert sdk.selected == 1
     assert sdk.rebooted
-    assert adapter.identity.endswith(":X15213-SN")
+    assert adapter.identity.endswith(":LSH0804382")
     adapter.close()
 
 
@@ -592,13 +711,14 @@ def test_usb_serial_binding_is_exact_after_stripping_and_closes_on_mismatch(
     import zlc_atom.devices.slm.device_types as module
 
     sdk = _UsbSdk()
+    sdk.serial = b"LSH0804383"
     handle = _Handle()
     monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": tmp_path)
     monkeypatch.setattr(module, "_load_sdk", lambda _directory: (sdk, handle))
 
     with pytest.raises(RuntimeError, match="requested X15213 serial"):
         X15213Adapter(
-            _config(transport="usb", display_name="", serial="X15213")
+            _config(transport="usb", display_name="", serial="  LSH0804382  ")
         )
 
     assert sdk.close_count == 1
@@ -625,7 +745,7 @@ def test_usb_first_probe_failure_always_closes_the_open_board(
 
     with pytest.raises(RuntimeError, match=operation):
         X15213Adapter(
-            _config(transport="usb", display_name="", serial="X15213-SN")
+            _config(transport="usb", display_name="", serial="LSH0804382")
         )
 
     assert sdk.close_count == 1

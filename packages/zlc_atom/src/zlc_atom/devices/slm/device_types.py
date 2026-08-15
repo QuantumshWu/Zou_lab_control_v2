@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
@@ -27,6 +28,9 @@ _SHAPE_YX = (1024, 1272)
 _RASTER_YX = (1024, 1280)
 _TWO_PI = 2.0 * np.pi
 _TYPE_ID = "slm.hamamatsu_x15213"
+_PROFILE_FORMAT = "zlc.slm.hamamatsu_x15213.device_profile"
+_PROFILE_VERSION = 1
+_PROFILE_DIRECTORY = Path(__file__).resolve().parent / "profiles"
 
 
 class _DisplayDeviceW(ctypes.Structure):
@@ -77,11 +81,6 @@ class _DevModeW(ctypes.Structure):
     )
 
 
-def _validate(values: Mapping[str, object]) -> None:
-    if int(values["active_x"]) + _SHAPE_YX[1] > _RASTER_YX[1]:
-        raise ValueError("X15213 active raster lies outside its 1280-pixel DVI input")
-
-
 HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
@@ -93,13 +92,6 @@ HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
                 AuthoringChoice("dvi", "DVI display"),
                 AuthoringChoice("usb", "USB frame memory"),
             ),
-        ),
-        AuthoringField(
-            "model",
-            "choice",
-            "Model",
-            "X15213",
-            choices=(AuthoringChoice("X15213", "LCOS-SLM X15213"),),
         ),
         AuthoringField(
             "display_name",
@@ -122,45 +114,24 @@ HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
             "",
             enabled_when=("transport", ("usb",)),
         ),
-        # Wavelength is experiment provenance only.  The measured two_pi_gray
-        # below is the sole radians-to-hardware mapping; no LUT is inferred.
+        AuthoringField(
+            "device_profile",
+            "str",
+            "Device profile",
+            "LSH0804382",
+        ),
         AuthoringField(
             "wavelength_nm",
             "float",
-            "Wavelength (nm, record only)",
-            1064.0,
+            "Wavelength (nm)",
+            852.0,
             minimum=1.0,
-        ),
-        AuthoringField(
-            "two_pi_gray",
-            "float",
-            "Measured gray for 2 pi",
-            255.0,
-            minimum=1.0,
-            maximum=255.0,
         ),
         AuthoringField("correction_path", "str", "Vendor correction BMP", ""),
-        AuthoringField(
-            "correction_offset_gray",
-            "int",
-            "Correction phase offset (gray)",
-            0,
-            minimum=0,
-            maximum=255,
-        ),
-        AuthoringField(
-            "correction_sign",
-            "choice",
-            "Correction sign",
-            1,
-            choices=(AuthoringChoice(1, "+"), AuthoringChoice(-1, "-")),
-        ),
-        AuthoringField("active_x", "int", "Active raster X offset", 4, minimum=0, maximum=8),
         AuthoringField("flip_x", "bool", "Flip X", False),
         AuthoringField("flip_y", "bool", "Flip Y", False),
         AuthoringField("settle_seconds", "float", "Optical settle (s)", 0.05, minimum=0.0),
     ),
-    validator=_validate,
 )
 
 
@@ -519,18 +490,149 @@ def _prepare_dvi_controller(sdk_directory: str, serial: str) -> bool:
                 handle.close()
 
 
-def _load_correction(path_text: str, active_x: int) -> np.ndarray:
+_PROFILE_FIELDS = frozenset(
+    {
+        "format",
+        "version",
+        "model",
+        "serial",
+        "default_wavelength_nm",
+        "readout_wavelength_nm",
+        "phase_pi_by_gray",
+    }
+)
+_WAVELENGTH_IN_NAME = re.compile(r"(?P<wavelength>\d+(?:\.\d+)?)\s*nm", re.IGNORECASE)
+_CALIBRATION_NAME = re.compile(
+    r"^CAL_(?P<serial>.+)_(?P<wavelength>\d+(?:\.\d+)?)nm$",
+    re.IGNORECASE,
+)
+
+
+def _load_profile(profile_name: str) -> dict[str, object]:
+    requested = profile_name.strip()
+    if not requested or Path(requested).name != requested:
+        raise ValueError("X15213 device profile must be a local profile name")
+    filename = requested if requested.casefold().endswith(".json") else f"{requested}.json"
+    path = _PROFILE_DIRECTORY / filename
+    if not path.is_file():
+        raise FileNotFoundError(f"X15213 device profile {requested!r} was not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"X15213 device profile {requested!r} is not valid JSON") from error
+    if not isinstance(payload, dict) or set(payload) != _PROFILE_FIELDS:
+        raise ValueError(f"X15213 device profile {requested!r} has an invalid field set")
+    if payload["format"] != _PROFILE_FORMAT or payload["version"] != _PROFILE_VERSION:
+        raise ValueError(f"X15213 device profile {requested!r} has an unsupported format")
+    if payload["model"] != "X15213":
+        raise ValueError(f"X15213 device profile {requested!r} names the wrong model")
+    serial = str(payload["serial"]).strip()
+    if not serial:
+        raise ValueError(f"X15213 device profile {requested!r} has no serial")
+    for field in (
+        "default_wavelength_nm",
+        "readout_wavelength_nm",
+    ):
+        value = float(payload[field])
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"X15213 device profile {requested!r} has invalid {field}")
+        payload[field] = value
+    curve = np.asarray(payload["phase_pi_by_gray"], dtype=np.float64)
+    if (
+        curve.shape != (256,)
+        or not np.all(np.isfinite(curve))
+        or curve[0] != 0.0
+        or np.any(np.diff(curve) <= 0.0)
+    ):
+        raise ValueError(
+            f"X15213 device profile {requested!r} needs 256 strictly increasing phase values"
+        )
+    payload["serial"] = serial
+    payload["phase_pi_by_gray"] = curve
+    payload["profile_name"] = Path(filename).stem
+    return payload
+
+
+def _half_up(values: object) -> np.ndarray:
+    return np.floor(np.asarray(values, dtype=np.float64) + 0.5)
+
+
+def _phase_lut(
+    curve: np.ndarray,
+    wavelength_nm: float,
+    readout_wavelength_nm: float,
+) -> tuple[np.ndarray, int]:
+    phase_codes = np.arange(256, dtype=np.float64)
+    target_pi = phase_codes * wavelength_nm / (128.0 * readout_wavelength_nm)
+    two_pi_target = 2.0 * wavelength_nm / readout_wavelength_nm
+    if target_pi[0] < curve[0] or two_pi_target > curve[-1]:
+        raise ValueError(
+            f"wavelength {wavelength_nm:g} nm lies outside the device profile phase-curve range"
+        )
+    gray_float = np.interp(target_pi, curve, phase_codes)
+    two_pi_float = float(np.interp(two_pi_target, curve, phase_codes))
+    gray = _half_up(gray_float)
+    two_pi_gray = int(np.floor(two_pi_float + 0.5))
+    if np.any(gray < 0.0) or np.any(gray > 255.0) or not 0 <= two_pi_gray <= 255:
+        raise ValueError(
+            f"wavelength {wavelength_nm:g} nm lies outside the device profile gray range"
+        )
+    return gray.astype(np.uint8), two_pi_gray
+
+
+def _correction_source_wavelength(path: Path, expected_serial: str) -> float | None:
+    calibration = _CALIBRATION_NAME.fullmatch(path.stem)
+    if calibration is not None:
+        observed_serial = calibration.group("serial")
+        if observed_serial.casefold() != expected_serial.casefold():
+            raise ValueError(
+                "X15213 correction calibration serial "
+                f"{observed_serial!r} does not match device profile serial {expected_serial!r}"
+            )
+        return float(calibration.group("wavelength"))
+    matches = tuple(_WAVELENGTH_IN_NAME.finditer(path.stem))
+    if matches:
+        return float(matches[-1].group("wavelength"))
+    return None
+
+
+def _scale_correction_wavelength(
+    values: np.ndarray,
+    source_wavelength_nm: float,
+    wavelength_nm: float,
+) -> np.ndarray:
+    if source_wavelength_nm == wavelength_nm:
+        return values
+    wrapped_radians = values.astype(np.float64) * (_TWO_PI / 256.0)
+    unwrapped = np.unwrap(wrapped_radians, axis=1)
+    unwrapped = np.unwrap(unwrapped, axis=0)
+    scaled = np.remainder(
+        unwrapped * (source_wavelength_nm / wavelength_nm), _TWO_PI
+    )
+    return np.mod(_half_up(scaled * (256.0 / _TWO_PI)), 256.0).astype(np.uint8)
+
+
+def _load_correction(
+    path_text: str,
+    *,
+    expected_serial: str,
+    wavelength_nm: float,
+) -> np.ndarray:
     if not path_text:
         return np.zeros(_SHAPE_YX, dtype=np.uint8)
-    with Image.open(Path(path_text)) as image:
+    path = Path(path_text)
+    with Image.open(path) as image:
         if image.mode != "L":
             raise ValueError("X15213 correction BMP must be an 8-bit grayscale image")
         values = np.array(image, dtype=np.uint8, copy=True)
-    if values.shape == _SHAPE_YX:
+    if values.shape != _SHAPE_YX:
+        raise ValueError("X15213 correction BMP must be 1272 x 1024 pixels")
+    source_wavelength = _correction_source_wavelength(path, expected_serial)
+    if source_wavelength is None:
         return values
-    if values.shape == _RASTER_YX:
-        return np.array(values[:, active_x : active_x + _SHAPE_YX[1]], copy=True)
-    raise ValueError("X15213 correction BMP must be 1272 x 1024 or 1280 x 1024 pixels")
+    if not np.isfinite(source_wavelength) or source_wavelength <= 0.0:
+        raise ValueError("X15213 correction BMP filename has an invalid wavelength")
+    return _scale_correction_wavelength(values, source_wavelength, wavelength_nm)
 
 
 class X15213Adapter:
@@ -540,6 +642,24 @@ class X15213Adapter:
 
     def __init__(self, values: Mapping[str, object]) -> None:
         authored = HAMAMATSU_X15213_SCHEMA.project_values(values)
+        profile = _load_profile(str(authored["device_profile"]))
+        self._profile_serial = str(profile["serial"])
+        requested_serial = str(authored["serial"]).strip()
+        if requested_serial and requested_serial != self._profile_serial:
+            raise ValueError(
+                f"X15213 serial {requested_serial!r} does not match device profile "
+                f"serial {self._profile_serial!r}"
+            )
+        self._wavelength_nm = float(authored["wavelength_nm"])
+        if not np.isfinite(self._wavelength_nm) or self._wavelength_nm <= 0.0:
+            raise ValueError("X15213 wavelength must be finite and positive")
+        self._readout_wavelength_nm = float(profile["readout_wavelength_nm"])
+        self._phase_curve = np.array(profile["phase_pi_by_gray"], copy=True)
+        self._phase_to_gray, self._two_pi_gray = _phase_lut(
+            self._phase_curve,
+            self._wavelength_nm,
+            self._readout_wavelength_nm,
+        )
         self._transport = str(authored["transport"])
         self._presenter = None
         self._display_name = ""
@@ -555,19 +675,19 @@ class X15213Adapter:
             geometry = _display(requested_display)
             self._display_name = str(geometry["name"]).strip()
             self._dvi_controller_mode_proven = _prepare_dvi_controller(
-                str(authored["sdk_directory"]), str(authored["serial"])
+                str(authored["sdk_directory"]), self._profile_serial
             )
             self.identity = f"hamamatsu-x15213:dvi-display:{self._display_name}"
-        self._active_x = int(authored["active_x"])
         self._flip_x = bool(authored["flip_x"])
         self._flip_y = bool(authored["flip_y"])
-        self._two_pi_gray = float(authored["two_pi_gray"])
-        self._correction_sign = int(authored["correction_sign"])
-        self._correction_offset = int(authored["correction_offset_gray"])
         self._settle = float(authored["settle_seconds"])
         correction_path = str(authored["correction_path"])
         self._correction_lock = Lock()
-        self._correction = _load_correction(correction_path, self._active_x)
+        self._correction = _load_correction(
+            correction_path,
+            expected_serial=self._profile_serial,
+            wavelength_nm=self._wavelength_nm,
+        )
         self._correction_path = correction_path
         self._correction_enabled = bool(correction_path)
         self._phase = canonical_phase(np.zeros(_SHAPE_YX), _SHAPE_YX)
@@ -581,7 +701,7 @@ class X15213Adapter:
                 )
             self._sdk, self._dll_handle = _load_sdk(directory)
             try:
-                self._board_id, serial = _connect_usb(self._sdk, str(authored["serial"]))
+                self._board_id, serial = _connect_usb(self._sdk, self._profile_serial)
             except BaseException:
                 if self._dll_handle is not None:
                     self._dll_handle.close()
@@ -591,6 +711,14 @@ class X15213Adapter:
     @property
     def last_commanded_phase(self) -> np.ndarray:
         return self._phase
+
+    @property
+    def wavelength_nm(self) -> float:
+        return self._wavelength_nm
+
+    @property
+    def two_pi_gray(self) -> float:
+        return float(self._two_pi_gray)
 
     @property
     def correction_path(self) -> str:
@@ -615,7 +743,11 @@ class X15213Adapter:
         path_text = str(path)
         if not path_text:
             raise ValueError("X15213 correction load requires a local BMP path")
-        correction = _load_correction(path_text, self._active_x)
+        correction = _load_correction(
+            path_text,
+            expected_serial=self._profile_serial,
+            wavelength_nm=self._wavelength_nm,
+        )
         with self._correction_lock:
             self._correction = correction
             self._correction_path = path_text
@@ -634,22 +766,17 @@ class X15213Adapter:
             oriented = oriented[::-1, :]
         if self._flip_x:
             oriented = oriented[:, ::-1]
+        phase_code = np.mod(
+            _half_up(oriented.astype(np.float64) * (128.0 / np.pi)), 256.0
+        ).astype(np.uint16)
         with self._correction_lock:
             correction_enabled = self._correction_enabled
             correction_values = self._correction
         if correction_enabled:
-            shifted = (
-                correction_values.astype(np.uint16) + self._correction_offset
+            phase_code = (
+                phase_code + correction_values.astype(np.uint16)
             ) % 256
-            correction = shifted.astype(np.float64) * (
-                self._correction_sign * _TWO_PI / self._two_pi_gray
-            )
-        else:
-            correction = 0.0
-        wrapped = np.remainder(oriented.astype(np.float64) + correction, _TWO_PI)
-        return np.asarray(
-            np.floor(wrapped * (self._two_pi_gray / _TWO_PI) + 0.5), dtype=np.uint8
-        )
+        return np.asarray(self._phase_to_gray[phase_code], dtype=np.uint8)
 
     def apply_phase(self, radians: object) -> np.ndarray:
         if self._closed:
@@ -660,7 +787,7 @@ class X15213Adapter:
             if self._presenter is None:
                 self._presenter = _open_dvi_presenter(self._display_name)
             raster = np.zeros(_RASTER_YX, dtype=np.uint8)
-            raster[:, self._active_x : self._active_x + _SHAPE_YX[1]] = gray
+            raster[:, : _SHAPE_YX[1]] = gray
             self._presenter[0](raster)
         else:
             size = int(gray.size)
@@ -728,6 +855,10 @@ def _discover_usb() -> tuple[DeviceInstanceConfig, ...]:
             return ()
         board_id = int(ids[0])
         serial = _usb_serial(sdk, board_id)
+        profile_name = serial
+        wavelength_nm = float(
+            _load_profile(profile_name)["default_wavelength_nm"]
+        )
         return (
             DeviceInstanceConfig(
                 f"x15213_usb_{_slug(serial)}",
@@ -738,6 +869,8 @@ def _discover_usb() -> tuple[DeviceInstanceConfig, ...]:
                     display_name="",
                     sdk_directory=str(directory),
                     serial=serial,
+                    device_profile=profile_name,
+                    wavelength_nm=wavelength_nm,
                 ),
             ),
         )

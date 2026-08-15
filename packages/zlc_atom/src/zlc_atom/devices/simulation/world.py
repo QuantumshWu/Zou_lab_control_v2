@@ -303,7 +303,7 @@ class SimulationWorld:
         # Seed changes the hidden bench, not the nominal command.  A fixed
         # low-order component ensures every supported seed is meaningfully
         # uncorrected; bounded jitter prevents a one-seed-only simulation.
-        coefficients = np.asarray((2.34, -1.56, 1.885, -1.17), dtype=float)
+        coefficients = np.asarray((2.34, -1.56, 2.135, 0.955), dtype=float)
         coefficients += np.random.default_rng(seed ^ 0x5A17).uniform(
             -0.02, 0.02, coefficients.shape
         )

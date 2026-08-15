@@ -9,7 +9,7 @@ route for virtual and physical adapters:
 Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
-SLM Editor target -> Mask + ROI/Wavefront -> Final -> explicit Send -> phase
+SLM Editor Pattern -> base phase + optional Zernike -> science phase -> explicit Send
 SLM Feedback(calibration + target + pulse) -> grouped qCMOS fluorescence -> accepted phase NPZ
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
@@ -33,22 +33,29 @@ same descriptor route as every other device: it can find an official USB SDK
 controller and head serial, or offer attached `1280 x 1024 @ approximately 60
 Hz` displays as DVI candidates. A DVI candidate is not an identity proof; the
 operator confirms which display is physically connected. The Editor has only
-**Mask** and **Wavefront** pages. **Mask** keeps the independent target and
+**Pattern** and **Wavefront** pages. Pattern keeps the independent target and
 pre-correction science-phase plots at the established `2x2 = 490 x 357`
 logical size; a shared **Size** selector also controls the independent
 Wavefront preview, and scrollable canvases keep larger presets from overlapping
-or being clipped. The main page exposes the applied input pupil, CGH crop,
-zero-order steering, system Zernike layer, and vendor-correction status. The
-pupil is either an authored ellipse or measured intensity clipped to that same
-ellipse. Wavefront places carrier and Noll Z2-Z11 controls beside its own phase
-preview. Loading/saving target, Mask or science phase and importing a raw 8-bit
-phase mask do not write the SLM; only **Send to SLM** applies the science phase.
+or being clipped. The main page exposes only Input pupil, Zernike, and vendor
+correction. The default pupil is a centered Gaussian with a `1/e^2` intensity
+diameter equal to 70% of the SLM height; Off uses uniform full-raster solver
+illumination. Pattern offers exact Grid, geometrically staggered Checkerboard,
+Gaussian, Flat Top, and English/Chinese Text with minimum spacing and an atom
+budget. Steering X/Y and Noll Z4-Z11 share the one Zernike switch. Loading or
+saving target/science phase does not write the SLM; only **Send to SLM** applies
+the science phase.
+
 The vendor correction BMP stays on the experiment computer, can be loaded and
 A/B enabled in the Editor, and is composed by the adapter only on the next
-explicit Send using bench-authored sign/offset/orientation, measured
-`two_pi_gray`, active-raster offset and settle. Development-machine readback
-tests are not optical proof; the experiment machine can directly
-Scan/configure/Send for final bring-up.
+explicit Send. A serial-specific profile under `devices/slm/profiles/` supplies
+the full calibrated phase curve. Wavelength builds the nonlinear LUT from that
+curve, so the displayed 2-pi gray is computed rather than manually authored
+(LSH0804382 at 852 nm gives 225). Correction is added modulo 256 before this
+LUT, stays at native `1272 x 1024`, and a wavelength-labelled map is converted
+without resizing. DVI uses the left 1272 columns and leaves the right eight
+zero. Development-machine readback tests are not optical proof; the experiment
+machine can directly Scan/configure/Send for final bring-up.
 
 Virtual loading follows the same shot logic the experiment expects: every
 cooling rise while the trap output is high independently redraws each active

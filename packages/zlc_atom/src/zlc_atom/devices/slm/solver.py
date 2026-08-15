@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import json
+import os
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from scipy import fft, ndimage
 from zlc_durable import atomic_write_file, write_readable_json
 
@@ -23,6 +26,15 @@ def _pair(value: object, name: str) -> tuple[int, int]:
         raise TypeError(f"{name} must be a two-integer pair") from error
     if len(pair) != 2 or any(item <= 0 for item in pair):
         raise ValueError(f"{name} must contain two positive integers")
+    return pair
+
+def _float_pair(value: object, name: str) -> tuple[float, float]:
+    try:
+        pair = tuple(float(item) for item in value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must be a two-number pair") from error
+    if len(pair) != 2 or any(not np.isfinite(item) or item <= 0.0 for item in pair):
+        raise ValueError(f"{name} must contain two finite positive numbers")
     return pair
 
 def _scalar(value: object, name: str, *, nonnegative: bool = False) -> float:
@@ -70,9 +82,9 @@ def _grid_indices(
     spans = tuple((grid[index] - 1) * spacing[index] for index in range(2))
     if any(span >= shape[index] for index, span in enumerate(spans)):
         raise ValueError("grid does not fit inside target shape")
-    starts = tuple((shape[index] - 1 - spans[index]) * 0.5 for index in range(2))
+    starts = tuple((shape[index] - spans[index]) // 2 for index in range(2))
     axes = tuple(
-        np.rint(starts[index] + spacing[index] * np.arange(grid[index])).astype(int)
+        starts[index] + spacing[index] * np.arange(grid[index], dtype=int)
         for index in range(2)
     )
     return shape, axes[0], axes[1]
@@ -94,43 +106,54 @@ def preset_checkerboard(
     grid_shape_yx: object,
     *,
     spacing_yx: object | None = None,
-    intensity_a: float = 1.0,
-    intensity_b: float = 0.0,
+    intensity: float = 1.0,
 ) -> np.ndarray:
-    shape, rows, columns = _grid_indices(shape_yx, grid_shape_yx, spacing_yx)
-    levels = (
-        _scalar(intensity_a, "intensity_a", nonnegative=True),
-        _scalar(intensity_b, "intensity_b", nonnegative=True),
+    shape = _pair(shape_yx, "shape_yx")
+    row_count, long_count = _pair(grid_shape_yx, "grid_shape_yx")
+    if long_count < 2:
+        raise ValueError("checkerboard long rows must contain at least two sites")
+    spacing = (
+        (
+            max(1, shape[0] // (row_count + 1)),
+            max(1, shape[1] // (2 * long_count)),
+        )
+        if spacing_yx is None
+        else _pair(spacing_yx, "spacing_yx")
     )
+    span_y = (row_count - 1) * spacing[0]
+    span_x = 2 * (long_count - 1) * spacing[1]
+    if span_y >= shape[0] or span_x >= shape[1]:
+        raise ValueError("checkerboard does not fit inside target shape")
+    rows = (shape[0] - span_y) // 2 + spacing[0] * np.arange(row_count)
+    long_columns = (
+        (shape[1] - span_x) // 2
+        + 2 * spacing[1] * np.arange(long_count)
+    )
+    short_columns = long_columns[:-1] + spacing[1]
     target = np.zeros(shape, dtype=np.float32)
-    parity = np.indices((len(rows), len(columns))).sum(axis=0) & 1
-    target[np.ix_(rows, columns)] = np.where(parity, levels[1], levels[0])
+    level = _scalar(intensity, "intensity", nonnegative=True)
+    for index, row in enumerate(rows):
+        target[row, long_columns if index % 2 == 0 else short_columns] = level
     return validate_target(target)
 
-def _profile(distance_inside: np.ndarray, edge: object) -> np.ndarray:
-    width = _scalar(edge, "edge", nonnegative=True)
-    if width == 0.0:
-        return (distance_inside >= 0.0).astype(np.float32)
-    return np.clip((distance_inside + 0.5) / width, 0.0, 1.0).astype(np.float32)
-
-def preset_rectangle(
+def preset_gaussian(
     shape_yx: object,
-    size_yx: object,
+    radius_yx: object,
     *,
     intensity: float = 1.0,
-    edge: float = 0.0,
 ) -> np.ndarray:
-    shape, size = _pair(shape_yx, "shape_yx"), _pair(size_yx, "size_yx")
-    if any(size[index] > shape[index] for index in range(2)):
-        raise ValueError("rectangle does not fit inside target shape")
+    shape = _pair(shape_yx, "shape_yx")
+    radius = _float_pair(radius_yx, "radius_yx")
     yy, xx = np.ogrid[: shape[0], : shape[1]]
-    dy = 0.5 * size[0] - np.abs(yy - 0.5 * (shape[0] - 1))
-    dx = 0.5 * size[1] - np.abs(xx - 0.5 * (shape[1] - 1))
+    exponent = -2.0 * (
+        ((yy - shape[0] // 2) / radius[0]) ** 2
+        + ((xx - shape[1] // 2) / radius[1]) ** 2
+    )
     return validate_target(
-        _scalar(intensity, "intensity", nonnegative=True) * _profile(np.minimum(dy, dx), edge)
+        _scalar(intensity, "intensity", nonnegative=True) * np.exp(exponent)
     )
 
-def preset_ellipse(
+def preset_flat_top(
     shape_yx: object,
     radius_yx: object,
     *,
@@ -138,38 +161,185 @@ def preset_ellipse(
     edge: float = 0.0,
 ) -> np.ndarray:
     shape = _pair(shape_yx, "shape_yx")
-    radius = tuple(float(item) for item in _pair(radius_yx, "radius_yx"))
+    radius = _float_pair(radius_yx, "radius_yx")
     if any(2.0 * radius[index] > shape[index] for index in range(2)):
-        raise ValueError("ellipse does not fit inside target shape")
+        raise ValueError("flat top does not fit inside target shape")
     yy, xx = np.ogrid[: shape[0], : shape[1]]
     radial = np.sqrt(
-        ((yy - 0.5 * (shape[0] - 1)) / radius[0]) ** 2
-        + ((xx - 0.5 * (shape[1] - 1)) / radius[1]) ** 2
+        ((yy - shape[0] // 2) / radius[0]) ** 2
+        + ((xx - shape[1] // 2) / radius[1]) ** 2
     )
-    distance = (1.0 - radial) * min(radius)
+    width = _scalar(edge, "edge", nonnegative=True)
+    if width == 0.0:
+        profile = (radial <= 1.0).astype(np.float32)
+    else:
+        distance = (1.0 - radial) * min(radius)
+        profile = np.clip(0.5 + distance / width, 0.0, 1.0).astype(np.float32)
     return validate_target(
-        _scalar(intensity, "intensity", nonnegative=True) * _profile(distance, edge)
+        _scalar(intensity, "intensity", nonnegative=True) * profile
     )
 
-def preset_ring(
-    shape_yx: object,
-    *,
-    radius: float,
-    width: float,
-    intensity: float = 1.0,
-    edge: float = 0.0,
-) -> np.ndarray:
-    shape = _pair(shape_yx, "shape_yx")
-    ring_radius = _scalar(radius, "radius")
-    ring_width = _scalar(width, "width")
-    if ring_radius + 0.5 * ring_width > 0.5 * min(shape):
-        raise ValueError("ring does not fit inside target shape")
-    yy, xx = np.ogrid[: shape[0], : shape[1]]
-    radial = np.hypot(yy - 0.5 * (shape[0] - 1), xx - 0.5 * (shape[1] - 1))
-    distance = 0.5 * ring_width - np.abs(radial - ring_radius)
-    return validate_target(
-        _scalar(intensity, "intensity", nonnegative=True) * _profile(distance, edge)
+_WINDOWS_CJK_FONTS = (
+    "msyhbd.ttc",
+    "Dengb.ttf",
+    "simhei.ttf",
+    "msyh.ttc",
+    "simsun.ttc",
+)
+
+def _missing_font_characters(font_path: Path, text: str) -> tuple[str, ...]:
+    font = ImageFont.truetype(
+        str(font_path),
+        size=64,
+        layout_engine=ImageFont.Layout.BASIC,
     )
+    notdef = font.getmask("\U0010ffff", mode="L")
+    notdef_key = notdef.size, bytes(notdef)
+    missing: list[str] = []
+    for character in text:
+        if character == " ":
+            continue
+        glyph = font.getmask(character, mode="L")
+        if (glyph.size, bytes(glyph)) == notdef_key and character not in missing:
+            missing.append(character)
+    return tuple(missing)
+
+def _text_font_path(font_path: str | Path | None, text: str) -> Path:
+    if font_path is not None:
+        selected = Path(font_path)
+        if not selected.is_file():
+            raise FileNotFoundError(f"text font does not exist: {selected}")
+        try:
+            missing = _missing_font_characters(selected, text)
+        except OSError as error:
+            raise ValueError(f"text font could not be loaded: {selected}") from error
+        if missing:
+            raise ValueError(
+                f"text font does not contain requested characters "
+                f"{''.join(missing)!r}: {selected}"
+            )
+        return selected
+    font_root = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    found = False
+    for name in _WINDOWS_CJK_FONTS:
+        candidate = font_root / name
+        if not candidate.is_file():
+            continue
+        found = True
+        try:
+            missing = _missing_font_characters(candidate, text)
+        except OSError:
+            continue
+        if not missing:
+            return candidate
+    if found:
+        raise ValueError(
+            "no supported Windows CJK font contains every requested character"
+        )
+    raise FileNotFoundError(
+        "no supported Windows CJK font was found "
+        f"({', '.join(_WINDOWS_CJK_FONTS)})"
+    )
+
+def _allowed_text_character(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        character == " "
+        or "A" <= character <= "Z"
+        or "a" <= character <= "z"
+        or "0" <= character <= "9"
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2FA1F
+    )
+
+def _rasterized_text(text: str, font_path: Path, size: int) -> np.ndarray:
+    font = ImageFont.truetype(
+        str(font_path),
+        size=size,
+        layout_engine=ImageFont.Layout.BASIC,
+    )
+    left, top, right, bottom = font.getbbox(text)
+    width, height = max(1, right - left), max(1, bottom - top)
+    image = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(image).text((-left, -top), text, fill=255, font=font)
+    mask = np.asarray(image, dtype=np.uint8) >= 128
+    rows, columns = np.nonzero(mask)
+    if rows.size == 0:
+        return np.zeros((0, 0), dtype=bool)
+    return mask[
+        rows.min():rows.max() + 1,
+        columns.min():columns.max() + 1,
+    ]
+
+def preset_text(
+    shape_yx: object,
+    text: object,
+    *,
+    spacing: int,
+    atom_budget: int,
+    intensity: float = 1.0,
+    font_path: str | Path | None = None,
+) -> np.ndarray:
+    """Rasterize one centered line of Latin/CJK text into discrete sites."""
+
+    shape = _pair(shape_yx, "shape_yx")
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    normalized = unicodedata.normalize("NFC", text).strip(" ")
+    if not normalized:
+        raise ValueError("text must contain at least one visible character")
+    if any(not _allowed_text_character(character) for character in normalized):
+        raise ValueError(
+            "text may contain only ASCII letters, digits, CJK characters, "
+            "and ordinary spaces"
+        )
+    try:
+        pitch = int(spacing)
+    except (TypeError, ValueError) as error:
+        raise TypeError("spacing must be a positive integer") from error
+    if isinstance(spacing, bool) or pitch != spacing or pitch <= 0:
+        raise ValueError("spacing must be a positive integer")
+    try:
+        budget = int(atom_budget)
+    except (TypeError, ValueError) as error:
+        raise TypeError("atom_budget must be a positive integer") from error
+    if isinstance(atom_budget, bool) or budget != atom_budget or budget <= 0:
+        raise ValueError("atom_budget must be a positive integer")
+    selected_font = _text_font_path(font_path, normalized)
+    logical_shape = (
+        (shape[0] - 1) // pitch + 1,
+        (shape[1] - 1) // pitch + 1,
+    )
+    best: np.ndarray | None = None
+    for size in range(1, 2 * logical_shape[0] + 2):
+        try:
+            mask = _rasterized_text(normalized, selected_font, size)
+        except OSError as error:
+            raise ValueError(
+                f"text font could not be loaded: {selected_font}"
+            ) from error
+        if mask.size == 0:
+            continue
+        if mask.shape[0] > logical_shape[0] or mask.shape[1] > logical_shape[1]:
+            break
+        if int(np.count_nonzero(mask)) > budget:
+            continue
+        best = mask
+    if best is None:
+        raise ValueError("text does not fit the target shape and atom budget")
+
+    rows, columns = np.nonzero(best)
+    span_y = (best.shape[0] - 1) * pitch
+    span_x = (best.shape[1] - 1) * pitch
+    rows = (shape[0] - span_y) // 2 + pitch * rows
+    columns = (shape[1] - span_x) // 2 + pitch * columns
+    target = np.zeros(shape, dtype=np.float32)
+    target[rows, columns] = _scalar(
+        intensity, "intensity", nonnegative=True
+    )
+    return validate_target(target)
 
 def imported_target(values: object) -> np.ndarray:
     target = validate_target(values)
@@ -219,17 +389,19 @@ def _phase_snapshot(field: np.ndarray) -> np.ndarray:
 
 def _cartesian_support(
     support: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    rows, columns = np.nonzero(support)
-    unique_rows = np.unique(rows)
-    unique_columns = np.unique(columns)
-    if (
-        rows.size > 256
-        or unique_rows.size * unique_columns.size != rows.size
-        or not np.all(support[np.ix_(unique_rows, unique_columns)])
-    ):
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    site_rows, site_columns = np.nonzero(support)
+    if site_rows.size > 256:
         return None
-    return unique_rows, unique_columns
+    rows = np.unique(site_rows)
+    columns = np.unique(site_columns)
+    # The exact separable transform forms the selected row/column envelope.
+    # Beyond these small bounds a full FFT is both simpler and cheaper; in
+    # particular, 256 unrelated diagonal sites must not create a 256x256 DFT.
+    if columns.size > 64 or rows.size * columns.size > 4096:
+        return None
+    active = support[np.ix_(rows, columns)]
+    return rows, columns, active
 
 def solve_phase(
     target: object,
@@ -330,8 +502,8 @@ def solve_phase(
             if saved_state is not None:
                 state_status = "support-changed"
         else:
-            rows, columns = cartesian
-            desired_spots = desired_unshifted[np.ix_(rows, columns)].ravel()
+            rows, columns, active = cartesian
+            desired_spots = desired_unshifted[np.ix_(rows, columns)][active]
             row_angles = (
                 (-2.0 * np.pi / desired.shape[0])
                 * rows.astype(np.float64)[:, None]
@@ -353,14 +525,16 @@ def solve_phase(
             column_backward = np.ascontiguousarray(
                 column_forward.conj()
             )
+            constrained_selected = np.zeros(
+                active.shape, dtype=np.complex64
+            )
             transform = "selected-dft"
             support_yx = [
                 [
-                    int((row + desired.shape[0] // 2) % desired.shape[0]),
-                    int((column + desired.shape[1] // 2) % desired.shape[1]),
+                    int((rows[row_index] + desired.shape[0] // 2) % desired.shape[0]),
+                    int((columns[column_index] + desired.shape[1] // 2) % desired.shape[1]),
                 ]
-                for row in rows
-                for column in columns
+                for row_index, column_index in np.argwhere(active)
             ]
 
         amplitude_spots = np.sqrt(desired_spots).astype(
@@ -415,10 +589,11 @@ def solve_phase(
                         weights /= max(float(np.linalg.norm(weights)), epsilon)
                         if stop_requested is not None and stop_requested():
                             raise InterruptedError("SLM phase solve stopped")
-                        values = (weights * fixed_phase).reshape(
-                            len(rows), len(columns)
-                        )
-                        back = (row_backward @ values) @ column_backward
+                        constrained_selected.fill(0.0)
+                        constrained_selected[active] = weights * fixed_phase
+                        back = (
+                            row_backward @ constrained_selected
+                        ) @ column_backward
                         field = pupil_unshifted * _unit_phase(back, epsilon)
                         hot_start_used = True
                         state_status = "reused"
@@ -444,9 +619,10 @@ def solve_phase(
                 raise InterruptedError("SLM phase solve stopped")
             if selected is None:
                 if transform == "selected-dft":
-                    selected = (
+                    selected_grid = (
                         row_forward @ (field @ column_forward_transposed)
-                    ).ravel()
+                    )
+                    selected = selected_grid[active]
                 else:
                     far = fft.fft2(field, norm="ortho")
                     selected = far[support_unshifted]
@@ -463,11 +639,13 @@ def solve_phase(
                     fixed_phase = np.array(current_phase, copy=True)
             else:
                 selected_phase = fixed_phase
-            constrained_values = (weights * selected_phase).reshape(
-                selected.shape if transform == "fft" else (len(rows), len(columns))
-            )
+            constrained_values = weights * selected_phase
             if transform == "selected-dft":
-                back = (row_backward @ constrained_values) @ column_backward
+                constrained_selected.fill(0.0)
+                constrained_selected[active] = constrained_values
+                back = (
+                    row_backward @ constrained_selected
+                ) @ column_backward
             else:
                 constrained.fill(0.0)
                 constrained[support_unshifted] = constrained_values
@@ -479,9 +657,10 @@ def solve_phase(
             gate_start = 1 if hot_start_used else 12
             if iterations is None and iterations_run >= gate_start:
                 if transform == "selected-dft":
-                    selected = (
+                    selected_grid = (
                         row_forward @ (field @ column_forward_transposed)
-                    ).ravel()
+                    )
+                    selected = selected_grid[active]
                 else:
                     far = fft.fft2(field, norm="ortho")
                     selected = far[support_unshifted]
@@ -504,10 +683,11 @@ def solve_phase(
                     np.exp(candidate_field, out=candidate_field)
                     candidate_field *= pupil_unshifted
                     if transform == "selected-dft":
-                        candidate_selected = (
+                        candidate_grid = (
                             row_forward
                             @ (candidate_field @ column_forward_transposed)
-                        ).ravel()
+                        )
+                        candidate_selected = candidate_grid[active]
                     else:
                         candidate_far = fft.fft2(candidate_field, norm="ortho")
                         candidate_selected = candidate_far[support_unshifted]
@@ -585,9 +765,10 @@ def solve_phase(
             )
             np.exp(final_field, out=final_field)
             final_field *= pupil_unshifted
-            final_selected = (
+            final_grid = (
                 row_forward @ (final_field @ column_forward_transposed)
-            ).ravel()
+            )
+            final_selected = final_grid[active]
         else:
             final_selected = checked_selected
         final_magnitude = np.abs(final_selected).astype(
