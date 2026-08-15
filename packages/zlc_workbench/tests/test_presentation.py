@@ -681,9 +681,9 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(
 
     A camera cycle's frames are point rows, and a grid faceted over them is
     the same picture twice.  The overlay is one geometry with one status row
-    per frame, so cell 0 shows the sites the long exposure found loaded and
-    cell 1 shows the short readout finding none of them -- which is what the
-    two exposures physically produced.  Asserting coordinates and ids here
+    per frame, so cell 0 shows the sites its classifier judged loaded and
+    cell 1 shows the short readout finding none of them.  Asserting coordinates
+    and ids here
     would have passed all along while every ring said UNKNOWN.
     """
 
@@ -756,19 +756,23 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(
         )
         overlay = site_overlay(processor, result.artifacts, revision=1)
 
-        # What an operator reads off the two cells, site by site.
-        long_exposure = tuple(
-            PointStatus.INVALID
-            if not readable[index]
-            else PointStatus.OCCUPIED
-            if loaded[index]
-            else PointStatus.EMPTY
-            for index in range(sites)
-        )
-        short_readout = tuple(
-            PointStatus.INVALID if not readable[index] else PointStatus.EMPTY
-            for index in range(sites)
-        )
+        # What an operator reads off the two classified cells, site by site.
+        # Physical loading is the hidden plant truth; the overlay must project
+        # the classifier's public per-frame occupied/valid facts instead.
+        def statuses_for(frame: int) -> tuple[PointStatus, ...]:
+            return tuple(
+                PointStatus.INVALID
+                if not result.valid[0, frame, index]
+                else PointStatus.OCCUPIED
+                if result.occupied[0, frame, index]
+                else PointStatus.EMPTY
+                for index in range(sites)
+            )
+
+        long_exposure = statuses_for(0)
+        short_readout = statuses_for(1)
+        assert PointStatus.OCCUPIED in long_exposure
+        assert PointStatus.OCCUPIED not in short_readout
         assert long_exposure != short_readout
         assert overlay.statuses_for(0.0) == long_exposure
         assert overlay.statuses_for(1.0) == short_readout
