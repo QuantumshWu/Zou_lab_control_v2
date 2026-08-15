@@ -320,6 +320,104 @@ def test_scan_keeps_dvi_candidate_when_sdk_has_no_usb_device(monkeypatch, tmp_pa
     assert found[0].parameters["transport"] == "dvi"
 
 
+def test_runtime_correction_status_and_failed_load_are_atomic(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    _patch_dvi_without_controller(monkeypatch)
+    frames: list[np.ndarray] = []
+    monkeypatch.setattr(
+        module,
+        "_open_dvi_presenter",
+        lambda _name: (lambda frame: frames.append(frame.copy()), lambda: None),
+    )
+    adapter = X15213Adapter(_config())
+    initial_phase = adapter.last_commanded_phase.copy()
+    correction_path = tmp_path / "runtime-correction.bmp"
+    Image.fromarray(
+        np.full((1024, 1272), 7, dtype=np.uint8), mode="L"
+    ).save(correction_path)
+
+    try:
+        assert adapter.correction_path == ""
+        assert adapter.correction_name == ""
+        assert adapter.correction_enabled is False
+        assert adapter.correction_available is True
+        with pytest.raises(RuntimeError, match="no .* correction map"):
+            adapter.set_correction_enabled(True)
+
+        adapter.load_correction(correction_path)
+
+        assert adapter.correction_path == str(correction_path)
+        assert adapter.correction_name == correction_path.name
+        assert adapter.correction_enabled is True
+        assert adapter.correction_available is True
+        np.testing.assert_array_equal(adapter.last_commanded_phase, initial_phase)
+        assert adapter._presenter is None
+        assert frames == []
+
+        bad_path = tmp_path / "wrong-shape.bmp"
+        Image.fromarray(np.zeros((12, 13), dtype=np.uint8), mode="L").save(bad_path)
+        with pytest.raises(ValueError, match="1272 x 1024 or 1280 x 1024"):
+            adapter.load_correction(bad_path)
+
+        assert adapter.correction_path == str(correction_path)
+        assert adapter.correction_name == correction_path.name
+        assert adapter.correction_enabled is True
+        np.testing.assert_array_equal(adapter.last_commanded_phase, initial_phase)
+        assert adapter._presenter is None
+        assert frames == []
+
+        adapter.apply_phase(np.zeros(adapter.shape_yx))
+        assert np.all(frames[-1][:, 4:1276] == 7)
+    finally:
+        adapter.close()
+
+
+def test_runtime_correction_enable_only_changes_the_next_apply(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    _patch_dvi_without_controller(monkeypatch)
+    frames: list[np.ndarray] = []
+    monkeypatch.setattr(
+        module,
+        "_open_dvi_presenter",
+        lambda _name: (lambda frame: frames.append(frame.copy()), lambda: None),
+    )
+    correction_path = tmp_path / "runtime-correction.bmp"
+    Image.fromarray(
+        np.full((1024, 1272), 9, dtype=np.uint8), mode="L"
+    ).save(correction_path)
+    adapter = X15213Adapter(_config())
+
+    try:
+        adapter.load_correction(correction_path)
+        adapter.apply_phase(np.zeros(adapter.shape_yx))
+        assert np.all(frames[-1][:, 4:1276] == 9)
+        commanded = adapter.last_commanded_phase.copy()
+
+        adapter.set_correction_enabled(False)
+        assert adapter.correction_enabled is False
+        assert len(frames) == 1
+        np.testing.assert_array_equal(adapter.last_commanded_phase, commanded)
+        adapter.apply_phase(np.zeros(adapter.shape_yx))
+        assert np.all(frames[-1][:, 4:1276] == 0)
+
+        adapter.set_correction_enabled(True)
+        assert adapter.correction_enabled is True
+        assert len(frames) == 2
+        np.testing.assert_array_equal(adapter.last_commanded_phase, commanded)
+        adapter.apply_phase(np.zeros(adapter.shape_yx))
+        assert np.all(frames[-1][:, 4:1276] == 9)
+    finally:
+        adapter.close()
+
+
 @pytest.mark.parametrize("correction_width", (1272, 1280))
 def test_dvi_applies_orientation_correction_and_active_raster(
     monkeypatch,
@@ -352,6 +450,8 @@ def test_dvi_applies_orientation_correction_and_active_raster(
     phase = np.zeros(adapter.shape_yx, dtype=np.float64)
     phase[0, 0] = np.pi
 
+    adapter.load_correction(correction_path)
+    assert adapter._presenter is None
     commanded = adapter.apply_phase(phase)
 
     assert commanded.shape == (1024, 1272)

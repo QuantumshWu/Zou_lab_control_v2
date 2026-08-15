@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from queue import Empty, Queue
 import re
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 from typing import Callable, Mapping
 
@@ -566,7 +566,9 @@ class X15213Adapter:
         self._correction_offset = int(authored["correction_offset_gray"])
         self._settle = float(authored["settle_seconds"])
         correction_path = str(authored["correction_path"])
+        self._correction_lock = Lock()
         self._correction = _load_correction(correction_path, self._active_x)
+        self._correction_path = correction_path
         self._correction_enabled = bool(correction_path)
         self._phase = canonical_phase(np.zeros(_SHAPE_YX), _SHAPE_YX)
         if self._transport == "usb":
@@ -590,15 +592,54 @@ class X15213Adapter:
     def last_commanded_phase(self) -> np.ndarray:
         return self._phase
 
+    @property
+    def correction_path(self) -> str:
+        with self._correction_lock:
+            return self._correction_path
+
+    @property
+    def correction_name(self) -> str:
+        with self._correction_lock:
+            return Path(self._correction_path).name if self._correction_path else ""
+
+    @property
+    def correction_enabled(self) -> bool:
+        with self._correction_lock:
+            return self._correction_enabled
+
+    @property
+    def correction_available(self) -> bool:
+        return True
+
+    def load_correction(self, path: str | Path) -> None:
+        path_text = str(path)
+        if not path_text:
+            raise ValueError("X15213 correction load requires a local BMP path")
+        correction = _load_correction(path_text, self._active_x)
+        with self._correction_lock:
+            self._correction = correction
+            self._correction_path = path_text
+            self._correction_enabled = True
+
+    def set_correction_enabled(self, enabled: bool) -> None:
+        requested = bool(enabled)
+        with self._correction_lock:
+            if requested and not self._correction_path:
+                raise RuntimeError("no X15213 correction map is loaded")
+            self._correction_enabled = requested
+
     def _gray(self, canonical: np.ndarray) -> np.ndarray:
         oriented = canonical
         if self._flip_y:
             oriented = oriented[::-1, :]
         if self._flip_x:
             oriented = oriented[:, ::-1]
-        if self._correction_enabled:
+        with self._correction_lock:
+            correction_enabled = self._correction_enabled
+            correction_values = self._correction
+        if correction_enabled:
             shifted = (
-                self._correction.astype(np.uint16) + self._correction_offset
+                correction_values.astype(np.uint16) + self._correction_offset
             ) % 256
             correction = shifted.astype(np.float64) * (
                 self._correction_sign * _TWO_PI / self._two_pi_gray
