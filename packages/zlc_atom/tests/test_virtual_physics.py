@@ -1409,7 +1409,14 @@ def test_slm_text_preset_is_centered_budgeted_spaced_and_byte_deterministic(
     font_root = Path(r"C:\Windows\Fonts")
     fonts = tuple(
         font_root / name
-        for name in ("msyhbd.ttc", "Dengb.ttf", "simhei.ttf", "msyh.ttc", "simsun.ttc")
+        for name in (
+            "msyh.ttc",
+            "msyhbd.ttc",
+            "simhei.ttf",
+            "Dengb.ttf",
+            "Deng.ttf",
+            "simsun.ttc",
+        )
     )
     font = next((path for path in fonts if path.is_file()), None)
     if font is None:
@@ -1444,6 +1451,7 @@ def test_slm_text_preset_is_centered_budgeted_spaced_and_byte_deterministic(
     assert np.count_nonzero(target) >= np.count_nonzero(smaller)
 
     monkeypatch.setenv("WINDIR", r"C:\Windows")
+    assert slm_solver._text_font_path(None, text) == font
     discovered = preset_text(shape, text, spacing=spacing, atom_budget=200)
     np.testing.assert_array_equal(discovered, target)
 
@@ -1484,6 +1492,99 @@ def test_slm_text_preset_is_centered_budgeted_spaced_and_byte_deterministic(
         (8, 8), "A", spacing=1, atom_budget=1, font_path=font
     )
     assert np.count_nonzero(recovered) == 1
+
+
+def test_slm_text_preset_uses_compact_filled_yahei_glyphs() -> None:
+    font = Path(r"C:\Windows\Fonts\msyh.ttc")
+    if not font.is_file():
+        pytest.skip("Microsoft YaHei Regular is not installed")
+
+    shape, spacing, budget = (256, 384), 4, 120
+
+    def logical_support(text: str) -> tuple[np.ndarray, int]:
+        target = preset_text(
+            shape,
+            text,
+            spacing=spacing,
+            atom_budget=budget,
+            font_path=font,
+        )
+        repeated = preset_text(
+            shape,
+            text,
+            spacing=spacing,
+            atom_budget=budget,
+            font_path=font,
+        )
+        np.testing.assert_array_equal(repeated, target)
+        coordinates = np.argwhere(target > 0.0)
+        assert 0 < len(coordinates) <= budget
+        rows = (coordinates[:, 0] - coordinates[:, 0].min()) // spacing
+        columns = (coordinates[:, 1] - coordinates[:, 1].min()) // spacing
+        support = np.zeros(
+            (int(rows.max()) + 1, int(columns.max()) + 1), dtype=bool
+        )
+        support[rows, columns] = True
+        return support, len(coordinates)
+
+    latin, _ = logical_support("ZLab")
+    latin_columns = np.flatnonzero(np.any(latin, axis=0))
+    latin_runs = np.split(
+        latin_columns, np.flatnonzero(np.diff(latin_columns) > 1) + 1
+    )
+    assert len(latin_runs) == 4
+    gaps = [
+        int(right[0] - left[-1] - 1)
+        for left, right in zip(latin_runs, latin_runs[1:])
+    ]
+    assert all(1 <= gap <= 3 for gap in gaps)
+    baselines = [
+        int(np.flatnonzero(np.any(latin[:, run[0]:run[-1] + 1], axis=1))[-1])
+        for run in latin_runs
+    ]
+    assert max(baselines) - min(baselines) <= 1
+    assert len({len(run) for run in latin_runs}) > 1
+
+    letter_b = latin[:, latin_runs[-1][0]:latin_runs[-1][-1] + 1]
+    stem = np.count_nonzero(letter_b, axis=0)
+    assert int(np.argmax(stem)) == 0
+    assert int(stem[0]) >= letter_b.shape[0] - 1
+    remaining = set(map(tuple, np.argwhere(letter_b)))
+    frontier = [remaining.pop()]
+    while frontier:
+        row, column = frontier.pop()
+        for delta_row in (-1, 0, 1):
+            for delta_column in (-1, 0, 1):
+                neighbor = (row + delta_row, column + delta_column)
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    frontier.append(neighbor)
+    assert not remaining
+
+    hanzi, hanzi_count = logical_support("神芯")
+    assert hanzi_count < budget
+    hanzi_columns = np.flatnonzero(np.any(hanzi, axis=0))
+    hanzi_runs = np.split(
+        hanzi_columns, np.flatnonzero(np.diff(hanzi_columns) > 1) + 1
+    )
+    assert len(hanzi_runs) == 2
+    assert 1 <= int(hanzi_runs[1][0] - hanzi_runs[0][-1] - 1) <= 3
+    assert all(len(run) >= 8 for run in hanzi_runs)
+    assert all(
+        np.count_nonzero(np.any(hanzi[:, run[0]:run[-1] + 1], axis=1))
+        >= hanzi.shape[0] - 1
+        for run in hanzi_runs
+    )
+    dense_blocks = (
+        hanzi[:-1, :-1]
+        & hanzi[1:, :-1]
+        & hanzi[:-1, 1:]
+        & hanzi[1:, 1:]
+    )
+    assert not np.any(dense_blocks)
+
+    with pytest.raises(ValueError, match="does not fit"):
+        preset_text(shape, "神芯", spacing=spacing, atom_budget=2, font_path=font)
 
 
 def _ideal_slm_intensity(

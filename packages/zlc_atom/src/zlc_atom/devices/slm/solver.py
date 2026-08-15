@@ -180,10 +180,11 @@ def preset_flat_top(
     )
 
 _WINDOWS_CJK_FONTS = (
-    "msyhbd.ttc",
-    "Dengb.ttf",
-    "simhei.ttf",
     "msyh.ttc",
+    "msyhbd.ttc",
+    "simhei.ttf",
+    "Dengb.ttf",
+    "Deng.ttf",
     "simsun.ttc",
 )
 
@@ -260,10 +261,46 @@ def _rasterized_text(text: str, font_path: Path, size: int) -> np.ndarray:
         size=size,
         layout_engine=ImageFont.Layout.BASIC,
     )
-    left, top, right, bottom = font.getbbox(text)
-    width, height = max(1, right - left), max(1, bottom - top)
-    image = Image.new("L", (width, height), 0)
-    ImageDraw.Draw(image).text((-left, -top), text, fill=255, font=font)
+    glyphs: list[tuple[str, int, tuple[int, int, int, int]]] = []
+    visible_index = 0
+    for index, character in enumerate(text):
+        if character == " ":
+            continue
+        box = font.getbbox(character, anchor="ls")
+        origin = int(round(
+            font.getlength(text[:index + 1]) - font.getlength(character)
+        )) + visible_index
+        glyphs.append((character, origin, box))
+        visible_index += 1
+    if not glyphs:
+        return np.zeros((0, 0), dtype=bool)
+
+    left = min(origin + box[0] for _, origin, box in glyphs)
+    right = max(origin + box[2] for _, origin, box in glyphs)
+    top = min(box[1] for _, _, box in glyphs)
+    bottom = max(box[3] for _, _, box in glyphs)
+    image = Image.new("L", (max(1, right - left), max(1, bottom - top)), 0)
+    draw = ImageDraw.Draw(image)
+    for character, origin, box in glyphs:
+        glyph_image = Image.new(
+            "L", (max(1, box[2] - box[0]), max(1, box[3] - box[1])), 0
+        )
+        ImageDraw.Draw(glyph_image).text(
+            (-box[0], -box[1]),
+            character,
+            fill=255,
+            font=font,
+            anchor="ls",
+        )
+        if not np.any(np.asarray(glyph_image, dtype=np.uint8) >= 128):
+            return np.zeros((0, 0), dtype=bool)
+        draw.text(
+            (origin - left, -top),
+            character,
+            fill=255,
+            font=font,
+            anchor="ls",
+        )
     mask = np.asarray(image, dtype=np.uint8) >= 128
     rows, columns = np.nonzero(mask)
     if rows.size == 0:
