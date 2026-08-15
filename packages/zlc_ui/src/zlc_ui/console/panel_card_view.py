@@ -264,28 +264,51 @@ class PanelCardView(FluentGroupBox):
         and in the board's packer, kept in step by hand; the moment the strip
         grew a second line the two answers disagreed and Qt clipped the
         picture to a rectangle the packer had already reserved.
+
+        With a picture mounted there is nothing to do here at all.  A new
+        preset does not resize the card, it resizes the PICTURE, and that
+        answer arrives a frame later from the renderer -- taking it now would
+        be re-measuring the old one, which is exactly what left a card 241 px
+        short of a grown plot and 263 px of blank above a shrunk one.
         """
 
-        if self._surface is None:
-            from zlc_ui.board import (
-                PLACEHOLDER_CELL_PX,
-                panel_display_size,
-                panel_size_cells,
-            )
+        if self._surface is not None:
+            return
+        from zlc_ui.board import (
+            PLACEHOLDER_CELL_PX,
+            panel_display_size,
+            panel_size_cells,
+        )
 
-            if self._size_choices:
-                width, height = panel_display_size(str(size))
-            else:
-                # Nobody has said which sizes exist yet, so there is no
-                # picture to be the size of: this card is the empty frame it
-                # is, measured in this package's own cell.
-                rows, columns = panel_size_cells(str(size))
-                width = columns * PLACEHOLDER_CELL_PX[0]
-                height = rows * PLACEHOLDER_CELL_PX[1]
-            self._placeholder.setFixedSize(width, height)
+        if self._size_choices:
+            width, height = panel_display_size(str(size))
+        else:
+            # Nobody has said which sizes exist yet, so there is no picture to
+            # be the size of: this card is the empty frame it is, measured in
+            # this package's own cell.
+            rows, columns = panel_size_cells(str(size))
+            width = columns * PLACEHOLDER_CELL_PX[0]
+            height = rows * PLACEHOLDER_CELL_PX[1]
+        self._placeholder.setFixedSize(width, height)
+        self._settle_size()
+
+    def _settle_size(self) -> None:
+        """Re-ask the layout, and tell the board its rectangle changed.
+
+        The card's size is a QUESTION its layout answers, and the answer moves
+        whenever what is mounted does.  Qt caches it and only re-reads a
+        widget whose own layout is activated -- a card's never is, because the
+        board places it by hand -- so nobody noticed the picture had changed
+        size until the next thing that happened to force a recompute.
+        """
+
         self.setMinimumSize(0, 0)
         self.setMaximumSize(QtWidgets.QWIDGETSIZE_MAX, QtWidgets.QWIDGETSIZE_MAX)
+        if self.layout() is not None:
+            self.layout().invalidate()
+        self.updateGeometry()
         self.adjustSize()
+        self.geometry_changed.emit()
 
     def set_live(self, live: bool) -> None:
         """Whether what this card shows will ever deliver again.
@@ -383,7 +406,6 @@ class PanelCardView(FluentGroupBox):
                 self.size_combo.setCurrentIndex(size_index)
         if incoming["size"] != previous_size:
             self._apply_card_size(str(incoming["size"]))
-            self.geometry_changed.emit()
         self._rebuild_settings_form()
 
     @property
@@ -511,6 +533,10 @@ class PanelCardView(FluentGroupBox):
                     self._surface.errorOccurred.disconnect(self.plot_error)
                 except (AttributeError, RuntimeError, TypeError):
                     pass
+            try:
+                self._surface.surfaceChanged.disconnect(self._surface_resized)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
             self._surface_error_connected = False
             self._surface_layout.removeWidget(self._surface)
             self._surface.hide()
@@ -529,13 +555,25 @@ class PanelCardView(FluentGroupBox):
             # one signal; the card relays it so the console can report it.
             relay.connect(self.plot_error)
             self._surface_error_connected = True
+        resized = getattr(widget, "surfaceChanged", None)
+        if hasattr(resized, "connect"):
+            # A plot surface also says when its picture became a DIFFERENT
+            # surface -- a new preset, kind or layout.  That is when its size
+            # changes, and it lands a frame or more after the operator asked
+            # for it, so a card cannot know its own size at mount: it must be
+            # told, or it keeps the rectangle the previous picture had.
+            resized.connect(self._surface_resized)
         self._surface_layout.addWidget(widget)
         widget.show()
         # A mounted picture states its own size, so the card's is now known:
         # take it, and tell the board its rectangle changed.
         self._placeholder.setFixedSize(0, 0)
-        self.adjustSize()
-        self.geometry_changed.emit()
+        self._settle_size()
+
+    def _surface_resized(self, _identity: object) -> None:
+        """The mounted picture is a different surface now: take its size."""
+
+        self._settle_size()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
         popup = self._settings_popup

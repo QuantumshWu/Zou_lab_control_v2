@@ -395,3 +395,62 @@ widget.close_adapter()
 host.close(timeout=10)
 """
     )
+
+
+def test_a_card_follows_its_picture_when_the_preset_changes() -> None:
+    """A new preset resizes the PICTURE, and the card has to follow it.
+
+    The new size arrives a frame or more later, from the renderer -- so at the
+    moment the operator picks it, every answer the card could give is the old
+    one.  Measured before this: growing left the card 241 px short of its own
+    plot, which Qt clipped until a drag re-packed the board, and shrinking
+    left 263 px of blank above the strip.
+    """
+
+    _run_qt(
+        _PROLOGUE
+        + """
+schema = DatasetSchema.create(
+    Axis.create('repeat', size=1),
+    PointTable.from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
+    dtype=np.float64,
+)
+snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
+host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')), size='2x2')
+card, widget = mounted_card(host)
+card.set_interval_choices((100,), 100)
+pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
+band = card._title_band
+packed = []
+card.geometry_changed.connect(lambda: packed.append(card.sizeHint()))
+
+
+def settled(size):
+    card.setGeometry(QtCore.QRect(0, 0, card.sizeHint().width(), card.sizeHint().height()))
+    app.processEvents()
+    return (
+        widget.presented_front is not None
+        and widget.presented_front.identity.preset == size
+        and card.height() - band.height() - widget.height() == pad
+        and card.width() - widget.width() == 2 * tested_module.CARD_PAD
+        and card.sizeHint().height() == card.height()
+    )
+
+
+first = card.sizeHint()
+for size in ('4x4', '2x2'):
+    host.set_size(size).result(timeout=20)
+    wait_until(
+        lambda size=size: settled(size),
+        message=f'the card never followed its picture to {size}',
+    )
+    # And the board was told, so it re-packs rather than waiting for a drag.
+    assert packed, 'the card resized without announcing it'
+    packed.clear()
+
+assert card.sizeHint() == first, (card.sizeHint(), first)
+card.set_surface(None)
+widget.close_adapter()
+host.close(timeout=10)
+"""
+    )
