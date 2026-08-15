@@ -15,18 +15,21 @@ and the real Hamamatsu LCOS-SLM X15213 leaf implement the same narrow
 Both `slm.virtual` and `slm.hamamatsu_x15213` open the concrete SLM Editor
 lazily from the loaded device card. The Editor has one continuous non-negative
 target and solves only its latest edit into a Mask/base phase in the background.
-The default **Mask** page retains two independent `2x2 = 490 x 357` logical target/Final plots. A shared **Size** selector applies the standing `zlc_plot` presets to both; the plot row scrolls rather than overlapping or clipping larger canvases.
-Mask ROI, common Wavefront controls (Steering X/Y, Z4-Z6 and Reset), and
-Advanced Z2/Z3/Z7-Z11 controls are separate scrollable pages; the Advanced tab
-also reports how many hidden coefficients are active. The Mask can be limited
-to an authored ROI; full-raster X/Y carrier and unit-pupil Noll coefficients
-are then added to make the displayed Final canonical phase. Target JSON and
-Mask/Final NPZ load/save never write hardware.
+The Editor has only **Mask** and **Wavefront** pages. **Mask** retains two
+independent `2x2 = 490 x 357` logical target and pre-correction science-phase
+plots. A shared **Size** selector also controls the independent Wavefront
+preview; scrollable canvases avoid overlap or clipping at larger presets. The
+main page exposes the applied input pupil, CGH crop, zero-order steering,
+system Zernike layer, and vendor-correction state. The pupil is either an
+authored ellipse or measured intensity clipped to that same ellipse, and the
+same support drives both solve and Zernike coordinates. Wavefront places the
+full-raster X/Y carrier and Noll Z2-Z11 controls beside its own phase preview.
+Target JSON and Mask/science-phase NPZ load/save never write hardware.
 An imported raw phase-mask image must be two-dimensional 8-bit grayscale and is
 mapped as `gray * 2*pi/256`; it may match the complete device or an enabled ROI
-and is explicitly not the vendor correction/LUT. Loading Final resets the
+and is explicitly not the vendor correction/LUT. Loading science phase resets the
 layers for an exact roundtrip. Only **Send to SLM** takes a short exclusive
-claim and applies Final; closing the Editor preserves the currently commanded
+claim and applies the science phase; closing the Editor preserves the currently commanded
 phase.
 
 The X15213 leaf supports the series' `1272 x 1024` active LCOS raster through

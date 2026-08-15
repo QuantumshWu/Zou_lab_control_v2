@@ -32,19 +32,23 @@ The real SLM device type is `slm.hamamatsu_x15213`. **Scan hardware** uses the
 same descriptor route as every other device: it can find an official USB SDK
 controller and head serial, or offer attached `1280 x 1024 @ approximately 60
 Hz` displays as DVI candidates. A DVI candidate is not an identity proof; the
-operator confirms which display is physically connected. The Editor's default
-**Mask** defaults both independent target/Final plots to the established `2x2 = 490 x 357` logical size. Its shared **Size** selector applies any standing `zlc_plot` preset to both, and the plot row scrolls when the chosen canvases exceed the window.
-Mask ROI, the common Wavefront controls (Steering X/Y and Z4-Z6), and Advanced
-Z2/Z3/Z7-Z11 live on separate scrollable pages, so phase controls never shrink
-the plots. It solves a Mask, optionally limits it to a rectangular ROI, adds
-full-raster carrier and unit-pupil Noll Zernike terms, and previews the wrapped
-Final. Loading/saving
-target, Mask or Final and importing a raw 8-bit phase mask do not write the
-SLM; only **Send to SLM** applies Final. The vendor correction BMP stays on the
-experiment computer and is read by the adapter from its configured path, with
-bench-authored sign/offset/orientation, measured `two_pi_gray`, active-raster
-offset and settle. Development-machine readback tests are not optical proof;
-the experiment machine can directly Scan/configure/Send for final bring-up.
+operator confirms which display is physically connected. The Editor has only
+**Mask** and **Wavefront** pages. **Mask** keeps the independent target and
+pre-correction science-phase plots at the established `2x2 = 490 x 357`
+logical size; a shared **Size** selector also controls the independent
+Wavefront preview, and scrollable canvases keep larger presets from overlapping
+or being clipped. The main page exposes the applied input pupil, CGH crop,
+zero-order steering, system Zernike layer, and vendor-correction status. The
+pupil is either an authored ellipse or measured intensity clipped to that same
+ellipse. Wavefront places carrier and Noll Z2-Z11 controls beside its own phase
+preview. Loading/saving target, Mask or science phase and importing a raw 8-bit
+phase mask do not write the SLM; only **Send to SLM** applies the science phase.
+The vendor correction BMP stays on the experiment computer, can be loaded and
+A/B enabled in the Editor, and is composed by the adapter only on the next
+explicit Send using bench-authored sign/offset/orientation, measured
+`two_pi_gray`, active-raster offset and settle. Development-machine readback
+tests are not optical proof; the experiment machine can directly
+Scan/configure/Send for final bring-up.
 
 Virtual loading follows the same shot logic the experiment expects: every
 cooling rise while the trap output is high independently redraws each active
