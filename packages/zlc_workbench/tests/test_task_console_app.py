@@ -426,9 +426,10 @@ assert catalog == (
     ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
     ('Measurement: Seamless Scan', ('logic', 'seamless_scan')),
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
-    ('Processor: Occupancy', ('logic', 'occupancy')),
-    ('Task: Calibration', ('logic', 'calibration')),
-    ('Task: Temperature', ('logic', 'temperature')),
+        ('Processor: Occupancy', ('logic', 'occupancy')),
+        ('Task: Calibration', ('logic', 'calibration')),
+        ('Task: Slm Feedback', ('logic', 'slm_feedback')),
+        ('Task: Temperature', ('logic', 'temperature')),
 )
 facet_index = next(
     index for index in range(view._view.kind_combo.count())
