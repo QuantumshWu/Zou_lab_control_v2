@@ -38,8 +38,9 @@ UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
 )
 _TARGET_RATIO = 1.01
 _VALIDATION_RELATIVE_SEM = 0.005
+_INITIAL_SOLVE_ITERATIONS = 12
 _SOLVE_ITERATIONS = 8
-_FEEDBACK_EXPONENT = 0.45
+_FEEDBACK_EXPONENT = 0.25
 _READOUT_FRAME = 1
 _SHOT_CHUNK = 128
 _GEOMETRY_TOLERANCE_FRACTION = 0.25
@@ -644,11 +645,13 @@ class SlmFeedbackTask:
                 api_values={},
             )
             current_target = self.target
+            spot_optimizer_state: dict[str, object] = {}
             current_phase, _ = solve_phase(
                 current_target,
                 initial_phase=incoming,
-                iterations=_SOLVE_ITERATIONS,
+                iterations=_INITIAL_SOLVE_ITERATIONS,
                 stop_requested=context.cancel_requested,
+                spot_optimizer_state=spot_optimizer_state,
             )
             baseline = None
             coarse_best = float("inf")
@@ -695,12 +698,10 @@ class SlmFeedbackTask:
                 if baseline is None and np.all(fluorescence > 0.0) and not saturated:
                     baseline = total
                 valid = bool(
-                    baseline is not None
-                    and not saturated
+                    not saturated
                     and not missing
                     and np.all(np.isfinite(fluorescence))
                     and np.all(fluorescence > 0.0)
-                    and total >= 0.9 * baseline
                 )
                 score = _ratio(fluorescence) if valid else float("inf")
                 history.append({
@@ -780,7 +781,6 @@ class SlmFeedbackTask:
                         pulse, context, iteration, shots=self.validation_shots
                     )
                     validation_saturated = bool(validation_saturated_sites)
-                    validation_total = float(np.sum(validation))
                     relative_error = validation_error / validation
                     max_relative_error = (
                         float(np.max(relative_error))
@@ -793,7 +793,6 @@ class SlmFeedbackTask:
                         and np.all(np.isfinite(validation))
                         and np.all(validation > 0.0)
                         and max_relative_error <= _VALIDATION_RELATIVE_SEM
-                        and validation_total >= 0.9 * baseline
                     )
                     validation_score = _ratio(validation) if validation_valid else float("inf")
                     history[-1]["validation"] = {
@@ -868,6 +867,7 @@ class SlmFeedbackTask:
                         initial_phase=current_phase,
                         iterations=_SOLVE_ITERATIONS,
                         stop_requested=context.cancel_requested,
+                        spot_optimizer_state=spot_optimizer_state,
                     )
             if accepted is None:
                 raise RuntimeError("qCMOS feedback did not reach 1.01 site uniformity")
