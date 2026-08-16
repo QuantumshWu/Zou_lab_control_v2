@@ -1,4 +1,4 @@
-"""Occupied-shot site-brightness feedback; no hidden-plant inference."""
+"""Repeat-mean site-brightness feedback; no hidden-plant inference."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
-from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.scan import ScanLiveSlot
 from zlc_atom.nodes.scan.source import wait_for_board
 
@@ -277,12 +276,6 @@ class SlmFeedbackTask:
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
-        self._occupancy = OccupancyProcessor(
-            calibration,
-            calibration_path=calibration_path,
-            producer=self.instance_id,
-            model_kind=model.kind,
-        )
         self.target, self.sequence = frozen_target, pulse_sequence
         self.calibration_path = Path(calibration_path).expanduser().resolve()
         self.target_path, self.pulse_path = Path(target_path).expanduser().resolve(), Path(pulse_path).expanduser().resolve()
@@ -440,7 +433,7 @@ class SlmFeedbackTask:
                         revision=revision,
                         validity=np.isfinite(curve_ratios)[None],
                     ),
-                    DatasetCoverage(self.max_updates, self.max_updates),
+                    DatasetCoverage(len(history), max(1, len(history))),
                     record,
                 ),
             }
@@ -512,7 +505,7 @@ class SlmFeedbackTask:
             raise ValueError("qCMOS fluorescence statistics require at least two shots")
         mean = np.zeros(self.calibration.n_sites, dtype=float)
         sum_squared_deviations = np.zeros_like(mean)
-        occupied_counts = np.zeros(self.calibration.n_sites, dtype=np.int64)
+        sample_counts = np.zeros(self.calibration.n_sites, dtype=np.int64)
         saturated_sites: set[int] = set()
         missing_sites: set[int] = set()
         measured = 0
@@ -567,42 +560,33 @@ class SlmFeedbackTask:
                         image_values - self._active_readout_average
                     ) / self._active_readout_shots
                     saturated_sites.update(self._saturated_sites(image))
-                    occupancy = self._occupancy.evaluate(value)
-                    counts = np.asarray(occupancy["counts"].snapshot.block.values)[
-                        0, _READOUT_FRAME
-                    ]
-                    valid = np.asarray(
-                        occupancy["valid"].snapshot.block.values, dtype=bool
-                    )[0, _READOUT_FRAME]
-                    occupied = np.asarray(
-                        occupancy["occupied"].snapshot.block.values, dtype=bool
-                    )[0, _READOUT_FRAME]
-                    missing_sites.update(
-                        int(index)
-                        for index in np.flatnonzero(~valid | ~np.isfinite(counts))
+                    counts = self.calibration.signals(
+                        image, model_kind=self.model.kind
                     )
-                    # Calibration defines both facts used here: ``occupied``
-                    # says which readouts contain one atom, and ``counts`` is
-                    # the same per-site feature whose occupied training mean
-                    # is persisted as ``bright_mean``.  The feedback observable
-                    # is that feature's mean over occupied shots only.  Dividing
-                    # each site by its own bright response would erase exactly
-                    # the brightness non-uniformity the operator asked to
-                    # correct; treating empty shots as zero would instead turn
-                    # this into a loading-probability measurement.
-                    sample = np.asarray(counts, dtype=float)
-                    usable = valid & np.isfinite(sample) & occupied
+                    # Feedback follows the operator-visible repeat mean.  Its
+                    # per-site dark level is subtracted, but every valid shot
+                    # contributes: loading probability and occupied-atom
+                    # fluorescence are both physical functions of trap depth.
+                    # A fixed occupied/empty threshold cannot be used here --
+                    # the very brightness change being corrected can cross the
+                    # calibration threshold and falsely make a real trap look
+                    # "missing".
+                    sample = (
+                        np.asarray(counts, dtype=float)
+                        - np.asarray(self.model.dark_mean, dtype=float)
+                    )
+                    usable = np.isfinite(sample)
                     if np.any(usable):
-                        next_counts = occupied_counts[usable] + 1
+                        next_counts = sample_counts[usable] + 1
                         delta = sample[usable] - mean[usable]
                         mean[usable] += delta / next_counts
                         sum_squared_deviations[usable] += delta * (
                             sample[usable] - mean[usable]
                         )
-                        occupied_counts[usable] = next_counts
+                        sample_counts[usable] = next_counts
                     measured += 1
                     context.report_progress(
-                        f"Reading occupied-shot qCMOS brightness for candidate {iteration + 1}",
+                        f"Reading mean qCMOS brightness for candidate {iteration + 1}",
                         current=measured,
                         total=requested,
                     )
@@ -612,16 +596,16 @@ class SlmFeedbackTask:
                     self.sequencer.safe()
                 finally:
                     source.close()
-        insufficient = occupied_counts < 2
+        insufficient = sample_counts < 2
         missing_sites.update(int(index) for index in np.flatnonzero(insufficient))
         variance = np.full_like(mean, np.nan)
         enough = ~insufficient
         variance[enough] = (
-            sum_squared_deviations[enough] / (occupied_counts[enough] - 1)
+            sum_squared_deviations[enough] / (sample_counts[enough] - 1)
         )
         standard_error = np.full_like(mean, np.nan)
         standard_error[enough] = np.sqrt(
-            variance[enough] / occupied_counts[enough]
+            variance[enough] / sample_counts[enough]
         )
         missing = np.fromiter(missing_sites, dtype=int)
         if missing.size:

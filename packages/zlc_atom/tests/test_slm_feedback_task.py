@@ -586,26 +586,13 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             )
         finally:
             installation.close()
-        original_evaluate = task._occupancy.evaluate
-
-        def one_missing_site(value):
-            outputs = original_evaluate(value)
-            valid = np.array(outputs["valid"].snapshot.block.values, copy=True)
-            valid[0, 1, 0] = False
-            outputs["valid"] = SimpleNamespace(
-                snapshot=SimpleNamespace(block=SimpleNamespace(values=valid))
-            )
-            return outputs
-
-        monkeypatch.setattr(task._occupancy, "evaluate", one_missing_site)
         measured, error, saturated, missing, readout_average = task._measure(
             pulse, _Context(), 0, shots=10
         )
-        assert np.isnan(measured[0]) and np.isnan(error[0])
-        np.testing.assert_allclose(measured[1:], fluorescence[1:])
-        np.testing.assert_allclose(error[1:], 0.0, atol=1e-15)
+        np.testing.assert_allclose(measured, fluorescence)
+        np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated
-        assert missing == (0,)
+        assert not missing
         assert readout_average.shape == task.calibration.frame_contract.image_shape
         assert sequencer.fires == [False, False, False]
         assert sequencer.scan_sweeps_history == [4, 4, 2]
@@ -622,12 +609,12 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         camera.close()
 
 
-def test_feedback_averages_calibration_brightness_only_over_occupied_shots(
-    tmp_path: Path, monkeypatch
+def test_feedback_averages_dark_subtracted_brightness_over_all_shots(
+    tmp_path: Path,
 ) -> None:
-    """The observable is the Calibration feature mean conditioned on occupied."""
+    """A brightness change must not disappear behind a stale occupancy threshold."""
 
-    fluorescence = np.arange(6, 11, dtype=np.uint16).repeat(7)
+    fluorescence = np.arange(1, 6, dtype=np.uint16).repeat(7)
 
     def frame_source(ordinal: int, exposure: float) -> np.ndarray:
         del exposure
@@ -682,37 +669,14 @@ def test_feedback_averages_calibration_brightness_only_over_occupied_shots(
         finally:
             installation.close()
 
-        expected = np.arange(20.0, 55.0)
         assert task.model.kind is ReadoutModelKind.BOX
         assert task.model.reducer == "mean"
-        shot_index = 0
-
-        def calibrated_site_facts(_value):
-            nonlocal shot_index
-            occupied_site = (shot_index + np.arange(35)) % 3 != 0
-            counts = np.full((1, 3, 35), 999.0)
-            counts[0, 1, occupied_site] = expected[occupied_site]
-            occupied = np.zeros((1, 3, 35), dtype=bool)
-            occupied[0, 1] = occupied_site
-            valid = np.ones((1, 3, 35), dtype=bool)
-            shot_index += 1
-            return {
-                "counts": SimpleNamespace(
-                    snapshot=SimpleNamespace(block=SimpleNamespace(values=counts))
-                ),
-                "occupied": SimpleNamespace(
-                    snapshot=SimpleNamespace(block=SimpleNamespace(values=occupied))
-                ),
-                "valid": SimpleNamespace(
-                    snapshot=SimpleNamespace(block=SimpleNamespace(values=valid))
-                ),
-            }
-
-        monkeypatch.setattr(task._occupancy, "evaluate", calibrated_site_facts)
         measured, error, saturated, missing, readout_average = task._measure(
             pulse, _Context(), 0, shots=10
         )
-        np.testing.assert_allclose(measured, expected)
+        # Values 1..4 are below the calibration's occupied threshold of 5,
+        # but remain valid contributions to the repeat-mean observable.
+        np.testing.assert_allclose(measured, fluorescence)
         np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated and not missing
         assert readout_average.shape == task.calibration.frame_contract.image_shape
