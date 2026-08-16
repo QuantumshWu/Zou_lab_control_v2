@@ -28,6 +28,7 @@ from .task import (
     READOUT_AVERAGE_OUTPUT,
     SLM_PHASE_ARTIFACT_CONTRACT,
     SlmFeedbackTask,
+    UNIFORMITY_HISTORY_OUTPUT,
 )
 
 
@@ -119,10 +120,15 @@ LOGIC_NODE = LogicNodeDescriptor(
     outputs=(
         OutputSpec(READOUT_AVERAGE_OUTPUT.name, READOUT_AVERAGE_OUTPUT.contract_id),
         OutputSpec(CANDIDATE_PHASE_OUTPUT.name, CANDIDATE_PHASE_OUTPUT.contract_id),
+        OutputSpec(
+            UNIFORMITY_HISTORY_OUTPUT.name,
+            UNIFORMITY_HISTORY_OUTPUT.contract_id,
+        ),
     ),
     node_previews=(
         NodePreviewSpec(READOUT_AVERAGE_OUTPUT.name, "image"),
         NodePreviewSpec(CANDIDATE_PHASE_OUTPUT.name, "image"),
+        NodePreviewSpec(UNIFORMITY_HISTORY_OUTPUT.name, "curve"),
     ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", SLM_PHASE_ARTIFACT_CONTRACT),

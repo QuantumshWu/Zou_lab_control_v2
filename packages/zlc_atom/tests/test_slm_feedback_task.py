@@ -204,10 +204,15 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert tuple((item.name, item.contract_id) for item in descriptor.outputs) == (
         ("readout_average", "slm-feedback.readout-average.v1"),
         ("candidate_phase", "slm-feedback.candidate-phase.v1"),
+        ("uniformity_history", "slm-feedback.uniformity-history.v1"),
     )
     assert tuple(
         (item.output_name, item.plot_kind) for item in descriptor.node_previews
-    ) == (("readout_average", "image"), ("candidate_phase", "image"))
+    ) == (
+        ("readout_average", "image"),
+        ("candidate_phase", "image"),
+        ("uniformity_history", "curve"),
+    )
     assert tuple(
         (item.capability_token, item.access) for item in descriptor.device_requirements
     ) == (
@@ -299,6 +304,75 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             metadata["history"][0]["fluorescence"],
             target_fluorescence[calibration_order],
         )
+    finally:
+        plane.close()
+
+
+def test_uniformity_history_curve_grows_one_point_per_candidate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    slm = _Slm((17, 23))
+    plane = SignalDataPlane()
+    context = _Context()
+    fronts: list[dict[str, object]] = []
+
+    def attach_live_outputs(slot):
+        context.live_slot = slot
+        slot.set_change_listener(lambda: fronts.append(slot.freeze_live_outputs()))
+
+    context.attach_live_outputs = attach_live_outputs
+    measurements = iter(
+        (
+            np.concatenate(([4.0], np.ones(34))),
+            np.concatenate(([2.0], np.ones(34))),
+        )
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "solve_phase",
+        lambda *args, **kwargs: (
+            np.full(slm.shape_yx, 0.5, dtype=np.float32),
+            {"method": "test"},
+        ),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, run_context, iteration, *, shots=None: (
+            next(measurements),
+            np.zeros(35),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape),
+        ),
+    )
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=_grid_target(slm.shape_yx),
+        updates=2,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="did not reach 1.01"):
+            task.execute(context)
+        output = context.live_slot.freeze_live_outputs()["uniformity_history"]
+        np.testing.assert_allclose(output.snapshot.block.values[0, :, 0], (4.0, 2.0))
+        assert len(fronts) == 2
+        assert (
+            fronts[0]["uniformity_history"].snapshot.block.schema
+            is fronts[1]["uniformity_history"].snapshot.block.schema
+        )
+        column = output.snapshot.block.schema.point_table.columns[0]
+        assert column.name == "candidate"
+        assert tuple(column.values) == (1.0, 2.0)
     finally:
         plane.close()
 
@@ -966,11 +1040,13 @@ def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
     def measure(self, pulse, run_context, iteration, *, shots=None):
         nonlocal calls
         calls += 1
+        fluorescence = np.ones(35)
         if shots is not None:
             validation_entered.set()
             assert release_validation.wait(2.0)
+            fluorescence[0] = 1.005
         image = np.full((5, 7), 22.0 if shots is not None else 11.0)
-        return np.ones(35), np.zeros(35), (), (), image
+        return fluorescence, np.zeros(35), (), (), image
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
@@ -1007,14 +1083,29 @@ def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
         readout_publication = plane.latest_publication(
             host.signal_key("readout_average")
         )
-        assert phase_publication is not None and readout_publication is not None
+        curve_publication = plane.latest_publication(
+            host.signal_key("uniformity_history")
+        )
+        assert (
+            phase_publication is not None
+            and readout_publication is not None
+            and curve_publication is not None
+        )
         phase_value = phase_publication.value(host.signal_key("candidate_phase"))
         readout_value = readout_publication.value(host.signal_key("readout_average"))
+        curve_value = curve_publication.value(host.signal_key("uniformity_history"))
         np.testing.assert_array_equal(phase_value.snapshot.block.values[0, 0], best)
         np.testing.assert_array_equal(
             readout_value.snapshot.block.values[0, 0], np.full((5, 7), 22.0)
         )
-        assert phase_value.run_record == readout_value.run_record
+        np.testing.assert_array_equal(
+            curve_value.snapshot.block.values[0, :, 0], np.asarray([1.0])
+        )
+        assert (
+            phase_value.run_record
+            == readout_value.run_record
+            == curve_value.run_record
+        )
         assert phase_value.run_record["artifact_path"] == str(artifacts[0])
     finally:
         release_validation.set()

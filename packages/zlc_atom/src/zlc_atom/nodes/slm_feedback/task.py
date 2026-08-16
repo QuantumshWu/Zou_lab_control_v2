@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from zlc_data import SPATIAL_X, SPATIAL_Y
+from zlc_data import SCAN_POINT, SPATIAL_X, SPATIAL_Y, AxisId, PointColumn
 from zlc_durable import unique_path
 from zlc_pulse import PulseSequence
 from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
@@ -33,6 +33,9 @@ READOUT_AVERAGE_OUTPUT = DatasetOutputDeclaration(
 )
 CANDIDATE_PHASE_OUTPUT = DatasetOutputDeclaration(
     "candidate_phase", "slm-feedback.candidate-phase.v1"
+)
+UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
+    "uniformity_history", "slm-feedback.uniformity-history.v1"
 )
 _TARGET_RATIO = 1.01
 _VALIDATION_RELATIVE_SEM = 0.005
@@ -315,7 +318,11 @@ class SlmFeedbackTask:
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
-        return (READOUT_AVERAGE_OUTPUT, CANDIDATE_PHASE_OUTPUT)
+        return (
+            READOUT_AVERAGE_OUTPUT,
+            CANDIDATE_PHASE_OUTPUT,
+            UNIFORMITY_HISTORY_OUTPUT,
+        )
 
     def _candidate_metadata(
         self,
@@ -354,6 +361,7 @@ class SlmFeedbackTask:
         stage: str,
         shots: int,
         uniformity_ratio: float | None,
+        history: list[dict[str, object]],
     ) -> None:
         slot = self._live_slot
         if slot is None:
@@ -374,6 +382,14 @@ class SlmFeedbackTask:
             ),
             "phase_role": "canonical phase applied while readout_average was acquired",
         }
+        curve_candidates = tuple(
+            float(index) for index in range(1, self.max_updates + 1)
+        )
+        curve_ratios = np.full(self.max_updates, np.nan, dtype="<f8")
+        for item in history:
+            ratio = item.get("uniformity_ratio")
+            if ratio is not None:
+                curve_ratios[int(item["iteration"]) - 1] = float(ratio)
         coverage = DatasetCoverage(1, 1)
         slot.publish(
             {
@@ -402,6 +418,29 @@ class SlmFeedbackTask:
                         revision=revision,
                     ),
                     coverage,
+                    record,
+                ),
+                UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
+                    UNIFORMITY_HISTORY_OUTPUT,
+                    snapshot_from_array(
+                        curve_ratios[None],
+                        producer=self.instance_id,
+                        signal=UNIFORMITY_HISTORY_OUTPUT.name,
+                        roles=(SCAN_POINT,),
+                        point_columns={
+                            SCAN_POINT: PointColumn(
+                                AxisId("slm_feedback.candidate"),
+                                "candidate",
+                                SCAN_POINT,
+                                PointColumn.NUMERIC,
+                                curve_candidates,
+                            )
+                        },
+                        generation=self._generation,
+                        revision=revision,
+                        validity=np.isfinite(curve_ratios)[None],
+                    ),
+                    DatasetCoverage(self.max_updates, self.max_updates),
                     record,
                 ),
             }
@@ -716,6 +755,7 @@ class SlmFeedbackTask:
                     stage="coarse",
                     shots=self.shots,
                     uniformity_ratio=score if valid else None,
+                    history=history,
                 )
                 completed: dict[str, object] = {
                     "candidate": candidate_number,
@@ -804,6 +844,7 @@ class SlmFeedbackTask:
                         uniformity_ratio=(
                             validation_score if validation_valid else None
                         ),
+                        history=history,
                     )
                     completed = {
                         **completed,
@@ -899,6 +940,7 @@ class SlmFeedbackTask:
                             stage=str(retained.get("stage", "coarse")),
                             shots=int(retained.get("shots", self.shots)),
                             uniformity_ratio=retained.get("uniformity_ratio"),
+                            history=history,
                         )
                     raise
             try:
@@ -915,4 +957,5 @@ __all__ = [
     "READOUT_AVERAGE_OUTPUT",
     "SLM_PHASE_ARTIFACT_CONTRACT",
     "SlmFeedbackTask",
+    "UNIFORMITY_HISTORY_OUTPUT",
 ]
