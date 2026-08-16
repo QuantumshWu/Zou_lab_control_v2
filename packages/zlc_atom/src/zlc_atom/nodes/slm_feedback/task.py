@@ -433,7 +433,7 @@ class SlmFeedbackTask:
                         revision=revision,
                         validity=np.isfinite(curve_ratios)[None],
                     ),
-                    DatasetCoverage(len(history), max(1, len(history))),
+                    DatasetCoverage(self.max_updates, self.max_updates),
                     record,
                 ),
             }
