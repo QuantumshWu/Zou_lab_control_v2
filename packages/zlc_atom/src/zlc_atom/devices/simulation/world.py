@@ -181,12 +181,12 @@ class SimulationWorld:
         # beginning of a probe.  The finite bright-state lifetime below keeps
         # long probes physical instead of letting this initial rate grow
         # without bound.
-        self.atom_rate = 100_000.0
+        self.atom_rate = 145_000.0
         self.atom_sigma_px = 0.7
         self.loading_probability = 0.5
         self.probe_saturation = 0.1
-        self.probe_detuning_linewidths = -2.0
-        self.trap_light_shift_linewidths = 0.5
+        self.probe_detuning_linewidths = -1.9
+        self.trap_light_shift_linewidths = 1.15
         self.fluorescence_lifetime_seconds = 0.05
         self.atom_temperature_k = DEFAULT_ATOM_TEMPERATURE_K
         self.trap_depth_k = DEFAULT_TRAP_DEPTH_K
@@ -290,7 +290,7 @@ class SimulationWorld:
         self._ensure_slm_propagation()
 
     def _slm_plant(self, seed: int) -> tuple[np.ndarray, np.ndarray]:
-        """Materialize fixed illumination and hidden low-order wavefront error."""
+        """Materialize fixed illumination and one apparatus wavefront ripple."""
 
         height, width = self._slm_shape_yx
         yy, xx = np.ogrid[
@@ -308,25 +308,17 @@ class SimulationWorld:
         illumination *= np.clip(1.0 - 0.20 * radius_squared, 0.0, None)
         amplitude = np.where(pupil, illumination, 0.0)
 
-        # Seed changes the hidden bench, not the nominal command.  A fixed
-        # low-order component ensures every supported seed is meaningfully
-        # uncorrected; bounded jitter prevents a one-seed-only simulation.
-        coefficients = np.asarray((2.34, -1.56, 2.135, 0.955), dtype=float)
-        coefficients += np.random.default_rng(seed ^ 0x5A17).uniform(
-            -0.02, 0.02, coefficients.shape
-        )
-        # Physical trap depths are local maxima, not values at authored target
-        # pixels.  This mild fixed wavefront error and the planted illumination
-        # together give the apparatus its correctable twofold depth spread.
-        defocus = 2.0 * radius_squared - 1.0
-        astigmatism = xx * xx - yy * yy
-        coma_x = (3.0 * radius_squared - 2.0) * xx
-        coma_y = (3.0 * radius_squared - 2.0) * yy
-        aberration = (
-            coefficients[0] * defocus
-            + coefficients[1] * astigmatism
-            + coefficients[2] * coma_x
-            + coefficients[3] * coma_y
+        # One small, target-independent mid-spatial wavefront ripple coherently
+        # redistributes power among the nominal diffraction orders without a
+        # per-site gain, a second hologram, or per-command normalization.
+        # Bounded seed jitter changes the hidden bench while preserving that
+        # fixed apparatus-scale error.
+        phase_rng = np.random.default_rng(seed ^ 0x5A17)
+        ripple_amplitude = 0.186 + phase_rng.uniform(-0.005, 0.005)
+        ripple_phase = 5.69 + phase_rng.uniform(-0.05, 0.05)
+        panel_row = np.arange(height, dtype=float)[:, np.newaxis]
+        aberration = ripple_amplitude * np.cos(
+            2.0 * np.pi * 21.0 * panel_row / float(height) + ripple_phase
         )
         return (
             _immutable(amplitude, "<f4"),
@@ -624,6 +616,9 @@ class SimulationWorld:
         light_shift = float(self.trap_light_shift_linewidths)
         if not np.isfinite(light_shift):
             raise ValueError("trap_light_shift_linewidths must be finite")
+        # The probe is fixed at the apparatus working point selected for the
+        # ideal uniform nominal array.  It never follows a candidate phase or
+        # the current array mean, so absolute depth remains observable.
         detuning = probe_detuning + light_shift * relative_depth
         scattering = saturation / (
             1.0 + saturation + np.square(2.0 * detuning)
