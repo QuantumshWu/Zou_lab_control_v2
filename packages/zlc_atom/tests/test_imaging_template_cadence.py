@@ -19,21 +19,32 @@ from __future__ import annotations
 import json
 
 import pytest
+from zlc_pulse import TIME_UNIT_TO_NS
 
 from zlc_atom.nodes import calibration_pulse_template_bytes
 
 
 def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
     tree = json.loads(calibration_pulse_template_bytes().decode("utf-8"))
+    raw_periods = {str(period["period_id"]): period for period in tree["periods"]}
     periods = {
-        str(period["period_id"]): float(period["duration"])
+        str(period["period_id"]): (
+            float(period["duration"])
+            * TIME_UNIT_TO_NS[str(period["unit"])]
+            / TIME_UNIT_TO_NS["s"]
+        )
         for period in tree["periods"]
     }
     assert set(periods) == {
         "load", "long_before", "gap_0", "short", "gap_1", "long_after"
     }
-    for period in tree["periods"]:
-        assert period["unit"] == "s"
+    assert raw_periods["load"]["duration"] == 100
+    assert raw_periods["load"]["unit"] == "us"
+    assert all(
+        period["unit"] == "s"
+        for period_id, period in raw_periods.items()
+        if period_id != "load"
+    )
 
     first_interval = periods["long_before"] + periods["gap_0"]
     second_interval = periods["short"] + periods["gap_1"]
