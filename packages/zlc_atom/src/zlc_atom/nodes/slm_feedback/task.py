@@ -6,9 +6,12 @@ from pathlib import Path
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_durable import unique_path
 from zlc_pulse import PulseSequence
+from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
 
+from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.slm import SlmAdapter, canonical_phase
 from zlc_atom.devices.slm.solver import save_phase, solve_phase, validate_target
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
@@ -20,10 +23,17 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_atom.nodes.occupancy import OccupancyProcessor
+from zlc_atom.nodes.scan import ScanLiveSlot
 from zlc_atom.nodes.scan.source import wait_for_board
 
 
 SLM_PHASE_ARTIFACT_CONTRACT = "zlc.slm.phase.v1"
+READOUT_AVERAGE_OUTPUT = DatasetOutputDeclaration(
+    "readout_average", "slm-feedback.readout-average.v1"
+)
+CANDIDATE_PHASE_OUTPUT = DatasetOutputDeclaration(
+    "candidate_phase", "slm-feedback.candidate-phase.v1"
+)
 _TARGET_RATIO = 1.01
 _VALIDATION_RELATIVE_SEM = 0.005
 _SOLVE_ITERATIONS = 8
@@ -297,6 +307,105 @@ class SlmFeedbackTask:
             windows.append((slice(y0, y1), slice(x0, x1)))
         self._site_mask, self._site_windows = site_mask, tuple(windows)
         self.artifact_directory = directory
+        self._generation = ""
+        self._publication_revision = 0
+        self._live_slot: ScanLiveSlot | None = None
+        self._active_readout_average: np.ndarray | None = None
+        self._active_readout_shots = 0
+
+    @property
+    def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
+        return (READOUT_AVERAGE_OUTPUT, CANDIDATE_PHASE_OUTPUT)
+
+    def _candidate_metadata(
+        self,
+        *,
+        candidate: int,
+        status: str,
+        history: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            "calibration_path": str(self.calibration_path),
+            "target_path": str(self.target_path),
+            "pulse_path": str(self.pulse_path),
+            "named_devices": {
+                "camera": self.camera_key,
+                "sequencer": self.sequencer_key,
+                "slm": self.slm_key,
+            },
+            "candidate": int(candidate),
+            "status": str(status),
+            "measurement": (
+                history[-1]
+                if history and history[-1]["iteration"] == candidate
+                else None
+            ),
+            "history": history,
+            "updates": len(history),
+        }
+
+    def _publish_candidate(
+        self,
+        *,
+        phase: np.ndarray,
+        readout_average: np.ndarray,
+        artifact_path: Path,
+        candidate: int,
+        stage: str,
+        shots: int,
+        uniformity_ratio: float | None,
+    ) -> None:
+        slot = self._live_slot
+        if slot is None:
+            raise RuntimeError("SLM feedback live outputs are not attached")
+        canonical = canonical_phase(phase, self.slm.shape_yx)
+        image = np.asarray(readout_average, dtype=float)
+        if image.shape != self.calibration.frame_contract.image_shape:
+            raise ValueError("feedback readout average differs from the calibrated image shape")
+        self._publication_revision += 1
+        revision = self._publication_revision
+        record: dict[str, object] = {
+            "candidate": int(candidate),
+            "stage": str(stage),
+            "shots": int(shots),
+            "artifact_path": str(artifact_path),
+            "uniformity_ratio": (
+                None if uniformity_ratio is None else float(uniformity_ratio)
+            ),
+            "phase_role": "canonical phase applied while readout_average was acquired",
+        }
+        coverage = DatasetCoverage(1, 1)
+        slot.publish(
+            {
+                READOUT_AVERAGE_OUTPUT.name: LiveDatasetOutput(
+                    READOUT_AVERAGE_OUTPUT,
+                    snapshot_from_array(
+                        image[None],
+                        producer=self.instance_id,
+                        signal=READOUT_AVERAGE_OUTPUT.name,
+                        roles=(SPATIAL_Y, SPATIAL_X),
+                        generation=self._generation,
+                        revision=revision,
+                    ),
+                    coverage,
+                    record,
+                ),
+                CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
+                    CANDIDATE_PHASE_OUTPUT,
+                    snapshot_from_array(
+                        canonical[None],
+                        producer=self.instance_id,
+                        signal=CANDIDATE_PHASE_OUTPUT.name,
+                        roles=(SPATIAL_Y, SPATIAL_X),
+                        value_unit="rad",
+                        generation=self._generation,
+                        revision=revision,
+                    ),
+                    coverage,
+                    record,
+                ),
+            }
+        )
 
     def _apply_exact(self, phase: object) -> np.ndarray:
         expected = canonical_phase(phase, self.slm.shape_yx)
@@ -349,7 +458,13 @@ class SlmFeedbackTask:
         iteration: int,
         *,
         shots: int | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        tuple[int, ...],
+        tuple[int, ...],
+        np.ndarray,
+    ]:
         contract = self.calibration.frame_contract
         if contract.exposure_seconds is None:
             raise ValueError("calibration does not record its readout exposure")
@@ -362,6 +477,8 @@ class SlmFeedbackTask:
         saturated_sites: set[int] = set()
         missing_sites: set[int] = set()
         measured = 0
+        self._active_readout_average = None
+        self._active_readout_shots = 0
         while measured < requested:
             _check_cancelled(context)
             chunk = min(_SHOT_CHUNK, requested - measured)
@@ -401,6 +518,15 @@ class SlmFeedbackTask:
                     _check_cancelled(context)
                     value = source.next_value(context)
                     image = np.asarray(value.snapshot.block.values)[0, _READOUT_FRAME]
+                    image_values = np.asarray(image, dtype=float)
+                    if self._active_readout_average is None:
+                        self._active_readout_average = np.zeros_like(
+                            image_values, dtype=float
+                        )
+                    self._active_readout_shots += 1
+                    self._active_readout_average += (
+                        image_values - self._active_readout_average
+                    ) / self._active_readout_shots
                     saturated_sites.update(self._saturated_sites(image))
                     occupancy = self._occupancy.evaluate(value)
                     counts = np.asarray(occupancy["counts"].snapshot.block.values)[
@@ -462,15 +588,26 @@ class SlmFeedbackTask:
         if missing.size:
             mean[missing] = np.nan
             standard_error[missing] = np.nan
+        if self._active_readout_average is None or self._active_readout_shots != requested:
+            raise RuntimeError("qCMOS readout average did not receive every requested shot")
         return (
             mean,
             standard_error,
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
+            np.array(self._active_readout_average, copy=True),
         )
 
     def execute(self, context: object) -> dict[str, object]:
         incoming = np.array(self.slm.last_commanded_phase, copy=True)
+        self._generation = str(getattr(context.generation, "value", context.generation))
+        self._publication_revision = 0
+        self._live_slot = ScanLiveSlot()
+        context.attach_live_outputs(self._live_slot)
+        history: list[dict[str, object]] = []
+        best_valid: dict[str, object] | None = None
+        latest_completed: dict[str, object] | None = None
+        durable_candidate: dict[str, object] | None = None
         try:
             exposure = self.calibration.frame_contract.exposure_seconds
             if exposure is None:
@@ -492,14 +629,43 @@ class SlmFeedbackTask:
             )
             baseline = None
             coarse_best = float("inf")
-            history: list[dict[str, object]] = []
-            accepted = None
+            accepted: dict[str, object] | None = None
             for iteration in range(self.max_updates):
                 _check_cancelled(context)
-                self._apply_exact(current_phase)
-                fluorescence, error, saturated_sites, missing_sites = self._measure(
-                    pulse, context, iteration
+                applied = self._apply_exact(current_phase)
+                candidate_number = iteration + 1
+                artifact_path = unique_path(
+                    self.artifact_directory,
+                    f"slm_feedback_candidate_{candidate_number:04d}",
+                    ".npz",
                 )
+                # The phase file exists before the first camera trigger.  A
+                # Stop during that measurement therefore never leaves an
+                # unrepeatable phase on the device with no durable source.
+                save_phase(
+                    artifact_path,
+                    applied,
+                    self._candidate_metadata(
+                        candidate=candidate_number,
+                        status="applied",
+                        history=history,
+                    ),
+                )
+                durable_candidate = {
+                    "candidate": candidate_number,
+                    "phase": np.array(applied, copy=True),
+                    "artifact_path": artifact_path,
+                }
+                context.report_progress(
+                    f"Candidate {candidate_number} phase saved to {artifact_path}"
+                )
+                (
+                    fluorescence,
+                    error,
+                    saturated_sites,
+                    missing_sites,
+                    readout_average,
+                ) = self._measure(pulse, context, iteration)
                 saturated = bool(saturated_sites)
                 missing = bool(missing_sites)
                 total = float(np.sum(fluorescence))
@@ -515,7 +681,7 @@ class SlmFeedbackTask:
                 )
                 score = _ratio(fluorescence) if valid else float("inf")
                 history.append({
-                    "iteration": iteration + 1,
+                    "iteration": candidate_number,
                     "shots": self.shots,
                     "valid": valid,
                     "saturated": saturated,
@@ -529,9 +695,45 @@ class SlmFeedbackTask:
                         if baseline is not None and np.isfinite(total)
                         else None
                     ),
+                    "artifact_path": str(artifact_path),
                 })
                 if valid:
                     coarse_best = min(coarse_best, score)
+                save_phase(
+                    artifact_path,
+                    applied,
+                    self._candidate_metadata(
+                        candidate=candidate_number,
+                        status="measured",
+                        history=history,
+                    ),
+                )
+                self._publish_candidate(
+                    phase=applied,
+                    readout_average=readout_average,
+                    artifact_path=artifact_path,
+                    candidate=candidate_number,
+                    stage="coarse",
+                    shots=self.shots,
+                    uniformity_ratio=score if valid else None,
+                )
+                completed: dict[str, object] = {
+                    "candidate": candidate_number,
+                    "phase": np.array(applied, copy=True),
+                    "readout_average": np.array(readout_average, copy=True),
+                    "artifact_path": artifact_path,
+                    "stage": "coarse",
+                    "shots": self.shots,
+                    "uniformity_ratio": score if valid else None,
+                    "history": history[-1],
+                    "score": score,
+                }
+                latest_completed = completed
+                durable_candidate = completed
+                if valid and (
+                    best_valid is None or score < float(best_valid["score"])
+                ):
+                    best_valid = completed
                 context.report_progress(
                     f"qCMOS fluorescence ratio {score:.5f}; "
                     f"best {coarse_best:.5f}"
@@ -549,6 +751,7 @@ class SlmFeedbackTask:
                         validation_error,
                         validation_saturated_sites,
                         validation_missing_sites,
+                        validation_average,
                     ) = self._measure(
                         pulse, context, iteration, shots=self.validation_shots
                     )
@@ -582,17 +785,56 @@ class SlmFeedbackTask:
                         "standard_error": _json_floats(validation_error),
                         "missing_sites": list(validation_missing_sites),
                     }
+                    save_phase(
+                        artifact_path,
+                        applied,
+                        self._candidate_metadata(
+                            candidate=candidate_number,
+                            status="validated",
+                            history=history,
+                        ),
+                    )
+                    self._publish_candidate(
+                        phase=applied,
+                        readout_average=validation_average,
+                        artifact_path=artifact_path,
+                        candidate=candidate_number,
+                        stage="validation",
+                        shots=self.validation_shots,
+                        uniformity_ratio=(
+                            validation_score if validation_valid else None
+                        ),
+                    )
+                    completed = {
+                        **completed,
+                        "readout_average": np.array(
+                            validation_average, copy=True
+                        ),
+                        "stage": "validation",
+                        "shots": self.validation_shots,
+                        "uniformity_ratio": (
+                            validation_score if validation_valid else None
+                        ),
+                    }
+                    latest_completed = completed
+                    durable_candidate = completed
+                    if (
+                        best_valid is not None
+                        and int(best_valid["candidate"]) == candidate_number
+                    ):
+                        best_valid = completed
                     context.report_progress(
                         f"qCMOS validation ratio {validation_score:.5f}; "
                         f"max relative SEM {max_relative_error:.5f}"
                     )
                     if validation_score <= _TARGET_RATIO:
-                        accepted = (
-                            np.array(current_phase, copy=True),
-                            history[-1],
-                            validation_score,
-                            max_relative_error,
-                        )
+                        accepted = {
+                            **completed,
+                            "phase": np.array(applied, copy=True),
+                            "history": history[-1],
+                            "validation_score": validation_score,
+                            "validation_max_relative_standard_error": max_relative_error,
+                        }
                         break
                 if valid:
                     current_target = _updated_target(current_target, fluorescence, self._rows, self._columns)
@@ -605,28 +847,60 @@ class SlmFeedbackTask:
             if accepted is None:
                 raise RuntimeError("qCMOS feedback did not reach 1.01 site uniformity")
             # Atomically order Stop against the irreversible terminal pair.
-            # A Stop that won restores ``incoming`` through the exception
-            # path; after this seal, apply/save either both lead to success or
+            # A Stop that won keeps the retained candidate through the
+            # exception path; after this seal, apply/save lead to success or
             # an exception is a real failure rather than a cancellation.
             context.seal_terminal()
-            applied = self._apply_exact(accepted[0])
-            artifact_path = unique_path(self.artifact_directory, "slm_feedback", ".npz")
-            save_phase(artifact_path, applied, {
-                "calibration_path": str(self.calibration_path),
-                "target_path": str(self.target_path),
-                "pulse_path": str(self.pulse_path),
-                "named_devices": {"camera": self.camera_key, "sequencer": self.sequencer_key, "slm": self.slm_key},
-                "best": accepted[1],
-                "history": history,
-                "updates": len(history),
-            })
+            applied = self._apply_exact(accepted["phase"])
+            artifact_path = Path(accepted["artifact_path"])
+            final_metadata = self._candidate_metadata(
+                candidate=int(accepted["candidate"]),
+                status="accepted",
+                history=history,
+            )
+            final_metadata["best"] = accepted["history"]
+            save_phase(artifact_path, applied, final_metadata)
             return {
                 "artifact_path": artifact_path,
-                "best_uniformity": accepted[2],
-                "validation_max_relative_standard_error": accepted[3],
+                "best_uniformity": accepted["validation_score"],
+                "validation_max_relative_standard_error": accepted[
+                    "validation_max_relative_standard_error"
+                ],
                 "updates": len(history),
             }
         except BaseException as error:
+            if context.cancel_requested():
+                retained = best_valid if best_valid is not None else latest_completed
+                if retained is None:
+                    retained = durable_candidate
+                    if (
+                        retained is not None
+                        and self._active_readout_average is not None
+                        and self._active_readout_shots > 0
+                    ):
+                        retained = {
+                            **retained,
+                            "readout_average": np.array(
+                                self._active_readout_average, copy=True
+                            ),
+                            "stage": "stopped-partial",
+                            "shots": self._active_readout_shots,
+                            "uniformity_ratio": None,
+                        }
+                if retained is not None:
+                    retained_phase = self._apply_exact(retained["phase"])
+                    readout = retained.get("readout_average")
+                    if readout is not None:
+                        self._publish_candidate(
+                            phase=retained_phase,
+                            readout_average=np.asarray(readout),
+                            artifact_path=Path(retained["artifact_path"]),
+                            candidate=int(retained["candidate"]),
+                            stage=str(retained.get("stage", "coarse")),
+                            shots=int(retained.get("shots", self.shots)),
+                            uniformity_ratio=retained.get("uniformity_ratio"),
+                        )
+                    raise
             try:
                 self._apply_exact(incoming)
             except BaseException as restore_error:
@@ -636,4 +910,9 @@ class SlmFeedbackTask:
             raise
 
 
-__all__ = ["SLM_PHASE_ARTIFACT_CONTRACT", "SlmFeedbackTask"]
+__all__ = [
+    "CANDIDATE_PHASE_OUTPUT",
+    "READOUT_AVERAGE_OUTPUT",
+    "SLM_PHASE_ARTIFACT_CONTRACT",
+    "SlmFeedbackTask",
+]

@@ -13,7 +13,9 @@ from zlc_atom.nodes._framework.descriptor import (
     DeviceAccess,
     DeviceRequirement,
     LogicNodeDescriptor,
+    NodePreviewSpec,
     NodeKind,
+    OutputSpec,
     ResolvedArtifact,
     ResolvedWorkspaceResource,
     WorkspaceResourceSpec,
@@ -21,7 +23,12 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC, TrapCalibration
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
 
-from .task import SLM_PHASE_ARTIFACT_CONTRACT, SlmFeedbackTask
+from .task import (
+    CANDIDATE_PHASE_OUTPUT,
+    READOUT_AVERAGE_OUTPUT,
+    SLM_PHASE_ARTIFACT_CONTRACT,
+    SlmFeedbackTask,
+)
 
 
 TARGET_CODEC = ArtifactCodec(
@@ -108,6 +115,14 @@ LOGIC_NODE = LogicNodeDescriptor(
             "calibration_path", "Calibration artifact", CALIBRATION_ARTIFACT_CODEC, argument_name="calibration"
         ),
         ArtifactInputSpec("target_path", "SLM target", TARGET_CODEC, argument_name="target"),
+    ),
+    outputs=(
+        OutputSpec(READOUT_AVERAGE_OUTPUT.name, READOUT_AVERAGE_OUTPUT.contract_id),
+        OutputSpec(CANDIDATE_PHASE_OUTPUT.name, CANDIDATE_PHASE_OUTPUT.contract_id),
+    ),
+    node_previews=(
+        NodePreviewSpec(READOUT_AVERAGE_OUTPUT.name, "image"),
+        NodePreviewSpec(CANDIDATE_PHASE_OUTPUT.name, "image"),
     ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", SLM_PHASE_ARTIFACT_CONTRACT),
