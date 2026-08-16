@@ -146,13 +146,16 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     world = SimulationWorld(seed=4)
     assert world.atom_sigma_px == pytest.approx(0.7)
     assert world.background_rate == pytest.approx(300.0)
-    assert world.atom_rate == pytest.approx(1100.0)
+    assert world.atom_rate == pytest.approx(100_000.0)
     assert world.conversion_e_per_count == pytest.approx(0.107)
     assert world.read_noise_e == pytest.approx(0.43)
     assert world.offset_counts == pytest.approx(200.0)
 
     exposure = 0.02
-    assert world.atom_rate * exposure == pytest.approx(22.0)
+    assert world.atom_rate * exposure == pytest.approx(2_000.0)
+    assert -world.fluorescence_lifetime_seconds * np.expm1(
+        -exposure / world.fluorescence_lifetime_seconds
+    ) < exposure
     site_count = len(world.geometry.site_centers_xy)
     empty = np.zeros(site_count, dtype=bool)
     dark = np.asarray(
@@ -182,6 +185,23 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     assert bright.dtype == np.dtype("<u2")
     assert float(np.mean(bright)) > float(np.mean(dark))
     assert float(np.var(dark)) > 0.0
+
+    for field, invalid in (
+        ("probe_saturation", 0.0),
+        ("probe_saturation", np.inf),
+        ("probe_detuning_linewidths", np.nan),
+        ("trap_light_shift_linewidths", np.inf),
+        ("fluorescence_lifetime_seconds", 0.0),
+    ):
+        invalid_world = SimulationWorld(seed=4)
+        setattr(invalid_world, field, invalid)
+        with pytest.raises(ValueError, match=field):
+            invalid_world.render_frame(
+                0,
+                exposure_seconds=exposure,
+                probe_seconds=0.005,
+                occupancy=empty,
+            )
 
 
 def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
@@ -420,7 +440,10 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         assert world.propagation_count == 1
         initial_loading = world._site_loading_probabilities()
         order = np.argsort(sites)
-        np.testing.assert_allclose(initial_loading, world.loading_probability)
+        assert np.all(np.diff(initial_loading[order]) >= 0.0)
+        assert float(np.max(initial_loading) / np.min(initial_loading)) > 1.2
+        initial_fluorescence = world._fluorescence_scales(sites)
+        assert np.all(np.diff(initial_fluorescence[order]) >= 0.0)
         survival = world._site_survival_probabilities(16e-6)
         assert np.all(np.diff(survival[order]) >= 0.0)
 
@@ -449,8 +472,17 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         _ = world._trap_plane_intensity
         assert world.propagation_count == 2
         corrected_loading = world._site_loading_probabilities()
-        np.testing.assert_allclose(corrected_loading, world.loading_probability)
         corrected_order = np.argsort(corrected)
+        assert np.all(np.diff(corrected_loading[corrected_order]) >= 0.0)
+        assert float(np.ptp(corrected_loading)) < float(np.ptp(initial_loading))
+        corrected_fluorescence = world._fluorescence_scales(corrected)
+        corrected_fluorescence_ratio = float(
+            np.max(corrected_fluorescence) / np.min(corrected_fluorescence)
+        )
+        initial_fluorescence_ratio = float(
+            np.max(initial_fluorescence) / np.min(initial_fluorescence)
+        )
+        assert corrected_fluorescence_ratio < initial_fluorescence_ratio
         corrected_survival = world._site_survival_probabilities(16e-6)
         assert np.all(np.diff(corrected_survival[corrected_order]) >= 0.0)
         corrected_ratio = float(np.max(corrected) / np.min(corrected))
@@ -527,10 +559,12 @@ def test_nominal_and_extra_traps_share_raw_local_peak_depths() -> None:
     np.testing.assert_array_equal(
         world._site_loading_probabilities(), np.zeros(35)
     )
-    np.testing.assert_allclose(
-        world._loading_probabilities(world._extra_site_trap_intensities),
-        world.loading_probability,
+    extra_loading = world._loading_probabilities(
+        world._extra_site_trap_intensities
     )
+    extra_order = np.argsort(world._extra_site_trap_intensities)
+    assert np.all(extra_loading > 0.0)
+    assert np.all(np.diff(extra_loading[extra_order]) >= 0.0)
 
     first_plane = np.array(world._trap_plane_intensity, copy=True)
     first_fixed = np.array(world._site_trap_intensities, copy=True)
@@ -715,16 +749,15 @@ def test_occupied_qcmos_box_brightness_tracks_fixed_site_trap_depth() -> None:
     """An occupied atom's public box mean must report its local trap depth."""
 
     world = SimulationWorld(seed=23)
-    world.atom_rate = 10_000.0
     target = np.array(preset_grid(world.slm_shape_yx, (5, 7)), copy=True)
     sites = np.argwhere(target > 0.0)
     for index, site in enumerate(sites):
         target[tuple(site)] = 1.0 if index % 2 == 0 else 0.25
     phase, _metadata = solve_phase(target, seed=0)
     world.apply_slm_phase(phase)
-    np.testing.assert_allclose(
-        world._site_loading_probabilities(), world.loading_probability
-    )
+    loading = world._site_loading_probabilities()
+    loading_order = np.argsort(world._site_trap_intensities)
+    assert np.all(np.diff(loading[loading_order]) >= 0.0)
     assert len(world._extra_slm_site_indices_yx) == 0
 
     frame = world.render_frame(
@@ -847,16 +880,16 @@ def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> 
     world.apply_slm_phase(phase)
     probabilities = world._site_loading_probabilities()
     assert len(world._extra_slm_site_indices_yx) == 0
-    np.testing.assert_allclose(
-        probabilities[selected], world.loading_probability
-    )
+    selected_order = np.argsort(world._site_trap_intensities[selected])
+    assert np.all(probabilities[selected] > 0.0)
+    assert np.all(np.diff(probabilities[selected][selected_order]) >= 0.0)
     np.testing.assert_array_equal(
         np.delete(probabilities, selected), np.zeros(32)
     )
 
     pulse = _world_pulse(cooling=True, trap=True)
     patterns: list[np.ndarray] = []
-    for _ in range(8):
+    for _ in range(32):
         _fire_world(world, pulse)
         occupancy = world.occupancy
         assert not np.any(np.delete(occupancy, selected))
@@ -1290,16 +1323,15 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         assert long_before_accuracy >= 0.95
         # The readout frame is short in LIGHT, not in integration: an
         # edge-triggered sensor integrates its configured exposure whatever
-        # the pulse window does, so this frame carries a fifth of the probe
-        # photons on top of the full exposure's background.  Its deterministic
-        # independent noise stream still resolves occupancy well above chance;
-        # enough cycles make both separations broad statistical statements.
+        # the pulse window does.  At the authored photon budget both windows
+        # can classify occupancy perfectly; the contrast-ratio assertion below
+        # is the physical duration guard rather than an artificial accuracy gap.
         assert short_accuracy >= 0.75
-        assert min(long_before_accuracy, long_after_accuracy) - short_accuracy >= 0.10
         assert long_after_accuracy >= 0.95
         np.testing.assert_allclose(
             np.mean(long_before, axis=0),
             np.mean(long_after, axis=0),
+            rtol=0.01,
             atol=10.0,
         )
         long_contrast = 0.5 * (
@@ -1309,6 +1341,79 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         short_contrast = float(np.mean(short[labels]) - np.mean(short[~labels]))
         assert short_contrast / long_contrast == pytest.approx(0.25, rel=0.20)
         assert installation.world.fire_count == repeats
+    finally:
+        plane.close()
+        installation.close()
+
+
+def test_public_repeat_reduction_exposes_the_planted_trap_depth_contrast() -> None:
+    """Fifty real qCMOS cycles make the initial coherent error visible.
+
+    Each cycle is a real fresh load.  The reduced image therefore contains the
+    physical combination the operator sees: depth-dependent capture and the
+    occupied atom's Stark-shifted fluorescence.
+    """
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    try:
+        world = installation.world
+        camera = installation.device("camera")
+        sequencer = installation.device("sequencer")
+        repeats = 50
+        loading = world._site_loading_probabilities()
+        order = np.argsort(world._site_trap_intensities)
+        assert np.all(np.diff(loading[order]) >= 0.0)
+        assert float(np.max(loading) / np.min(loading)) > 1.2
+        np.testing.assert_allclose(
+            world._loading_probabilities(
+                np.asarray([world._loading_intensity_scale])
+            ),
+            [world.loading_probability],
+        )
+        depth_ratio = float(
+            np.max(world._site_trap_intensities)
+            / np.min(world._site_trap_intensities)
+        )
+        assert 1.8 <= depth_ratio <= 2.2
+
+        measurement = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest("camera", 0.02, None, repeats, 3),
+            signal_plane=plane,
+        )
+        pulse = resolve_pulse(
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=sequencer.describe(),
+            api_values={
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
+            },
+        )
+        capture = measurement.prepare()
+        arm_sequencer(sequencer, pulse)
+        for _ in range(repeats):
+            sequencer.fire()
+            assert sequencer.wait_done(1.0) is not None
+        result = capture.collect()
+        frames = np.asarray(
+            result.publication.value(measurement.signal_key("frames")).snapshot.block.values
+        )
+        assert frames.shape == (repeats, 3, 96, 128)
+        assert int(np.max(frames)) < np.iinfo(np.uint16).max
+
+        # This is the public Image plot's Reduce repeat -> mean projection of
+        # the authored 20 ms sensor / 5 ms probe readout frame.
+        reduced = np.mean(frames[:, 1], axis=0)
+        site_boxes = extract_box_signals(
+            reduced, world.geometry.site_centers_xy, radius=1, reducer="mean"
+        )
+        observed_raw_count_ratio = float(
+            np.max(site_boxes) / np.min(site_boxes)
+        )
+        assert 1.8 <= observed_raw_count_ratio <= 2.2
     finally:
         plane.close()
         installation.close()

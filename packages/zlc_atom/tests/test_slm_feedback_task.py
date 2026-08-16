@@ -110,6 +110,32 @@ def _calibration(
     )
 
 
+def _calibration_at(
+    centers_xy: np.ndarray, *, shape: tuple[int, int] = (64, 64)
+) -> TrapCalibration:
+    centers = np.asarray(centers_xy, dtype=float)
+    count = len(centers)
+    ids = tuple(f"site_{index:04d}" for index in range(count))
+    site_map = SiteMap(ids, centers, np.ones(count, bool), np.ones(count))
+    model = ReadoutModel(
+        ids,
+        np.full(count, 5.0),
+        np.zeros(count),
+        np.full(count, 10.0),
+        np.ones(count, bool),
+        np.ones(count),
+        kind=ReadoutModelKind.BOX,
+        integration_half_width=0,
+        reducer="mean",
+    )
+    return TrapCalibration(
+        site_map,
+        (model,),
+        ReadoutModelKind.BOX,
+        FrameContract(shape, exposure_seconds=0.020),
+    )
+
+
 def _grid_target(shape: tuple[int, int]) -> np.ndarray:
     target = np.zeros(shape, dtype=np.float32)
     rows = np.linspace(1, shape[0] - 2, 5, dtype=int)
@@ -126,6 +152,7 @@ def _task(
     sequencer: object,
     plane: SignalDataPlane,
     target: np.ndarray,
+    calibration: TrapCalibration | None = None,
     shots: int = 10,
     validation_shots: int = 20,
     updates: int = 3,
@@ -138,7 +165,7 @@ def _task(
         slm=slm,
         slm_key="slm",
         signal_plane=plane,
-        calibration=_calibration(),
+        calibration=_calibration() if calibration is None else calibration,
         calibration_path=tmp_path / "calibration.json",
         target=target,
         target_path=tmp_path / "target.json",
@@ -185,6 +212,211 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     updated = _updated_target(target, fluorescence, rows, columns)
     assert updated[rows[0], columns[0]] > updated[rows[-1], columns[-1]]
     np.testing.assert_allclose(np.sum(updated), np.sum(target), rtol=1e-6)
+
+
+def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = np.zeros((17, 23), dtype=np.float32)
+    rows = np.asarray([2, 2, 5, 7, 10, 10])
+    columns = np.asarray([3, 9, 5, 12, 4, 15])
+    target[rows, columns] = 1.0
+    nominal_centers = np.column_stack(
+        (10.0 + 2.5 * (columns - 3), 12.0 + 3.0 * (rows - 2))
+    )
+    nominal_centers += np.asarray(
+        [
+            [0.0, 0.0],
+            [0.10, -0.08],
+            [-0.12, 0.05],
+            [0.06, 0.11],
+            [-0.04, -0.09],
+            [0.0, 0.0],
+        ]
+    )
+    calibration_order = np.asarray([3, 0, 5, 1, 4, 2])
+    calibration = _calibration_at(nominal_centers[calibration_order])
+    target_fluorescence = np.asarray([0.7, 1.4, 0.9, 1.2, 0.8, 1.1])
+    measured = iter(
+        (
+            target_fluorescence[calibration_order],
+            np.ones(len(rows)),
+            np.ones(len(rows)),
+        )
+    )
+    solved_targets: list[np.ndarray] = []
+
+    def solve(candidate, **_kwargs):
+        solved_targets.append(np.array(candidate, copy=True))
+        return np.full(target.shape, 0.25 * len(solved_targets), dtype=np.float32), {}
+
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration, *, shots=None: (
+            next(measured),
+            np.zeros(len(rows)),
+            (),
+            (),
+        ),
+    )
+    plane = SignalDataPlane()
+    task = _task(
+        tmp_path,
+        slm=_Slm(target.shape),
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=target,
+        calibration=calibration,
+        updates=2,
+    )
+    try:
+        result = task.execute(_Context())
+        expected = _updated_target(target, target_fluorescence, rows, columns)
+        np.testing.assert_allclose(solved_targets[1], expected)
+        _saved, metadata = load_phase(result["artifact_path"])
+        np.testing.assert_allclose(
+            metadata["history"][0]["fluorescence"],
+            target_fluorescence[calibration_order],
+        )
+    finally:
+        plane.close()
+
+
+@pytest.mark.parametrize("failure", ("count", "distortion", "ambiguous"))
+def test_sparse_geometry_refuses_non_bijective_calibration(
+    tmp_path: Path, failure: str
+) -> None:
+    target = np.zeros((17, 23), dtype=np.float32)
+    rows = np.asarray([2, 2, 8, 8])
+    columns = np.asarray([3, 12, 5, 15])
+    target[rows, columns] = 1.0
+    centers = np.column_stack((10.0 + 2.0 * columns, 15.0 + 3.0 * rows))
+    if failure == "count":
+        centers = centers[:-1]
+    elif failure == "distortion":
+        centers[2] += (20.0, 15.0)
+    else:
+        centers[1] = centers[0]
+    plane = SignalDataPlane()
+    try:
+        with pytest.raises(ValueError, match="count|unmatched|ambiguous"):
+            _task(
+                tmp_path,
+                slm=_Slm(target.shape),
+                camera=object(),
+                sequencer=object(),
+                plane=plane,
+                target=target,
+                calibration=_calibration_at(centers),
+            )
+    finally:
+        plane.close()
+
+
+def test_sparse_geometry_refuses_a_large_global_shear(
+    tmp_path: Path,
+) -> None:
+    target = np.zeros((19, 23), dtype=np.float32)
+    rows = np.asarray([2, 2, 8, 8, 14, 14])
+    columns = np.asarray([3, 15, 5, 17, 4, 16])
+    target[rows, columns] = 1.0
+    centers = np.column_stack(
+        (
+            5.0 + 1.5 * columns + rows,
+            8.0 + 2.0 * rows,
+        )
+    )
+    plane = SignalDataPlane()
+    try:
+        with pytest.raises(ValueError, match="apparatus orientation"):
+            _task(
+                tmp_path,
+                slm=_Slm(target.shape),
+                camera=object(),
+                sequencer=object(),
+                plane=plane,
+                target=target,
+                calibration=_calibration_at(centers),
+            )
+    finally:
+        plane.close()
+
+
+@pytest.mark.parametrize("orientation", ("row", "column"))
+def test_axis_aligned_sparse_geometry_refuses_a_large_cross_axis_tilt(
+    tmp_path: Path, orientation: str
+) -> None:
+    target = np.zeros((23, 25), dtype=np.float32)
+    primary = np.asarray([3, 8, 14, 19])
+    if orientation == "row":
+        rows, columns = np.full(4, 6), primary
+        centers = np.column_stack((2.0 * primary + 4.0, primary + 9.0))
+    else:
+        rows, columns = primary, np.full(4, 9)
+        centers = np.column_stack((primary + 7.0, 2.0 * primary + 5.0))
+    target[rows, columns] = 1.0
+    plane = SignalDataPlane()
+    try:
+        with pytest.raises(ValueError, match="apparatus orientation"):
+            _task(
+                tmp_path,
+                slm=_Slm(target.shape),
+                camera=object(),
+                sequencer=object(),
+                plane=plane,
+                target=target,
+                calibration=_calibration_at(centers),
+            )
+    finally:
+        plane.close()
+
+
+@pytest.mark.parametrize(
+    ("rows", "columns", "centers"),
+    (
+        ([7], [11], [[23.0, 31.0]]),
+        (
+            [6, 6, 6, 6],
+            [3, 8, 14, 19],
+            [[30.0, 22.1], [8.0, 22.0], [40.0, 21.9], [18.0, 22.0]],
+        ),
+        (
+            [2, 7, 13, 18],
+            [9, 9, 9, 9],
+            [[27.1, 43.0], [27.0, 10.0], [26.9, 25.0], [27.0, 58.0]],
+        ),
+    ),
+)
+def test_sparse_geometry_accepts_single_site_and_collinear_support(
+    tmp_path: Path,
+    rows: list[int],
+    columns: list[int],
+    centers: list[list[float]],
+) -> None:
+    target = np.zeros((23, 25), dtype=np.float32)
+    target[np.asarray(rows), np.asarray(columns)] = 1.0
+    plane = SignalDataPlane()
+    try:
+        task = _task(
+            tmp_path,
+            slm=_Slm(target.shape),
+            camera=object(),
+            sequencer=object(),
+            plane=plane,
+            target=target,
+            calibration=_calibration_at(np.asarray(centers)),
+        )
+        assert len(task._rows) == len(rows)
+    finally:
+        plane.close()
 
 
 def test_measurement_streams_bounded_exact_grouped_qcmos_publications(

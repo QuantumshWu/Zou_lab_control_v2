@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from zlc_durable import unique_path
 from zlc_pulse import PulseSequence
 
@@ -29,6 +30,10 @@ _SOLVE_ITERATIONS = 8
 _FEEDBACK_EXPONENT = 0.45
 _READOUT_FRAME = 1
 _SHOT_CHUNK = 128
+_GEOMETRY_TOLERANCE_FRACTION = 0.25
+_MAX_NORMALIZED_AFFINE_DEVIATION = 0.25
+_MAX_NORMALIZED_AFFINE_CONDITION = 3.0
+_MAX_CROSS_AXIS_SPAN_FRACTION = 0.25
 
 
 def _check_cancelled(context: object) -> None:
@@ -49,27 +54,154 @@ def _json_floats(values: object) -> list[float | None]:
     return [float(value) if np.isfinite(value) else None for value in np.asarray(values)]
 
 
-def _support(target: np.ndarray, calibration: TrapCalibration) -> tuple[np.ndarray, np.ndarray]:
-    """The only unambiguous first feedback geometry: a complete 5 x 7 grid."""
+def _support(
+    target: np.ndarray, calibration: TrapCalibration
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return target support coordinates aligned to Calibration site order."""
 
     rows, columns = np.nonzero(target > 0.0)
-    unique_rows, unique_columns = np.unique(rows), np.unique(columns)
-    if (
-        calibration.n_sites != 35
-        or len(rows) != 35
-        or len(unique_rows) != 5
-        or len(unique_columns) != 7
-        or set(zip(rows, columns, strict=True))
-        != set((int(row), int(column)) for row in unique_rows for column in unique_columns)
+    if len(rows) != calibration.n_sites:
+        raise ValueError(
+            "SLM target support count differs from the Calibration SiteMap count"
+        )
+    if not len(rows):
+        raise ValueError("SLM feedback target support is empty")
+    if len(rows) == 1:
+        return rows, columns
+
+    centers = np.asarray(calibration.site_map.centers_xy, dtype=float)
+    separations = np.sqrt(
+        np.sum((centers[:, np.newaxis, :] - centers[np.newaxis, :, :]) ** 2, axis=2)
+    )
+    separations[np.diag_indices_from(separations)] = np.inf
+    minimum_spacing = float(np.min(separations))
+    if not np.isfinite(minimum_spacing) or minimum_spacing <= 0.0:
+        raise ValueError("Calibration SiteMap geometry is ambiguous")
+
+    target_xy = np.column_stack((columns, rows)).astype(float, copy=False)
+    normalized_target = np.zeros_like(target_xy)
+    normalized_centers = np.zeros_like(centers)
+    for axis in range(2):
+        authored = target_xy[:, axis]
+        measured = centers[:, axis]
+        authored_span = float(np.ptp(authored))
+        measured_span = float(np.ptp(measured))
+        if authored_span > 0.0:
+            if measured_span == 0.0:
+                raise ValueError(
+                    "Calibration SiteMap geometry has unmatched target support"
+                )
+            normalized_target[:, axis] = (
+                authored - float(np.min(authored))
+            ) / authored_span
+            normalized_centers[:, axis] = (
+                measured - float(np.min(measured))
+            ) / measured_span
+
+    initial_cost = np.sum(
+        (
+            normalized_target[:, np.newaxis, :]
+            - normalized_centers[np.newaxis, :, :]
+        )
+        ** 2,
+        axis=2,
+    )
+    target_indices, calibration_indices = linear_sum_assignment(initial_cost)
+    calibration_for_target = np.empty(len(rows), dtype=np.intp)
+    calibration_for_target[target_indices] = calibration_indices
+    design = np.column_stack((target_xy, np.ones(len(rows), dtype=float)))
+    for _iteration in range(4):
+        affine, *_unused = np.linalg.lstsq(
+            design, centers[calibration_for_target], rcond=None
+        )
+        predicted = design @ affine
+        cost = np.sum(
+            (predicted[:, np.newaxis, :] - centers[np.newaxis, :, :]) ** 2,
+            axis=2,
+        )
+        target_indices, calibration_indices = linear_sum_assignment(cost)
+        updated_order = np.empty(len(rows), dtype=np.intp)
+        updated_order[target_indices] = calibration_indices
+        if np.array_equal(updated_order, calibration_for_target):
+            break
+        calibration_for_target = updated_order
+
+    affine, *_unused = np.linalg.lstsq(
+        design, centers[calibration_for_target], rcond=None
+    )
+    predicted = design @ affine
+    matched_centers = centers[calibration_for_target]
+    for axis in range(2):
+        authored = target_xy[:, axis]
+        if float(np.ptp(authored)) > 0.0 and float(
+            np.sum(
+                (authored - np.mean(authored))
+                * (matched_centers[:, axis] - np.mean(matched_centers[:, axis]))
+            )
+        ) <= 0.0:
+            raise ValueError("Calibration SiteMap geometry has unmatched target support")
+    distances = np.sqrt(
+        np.sum(
+            (predicted[:, np.newaxis, :] - centers[np.newaxis, :, :]) ** 2,
+            axis=2,
+        )
+    )
+    nearby = distances <= _GEOMETRY_TOLERANCE_FRACTION * minimum_spacing
+    if np.any(np.sum(nearby, axis=1) > 1) or np.any(np.sum(nearby, axis=0) > 1):
+        raise ValueError("Calibration SiteMap geometry is ambiguous")
+    if not np.all(np.sum(nearby, axis=1) == 1) or not np.all(
+        np.sum(nearby, axis=0) == 1
     ):
-        raise ValueError("SLM feedback requires one complete 5 x 7 sparse target aligned to 35 calibrated sites")
-    centers = calibration.site_map.centers_xy.reshape(5, 7, 2)
-    if not (
-        np.all(np.diff(centers[:, :, 0], axis=1) > 0.0)
-        and np.all(np.diff(np.mean(centers[:, :, 1], axis=1)) > 0.0)
-    ):
-        raise ValueError("calibration sites do not declare a stable 5 x 7 row-major order")
-    return rows, columns
+        raise ValueError("Calibration SiteMap geometry has unmatched target support")
+    calibration_for_target = np.argmax(nearby, axis=1).astype(
+        np.intp, copy=False
+    )
+    target_spans = np.ptp(target_xy, axis=0)
+    matched_spans = np.ptp(centers[calibration_for_target], axis=0)
+    if target_spans[0] > 0.0 and target_spans[1] == 0.0:
+        tilted = (
+            matched_spans[1] / matched_spans[0]
+            > _MAX_CROSS_AXIS_SPAN_FRACTION
+        )
+    elif target_spans[0] == 0.0 and target_spans[1] > 0.0:
+        tilted = (
+            matched_spans[0] / matched_spans[1]
+            > _MAX_CROSS_AXIS_SPAN_FRACTION
+        )
+    else:
+        tilted = False
+    if tilted:
+        raise ValueError(
+            "Calibration SiteMap differs from the trusted apparatus orientation"
+        )
+    if np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0)) == 2:
+        normalized_design = np.column_stack(
+            (normalized_target, np.ones(len(rows), dtype=float))
+        )
+        normalized_affine, *_unused = np.linalg.lstsq(
+            normalized_design,
+            normalized_centers[calibration_for_target],
+            rcond=None,
+        )
+        linear = normalized_affine[:2]
+        determinant = float(np.linalg.det(linear))
+        condition = float(np.linalg.cond(linear))
+        if (
+            not np.all(np.isfinite(linear))
+            or determinant <= 0.0
+            or not np.isfinite(condition)
+            or condition > _MAX_NORMALIZED_AFFINE_CONDITION
+            or float(np.max(np.abs(linear - np.eye(2))))
+            > _MAX_NORMALIZED_AFFINE_DEVIATION
+        ):
+            raise ValueError(
+                "Calibration SiteMap differs from the trusted apparatus orientation"
+            )
+    target_for_calibration = np.empty(len(rows), dtype=np.intp)
+    target_for_calibration[calibration_for_target] = np.arange(
+        len(rows), dtype=np.intp
+    )
+    return rows[target_for_calibration], columns[target_for_calibration]
 
 
 def _updated_target(target: np.ndarray, fluorescence: np.ndarray, rows: np.ndarray, columns: np.ndarray) -> np.ndarray:
@@ -125,7 +257,9 @@ class SlmFeedbackTask:
         response = np.asarray(model.bright_mean) - np.asarray(model.dark_mean)
         valid = calibration.site_map.valid_sites & model.usable_sites
         if not np.all(valid) or not np.all(np.isfinite(response)) or np.any(response <= 0.0):
-            raise ValueError("all 35 sites require finite usable dark/bright PSF calibration")
+            raise ValueError(
+                "all calibrated sites require finite usable dark/bright BOX calibration"
+            )
         self._rows, self._columns = _support(frozen_target, calibration)
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key

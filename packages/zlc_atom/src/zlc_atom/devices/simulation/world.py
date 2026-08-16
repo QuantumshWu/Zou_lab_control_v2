@@ -177,9 +177,17 @@ class SimulationWorld:
         self.conversion_e_per_count = 0.107
         self.read_noise_e = 0.43
         self.background_rate = 300.0
-        self.atom_rate = 1_100.0
+        # Detected electrons per second for one nominal-depth atom at the
+        # beginning of a probe.  The finite bright-state lifetime below keeps
+        # long probes physical instead of letting this initial rate grow
+        # without bound.
+        self.atom_rate = 100_000.0
         self.atom_sigma_px = 0.7
         self.loading_probability = 0.5
+        self.probe_saturation = 0.1
+        self.probe_detuning_linewidths = -2.0
+        self.trap_light_shift_linewidths = 0.5
+        self.fluorescence_lifetime_seconds = 0.05
         self.atom_temperature_k = DEFAULT_ATOM_TEMPERATURE_K
         self.trap_depth_k = DEFAULT_TRAP_DEPTH_K
         self.trap_waist_m = DEFAULT_TRAP_WAIST_M
@@ -588,7 +596,47 @@ class SimulationWorld:
         base = float(self.loading_probability)
         if not 0.0 <= base <= 1.0:
             raise ValueError("loading_probability must be between zero and one")
-        return np.where(np.asarray(intensities) > 0.0, base, 0.0)
+        scale = self._loading_intensity_scale
+        if scale is None or not np.isfinite(scale) or scale <= 0.0:
+            raise RuntimeError("nominal SLM command produced no site intensity")
+        relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
+        if base == 1.0:
+            return np.asarray(relative_depth > 0.0, dtype=float)
+        # A finite cooling interval captures at a rate set by the harmonic
+        # trap frequency, omega_r proportional to sqrt(U).  ``base`` is the
+        # authored probability at nominal depth, so this is exactly p=base at
+        # U/U0=1 and exactly zero where no trap exists.
+        return -np.expm1(np.log1p(-base) * np.sqrt(relative_depth))
+
+    def _fluorescence_scales(self, intensities: np.ndarray) -> np.ndarray:
+        """Occupied-atom scattering from one shared Stark-shifted probe law."""
+
+        scale = self._loading_intensity_scale
+        if scale is None or not np.isfinite(scale) or scale <= 0.0:
+            raise RuntimeError("nominal SLM command produced no site intensity")
+        relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
+        saturation = float(self.probe_saturation)
+        if not np.isfinite(saturation) or saturation <= 0.0:
+            raise ValueError("probe_saturation must be positive and finite")
+        probe_detuning = float(self.probe_detuning_linewidths)
+        if not np.isfinite(probe_detuning):
+            raise ValueError("probe_detuning_linewidths must be finite")
+        light_shift = float(self.trap_light_shift_linewidths)
+        if not np.isfinite(light_shift):
+            raise ValueError("trap_light_shift_linewidths must be finite")
+        detuning = probe_detuning + light_shift * relative_depth
+        scattering = saturation / (
+            1.0 + saturation + np.square(2.0 * detuning)
+        )
+        nominal_detuning = probe_detuning + light_shift
+        nominal_scattering = saturation / (
+            1.0 + saturation + (2.0 * nominal_detuning) ** 2
+        )
+        return np.where(
+            relative_depth > 0.0,
+            scattering / nominal_scattering,
+            0.0,
+        )
 
     def _site_loading_probabilities(self) -> np.ndarray:
         self._ensure_slm_propagation()
@@ -774,15 +822,20 @@ class SimulationWorld:
                 if shot_occupancy.size != len(self.geometry.site_centers_xy):
                     raise ValueError("occupancy size differs from simulation site map")
             base_area = self.atom_sigma_px**2
-            scale = self._loading_intensity_scale
-            if scale is None or not np.isfinite(scale) or scale <= 0.0:
-                raise RuntimeError("nominal SLM command produced no site intensity")
-            relative_depths = np.clip(
-                self._site_trap_intensities / scale, 0.0, None
+            fluorescence_lifetime = float(self.fluorescence_lifetime_seconds)
+            if not np.isfinite(fluorescence_lifetime) or fluorescence_lifetime <= 0.0:
+                raise ValueError(
+                    "fluorescence_lifetime_seconds must be positive and finite"
+                )
+            fluorescence_seconds = -fluorescence_lifetime * math.expm1(
+                -probe / fluorescence_lifetime
             )
-            for occupied, depth, gain, sigma_xy, spot in zip(
+            fluorescence_scales = self._fluorescence_scales(
+                self._site_trap_intensities
+            )
+            for occupied, brightness, gain, sigma_xy, spot in zip(
                 shot_occupancy,
-                relative_depths,
+                fluorescence_scales,
                 self._detector_efficiency,
                 self._site_psf_sigma_xy,
                 self._site_psf_spots,
@@ -792,19 +845,19 @@ class SimulationWorld:
                     sigma_x, sigma_y = (float(value) for value in sigma_xy)
                     expected_electrons += (
                         self.atom_rate
-                        * probe
+                        * fluorescence_seconds
                         * float(gain)
                         * base_area
                         / (sigma_x * sigma_y)
-                        * float(depth)
+                        * float(brightness)
                         * spot
                     )
-            extra_depths = np.clip(
-                self._extra_site_trap_intensities / scale, 0.0, None
+            extra_fluorescence_scales = self._fluorescence_scales(
+                self._extra_site_trap_intensities
             )
-            for occupied, depth, gain, sigma_xy, spot in zip(
+            for occupied, brightness, gain, sigma_xy, spot in zip(
                 self._extra_occupancy,
-                extra_depths,
+                extra_fluorescence_scales,
                 self._extra_detector_efficiency,
                 self._extra_site_psf_sigma_xy,
                 self._extra_site_psf_spots,
@@ -814,11 +867,11 @@ class SimulationWorld:
                     sigma_x, sigma_y = (float(value) for value in sigma_xy)
                     expected_electrons += (
                         self.atom_rate
-                        * probe
+                        * fluorescence_seconds
                         * float(gain)
                         * base_area
                         / (sigma_x * sigma_y)
-                        * float(depth)
+                        * float(brightness)
                         * spot
                     )
             electrons = self._qcmos_rng.poisson(
