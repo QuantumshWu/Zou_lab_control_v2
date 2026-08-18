@@ -22,13 +22,7 @@
 //     STALLS the engine and flags STATUS underflow rather than emitting a wrong
 //     point; the host never drives point timing.
 //
-// PROVEN PRE-HARDWARE: this module's exact register transfers are mirrored
-// cycle-for-cycle by engine_model.rtl_mirror_play for the deployed RD_LAT=2
-// path, including 1-tick spacing and the boundary hand cases.  The xsim testbenches in sim/ run the
-// REAL RTL (and real block-RAM netlists where it matters).  See
-// test_final_engine_model_* / test_edge_streamer_rtl_mirror_* / sim/README.md.
-//
-// SEED INVARIANT (the subtle part the mirror forced out): at every boundary, seed
+// SEED INVARIANT: at every boundary, seed
 // FIFO_DEPTH resident shadows starting at the FIRST not-yet-output edge, and
 // issue NO read at the boundary (occupancy == #shadows <= depth).  The first
 // PREFETCHED edge is issued only when the head fires and frees a slot; with
@@ -49,8 +43,7 @@
 //   out_delayed[t] = out_undelayed[t-d], but their storage contracts differ: TTL scales with
 //   toggles in flight (<= EVT_DEPTH), DAC with segments in flight per bus (<= BUS_EVT_DEPTH).
 //   Neither scales with delay length.  The 32-bit delay field is host-capped at (1<<31)-1 ticks
-//   (~42.9 s at 20 ns).  d=0 is passthrough; d=1 is one register.  Proven cycle-exact by
-//   engine_model.rtl_delay_line_mirror / rtl_bus_segment_delay_mirror.
+//   (~42.9 s at 20 ns).  d=0 is passthrough; d=1 is one register.
 // =============================================================================
 
 module zlc_edge_streamer #(
@@ -172,7 +165,7 @@ module zlc_edge_streamer #(
     // emitted descriptor the bus holds BUS_SAFE_VALUE (mid code = 0 V) -> silent until t>=d, for
     // free.  Storage scales with SEGMENTS IN FLIGHT (host-validated <= BUS_EVT_DEPTH), INDEPENDENT of
     // ramp density -- a large POSITIVE delay on a dense ramp no longer overflows.  d shares the TTL
-    // TTL_DELAY_WIDTH range.  Proven == engine_model.rtl_bus_segment_delay_mirror == bus_delay_line_reference.
+    // TTL_DELAY_WIDTH range.
     //   * bus_delay_ticks : per-bus delay d in ticks (0 = no delay = passthrough)
     input  wire [BUS_COUNT*TTL_DELAY_WIDTH-1:0] bus_delay_ticks,
 
@@ -186,9 +179,7 @@ module zlc_edge_streamer #(
     // Storage scales with TOGGLES IN FLIGHT (host-validated <= EVT_DEPTH), NOT with d; the
     // register field is TTL_DELAY_WIDTH (32b), and the HOST enforces a conservative default cap
     // of (1<<31)-1 ticks (~42.9 s; streamer_config.json ttl_delay_max_ticks).
-    // Proven == engine_model.rtl_delay_line_mirror ==
-    // delay_line_reference for ANY d (zero, positive, and -- via the host's folded global shift
-    // G -- negative).
+    // The host folds negative authored delays into a global shift G.
     //   * delay_ticks : per-channel delay d in ticks (0 = no delay), one TTL_DELAY_WIDTH (32b)
     //     slice per channel
     input  wire [CHANNEL_COUNT*TTL_DELAY_WIDTH-1:0] delay_ticks,
@@ -312,8 +303,7 @@ module zlc_edge_streamer #(
     // (g_busseg below), so buffer depth = segments-in-flight, INDEPENDENT of ramp density.  The apply
     // task pulses bus_seg_push[i] with the resolved descriptor in the DELAYED time base (emit = g_time
     // + d = the ramp's shifted start; rstop = emit + span; fend = the shifted frame boundary, past
-    // which a truncated ramp FREEZES).  Byte-for-byte the host oracle
-    // engine_model.rtl_bus_segment_delay_mirror (out[t] = in[t-d], first-frame safe, done-tail).
+    // which a truncated ramp FREEZES).
     reg                   bus_seg_push  [0:BUS_COUNT-1];   // 1-cycle strobe: bus i applied a segment
     reg [GTIME_WIDTH-1:0] bus_seg_emit  [0:BUS_COUNT-1];   // g_time+d at apply (== rstart, delayed base)
     reg [GTIME_WIDTH-1:0] bus_seg_rstop [0:BUS_COUNT-1];   // ramp end in the delayed base (emit + span)
@@ -429,7 +419,7 @@ module zlc_edge_streamer #(
     // (cleared from the undelayed state_mask); delayed_out[b] is the SCHEDULED level for that
     // channel: evt_out (event scheduler, d >= 2) or prev_undelayed (a register IS a 1-tick
     // delay, d == 1).  Both are 0 until the first scheduled toggle -> out[t] = in[t-d], 0
-    // before t = d, exactly the proven delay_line_reference semantics.
+    // before t = d.
     // out = (state_mask & ~delayed_mask) | delayed_out -- a non-delayed channel passes straight
     // through; a delay never touches another channel.  d_ch == 0 never reaches here.
     reg [CHANNEL_COUNT-1:0] delayed_mask;   // bit b set iff channel b is delayed (d_ch != 0)
@@ -462,8 +452,7 @@ module zlc_edge_streamer #(
     // Before its first descriptor emits the bus holds BUS_SAFE_VALUE (mid code = 0 V, first frame
     // correct); a ramp that reaches the frame boundary FREEZES (g_time >= dfend) instead of ramping
     // into the next frame's idle window; g_time keeps advancing at done so the last d ticks drain
-    // (done-tail).  d==0 -> passthrough; d==1 -> one register; d>=2 -> the delayed player.  Matches
-    // host.engine_model.rtl_bus_segment_delay_mirror (proven == out[t]=in[t-d]).
+    // (done-tail).  d==0 -> passthrough; d==1 -> one register; d>=2 -> the delayed player.
     localparam integer O_ISRAMP = 0;
     localparam integer O_STEEP  = O_ISRAMP + 1;
     localparam integer O_UP     = O_STEEP  + 1;
@@ -677,7 +666,7 @@ module zlc_edge_streamer #(
     // edge descriptor (emit=g_time+d, isramp=0) -> the re-player drains to SAFE d ticks after done,
     // exactly like d==0 (bus_value_active) and d==1 (the dprev register) already do.  A bus with d<=1
     // needs no descriptor.  Called ONLY at the finite-program done edge (NOT at FIRE, where reset_sync
-    // flushes the whole g_busseg FIFO anyway).  Mirrors engine_model.bus_undelayed_and_log's done snap.
+    // flushes the whole g_busseg FIFO anyway).
     task zlc_bus_capture_safe_hold;
         integer i;
         begin
@@ -790,7 +779,7 @@ module zlc_edge_streamer #(
                     // FREEZE: only a REPEAT_FOREVER frame wraps (re-inits at final_tick, truncating an
                     // unfinished ramp to a HOLD -> the delayed re-player must freeze there), so fend =
                     // emit + ticks-left-in-frame.  A FINITE (fire-once) program never wraps -- the ramp
-                    // runs to its rstop and snaps to target, exactly like engine_model's finite path
+                    // runs to its rstop and snaps to target
                     // (frame_end = +inf, never freeze), so fend = all-ones sentinel.
                     bus_seg_push[i]   <= 1'b1;
                     bus_seg_emit[i]   <= g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus};
@@ -804,8 +793,7 @@ module zlc_edge_streamer #(
                     // a mid-frame apply == time_count there).  The old (final_tick - time_count) BOTH read
                     // not-yet-committed registers at the reinit/wrap cycle where time_count==final_tick
                     // (boundary value), collapsing to 0 -> fend==emit -> the re-player FROZE the ramp at
-                    // its start EVERY frame (the "delayed DAC = constant" bug).  Matches engine_model
-                    // frame_end = origin + flen (shifted fend = emit + flen).
+                    // its start EVERY frame (the "delayed DAC = constant" bug).
                     bus_seg_fend[i]   <= repeat_forever_active
                         ? (g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus}
                            + {{(GTIME_WIDTH-TICK_WIDTH){1'b0}},
@@ -929,8 +917,8 @@ module zlc_edge_streamer #(
     endtask
 
     // ---- seed the prefetch from edge-0 shadows for slot vector sv (start/scan/repeat) ----
-    // Mirrors engine_model.boundary_to: output edge0 directly iff eff(edge0)==0,
-    // then seed FIFO_DEPTH (= RD_LAT+2) resident shadows from the first not-yet-output edge.
+    // Output edge0 directly iff eff(edge0)==0, then seed FIFO_DEPTH (= RD_LAT+2)
+    // resident shadows from the first not-yet-output edge.
     // ``cnt`` is the program's edge count, passed in EXPLICITLY (not read from the
     // active_count REG).  At FIRE, active_count <= prog_count is a non-blocking write
     // that has NOT committed when this task runs the same cycle, so reading the reg
@@ -998,8 +986,7 @@ module zlc_edge_streamer #(
                                           // active_count at the (committed) frame/scan seams
     // EVENT-SCHEDULER boundary work: keep g_time advancing so queued toggles / value-changes pop.
     // Set on EVERY tick once the engine has fired (running OR done-but-emitting), so the
-    // schedulers delay the WHOLE output stream -- exactly the post-play delay_line_reference
-    // shift.  No frame seam / skip counter -- the event schedulers need none.
+    // schedulers delay the WHOLE output stream. No frame seam / skip counter is needed.
     reg bnd_delay_advance;     // advance the event schedulers' free-running g_time this tick
 
     always @(posedge clk) begin
@@ -1108,8 +1095,7 @@ module zlc_edge_streamer #(
             landed = pend[PIPE-1];   // data valid PIPE (=RD_LAT+1) cycles after issue
             // every RUNNING output tick advances the event schedulers' g_time; a toggle pushed at
             // t pops d ticks later, so the scheduled output IS the delayed output.  The event
-            // schedulers need no frame seam / skip counter -- they delay the whole stream
-            // uniformly, exactly the post-play delay_line_reference shift.
+            // schedulers need no frame seam / skip counter; they delay the whole stream uniformly.
             bnd_delay_advance = 1'b1;
             if (loop_count_active>32'd1 && loops_remaining>32'd1 && time_count>=loop_end_active) begin
                 // loop rewind: output loop_start mask, seed arm from loop_start+1
@@ -1224,8 +1210,7 @@ module zlc_edge_streamer #(
             // DELAYED channel/bus drains the events still QUEUED in its scheduler (the last d
             // ticks of toggles) and then settles at its REST value -- state_mask was cleared to 0
             // and bus_value_active to BUS_SAFE_VALUE (mid code = 0 V) at done, so the queued tail
-            // carries those rest values and out[t] = in[t-d] holds for the WHOLE stream, exactly
-            // the delay_line_reference / rtl_mirror_play contract.  Without this g_time would
+            // carries those rest values and out[t] = in[t-d] holds for the WHOLE stream. Without this g_time would
             // FREEZE at done and a delayed channel would hold a STALE (possibly HIGH) value until
             // the host reacts (ms over JTAG).  A new FIRE takes the start_event branch above
             // (clears every scheduler's wr/rd/cnt), so this free-running advance is never harmful.

@@ -5,7 +5,7 @@ import numpy as np
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
 from zlc_plot._fit_projection import FitScope
 from zlc_plot.fit import FacetFitBatchResult, FitEngine
-from zlc_plot.selectors import NumericRange, SelectorKind
+from zlc_plot.selectors import NumericRange
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 
 
@@ -119,7 +119,7 @@ class _FailFirstFitEngine(FitEngine):
         return super().fit(model, coordinates, observations, **kwargs)
 
 
-def test_facet_table_publishes_mixed_success_and_explicit_error_validity() -> None:
+def test_facet_result_publishes_mixed_success_and_explicit_error_validity() -> None:
     session = PlotSession(
         _facet_snapshot(facet_unit="m"),
         _spec(),
@@ -128,14 +128,13 @@ def test_facet_table_publishes_mixed_success_and_explicit_error_validity() -> No
     try:
         result = session.fit("gaussian_offset", live=True)
         assert isinstance(result, FacetFitBatchResult)
-        table = result.table
-        assert np.array_equal(table.success, [False, True])
-        assert table.sample_unit == "m"
-        for name in table.parameter_names:
-            assert np.isnan(table.parameter_values[name][0])
-            assert np.isnan(table.parameter_errors[name][0])
-            assert not bool(table.parameter_error_validity[name][0])
-            assert bool(table.parameter_error_validity[name][1])
+        assert np.array_equal(result.success, [False, True])
+        assert result.sample_unit == "m"
+        for name in result.parameter_names:
+            assert np.isnan(result.parameter_values[name][0])
+            assert np.isnan(result.parameter_errors[name][0])
+            assert not bool(result.parameter_error_validity[name][0])
+            assert bool(result.parameter_error_validity[name][1])
     finally:
         session.close()
 
@@ -184,7 +183,7 @@ def test_one_region_gives_every_cell_of_the_batch_the_same_domain() -> None:
 
     session = PlotSession(_facet_snapshot(), _spec())
     try:
-        session.commit_selector(SelectorKind.X_RANGE, NumericRange(-1.0, 1.0))
+        session.set_x_selector(-1.0, 1.0)
         session.set_viewport(NumericRange(-3.0, 0.0), NumericRange(-10.0, 10.0))
         result = session.fit("gaussian_offset", live=False, fit_all_facets=True)
         assert isinstance(result, FacetFitBatchResult)

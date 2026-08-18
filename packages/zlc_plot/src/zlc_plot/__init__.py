@@ -32,8 +32,6 @@ _EXPORTS = {
     "FitTarget": ("zlc_plot.fit", "FitTarget"),
     "AxisRef": ("zlc_plot.kinds", "AxisRef"),
     "PlotKind": ("zlc_plot.kinds", "PlotKind"),
-    "LiveDataRevision": ("zlc_plot.live", "LiveDataRevision"),
-    "LivePlotController": ("zlc_plot.live", "LivePlotController"),
     "ImageFrame": ("zlc_plot.primitives", "ImageFrame"),
     "ImagePointOverlay": ("zlc_plot.primitives", "ImagePointOverlay"),
     "PointStatus": ("zlc_plot.primitives", "PointStatus"),
@@ -45,7 +43,6 @@ _EXPORTS = {
     "PulseScanRegion": ("zlc_plot.primitives", "PulseScanRegion"),
     "PulseTimelineData": ("zlc_plot.primitives", "PulseTimelineData"),
     "fitting_spec": ("zlc_plot._kinds", "fitting_spec"),
-    "panel_kinds": ("zlc_plot._kinds", "panel_kinds"),
     "PANEL_SIZE_NAMES": ("zlc_plot.layout", "PANEL_SIZE_NAMES"),
     "recommended_pulse_preset": ("zlc_plot.layout", "recommended_pulse_preset"),
     "image_axes": ("zlc_plot.data_contract", "image_axes"),
@@ -79,15 +76,6 @@ _EXPORTS = {
 
 __version__ = "1.1.0"
 
-# Keep a little headroom for an explicitly reviewed addition without letting
-# accidental imports turn the facade back into a second implementation API.
-# 59 -> 61 for the two the pulse editor was reaching into .layout for: which
-# sizes a panel may be, and which one suits a pulse of a given shape.  A host
-# cannot answer either without re-deriving this package's layout rules, and a
-# host that re-derives them is a second layout engine.
-MAX_PUBLIC_NAMES = 61
-
-
 def __getattr__(name: str) -> object:
     """Resolve one facade name, importing only what that name lives in.
 
@@ -119,7 +107,7 @@ def __getattr__(name: str) -> object:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__) | {"MAX_PUBLIC_NAMES"})
+    return sorted(set(globals()) | set(__all__))
 
 
 __all__ = [
@@ -136,13 +124,10 @@ __all__ = [
     "FitModelSpec",
     "FitTarget",
     "fitting_spec",
-    "panel_kinds",
     "HistogramPlot",
     "ImageFrame",
     "ImagePlot",
     "ImagePointOverlay",
-    "LiveDataRevision",
-    "LivePlotController",
     "NumericRange",
     "PlotKind",
     "PlotLabels",

@@ -24,10 +24,6 @@ dev = [
     "pytest",
 ]
 
-[project.scripts]
-zlc-check-environment = "zlc_workbench.tools.check_environment:main"
-zlc-task-console = "zlc_workbench.apps.task_console:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 

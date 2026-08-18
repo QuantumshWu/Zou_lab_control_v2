@@ -397,13 +397,11 @@ def _probe_uart_port(
     target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
-    state_dir: str,
     baud: int,
 ) -> None:
     """Probe one UART by reusing ``PulseStreamer.open``'s word63 handshake."""
     from .transport import UartRegisterTransport
     transport = UartRegisterTransport(
-        state_dir=state_dir,
         port=port,
         baud=baud,
         action_timeout=timeout,
@@ -444,7 +442,6 @@ def resolve_backend(
     *,
     uart_port: str | None = None,
     uart_baud: int = 3_000_000,
-    state_dir: str = "fpga/build/state",
     target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
@@ -474,7 +471,6 @@ def resolve_backend(
             target=target,
             params=params,
             clock_hz=clock_hz,
-            state_dir=state_dir,
             baud=int(uart_baud),
         )
     for port in ports:
@@ -1214,7 +1210,6 @@ def _main(argv: list[str] | None = None) -> int:
             args.backend,
             uart_port=args.uart_port,
             uart_baud=args.uart_baud,
-            state_dir=args.state_dir,
             target=target,
             params=config["params"],
             clock_hz=config["clock_hz"],
@@ -1265,7 +1260,6 @@ def _main(argv: list[str] | None = None) -> int:
             if not resolution.uart_port:  # pragma: no cover - resolver guarantees this.
                 raise RuntimeError("UART resolution did not return a port")
             transport = UartRegisterTransport(
-                state_dir=args.state_dir,
                 port=resolution.uart_port,
                 baud=args.uart_baud,
             )

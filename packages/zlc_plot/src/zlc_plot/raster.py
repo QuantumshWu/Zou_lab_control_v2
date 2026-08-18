@@ -46,7 +46,6 @@ if TYPE_CHECKING:
         FitResult,
     )
     from .layout import SurfacePlan
-    from .live import LiveContract, LivePlotController
     from .primitives import ImageFrame, ImagePointOverlay, PlotInput
     from .session import (
         DisplayDescription,
@@ -953,26 +952,6 @@ class RasterPlotHost:
         return self._subscribe_session_event(
             callback,
             lambda session, listener: session.subscribe_selection(listener),
-        )
-
-    def live_controller(
-        self,
-        contract: "LiveContract",
-        *,
-        refresh_interval_ms: int | None = None,
-    ) -> "LivePlotController":
-        """Create a live producer bridge whose mutations stay on this worker."""
-
-        from .live import LivePlotController
-
-        self.wait_for_front()
-        return LivePlotController(
-            self._worker_adapter,
-            contract,
-            refresh_interval_ms=refresh_interval_ms,
-            dispatch=self.dispatch,
-            control_dispatch=self.dispatch_control,
-            presentation_dispatch=self.dispatch_presentation,
         )
 
     def _dispatch_callback(

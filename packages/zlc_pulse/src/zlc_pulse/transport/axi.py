@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
-from ..wire import CtrlWords
 from .base import JTAG_AXI_OBSERVER_INTERVAL, TransportAborted
 
 
@@ -123,7 +122,7 @@ class VivadoAxiRegisterTransport:
                 bufsize=1,
             )
         except FileNotFoundError as error:
-            self.record_diagnostic(
+            self._record_diagnostic(
                 "start_failure",
                 f"Vivado executable was not found: {self.vivado!r}",
             )
@@ -216,32 +215,6 @@ class VivadoAxiRegisterTransport:
                 stop=stop,
             )
 
-    def rewrite_scan_bank(
-        self,
-        *,
-        unarmed_bank_ready: int,
-        bank_words: Sequence[tuple[int, int]],
-        chunk_word: int,
-        chunk_index: int,
-        rearmed_bank_ready: int,
-        stop: threading.Event | None = None,
-        deadline: float | None = None,
-    ) -> None:
-        """Commit one bank in a single ordered Vivado action."""
-
-        if chunk_word not in (CtrlWords.BANK0_CHUNK, CtrlWords.BANK1_CHUNK):
-            raise ValueError("scan-bank rewrite has an invalid chunk register")
-        self.write_words(
-            (
-                (CtrlWords.BANK_READY, unarmed_bank_ready),
-                *tuple(bank_words),
-                (chunk_word, chunk_index),
-                (CtrlWords.BANK_READY, rearmed_bank_ready),
-            ),
-            stop=stop,
-            deadline=deadline,
-        )
-
     def read_word(
         self,
         word_offset: int,
@@ -259,45 +232,7 @@ class VivadoAxiRegisterTransport:
         )
         return self._parse_read(output, marker)
 
-    def read_words(
-        self,
-        word_offsets: Sequence[int],
-        *,
-        stop: threading.Event | None = None,
-        deadline: float | None = None,
-    ) -> tuple[int, ...]:
-        """Read several proof words in one persistent-Vivado action.
-
-        Each address remains an independent AXI read transaction; only the costly
-        Python/Vivado stdin-marker round trip is shared. External executors retain
-        the older one-read contract used by hardware models and therefore fall back
-        to ``read_word``.
-        """
-
-        offsets = tuple(int(value) for value in word_offsets)
-        if not offsets:
-            return ()
-        if self._external_executor is not None:
-            return tuple(
-                self.read_word(address, stop=stop, deadline=deadline)
-                for address in offsets
-            )
-        absolute_deadline = self._effective_deadline(deadline)
-        lines: list[str] = []
-        markers: list[str] = []
-        for index, address in enumerate(offsets):
-            marker = f"ZLCBATCH_{index:04d}"
-            markers.append(marker)
-            lines.extend(self._read_txn_tcl(address * 4, marker))
-        output = self._run_tcl(
-            lines,
-            action="axi_read_batch",
-            deadline=absolute_deadline,
-            stop=stop,
-        )
-        return tuple(self._parse_read(output, marker) for marker in markers)
-
-    def record_diagnostic(self, name: str, text: str) -> None:
+    def _record_diagnostic(self, name: str, text: str) -> None:
         try:
             (self.state_dir / f"{name}.log").write_text(
                 text,
@@ -471,7 +406,7 @@ class VivadoAxiRegisterTransport:
             self.close()
             raise RuntimeError(f"Vivado stopped before {action}") from error
         output = self._read_until_marker(marker, deadline=deadline, stop=stop)
-        self.record_diagnostic(action, output)
+        self._record_diagnostic(action, output)
         if f"{marker}_ERROR" in output:
             detail = next(
                 (

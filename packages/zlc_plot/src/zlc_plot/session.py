@@ -1084,13 +1084,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return "current" if current else "lagging"
 
     @property
-    def live_fit_enabled(self) -> bool:
-        """Whether newer data revisions include an automatic fit frame."""
-
-        with self._lock:
-            return self._live_fit_request is not None
-
-    @property
     def fit_models(self) -> tuple[FitModelSpec, ...]:
         """Semantically and dimensionally valid models for the painted plot."""
 
@@ -2405,18 +2398,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 raise
         return plan
 
-    def adopt_native_device_pixel_ratio(self, ratio: float) -> SurfacePlan:
-        """Adopt DPR already applied by an attached native canvas in place.
-
-        A browser adapter may report DPR while its widget model is still creating the
-        current widget view.  Replacing that widget at this point invalidates
-        its toolbar child model.  Logical geometry and axes topology do not
-        change with DPR, so the existing renderer can safely adopt the new
-        physical plan without replacing the Figure or canvas.
-        """
-
-        return self._set_device_pixel_ratio(ratio, preserve_native_canvas=True)
-
     def set_axis_unit(self, axis: AxisRef, unit: str | None) -> DisplayState:
         if not isinstance(axis, AxisRef):
             raise TypeError("axis must be AxisRef")
@@ -3185,60 +3166,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._pulse_display_x_to_source(value.x), value.y
                 )
         return canonical
-
-    def commit_selector(
-        self,
-        kind: SelectorKind,
-        value: SelectorValue,
-        *,
-        display: bool = True,
-    ) -> SelectorState:
-        """Commit one frontend gesture through the shared selector lifecycle."""
-
-        if not isinstance(kind, SelectorKind):
-            raise TypeError("kind must be SelectorKind")
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-            current = self._projected._selector_state_or_none(kind)
-            if current is not None:
-                canonical = self._canonical_selector_value(
-                    current,
-                    value,
-                    display=display,
-                )
-                candidate = replace(
-                    current,
-                    value=canonical,
-                    facet_index=self._focused_facet_index,
-                )
-                self._require_stable_selector(candidate)
-                if candidate == current:
-                    self._render_current(RenderEffect.OVERLAY)
-                    self._emit_selection(SelectionChange.COMMITTED, current)
-                    return current
-                state = self._install_selector_state(
-                    candidate,
-                    emit_change=False,
-                )
-            else:
-                provisional = SelectorState(
-                    kind,
-                    value,
-                    facet_index=self._focused_facet_index,
-                )
-                canonical = self._canonical_selector_value(
-                    provisional,
-                    value,
-                    display=display,
-                )
-                prepared = replace(provisional, value=canonical)
-                state = self._install_selector_state(
-                    prepared,
-                    emit_change=False,
-                )
-            self._emit_selection(SelectionChange.COMMITTED, state)
-        return state
 
     def remove_selector(
         self,

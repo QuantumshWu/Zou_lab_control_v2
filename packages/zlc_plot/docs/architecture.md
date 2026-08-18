@@ -21,7 +21,7 @@
 | Parameter names/types/defaults/ranges/choices/render impact | core `ParameterSchema` + `RenderEffect` |
 | Schema-to-control projection and PyQt5 widgets | `zlc_plot.ui` / `zlc_plot.qt_controls` |
 | Concrete control layout and application workflow | application UI |
-| Pulse payload revision envelope and latest-only handoff | `LiveDataRevision` / `LivePlotController` |
+| Run history, cadence and revision publication | embedding Runtime/application |
 | Fit models and immutable fit results | `zlc_plot.fit` |
 | Immutable rendered front and exact physical-pixel export | `RasterFront` / `RasterBuffer` |
 | Same-shot causal join, panel document and PulseDocument projection | application layer |
@@ -35,10 +35,10 @@ application / acquisition
         ▼
  zlc_data.OwnedSnapshot / ImageFrame ─┐
  PulseTimelineData ──────────────► zlc_plot.PlotSession
-        │                     │              │
-        │             LiveDataRevision       ├── headless Agg/export
-        │                     │              ├── NotebookView (RasterFront + anywidget)
-        │                     └─ latest-only └── RasterPlotHost worker
+        │                                    │
+        │                                    ├── headless Agg/export
+        │                                    ├── NotebookView (RasterFront + anywidget)
+        │                                    └── RasterPlotHost worker
         │                                           │
         │                                           └── Qt5PlotWidget (QImage)
         │
@@ -176,27 +176,10 @@ Static 是只接收一个 immutable payload 的 session；live 使用同一个
 session/render path 接收严格递增的 immutable revisions，因此 selector、viewport、
 单位、显示参数和 fit 没有第二套实现。Dataset live 保持同一 schema/generation；
 同一因果 image 与动态 point overlay 使用一个 `ImageFrame`，frame ordering 只由其
-snapshot 决定；点层仍有单调 revision，空层也是有 revision 的值。`PulseTimelineData` 由 `LiveDataRevision` 在 transport boundary
-携带 producer revision。Controller 展示 payload 时保留该 revision，使 session
-state、selection events、selected data 和 fit inputs 指向同一 producer revision。
-
-`LivePlotController` owns one fixed-contract ingress built on
-`LatestRevisionChannel`, giving dataset and specialised plot payloads the same
-cadence-free, capacity-one semantics.
-Producers may publish faster than display, and a pending item is replaced by the
-newest revision. GUI timers choose a configurable display cadence while ingress
-never builds an unbounded queue.
-
-`PlotSession.owner_dispatch` is the stable live-to-owner gateway. It resolves
-the currently attached Notebook or raster marshal when invoked instead of
-capturing whichever host existed when a controller was constructed. Headless
-direct execution and host attach/release share one ownership gate, and every
-concrete dispatcher returns one Future covering callback completion. This keeps
-controller construction order independent from host attachment without allowing
-a live worker to bypass an attached surface owner. Notebook and Qt owners retain
-their queued completion Futures and cancel them during close; the controller's
-active owner wait has a separate shutdown wake, so a stopped event loop cannot
-strand the live worker.
+snapshot决定；点层仍有单调revision，空层也是有revision的值。
+Runtime/application拥有run accumulation、cadence和Stop；它把选定的immutable
+revision提交给`RasterPlotHost`。Plot只保留一条prepare/solve/commit transaction，
+使session state、selection events、selected data和fit inputs引用同一source revision。
 
 Layout changes rebuild the complete named layout inside the accepted Figure and publish it only after successful drawing. Data/artist updates mutate the same persistent artists whenever layout topology is unchanged.
 

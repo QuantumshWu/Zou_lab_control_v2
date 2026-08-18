@@ -21,7 +21,6 @@ from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactInputSpec,
     ArtifactOutputSpec,
-    DeviceAccess,
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
@@ -203,12 +202,8 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactOutputSpec("artifact_path", TEMPERATURE_ARTIFACT_CONTRACT),
     ),
     device_requirements=(
-        DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
-        DeviceRequirement(
-            "sequencer.streamer",
-            "sequencer",
-            DeviceAccess.EXCLUSIVE,
-        ),
+        DeviceRequirement("camera.adapter", "camera"),
+        DeviceRequirement("sequencer.streamer", "sequencer"),
     ),
     build=_build,
     ui_contributions=(_editor_factory,),

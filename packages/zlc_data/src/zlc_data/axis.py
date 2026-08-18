@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 from .validation import (
@@ -111,51 +111,6 @@ def point_ordinal_axis(
         normalized_size,
         normalized,
     )
-
-
-@dataclass(frozen=True, order=True)
-class AxisSourceRef:
-    """One closed reference to a tensor axis or the shared point-row domain."""
-
-    kind: str
-    axis_id: AxisId | None = None
-
-    TENSOR: ClassVar[str] = "TENSOR"
-    POINT_ROWS: ClassVar[str] = "POINT_ROWS"
-    POINT_COORDINATE: ClassVar[str] = "POINT_COORDINATE"
-    GRID_DIMENSION: ClassVar[str] = "GRID_DIMENSION"
-
-    def __post_init__(self) -> None:
-        with_id = {
-            self.TENSOR,
-            self.POINT_COORDINATE,
-            self.GRID_DIMENSION,
-        }
-        without_id = {self.POINT_ROWS}
-        if self.kind in with_id:
-            if not isinstance(self.axis_id, AxisId):
-                raise TypeError(f"{self.kind} source requires an AxisId")
-        elif self.kind in without_id:
-            if self.axis_id is not None:
-                raise ValueError(f"{self.kind} source cannot carry an AxisId")
-        else:
-            raise ValueError(f"unsupported axis source kind {self.kind!r}")
-
-    @classmethod
-    def tensor(cls, axis_id: AxisId) -> "AxisSourceRef":
-        return cls(cls.TENSOR, axis_id)
-
-    @classmethod
-    def point_rows(cls) -> "AxisSourceRef":
-        return cls(cls.POINT_ROWS)
-
-    @classmethod
-    def point_coordinate(cls, coordinate_id: AxisId) -> "AxisSourceRef":
-        return cls(cls.POINT_COORDINATE, coordinate_id)
-
-    @classmethod
-    def grid_dimension(cls, coordinate_id: AxisId) -> "AxisSourceRef":
-        return cls(cls.GRID_DIMENSION, coordinate_id)
 
 
 @dataclass(frozen=True)

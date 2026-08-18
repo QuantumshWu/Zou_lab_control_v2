@@ -15,9 +15,234 @@ from zlc_pulse import (
     compile_sequence,
 )
 from zlc_pulse.model import PulseFieldRef
-from zlc_pulse.engine_model import ScanUnderflow, reference_play, streaming_scan_play
 from zlc_pulse.schedule import trigger_times, trigger_windows
 from zlc_pulse.wire import StreamerParams
+
+
+class _ScanUnderflow(RuntimeError):
+    pass
+
+
+def _effective_tick(
+    base: int,
+    coefficients: tuple[int, ...],
+    point: tuple[int, ...],
+    frac_bits: int,
+) -> int:
+    """Independent affine oracle for the small, in-range rows in this file."""
+
+    assert len(coefficients) == len(point)
+    assert all(-(1 << 24) <= value < (1 << 24) for value in point)
+    return int(base) + (
+        sum(int(coefficient) * int(value) for coefficient, value in zip(coefficients, point))
+        >> int(frac_bits)
+    )
+
+
+def _reference_play(program, n_ticks: int) -> list[int]:
+    """Minimal combinatorial edge-engine oracle owned by these tests."""
+
+    assert not any(program.channel_delays), "this oracle does not model output delays"
+    ticks = tuple(program.ticks)
+    masks = tuple(program.masks)
+    coefficients = tuple(program.tick_slot_coeffs)
+    points = tuple(program.scan_points)
+    zero = (0,) * len(program.slot_kinds)
+
+    def effective(index: int, point: tuple[int, ...]) -> int:
+        return _effective_tick(
+            ticks[index], coefficients[index], point, program.scan_coeff_frac_bits
+        )
+
+    def loop_end(point: tuple[int, ...]) -> int:
+        return _effective_tick(
+            program.loop_end_tick,
+            tuple(program.loop_end_slot_coeffs),
+            point,
+            program.scan_coeff_frac_bits,
+        )
+
+    point_index = 0
+    point = points[0] if points else zero
+    final_tick = effective(len(ticks) - 1, point)
+    active_loop_end = loop_end(point)
+    loops_left = program.loop_count
+    running = bool(ticks)
+    if running and effective(0, point) == 0:
+        mask, tick, edge = masks[0], 1, 1
+    else:
+        mask, tick, edge = 0, 0, 0
+
+    output: list[int] = []
+    for _ in range(int(n_ticks)):
+        output.append(mask)
+        if not running:
+            continue
+        if program.loop_count > 1 and loops_left > 1 and tick >= active_loop_end:
+            mask = masks[program.loop_start_index]
+            tick = effective(program.loop_start_index, point) + 1
+            edge = program.loop_start_index + 1
+            loops_left -= 1
+        elif tick >= final_tick:
+            if point_index + 1 < len(points):
+                point_index += 1
+                point = points[point_index]
+            elif program.repeat_forever:
+                point_index = 0
+                point = points[0] if points else zero
+            else:
+                running = False
+                mask = 0
+                continue
+            final_tick = effective(len(ticks) - 1, point)
+            active_loop_end = loop_end(point)
+            loops_left = program.loop_count
+            if effective(0, point) == 0:
+                mask, tick, edge = masks[0], 1, 1
+            else:
+                mask, tick, edge = 0, 0, 0
+        else:
+            if edge < len(ticks) and tick == effective(edge, point):
+                mask = masks[edge]
+                edge += 1
+            tick += 1
+    return output
+
+
+def _streaming_scan_play(
+    program,
+    n_ticks: int,
+    *,
+    bank_size: int,
+    refill_delay: int = 0,
+    raise_on_underflow: bool = False,
+) -> tuple[list[int], bool, int]:
+    """Test-owned two-bank refill oracle for the scan cases below."""
+
+    assert not any(program.channel_delays), "this oracle does not model output delays"
+    points = tuple(program.scan_points)
+    if not points or bank_size <= 0:
+        return _reference_play(program, n_ticks), False, 0
+
+    ticks = tuple(program.ticks)
+    masks = tuple(program.masks)
+    coefficients = tuple(program.tick_slot_coeffs)
+
+    def effective(index: int, point: tuple[int, ...]) -> int:
+        return _effective_tick(
+            ticks[index], coefficients[index], point, program.scan_coeff_frac_bits
+        )
+
+    def loop_end(point: tuple[int, ...]) -> int:
+        return _effective_tick(
+            program.loop_end_tick,
+            tuple(program.loop_end_slot_coeffs),
+            point,
+            program.scan_coeff_frac_bits,
+        )
+
+    chunk_count = (len(points) + bank_size - 1) // bank_size
+    bank_chunk = [-1, -1]
+    bank_ready = [False, False]
+    pending: list[tuple[int, int, int]] = []
+    streaming = chunk_count > 2
+    wrap_toggle = (chunk_count & 1) if streaming else 0
+
+    def load(bank: int, chunk: int) -> None:
+        bank_chunk[bank] = chunk
+        bank_ready[bank] = True
+
+    load(0, 0)
+    if chunk_count > 1:
+        load(1, 1)
+
+    point_index = 0
+    point = points[0]
+    final_tick = effective(len(ticks) - 1, point)
+    active_loop_end = loop_end(point)
+    loops_left = program.loop_count
+    bank_base = 0
+    running = bool(ticks)
+    stalled = False
+    cycle = 0
+    if running and effective(0, point) == 0:
+        mask, tick, edge = masks[0], 1, 1
+    else:
+        mask, tick, edge = 0, 0, 0
+
+    def bank_for(chunk: int, base: int) -> int:
+        return (chunk % 2) ^ base
+
+    def request_refill() -> None:
+        if not streaming:
+            return
+        current_chunk = point_index // bank_size
+        if current_chunk + 1 < chunk_count:
+            next_chunk, next_base = current_chunk + 1, bank_base
+        else:
+            next_chunk, next_base = 0, bank_base ^ wrap_toggle
+        bank = bank_for(next_chunk, next_base)
+        if (bank_ready[bank] and bank_chunk[bank] == next_chunk) or any(
+            item[0] == bank and item[1] == next_chunk for item in pending
+        ):
+            return
+        bank_ready[bank] = False
+        bank_chunk[bank] = -1
+        pending.append((bank, next_chunk, cycle + max(0, int(refill_delay))))
+
+    output: list[int] = []
+    for _ in range(int(n_ticks)):
+        cycle += 1
+        for item in tuple(value for value in pending if value[2] <= cycle):
+            pending.remove(item)
+            load(item[0], item[1])
+        request_refill()
+        output.append(mask)
+        if not running:
+            continue
+        if program.loop_count > 1 and loops_left > 1 and tick >= active_loop_end:
+            mask = masks[program.loop_start_index]
+            tick = effective(program.loop_start_index, point) + 1
+            edge = program.loop_start_index + 1
+            loops_left -= 1
+        elif tick >= final_tick:
+            last = point_index + 1 >= len(points)
+            if last and not program.repeat_forever:
+                running = False
+                mask = 0
+                continue
+            next_index = 0 if last else point_index + 1
+            current_chunk = point_index // bank_size
+            next_chunk = next_index // bank_size
+            next_base = bank_base ^ wrap_toggle if last else bank_base
+            crossing = last or next_chunk != current_chunk
+            bank = bank_for(next_chunk, next_base)
+            if crossing and not (
+                bank_ready[bank] and bank_chunk[bank] == next_chunk
+            ):
+                if raise_on_underflow:
+                    raise _ScanUnderflow(
+                        f"scan chunk {next_chunk} not ready at tick {tick}"
+                    )
+                stalled = True
+            else:
+                if crossing:
+                    bank_base = next_base
+                point_index = next_index
+                point = points[point_index]
+                final_tick = effective(len(ticks) - 1, point)
+                active_loop_end = loop_end(point)
+                loops_left = program.loop_count
+                if effective(0, point) == 0:
+                    mask, tick, edge = masks[0], 1, 1
+                else:
+                    mask, tick, edge = 0, 0, 0
+        else:
+            if edge < len(ticks) and tick == effective(edge, point):
+                mask = masks[edge]
+                edge += 1
+            tick += 1
+    return output, stalled, point_index + 1
 
 
 def _target() -> PulseTarget:
@@ -66,7 +291,7 @@ def test_slot_compile_changes_only_affine_data_and_dac_selectors() -> None:
     assert program.tick_slot_coeffs[1][0] != 0
     assert program.scan_points == ()
     changed = replace(program, scan_points=((2,),), scan_point_durations=(4e-8,))
-    assert reference_play(changed, 12)[:5] == [1, 1, 2, 0, 0]
+    assert _reference_play(changed, 12)[:5] == [1, 1, 2, 0, 0]
 
 
 def test_write_slots_single_row_matches_static_waveform() -> None:
@@ -78,7 +303,7 @@ def test_write_slots_single_row_matches_static_waveform() -> None:
         50e6,
     )
     runtime_row = replace(slotted, scan_points=((1,),), scan_point_durations=(4e-8,))
-    assert reference_play(runtime_row, 12) == reference_play(static, 12)
+    assert _reference_play(runtime_row, 12) == _reference_play(static, 12)
 
 
 def test_negative_bus_delay_shifts_every_driven_ttl_lane() -> None:
@@ -110,8 +335,10 @@ def test_scan_table_is_data_and_engine_wrap_is_gapless() -> None:
         scan_points=((1,), (2,), (1,), (3,), (1,)),
         scan_point_durations=(2e-8, 3e-8, 2e-8, 4e-8, 2e-8),
     )
-    expected = reference_play(program, 80)
-    actual, stalled, points_played = streaming_scan_play(program, 80, bank_size=2, refill_delay=0)
+    expected = _reference_play(program, 80)
+    actual, stalled, points_played = _streaming_scan_play(
+        program, 80, bank_size=2, refill_delay=0
+    )
     assert actual == expected
     assert stalled is False
     assert points_played == len(program.scan_points)
@@ -130,8 +357,10 @@ def test_scan_table_wrap_is_gapless_for_forever_program() -> None:
         scan_points=((1,), (2,), (1,), (3,), (1,)),
         scan_point_durations=(2e-8, 3e-8, 2e-8, 4e-8, 2e-8),
     )
-    expected = reference_play(program, 40)
-    actual, stalled, _ = streaming_scan_play(program, 40, bank_size=2, refill_delay=0)
+    expected = _reference_play(program, 40)
+    actual, stalled, _ = _streaming_scan_play(
+        program, 40, bank_size=2, refill_delay=0
+    )
     assert actual == expected
     assert stalled is False
 
@@ -149,8 +378,8 @@ def test_scan_table_late_refill_raises_underflow() -> None:
         scan_points=((1,), (2,), (1,), (3,), (1,)),
         scan_point_durations=(2e-8, 3e-8, 2e-8, 4e-8, 2e-8),
     )
-    with np.testing.assert_raises(ScanUnderflow):
-        streaming_scan_play(
+    with np.testing.assert_raises(_ScanUnderflow):
+        _streaming_scan_play(
             program,
             100,
             bank_size=2,

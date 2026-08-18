@@ -1,10 +1,8 @@
 # zlc_plot public contract
 
-This file is the machine-readable name contract for the top-level
-`zlc_plot` facade. The package's `__all__` and this list must stay identical.
-Implementation details remain importable from their owning submodules, but a
-name is not part of the convenience API merely because a module happens to
-load it.
+This file summarizes the top-level `zlc_plot` facade for human readers.
+The executable source of truth is the package's `__all__`; documentation is
+not parsed as a second API implementation.
 
 <!-- zlc_plot-public-names:start -->
 AxisRef
@@ -21,8 +19,6 @@ HistogramPlot
 ImageFrame
 ImagePlot
 ImagePointOverlay
-LiveDataRevision
-LivePlotController
 NumericRange
 PANEL_SIZE_NAMES
 PlotKind
@@ -61,7 +57,6 @@ fitting_spec
 histogram
 image
 image_axes
-panel_kinds
 parameter_controls
 pulse_timeline
 recommended_pulse_preset
@@ -76,11 +71,7 @@ updated_spec
 exceptions on the facade. `FitCancelled` is raised through fit futures when a
 request is superseded, cleared, or closed; `BackendUnavailableError` reports a
 missing optional frontend. The internal `ZLCPlotError`, `UnitError`,
-`RevisionError`, `FitDeadlineExceeded`, and `LiveUpdateError` remain available
+`RevisionError` and `FitDeadlineExceeded` remain available
 from their owning submodules only. Callers should catch their standard bases
 (`ValueError`, `TimeoutError`, or `RuntimeError`) when they need a broader
 policy; the facade does not expose a partial exception hierarchy.
-
-`MAX_PUBLIC_NAMES` is a guard constant, not a plotting API name. It bounds the
-real non-module names visible on the package object at 57 while leaving two
-reviewed slots above the 55-name contract.

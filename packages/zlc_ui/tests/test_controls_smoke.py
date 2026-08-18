@@ -6,7 +6,6 @@ import sys
 from types import SimpleNamespace
 
 from zlc_ui.board import BoardMetrics, nearest_anchor, pack
-from zlc_ui.graph import FlowGraphNode, describe_shape_text, flow_graph_from_tree
 
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
@@ -78,7 +77,7 @@ assert form.read_all() == {'name': 'changed', 'count': 4}
     )
 
 
-def test_board_graph_and_shape_values() -> None:
+def test_board_geometry_values() -> None:
     metrics = BoardMetrics(4)
     cards = [
         SimpleNamespace(width=40, height=30, col=0, row=0),
@@ -98,19 +97,6 @@ def test_nearest_anchor_uses_probe_position_without_mutating_layout_record() -> 
     probe = SimpleNamespace(width=500, height=275, col=600, row=0)
     assert nearest_anchor(probe, others, metrics, 1200) == (516, 8)
     assert (probe.col, probe.row) == (600, 0)
-
-    graph = flow_graph_from_tree(
-        {
-            "nodes": (
-                {"id": "source", "name": "Source", "role": "producer"},
-                {"id": "view", "name": "View", "role": "consumer"},
-            ),
-            "edges": ({"from": "source", "to": "view", "signal": "temperature"},),
-        }
-    )
-    assert isinstance(graph.nodes[0], FlowGraphNode)
-    assert describe_shape_text("1 × 2") == "1 × 2"
-
 
 def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
     metrics = BoardMetrics(10)
@@ -147,45 +133,5 @@ deadline = time.monotonic() + 1.0
 while not called and time.monotonic() < deadline:
     app.processEvents()
 assert called == [True]
-"""
-    )
-
-
-def test_flow_graph_view_paints_edges_and_arrow_heads() -> None:
-    # The gallery grabs the top of its scroll area, so FlowGraphView's edge
-    # painting never ran there; a widget-level grab exercises it directly.
-    _run_qt_smoke(
-        """
-from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['zlc-ui-tests'])
-from zlc_ui.graph import FlowGraph, FlowGraphEdge, FlowGraphNode, FlowGraphView
-view = FlowGraphView()
-view.set_role_styles({'producer': ('#123456', '#654321')}, compact_roles=frozenset({'view'}))
-assert view._role_style('producer') == ('#123456', '#654321')
-assert view._is_compact(FlowGraphNode('panel', 'Fake panel', 'view'))
-view.set_graph(
-    FlowGraph(
-        nodes=(
-            FlowGraphNode('source', 'Fake source', 'producer'),
-            FlowGraphNode('transform', 'Fake transform', 'processor'),
-            FlowGraphNode('panel', 'Fake panel', 'view'),
-        ),
-        edges=(
-            FlowGraphEdge('source', 'transform', 'temperature', (1,)),
-            FlowGraphEdge('transform', 'panel', 'smoothed', (1,)),
-        ),
-    )
-)
-view.resize(900, 500)
-view.show()
-app.processEvents()
-arrows = []
-original = FlowGraphView._draw_arrow_head
-FlowGraphView._draw_arrow_head = staticmethod(
-    lambda painter, p1, p2: (arrows.append((p1, p2)), original(painter, p1, p2))
-)
-pixmap = view.grab()
-assert not pixmap.isNull()
-assert len(arrows) >= 2, f'expected >=2 painted arrow heads, got {len(arrows)}'
 """
     )

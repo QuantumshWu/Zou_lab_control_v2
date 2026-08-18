@@ -3899,33 +3899,3 @@ class FluentStatusStrip(FluentFrame):
     def text(self) -> str:
         """The current message's FULL text (the label elides for display only)."""
         return self.message.text()
-
-
-class FluentFormGrid(QtWidgets.QWidget):
-    """A multi-column form whose first (label) column is shared and aligned.
-
-    Every row keeps the same height and the same label-column width, so a stack
-    of forms lines up without per-row fixed geometry.
-    """
-
-    def __init__(self, parent=None, *, label_width: int | None = None):
-        super().__init__(parent)
-        self.setStyleSheet("background: transparent;")
-        self.grid = QtWidgets.QGridLayout(self)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setHorizontalSpacing(Metrics.gap_item())
-        self.grid.setVerticalSpacing(Metrics.gap_row())
-        self.grid.setColumnStretch(1, 1)
-        self._rows = 0
-        if label_width is not None:
-            self.grid.setColumnMinimumWidth(0, int(label_width))
-
-    def add_row(self, label, *widgets) -> ElidedLabel | QtWidgets.QWidget:
-        cell = ElidedLabel(str(label)) if isinstance(label, str) else label
-        cell.setFixedHeight(Metrics.row_h())
-        self.grid.addWidget(cell, self._rows, 0)
-        for column, widget in enumerate(widgets, start=1):
-            widget.setFixedHeight(Metrics.row_h())
-            self.grid.addWidget(widget, self._rows, column)
-        self._rows += 1
-        return cell

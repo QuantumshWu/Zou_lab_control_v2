@@ -985,9 +985,7 @@ def default_coeff_frac_bits(path: str | Path | None = None) -> int:
     return int(default_params(path).coeff_frac_bits)
 
 def default_slot_mul_width(path: str | Path | None = None) -> int:
-    """The scan slot-operand narrow width the engine (and its Python mirror) clamps a scan tick to --
-    the single source engine_model reads instead of a bare literal 25, so the model can never mirror a
-    different width than the bitstream + the config-driven validator bound."""
+    """The scan slot-operand width shared by the compiler and generated RTL."""
     return int(load_streamer_config(path)["slot_mul_width"])
 
 def check_config_capacity(path: str | Path | None = None) -> dict:

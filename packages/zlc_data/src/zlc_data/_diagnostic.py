@@ -22,13 +22,4 @@ def exact_integer_text(value: object) -> str:
         return hex(integer)
 
 
-def exact_index_tuple_text(values: tuple[object, ...]) -> str:
-    """Format one logical index tuple without losing any component value."""
-
-    labels = tuple(exact_integer_text(value) for value in values)
-    if len(labels) == 1:
-        return f"({labels[0]},)"
-    return f"({', '.join(labels)})"
-
-
-__all__ = ["exact_index_tuple_text", "exact_integer_text"]
+__all__ = ["exact_integer_text"]

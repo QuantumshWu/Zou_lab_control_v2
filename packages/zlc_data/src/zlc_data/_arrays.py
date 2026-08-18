@@ -89,21 +89,6 @@ def immutable_array(values, *, dtype: np.dtype, shape: tuple[int, ...]) -> np.nd
     return result
 
 
-def immutable_bool_broadcast(value: bool, shape: tuple[int, ...]) -> np.ndarray:
-    """Return a zero-allocation uniform boolean plane backed by one byte."""
-
-    if not isinstance(value, (bool, np.bool_)):
-        raise TypeError("immutable boolean broadcast value must be bool")
-    normalized_shape = tuple(shape)
-    if any(
-        isinstance(size, bool) or not isinstance(size, int) or size < 0
-        for size in normalized_shape
-    ):
-        raise ValueError("immutable boolean broadcast shape must be nonnegative integers")
-    scalar = _IMMUTABLE_TRUE if bool(value) else _IMMUTABLE_FALSE
-    return np.broadcast_to(scalar.reshape((1,) * len(normalized_shape)), normalized_shape)
-
-
 def immutable_bool_array(values, *, shape: tuple[int, ...]) -> np.ndarray:
     source = np.asarray(values)
     if source.dtype != np.dtype(bool):

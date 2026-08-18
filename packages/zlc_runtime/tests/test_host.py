@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
-from dataclasses import dataclass
 from threading import Event, get_ident
 from types import SimpleNamespace
 import time
 
 import numpy as np
 import pytest
-
-from zlc_data import (
-    BlockId,
-)
 
 
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
@@ -106,21 +101,6 @@ def _wait_processor(
     return front
 
 
-@dataclass
-class _ImmediateHandle:
-    value: object
-    cancelled: bool = False
-
-    def snapshot(self):
-        return SimpleNamespace(phase="done")
-
-    def cancel(self, reason: str | None = None) -> None:
-        self.cancelled = True
-
-    def result(self):
-        return self.value
-
-
 def test_worker_without_kind_publishes_final_and_records_context_capabilities() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     run_record = {
@@ -142,21 +122,13 @@ def test_worker_without_kind_publishes_final_and_records_context_capabilities() 
                 for name in (
                     "cancel_requested",
                     "seal_terminal",
-                    "start_and_wait",
                     "attach_live_outputs",
-                    "open_live_dataset",
-                    "open_exact_dataset",
                     "publish_final",
                     "report_progress",
-                    "warn",
                 )
             )
             assert context.cancel_requested() is False
             context.report_progress("capturing", current=2, total=5)
-            context.warn("one warning")
-            assert context.start_and_wait(
-                lambda: _ImmediateHandle("hardware result")
-            ) == "hardware result"
             context.publish_final(
                 {"frame": _final_output("frame", 7, declaration, run_record)}
             )
@@ -165,14 +137,11 @@ def test_worker_without_kind_publishes_final_and_records_context_capabilities() 
     node = Node()
     host = NodeHost(node, plane, wake.set)
     try:
-        assert host.node is node
-        assert host.source_signal is None
         host.start()
         observation = _wait_worker(host, wake)
         assert observation == host.observation
         assert observation.phase == "done"
         assert observation.progress == NodeProgress("capturing", current=2, total=5)
-        assert observation.warnings == ("one warning",)
         assert host.final_result == {"status": "ok"}
         assert host.signal_key("frame") == "@logic/camera/frame"
         with pytest.raises(KeyError, match="undeclared node output"):
@@ -253,7 +222,7 @@ def test_worker_cancel_and_shutdown_refuses_pending_worker() -> None:
         assert started.wait(2.0)
         with pytest.raises(RuntimeError, match="before terminal"):
             host.shutdown()
-        assert host.phase == "stopping"
+        assert host.observation.phase == "stopping"
         release.set()
         observation = _wait_worker(host, wake)
         assert observation.phase == "cancelled"
@@ -538,7 +507,6 @@ def test_source_bound_processor_without_kind_follows_latest_publication() -> Non
 
     host = NodeHost(Node(), plane, wake.set)
     try:
-        assert host.source_signal == "camera/frame"
         host.start()
         first_front = _wait_processor(
             plane,
@@ -576,7 +544,7 @@ def test_source_bound_processor_without_kind_follows_latest_publication() -> Non
         assert host.running
         host.cancel("test cancellation")
         assert host.terminal
-        assert host.phase == "cancelled"
+        assert host.observation.phase == "cancelled"
     finally:
         if not host.terminal:
             host.cancel("cleanup")
@@ -685,48 +653,6 @@ def test_worker_cancel_then_restart_resets_the_generation_stop_event() -> None:
         release_first.set()
         if not host.terminal:
             _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-class _LiveSpec:
-    block_id = BlockId("host-live")
-    dataset_edge = object()
-
-
-class _LiveOwner:
-    def live_dataset_outputs(self, _frozen):
-        return {}
-
-
-def test_worker_live_attachment_is_singleton_per_generation() -> None:
-    declaration = DatasetOutputDeclaration("frame", "test.live.frame")
-    wake = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "live-once"
-        dataset_output_declarations = (declaration,)
-
-        def execute(self, context):
-            context.open_live_dataset(
-                _LiveSpec(),
-                output_owner=_LiveOwner(),
-            )
-            with pytest.raises(RuntimeError, match="one Node generation"):
-                context.open_live_dataset(
-                    _LiveSpec(),
-                    output_owner=_LiveOwner(),
-                )
-            return "live opened once"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == "done"
-        assert host.final_result == "live opened once"
-    finally:
         host.shutdown()
         plane.close()
 
@@ -975,9 +901,9 @@ def test_processor_failure_and_inflight_cancel_are_terminal_callbacks() -> None:
                     wake,
                     lambda _front: host.terminal,
                 )
-                assert host.phase == "failed"
-                assert host.last_error is not None
-                assert "processor failed" in host.last_error
+                assert host.observation.phase == "failed"
+                assert host.observation.error is not None
+                assert "processor failed" in host.observation.error
             else:
                 assert evaluate_started.wait(2.0)
                 host.cancel("stop processor")
@@ -987,7 +913,7 @@ def test_processor_failure_and_inflight_cancel_are_terminal_callbacks() -> None:
                     wake,
                     lambda _front: host.terminal,
                 )
-                assert host.phase == "cancelled"
+                assert host.observation.phase == "cancelled"
         finally:
             release.set()
             if not host.terminal:

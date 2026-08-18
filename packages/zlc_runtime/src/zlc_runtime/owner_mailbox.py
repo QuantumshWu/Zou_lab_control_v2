@@ -6,8 +6,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 from typing import Callable, NamedTuple
 
-from ._public import RunHandleLike
-
 
 class OwnerCompletion(NamedTuple):
     kind: str
@@ -34,16 +32,11 @@ class RunOwnerMailbox:
         self._tracked: set[Future] = set()
         self._completions: list[OwnerCompletion] = []
         self._generation = 0
-        self._handle: RunHandleLike | None = None
         self._owner_reaped = True
 
     @property
     def generation(self) -> int:
         return self._generation
-
-    @property
-    def handle(self) -> RunHandleLike | None:
-        return self._handle
 
     @property
     def owner_reaped(self) -> bool:
@@ -61,12 +54,8 @@ class RunOwnerMailbox:
 
     def begin_generation(self) -> int:
         self._generation += 1
-        self._handle = None
         self._owner_reaped = False
         return self._generation
-
-    def set_handle(self, handle: RunHandleLike) -> None:
-        self._handle = handle
 
     def mark_owner_reaped(self) -> None:
         self._owner_reaped = True

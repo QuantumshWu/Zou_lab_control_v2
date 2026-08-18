@@ -2233,28 +2233,6 @@ def calibrate(
     return CalibrationResult(calibration, report)
 
 
-def signals(
-    calibration: TrapCalibration,
-    image: object,
-    *,
-    model_kind: ReadoutModelKind | None = None,
-) -> np.ndarray:
-    if not isinstance(calibration, TrapCalibration):
-        raise TypeError("calibration must be TrapCalibration")
-    return calibration.signals(image, model_kind=model_kind)
-
-
-def detect(
-    calibration: TrapCalibration,
-    image: object,
-    *,
-    model_kind: ReadoutModelKind | None = None,
-) -> AtomDetection:
-    if not isinstance(calibration, TrapCalibration):
-        raise TypeError("calibration must be TrapCalibration")
-    return calibration.detect(image, model_kind=model_kind)
-
-
 __all__ = [
     "AtomDetection",
     "CalibrationResult",
@@ -2268,9 +2246,7 @@ __all__ = [
     "SiteMap",
     "TrapCalibration",
     "calibrate",
-    "detect",
     "extract_box_signals",
     "extract_psf_signals",
     "readout_model_kind_from_choice",
-    "signals",
 ]

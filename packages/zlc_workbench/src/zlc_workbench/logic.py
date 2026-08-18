@@ -524,7 +524,7 @@ class LogicCatalog:
                 name,
                 str(getattr(item.kind, "value", item.kind)),
                 ", ".join(
-                    output.name for output in item.outputs_for({})
+                    output.name for output in item.outputs
                 ) or "nothing",
             )
             for name, item in sorted(self.by_name.items())
@@ -538,16 +538,13 @@ def make_host(
     descriptor: Any,
     node: Any,
     *,
-    authored_values: Mapping[str, object],
     signal_plane: Any,
     instance_id: str,
     request_owner_wake: Callable[[], None] | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
-    The descriptor resolves outputs from the same frozen values used to build
-    the node.  A three-frame camera cycle therefore exposes three ordinary
-    signals without teaching the runtime or plot layer about cameras.
+    The descriptor's frozen output declarations are the sole signal vocabulary.
     """
 
     return NodeHost(
@@ -557,6 +554,6 @@ def make_host(
         instance_id=str(instance_id),
         dataset_output_declarations=tuple(
             DatasetOutputDeclaration(output.name, output.contract_id)
-            for output in descriptor.outputs_for(authored_values)
+            for output in descriptor.outputs
         ),
     )

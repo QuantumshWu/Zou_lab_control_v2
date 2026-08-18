@@ -8,17 +8,21 @@ reconstruct arrays, axes, coverage, or lineage.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol, runtime_checkable
+from typing import Mapping
 
 from zlc_data import OwnedSnapshot
 from .dataset import (
     DatasetCoverage,
-    DatasetPreviewSnapshot,
     MonitorCoverage,
-    MonitorDatasetSnapshot,
 )
 from zlc_data import canonical_text
-from .output_name import bare_output_name
+
+
+def _bare_output_name(value: str, *, kind: str = "output") -> str:
+    name = canonical_text(value, f"{kind} name")
+    if "/" in name or name.startswith("@"):
+        raise ValueError(f"{kind} name must be bare, not namespaced")
+    return name
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +36,7 @@ class DatasetOutputDeclaration:
         object.__setattr__(
             self,
             "name",
-            bare_output_name(self.name, kind="dataset output"),
+            _bare_output_name(self.name, kind="dataset output"),
         )
         object.__setattr__(
             self,
@@ -100,63 +104,8 @@ class LiveDatasetOutput:
         return self.declaration.contract_id
 
 
-class LiveDatasetOutputOwner(Protocol):
-    """Application owner that names/materializes one live producer front.
-
-    The Workbench may retain this owner beside its process-local live slot, but
-    it never receives an open projection callable and never interprets a
-    measurement Dataset itself.
-    """
-
-    def live_dataset_outputs(
-        self,
-        frozen: DatasetPreviewSnapshot | MonitorDatasetSnapshot,
-    ) -> Mapping[str, LiveDatasetOutput]: ...
-
-
-@runtime_checkable
-class LiveDatasetSnapshotSource(Protocol):
-    """Narrow process-local source exposed to a desktop live-slot host.
-
-    Acquisition implementations own ingestion and physical materialization.
-    A Workbench may only freeze the already-defined current revision and close
-    its borrowed lifetime; it must not branch on Camera/runtime dataset types.
-    """
-
-    def freeze_current(self) -> MonitorDatasetSnapshot: ...
-
-    def close(self) -> None: ...
-
-
-def single_live_dataset_output(
-    declaration: DatasetOutputDeclaration,
-    frozen: DatasetPreviewSnapshot | MonitorDatasetSnapshot,
-) -> LiveDatasetOutput:
-    """Publish an identity live view whose geometry was not transformed."""
-
-    if not isinstance(declaration, DatasetOutputDeclaration):
-        raise TypeError("declaration must be DatasetOutputDeclaration")
-    if isinstance(frozen, MonitorDatasetSnapshot):
-        if frozen.head is None:
-            raise RuntimeError("monitor dataset has no accepted event head")
-    elif isinstance(frozen, DatasetPreviewSnapshot):
-        pass
-    else:
-        raise TypeError(
-            "live output requires MonitorDatasetSnapshot or DatasetPreviewSnapshot"
-        )
-    return LiveDatasetOutput(
-        declaration,
-        frozen.snapshot,
-        frozen.coverage,
-    )
-
-
 __all__ = [
     "DatasetOutputDeclaration",
     "FinalDatasetOutput",
     "LiveDatasetOutput",
-    "LiveDatasetOutputOwner",
-    "LiveDatasetSnapshotSource",
-    "single_live_dataset_output",
 ]

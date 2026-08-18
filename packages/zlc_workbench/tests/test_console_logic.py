@@ -398,7 +398,7 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
         )
 
 
-def _claim_descriptor(api_name: str, access, *capabilities: str):
+def _claim_descriptor(api_name: str, *capabilities: str):
     from zlc_atom.authoring import AuthoringSchema
     from zlc_atom.nodes import (
         DeviceRequirement,
@@ -424,18 +424,16 @@ def _claim_descriptor(api_name: str, access, *capabilities: str):
         NodeKind.MEASUREMENT,
         AuthoringSchema(),
         device_requirements=tuple(
-            DeviceRequirement(token, f"device_{index}", access)
+            DeviceRequirement(token, f"device_{index}")
             for index, token in enumerate(requested)
         ),
         build=build,
     )
 
 
-def test_only_exact_exclusive_device_claims_queue_and_stop_the_old_row(presenter) -> None:
-    from zlc_atom.nodes import DeviceAccess
-
-    first_descriptor = _claim_descriptor("first", DeviceAccess.EXCLUSIVE)
-    second_descriptor = _claim_descriptor("second", DeviceAccess.EXCLUSIVE)
+def test_same_device_claims_queue_and_stop_the_old_row(presenter) -> None:
+    first_descriptor = _claim_descriptor("first")
+    second_descriptor = _claim_descriptor("second")
     presenter.catalog = LogicCatalog((first_descriptor, second_descriptor))
     first = presenter.add_logic("first")
     second = presenter.add_logic("second")
@@ -456,34 +454,14 @@ def test_only_exact_exclusive_device_claims_queue_and_stop_the_old_row(presenter
     assert presenter.logic[second].host.running
 
 
-def test_observe_and_exclusive_claims_on_one_device_coexist(presenter) -> None:
-    from zlc_atom.nodes import DeviceAccess
-
-    observer = _claim_descriptor("observer", DeviceAccess.OBSERVE)
-    owner = _claim_descriptor("owner", DeviceAccess.EXCLUSIVE)
-    presenter.catalog = LogicCatalog((observer, owner))
-    observer_id = presenter.add_logic("observer")
-    owner_id = presenter.add_logic("owner")
-    assert presenter.start_logic(observer_id) is True
-    observer_host = presenter.logic[observer_id].host
-
-    assert presenter.start_logic(owner_id) is True
-    assert presenter.logic[owner_id].pending is None
-    assert observer_host is not None and observer_host.running
-    assert presenter.logic[owner_id].host is not None
-    assert presenter.logic[owner_id].host.running
-
-
 def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -> None:
     """A Pulse command cannot enter through the candidate's currently-free device."""
 
-    from zlc_atom.nodes import DeviceAccess
     from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
 
-    old = _claim_descriptor("old", DeviceAccess.EXCLUSIVE, "camera.adapter")
+    old = _claim_descriptor("old", "camera.adapter")
     replacement = _claim_descriptor(
         "replacement",
-        DeviceAccess.EXCLUSIVE,
         "camera.adapter",
         "sequencer.streamer",
     )
@@ -504,7 +482,6 @@ def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -
                     "sequencer",
                     "sequencer",
                     presenter.session.sequencer,
-                    DeviceAccess.EXCLUSIVE,
                 ),
             ),
         )
@@ -539,12 +516,10 @@ def test_running_sequencer_logic_rejects_pulse_without_touching_device(
 ) -> None:
     import zlc_pulse
 
-    from zlc_atom.nodes import DeviceAccess
     from zlc_workbench.device_use import DeviceUseBusy
 
     descriptor = _claim_descriptor(
         "sequencer_task",
-        DeviceAccess.EXCLUSIVE,
         "sequencer.streamer",
     )
     presenter.catalog = LogicCatalog((descriptor,))
@@ -589,7 +564,6 @@ def test_notebook_fire_holds_the_session_lease_through_wait_done(
     session,
     monkeypatch,
 ) -> None:
-    from zlc_atom.nodes import DeviceAccess
     from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
 
     session.load_pulse(PULSE_NAME)
@@ -613,7 +587,6 @@ def test_notebook_fire_holds_the_session_lease_through_wait_done(
                         "sequencer",
                         "sequencer",
                         session.sequencer,
-                        DeviceAccess.EXCLUSIVE,
                     ),
                 ),
             )
@@ -634,16 +607,12 @@ def test_notebook_fire_holds_the_session_lease_through_wait_done(
 def test_pulse_drive_rejects_whole_logic_candidate_before_any_logic_is_stopped(
     presenter,
 ) -> None:
-    from zlc_atom.nodes import DeviceAccess
-
     camera_owner = _claim_descriptor(
         "camera_owner",
-        DeviceAccess.EXCLUSIVE,
         "camera.adapter",
     )
     calibration = _claim_descriptor(
         "calibration_like",
-        DeviceAccess.EXCLUSIVE,
         "camera.adapter",
         "sequencer.streamer",
     )

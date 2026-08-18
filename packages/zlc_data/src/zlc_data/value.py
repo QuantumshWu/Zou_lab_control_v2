@@ -8,7 +8,6 @@ from uuid import uuid4
 import numpy as np
 from .validation import (
     canonical_text,
-    integer,
     nonnegative_integer,
     digest_text,
 )
@@ -20,7 +19,6 @@ from .validity import (
     INVALID,
     VALID,
     CellValidity,
-    ComponentValidity,
     DatasetComponentValidity,
     Invalid,
     Valid,
@@ -75,47 +73,6 @@ class DatasetRevisionRef:
         if not isinstance(self.revision, DatasetRevision):
             raise TypeError("revision must be DatasetRevision")
 
-
-@dataclass(frozen=True, eq=False)
-class Value:
-    values: np.ndarray
-    validity: Valid | Invalid | ComponentValidity
-    schema: ValueSchema
-    __hash__ = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.schema, ValueSchema):
-            raise TypeError("schema must be ValueSchema")
-        _validate_value_validity(self.validity, self.schema)
-        array = immutable_array(
-            self.values,
-            dtype=self.schema.dtype,
-            shape=self.schema.data_shape,
-        )
-        object.__setattr__(self, "values", array)
-
-
-@dataclass(frozen=True)
-class ValuePayloadContract:
-    """Single owner for Value snapshot and schema validation."""
-
-    schema: ValueSchema
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.schema, ValueSchema):
-            raise TypeError("schema must be ValueSchema")
-
-    def snapshot(self, payload: Value) -> Value:
-        self.validate(payload)
-        return payload
-
-    def validate(self, payload: Value) -> None:
-        if not isinstance(payload, Value):
-            raise TypeError("ValuePayloadContract accepts only Value payloads")
-        if payload.schema is not self.schema:
-            raise TypeError(
-                "Value payload must share the generation-owned ValueSchema instance"
-            )
 
 @dataclass(frozen=True, eq=False)
 class DataBlock:
@@ -289,101 +246,6 @@ def expand_snapshot_validity(snapshot: OwnedSnapshot) -> np.ndarray:
     return snapshot.expanded_validity()
 
 
-def dataset_cell_value(
-    block: DataBlock,
-    repeat_index: int,
-    point_ordinal: int,
-) -> Value:
-    """Extract one exact physical Dataset cell as its declared ``Value``.
-
-    This is the sole in-memory Dataset-to-Value boundary.  It preserves the
-    cell schema and projects dataset validity without asking a presentation or
-    application shell to interpret validity masks or trailing dimensions.
-    """
-
-    if not isinstance(block, DataBlock):
-        raise TypeError("block must be DataBlock")
-    normalized_repeat = integer(repeat_index, "repeat_index")
-    normalized_point = integer(point_ordinal, "point_ordinal")
-    assert normalized_repeat is not None and normalized_point is not None
-    repeat_index = normalized_repeat
-    point_ordinal = normalized_point
-    for name, index, size in (
-        ("repeat_index", repeat_index, block.schema.repeat_axis.size),
-        (
-            "point_ordinal",
-            point_ordinal,
-            block.schema.point_table.row_count,
-        ),
-    ):
-        if not 0 <= index < size:
-            raise IndexError(f"{name} is outside the Dataset")
-
-    validity = block.validity
-    if isinstance(validity, (Valid, Invalid)):
-        cell_validity = validity
-    elif isinstance(validity, CellValidity):
-        cell_validity = (
-            VALID
-            if bool(validity.mask[repeat_index, point_ordinal])
-            else INVALID
-        )
-    elif isinstance(validity, DatasetComponentValidity):
-        cell_validity = ComponentValidity(
-            validity.axis_ids,
-            validity.mask[repeat_index, point_ordinal],
-        )
-    else:  # pragma: no cover - DataBlock validation closes the union
-        raise TypeError("DataBlock validity has an unsupported type")
-    return Value(
-        block.values[repeat_index, point_ordinal],
-        cell_validity,
-        block.schema.cell_schema,
-    )
-
-
-def expand_value_validity(
-    validity: Valid | Invalid | ComponentValidity,
-    schema: ValueSchema,
-) -> np.ndarray:
-    """Return an AxisId-aware read-only validity view over ``schema.data_shape``."""
-
-    _validate_value_validity(validity, schema)
-    if isinstance(validity, (Valid, Invalid)):
-        return np.broadcast_to(isinstance(validity, Valid), schema.data_shape)
-    positions = _axis_positions(validity.axis_ids, schema)
-    broadcast_shape = [1] * len(schema.data_axes)
-    for mask_index, axis_position in enumerate(positions):
-        broadcast_shape[axis_position] = validity.mask.shape[mask_index]
-    return np.broadcast_to(validity.mask.reshape(tuple(broadcast_shape)), schema.data_shape)
-
-
-def expand_component_validity(
-    validity: Valid | Invalid | ComponentValidity,
-    schema: ValueSchema,
-) -> np.ndarray:
-    """Return validity over the schema's declared component axes only.
-
-    This is the canonical mask stored by materialization, independent of whether
-    a producer supplied a scalar Valid/Invalid marker or a mask over a smaller
-    named-axis subset.
-    """
-
-    _validate_value_validity(validity, schema)
-    contract = schema.validity_contract
-    if contract.mode is not ValidityMode.COMPONENTS:
-        raise ValueError("component validity expansion requires a COMPONENTS contract")
-    declared = contract.component_axis_ids
-    declared_shape = tuple(schema.axis(axis_id).size for axis_id in declared)
-    if isinstance(validity, (Valid, Invalid)):
-        return np.broadcast_to(isinstance(validity, Valid), declared_shape)
-    positions = tuple(declared.index(axis_id) for axis_id in validity.axis_ids)
-    broadcast_shape = [1] * len(declared)
-    for mask_index, declared_position in enumerate(positions):
-        broadcast_shape[declared_position] = validity.mask.shape[mask_index]
-    return np.broadcast_to(validity.mask.reshape(tuple(broadcast_shape)), declared_shape)
-
-
 def expand_dataset_validity(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
@@ -454,7 +316,7 @@ def _axis_positions(axis_ids: tuple[AxisId, ...], schema: ValueSchema) -> tuple[
 
 
 def _validate_component_axes(
-    validity: ComponentValidity | DatasetComponentValidity,
+    validity: DatasetComponentValidity,
     schema: ValueSchema,
 ) -> tuple[int, ...]:
     if schema.validity_contract.mode is not ValidityMode.COMPONENTS:
@@ -463,22 +325,6 @@ def _validate_component_axes(
     if any(axis_id not in declared for axis_id in validity.axis_ids):
         raise ValueError("component validity uses an axis absent from the schema contract")
     return _axis_positions(validity.axis_ids, schema)
-
-
-def _validate_value_validity(
-    validity: Valid | Invalid | ComponentValidity,
-    schema: ValueSchema,
-) -> None:
-    if isinstance(validity, (Valid, Invalid)):
-        return
-    if not isinstance(validity, ComponentValidity):
-        raise TypeError("Value validity must be Valid, Invalid, or ComponentValidity")
-    positions = _validate_component_axes(validity, schema)
-    expected = tuple(schema.data_axes[index].size for index in positions)
-    if validity.mask.shape != expected:
-        raise ValueError(
-            f"component validity shape {validity.mask.shape} does not match named axes {expected}"
-        )
 
 
 def _validate_dataset_validity(
@@ -513,12 +359,8 @@ __all__ = [
     "OwnedSnapshot",
     "StreamGenerationId",
     "VALID",
-    "Value",
-    "ValuePayloadContract",
     "compact_dataset_validity",
-    "dataset_cell_value",
     "expand_dataset_validity",
     "expand_snapshot_validity",
-    "expand_value_validity",
     "owned_snapshot_from_arrays",
 ]

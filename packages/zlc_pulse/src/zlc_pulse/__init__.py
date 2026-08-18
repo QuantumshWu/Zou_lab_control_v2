@@ -55,9 +55,6 @@ from .scan import (  # noqa: E402
 )
 from .transport import (  # noqa: E402
     MemoryRegisterTransport,
-    UartError,
-    UartRegisterTransport,
-    VivadoAxiRegisterTransport,
 )
 
 # This is the final user-facing package surface.  Keep implementation types
@@ -84,8 +81,6 @@ __all__ = [
     "compile_sequence",
     "pulse_target_from_xdc",
     "load_streamer_config",
-    "UartRegisterTransport",
-    "VivadoAxiRegisterTransport",
     "MemoryRegisterTransport",
     "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_HOST",
@@ -108,18 +103,15 @@ __all__ = [
     "scan_rows_to_wire",
     "scan_rows_from_wire",
     "RemoteError",
-    "UartError",
-    "BackendResolutionError",
     "__version__",
 ]
 
 
 def __getattr__(name: str):
     if name in {
-        "RemotePulseStreamer", "RemoteError", "BackendResolutionError", "serve", "connect",
+        "RemotePulseStreamer", "RemoteError", "serve", "connect",
     }:
         from .remote import (
-            BackendResolutionError,
             RemoteError,
             RemotePulseStreamer,
             connect,
@@ -130,7 +122,6 @@ def __getattr__(name: str):
             {
                 "RemotePulseStreamer": RemotePulseStreamer,
                 "RemoteError": RemoteError,
-                "BackendResolutionError": BackendResolutionError,
                 "serve": serve,
                 "connect": connect,
             }

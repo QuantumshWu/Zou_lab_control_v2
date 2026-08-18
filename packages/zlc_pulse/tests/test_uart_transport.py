@@ -8,8 +8,6 @@ a sync pair.  That frame is never acknowledged.
 
 from __future__ import annotations
 
-import tempfile
-
 
 def test_a_frame_the_board_never_answered_is_sent_again() -> None:
     """One mis-sampled stop bit and the bridge abandons that frame.
@@ -60,7 +58,7 @@ def test_a_frame_the_board_never_answered_is_sent_again() -> None:
             return framing.encode_reply(request[3], framing.ST_OK, (0,))
 
     link = _LossyLink()
-    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=link)
+    transport = UartRegisterTransport(link=link)
     transport.start()
 
     rows = tuple((100 + index, index) for index in range(0, 40, 2))
@@ -92,7 +90,7 @@ def test_a_command_strobe_is_never_sent_twice() -> None:
         def write_batch(self, requests, *, deadline, stop=None):
             return []
 
-    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=_SilentLink())
+    transport = UartRegisterTransport(link=_SilentLink())
     transport.start()
     with pytest.raises(TimeoutError, match="1 attempt"):
         transport.write_words(((1, 0), (1, 8)), resend=False)
@@ -142,7 +140,7 @@ def test_resending_happens_while_there_is_still_time_to_resend() -> None:
             ]
 
     link = _RealisticallyLossyLink()
-    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=link)
+    transport = UartRegisterTransport(link=link)
     transport.start()
     transport.write_words(tuple((100 + index, index) for index in range(10)))
 
@@ -190,7 +188,7 @@ def test_a_damaged_acknowledgement_means_send_that_frame_again() -> None:
                 replies[0] = bytes(damaged)
             return replies
 
-    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=_CorruptingLink())
+    transport = UartRegisterTransport(link=_CorruptingLink())
     transport.start()
     transport.write_words(((7, 1), (9, 2)))
     assert transport.resends == 1
@@ -228,7 +226,7 @@ def test_a_rejected_strobe_is_provably_unexecuted_and_may_go_again() -> None:
             ]
 
     link = _RejectingOnceLink()
-    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=link)
+    transport = UartRegisterTransport(link=link)
     transport.start()
     # resend=False is the strobe contract, and a rejected strobe still goes again.
     transport.write_words(((1, 0), (1, 8)), resend=False)
@@ -278,6 +276,6 @@ def test_a_retry_costs_milliseconds_not_seconds() -> None:
 
         def close(self) -> None: ...
 
-    transport = UartRegisterTransport(state_dir=tempfile.mkdtemp(), link=_Idle())
+    transport = UartRegisterTransport(link=_Idle())
     ten_frames = [framing.encode_write(index * 4, (0,), seq=index) for index in range(10)]
     assert transport._attempt_budget(ten_frames) < 0.2

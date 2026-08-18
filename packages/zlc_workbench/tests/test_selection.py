@@ -142,6 +142,18 @@ def _draw_area(host, *, span: tuple[float, float, float, float] = (0.3, 0.3, 0.7
         ).result()
 
 
+def _commit_x_range(host, low: float, high: float) -> None:
+    """Install through the public selector API, then deliver its commit event."""
+
+    operation = host._submit(
+        lambda: host._require_session().set_x_selector(
+            low, high, display=False, emit_change=False
+        ),
+        mode=_control_mode(),
+    ).result(timeout=15)
+    _emit(host, __import__("zlc_plot").SelectionChange.COMMITTED, operation.value)
+
+
 def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
     session, frames, image_panel
 ) -> None:
@@ -730,14 +742,7 @@ def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> N
                 plot.NumericRange(-1.0, 20.0),
             ).result(timeout=15)
             assert viewports and viewports[-1].ranges[0].domain == domain
-            host._submit(
-                lambda: host._require_session().commit_selector(
-                    plot.SelectorKind.X_RANGE,
-                    plot.NumericRange(1.0, 2.0),
-                    display=False,
-                ),
-                mode=_control_mode(),
-            ).result(timeout=15)
+            _commit_x_range(host, 1.0, 2.0)
 
             assert source.last_error is None, source.last_error
             assert bridge.last_error is None, bridge.last_error
@@ -772,14 +777,7 @@ def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
             plot.NumericRange(0.0, 1.0),
             plot.NumericRange(-1.0, 10.0),
         ).result(timeout=15)
-        host._submit(
-            lambda: host._require_session().commit_selector(
-                plot.SelectorKind.X_RANGE,
-                plot.NumericRange(0.0, 1.0),
-                display=False,
-            ),
-            mode=_control_mode(),
-        ).result(timeout=15)
+        _commit_x_range(host, 0.0, 1.0)
         assert seen == []
         assert viewports == []
         assert source.last_error is None

@@ -16,7 +16,6 @@ from zlc_atom.devices.camera.photoelectrons import (
     resolve_photoelectron_availability,
 )
 from zlc_atom.nodes._framework.descriptor import (
-    DeviceAccess,
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
@@ -231,20 +230,6 @@ def _build(
     )
 
 
-def _frames_preview(_values) -> tuple[NodePreviewSpec, ...]:
-    """What Start puts on screen: the cycle this run is about to take.
-
-    A cycle's frames are its point rows, one picture each, and that is true
-    of a cycle of one as much as a cycle of three.  Naming the kind by the
-    count made the panel change shape when an operator changed the count --
-    restart a measurement with three frames where there had been one and the
-    panel that was an image had to be rebuilt as a grid, losing everything
-    set on it.  One kind, whatever the count.
-    """
-
-    return (NodePreviewSpec(CAMERA_FRAMES_OUTPUT.name, "facet_grid"),)
-
-
 LOGIC_NODE = LogicNodeDescriptor(
     "camera_measurement",
     NodeKind.MEASUREMENT,
@@ -253,9 +238,9 @@ LOGIC_NODE = LogicNodeDescriptor(
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with
     # the acquisition configuration.
     outputs=(OutputSpec(CAMERA_FRAMES_OUTPUT.name, CAMERA_FRAMES_OUTPUT.contract_id),),
-    resolve_node_previews=_frames_preview,
+    node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT.name, "facet_grid"),),
     device_requirements=(
-        DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
+        DeviceRequirement("camera.adapter", "camera"),
     ),
     build=_build,
     selection_mappings=(_IMAGE_AREA_TO_ROI,),

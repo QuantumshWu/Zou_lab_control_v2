@@ -33,9 +33,8 @@ invariants live in `docs/SYSTEM_ARCHITECTURE_DESIGN_zh.md` and
   implement, write bitstream + probes.
 - `program_fpga.tcl`: program the device with the generated `.bit`/`.ltx`.
 - `diagnose_hw_target.tcl`: non-destructive hardware-target diagnostic.
-- The host-side wire contract lives in `src/zlc_pulse/wire.py`; the cycle model
-  lives in `src/zlc_pulse/engine_model.py`. The old `host/` tree is deliberately
-  absent here so there is one Python owner for packing and modeling.
+- The host-side wire contract lives in `src/zlc_pulse/wire.py`. The old `host/`
+  tree is deliberately absent so there is one Python owner for packing.
 - `sim/`: xsim (Vivado simulator) testbenches that run the REAL RTL --- and,
   where it matters, the real block-RAM IP netlists --- covering the prefetch
   pipeline, seamless scan wrap, event-scheduler delays, ramp scans, DA clock

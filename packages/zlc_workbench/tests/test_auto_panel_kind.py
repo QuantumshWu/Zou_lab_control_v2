@@ -182,14 +182,9 @@ def test_a_measurement_declares_the_plot_its_own_start_opens() -> None:
 
     descriptors = {value.api_name: value for value in discover_logic_nodes()}
     camera = descriptors["camera_measurement"]
-    values = {field.name: field.default for field in camera.authoring_schema.fields}
-
-    single = camera.previews_for({**values, "frames_per_cycle": 1})
-    assert tuple((spec.output_name, spec.plot_kind) for spec in single) == (
-        ("frames", "facet_grid"),
-    )
-    several = camera.previews_for({**values, "frames_per_cycle": 3})
-    assert tuple((spec.output_name, spec.plot_kind) for spec in several) == (
+    assert tuple(
+        (spec.output_name, spec.plot_kind) for spec in camera.node_previews
+    ) == (
         ("frames", "facet_grid"),
     )
 

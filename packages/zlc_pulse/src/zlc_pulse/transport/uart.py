@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import math
-from pathlib import Path
 import threading
 import time
 from typing import Protocol
 
-from ..wire import CtrlWords
 from . import uart_frame as framing
 from .base import UART_OBSERVER_INTERVAL, TransportAborted
 
@@ -141,15 +139,12 @@ class UartRegisterTransport:
     def __init__(
         self,
         *,
-        state_dir: str | Path,
         link: UartLink | None = None,
         port: str | None = None,
         baud: int = 3_000_000,
         action_timeout: float = 5.0,
         max_frame_words: int = framing.MAX_FRAME_WORDS,
     ) -> None:
-        self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
         if isinstance(action_timeout, bool) or not isinstance(action_timeout, (int, float)) or not math.isfinite(float(action_timeout)) or action_timeout <= 0:
             raise ValueError("action_timeout must be positive and finite")
         self.action_timeout = float(action_timeout)
@@ -423,31 +418,6 @@ class UartRegisterTransport:
                 raise UartError(f"UART read reply was invalid (status=0x{status:02X})")
             return int(words[0]) & 0xFFFFFFFF
         raise UartError(f"UART read failed ({last or 'no attempt ran'})")
-
-    def rewrite_scan_bank(
-        self,
-        *,
-        unarmed_bank_ready: int,
-        bank_words: Sequence[tuple[int, int]],
-        chunk_word: int,
-        chunk_index: int,
-        rearmed_bank_ready: int,
-        stop: threading.Event | None = None,
-        deadline: float | None = None,
-    ) -> None:
-        if chunk_word not in (CtrlWords.BANK0_CHUNK, CtrlWords.BANK1_CHUNK):
-            raise ValueError("invalid scan chunk register")
-        absolute = self._deadline(deadline)
-        self.write_words(((CtrlWords.BANK_READY, unarmed_bank_ready),), stop=stop, deadline=absolute)
-        self.write_words(tuple(bank_words), stop=stop, deadline=absolute)
-        self.write_words(((chunk_word, chunk_index),), stop=stop, deadline=absolute)
-        self.write_words(((CtrlWords.BANK_READY, rearmed_bank_ready),), stop=stop, deadline=absolute)
-
-    def record_diagnostic(self, name: str, text: str) -> None:
-        try:
-            (self.state_dir / f"{name}.log").write_text(text, encoding="utf-8", errors="replace")
-        except OSError:
-            pass
 
     def _deadline(self, value: float | None, *, frames: int = 1, words: int = 1) -> float:
         """When this transaction has waited long enough.

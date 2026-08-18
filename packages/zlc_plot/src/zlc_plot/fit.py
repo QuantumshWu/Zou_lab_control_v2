@@ -558,116 +558,6 @@ class FitOptions:
             object.__setattr__(self, "deadline_seconds", deadline)
 
 
-@dataclass(frozen=True, slots=True)
-class FitNumericTable:
-    """Pure numeric fit columns shared by single fits and facet batches.
-
-    ``source_revision`` identifies the data used by the solver.  The
-    independent ``batch_revision`` identifies this publication and is the
-    revision a downstream derived-data stream must advance monotonically.
-    """
-
-    parameter_names: tuple[str, ...]
-    parameter_units: Mapping[str, str]
-    parameter_values: Mapping[str, np.ndarray]
-    parameter_errors: Mapping[str, np.ndarray]
-    parameter_error_validity: Mapping[str, np.ndarray]
-    success: np.ndarray
-    sample_axis_name: str
-    sample_coordinates: np.ndarray
-    sample_unit: str
-    sample_labels: tuple[str, ...] | None
-    source_revision: int
-    batch_revision: int
-
-    def __post_init__(self) -> None:
-        names = tuple(_text(name, "fit table parameter name") for name in self.parameter_names)
-        if len(names) != len(set(names)):
-            raise ValueError("fit table parameter names must be unique")
-        units = dict(self.parameter_units)
-        if set(units) != set(names):
-            raise ValueError("fit table parameter units must match parameter names")
-        units = {
-            name: _text(units[name], f"fit table unit {name}", allow_empty=True)
-            for name in names
-        }
-        values = _numeric_fit_columns(self.parameter_values, names, "values")
-        errors = _numeric_fit_columns(self.parameter_errors, names, "errors")
-        error_validity = _boolean_fit_columns(
-            self.parameter_error_validity,
-            names,
-            "error validity",
-        )
-        success = np.asarray(self.success, dtype=np.bool_).reshape(-1)
-        count = int(success.size)
-        if any(column.size != count for column in (*values.values(), *errors.values())):
-            raise ValueError("fit table columns must have equal length")
-        if any(column.size != count for column in error_validity.values()):
-            raise ValueError("fit table error-validity columns must have equal length")
-        for name in names:
-            value_column = values[name]
-            error_column = errors[name]
-            valid_error = error_validity[name]
-            if np.any(success & ~np.isfinite(value_column)):
-                raise ValueError(
-                    f"fit table successful values for {name!r} must be finite"
-                )
-            if np.any(~success & np.isfinite(value_column)):
-                raise ValueError(
-                    f"fit table failed values for {name!r} must be NaN"
-                )
-            expected_error_validity = success & np.isfinite(error_column)
-            if not np.array_equal(valid_error, expected_error_validity):
-                raise ValueError(
-                    f"fit table error validity for {name!r} disagrees with values"
-                )
-            if np.any(~valid_error & np.isfinite(error_column)):
-                raise ValueError(
-                    f"fit table invalid errors for {name!r} must be NaN"
-                )
-            if np.any(valid_error & (error_column < 0.0)):
-                raise ValueError(
-                    f"fit table valid errors for {name!r} cannot be negative"
-                )
-        success = _readonly(success)
-        coordinates = np.asarray(self.sample_coordinates, dtype=np.float64).reshape(-1)
-        if coordinates.size != count or not np.all(np.isfinite(coordinates)):
-            raise ValueError("fit table sample coordinates must match success")
-        labels = self.sample_labels
-        if labels is not None:
-            labels = tuple(_text(label, "fit table sample label") for label in labels)
-            if len(labels) != count:
-                raise ValueError("fit table sample labels must match coordinates")
-        axis_name = _text(self.sample_axis_name, "fit table sample axis name", allow_empty=True)
-        unit = _text(self.sample_unit, "fit table sample unit", allow_empty=True)
-        if unit == "1":
-            unit = ""
-        source_revision = integer(self.source_revision, "fit table source_revision")
-        batch_revision = integer(self.batch_revision, "fit table batch_revision")
-        if source_revision < 0:
-            raise ValueError("fit table source_revision must be non-negative")
-        if batch_revision < 0:
-            raise ValueError("fit table batch_revision must be non-negative")
-        if labels is None and unit and not axis_name:
-            raise ValueError("unit-bearing sample coordinates require an axis name")
-        object.__setattr__(self, "parameter_names", names)
-        object.__setattr__(self, "parameter_units", MappingProxyType(units))
-        object.__setattr__(self, "parameter_values", MappingProxyType(values))
-        object.__setattr__(self, "parameter_errors", MappingProxyType(errors))
-        object.__setattr__(
-            self,
-            "parameter_error_validity",
-            MappingProxyType(error_validity),
-        )
-        object.__setattr__(self, "success", success)
-        object.__setattr__(self, "sample_axis_name", axis_name)
-        object.__setattr__(self, "sample_coordinates", _readonly(coordinates))
-        object.__setattr__(self, "sample_unit", unit)
-        object.__setattr__(self, "sample_labels", labels)
-        object.__setattr__(self, "source_revision", source_revision)
-        object.__setattr__(self, "batch_revision", batch_revision)
-
-
 def _readonly(array: np.ndarray) -> np.ndarray:
     source = np.ascontiguousarray(array)
     backing: object = source
@@ -722,87 +612,6 @@ class _DeferredFitData:
                 self._arrays = (fitted, residuals, indices)
                 self._loader = None
             return self._arrays
-
-
-def _numeric_fit_columns(
-    columns: Mapping[str, np.ndarray],
-    names: tuple[str, ...],
-    label: str,
-) -> dict[str, np.ndarray]:
-    if not isinstance(columns, Mapping) or set(columns) != set(names):
-        raise ValueError(f"fit table parameter {label} must match parameter names")
-    normalized: dict[str, np.ndarray] = {}
-    for name in names:
-        values = np.asarray(columns[name], dtype=np.float64).reshape(-1)
-        normalized[name] = _readonly(values)
-    return normalized
-
-
-def _boolean_fit_columns(
-    columns: Mapping[str, np.ndarray],
-    names: tuple[str, ...],
-    label: str,
-) -> dict[str, np.ndarray]:
-    if not isinstance(columns, Mapping) or set(columns) != set(names):
-        raise ValueError(f"fit table parameter {label} must match parameter names")
-    normalized: dict[str, np.ndarray] = {}
-    for name in names:
-        values = np.asarray(columns[name], dtype=np.bool_).reshape(-1)
-        normalized[name] = _readonly(values)
-    return normalized
-
-
-def _make_fit_numeric_table(
-    *,
-    parameter_names: tuple[str, ...],
-    parameter_units: Mapping[str, str],
-    parameter_values: Mapping[str, np.ndarray],
-    parameter_errors: Mapping[str, np.ndarray],
-    success: np.ndarray,
-    sample_axis_name: str,
-    sample_coordinates: np.ndarray,
-    sample_unit: str,
-    sample_labels: tuple[str, ...] | None,
-    source_revision: int,
-    batch_revision: int,
-) -> FitNumericTable:
-    """Construct the one numeric-table shape for scalar and facet fits."""
-
-    successful = np.asarray(success, dtype=np.bool_).reshape(-1)
-    values = {
-        name: np.where(
-            successful,
-            np.asarray(parameter_values[name], dtype=np.float64).reshape(-1),
-            np.nan,
-        )
-        for name in parameter_names
-    }
-    errors = {
-        name: np.asarray(parameter_errors[name], dtype=np.float64).reshape(-1)
-        for name in parameter_names
-    }
-    error_validity = {
-        name: successful & np.isfinite(errors[name])
-        for name in parameter_names
-    }
-    errors = {
-        name: np.where(error_validity[name], errors[name], np.nan)
-        for name in parameter_names
-    }
-    return FitNumericTable(
-        parameter_names=parameter_names,
-        parameter_units=parameter_units,
-        parameter_values=values,
-        parameter_errors=errors,
-        parameter_error_validity=error_validity,
-        success=successful,
-        sample_axis_name=sample_axis_name,
-        sample_coordinates=sample_coordinates,
-        sample_unit=sample_unit,
-        sample_labels=sample_labels,
-        source_revision=source_revision,
-        batch_revision=batch_revision,
-    )
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -1035,32 +844,6 @@ class FitResult:
     @property
     def success_mask(self) -> np.ndarray:
         return _readonly(np.asarray((self.success,), dtype=np.bool_))
-
-    @property
-    def table(self) -> FitNumericTable:
-        return _make_fit_numeric_table(
-            parameter_names=self.parameter_names,
-            parameter_units=self.parameter_units,
-            parameter_values={
-                name: np.asarray((float(self.parameter_values[index]),), dtype=np.float64)
-                for index, name in enumerate(self.parameter_names)
-            },
-            parameter_errors={
-                name: np.asarray((
-                    float(self.standard_errors[index])
-                    if self.covariance_valid
-                    else np.nan,
-                ), dtype=np.float64)
-                for index, name in enumerate(self.parameter_names)
-            },
-            success=self.success_mask,
-            sample_axis_name="",
-            sample_coordinates=np.asarray((0.0,), dtype=np.float64),
-            sample_unit="",
-            sample_labels=None,
-            source_revision=self.source_revision,
-            batch_revision=self.batch_revision,
-        )
 
     def _clone(self, **overrides: Any) -> "FitResult":
         """Copy this result while preserving still-deferred arrays.
@@ -1426,23 +1209,6 @@ class FacetFitBatchResult:
             values.setflags(write=False)
             result[name] = values
         return MappingProxyType(result)
-
-    @property
-    def table(self) -> FitNumericTable:
-        return _make_fit_numeric_table(
-            parameter_names=self.parameter_names,
-            parameter_units=self.parameter_units,
-            parameter_values=self.parameter_values,
-            parameter_errors=self.parameter_errors,
-            success=self.success,
-            sample_axis_name=self.sample_axis_name,
-            sample_coordinates=self.sample_coordinates,
-            sample_unit=self.sample_unit,
-            sample_labels=self.sample_labels,
-            source_revision=self.source_revision,
-            batch_revision=self.batch_revision,
-        )
-
 
 class FitEngine:
     def __init__(self, registry: FitModelRegistry | None = None) -> None:
@@ -2961,7 +2727,6 @@ __all__ = [
     "FitDeadlineExceeded",
     "FitEngine",
     "FacetFitBatchResult",
-    "FitNumericTable",
     "FitModelRegistry",
     "FitModelSpec",
     "FitOptions",

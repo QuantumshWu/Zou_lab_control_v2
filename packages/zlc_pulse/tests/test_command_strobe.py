@@ -357,34 +357,6 @@ def test_the_description_survives_the_wire() -> None:
         streamer.close()
 
 
-def test_a_slot_value_the_multiplier_cannot_hold_is_refused() -> None:
-    """The host used to predict a schedule the board would not play.
-
-    The RTL takes the low 25 signed bits of a slot value; only the RTL mirror
-    narrowed them, so the compiler computed one tick, the validator approved it,
-    and the board played another.  They agree now -- which means they agree on
-    something nobody asked for, so a value that does not fit is refused instead.
-    """
-
-    from zlc_pulse.compile import (
-        evaluate_affine_tick,
-        narrow_slot_operand,
-        slot_operand_width,
-    )
-    from zlc_pulse.engine_model import effective_tick
-
-    width = slot_operand_width()
-    over = 1 << width
-
-    assert narrow_slot_operand(over) == 0
-    assert narrow_slot_operand(7) == 7
-    # One arithmetic, so the host cannot predict what the board will not play.
-    for value in (7, over, over + 5, -over):
-        assert evaluate_affine_tick(0, (1,), (value,), 0) == effective_tick(
-            0, (1,), (value,), 0
-        )
-
-
 def test_the_host_refills_one_chunk_ahead_of_the_cursor() -> None:
     """The contract the RTL is built to, and the cycle model implements.
 

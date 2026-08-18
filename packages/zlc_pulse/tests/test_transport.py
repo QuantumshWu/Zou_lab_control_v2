@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import sys
 
-from zlc_pulse.transport import InterprocessDeviceLease, VivadoAxiRegisterTransport
+from zlc_pulse.transport import VivadoAxiRegisterTransport
 from zlc_pulse.transport import uart_frame as framing
 from zlc_pulse.transport.axi import JTAG_AXI_OBSERVER_INTERVAL
 from zlc_pulse.transport.uart import PySerialLink, UartError, UartRegisterTransport
@@ -48,23 +48,6 @@ def test_axi_burst_split_preserves_4kb_boundary(tmp_path) -> None:
     assert len(writes) == 2
     assert "-address 00000FFC" in writes[0]
     assert "-address 00001000" in writes[1]
-
-
-def test_device_lease_is_exclusive_until_release(tmp_path) -> None:
-    first = InterprocessDeviceLease(tmp_path / "pulse.lock")
-    second = InterprocessDeviceLease(tmp_path / "pulse.lock")
-    first.acquire()
-    try:
-        try:
-            second.acquire()
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("a second lease acquired the same device")
-    finally:
-        first.release()
-    second.acquire()
-    second.release()
 
 
 def test_uart_open_disables_modem_control_lines_before_any_write(monkeypatch) -> None:
@@ -112,7 +95,7 @@ def test_uart_crc_status_is_reported_as_crc_error(tmp_path) -> None:
             del requests, deadline, stop
             return []
 
-    transport = UartRegisterTransport(state_dir=tmp_path, link=FakeLink())
+    transport = UartRegisterTransport(link=FakeLink())
     transport.start()
     try:
         try:

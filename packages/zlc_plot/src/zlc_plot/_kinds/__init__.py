@@ -111,18 +111,6 @@ def fitting_spec(schema: Any, kind: Any = None, *, cell: Any = None) -> Any:
     return None
 
 
-def panel_kinds() -> tuple[tuple[str, str], ...]:
-    """Every plot kind as (value, display name), in registry order.
-
-    One listing.  A window that types its own list offers kinds that may not
-    exist and misses ones that do -- the console's kind picker held a single
-    hardcoded entry while six kinds were registered.
-    """
-
-    return tuple((handler.kind.value, handler.display_name) for handler in HANDLERS)
-
-
 __all__ = [
     "HANDLERS", "KindHandler", "default_spec", "fitting_spec", "handler_for",
-    "panel_kinds",
 ]

@@ -14,7 +14,7 @@ non-standard UI dependency beyond PyQt5 is the reference
    data concepts such as `Dataset`, `Signal`, `Device`, `Pulse`, `Plot`,
    `matplotlib`, or `numpy`.
 2. This package owns the first two layers only:
-   - **Pure controls** (`fluent`, `form`, `board`, `graph`, and
+   - **Pure controls** (`fluent`, `form`, `board`, and
      `concurrency`) are domain-independent building blocks.
    - **Pure views** (`console` and other view packages) expose operator intent
      through `*_requested`, `*_picked`, and `*_committed` signals and accept
@@ -115,7 +115,6 @@ The package is organized as follows:
   reusable `frameless_content_top_margin()` native-titlebar boundary metric.
 - `zlc_ui.form` — Qt-free form specifications plus their Qt projection.
 - `zlc_ui.board` — domain-independent card geometry.
-- `zlc_ui.graph` — generic flow graph and text-shape helpers.
 - `zlc_ui.concurrency` — reusable Qt owner-wake primitives.
 - `zlc_ui.ensure_qt_app` — the single QApplication/HiDPI/Fluent-scale entry
   point; call it before constructing any zlc_ui widget or enabling `%gui qt`.
@@ -137,7 +136,6 @@ The package is organized as follows:
 
 Detailed view signatures are maintained in `docs/console-views.md`, including
 the device-manager contract.
-The source-size comparison is recorded in `docs/loc-report.md`.
 
 ## FormRuntimeContext
 

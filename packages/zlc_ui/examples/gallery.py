@@ -25,7 +25,6 @@ import zlc_ui.concurrency as _concurrency  # noqa: E402
 import zlc_ui.console as _console  # noqa: E402
 import zlc_ui.fluent as _fluent  # noqa: E402
 import zlc_ui.form as _form  # noqa: E402
-import zlc_ui.graph as _graph  # noqa: E402
 import zlc_ui.pulse as _pulse  # noqa: E402
 from zlc_ui import (  # noqa: E402
     BoardMetrics,
@@ -45,7 +44,6 @@ FluentCheckBox = _fluent.FluentCheckBox
 FluentCodeEdit = _fluent.FluentCodeEdit
 FluentComboBox = _fluent.FluentComboBox
 FluentDoubleSpinBox = _fluent.FluentDoubleSpinBox
-FluentFormGrid = _fluent.FluentFormGrid
 FluentFrame = _fluent.FluentFrame
 FluentGroupBox = _fluent.FluentGroupBox
 FluentLabel = _fluent.FluentLabel
@@ -78,10 +76,6 @@ scaled_px = _fluent.scaled_px
 WINDOW_SCREEN_FRACTION = _fluent.WINDOW_SCREEN_FRACTION
 window_pad = _fluent.window_pad
 FluentParameterForm = _form.FluentParameterForm
-FlowGraph = _graph.FlowGraph
-FlowGraphEdge = _graph.FlowGraphEdge
-FlowGraphNode = _graph.FlowGraphNode
-FlowGraphView = _graph.FlowGraphView
 FluentScanLineEdit = _pulse.FluentScanLineEdit
 
 
@@ -204,7 +198,6 @@ class _GalleryBody(QtWidgets.QWidget):
         layout.addWidget(self._build_pulse_binding_section())
         layout.addWidget(self._build_board_section())
         layout.addWidget(self._build_tabs_section())
-        layout.addWidget(self._build_graph_section())
         layout.addWidget(self._build_info_section())
         layout.addWidget(self._heading("3", "完整 GUI 示例", "下面四个页面直接使用正式 demo 的 build_demo()；独立窗口使用同一套 create_window()。"))
         layout.addWidget(self._build_gui_examples_section())
@@ -309,16 +302,12 @@ class _GalleryBody(QtWidgets.QWidget):
         return card
 
     def _build_status_form_section(self) -> QWidget:
-        card, inner = self._section("组合：FluentStatusStrip + FluentFormGrid")
+        card, inner = self._section("组合：FluentStatusStrip")
         status = FluentStatusStrip(action_text="Review")
         status.show_message("task: fake acquisition is ready", severity="task")
         status.set_action_visible(True)
         inner.addWidget(self._named("FluentStatusStrip", status))
 
-        grid = FluentFormGrid(label_width=scaled_px(84, minimum=72))
-        grid.add_row("Rows", FluentLineEdit("aligned"))
-        grid.add_row("Readout", FluentReadoutEdit("read-only text"))
-        inner.addWidget(self._named("FluentFormGrid", grid))
         return card
 
     def _build_pulse_binding_section(self) -> QWidget:
@@ -521,34 +510,6 @@ class _GalleryBody(QtWidgets.QWidget):
         )
         tabs.setMinimumHeight(130)
         inner.addWidget(self._named("FluentTabWidget", tabs))
-        return card
-
-    def _build_graph_section(self) -> QWidget:
-        card, inner = self._section("Plain flow graph projection")
-        graph_view = FlowGraphView(
-            role_styles={
-                "producer": (ACCENT, "#4A7BA6"),
-                "processor": (GREEN, "#4E8B77"),
-                "view": (GREY, "#7C7C7C"),
-                "device": (ORANGE, "#A9743F"),
-            },
-            compact_roles=frozenset({"device"}),
-        )
-        graph_view.setMinimumHeight(230)
-        graph_view.set_graph(
-            FlowGraph(
-                nodes=(
-                    FlowGraphNode("source", "Fake source", "producer"),
-                    FlowGraphNode("transform", "Fake transform", "processor"),
-                    FlowGraphNode("panel", "Fake panel", "view"),
-                ),
-                edges=(
-                    FlowGraphEdge("source", "transform", "temperature", (1,)),
-                    FlowGraphEdge("transform", "panel", "smoothed", (1,)),
-                ),
-            )
-        )
-        inner.addWidget(self._named("FlowGraphView", graph_view))
         return card
 
     def _build_info_section(self) -> QWidget:

@@ -20,16 +20,11 @@ class DeviceClaim:
     argument_name: str
     device_key: str
     device: object = field(compare=False)
-    access: object
-
-
-def _exclusive(claim: DeviceClaim) -> bool:
-    return str(getattr(claim.access, "value", claim.access)) == "exclusive"
 
 
 def _conflict(left: Sequence[DeviceClaim], right: Sequence[DeviceClaim]) -> bool:
     return any(
-        first.device is second.device and _exclusive(first) and _exclusive(second)
+        first.device is second.device
         for first in left
         for second in right
     )

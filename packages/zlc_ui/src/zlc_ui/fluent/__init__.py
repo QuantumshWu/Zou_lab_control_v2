@@ -30,7 +30,7 @@ for _name in (
     "FluentCodeEdit", "FluentDoubleSpinBox", "FluentCheckBox", "FluentScrollArea",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "bind_body_close", "launch_qt_window", "launch_fluent_window",
     "open_fluent_window",
-    "Metrics", "measure_text_width", "ElidedLabel", "FluentStatusStrip", "FluentFormGrid",
+    "Metrics", "measure_text_width", "ElidedLabel", "FluentStatusStrip",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (

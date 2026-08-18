@@ -1269,35 +1269,6 @@ class ConsolePresenter:
         for node_id in tuple(self.logic):
             self.refresh_logic_editor(node_id)
 
-    def retarget_panel(self, panel_id: str, signal: str) -> bool:
-        """Point one fixed-kind panel at a different compatible signal."""
-
-        return self.update_panel_state(panel_id, {"signal": str(signal)})
-
-    def resize_panel(self, panel_id: str, size: str) -> bool:
-        """One panel's size preset, applied to the plot as well as the card.
-
-        The card and the figure inside it have to agree: a card resized around
-        a figure that stayed 2x2 is a big card with a small picture in it.
-        """
-
-        return self.update_panel_state(panel_id, {"size": str(size)})
-
-    def set_panel_interval(self, panel_id: str, interval_ms: int) -> bool:
-        """How often one panel redraws.
-
-        Per panel, not per board: a camera worth watching at 10 Hz sits beside
-        a fit result that changes once a run, and one interval for both either
-        wastes the machine or hides the camera.
-        """
-
-        return self.update_panel_state(
-            panel_id, {"interval_ms": int(interval_ms)}
-        )
-
-    def rename_panel(self, panel_id: str, title: str) -> bool:
-        return self.update_panel_state(panel_id, {"title": str(title)})
-
     def edit_panel(self, panel_id: str) -> bool:
         """Open or focus the panel's non-modal Edit projection.
 
@@ -2072,10 +2043,7 @@ class ConsolePresenter:
 
         if binding.host is not None:
             return tuple(binding.host.dataset_output_declarations)
-        try:
-            return tuple(binding.descriptor.outputs_for(binding.draft.values))
-        except (TypeError, ValueError):
-            return ()
+        return tuple(binding.descriptor.outputs)
 
     def panel_editor_projection(self, panel_id: str) -> dict[str, Any] | None:
         """Plain, widget-free state consumed by the non-modal Panel Edit tab."""
@@ -4361,11 +4329,10 @@ class ConsolePresenter:
             extras=self._logic_extras(),
         )
         node = binding.descriptor.instantiate(**arguments)
-        previews = binding.descriptor.previews_for(finalization.values)
+        previews = tuple(binding.descriptor.node_previews)
         host = make_host(
             binding.descriptor,
             node,
-            authored_values=finalization.values,
             signal_plane=self.session.signal_plane,
             instance_id=binding.node_id,
             request_owner_wake=self.board.wake.request_owner_wake,
@@ -4375,7 +4342,6 @@ class ConsolePresenter:
                 requirement.argument_name,
                 finalization.device_keys[requirement.argument_name],
                 arguments[requirement.argument_name],
-                requirement.access,
             )
             for requirement in binding.descriptor.device_requirements
         )

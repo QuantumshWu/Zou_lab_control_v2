@@ -687,10 +687,6 @@ class NotebookView:
         )
         return None
 
-    def live_controller(self, contract: Any, *, refresh_interval_ms: int | None = None) -> Any:
-        self._host.wait_for_front()
-        return self._host.live_controller(contract, refresh_interval_ms=refresh_interval_ms)
-
     def close(self) -> None:
         if self._closed:
             return

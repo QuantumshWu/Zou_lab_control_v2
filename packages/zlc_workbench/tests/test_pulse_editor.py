@@ -979,7 +979,6 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
 
     view = _EditorView()
     board = _Sequencer()
-    from zlc_atom.nodes._framework.descriptor import DeviceAccess
     from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy, DeviceUseCoordinator
 
     device_use = DeviceUseCoordinator()
@@ -1005,7 +1004,6 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
                         "sequencer",
                         "sequencer",
                         board,
-                        DeviceAccess.EXCLUSIVE,
                     ),
                 ),
             )
@@ -1021,7 +1019,6 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
                     "sequencer",
                     "sequencer",
                     board,
-                    DeviceAccess.EXCLUSIVE,
                 ),
             ),
         )

@@ -1869,7 +1869,7 @@ class PulseEditorPresenter:
             self._drive_lease = self.device_use.acquire_command(
                 self._device_owner,
                 "PulseGUI",
-                (DeviceClaim("sequencer", "sequencer", self.sequencer, "exclusive"),),
+                (DeviceClaim("sequencer", "sequencer", self.sequencer),),
             )
         except DeviceUseBusy as error:
             self._warn(str(error))

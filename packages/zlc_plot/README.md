@@ -143,14 +143,12 @@ session.set_size("2x4")
 Live fit 的唯一自动触发源是新的 data revision，且每个数据帧是一个**对**：`update_data()`（以及宿主管线的 prepare → solve → commit）把 fit@N 求解到底并与 data@N 在同一张 front 上发布——帧生而完整，旧 overlay 永不出现在新数据上。求解慢只降低对速率（更新的数据只替换排队中的下一个对，在途的对总是跑完）；取消只发生在 re-arm、`replace_spec` 与 close。selector、viewport、unit 和 resize 只更新交互/显示层；需要立即按新选择重算时显式调用 `fit()`。
 
 Rolling 的静态快照也保留 R 轴的逐 shot 历史种子，因此 static 与 live 共用同一
-projection 语义；live 端仍以严格递增 revision 和 capacity-one latest-only lane
-提交新快照。Notebook 拖拽候选由 kernel 烘焙进单一 raster front，详见
-[`docs/acceptance-decisions-2026-08-04.md`](docs/acceptance-decisions-2026-08-04.md)。
+projection 语义；Runtime以严格递增revision提交新快照。Notebook拖拽候选由
+kernel烘焙进单一raster front。
 
 唯一的可执行教程 [`notebooks/usage.ipynb`](notebooks/usage.ipynb)
-包含六种 plot kind、交互 selector、fit、单位/limits/labels 热更新、Image point
-overlay、保存、真正持续更新且 non-block 的 live plot，以及从 Notebook 启动
-PyQt5 窗口。
+包含六种plot kind、交互selector、fit、单位/limits/labels热更新、Image point
+overlay、保存和直接revision更新。
 
 ## 快速显示参数更新
 
@@ -206,73 +204,14 @@ Histogram 的 `normal` / `fixed` bin domain 在 live revision 间只向越界一
 
 ## Live plot
 
-Static plot 是只接收一个 immutable payload 的 session；live plot 则通过同一个 session/render API 持续提交新 revision，因此 selector、viewport、单位、显示参数和 fit 的行为一致。常规 `(R, P, *data_dim)` live plot 直接发布固定 schema/generation、严格递增 revision 的 snapshot：
-
-```python
-import asyncio
-from zlc_data import owned_snapshot_from_arrays
-
-from zlc_plot import DEFAULTS
-
-live = view.live_controller(
-    schema,
-    refresh_interval_ms=DEFAULTS.live.default_refresh_interval_ms,
-)
-live.start()
-live_stop = asyncio.Event()
-
-async def publish_live():
-    revision = session.data_revision
-    while not live_stop.is_set():
-        revision += 1
-        live.publish(owned_snapshot_from_arrays(
-            schema=schema,
-            values=values * (1.0 + 0.08 * np.sin(0.2 * revision)),
-            revision=revision,
-        ))
-        await asyncio.sleep(DEFAULTS.live.refresh_intervals_ms[0] / 1000.0)
-
-live_task = asyncio.create_task(publish_live())
-```
-
-这段启动格立即返回，canvas 随后持续可见地更新。停止时先终止 producer，
-再以非阻塞请求停止 consumer；Notebook event loop 继续运行到 worker 退出：
-
-```python
-live_stop.set()
-await live_task
-live.stop(wait=False)
-while live.worker_alive:
-    await asyncio.sleep(0.01)
-live.close(timeout=0)
-```
-
-每个 cadence tick 只接纳 capacity-one ingress 中的 latest revision。新 data projection 完成后立即提交；若 live fit 已启用，同一 session 随后取消旧 solver并只拟合当前 revision，完成后以单独 overlay front 发布。新 data 绝不等待慢 fit，也不会带着旧 revision overlay；中间 producer revision 继续由 capacity-one ingress 合并。Area/X 拖动只更新交互场景，不进入 fit worker；只有显式 fit 或新的 data revision才会求解。只有应用显式 stop/pause 时，尚未呈现的 active revision 才会作为单个 latest 值保留给 resume/pump。可直接运行的
-PyQt5 持续 live 窗口是：
-
-```bash
-python examples/live_simulation.py
-```
-
-`PulseTimelineData` 本身不携带 producer revision；live transport 使用独立 immutable envelope，避免把可变采集状态塞进可复用 payload：
-
-```python
-from zlc_plot import LiveDataRevision, LivePlotController
-
-initial = LiveDataRevision(revision=0, payload=pulse_data)
-pulse_live = LivePlotController(pulse_session, initial)
-pulse_live.publish(LiveDataRevision(revision=1, payload=pulse_data))
-pulse_live.pump_once()  # 或 start() 后按配置 cadence 消费
-assert pulse_session.data_revision == 1
-pulse_live.close()
-```
-
-Pending capacity 固定为 1。Producer 不等待 render；当生产速度高于显示刷新时，只保留最新 revision。Envelope revision 会原样成为 session、selection event 与 selected data 的 data revision；PulseTimeline 直接调用 `update_data(pulse)` 时从当前 revision 自动加一。有无 automatic live fit 都使用同一个 `update_data()`；`LivePlotController.publish()` 只增加 capacity-one ingress 和 100/200/400/800 ms cadence（默认 100 ms，最高 10 Hz），不增加另一套 fit 状态机。
-
-`stop()` 停止 consumer 但不关闭 controller，可用 `start()` 恢复；`close()` 是终止并释放 ingress 的操作。Notebook 的持续 producer 与完整 cleanup 写法见唯一的 `notebooks/usage.ipynb`。
+`zlc_plot`只负责把调用方提交的immutable revision投影、拟合并生成
+`RasterFront`。完整run history、publication cadence、Stop和Final属于
+`zlc_runtime`；plot层不再维护第二个live channel、controller或worker。
+Workbench通过`RasterPlotHost.update_data()`提交Runtime已经选定的revision。
+Pulse timeline直接以不可变`PulseTimelineData`更新同一个session。
 
 鼠标 motion cadence、selector 命中半径和滚轮缩放倍率集中在
-`DEFAULTS.interaction`，与 live cadence 一样可以通过完整 defaults 对象配置。
+`DEFAULTS.interaction`。
 
 ## PyQt5 嵌入
 
@@ -328,13 +267,7 @@ Pulse preview 或嵌套 scroll area 可调用 `widget.set_interaction_enabled(Fa
 
 `widget.presented_front.buffer.save(path)` 保存当前屏幕已经显示的准确物理 RGBA 像素，不触发重绘；`plot_host.save(path, dpi=...)` 则按指定 DPI 正式重绘导出。
 
-必须在创建首个 `QApplication` 前调用 `ensure_qt5_application()`。它统一配置 PyQt5 High-DPI 属性并注册包内 Helvetica Light；固定 preset 的逻辑尺寸不变，而高 DPR 屏幕使用更多物理像素绘制同一 surface。首帧、live 更新和 preset 切换都通过 worker 内 session 的同一重绘路径进入 Qt QImage front。Live producer 使用 `plot_host.live_controller(initial)`，不会把 session 暴露给 UI thread。
-
-完整的外部控件、selector range/data、fit、单位、固定尺寸与 live 连接示例：
-
-```bash
-python examples/pyqt5_embed.py
-```
+必须在创建首个 `QApplication` 前调用 `ensure_qt5_application()`。它统一配置 PyQt5 High-DPI 属性并注册包内 Helvetica Light；固定 preset 的逻辑尺寸不变，而高 DPR 屏幕使用更多物理像素绘制同一 surface。首帧、Runtime提交的数据更新和preset切换都通过worker内session的同一重绘路径进入Qt QImage front。
 
 常规热更新与 1024²/2048² monitor-camera live profiling 结果及复现命令见
 [`docs/performance.md`](docs/performance.md)。
@@ -368,12 +301,11 @@ from zlc_data import owned_snapshot_from_arrays
 from zlc_plot import ImageFrame
 
 frame = ImageFrame(snapshot, overlay)
-image_live = image_view.live_controller(frame).start()
 next_frame = ImageFrame(
     owned_snapshot_from_arrays(schema=schema, values=values, revision=1),
     overlay,
 )
-image_live.publish(next_frame)
+image_session.update_data(next_frame)
 ```
 
 Image 的 equal-aspect 使用 canonical 单位的物理比例；例如 x 以 nm、y 以 µm 显示时，

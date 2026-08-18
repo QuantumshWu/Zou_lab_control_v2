@@ -54,9 +54,6 @@ class RegisterTransport(Protocol):
         deadline: float | None = None,
     ) -> int: ...
 
-    def record_diagnostic(self, name: str, text: str) -> None: ...
-
-
 __all__ = [
     "DEFAULT_OBSERVER_INTERVAL",
     "JTAG_AXI_OBSERVER_INTERVAL",

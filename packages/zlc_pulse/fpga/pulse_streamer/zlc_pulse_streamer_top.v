@@ -34,15 +34,14 @@
 //
 // 1-TICK: the build tcl forces the 3 edge BRAMs to READ_LATENCY_B = 2 so the
 // engine's RD_LAT=2 prefetch pipeline is deterministic and back-to-back 20 ns
-// edges play one per clock (see zlc_edge_streamer.v + engine_model proofs).
+// edges play one per clock (see zlc_edge_streamer.v and the xsim benches).
 //
 // Geometry localparams are computed by the SAME formulas as host.image.region_bases
 // (locked by test_final_top_regions_match_image); the create-project tcl derives
 // the BRAM IP geometry from host.image too.
 //
-// *** Structurally complete + contract-tested; the engine + control FSM are
-// checked by Python cycle models and targeted xsim benches; physical deployment
-// still requires on-board evidence. ***
+// *** Structurally complete; physical deployment still requires the automated
+// RTL and on-board evidence defined by the product architecture. ***
 // =============================================================================
 
 module zlc_pulse_streamer_top #(

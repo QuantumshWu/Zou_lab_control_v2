@@ -47,7 +47,6 @@ EXPECTED_FACADE = (
     "use_panel_display_sizes",
 )
 EXPECTED_PUBLIC = frozenset(name for name in EXPECTED_FACADE if not name.startswith("_"))
-MAX_PUBLIC_NAMES = 29
 
 #: GUIs still handed out as widget trees rather than opened behind a handle.
 #: Each entry is one window's worth of work, and removing the last one is what
@@ -59,7 +58,6 @@ NOT_YET_BEHIND_A_HANDLE = frozenset()
 #: notebook explains the window chrome itself; neither is a window reached
 #: around its handle.  A window's package may not be added here.
 STILL_REACHED_IN_THE_NOTEBOOK = ()
-REMOVED_FACADE_NAMES = ("FlowGraph", "FlowGraphEdge", "FlowGraphNode")
 
 
 def _real_public_names(package) -> frozenset[str]:
@@ -85,7 +83,6 @@ def test_facade_allow_list_and_concrete_public_namespace() -> None:
 
     public_names = _real_public_names(package)
     assert public_names == EXPECTED_PUBLIC
-    assert len(public_names) <= MAX_PUBLIC_NAMES
     assert "import_module" not in public_names
     assert "annotations" not in public_names
 
@@ -97,20 +94,6 @@ def test_contract_names_match_facade_bidirectionally() -> None:
     documented = tuple(re.findall(r'"([^"]+)"', match.group(1)))
     assert documented == EXPECTED_FACADE
     assert set(documented) == set(importlib.import_module("zlc_ui").__all__)
-
-
-def test_removed_names_are_only_available_from_their_submodule() -> None:
-    package = importlib.import_module("zlc_ui")
-    graph = importlib.import_module("zlc_ui.graph")
-
-    for name in REMOVED_FACADE_NAMES:
-        try:
-            getattr(package, name)
-        except AttributeError:
-            pass
-        else:
-            raise AssertionError(f"removed facade name still resolves: {name}")
-        assert hasattr(graph, name)
 
 
 def test_retained_names_still_point_at_their_implementations() -> None:
@@ -127,14 +110,6 @@ def test_retained_names_still_point_at_their_implementations() -> None:
     for public_name, (module_name, implementation_name) in implementation_paths.items():
         implementation = getattr(importlib.import_module(module_name), implementation_name)
         assert getattr(package, public_name) is implementation
-
-
-def test_graph_submodule_import_path_remains_explicitly_usable() -> None:
-    from zlc_ui.graph import FlowGraph, FlowGraphEdge, FlowGraphNode
-
-    assert FlowGraph.__module__ == "zlc_ui.graph.flow_graph"
-    assert FlowGraphEdge.__module__ == "zlc_ui.graph.flow_graph"
-    assert FlowGraphNode.__module__ == "zlc_ui.graph.flow_graph"
 
 
 def test_examples_and_notebook_do_not_hide_facade_names_behind_submodule_imports() -> None:

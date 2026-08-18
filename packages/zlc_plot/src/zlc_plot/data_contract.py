@@ -79,10 +79,6 @@ def schema_data_axes(schema: DatasetSchema) -> tuple[AxisSpec, ...]:
     return tuple(schema.cell_schema.data_axes)
 
 
-def schema_dtype(schema: DatasetSchema) -> np.dtype:
-    return np.dtype(schema.cell_schema.dtype)
-
-
 def schema_value_unit(schema: DatasetSchema, registry: UnitRegistry) -> Unit:
     return resolve_unit(schema.cell_schema.value_unit or "1", registry)
 
@@ -292,7 +288,6 @@ __all__ = [
     "point_column",
     "resolve_unit",
     "schema_data_axes",
-    "schema_dtype",
     "schema_equal",
     "schema_point_count",
     "schema_repeat_count",

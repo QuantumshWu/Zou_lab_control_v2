@@ -29,7 +29,6 @@ from .raster import (
 from .selectors import SelectorState
 
 if TYPE_CHECKING:
-    from .live import LiveContract, LivePlotController
     from .session import PlotSession
 
 
@@ -77,18 +76,6 @@ class _InteractionGate:
         self._enabled = enabled
         self._generation += 1
         return True
-
-
-def notebook_available() -> bool:
-    """Return whether the raster notebook widget dependencies are installed."""
-
-    try:
-        importlib.import_module("IPython.display")
-        importlib.import_module("IPython")
-        importlib.import_module("ipywidgets")
-    except (ImportError, ModuleNotFoundError):
-        return False
-    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,16 +279,6 @@ def ensure_qt5_application(
     _register_qt5_font(modules.QtGui)
     _enable_ipython_qt_loop()
     return _QT_APPLICATION
-
-
-def qt5_available() -> bool:
-    """Return whether the PyQt5-only adapter can be loaded."""
-
-    try:
-        _load_qt5_modules()
-    except BackendUnavailableError:
-        return False
-    return True
 
 
 def _qt5_plot_widget_class() -> type[Any]:
@@ -1281,6 +1258,4 @@ __all__ = [
     "Qt5PlotWidget",
     "RasterPlotHost",
     "ensure_qt5_application",
-    "notebook_available",
-    "qt5_available",
 ]

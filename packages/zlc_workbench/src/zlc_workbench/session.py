@@ -391,7 +391,6 @@ class ExperimentSession:
                     "sequencer",
                     "sequencer",
                     self.sequencer,
-                    "exclusive",
                 ),
             ),
         )

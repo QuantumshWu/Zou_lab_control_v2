@@ -6,8 +6,7 @@ Everything below this section predates the 2026-08-10 performance overhaul
 and is retained as a dated record; treat these numbers as the current
 reference.  Measured on the reference machine (Windows 11, Python 3.13.12,
 numpy 2.4.2, matplotlib 3.10.8), 2048^2 uint16 camera contract, warm p50,
-via the bootstrapped `examples/camera_live_profile.py` and the public
-session/host APIs:
+via direct session/host probes:
 
 | Case | Before | After |
 |---|---:|---:|
@@ -108,14 +107,10 @@ the GUI/notebook parity and the single raster authority less explicit.
 
 ## Scope
 
-`examples/camera_live_profile.py` is a headless internal instrumentation utility,
-not an application integration example. It subclasses protected session/host
-hooks only to time stage boundaries; the workload itself uses the same public
-composition as a GUI camera view:
+The measured workload used the same direct composition as a GUI camera view:
 
 ```text
 immutable zlc_data.OwnedSnapshot
-    -> LivePlotController (capacity one, latest only)
     -> PlotSession ImagePlot
     -> RasterPlotHost
     -> immutable promoted RasterFront
@@ -128,13 +123,8 @@ axes are declared dense `data_dim` axes and the `ImagePlot` refers to them with
 capacity-one ingress replaces only a pending revision, so acquisition can keep
 publishing without building a presentation queue.
 
-The profiler can run a flattened `P=H*W` plus `GridTopology` comparison, but
-that is not the recommended camera representation:
-
-```powershell
-python examples/camera_live_profile.py --resolution 1024 --geometry data-dim
-python examples/camera_live_profile.py --resolution 1024 --geometry point-topology
-```
+The comparison also covered flattened `P=H*W` plus `GridTopology`, but that is
+not the recommended camera representation.
 
 The producer freezes a new immutable `uint16` snapshot for every revision.  It
 publishes faster than the presentation cadence, waits for the final revision,
@@ -194,7 +184,7 @@ medians.
 ## Current virtual-camera, Distribution and live-fit profile (2026-08-09)
 
 This pass used the current checkout on Windows 11 / Python 3.13.12 with the
-public `PlotSession`, `RasterPlotHost`, and `LivePlotController` APIs. Ten fresh
+public `PlotSession` and `RasterPlotHost` APIs. Ten fresh
 processes constructed one `96 x 128` Image session at `2x2`; the cold session
 median/p95 was 190.83 / 194.77 ms. A 30-frame, 30 Hz `128 x 128` camera run at
 the 100 ms display cadence measured projection 0.77 / 1.06 ms, artist render
@@ -221,8 +211,7 @@ existing `FitSelection`; it did not submit the 300 raw samples to a second fit
 path. Calibration uses only the independent threshold classifier, not the
 generic 35-cell fit row.
 
-A controlled 250 ms solver quantified the live-fit correction with the same
-10 Hz producer and public `LivePlotController` path. Before the correction
+A controlled 250 ms solver quantified the former live-fit path. Before the correction
 (`f4095be`), data waited for fit: only revisions 1/4/7/9/13/15 appeared and
 front intervals were 295.62 / 314.89 ms median/p95; all six stale-in-between
 fits were accepted. After the correction, 14 of 15 latest data revisions
@@ -230,8 +219,8 @@ appeared at 97.60 / 146.38 ms and only final fit revision 15 was accepted.
 The TaskConsole path calls `RasterPlotHost.update_data()` directly; its same
 96 x 128 workload took 17.79 / 19.45 ms per data front and maintained
 100.11 / 101.98 ms intervals while only fit revision 15 survived. Thus slow
-analysis no longer changes data cadence, and neither Workbench nor the live
-controller owns a second fit state machine.
+analysis no longer changes data cadence. This dated result does not define the
+current exact-pair product contract.
 
 ## Dense-image data and display paths
 
@@ -266,7 +255,7 @@ repeated PointTable values.
 
 The recorded reference measurements were taken on Windows 11, Python 3.13.12, NumPy 2.4.2 and
 Matplotlib 3.10.8 on a 16-logical-CPU machine.  Each row is a fresh process
-running `examples/camera_live_profile.py` with a `2048 x 2048 uint16` camera.
+using a direct `2048 x 2048 uint16` session/host probe.
 Values are milliseconds.
 
 | Preset / cadence | DPR / front raster | Prepared image | Promoted / published | Projection p50 / p95 | Artist render p50 / p95 | Complete pipeline p50 / p95 | Peak RSS delta |
@@ -395,21 +384,6 @@ same immutable schema object makes ingress validation constant-time:
 (16 published, two promoted, 14 coalesced) and reached revision 16, but this is
 further evidence that camera pixels belong in dense data axes rather than
 flattened point rows.
-
-## Reproduction
-
-Install the optional process-metrics dependency with
-`python -m pip install -e ".[profile]"` before collecting RSS/CPU results.
-Run each case in a fresh process so its RSS baseline is independent:
-
-```powershell
-python examples/camera_live_profile.py --resolution 2048 --frames 30 --producer-hz 30 --refresh-ms 100 --size 2x2 --dpr 1 --timeout 20
-python examples/camera_live_profile.py --resolution 2048 --frames 30 --producer-hz 30 --refresh-ms 400 --size 8x8 --dpr 1 --timeout 20
-python examples/camera_live_profile.py --resolution 1024 --geometry point-topology --frames 16 --producer-hz 20 --refresh-ms 100 --size 8x8 --dpr 1
-```
-
-The command prints machine-readable JSON.  `--output report.json` writes the
-same report for later comparisons.
 
 ## Grouped reduction is vectorised (2026-08-11)
 

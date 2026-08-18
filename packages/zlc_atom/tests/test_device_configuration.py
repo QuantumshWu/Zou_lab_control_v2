@@ -210,7 +210,7 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
             timeout=1.0,
         )
         record = mot_camera.read_frame_records(1, timeout=2.0, exact=True)[0]
-        assert installation.world.fire_count == 0
+        assert installation.world._fire_count == 0
         assert record.image.shape == (240, 320)
         assert record.image.dtype.str == "|u1"
         assert float(np.std(record.image)) > 0.0

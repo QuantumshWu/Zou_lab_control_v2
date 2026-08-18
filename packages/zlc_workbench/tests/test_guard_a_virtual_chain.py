@@ -183,7 +183,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         calibration_host = make_host(
             calibration_descriptor,
             calibration_node,
-            authored_values=calibration_finalization.values,
             signal_plane=plane,
             instance_id="calibration",
         )
@@ -318,7 +317,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         finite_host = make_host(
             camera_descriptor,
             finite_node,
-            authored_values=finite_finalization.values,
             signal_plane=plane,
             instance_id="camera_measurement",
         )
@@ -383,7 +381,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         occupancy_host = make_host(
             occupancy_descriptor,
             occupancy_node,
-            authored_values=occupancy_finalization.values,
             signal_plane=plane,
             instance_id="occupancy",
         )
@@ -476,7 +473,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         infinite_host = make_host(
             camera_descriptor,
             infinite_node,
-            authored_values=infinite_finalization.values,
             signal_plane=plane,
             instance_id="camera_measurement",
         )

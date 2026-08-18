@@ -536,11 +536,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         camera_descriptor = descriptors["camera_measurement"]
         assert tuple(
             (preview.output_name, preview.plot_kind)
-            for preview in camera_descriptor.previews_for({"frames_per_cycle": 1})
-        ) == (("frames", "facet_grid"),)
-        assert tuple(
-            (preview.output_name, preview.plot_kind)
-            for preview in camera_descriptor.previews_for({"frames_per_cycle": 3})
+            for preview in camera_descriptor.node_previews
         ) == (("frames", "facet_grid"),)
         assert not hasattr(descriptors["calibration"], "task_reports")
         assert [

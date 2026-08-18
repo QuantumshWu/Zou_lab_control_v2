@@ -144,8 +144,4 @@ class MemoryRegisterTransport:
                 return int(self.cursor_value) & 0xFFFFFFFF
             return int(self.words.get(int(word_offset), 0)) & 0xFFFFFFFF
 
-    def record_diagnostic(self, name: str, text: str) -> None:
-        del name, text
-
-
 __all__ = ["MemoryRegisterTransport"]

@@ -5,7 +5,6 @@ import json
 import struct
 import time
 from threading import Event
-from pathlib import Path
 
 import numpy as np
 
@@ -123,25 +122,6 @@ def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     # blurry and then jump once the environment report round-trips.
     assert "_acceptFrame" in _WIDGET_ESM
     assert "_graceDeadline" in _WIDGET_ESM
-
-
-def test_usage_notebook_uses_the_real_pyqt_window_lifecycle() -> None:
-    """The tutorial must show/create/close the reusable GUI handle."""
-
-    notebook_path = Path(__file__).parents[1] / "notebooks" / "usage.ipynb"
-    notebook = json.loads(notebook_path.read_text(encoding="utf-8-sig"))
-    source = "\n".join(
-        "".join(cell.get("source", []))
-        for cell in notebook["cells"]
-        if cell.get("cell_type") == "code"
-    )
-    assert "%gui qt" in source
-    magic = source.index("run_line_magic('gui', 'qt')")
-    assert source.index("ensure_qt5_application([])") < magic
-    assert magic < source.index("create_window()")
-    assert "gui_handle = create_window()" in source
-    assert "gui_handle.close(wait=True)" in source
-    assert "Qt5PlotWidget(" not in source
 
 
 def test_session_mutation_republishes_front_and_keeps_pointer_compatible() -> None:

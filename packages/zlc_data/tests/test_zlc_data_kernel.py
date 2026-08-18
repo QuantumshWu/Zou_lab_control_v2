@@ -13,7 +13,6 @@ from zlc_data._arrays import immutable_array, is_intrinsically_immutable_array
 from zlc_data.axis import (
     REPEAT,
     SCAN_POINT,
-    SITE,
     SPATIAL_X,
     SPATIAL_Y,
     AxisId,
@@ -30,7 +29,6 @@ from zlc_data.schema import (
 from zlc_data.validity import (
     VALID,
     CellValidity,
-    ComponentValidity,
     DatasetComponentValidity,
     ValidityContract,
 )
@@ -39,8 +37,6 @@ from zlc_data.value import (
     DataBlock,
     DatasetRevision,
     StreamGenerationId,
-    Value,
-    expand_value_validity,
 )
 
 
@@ -86,12 +82,8 @@ def dataset_schema(*, explicit: bool = False, component_validity: bool = False) 
 
 def test_scalar_has_the_canonical_length_one_carrier_axis():
     scalar_schema = ValueSchema.scalar(np.dtype(np.float64), "count")
-    value = Value(np.array([2.5]), VALID, scalar_schema)
-
     assert scalar_schema.is_scalar
-    assert value.values.shape == (1,)
-    with pytest.raises(ValueError, match="shape"):
-        Value(np.array(2.5), VALID, scalar_schema)
+    assert scalar_schema.data_shape == (1,)
 
 
 def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_copy():
@@ -110,21 +102,16 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
         np.dtype("<u2"),
         "count",
     )
-    value = Value(transposed, VALID, value_schema)
-    assert np.shares_memory(value.values, transposed)
-    assert value.values.strides == transposed.strides
-    assert is_intrinsically_immutable_array(value.values)
-
     repeat = axis("camera.transposed.repeat", REPEAT, 1)
     schema = DatasetSchema(repeat, PointTable(1), None, value_schema)
     block = DataBlock(
         BlockId("immutable-transpose"),
         DatasetRevision(0),
-        value.values.reshape(schema.physical_shape),
+        transposed.reshape(schema.physical_shape),
         VALID,
         schema,
     )
-    assert np.shares_memory(block.values, value.values)
+    assert np.shares_memory(block.values, transposed)
     assert is_intrinsically_immutable_array(block.values)
 
     mutable[:] = 0
@@ -150,38 +137,6 @@ def test_dataset_rejects_duplicate_axis_identity_across_axis_families():
     )
     with pytest.raises(ValueError, match="unique"):
         DatasetSchema(repeat, point_table, None, image_schema())
-
-
-def test_component_validity_is_named_and_cannot_broadcast_by_trailing_position():
-    schema = image_schema(component_validity=True)
-    y, x = schema.data_axes
-    valid_x = ComponentValidity((x.axis_id,), np.ones((4,), dtype=bool))
-    Value(np.zeros((3, 4), dtype=np.uint16), valid_x, schema)
-
-    wrong_order = ComponentValidity((x.axis_id, y.axis_id), np.ones((4, 3), dtype=bool))
-    with pytest.raises(ValueError, match="order"):
-        Value(np.zeros((3, 4), dtype=np.uint16), wrong_order, schema)
-
-    wrong_shape = ComponentValidity((x.axis_id,), np.ones((3,), dtype=bool))
-    with pytest.raises(ValueError, match="shape"):
-        Value(np.zeros((3, 4), dtype=np.uint16), wrong_shape, schema)
-
-
-def test_equal_sized_component_axes_broadcast_by_identity_not_shape():
-    site = axis("readout.site", SITE, 2)
-    component = axis("readout.component", SPATIAL_X, 2)
-    schema = ValueSchema(
-        (site, component),
-        ValidityContract.components(site.axis_id, component.axis_id),
-        np.dtype(np.float64),
-    )
-    mask = np.array([True, False])
-    site_valid = expand_value_validity(ComponentValidity((site.axis_id,), mask), schema)
-    component_valid = expand_value_validity(
-        ComponentValidity((component.axis_id,), mask), schema
-    )
-    np.testing.assert_array_equal(site_valid, [[True, True], [False, False]])
-    np.testing.assert_array_equal(component_valid, [[True, False], [True, False]])
 
 
 def test_dataset_component_validity_includes_repeat_and_physical_point_rows():
@@ -495,14 +450,6 @@ def test_repeat_role_has_exactly_one_structural_owner():
                 np.dtype(np.float64),
             ),
         )
-
-
-def test_value_accepts_endian_equivalent_input():
-    schema = ValueSchema.scalar(np.dtype("<i2"))
-    source = np.array([513], dtype=">i2")
-    value = Value(source, VALID, schema)
-    assert value.values.dtype == np.dtype("<i2")
-    assert value.values.item() == 513
 
 
 def test_import_is_headless_and_does_not_pull_legacy_domain():

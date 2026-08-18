@@ -12,7 +12,6 @@ from .axis import (
     SPATIAL_Y,
     AxisId,
     AxisRoleId,
-    AxisSourceRef,
     AxisSpec,
     CoordinateFrameId,
     point_ordinal_axis,
@@ -48,7 +47,6 @@ from .validity import (
     INVALID,
     VALID,
     CellValidity,
-    ComponentValidity,
     DatasetComponentValidity,
     Invalid,
     Valid,
@@ -56,15 +54,12 @@ from .validity import (
     ValidityMode,
 )
 from .value import (
-    expand_component_validity,
     BlockId,
     DataBlock,
     DatasetRevision,
     DatasetRevisionRef,
     OwnedSnapshot,
     StreamGenerationId,
-    Value,
-    ValuePayloadContract,
     compact_dataset_validity,
     expand_dataset_validity,
     expand_snapshot_validity,
@@ -83,8 +78,6 @@ from .io import (
 )
 from .snapshot_projection import (
     materialize_derived_dataset,
-    materialize_scalar_dataset,
-    materialize_value_dataset,
 )
 
 __all__ = [
@@ -97,19 +90,16 @@ __all__ = [
     "canonical_text",
     "digest_text",
     "exact_mapping",
-    "expand_component_validity",
     "finite_real",
     "integer",
     "nonnegative_integer",
     "positive_integer",
     "AxisId",
     "AxisRoleId",
-    "AxisSourceRef",
     "AxisSpec",
     "BlockId",
     "COMPONENT",
     "CellValidity",
-    "ComponentValidity",
     "CoordinateFrameId",
     "point_ordinal_axis",
     "DataBlock",
@@ -135,8 +125,6 @@ __all__ = [
     "Valid",
     "ValidityContract",
     "ValidityMode",
-    "Value",
-    "ValuePayloadContract",
     "ValueSchema",
     "NPZFormatError",
     "__version__",
@@ -145,8 +133,6 @@ __all__ = [
     "expand_snapshot_validity",
     "load_npz",
     "materialize_derived_dataset",
-    "materialize_value_dataset",
-    "materialize_scalar_dataset",
     "owned_snapshot_from_arrays",
     "save_npz",
 ]

@@ -19,7 +19,6 @@ from zlc_pulse import PulseSequence
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
-    DeviceAccess,
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
@@ -160,11 +159,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # number per point -- opens as the curve it is.
     node_previews=(NodePreviewSpec(SCAN_OUTPUT.name, "facet_grid"),),
     device_requirements=(
-        DeviceRequirement(
-            "sequencer.streamer",
-            "sequencer",
-            DeviceAccess.EXCLUSIVE,
-        ),
+        DeviceRequirement("sequencer.streamer", "sequencer"),
     ),
     build=_build,
     # A region drawn on this scan's own plot is a statement about

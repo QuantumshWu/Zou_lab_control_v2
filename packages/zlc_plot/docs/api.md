@@ -14,7 +14,7 @@ here so copied examples and API reviews have one visible name set:
 ```text
 AxisRef  BackendUnavailableError  CurvePlot  DEFAULTS  DEFAULT_UNITS
 FacetGridPlot  FitCancelled  FitEvent  FitModelSpec  FitTarget  HistogramPlot
-ImageFrame  ImagePlot  ImagePointOverlay  LiveDataRevision  LivePlotController
+ImageFrame  ImagePlot  ImagePointOverlay
 NumericRange  PlotKind  PlotLabels  PlotSession  PlotSpec  PointStatus
 PulseAnalogTrace  PulseBlock  PulseChannel  PulseDacScanSegment
 PulseRepeatMarker  PulseScanRegion  PulseTimelineData  PulseTimelinePlot
@@ -25,8 +25,7 @@ facet_grid  histogram  image  parameter_controls  pulse_timeline  resolve_unit
 rolling  schema_summary  show  updated_spec
 ```
 
-`MAX_PUBLIC_NAMES == 57` is only the namespace guard. Fit-engine result
-records, raster packets, semantic internals and the remaining exception types
+Fit-engine result records, raster packets, semantic internals and the remaining exception types
 stay available from their owning submodules and are intentionally absent from
 the facade. `FitCancelled` and `BackendUnavailableError` are the only
 individually catchable optional-runtime exceptions exported at the top level.
@@ -535,29 +534,27 @@ selector/viewport 改变后旧结果只标为 `"lagging"`，不会在 pointer mo
 
 `zlc_plot.fit.FitResult` 包含 success/message、model id、参数值、covariance/error、selected indices 和 `source_revision`；facet batch 使用同名的 `source_revision`，而 `batch_revision` 只表示发布顺序。只有 source revision 仍然有效的结果才会显示到当前图。Curve、Rolling、Histogram、Image 与 FacetGrid 的三种 cell 语义共用同一 `zlc_plot._fit_projection.FitSelection`、solver、结果接受和 overlay presentation 生命周期；差异只在于从当前 painted payload 生成 series、bin counts 或 scalar-field solver input。FacetGrid 的 `fit(..., live=True)` 每个 data revision 对所有 cell 生成一个 `zlc_plot.fit.FacetFitBatchResult`，其 `overlays` 与 `results` 按 cell 同序；overview 画全部 cell 的 fit 曲线和每 cell 一个 headline 参数注释，focus 后显示所选 cell 的完整参数框。group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 随后筛选实际显示的 projection；fit 不会另建 raw tensor mask/reduction 路径。Rolling 还会把候选数据限制在当前可见 window。selector/viewport 决定参数估计样本，`zlc_plot.fit.FitResult.fitted` 与 residuals 也对应这些样本；图内 overlay 则用已接受参数覆盖当前完整显示域。`FitResult.selected_indices` 索引当前 fit projection（series、histogram bins 或扁平 image projection），不是原始 snapshot 的 flat indices；原始数据索引只由显式 `selector_data(kind)` 返回。成功结果同时显示使用当前显示单位的公式、参数值和 `±` 不确定度。
 
-Facet 批量结果的纯数值表通过 `batch.table`（也可直接从 batch 读取同名列）取得：
+Facet批量结果直接公开与cell同序的数值列：
 
 ```python
-table = batch.table
-table.parameter_names       # tuple[str, ...]
-table.parameter_units       # name -> canonical unit matching parameter_values, or ""
-table.parameter_values      # name -> read-only float64[cell]
-table.parameter_errors      # name -> read-only float64[cell], NaN when invalid
-table.parameter_error_validity # name -> read-only bool[cell] for error data
-table.success               # read-only bool[cell] for value data
-table.sample_coordinates    # canonical numeric facet values, or 0..N-1 for text
-table.sample_labels         # text labels, otherwise None
-table.source_revision       # source data revision
-table.batch_revision        # strictly increasing publication revision
+batch.parameter_names
+batch.parameter_units
+batch.parameter_values
+batch.parameter_errors
+batch.parameter_error_validity
+batch.success
+batch.sample_coordinates
+batch.sample_labels
+batch.source_revision
+batch.batch_revision
 ```
 
-`zlc_plot.fit.FitResult.table` exposes the same columns as the N=1 single-fit case
-(`sample_axis_name=""`, coordinate `[0.0]`, no sample unit or labels). The
-table contains only immutable NumPy arrays and strings; it never constructs or
-imports a data/runtime snapshot. Facet failure messages are exposed as
-`batch.failure_messages`, separate from parameter standard errors.
+Scalar`FitResult`公开自己的参数向量、standard errors和source/batch revision；
+不再构造一份重复table。Facet failure messages由`batch.failure_messages`提供。
 
-`fit()` / `fit_async()` 默认启用 live fit。`fit_async(..., live=True)` 返回的 Future 绑定到这一次逻辑请求，而不是某一个很快过期的数据 revision。之后每次 `update_data()` 都先提交并 promotion 新 data front，同时清除旧 revision 的 fit overlay；session 随后取消旧 solver，只对当前最新 revision 后台拟合。只有仍匹配当前 data revision 和 request generation 的结果才发布 overlay/`FitEvent` 并完成逻辑 Future。`LivePlotController` 仅在同一入口前增加 capacity-one ingress 与 cadence。selector、viewport、unit 和 resize 不会因为没有新 data 而自动求解；需要立刻按新选择重算时显式调用 `fit()`。新的 fit 请求、`clear_fit()` 与 session close 会明确终止尚未完成的旧请求。删除由 `selector_kind=` 显式绑定的 selector 会立即 disarm 该 live request、清除旧 overlay，并让尚未完成的逻辑 Future 以 `FitCancelled` 结束；自动选择请求仍保持 armed，下一次 data revision 使用剩余 authority。
+`fit()` / `fit_async()`默认启用live fit。Runtime提交的每个data revision通过同一
+prepare/solve/commit入口与匹配的fit原子呈现。selector、viewport、unit和resize
+不会因为没有新data而自动求解；需要立刻按新选择重算时显式调用`fit()`。
 
 `zlc_plot.fit.FitResult.parameters` 始终使用 canonical units。外部 GUI/Notebook 若要显示与图内一致的公式、参数、单位和 uncertainty，应订阅 accepted fit event：
 
@@ -595,67 +592,10 @@ center/radius glyph 由 `FitPresentationSpec` 声明。renderer 只消费已经�
 
 ## Live revisions
 
-```python
-from zlc_plot import DEFAULTS, LivePlotController
-
-live = LivePlotController(
-    session,
-    snapshot,
-    refresh_interval_ms=DEFAULTS.live.default_refresh_interval_ms,
-)
-live.start()
-
-# Producer thread: exact schema/generation, strictly newer revision.
-# publish never waits for rendering; capacity-one ingress replaces old pending data.
-live.publish(next_snapshot)
-
-metrics = live.metrics()
-live.close()
-```
-
-Dataset revisions in one session retain exact schema, geometry, dtype and
-generation. PulseTimeline payloads remain revision-free immutable values; an
-independent typed envelope supplies producer ordering:
-
-```python
-from zlc_plot import LiveDataRevision, LivePlotController
-
-initial = LiveDataRevision(revision=0, payload=pulse_data)
-pulse_live = LivePlotController(pulse_session, initial)
-pulse_live.publish(LiveDataRevision(revision=1, payload=pulse_data))
-pulse_live.pump_once()
-assert pulse_session.data_revision == 1
-pulse_live.close()
-```
-
-The contract fixes the specialised payload class. `LivePlotController` owns the public
-capacity-one handoff and display cadence. Refresh presets are centralized at
-100/200/400/800 ms (default 100 ms,
-maximum 10 Hz). `LivePlotController` exposes coalescing/drop/error metrics and
-supports an injected UI-thread dispatcher.
-When no dispatcher is supplied for a `PlotSession`, the controller retains the
-session's stable owner gateway rather than the host attached at construction
-time. A controller may therefore be created before a Notebook host is
-materialized; attachment and the headless direct path are serialized, and
-subsequent revisions use the current owner. Every concrete host dispatcher
-returns a `concurrent.futures.Future`; absence of a host is represented by no
-dispatcher, never by a dispatcher returning `None`.
-Selector 或 pan gesture 不暂停 live consumer、render 或 live fit；可见 front 继续提升到最新 revision。前端只保留手势所需的坐标状态，并在新 data front 到来时对齐同一 axes；若 display/layout/DPR 在手势中改变则取消该手势，避免把旧坐标提交到新布局。
-The producer revision is passed through to `PlotSession`; it becomes the
-session, selection-event, selected-data, and fit data revision. Direct
-`update_data(pulse)` calls without an envelope advance the current
-session revision by one. While a live fit is armed, every data frame is a
-PAIR: `update_data()` solves the fit to completion and accepts the overlay
-into the same presented front as its data — the frame is born complete.
-Hosted panels run the identical pair off the render worker through the live
-protocol `prepare_live_frame` → `solve_live_frame` (fit executor) →
-`commit_live_frame(prepared, solved)`; the returned finalization is
-acknowledged with `publish_live_frame` after promotion (or rolled back with
-`abort_live_frame`). There is no solve budget and no asynchronous
-catch-up: a slow solve lowers the pair rate while newer frames coalesce in
-the latest-only mailbox, and an in-flight pair always runs to completion —
-cancellation happens only on re-arm, `replace_spec`, and close.
-`LivePlotController.publish()` adds only capacity-one ingress and cadence.
+Runtime owns run history、publication cadence和Stop/Final。它通过
+`RasterPlotHost.update_data()`提交immutable revision；host在自己的worker上执行
+`prepare_live_frame → solve_live_frame → commit_live_frame`，并只发布匹配的
+data/fit pair。Plot层不再提供第二个live controller或channel。
 
 ## Notebook
 
@@ -720,28 +660,15 @@ session.set_x_selector(-1.0, 1.0, display=True)
 result = session.fit("gaussian_offset")
 ```
 
-For live updates, materialize the view first and use its prewired controller:
+For a new immutable revision, submit it through the existing session/host:
 
 ```python
-live = view.live_controller(snapshot.schema, refresh_interval_ms=400).start()
-live.publish(next_snapshot)
+session.update_data(next_snapshot)
+# Hosted product code uses host.update_data(next_snapshot).
 ```
 
-Notebook 的 live controller 直接绑定同一个 `RasterPlotHost`；producer 只提交
-snapshot，consumer 只发布 capacity-one 的最新完整 front。关闭 adapter 会取消
-尚未进入 owner thread 的 queued work，晚到的 callback 不会触碰已关闭 session。
-`LivePlotController.stop()` 同时唤醒 owner wait 与 cadence wait，因此关闭不依赖
-失效的 notebook loop。
-
-`stop()` pauses the consumer without closing the controller, and `start()`
-resumes it. `close()` is terminal. The application owns the producer task and
-must stop that task before final controller/view/session cleanup. The usage
-Notebook shows continuously running, rerunnable producers and complete cleanup.
-
-`python examples/live_simulation.py` opens a standalone PyQt5 Rolling surface
-whose immutable data revisions continue to publish and remain visibly updating
-until the window is closed. Pointer cadence, selector hit radius and wheel zoom
-factor are available through `DEFAULTS.interaction`.
+Run history、cadence和Stop由Runtime拥有；Notebook view只消费RasterHost front。
+Pointer cadence、selector hit radius和wheel zoom factor位于`DEFAULTS.interaction`。
 
 Missing dependencies raise `BackendUnavailableError` without making ordinary
 package import depend on Jupyter.
@@ -797,8 +724,7 @@ size.currentTextChanged.connect(
 )
 ```
 
-Qt live producer 使用 `plot_host.live_controller(initial)`；prepare/finalize 走不发布 raster 的
-control queue；data frame 先 render/promotion，匹配该 revision 的 fit overlay完成后再独立 promotion。事件订阅使用
+Runtime通过`plot_host.update_data(snapshot)`提交revision。事件订阅使用
 `plot_host.subscribe_display/subscribe_selection/subscribe_fit`，回调若要修改 Qt 控件，
 再经 `widget.dispatch` 回到 UI thread。Notebook 与 Qt 同时打开时，应基于同一 immutable
 snapshot 分别创建 session。
@@ -839,9 +765,6 @@ application's causal join.
 The exact already-visible physical pixels are available through
 `widget.presented_front.buffer.save(path)`. `plot_host.save(path, dpi=...)`
 remains the separate high-resolution rerendering route.
-
-The complete external-window example is
-[`examples/pyqt5_embed.py`](../examples/pyqt5_embed.py).
 
 ## Persistence boundary
 

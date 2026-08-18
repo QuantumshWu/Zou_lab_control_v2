@@ -203,12 +203,12 @@ class SimulationWorld:
         self._commanded_phase = _immutable(nominal_phase, "<f4")
         self._slm_phase_revision = 0
         self._propagated_revision = -1
+        self._propagation_count = 0
         self._trap_plane_intensity: np.ndarray | None = None
         self._site_trap_intensities: np.ndarray | None = None
         self._slm_nominal_peak_indices_yx = _immutable(
             np.full((site_count, 2), -1, dtype=np.intp), np.intp
         )
-        self._propagation_count = 0
         self._loading_intensity_scale: float | None = None
         self._slm_pupil_amplitude, self._hidden_slm_aberration = (
             self._slm_plant(seed)
@@ -333,11 +333,6 @@ class SimulationWorld:
     def commanded_phase(self) -> np.ndarray:
         with self._lock:
             return self._commanded_phase
-
-    @property
-    def slm_phase_revision(self) -> int:
-        with self._lock:
-            return self._slm_phase_revision
 
     def apply_slm_phase(self, radians: object) -> np.ndarray:
         """Atomically accept one explicit command and invalidate propagation."""
@@ -579,11 +574,6 @@ class SimulationWorld:
         self._propagated_revision = self._slm_phase_revision
         self._propagation_count += 1
 
-    @property
-    def propagation_count(self) -> int:
-        with self._lock:
-            return self._propagation_count
-
     def _loading_probabilities(self, intensities: np.ndarray) -> np.ndarray:
         base = float(self.loading_probability)
         if not 0.0 <= base <= 1.0:
@@ -637,24 +627,6 @@ class SimulationWorld:
         self._ensure_slm_propagation()
         return self._loading_probabilities(self._site_trap_intensities)
 
-    @property
-    def detector_efficiency(self) -> np.ndarray:
-        """Small fixed fluorescence-readout nuisance, never trap-depth truth."""
-
-        return np.array(self._detector_efficiency, copy=True)
-
-    @property
-    def site_psf_sigma_xy(self) -> np.ndarray:
-        return np.array(self._site_psf_sigma_xy, copy=True)
-
-    @property
-    def site_psf_angle_radians(self) -> np.ndarray:
-        return np.array(self._site_psf_angle_radians, copy=True)
-
-    @property
-    def site_psf_skew(self) -> np.ndarray:
-        return np.array(self._site_psf_skew, copy=True)
-
     def register_camera(
         self,
         camera: Any,
@@ -663,16 +635,6 @@ class SimulationWorld:
         with self._lock:
             if not any(existing is camera for existing, _renderer in self._cameras):
                 self._cameras.append((camera, renderer))
-
-    @property
-    def occupancy(self) -> np.ndarray:
-        with self._lock:
-            return np.array(self._occupancy, copy=True)
-
-    @property
-    def fire_count(self) -> int:
-        with self._lock:
-            return self._fire_count
 
     def _load_shot(self) -> np.ndarray:
         self._ensure_slm_propagation()
@@ -720,23 +682,6 @@ class SimulationWorld:
         reach_speed = self.trap_waist_m * math.sqrt(depth_scale) / off_time
         recaptured = min(escape, reach_speed)
         return _maxwell_boltzmann_below(recaptured, most_probable) / bound
-
-    def release_survival(self, trap_off_seconds: float) -> float:
-        """The chance one trapped atom is still trapped after a release.
-
-        The trap is off for ``trap_off_seconds`` and every atom flies at the
-        speed it had.  It is back inside the trap's reach at the end only if
-        it was slower than reach/time; it was bound in the first place only
-        if it was slower than the depth allows.  So the survivors are the
-        slow tail of the thermal distribution, and the release time alone
-        decides how slow that tail has to be.
-
-        This is what makes release-recapture a THERMOMETER: the shape of
-        this curve against the release time is the atoms' temperature, and
-        nothing else about the bench enters it.
-        """
-
-        return self._release_survival(trap_off_seconds, 1.0)
 
     def _site_survival_probabilities(self, trap_off_seconds: float) -> np.ndarray:
         self._ensure_slm_propagation()

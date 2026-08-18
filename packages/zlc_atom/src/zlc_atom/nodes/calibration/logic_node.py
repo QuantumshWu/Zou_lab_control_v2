@@ -10,7 +10,6 @@ from zlc_atom.devices.camera.photoelectrons import (
 )
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactOutputSpec,
-    DeviceAccess,
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
@@ -287,10 +286,8 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),
     device_requirements=(
-        DeviceRequirement("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
-        DeviceRequirement(
-            "sequencer.streamer", "sequencer", DeviceAccess.EXCLUSIVE
-        ),
+        DeviceRequirement("camera.adapter", "camera"),
+        DeviceRequirement("sequencer.streamer", "sequencer"),
     ),
     build=_build,
     workspace_resources=(_CALIBRATION_PULSE_RESOURCE,),

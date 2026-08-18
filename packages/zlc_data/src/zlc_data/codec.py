@@ -9,7 +9,7 @@ import numpy as np
 from ._tree import digest as _tree_digest, encode as _encode
 from .validation import canonical_text as _text, exact_mapping as _exact_map
 
-from .axis import AxisId, AxisRoleId, AxisSourceRef, AxisSpec, CoordinateFrameId
+from .axis import AxisId, AxisRoleId, AxisSpec, CoordinateFrameId
 from .schema import (
     DatasetSchema,
     GridTopology,
@@ -25,7 +25,6 @@ from .validity import (
 
 
 AXIS_SCHEMA = "zlc_data.AxisSpec"
-AXIS_SOURCE_REF_SCHEMA = "zlc_data.AxisSourceRef"
 POINT_COLUMN_SCHEMA = "zlc_data.PointColumn"
 POINT_TABLE_SCHEMA = "zlc_data.PointTable"
 GRID_TOPOLOGY_SCHEMA = "zlc_data.GridTopology"
@@ -132,32 +131,6 @@ def axis_from_tree(tree: Any) -> AxisSpec:
     if _encode(axis_to_tree(axis)) != _encode(tree):
         raise ValueError("AxisSpec tree is typed but non-canonical")
     return axis
-
-
-def axis_source_ref_to_tree(source: AxisSourceRef) -> dict[str, Any]:
-    if not isinstance(source, AxisSourceRef):
-        raise TypeError("source must be AxisSourceRef")
-    return {
-        "schema": AXIS_SOURCE_REF_SCHEMA,
-        "kind": source.kind,
-        "axis_id": None if source.axis_id is None else source.axis_id.value,
-    }
-
-
-def axis_source_ref_from_tree(tree: Any) -> AxisSourceRef:
-    data = _exact_map(
-        tree,
-        {"schema", "kind", "axis_id"},
-        AXIS_SOURCE_REF_SCHEMA,
-    )
-    axis_id = data["axis_id"]
-    source = AxisSourceRef(
-        kind=data["kind"],
-        axis_id=None if axis_id is None else AxisId(axis_id),
-    )
-    if _encode(axis_source_ref_to_tree(source)) != _encode(tree):
-        raise ValueError("AxisSourceRef tree is typed but non-canonical")
-    return source
 
 
 def point_column_to_tree(column: PointColumn) -> dict[str, Any]:

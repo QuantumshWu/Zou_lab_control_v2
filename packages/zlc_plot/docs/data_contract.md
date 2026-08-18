@@ -61,18 +61,12 @@ Applications may pass a `UnitRegistry` to `PlotSession` when a producer uses a
 custom unit symbol.  Labels and selected display units are plot/session state,
 not data-schema state.
 
-## Latest-only transport
+## Runtime handoff
 
-Acquisition code publishes immutable revisions directly through
-`LivePlotController`.  The controller validates one fixed payload contract,
-keeps only the latest pending revision, exposes transport metrics, presents
-each latest data front first, and then accepts only its matching live-fit
-result.  Display cadence belongs to the embedding application.
-
-Pulse timelines use the public `LiveDataRevision` envelope because
-`PulseTimelineData` intentionally has no intrinsic revision.  Image point
-annotations use `ImageFrame` and remain a presentation overlay; they are not a
-second data package or plot kind.
+Acquisition history, cadence and partial/final lifecycle belong to Runtime.
+Plot receives immutable revisions through its existing host/session update
+transaction. `PulseTimelineData` remains an immutable presentation payload;
+`ImageFrame` carries an image and its point annotations as one plot input.
 
 ## Persistence and application ownership
 

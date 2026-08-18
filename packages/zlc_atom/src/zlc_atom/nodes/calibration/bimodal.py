@@ -8,7 +8,7 @@ It intentionally has no device, runtime, plotting, or GUI imports.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import erf, exp, isfinite, pi, sqrt
+from math import erf, isfinite, pi, sqrt
 
 import numpy as np
 
@@ -27,16 +27,6 @@ def _erf_array(values: np.ndarray) -> np.ndarray:
     flat = np.asarray(values, dtype=float).reshape(-1)
     result = np.fromiter((erf(float(value)) for value in flat), dtype=float)
     return result.reshape(np.asarray(values).shape)
-
-
-def gaussian(x: object, amp: float, mu: float, sigma: float) -> np.ndarray | float:
-    """Return ``amp * exp(-(x-mu)^2/(2*sigma^2))``."""
-
-    width = max(abs(float(sigma)), _SIGMA_FLOOR)
-    result = float(amp) * np.exp(
-        -((np.asarray(x, dtype=float) - float(mu)) ** 2) / (2.0 * width * width)
-    )
-    return float(result) if result.ndim == 0 else result
 
 
 def normal_cdf(x: object, mu: float = 0.0, sigma: float = 1.0) -> np.ndarray | float:
@@ -61,34 +51,6 @@ def finite_mean(values: object, axis: int | tuple[int, ...] | None = None) -> np
     output = np.full(np.shape(count), np.nan, dtype=float)
     np.divide(total, count, out=output, where=count > 0)
     return output
-
-
-def confidence_weighted_fidelity(
-    threshold: float,
-    mu0: float,
-    sigma0: float,
-    weight0: float,
-    mu1: float,
-    sigma1: float,
-    weight1: float,
-) -> tuple[float, float, float]:
-    """Return confidence-weighted, raw, and normalized peak separation."""
-
-    total = float(weight0) + float(weight1)
-    if total <= 0.0:
-        return float("nan"), float("nan"), float("nan")
-    dark_ok = float(normal_cdf(threshold, mu0, sigma0))
-    bright_ok = 1.0 - float(normal_cdf(threshold, mu1, sigma1))
-    raw = (float(weight0) * dark_ok + float(weight1) * bright_ok) / total
-    separation = abs(float(mu1) - float(mu0)) / max(
-        sqrt(float(sigma0) ** 2 + float(sigma1) ** 2), _SIGMA_FLOOR
-    )
-    balance = 2.0 * min(float(weight0), float(weight1)) / total
-    effective = max(0.0, separation - 2.0)
-    confidence = float(
-        np.clip(balance * (1.0 - exp(-0.5 * effective * effective)), 0.0, 1.0)
-    )
-    return 0.5 + (raw - 0.5) * confidence, raw, separation
 
 
 def _threshold_error(
@@ -484,10 +446,8 @@ class PerSiteConfusion:
 __all__ = [
     "BimodalFit",
     "PerSiteConfusion",
-    "confidence_weighted_fidelity",
     "finite_mean",
     "fit_bimodal",
-    "gaussian",
     "gaussian_fidelity",
     "normal_cdf",
     "optimal_gaussian_threshold",

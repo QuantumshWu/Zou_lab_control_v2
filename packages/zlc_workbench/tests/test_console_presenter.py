@@ -692,7 +692,7 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
         assert display[key]["unavailable_reason"]
     assert binding.state.overlay_signal == ""
     original_state = binding.state
-    assert presenter.set_panel_interval(binding.panel_id, 500) is False
+    assert presenter.update_panel_state(binding.panel_id, {"interval_ms": 500}) is False
     assert binding.state is original_state
 
 
@@ -751,7 +751,7 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
     signal = node.signal_key("frames")
 
     binding = presenter.add_selected_panel("facet_grid")
-    assert presenter.retarget_panel(binding.panel_id, signal) is True
+    assert presenter.update_panel_state(binding.panel_id, {"signal": signal}) is True
     assert binding.host is not None
     first_host = binding.host
 
@@ -813,7 +813,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert binding.editor_host is None
     node, _snapshot = _one_shot(session)
     signal = node.signal_key("frames")
-    assert presenter.retarget_panel(binding.panel_id, signal) is True
+    assert presenter.update_panel_state(binding.panel_id, {"signal": signal}) is True
     assert binding.signal == signal
     assert binding.state.title == signal
     assert binding.host is not None
@@ -1239,10 +1239,12 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     assert presenter.start_logic(consumer_id)
     _settle_panel_hosts(
         presenter,
-        lambda: presenter.logic[consumer_id].host is not None,
+        lambda: presenter.logic[consumer_id].host is not None
+        and presenter.logic[consumer_id].host.observation.terminal,
     )
     host = presenter.logic[consumer_id].host
-    assert host is not None and host.source_signal == roi_signal
+    assert host is not None and host.observation.phase == "done"
+    assert presenter.logic[consumer_id].draft.source_signal == roi_signal
 
 
 
@@ -1423,10 +1425,10 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
     ]
     assert presenter.view.panel_editors[binding.panel_id]["state"]["title"] == "MOT"
 
-    presenter.set_panel_interval(binding.panel_id, 100)
+    presenter.update_panel_state(binding.panel_id, {"interval_ms": 100})
     assert binding.port.display_interval_ms == 100
 
-    presenter.resize_panel(binding.panel_id, "4x4")
+    presenter.update_panel_state(binding.panel_id, {"size": "4x4"})
     assert card.size == "4x4"
 
 
@@ -1448,7 +1450,9 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
 
     # A second producer, so there is something else to point at.
     other, other_snapshot = _one_shot(session, producer="cm2")
-    presenter.retarget_panel(first.panel_id, other.signal_key("frames"))
+    presenter.update_panel_state(
+        first.panel_id, {"signal": other.signal_key("frames")}
+    )
 
     binding = presenter.panels[first.panel_id]
     assert binding.signal == other.signal_key("frames")
@@ -1560,8 +1564,8 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert panel.editor_host.qt_widget() is editor_widget
     assert not first_editor_host._closing
 
-    assert presenter.retarget_panel(
-        panel.panel_id, second_node.signal_key("frames")
+    assert presenter.update_panel_state(
+        panel.panel_id, {"signal": second_node.signal_key("frames")}
     )
     assert panel.frozen_stale and panel.editor_host is first_editor_host
     _commit_area(first_editor_host)
@@ -1624,7 +1628,9 @@ def test_pointing_a_panel_at_a_signal_that_never_published_is_refused(
     binding = presenter.add_panel(node.signal_key("frames"), snapshot)
     card = presenter.view.cards[0]
 
-    presenter.retarget_panel(binding.panel_id, "@logic/nobody/frames")
+    presenter.update_panel_state(
+        binding.panel_id, {"signal": "@logic/nobody/frames"}
+    )
 
     assert presenter.panels[binding.panel_id].signal == node.signal_key("frames")
     assert any("has not published" in text for _severity, text in presenter.view.status)
@@ -1772,7 +1778,9 @@ def test_a_panel_keeps_the_kind_it_was_added_as(presenter, session) -> None:
     assert binding.state is original_state
 
     other, _other_snapshot = _one_shot(session, producer="cm2")
-    assert presenter.retarget_panel(binding.panel_id, other.signal_key("frames")) is True
+    assert presenter.update_panel_state(
+        binding.panel_id, {"signal": other.signal_key("frames")}
+    ) is True
     assert presenter.panels[binding.panel_id].kind == "curve"
 
 
@@ -1896,8 +1904,8 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     )
     semantic_key = semantic_field["key"]
     semantic_value = semantic_field["value"]
-    presenter.resize_panel(first.panel_id, "4x4")
-    presenter.set_panel_interval(first.panel_id, 800)
+    presenter.update_panel_state(first.panel_id, {"size": "4x4"})
+    presenter.update_panel_state(first.panel_id, {"interval_ms": 800})
     presenter.update_panel_state(
         first.panel_id,
         {
@@ -2429,7 +2437,7 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
     binding = presenter.logic[camera_id]
     declared = tuple(
         (spec.output_name, spec.plot_kind)
-        for spec in binding.descriptor.previews_for(binding.draft.values)
+        for spec in binding.descriptor.node_previews
     )
     assert declared == (("frames", "facet_grid"),), (
         "a measurement names what Start shows, and how: three frames per "

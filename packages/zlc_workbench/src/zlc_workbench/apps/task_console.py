@@ -359,7 +359,7 @@ class ExperimentGuiFlow:
                 lease = session.device_use.acquire_command(
                     control,
                     f"{key} control",
-                    (DeviceClaim(key, key, device, "exclusive"),),
+                    (DeviceClaim(key, key, device),),
                 )
             except DeviceUseBusy as error:
                 try:

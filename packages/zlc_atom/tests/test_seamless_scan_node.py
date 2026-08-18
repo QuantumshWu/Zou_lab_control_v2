@@ -323,7 +323,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         # formula copied here: an atom leaves because it is fast enough to
         # walk out of the trap while the light is off.
         planted = np.asarray(
-            [installation.world.release_survival(value * 1e-3) for value in t_offs],
+            [installation.world._release_survival(value * 1e-3, 1.0) for value in t_offs],
             dtype=float,
         )
         planted = planted / planted[0]

@@ -115,7 +115,6 @@ assert calls == [{
 def test_capability_tokens_have_machine_visible_types() -> None:
     assert set(CAPABILITY_TYPES) == {
         "camera.adapter",
-        "camera.working_point",
         "sequencer.streamer",
         "slm.phase",
     }
@@ -133,7 +132,7 @@ def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
         assert slm.identity == "virtual-slm"
         assert slm.shape_yx == (128, 128)
 
-        before_revision = installation.world.slm_phase_revision
+        before_revision = installation.world._slm_phase_revision
         authored = np.linspace(
             -np.pi,
             5.0 * np.pi,
@@ -145,13 +144,13 @@ def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
         assert not commanded.flags.writeable
         assert float(np.min(commanded)) >= 0.0
         assert float(np.max(commanded)) < 2.0 * np.pi
-        assert installation.world.slm_phase_revision == before_revision + 1
+        assert installation.world._slm_phase_revision == before_revision + 1
         np.testing.assert_array_equal(slm.last_commanded_phase, commanded)
         with pytest.raises(ValueError, match="read-only"):
             commanded[0, 0] = 0.0
         slm.close()
         np.testing.assert_array_equal(slm.last_commanded_phase, commanded)
-        assert installation.world.slm_phase_revision == before_revision + 1
+        assert installation.world._slm_phase_revision == before_revision + 1
     finally:
         installation.close()
 
@@ -184,23 +183,21 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
     )
 
 
-def test_device_requirements_name_build_arguments_and_exclusive_access() -> None:
-    from zlc_atom.nodes._framework import DeviceAccess
-
+def test_device_requirements_name_build_arguments() -> None:
     descriptors = {value.api_name: value for value in discover_logic_nodes()}
     camera = descriptors["camera_measurement"].device_requirements
     calibration = descriptors["calibration"].device_requirements
 
     assert [
-        (value.capability_token, value.argument_name, value.access)
+        (value.capability_token, value.argument_name)
         for value in camera
-    ] == [("camera.adapter", "camera", DeviceAccess.EXCLUSIVE)]
+    ] == [("camera.adapter", "camera")]
     assert [
-        (value.capability_token, value.argument_name, value.access)
+        (value.capability_token, value.argument_name)
         for value in calibration
     ] == [
-        ("camera.adapter", "camera", DeviceAccess.EXCLUSIVE),
-        ("sequencer.streamer", "sequencer", DeviceAccess.EXCLUSIVE),
+        ("camera.adapter", "camera"),
+        ("sequencer.streamer", "sequencer"),
     ]
     assert all(not hasattr(value, "device_key") for value in (*camera, *calibration))
 
@@ -208,7 +205,6 @@ def test_device_requirements_name_build_arguments_and_exclusive_access() -> None
 def test_logic_build_namespace_rejects_authored_resolved_or_reserved_collisions() -> None:
     from zlc_atom.authoring import AuthoringField, AuthoringSchema
     from zlc_atom.nodes import (
-        DeviceAccess,
         DeviceRequirement,
         LogicNodeDescriptor,
         NodeKind,
@@ -220,11 +216,7 @@ def test_logic_build_namespace_rejects_authored_resolved_or_reserved_collisions(
             NodeKind.MEASUREMENT,
             AuthoringSchema((AuthoringField("camera", "text", "Camera"),)),
             device_requirements=(
-                DeviceRequirement(
-                    "camera.adapter",
-                    "camera",
-                    DeviceAccess.EXCLUSIVE,
-                ),
+                DeviceRequirement("camera.adapter", "camera"),
             ),
         )
     with pytest.raises(ValueError, match="signal_plane"):

@@ -84,7 +84,6 @@ assert body.findChild(QtWidgets.QWidget, 'GalleryHeading2') is not None
 assert body.findChild(QtWidgets.QWidget, 'GalleryHeading3') is not None
 visible_names = {label.text() for label in body.findChildren(QtWidgets.QLabel) if label.text()}
 assert 'FluentStatusStrip' in visible_names
-assert 'FluentFormGrid' in visible_names
 assert 'ConsoleBoardView' in visible_names
 assert 'FluentScanLineEdit · Duration intent' in visible_names
 assert 'FluentScanLineEdit · Scan slot 1 · duration' in visible_names

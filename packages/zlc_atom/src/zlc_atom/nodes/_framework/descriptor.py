@@ -21,18 +21,10 @@ class NodeKind(str, Enum):
     PROCESSOR = "processor"
 
 
-class DeviceAccess(str, Enum):
-    """How one logic run may use a named device instance."""
-
-    OBSERVE = "observe"
-    EXCLUSIVE = "exclusive"
-
-
 @dataclass(frozen=True)
 class DatasetInputSpec:
     name: str
     contract_id: str | None
-    required: bool = True
 
     def __post_init__(self) -> None:
         if not self.name or (self.contract_id is not None and not self.contract_id):
@@ -222,28 +214,23 @@ class NodePreviewSpec:
     """
 
     output_name: str
-    plot_kind: str = ""
+    plot_kind: str
 
     def __post_init__(self) -> None:
-        if not self.output_name:
-            raise ValueError("node preview requires an output_name")
+        if not self.output_name or not self.plot_kind:
+            raise ValueError("node preview requires output_name and plot_kind")
 
 
 @dataclass(frozen=True)
 class DeviceRequirement:
     capability_token: str
     argument_name: str
-    access: DeviceAccess
 
     def __post_init__(self) -> None:
         if not self.capability_token or not self.argument_name:
             raise ValueError(
                 "device requirement token and build argument name must be non-empty"
             )
-        if not isinstance(self.access, DeviceAccess):
-            raise TypeError("device requirement access must be DeviceAccess")
-
-
 @dataclass(frozen=True)
 class SelectionMapping:
     """Data-only translation from one semantic selection to a draft patch."""
@@ -288,13 +275,9 @@ class LogicNodeDescriptor:
     authoring_schema: AuthoringSchema
     input_specs: tuple[DatasetInputSpec | ArtifactInputSpec, ...] = ()
     outputs: tuple[OutputSpec, ...] = ()
-    resolve_outputs: Callable[[Mapping[str, object]], tuple[OutputSpec, ...]] | None = None
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     node_previews: tuple[NodePreviewSpec, ...] = ()
-    resolve_node_previews: (
-        Callable[[Mapping[str, object]], tuple[NodePreviewSpec, ...]] | None
-    ) = None
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -322,7 +305,7 @@ class LogicNodeDescriptor:
         opened perfectly well.
         """
 
-        return bool(self.node_previews) or self.resolve_node_previews is not None
+        return bool(self.node_previews)
 
     def __post_init__(self) -> None:
         if not self.api_name or not isinstance(self.kind, NodeKind):
@@ -340,22 +323,12 @@ class LogicNodeDescriptor:
             raise TypeError("input_specs contain an unsupported input type")
         if any(not isinstance(value, OutputSpec) for value in outputs):
             raise TypeError("outputs must contain OutputSpec values")
-        if self.resolve_outputs is not None and not callable(self.resolve_outputs):
-            raise TypeError("resolve_outputs must be callable or None")
-        if outputs and self.resolve_outputs is not None:
-            raise ValueError("static outputs and resolve_outputs are exclusive")
         if any(not isinstance(value, NodePreviewSpec) for value in node_previews):
             raise TypeError("node_previews must contain NodePreviewSpec values")
-        if self.resolve_node_previews is not None and not callable(
-            self.resolve_node_previews
-        ):
-            raise TypeError("resolve_node_previews must be callable or None")
         if self.resolve_field_availability is not None and not callable(
             self.resolve_field_availability
         ):
             raise TypeError("resolve_field_availability must be callable or None")
-        if node_previews and self.resolve_node_previews is not None:
-            raise ValueError("static and resolved node previews are exclusive")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
@@ -378,14 +351,9 @@ class LogicNodeDescriptor:
             raise ValueError("output names must be unique")
         if len({value.output_name for value in node_previews}) != len(node_previews):
             raise ValueError("node preview output names must be unique")
-        # Only a node whose outputs are fixed at declaration can be held to
-        # them here; one that resolves them from its values answers later.
-        unknown_previews = (
-            set()
-            if self.resolve_outputs is not None
-            else {value.output_name for value in node_previews}
-            - {value.name for value in outputs}
-        )
+        unknown_previews = {value.output_name for value in node_previews} - {
+            value.name for value in outputs
+        }
         if unknown_previews:
             raise ValueError(
                 f"node previews use undeclared outputs: {sorted(unknown_previews)}"
@@ -473,41 +441,6 @@ class LogicNodeDescriptor:
             return self
         return self.build(**kwargs)
 
-    def outputs_for(self, values: Mapping[str, object]) -> tuple[OutputSpec, ...]:
-        """Resolve the outputs declared by one exact authored request."""
-
-        if self.resolve_outputs is None:
-            return self.outputs
-        authored = self.authoring_schema.project_values(values)
-        outputs = tuple(self.resolve_outputs(authored))
-        if any(not isinstance(value, OutputSpec) for value in outputs):
-            raise TypeError("resolve_outputs must return OutputSpec values")
-        if len({value.name for value in outputs}) != len(outputs):
-            raise ValueError("resolved output names must be unique")
-        return outputs
-
-    def previews_for(
-        self, values: Mapping[str, object]
-    ) -> tuple[NodePreviewSpec, ...]:
-        """The previews this exact authored request declares.
-
-        What a measurement's Start puts on screen is the measurement's own
-        answer, and it can depend on what it was asked to measure: a camera
-        cycle of one frame IS a picture, and a cycle of three is three of
-        them side by side.  The node knows which it is about to take; the
-        plotting package, given only a shape, would be guessing.
-        """
-
-        if self.resolve_node_previews is None:
-            return self.node_previews
-        authored = self.authoring_schema.project_values(values)
-        previews = tuple(self.resolve_node_previews(authored))
-        if any(not isinstance(value, NodePreviewSpec) for value in previews):
-            raise TypeError("resolve_node_previews must return NodePreviewSpec values")
-        if len({value.output_name for value in previews}) != len(previews):
-            raise ValueError("resolved preview output names must be unique")
-        return previews
-
     def selection_patch(
         self,
         selection: SelectionState,
@@ -565,7 +498,6 @@ __all__ = [
     "ArtifactCodec",
     "ArtifactInputSpec",
     "DatasetInputSpec",
-    "DeviceAccess",
     "DeviceRequirement",
     "LogicNodeDescriptor",
     "NodeKind",

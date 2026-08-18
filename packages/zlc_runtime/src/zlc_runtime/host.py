@@ -5,28 +5,22 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import threading
-from typing import Protocol
 
 from zlc_data import canonical_text
 
-from ._public import RunHandleLike
 from .dataset import DatasetCoverage, MonitorCoverage
 from .dataset_output import (
     DatasetOutputDeclaration,
     FinalDatasetOutput,
     LiveDatasetOutput,
-    LiveDatasetOutputOwner,
 )
-from .live_dataset import LiveDatasetPort, _ExactDeltaLivePort
 from .owner_mailbox import RunOwnerMailbox
 from .plane import SignalDataPlane, SignalPublication, SignalValue
-from .preview import ExactDatasetPreviewSpec, LiveDatasetViewSpec
 from .streams import FollowTap, StreamEndedEarly
 
 
 __all__ = [
     "LogicNodeObservation",
-    "Node",
     "NodeExecutionContext",
     "NodeHost",
     "NodeProgress",
@@ -38,12 +32,6 @@ _UNRESOLVED = object()
 
 class _StartSuppressed(Exception):
     """Cancellation won before a worker operation started its work."""
-
-
-class Node(Protocol):
-    """Behavior object hosted according to whether it binds a source signal."""
-
-    ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +70,6 @@ class LogicNodeObservation:
     terminal: bool
     phase: str
     error: str | None = None
-    warnings: tuple[str, ...] = ()
-    run_snapshot: object | None = None
     progress: NodeProgress | None = None
 
     def __post_init__(self) -> None:
@@ -92,16 +78,12 @@ class LogicNodeObservation:
         object.__setattr__(self, "phase", canonical_text(self.phase, "node observation phase"))
         if self.error is not None:
             object.__setattr__(self, "error", canonical_text(self.error, "node observation error"))
-        warnings = tuple(self.warnings)
-        if any(not isinstance(value, str) or not value.strip() for value in warnings):
-            raise ValueError("node observation warnings must be non-empty text")
-        object.__setattr__(self, "warnings", tuple(value.strip() for value in warnings))
         if self.progress is not None and not isinstance(self.progress, NodeProgress):
             raise TypeError("node observation progress must be NodeProgress or None")
 
 
 class NodeExecutionContext:
-    """What a worker operation is given: nine capabilities and its identity.
+    """The runtime capabilities and generation identity given to one worker.
 
     ``generation`` is not a capability -- it performs nothing -- but a node that
     stamps its output has to know which run it is in, and the host is the only
@@ -134,34 +116,10 @@ class NodeExecutionContext:
 
         self._host._seal_worker_terminal()
 
-    def start_and_wait(self, starter: Callable[[], RunHandleLike]) -> object:
-        return self._host._start_and_wait(starter)
-
     def attach_live_outputs(self, slot: object) -> None:
         """Attach one application-owned live output slot to this generation."""
 
         self._host._attach_live(slot)
-
-    def open_live_dataset(
-        self,
-        spec: LiveDatasetViewSpec,
-        *,
-        output_owner: LiveDatasetOutputOwner,
-        retain_on_terminal: bool = True,
-    ) -> LiveDatasetPort:
-        return self._host._open_live_dataset(
-            spec,
-            output_owner=output_owner,
-            retain_on_terminal=retain_on_terminal,
-        )
-
-    def open_exact_dataset(
-        self,
-        spec: ExactDatasetPreviewSpec,
-        *,
-        projection: object,
-    ) -> object:
-        return self._host._open_exact_dataset(spec, projection=projection)
 
     def publish_final(
         self,
@@ -180,16 +138,12 @@ class NodeExecutionContext:
 
         self._host._report_progress(NodeProgress(message, current, total))
 
-    def warn(self, message: str) -> None:
-        self._host._warn(message)
-
-
 class NodeHost:
     """Host one worker or source-bound processor with one lifecycle surface."""
 
     def __init__(
         self,
-        node: Node,
+        node: object,
         data_plane: SignalDataPlane,
         request_owner_wake: Callable[[], None] | None = None,
         *,
@@ -253,11 +207,8 @@ class NodeHost:
         self._terminal = False
         self._phase = "not started"
         self._error: str | None = None
-        self._warnings: list[str] = []
         self._progress: NodeProgress | None = None
         self._result: object = _UNRESOLVED
-        self._handle: RunHandleLike | None = None
-        self._snapshot: object | None = None
         self._stop_event = threading.Event()
         self._start_lock = threading.Lock()
         self._worker_stop_sealed = False
@@ -268,10 +219,6 @@ class NodeHost:
         self._processor_path: str | None = None
         self._source_publication: SignalPublication | None = None
         self._follow_tap: FollowTap[SignalPublication] | None = None
-
-    @classmethod
-    def create(cls, node: Node, **kwargs) -> "NodeHost":
-        return cls(node, **kwargs)
 
     @staticmethod
     def _resolve_names(
@@ -290,7 +237,7 @@ class NodeHost:
     @classmethod
     def _resolve_declarations(
         cls,
-        node: Node,
+        node: object,
         instance_id: str,
         explicit: Iterable[DatasetOutputDeclaration] | None,
         names: Iterable[str] | None,
@@ -321,7 +268,7 @@ class NodeHost:
         )
 
     @staticmethod
-    def _resolve_source_signal(node: Node, explicit: str | None) -> str | None:
+    def _resolve_source_signal(node: object, explicit: str | None) -> str | None:
         candidate: object = explicit
         if candidate is None:
             candidate = getattr(node, "input_signal", None)
@@ -345,16 +292,6 @@ class NodeHost:
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
         return self._dataset_outputs
 
-    @property
-    def node(self) -> Node:
-        """The exact admitted node whose request this host is running."""
-
-        return self._node
-
-    @property
-    def source_signal(self) -> str | None:
-        return self._source_signal
-
     def signal_key(self, output_name: str) -> str:
         name = canonical_text(output_name, "node output name")
         if name not in {value.name for value in self._dataset_outputs}:
@@ -372,18 +309,6 @@ class NodeHost:
     @property
     def terminal(self) -> bool:
         return self._terminal
-
-    @property
-    def phase(self) -> str:
-        return self._phase
-
-    @property
-    def last_error(self) -> str | None:
-        return self._error
-
-    @property
-    def handle(self) -> RunHandleLike | None:
-        return self._handle
 
     @property
     def final_result(self) -> object | None:
@@ -412,8 +337,6 @@ class NodeHost:
             self._terminal,
             self._phase,
             self._error,
-            tuple(self._warnings),
-            self._snapshot,
             self._progress,
         )
 
@@ -451,7 +374,6 @@ class NodeHost:
                 return
             self._stop_reason = reason
             self._stop_event.set()
-            handle = self._handle
         self._phase = "stopping"
         if self._mode == "processor" and self._processor_path == "latest":
             idle = self._data_plane.cancel_latest_only_processor(self)
@@ -462,19 +384,9 @@ class NodeHost:
             if self._follow_tap is not None:
                 self._follow_tap.close()
             self._retire_plane_state()
-        elif handle is not None:
-            try:
-                handle.cancel(reason)
-            except BaseException as error:
-                self._warnings.append(f"cancel warning: {type(error).__name__}: {error}")
 
     def poll(self) -> LogicNodeObservation:
         if self._mode == "worker":
-            if self._active and self._handle is not None:
-                self._snapshot = self._handle.snapshot()
-                phase = getattr(self._snapshot, "phase", None)
-                if isinstance(phase, str) and phase.strip():
-                    self._phase = phase.strip()
             self._poll_worker()
         elif self._processor_path == "frozen":
             self._poll_frozen_processor()
@@ -516,11 +428,8 @@ class NodeHost:
         self._terminal = False
         self._phase = "starting"
         self._error = None
-        self._warnings.clear()
         self._progress = None
         self._result = _UNRESOLVED
-        self._handle = None
-        self._snapshot = None
         self._stop_event.clear()
         self._worker_stop_sealed = False
         self._stop_reason = "Host requested stop"
@@ -657,14 +566,6 @@ class NodeHost:
             return
         self._end_run("failed", f"{type(error).__name__}: {error}")
 
-    def _warn(self, message: str) -> None:
-        message = canonical_text(message, "node warning")
-        if not self._active:
-            raise RuntimeError("inactive node cannot publish a warning")
-        with self._start_lock:
-            self._warnings.append(message)
-        self._request_owner_wake()
-
     def _seal_worker_terminal(self) -> None:
         with self._start_lock:
             if self._mode != "worker" or not self._active:
@@ -672,28 +573,6 @@ class NodeHost:
             if self._stop_event.is_set():
                 raise _StartSuppressed()
             self._worker_stop_sealed = True
-
-    def _start_and_wait(self, starter: Callable[[], RunHandleLike]) -> object:
-        if not callable(starter):
-            raise TypeError("Run starter must be callable")
-        with self._start_lock:
-            if self._stop_event.is_set():
-                raise _StartSuppressed()
-        handle = starter()
-        if not all(callable(getattr(handle, name, None)) for name in ("snapshot", "cancel", "result")):
-            raise TypeError("Run starter returned no RunHandleLike")
-        with self._start_lock:
-            self._handle = handle
-            if self._owner is not None:
-                self._owner.set_handle(handle)
-            cancelled = self._stop_event.is_set()
-            reason = self._stop_reason
-        if cancelled:
-            handle.cancel(reason)
-        try:
-            return handle.result()
-        finally:
-            self._snapshot = handle.snapshot()
 
     def _publish_final(
         self,
@@ -731,26 +610,6 @@ class NodeHost:
             slot.close()
             raise
         self._live_opened = True
-
-    def _open_live_dataset(
-        self,
-        spec: LiveDatasetViewSpec,
-        *,
-        output_owner: LiveDatasetOutputOwner,
-        retain_on_terminal: bool,
-    ) -> LiveDatasetPort:
-        slot = LiveDatasetPort(
-            spec,
-            retain_on_terminal=retain_on_terminal,
-            output_owner=output_owner,
-        )
-        self._attach_live(slot)
-        return slot
-
-    def _open_exact_dataset(self, spec: ExactDatasetPreviewSpec, *, projection: object) -> object:
-        slot = _ExactDeltaLivePort(spec, projection)
-        self._attach_live(slot)
-        return slot
 
     def _retire_plane_state(self) -> None:
         if not self._plane_state:

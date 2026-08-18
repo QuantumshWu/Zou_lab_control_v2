@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from importlib import import_module
-from pathlib import Path
 import types
 
 import zlc_plot
@@ -22,8 +21,6 @@ EXPECTED_NAMES = {
     "ImageFrame",
     "ImagePlot",
     "ImagePointOverlay",
-    "LiveDataRevision",
-    "LivePlotController",
     "NumericRange",
     "PlotKind",
     "PlotLabels",
@@ -59,7 +56,6 @@ EXPECTED_NAMES = {
     "histogram",
     "image_axes",
     "image",
-    "panel_kinds",
     "parameter_controls",
     "pulse_timeline",
     "resolve_unit",
@@ -79,14 +75,11 @@ REMOVED_NAMES = {
     "FitDeadlineExceeded",
     "FitEngine",
     "FitModelRegistry",
-    "FitNumericTable",
     "FitOptions",
     "FitParameterDisplay",
     "FitResult",
     "FitScope",
     "FitSelection",
-    "LivePlotMetrics",
-    "LiveUpdateError",
     "NotebookView",
     "ParameterControl",
     "PlotLibraryDefaults",
@@ -113,43 +106,21 @@ REMOVED_NAMES = {
     "axis_choices_for_schema",
     "builtin_fit_models",
     "default_spec",
-    "notebook_available",
-    "qt5_available",
     "replace_spec_initial_state",
     "semantic_controls",
 }
 
 
-def _contract_names() -> set[str]:
-    path = Path(__file__).parents[1] / "docs" / "contract.md"
-    text = path.read_text(encoding="utf-8")
-    start = "<!-- zlc_plot-public-names:start -->"
-    end = "<!-- zlc_plot-public-names:end -->"
-    block = text.split(start, 1)[1].split(end, 1)[0]
-    return {
-        line.strip()
-        for line in block.splitlines()
-        if line.strip() and not line.strip().startswith("```")
-    }
-
-
-def test_facade_names_match_contract_and_have_a_real_namespace_cap() -> None:
+def test_facade_names_are_exact_and_resolve() -> None:
     assert set(zlc_plot.__all__) == EXPECTED_NAMES
-    assert _contract_names() == EXPECTED_NAMES
-    # Derived, not re-typed: the contract listing IS the count, so adding a
-    # name meant editing the same number in three places and the test failed
-    # on the bookkeeping rather than on the surface it guards.  The length
-    # check still earns its place -- it catches a name listed twice.
     assert len(zlc_plot.__all__) == len(EXPECTED_NAMES)
-    assert zlc_plot.MAX_PUBLIC_NAMES == len(EXPECTED_NAMES)
     public = [
         name
         for name in dir(zlc_plot)
         if not name.startswith("_")
         and not isinstance(getattr(zlc_plot, name), types.ModuleType)
     ]
-    assert set(public) <= EXPECTED_NAMES - {"__version__"} | {"MAX_PUBLIC_NAMES"}
-    assert len(public) <= zlc_plot.MAX_PUBLIC_NAMES
+    assert set(public) <= EXPECTED_NAMES - {"__version__"}
     assert all(hasattr(zlc_plot, name) for name in zlc_plot.__all__)
     assert zlc_plot.__version__ == "1.1.0"
 
@@ -164,14 +135,11 @@ def test_removed_names_are_not_facade_attributes_but_submodules_stay_usable() ->
         "FitDeadlineExceeded": "zlc_plot.fit",
         "FitEngine": "zlc_plot.fit",
         "FitModelRegistry": "zlc_plot.fit",
-        "FitNumericTable": "zlc_plot.fit",
         "FitOptions": "zlc_plot.fit",
         "FitParameterDisplay": "zlc_plot.fit",
         "FitResult": "zlc_plot.fit",
         "FitScope": "zlc_plot._fit_projection",
         "FitSelection": "zlc_plot._fit_projection",
-        "LivePlotMetrics": "zlc_plot.live",
-        "LiveUpdateError": "zlc_plot.live",
         "NotebookView": "zlc_plot.notebook",
         "ParameterControl": "zlc_plot.ui",
         "PlotLibraryDefaults": "zlc_plot.config",
@@ -198,8 +166,6 @@ def test_removed_names_are_not_facade_attributes_but_submodules_stay_usable() ->
         "axis_choices_for_schema": "zlc_plot.semantics",
         "builtin_fit_models": "zlc_plot.fit",
         "default_spec": "zlc_plot._kinds",
-        "notebook_available": "zlc_plot.backends",
-        "qt5_available": "zlc_plot.backends",
         "replace_spec_initial_state": "zlc_plot.session_policy",
         "semantic_controls": "zlc_plot.ui",
     }

@@ -2,9 +2,7 @@
 
 from .bimodal import (
     BimodalFit,
-    confidence_weighted_fidelity,
     fit_bimodal,
-    gaussian,
     gaussian_fidelity,
     normal_cdf,
     optimal_gaussian_threshold,
@@ -23,12 +21,10 @@ from .calibration import (
     TrapCalibration,
     calibrate,
     classify_threshold,
-    detect,
     detect_sites,
     extract_box_signals,
     extract_psf_signals,
     readout_model_kind_from_choice,
-    signals,
 )
 from .logic_node import LOGIC_NODE
 from .psf import gaussian_psf_kernel, normalized_psf_kernel
@@ -58,13 +54,10 @@ __all__ = [
     "TrapCalibration",
     "calibrate",
     "classify_threshold",
-    "confidence_weighted_fidelity",
-    "detect",
     "detect_sites",
     "extract_box_signals",
     "extract_psf_signals",
     "fit_bimodal",
-    "gaussian",
     "gaussian_fidelity",
     "gaussian_psf_kernel",
     "normal_cdf",
@@ -72,5 +65,4 @@ __all__ = [
     "optimal_gaussian_threshold",
     "per_site_fidelity",
     "readout_model_kind_from_choice",
-    "signals",
 ]

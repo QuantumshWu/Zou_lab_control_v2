@@ -15,7 +15,6 @@ from zlc_atom.devices.slm.solver import load_phase
 from zlc_atom.devices.slm.solver import preset_grid
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import discover_logic_nodes
-from zlc_atom.nodes._framework.descriptor import DeviceAccess
 from zlc_atom.nodes.calibration import (
     FrameContract,
     ReadoutModel,
@@ -214,11 +213,11 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         ("uniformity_history", "curve"),
     )
     assert tuple(
-        (item.capability_token, item.access) for item in descriptor.device_requirements
+        item.capability_token for item in descriptor.device_requirements
     ) == (
-        ("camera.adapter", DeviceAccess.EXCLUSIVE),
-        ("sequencer.streamer", DeviceAccess.EXCLUSIVE),
-        ("slm.phase", DeviceAccess.EXCLUSIVE),
+        "camera.adapter",
+        "sequencer.streamer",
+        "slm.phase",
     )
     source = inspect.getsource(feedback_module)
     assert "SimulationWorld" not in source and "devices.simulation" not in source

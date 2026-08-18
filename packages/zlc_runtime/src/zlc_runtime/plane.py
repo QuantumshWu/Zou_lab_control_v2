@@ -1,7 +1,7 @@
 """Headless signal plane with producer-local causal coherence.
 
-A hosted producer publishes through a ``LiveDatasetPort``; this plane freezes
-only sources that reported a new revision. Each source is one producer
+A hosted producer publishes through its application-owned live output slot;
+this plane freezes only sources that reported a new revision. Each source is one producer
 transaction. Combining their latest immutable fronts for one consumer cycle
 does not assert that independent producers observed the same physical event.
 

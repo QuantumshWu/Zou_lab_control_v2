@@ -77,8 +77,5 @@ import the package that draws (a canvas would carry matplotlib into the GUI
 layer), and the outside may not hold a widget, so the host is asked for its
 widget on this side of the wall -- see `PulseEditorHandle.show_preview`.
 
-`FlowGraph`, `FlowGraphEdge`, and `FlowGraphNode` are deliberately not
-re-exported here.  Their implementation remains available from
-`zlc_ui.graph`, which is the explicit path for the graph demonstration.
-Concrete Qt views likewise remain in their feature submodules so the facade
+Concrete Qt views remain in their feature submodules so the facade
 does not become an unbounded view registry.

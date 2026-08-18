@@ -817,7 +817,7 @@ try:
     blocker = flow.session.device_use.acquire_command(
         blocker_owner,
         'camera task',
-        (DeviceClaim('camera', 'camera', camera, 'exclusive'),),
+        (DeviceClaim('camera', 'camera', camera),),
     )
     try:
         exposure.setValue(0.06); application.processEvents()

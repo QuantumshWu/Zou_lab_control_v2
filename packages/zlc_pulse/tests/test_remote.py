@@ -288,7 +288,6 @@ def _fake_resolution(tmp_path, outcomes, *, requested="auto", ports=("COM1",)):
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         port_provider=lambda: ports,
         probe=probe,
     )
@@ -342,7 +341,6 @@ def test_backend_auto_probes_every_os_port_with_physical_usb_first(monkeypatch, 
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         probe=probe,
     )
 
@@ -424,7 +422,7 @@ def test_real_uart_crc_status_exception_maps_to_crc_category(tmp_path) -> None:
         def write_batch(self, requests, *, deadline, stop=None):
             return [framing.encode_reply(request[3], framing.ST_CRC_FAIL) for request in requests]
 
-    transport = transport_module.UartRegisterTransport(state_dir=tmp_path, link=CrcLink())
+    transport = transport_module.UartRegisterTransport(link=CrcLink())
     transport.start()
     try:
         with pytest.raises(UartError) as failure:
@@ -457,7 +455,6 @@ def test_backend_auto_missing_pyserial_falls_back_without_probe(tmp_path) -> Non
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         port_provider=missing_pyserial,
         probe=lambda port, timeout: calls.append((port, timeout)),
     )
@@ -469,12 +466,12 @@ def test_backend_auto_missing_pyserial_falls_back_without_probe(tmp_path) -> Non
 
 def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> None:
     params = StreamerParams()
-    records: list[tuple[str, int, float, int]] = []
+    records: list[tuple[str, int, float]] = []
     open_calls: list[int] = []
 
     class FakeTransport:
-        def __init__(self, *, state_dir, port, baud, action_timeout):
-            records.append((port, baud, action_timeout, int(state_dir is not None)))
+        def __init__(self, *, port, baud, action_timeout):
+            records.append((port, baud, action_timeout))
             self.started = False
             self.closed = 0
 
@@ -504,14 +501,13 @@ def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> 
         target=_BOARD_TARGET,
         params=params,
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         port_provider=lambda: ("COM7",),
     )
 
     assert result.backend == "uart"
     assert result.uart_port == "COM7"
     assert result.attempts == ("COM7: word63 fingerprint matched",)
-    assert records == [("COM7", 3_000_000, 0.5, 1)]
+    assert records == [("COM7", 3_000_000, 0.5)]
     assert len(open_calls) == 1
 
 
@@ -520,7 +516,7 @@ def test_uart_probe_direct_helper_uses_existing_open_handshake(monkeypatch, tmp_
     addresses: list[int] = []
 
     class FakeTransport:
-        def __init__(self, *, state_dir, port, baud, action_timeout):
+        def __init__(self, *, port, baud, action_timeout):
             self.started = False
 
         def start(self) -> None:
@@ -541,7 +537,6 @@ def test_uart_probe_direct_helper_uses_existing_open_handshake(monkeypatch, tmp_
         target=_BOARD_TARGET,
         params=params,
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         baud=3_000_000,
     )
 
@@ -566,7 +561,6 @@ def test_explicit_jtag_skips_uart_probe(tmp_path) -> None:
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         port_provider=lambda: (_ for _ in ()).throw(AssertionError("UART enumeration must be skipped")),
         probe=lambda port, timeout: calls.append((port, timeout)),
     )
@@ -584,7 +578,6 @@ def test_uart_port_override_is_the_only_auto_candidate(tmp_path) -> None:
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
-        state_dir=str(tmp_path),
         port_provider=lambda: (_ for _ in ()).throw(AssertionError("port enumeration must be skipped")),
         probe=lambda port, timeout: calls.append((port, timeout)),
     )

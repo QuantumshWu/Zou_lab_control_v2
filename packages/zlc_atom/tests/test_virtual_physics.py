@@ -235,7 +235,7 @@ def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
     def rebuilt_psf(*_args, **_kwargs):
         raise AssertionError("render_frame rebuilt a fixed site PSF")
 
-    propagation_count = world.propagation_count
+    propagation_count = world._propagation_count
     monkeypatch.setattr(simulation_world.np, "exp", rebuilt_psf)
     for ordinal in (3, 4):
         world.render_frame(
@@ -244,7 +244,7 @@ def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
             probe_seconds=0.005,
             occupancy=occupancies[ordinal % len(occupancies)],
         )
-    assert world.propagation_count == propagation_count
+    assert world._propagation_count == propagation_count
 
 
 def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
@@ -410,10 +410,10 @@ def test_mot_camera_sees_the_dac_from_its_own_fire() -> None:
 
 def test_virtual_sites_have_small_detector_nuisance_and_psf_diversity() -> None:
     world = SimulationWorld(seed=4)
-    efficiency = world.detector_efficiency
-    sigma_xy = world.site_psf_sigma_xy
-    angles = world.site_psf_angle_radians
-    skew = world.site_psf_skew
+    efficiency = np.array(world._detector_efficiency, copy=True)
+    sigma_xy = np.array(world._site_psf_sigma_xy, copy=True)
+    angles = np.array(world._site_psf_angle_radians, copy=True)
+    skew = np.array(world._site_psf_skew, copy=True)
 
     assert efficiency.shape == (35,)
     assert float(np.max(efficiency) / np.min(efficiency)) <= 1.03
@@ -423,7 +423,7 @@ def test_virtual_sites_have_small_detector_nuisance_and_psf_diversity() -> None:
     assert float(np.ptp(angles)) > 0.05
     assert float(np.ptp(skew)) > 0.05
     np.testing.assert_allclose(
-        SimulationWorld(seed=4).detector_efficiency,
+        SimulationWorld(seed=4)._detector_efficiency,
         efficiency,
     )
 
@@ -439,7 +439,7 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         sites = world._site_trap_intensities
         initial_ratio = float(np.max(sites) / np.min(sites))
         ratios.append(initial_ratio)
-        assert world.propagation_count == 1
+        assert world._propagation_count == 1
         initial_loading = world._site_loading_probabilities()
         order = np.argsort(sites)
         assert np.all(np.diff(initial_loading[order]) >= 0.0)
@@ -467,22 +467,22 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
             1, exposure_seconds=0.005, occupancy=loaded
         )
         assert not np.array_equal(first, second)
-        assert world.propagation_count == 1
+        assert world._propagation_count == 1
 
         # Only this acceptance oracle reads the planted hidden wavefront.  The
         # solver and every future feedback Task receive no such reference.
-        before = world.slm_phase_revision
+        before = world._slm_phase_revision
         world.apply_slm_phase(
             world.commanded_phase - world._hidden_slm_aberration
         )
-        assert world.slm_phase_revision == before + 1
+        assert world._slm_phase_revision == before + 1
         world._ensure_slm_propagation()
         corrected = world._site_trap_intensities
         corrected_mean_ratio = float(np.mean(corrected) / np.mean(sites))
         assert 0.8 <= corrected_mean_ratio <= 1.3
-        assert world.propagation_count == 2
+        assert world._propagation_count == 2
         _ = world._trap_plane_intensity
-        assert world.propagation_count == 2
+        assert world._propagation_count == 2
         corrected_loading = world._site_loading_probabilities()
         corrected_order = np.argsort(corrected)
         assert np.all(np.diff(corrected_loading[corrected_order]) >= 0.0)
@@ -726,7 +726,7 @@ def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
         world.loading_probability = 1.0
         world.atom_rate = 10_000.0
         _fire_world(world, _world_pulse(cooling=True, trap=True))
-        assert np.all(world.occupancy)
+        assert np.all(world._occupancy)
 
         snapshots: list[np.ndarray] = []
         original_render = world.render_frame
@@ -767,12 +767,12 @@ def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
         world.apply_slm_phase(sparse_phase)
         sparse_frame = triggered_snapshot()
         assert not snapshots[-1][removed]
-        assert not world.occupancy[removed]
+        assert not world._occupancy[removed]
 
         world.apply_slm_phase(nominal_phase)
         restored_frame = triggered_snapshot()
         assert not snapshots[-1][removed]
-        assert not world.occupancy[removed]
+        assert not world._occupancy[removed]
 
         kept_center = tuple(world.geometry.site_centers_xy[kept[0]])
         removed_center = tuple(world.geometry.site_centers_xy[removed])
@@ -893,7 +893,7 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
                 radius=1,
                 reducer="mean",
             )
-            assert world._propagated_revision == world.slm_phase_revision
+            assert world._propagated_revision == world._slm_phase_revision
             return old_signal - background, new_signal - background
 
         add_target = np.array(base_target, copy=True)
@@ -937,7 +937,7 @@ def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> 
     patterns: list[np.ndarray] = []
     for _ in range(32):
         _fire_world(world, pulse)
-        occupancy = world.occupancy
+        occupancy = np.array(world._occupancy, copy=True)
         assert not np.any(np.delete(occupancy, selected))
         patterns.append(occupancy[selected])
 
@@ -953,10 +953,10 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     after_qcmos = SimulationWorld(seed=31)
     after_mot = SimulationWorld(seed=31)
     np.testing.assert_array_equal(
-        reference.detector_efficiency, after_qcmos.detector_efficiency
+        reference._detector_efficiency, after_qcmos._detector_efficiency
     )
     np.testing.assert_array_equal(
-        reference.detector_efficiency, after_mot.detector_efficiency
+        reference._detector_efficiency, after_mot._detector_efficiency
     )
 
     empty = np.zeros(35, dtype=bool)
@@ -987,8 +987,8 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     )
     for world in (reference, after_qcmos, after_mot):
         world._lose_atoms(16e-6)
-    np.testing.assert_array_equal(reference.occupancy, after_qcmos.occupancy)
-    np.testing.assert_array_equal(reference.occupancy, after_mot.occupancy)
+    np.testing.assert_array_equal(reference._occupancy, after_qcmos._occupancy)
+    np.testing.assert_array_equal(reference._occupancy, after_mot._occupancy)
 
     qcmos_reference = SimulationWorld(seed=37)
     qcmos_after_mot = SimulationWorld(seed=37)
@@ -1185,7 +1185,7 @@ def test_safe_has_no_persistent_test_only_occupancy_mode() -> None:
     world._mot_population = 1.0
     world._dac_values.update(da_bias_x=17, da_bias_y=-23, da_bias_z=31)
     world.safe()
-    assert not np.any(world.occupancy)
+    assert not np.any(world._occupancy)
     assert not np.any(world._extra_occupancy)
     assert world._mot_population == 0.0
     assert world._dac_values == {
@@ -1198,12 +1198,12 @@ def test_safe_has_no_persistent_test_only_occupancy_mode() -> None:
 def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
     world = SimulationWorld(seed=3)
     _fire_world(world, _world_pulse(trap=True))
-    assert not np.any(world.occupancy), "a pulse without cooling cannot load atoms"
+    assert not np.any(world._occupancy), "a pulse without cooling cannot load atoms"
     world.loading_probability = 1.0
     _fire_world(world, _world_pulse(cooling=True, trap=True))
-    assert np.all(world.occupancy)
+    assert np.all(world._occupancy)
     _fire_world(world, _world_pulse(duration=1.0))
-    assert not np.any(world.occupancy)
+    assert not np.any(world._occupancy)
 
 
 def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
@@ -1234,13 +1234,13 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         assert time.monotonic() - started >= program.duration_seconds * 0.8
         streamer.fire(forever=True)
         deadline = time.monotonic() + 0.5
-        while world.fire_count < 3 and time.monotonic() < deadline:
+        while world._fire_count < 3 and time.monotonic() < deadline:
             time.sleep(0.005)
-        assert world.fire_count >= 3
+        assert world._fire_count >= 3
         streamer.safe()
-        stopped_at = world.fire_count
+        stopped_at = world._fire_count
         time.sleep(0.08)
-        assert world.fire_count == stopped_at
+        assert world._fire_count == stopped_at
     finally:
         streamer.close()
 
@@ -1307,7 +1307,7 @@ def test_zero_slot_scan_sweeps_are_independent_three_frame_shots(monkeypatch) ->
 
         assert len(records) == sweeps * 3
         assert terminal.produced_count == sweeps * 3
-        assert world.fire_count == sweeps
+        assert world._fire_count == sweeps
         assert len(loaded) == sweeps
         assert len(rendered) == sweeps * 3
         for shot, occupancy in enumerate(loaded):
@@ -1344,7 +1344,7 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         expected = []
         for _ in range(repeats):
             sequencer.fire()
-            expected.append(installation.world.occupancy)
+            expected.append(np.array(installation.world._occupancy, copy=True))
             sequencer.wait_done(1.0)
         result = capture.collect()
         labels = np.asarray(expected, dtype=bool)
@@ -1386,7 +1386,7 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         )
         short_contrast = float(np.mean(short[labels]) - np.mean(short[~labels]))
         assert short_contrast / long_contrast == pytest.approx(0.25, rel=0.20)
-        assert installation.world.fire_count == repeats
+        assert installation.world._fire_count == repeats
     finally:
         plane.close()
         installation.close()
