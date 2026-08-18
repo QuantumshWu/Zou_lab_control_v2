@@ -1,14 +1,11 @@
-# Zou_lab_control v2 — historical/inactive pointer
+# Zou Lab Control v2 — Handoff
 
-> **HISTORICAL / INACTIVE。** 本文件不保存产品快照、Checkpoint、测试数字、HEAD、验收结论、缺陷清单或下一步；不得用它恢复 Goal，也不得把它扩写成第三份实施权威。
+当前唯一实施入口：
 
-当前且唯一的目标权威是：
+1. [ZLC_V2_IMPLEMENTATION_GOAL.md](ZLC_V2_IMPLEMENTATION_GOAL.md) — 用户批准的完整目标、纪律、milestones与Definition of Done；
+2. [ARCHITECTURE_DESIGN.md](ARCHITECTURE_DESIGN.md) — 批准的Target不变量；
+3. [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) — 持久Checkpoint、当前状态、证据和下一步。
 
-1. `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
-2. `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\IMPLEMENTATION_PLAN.md`
+恢复任务时依次完整读取上述三份文件，再读取当前Checkpoint所引用的`AUDIT/`报告并核对HEAD/dirty state。Package README、旧GOAL、survey、acceptance、历史contracts和旧tests不是实施authority。
 
-凡上述权威或用户明确要求参考 v1，唯一允许读取的 v1 树是：
-
-`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`
-
-`ZLC_main`、`_reference\Zou_lab_control_v1` 和其他副本均不得代替。v1 只用于用户逐项点名的行为参考，不是 v2 上位规格。当前状态、未完成 stages 和最终验收门只读取 `IMPLEMENTATION_PLAN.md` 的持久执行 Checkpoint。
+当前用户边界：只执行到Milestone 1完成并commit；随后停止，等待用户确认后才可进入Milestone 2。

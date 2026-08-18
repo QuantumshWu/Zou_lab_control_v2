@@ -1,510 +1,228 @@
-# Zou_lab_control v2 目标架构设计（执行权威）
+# Zou Lab Control v2 — Approved Target Architecture
 
-> 仓库绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2`
-> 本文绝对路径：`C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
-> 凡本文或用户明确要求“参考 v1”时，唯一允许读取的 v1 树是 `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`。`ZLC_main`、`_reference\Zou_lab_control_v1` 和其他副本都不得代替它。这个路径裁决不把 v1 升格为产品规格；v1 只作为用户逐项点名的 Device Manager、TaskConsole/运行中 Task 操作面、Calibration report 和 virtual apparatus 默认值的行为参考，v2 package boundary 和唯一真相源仍只按用户裁决和本文实施。
-> 设计基线：`0243aa6`。完成状态与实测证据以 `IMPLEMENTATION_PLAN.md` Checkpoint 为准；package/full-tree 测试不能替代真实实验入口和可见 GUI 的验收。
-> 权威顺序：用户当前裁决 > 简单且可维护的边界 > v2 当前实现 > v1 参考。v1 不是规格。
-> 根目录 `HANDOFF.md` 只是指向这两份权威文档的 historical/inactive pointer，不保存产品快照、Checkpoint 或验收结论，也不需要在上下文恢复时重读。
+状态：`TARGET / NOT YET IMPLEMENTED`，除非`IMPLEMENTATION_PLAN.md`的当前Checkpoint明确标为完成。
 
-### 封闭的目标权威集合
+本文只定义用户批准的产品不变量，不保存历史commit、旧测试数字或阶段日志。当前实现状态、验证证据和下一步只看`IMPLEMENTATION_PLAN.md`。完整实施范围与阶段顺序见根目录`ZLC_V2_IMPLEMENTATION_GOAL.md`。
 
-Goal 启动后，仅下列两份磁盘文档定义目标和实施方向：
+## 1. Authority与原则
 
-1. `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\ARCHITECTURE_DESIGN.md`
-2. `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v2\IMPLEMENTATION_PLAN.md`
+实施authority顺序：
 
-当前树的源代码、git diff 和实测结果是“现状证据”，不是“目标规格”。下列文件都是历史资料或旧 package 说明，可用于定位现有 API/过期行为，但不得作为 Goal，不得覆盖或重新解释上述两份权威文档。七份 `packages/*/GOAL.md` 已收缩为只指向这两份权威的 historical/inactive tombstone，不再保留 active 正文或另一份待办：
+1. 用户最新明确指令；
+2. `ZLC_V2_IMPLEMENTATION_GOAL.md`；
+3. 本文目标不变量；
+4. `IMPLEMENTATION_PLAN.md`当前Checkpoint；
+5. 当前代码与实验事实。
 
-- 根目录 `HANDOFF.md` 和 `README.md`；
-- `packages/*/GOAL.md`（当前存在 7 份）；
-- `packages/*/docs/contract.md`；
-- `packages/*/README.md` 及其他历史 design/goal 文档。
+Package README、旧GOAL、survey、acceptance、历史contract和旧tests不是目标规格；它们在Milestone 1中删除或按当前产品重写。
 
-若这些文件与权威文档冲突，直接忽略冲突的旧说法并继续实施。若两份权威文档彼此冲突，执行者按本文末尾的自主决策顺序选择最优实现，同步修正两份文档和 Checkpoint，不停下询问。
+总体原则：
 
-## 1. 目标
+- 保留八层骨架，删除平行truth和单消费者framework；
+- 默认删，不为旧测试、兼容或“以后可能”保留历史路径；
+- 每个事实只有一个owner；
+- 优先扩展现有Data、Plane、Host、Session和device骨架，不新增manager/registry/base-class；
+- 不用GPU、降采样、质量放宽、丢revision或增加timeout掩盖性能根因；
+- 不增加密码、认证、TLS、权限系统或新的content hash体系；
+- Domain validation、hardware acknowledgement、owner identity和strict format是功能正确性，不是防御性框架。
 
-首先跑通同一条真实产品路径，虚拟设备和真设备只在 adapter 底部分叉：
+## 2. 八层职责
+
+| Layer | 唯一职责 | 禁止 |
+|---|---|---|
+| `zlc_data` | Immutable scientific schema、values、validity、selection projection和codec grammar | Runtime、Qt、device、workspace路径 |
+| `zlc_durable` | Atomic write、并发安全命名、workspace path | Science schema与figure语义 |
+| `zlc_runtime` | Node lifecycle、canonical run accumulation、live/partial/final publication、causal identity、front scheduling | Plugin physics、plot rendering、Qt |
+| `zlc_plot` | Snapshot projection、exact fit、overlay、selector、raster front | Signal registry、Task lifecycle、plugin science |
+| `zlc_ui` | Qt views和plain view models | Plot/Runtime/device/domain ownership与blocking work |
+| `zlc_pulse` | Pulse model、compile、wire、transport和execution evidence | Measurement shot policy与Workbench state |
+| `zlc_atom` | Device plugins、science nodes、Calibration、SLM/atom physics | Workbench composition与panel-save truth |
+| `zlc_workbench` | Composition、workspace/session、device claims、panel/layout persistence | Plugin science与第二Runtime/Plot实现 |
+
+最终作为一个ZLC distribution安装；八层是代码依赖边界，不是八个standalone wheels。
+
+## 3. Data与Durability
+
+### 3.1 Scientific data
+
+- `OwnedSnapshot`是外部不可变数据面；schema、coordinates、labels、units和validity共同定义truth。
+- Snapshot restriction必须对values、validity、coordinates、labels和coordinate frame执行同一projection。
+- Validity入口只接受明确bool contract，不做numeric truthiness转换。
+- Selection按AxisId和typed coordinate唯一解析；重名或不可唯一映射必须拒绝。
+- 同一run/content revision不可代表不同内容；EventRef只表达causal publication，不代替content identity。
+
+### 3.2 Figure archive
+
+- 一个writer、一个reader、一个format owner。
+- Writer写入前规划全部member namespace并拒绝碰撞。
+- Reader在解释内容前严格验证format/version、required members、shape、duplicates和non-finite metadata。
+- 未知metadata类型拒绝，不自动字符串化。
+
+### 3.3 Durable paths
+
+- Unique name allocation与commit构成一个并发原子操作，多process不得取得同一目标。
+- Atomic replace失败后的outcome必须诚实，不把可能已写入伪装成旧状态。
+- 不新增content hash；使用run identity、受控path、shape/size和完成状态记录artifact集合。
+
+## 4. Canonical Runtime Live Contract
+
+### 4.1 One run-data owner
+
+Logic Node只提交本次新增chunk/event；Runtime按run和signal identity累计唯一canonical dataset：
 
 ```text
-Calibration Task
-    -> repeat: camera measurement -> progress + current image -> Monitor panel
-    -> finish loop: calculate SiteMap + box/psf/uniform_psf models once
-    -> save that result as calibration JSON
-    -> pass that same result to zlc_plot: site map + fidelity + three classifier grids + PSF kernels
-Camera Measurement
-    -> frames signal
-Occupancy Processor(frames + calibration path + readout-model choice)
-    -> occupancy data
-Plot Panel
-    -> Panel Edit Save Fig(image + data)
+Node new chunk
+  -> Runtime append/commit
+  -> immutable live view
+  -> retained partial seal
+  -> final seal
+  -> Panel / Processor projections
 ```
 
-同时保证 TaskConsole 的 Add -> Edit -> Start/Restart、selector 反写 measurement draft、两种 header save 都符合产品语义。整个产品 UI 不提供 `Apply` 按钮。
-
-## 2. 核心设计原则
-
-1. 一个事实只有一个所有者。科学数据归 `zlc_data`，运行和 signal plane 归 `zlc_runtime`，中性原实验语义归 `zlc_atom`，绘图语义归 `zlc_plot`，widget 归 `zlc_ui`，跨层接线归 `zlc_workbench`。
-2. UI 只提交意图和 draft，不直接读写硬件。阻塞 camera/sequencer 调用在 worker/session 侧执行。
-3. exposure、ROI 是 Camera Measurement 的参数。UI 接线层负责表单同步和 selector 反写；Start/Restart 时 measurement request 将参数传给用户选中的 camera adapter。
-4. 不增加 fingerprint、SHA/hash、防篡改协议、想象出的兼容层，或大量防御型包装。
-5. latest buffer 只保存当前值，不记录、展示或存档丢了多少/哪些。
-6. 测试守卫尽量修改现有测试。只增加少量能在原缺陷下变红的纵向行为测试。
-7. 保持稳定的只有整体骨架：plugin discovery、descriptor/contract、NodeHost 生命周期、session/device ownership 和公共 signal/plot 能力。每个 Logic Node、device plugin 以及 Workbench 功能都在该骨架内用最短实现完成自己的业务；Workbench 只做基本逻辑和接线。单个 plugin 的需求不得升级成新的通用 registry/coordinator/transaction/DTO/adapter 层，现有单消费者框架应直接删除。
-8. `zlc_atom` foundation 与 concrete plugin 的依赖边界必须分开：顶层基础模块、公共 contract、install/runtime glue 和 `nodes/_framework` 保持 headless，不依赖 Qt、`zlc_plot` 或 `zlc_ui`；具体 `nodes/<plugin>`、`devices/<plugin>` 可以在自己的目录内声明并实现本插件独有的 plot/UI，并调用 `zlc_plot`/`zlc_ui` 公共 API。该局部能力不得反向进入 foundation，也不得被 Workbench 收编成通用 plugin-specific 框架。
+- Camera、Scan、Calibration和Task preview不得自建parallel slot/history/terminal truth。
+- Camera使用chunked append，避免每次复制全部历史；Scan按固定point geometry增长。
+- 未写位置invalid；coverage只描述实际写入extent。
+- UI freeze只读取已提交状态，不调用plugin materializer。
+- Stop/Final不受Panel、freeze或Processor订阅影响。
 
-## 3. Experiment、GUI 和设备所有权
+### 4.2 Identity与processors
 
-Notebook 创建的一个 `Experiment`/session 天然是共享底层。TaskConsole 和 Pulse Editor 都从它取同一组 named devices、同一个 virtual world 和同一个 sequencer。不新造第二个 session、IPC 或“两个 GUI 抢着 open 设备”问题。
+- Generation标识一次run/restart；generation内schema和stream generation固定。
+- Revision严格递增，不接受重复、倒退或同ref不同内容。
+- 一次commit的siblings共享revision、run record和causal parent。
+- Exact scientific Processor逐event处理；pure display derivation可latest。策略由input contract声明，不从coverage猜。
+- 不同Processor可并发，同一Processor保持有序。
 
-### 3.0 正式实验入口与 Device Manager
+### 4.3 Logic Node contract
 
-1. 根目录 `bin\experiment.bat` 就是正式实验入口，等价于权威 v1 树中的 `task_console.bat`：它只启动一个统一的 TaskConsole experiment flow，不能串起多个 Python 进程，也不再增加第二个根入口。
-2. 同一 Qt 进程先显示用户指定的 v1 Device Manager 操作面：`Config` tab 与 `Devices` header；左侧按 device domain 动态生成 Camera/Rf/Sequencer 等分组，每组包含具体 device cards 与 `Add device`；右侧是 `Discovered hardware`/`Scan hardware` 和 `Loaded session`；底部是 `New…`、`Load…`、`Save`、`Save as…`、`Init devices`。不得显示错误的 `Installation`、`Backend`、`Configured devices`、`Available`、`Cancel` 结构，也不得把 v2 内部 `InstallationConfig` 名称泄漏成用户界面。
-3. `Init devices` 只从当前 device draft 创建并持有唯一 `ExperimentSession`；成功后同一进程只自动显示 TaskConsole，Device Manager 的 loaded cards 继续承担状态、`Control` 和显式 close 入口。设备初始化不打开任何 device control GUI，不解析、不编译、不预载任何 pulse，也不以 `calibration`/`imaging_template` 是否存在作为成功条件。
-4. 每个已初始化 device card 的 `Control` 打开独立窗口；同一 session 的同一 named device 最多一个 control window，重复点击只 raise 已有窗口。普通 device 由 Device Manager 用既有 `tunable_fields()` / `tune()` 与公共 form UI 组合；专用 device 可由自己的 `DeviceTypeDescriptor` 提供一个懒加载 `control_factory`。descriptor 只携带 optional callable，foundation 不导入 Qt/UI；具体 `devices/<plugin>` 拥有自己的 factory，Workbench 只调用它，不按 `type_id` 分支，也不建立另一套 device GUI manager/session owner。
-5. Sequencer 的 `Control` 按需打开现有 Pulse Editor，精确借用该 card 对应的 named sequencer、同一 workspace 与同一 `DeviceUseCoordinator`；它不自行 dial 第二个设备，也不拥有或关闭底层 sequencer。关闭 control GUI 不关闭 device；若该 GUI 自己仍持有 active command，则必须先按本插件的物理语义安全退役并释放 claim（Pulse Editor 回到 sequencer safe，SLM Editor 则按 SLM 明确裁决保持当前 phase），关闭后可再次由同一 card 打开。关闭 session 时，composition owner 先关闭其持有的全部 device control windows，再按 TaskConsole nodes/workers 与 plot bindings -> session/devices -> Device Manager owner 的顺序有界清理；任何 window、claim 或 device ownership 尚未释放都不得伪装成成功退出。
-6. `Scan hardware` 继续只调用各 concrete descriptor 的 `discover`，Workbench 不写 SLM 分支。`slm.hamamatsu_x15213` 同时返回两类候选：USB 只在本机找到成对的官方 `hpkSLMdaLV.dll` / `hpkSLMda.dll`、能打开 controller 并读取 head serial 时出现；DVI 只枚举 attached `1280 x 1024`、约 60 Hz 的 Windows display。DVI display 枚举本身没有可靠 EDID 身份，因此只能标为候选，操作者必须确认哪块屏连接 X15213。Scan 只枚举/读身份并关闭临时 USB handle，不发送 phase frame；设备初始化负责建立所选 transport，只有 Editor 的显式 `Send to SLM` 才 apply phase。
+- Measurement必须在bounded cadence内live commit。
+- Task必须发布progress与声明preview，或显式声明无preview。
+- 第一份真实publication前不显示live；terminal清除progress并seal/retire preview。
+- Descriptor outputs、runtime declarations和preview references只有一份typed vocabulary。
+- 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
 
-### 3.1 两种访问状态
+### 4.4 Task运行中冻结
 
-| 访问 | 语义 | 并发规则 |
-|---|---|---|
-| `OBSERVE` | 只读状态、snapshot、序列状态 | 可有多个 observer，也可与一个 exclusive owner 共存 |
-| `EXCLUSIVE` | 驱动/配置/采集该底层设备 | 同一时刻只有一个正在运行的 Logic Node owner |
+冻结：Add Logic Node、当前Node source/preview signal、overlay binding、scope/reduction/fate以及冲突硬件配置。
 
-启动 Logic Node 的正常顺序是：
+允许：其它Panel、当前Panel的样式/viewport等纯显示参数。Calibration继续显示long/readout/long三帧Grid/Figure。
 
-1. 先完整 validate/build 新 request；无效参数不停旧 node。
-2. 查找与新 request 的 `EXCLUSIVE` claim 指向同一底层实例的运行中节点。
-3. 只停止这些冲突节点，等它们退出并释放设备。
-4. 启动新 node。不冲突的 node 和所有 observer 不受影响。
+## 5. Plot、Fit、Overlay与Selector
 
-例如，启动 Calibration 会停止正在独占同一 camera 的 Camera Measurement；不会因为有窗口在只读显示 camera snapshot 而拒绝启动。
+### 5.1 Exact Data/Fit pairing
 
-### 3.2 Sequencer 的特判
+- Fit armed后每个source revision都有一个ordered exact fit job；不丢revision、不只fit latest。
+- Panel只原子呈现`data@N + fit@N`。
+- FitResult携带source parent/revision，Rolling trace逐revision连续。
+- Fit计算在后台worker；Qt owner thread不等待Future或执行fit。
+- Backlog超过经profiling确定的支持预算时loud error，不跳revision；raw data仍可离线重算。
 
-- Pulse Editor 是同一 session 上的 editor/controller，不登记为一个长期占用 sequencer 的 Logic Node。编辑和只读查看更不占用。
-- Camera Measurement 独占 camera；它若需要 sequencer 状态，只以 `OBSERVE` 访问，不 prepare/fire pulse。
-- Calibration 或真正执行 scan points 的 Logic Node 在运行期间可以 `EXCLUSIVE` 占用 sequencer。
-- Pulse Editor 的普通 prepare/fire 使用同一 session 中的 sequencer 实例，不引入另一套 device owner 机制。当有长时间 exclusive scan/task 时，UI 按 session 当前状态禁用或拒绝冲突的驱动命令即可。
+### 5.2 Performance与state
 
-### 3.3 Simulation 设备与共同契约
+- PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
+- Title/layout等非plot变化不得re-fit。
+- 删除重复configure/clear/replay与多front handoff。
+- 性能以真实TaskConsole、1/4/8 panels、fit+overlay、Setting/Edit和Qt owner latency为profile对象。
 
-1. 所有 virtual apparatus 实现只位于 `packages/zlc_atom/src/zlc_atom/devices/simulation/`：`camera.py`、`sequencer.py`、`slm.py`、`world.py` 和 `device_types.py`。真实 device plugin 目录只保留共同契约、binding 和硬件 leaf，不再寄存 virtual 类或 SimulationWorld。
-2. Camera 的共同契约是 runtime-checkable `CameraAdapter` Protocol，不虚构另一个 `BaseCamera`。`VirtualCamera`、DCAM 和 Pylon 都通过同一 adapter/binding 契约，安装时校验该 Protocol。Sequencer 的共同契约是 nominal `SequencerDevice`，`VirtualSequencer` 必须继承它。
-3. Virtual camera/sequencer/SLM 与硬件一样由 `DeviceTypeDescriptor -> InstalledLeaf -> binding` 组成，Logic Node 只按 capability 取设备，不写 `if virtual` 分支。
-4. `SimulationWorld` 是 virtual 成像物理、site geometry、seed 和 trigger routing 的唯一所有者。默认 virtual apparatus 是 `5 x 7 = 35` sites 和 `96 x 128` image；这是模拟装置的可测真值，不能倒流成 Calibration request 的 grid/count 输入。
-5. Virtual sequencer 的 finite `fire -> wait_done` 必须尊重 compiled pulse 的 logical duration；不能因为 memory transport 已立即给出 DONE 就把几十到几百次采集压进一个 Monitor refresh interval。`forever` 与 finite 都复用同一个 compiled duration，只是前者持续按 cadence 触发、后者到 logical terminal 才交付一次完成报告。
-6. Virtual 物理只消费真实 sequencer 已 applied 的 `CompiledProgram`。logical output key、lane、DAC bus、delay、repeat 和 scan row 全部来自与真板相同的 `board.xdc -> PulseTarget -> compile` 路径；Simulation 不保存另一份 virtual target、pin map 或 pulse-name 分支。
-7. 每个 `cooling` rising edge 在 `trap` 为 high 时都是一次新的装载 shot，不沿用上一次 pattern。令同一固定 apparatus reference 下的相对 local trap depth 为 `d_i`、作者给出的 nominal-depth capture probability 为 `p_0`；当前 phenomenological apparatus model 假设固定 cooling 时间内的 Poisson capture rate `Γ_i` 随 harmonic trap frequency 变化，即 `Γ_i/Γ_0=ω_i/ω_0=sqrt(d_i)`，逐 site 独立抽取 `p_i=1-exp(log(1-p_0)*sqrt(d_i))`。所以 `p_i(d_i=1)=p_0`，没有 active trap 的 site 严格为零，而更深 trap 的装载率真实更高。local depth还进入 occupied-atom qCMOS brightness 与 trap-off release survival。`trap` 关闭的完整实际时长造成 release loss；`emCCD` 窗口触发 qCMOS，而原子荧光只积分 camera working exposure 与 `probe` 窗口的真实交集。`da_bias_x/y/z` 分别表示 MOT 图像 x、y 和光轴磁场：signed `(0,0,0)` 是唯一期望亮度最优点，亮斑位于像素几何中心 `((width-1)/2, (height-1)/2)`；x/y 移动 MOT，三轴离零场的距离共同降低亮度，不得再按 frame ordinal 人为漂移。
-8. 创建 world、Pulse 尚未 On、`safe()` 和 close 后都是同一个物理安全态：全部 TTL low、全部 DAC authored value 为 0、无已装载原子。finite、forever 和 scan 只复用现有 VirtualPulseStreamer/world worker，不新增另一套 simulation scheduler。
+### 5.3 Overlay与selector
 
-### 3.4 SLM phase、target 与 virtual coherent optics
+- Overlay是plugin发布的typed companion signal，不由Workbench重建science。
+- Data、Fit和Overlay共同使用同一个scope/axis/fate projection；无法唯一对齐则拒绝。
+- ROI/binning坐标只由一个transform owner处理。
+- Selector Off时普通滚轮滚外层board；On时plot接管交互。
 
-1. SLM 的唯一公共 capability 是 `slm.phase`。共同设备契约是 runtime-checkable `SlmAdapter`：只暴露稳定 identity、二维 phase shape、`apply_phase(radians)`、immutable last-commanded phase snapshot 和 `close()`。Canonical command 永远是 finite wrapped radians `[0, 2π)`。X15213 的 device profile、wavelength-dependent nonlinear gray LUT、本机 correction BMP、orientation、optical settle 以及 USB/DVI transport 全部只在真实 Hamamatsu leaf 内；solver、Editor science phase、Workbench 和 virtual contract 都不携带 vendor gray/LUT 语义。
-2. SLM concrete plugin 的唯一 target truth 是二维 finite non-negative target-plane intensity。Binary toggle 只是向同一 intensity 写 `0/1`；site 是目标焦平面的 spot，不是 SLM pixel 或 qCMOS pixel。唯一公开 preset 集是 exact-spacing Grid、长短行几何交错 Checkerboard、单束 Gaussian、elliptical Flat Top 和中英文 Text；Text 同时服从 minimum site spacing 与 atom budget。Text 在 Windows 上默认优先 Microsoft YaHei Regular，保留原 filled glyph，按字体的 proportional advance 和共同 baseline 排版，相邻可见字符只增加一个 logical-pixel tracking。`atom_budget` 只是严格上限：选择上限内能完整显示所有字符的最大字号，不为凑满预算抽点、细化或静默丢字。它们和 array/image import 都只 materialize 成这一份 target，不保留第二份 preset state，也不把 Checkerboard 实现成两种强度交替。
-3. 对外只有一个 `solve_phase`，同一二维 intensity 仍是唯一 target truth；但 `objective_kind="spots"|"image"|"auto"` 明确描述作者要做离散焦点还是连续图像，而不是让连通块大小偷偷猜业务语义。Grid/Checkerboard/Text、单点 Toggle 与稀疏手动画明确用 `spots`；Gaussian/Flat Top 用 `image`；只有缺少作者语义的旧 artifact/import 才保留 conservative `auto`。solver 的 near-field source 是与 SLM phase 同 shape 的 finite non-negative **amplitude**。Editor 的 Input pupil On 使用作者可调中心和 X/Y `1/e²` intensity diameter 的 Gaussian amplitude，默认正中心且两轴直径均为 SLM 高度的 70%；Off 明确传 full-raster uniform amplitude。相同 center/diameter 永远定义 Noll Zernike 的 configured unit disk，因而 Input pupil Off 只关闭 Gaussian illumination model，不把 Zernike 坐标域改成矩形。`spots` 使用 full-resolution WGS-Kim：先更新、随后固定远场 spot phase，只在非零 support 计算远场点相位；小 Cartesian envelope（允许 Checkerboard/Text 的 holes）使用与完整 DFT 数学等价的 separable selected-frequency transform，成本过大或非 Cartesian 时回退不含循环内 shift 的完整 FFT。不得 snap 坐标、裁物理像素、降采样或放宽最终 intensity quality gate。`image` 继续走 full-resolution MRAF。默认 sparse solve 只在**实际返回的 canonical float32 phase**重新传播并精确满足既有 1% simulated support-ratio quality gate 后提前停止，否则跑满上限并如实报告；显式 iteration count 必须精确执行。authoritative warm start 只传上一次 accepted Pattern/base canonical phase，不能把已含 Zernike 的 science phase 再叠加一次；此外，只有在 `spots` objective、非零 support、已应用 pupil context 与 Pattern authority 都未被替换时，Editor 才可持有 caller-owned 的短命 optimizer state，复用 fixed far-field spot phases、site weights 与 target amplitudes。该 state 只由 latest matching successful solve 接纳；support/objective 改变、Clear、任何 pupil Apply、Load science phase 或 close 都立即使其失效。它不是设备 truth、不是 phase metadata、不是 artifact/hash，也不得进入 serializer；stale、Stop 或 failed solve 都不能提交它。Target 用 strict JSON 保存；science phase 使用 `allow_pickle=False` canonical-phase NPZ codec 和 plain metadata，不增加第二 serializer、hash/fingerprint 或 Python object payload。没有 X15213 实测 fringing-field forward model时不得凭空加 blur/crosstalk kernel；当前只报告 focal-plane ghost/background/efficiency，未来取得本机标定后才补 device crosstalk correction。
-4. `VirtualSLM` 只更新 installation-owned `SimulationWorld` 的 commanded phase 与 monotonically increasing phase revision。world 以 pupil illumination、8-bit phase quantization、固定且target-independent的apparatus wavefront ripple、illumination decenter/vignetting和同一 FFT 产生唯一 target-plane trap intensity；该ripple只是入射场上的一个小mid-spatial相位误差，不是第二张CGH、逐site gain或按command变化的归一化。传播结果共同决定 active topology、上条 harmonic-frequency finite-capture loading、occupied-atom qCMOS brightness 与 release survival。occupied fluorescence 不直接把 depth 伪装成 pixel gain：在理想均匀nominal depth处选定后保持固定的probe对所有 sites 使用 differential AC-Stark shift `δ_i∝d_i` 后的 two-level Lorentzian scattering `s/(1+s+(2(Δ+δ_i)/Γ)^2)`，并以共同 finite bright-state lifetime限制长 probe photon budget；probe detuning不得跟随current phase、active-site mean或feedback candidate重锁。允许的小 detector/readout nuisance仍不得成为主要非均匀来源。solver 与 Task 都不能读取 hidden aberration 或 hidden trap truth。每次 camera trigger 必须消费最新 phase revision。actual propagated plane 中的新增/移动 peak 按固定 nominal SLM↔qCMOS 仿射关系出现在 raw camera frame；不得从 Editor target 旁路注入 world。所有 trap depth 都直接取同一 propagated plane 的 raw local peak，并共享同一固定 apparatus reference；已校准 nominal anchor 可用较低的 `0.10 x reference` detection gate，blind off-grid candidate 必须通过较强的 `0.20 x reference` dominance gate，二者只区分已知位置与未知 topology 的识别置信度，不得读取 current target/support、重标或归一化 depth。原 nominal 35-site map 仍是初始 Calibration/Occupancy reference；几何改变后旧 Calibration 明确 stale，必须重跑检测，不能让 artifact 静默跟随。
-5. 现有随机逐-site efficiency 不再是 trap-depth 真相。若保留 site-dependent fluorescence factor，它只能是小、固定的 detector/readout nuisance；qCMOS brightness feedback 可以连同该真实可见 nuisance 一起校平，但不得把它伪装成 trap depth 或在反馈前按各 site 自己的 bright response 除掉。默认 35-site nominal phase 在 hidden coherent plant 下的 `Imax/Imin` 为 `1.8–2.2`，至少 90% 的初始非均匀误差来自可纠正相干项；公开Camera Measurement以20 ms sensor、5 ms probe、50次fresh load采集后，`Reduce repeat -> mean`的raw site BOX `max/min`必须在`3.5–4.5`且uint16不饱和，使该初始不均匀无需hidden oracle即可看见。移除固定apparatus ripple只可收窄spread，不得让mean trap depth或总occupied fluorescence异常跳变。同一 phase revision只传播一次；随后多帧只重采depth-dependent occupancy、photon与read noise。
-6. 真实 leaf 只支持已明确的 Hamamatsu LCOS-SLM X15213 series：active phase shape `1272 x 1024`，DVI input raster `1280 x 1024 @ ~60 Hz`，也可用官方 USB frame-memory SDK。DVI 固定把 active image 放在左侧 `0:1272`，最右 8 列恒零且要求 exact unscaled presenter；USB 写原生 `1272 x 1024` frame memory、切 display slot并做 byte-exact image readback。每台设备在 `devices/slm/profiles/<serial>.json` 持有 serial、readout wavelength 与完整 256 点 calibrated phase curve，不持有手填 `two_pi_gray` 常数；authoring 的 `wavelength_nm` 真正从该 curve 反建 nonlinear phase-code→drive LUT，并只读显示反插得到的 2π gray（当前 `LSH0804382` 在 852 nm 为 225）。Canonical phase 先 half-up 成 0–255 phase code；启用时再与 native `L 1272 x 1024` correction code 相加并 mod 256；最后才查 nonlinear device LUT。显式带 `NNNnm` 的 vendor correction 文件按连续二维 phase unwrap 后做 source/current wavelength conversion、再 wrap/half-up，禁止 resize/interpolation；文件名带 `CAL_<serial>` 时还必须与 profile head serial 精确一致。orientation 在进入 device code 前完成。开发机的 mocked transport/readback只能证明 frame bytes，不是 optical proof；最终 orientation、settle、controller drive state与光路效果仍须实验机验收。
+## 6. UI与Lifecycle
 
-### 3.5 SLM Editor 与 qCMOS 原子荧光直接反馈
+- `zlc_ui`不拥有domain parser、device state或plot lifecycle。
+- Qt slot不得执行blocking I/O、device tune或`Future.result()`。
+- Window只有在owned command、worker、executor和claim安全退出后才能消失。
+- Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
+- Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
+- Form reconcile必须按当前schema重建dependency graph。
+- PanelState decoder、owner wake和产品Figure save各只有一个实现。
 
-1. SLM Editor 是 `devices/slm` concrete plugin 自己的独立 device window，继续沿用 descriptor lazy `control_factory`、同一 named SLM 与同一 `DeviceUseCoordinator`。界面只保留 `Pattern` 与 `Wavefront` 两个 permanent tab；不得残留 Mask/Mask ROI/CGH crop/Measured pupil/Advanced 或独立 zero-order steering 历史面。默认 Pattern 页保留 target 与 `Science phase (pre-correction)` 两张既有 `2x2 = 490 x 357` logical plot viewport；新增相位层不得挤小这两个图。一个共享 `Size` selector 只使用 `zlc_plot.PANEL_SIZE_NAMES`，同时调整两个独立 plot host 和 Wavefront 页的第三个独立 host；各画布可滚动，因此更大 preset 不重叠、不裁切，DPR 只改变 raster physical pixels。主页面只显示 Input pupil、Zernike 与 Vendor correction 三条 enable/status/Edit或Load入口。单一 Pattern popup 只提供 Grid、几何 staggered Checkerboard、Gaussian、Flat Top 和中英文 Text；popup draft 不触发 solve，只有 Apply 一次 materialize 唯一 target，无效组合保留draft/target/revision并在状态栏说明错误。Wavefront 页左侧可滚动参数面板把 full-raster Steering X/Y 与正确 Noll Z4–Z11 全部置于同一个 Zernike On/Off 下，右侧显示该层的独立 wrapped phase preview；Steering tooltip 明确需要真实 Fourier-plane stop/aperture，软件本身不宣称消灭零级。Vendor BMP不进入该预览。
-2. 左侧编辑唯一 continuous non-negative target；后台 `solve_phase` 只更新 Pattern/base phase。Input pupil On/Off 或中心/直径 Apply 会产生新的 full-resolution pupil amplitude并重新 solve当前 target；没有 CGH crop 或 measured-pupil旁路。右侧 science phase只显示 `wrap(Pattern base + enabled Steering/Z4–Z11)`，不含 device-local correction/LUT。target/pupil改动仍由 capacity-one latest-only worker求解，Qt owner不做 FFT；Selectors off 保留画笔，on 开放两张主图 selector/zoom/pan。Target JSON 与 science phase NPZ 的 load/save都不写硬件；Load science phase清零/关闭Zernike层，从而保持 exact phase roundtrip。
-3. X15213 vendor correction 只由 concrete adapter持有，并在 canonical phase量化成phase code后、nonlinear wavelength LUT前相加并mod 256。Editor 主页面显示 `Off/On · filename · wavelength · 2π gray`，提供 `Load correction` 与 enable A/B；load/enable只改变下一次 Send 的adapter mapping，不修改Target/Pattern/science phase/NPZ，也不立即发送frame。virtual/generic adapter显示 `Unavailable`，不得伪装软件 correction。只有显式 `Send to SLM` 取得短命 EXCLUSIVE claim后调用 `apply_phase`；science phase若落后于当前 target/pupil request必须拒绝。关闭 Editor不apply/restore/blank/关闭SLM，commanded phase原样保留。
-4. 第一版粗调的唯一 observable 是现有 qCMOS 上与 `Reduce repeat -> mean` 相同的逐-site平均荧光。每个 candidate phase 下执行作者写下的真实 cool/load/probe pulse 与 exact grouped camera cycles；相机沿用 calibration 记录的 sensor integration，而 pulse 的 probe gate 保持其 authored API values，两者不得互相覆盖。每个 valid/finite shot 的 BOX feature 都进入逐-site Welford 平均，并只减去 Calibration 持有的 dark mean；不得按该site的bright response归一化，也不得用固定occupied threshold筛选，因为trap变化会同时改变loading probability与occupied-atom fluorescence，旧threshold可能把变暗但真实存在的trap误报为missing。loop 内不重新找 site，也不逐 site 做 nonlinear Gaussian fit。
-5. 反馈只做直接强度比例校正，不拟合 Zernike、modal coefficients、hidden aberration、绝对trap depth或连续波前；Editor 中由操作者明确设置的 wavefront coefficients 不属于 feedback 估计。令正 target support 上的逐-site dark-subtracted repeat-mean BOX brightness 为 `F_i`：初始solve至少完成WGS-Kim冻结远场spot phase所需的12轮，并由Task在整次run内持有同一个caller-owned optimizer state；后续每轮只更新 `w_i <- w_i * (GM(F) / F_i)^0.25`，再归一化target total，在固定远场spot phase下继续8轮site-amplitude优化、apply并复测。不得像旧实现那样每轮只传warm-start phase却重新优化spot phase；那会改变干涉映射并造成反馈振荡。best只按site spread排序，不奖励总荧光变大；total brightness仅作为历史诊断，不设相对baseline门，也不参与candidate有效性或best排序。绝对trap depth未来只能由trap-frequency/light-shift等独立observable校准，本Task不得用亮度变大冒充trap更深、focus更好或像差更小。Task production code不得 import SimulationWorld、读取 hidden trap plane/site intensity或按 simulation seed 分支。
-6. qCMOS 只观测当前 Calibration SiteMap 声明的离散 atom sites。任意 sparse target 开始反馈前，Task 信任已验收的 target x/y 与 camera x/y 同向且近 identity 的 apparatus registration；在该先验下把正 support 确定性匹配到 SiteMap 的最近一一对应。site count 不同、先验不满足、当前匹配存在 local multiple candidates 或任何 unmatched site 都拒绝开始；规则对称点集不声称仅凭无标签点集证明全局 permutation 唯一。成功 mapping 在 Task 开始时冻结且整次运行不得重配。Task 必须如实报告映射后sites的 brightness、missing/saturation、总 shots 与有效finite samples不足的sites；brightness变暗或occupied分类变化本身不得被叫作missing。Task不得声称它看见 sparse sites之间或dense flat-top的每个pixel；add/remove/move后必须先重跑 Calibration并重新registration，不能拿旧boxes继续闭环。Dense target仍复用同一continuous target与`solve_phase`；完整dense interior只由验收端在Task terminal后用virtual oracle检查，不能倒流成Task输入，也不能用qCMOS离散点伪装成全平面测量。
-7. Task 开始前冻结 target/resources/calibration并保存incoming phase；每个候选依次 apply -> 原子写入与该canonical command逐元素相同的candidate phase NPZ -> exact qCMOS shots -> fixed-spot-phase fluorescence update。只有首次原子写成功返回的candidate才是可恢复的durable候选；每轮把实际readout frames的repeat mean、同一candidate phase和截至当前每个coarse candidate的`max(F_i)/min(F_i)` history作为同generation/revision的三个outputs发布，因此运行中的Monitor自动显示`readout_average`、`candidate_phase`两张image preview与`uniformity_history`一张curve preview。curve从首个publication起就以`max_updates`固定schema预分配，未来点为invalid/NaN；每轮revision递增并只填一个新点，使同一个plot panel真正live更新而不因shape/schema改变被拒绝。curve只保存1-based candidate的实际ratio，不得伪造candidate 0或carry-forward旧值；通用renderer不因本Task改变。validation复测同一candidate但不伪造新的update点；无效measurement在curve中保留candidate位置但没有finite ratio。候选只有在missing/saturated/non-finite或统计证据不足时无效；total brightness不作有效性门。成功最后明确apply通过独立validation的candidate，并把同一路径原子更新为accepted artifact。Stop保留并重施加最低有效coarse score的durable candidate；尚无有效项时依次退回最新完成或当前已durable候选，并让device command、两张candidate-specific snapshots与artifact candidate id保持一致；history curve保留全部已完成候选，使操作者可继续使用该相位。若Stop发生在首个candidate写盘失败之前则恢复incoming；其他异常始终尝试恢复incoming，恢复失败必须真实报错。Editor close与Task lifecycle相互独立。
-8. `Blank`/`Off`/beam-dump 不是 zero phase。X15213 phase transport 已有真实 leaf，但实验室安全光路与 beam-dump command 仍未被证明，因此公共 `SlmAdapter` 不增加虚假的 blank，Editor 也不显示该控件。关闭 Editor 或 session 不擅自写 zero phase；如需安全退役，必须先取得并验收实验室明确的物理 command。
+## 7. Pulse、Camera、Remote与FPGA
 
-## 4. Package 责任边界
+### 7.1 Execution vocabulary
 
-`zlc_workbench` 是 composition root，但不拥有科学或绘图规则。
+- `RepeatRegion`只表达timeline内部loop。
+- Cycle/shot、scan sweep和Dataset repeat是独立事实。
+- 一个finite execution入口表达N cycles；actual played values进入Dataset coordinates和run record。
 
-| Package | 拥有 | 不拥有 |
-|---|---|---|
-| `zlc_data` | axis/schema/validity，immutable `OwnedSnapshot`，科学数据 NPZ 表达 | device、queue、GUI |
-| `zlc_durable` | workspace path、唯一文件名、原子写 | 科学算法、hash/fingerprint |
-| `zlc_runtime` | stream/tap/dataset builder、signal publication、node lifecycle、worker | camera/ROI/exposure、Qt、plot kind |
-| `zlc_plot` | plot spec/projection/display/fit/selector/renderer/image export | device、TaskConsole layout、measurement form |
-| `zlc_ui` | window/tab/form/widget、operator intent | device 访问、物理规则、runtime 调度 |
-| `zlc_pulse` | pulse model/compiler/slot/scan、sequencer transport | measurement、TaskConsole 管线 |
-| `zlc_atom` | foundation 拥有 device capability/adapter、logic contract/host-facing descriptor；具体 plugin 目录拥有自身物理、专有 plot/UI 声明与实现。Calibration Task 在自己的 plugin 目录调用公开 `zlc_plot` API 生成业务 report | foundation 不拥有 Qt/plot/UI；不拥有 TaskConsole panel/layout/archive 或 renderer 实现；plugin-local UI 不得反向进入 foundation |
-| `zlc_workbench` | Experiment 接线、row draft、资源仲裁、Start/Restart、panel-producer 联动、save 组装 | 相机 SDK 分支、site 检测算法、plot 参数合法性 |
+### 7.2 Camera
 
-## 5. Logic 模型：role 与数据 extent 正交
+- Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。
+- 每个run核compiled trigger windows、frames-per-cycle和received ordinal；gap/cardinality错误立即失败。
+- Temperature保留约20ms exposure并增加足够trigger/recapture gap，使用相容Calibration。
+- Virtual按真实cadence逐cycle、支持Stop并模拟camera busy。
 
-| Role | 责任 | finite/infinite 语义 |
-|---|---|---|
-| Measurement | 使用设备并产生 dataset | 每次 run 可 finite 或 infinite |
-| Task | 编排 measurement/分析，发布 progress/LIVE preview，完成后返回结果并保存 artifact | 不用 finite/infinite 给 Task 分类 |
-| Processor | 消费上游 signal 并产生派生 dataset | 消费方式由当前上游决定 |
+### 7.3 Remote
 
-因此删除 `MEASUREMENT -> finite / TASK -> finite / PROCESSOR -> reactive` 的硬映射。
+- 无密码、认证、TLS或权限UI。
+- Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。
+- 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。
+- UART port显式配置，不扫描所有COM。
+- 只有server process持hardware transport；不保留假的进程内Interprocess lease。
 
-Task 运行中的 measurement 数据可以作为普通 signal 进入 Monitor；Task 完成结果则由调用方直接消费。Calibration 不把最终结果拆成一组为了 report 才存在的 signals，也不发布 report blob。
+### 7.4 Host/RTL/build invariants
 
-Camera Measurement 中：
+- Load前核target ABI、clock、geometry、counts、camera cadence和delay FIFO capacity。
+- Count必须是合法hardware range内整数，不clamp/wrap。
+- Hardware SAFE独立gate TTL/DAC data/clock；LOAD/FIRE前pins保持safe。
+- Public DONE等待delay FIFOs和final DAC latch完成并进入安全态。
+- Underflow、overflow和protocol error sticky且loud；scan point0必须resident。
+- 50MHz engine有真实clock/STA constraints。
+- Explicit board manifest统一生成host lanes、top mapping和XDC，不靠XDC行序。
+- Build delete做真实path containment；program/flash exactly-one target fail closed，默认不自动flash。
+- RTL tests自动compile/run并以nonzero failure/逐tickreference证明。
 
-- `Repeat > 0`：finite，收集确定数量的 frames；
-- `Repeat = 0`：infinite，worker 持续采集，signal plane 保留 latest；
-- UI 不再有另一个 finite/infinite mode 开关。
+## 8. SLM
 
-Finite 上游结束后的“frozen replay”只指：如果 Camera Measurement 已经采完并在 plane 中留下最终 immutable dataset，此后启动 Occupancy 可以对这份数据处理一次，不强迫重跑 camera。它不是磁盘 archive replay，也不保存 infinite 历史。
+### 8.1 USB-only device
 
-## 6. Signal 身份和 revision
-
-| 概念 | 用途 |
-|---|---|
-| Logic/node id | TaskConsole 中的稳定节点身份 |
-| Signal key | `node id + output name` 的稳定接线名；Restart 不改名 |
-| Generation | 一次成功 Start/run；每次 Restart 更换 |
-| Snapshot revision | 同一 generation 中 immutable snapshot 的单调内容次序 |
-
-Revision 不是安全或文件版本。它唯一有用的场景是 plot/fit worker 异步完成时，防止旧 snapshot 的结果晚到后覆盖新图。当前 `OwnedSnapshot`/plot 已经有 revision，因此只复用它，不再新建一套 sequence/revision 机制。
-
-比较时必须同时看 generation：两次 run 都可能有 `revision=1`。新 generation 到来时 panel 替换 plot host；同一 generation 内才用 revision 拒绝晚到的旧结果。Revision 不显示给用户，不进 layout，也不作为科学 provenance。
-
-## 7. Measurement 参数、表单和 Restart
-
-### 7.1 参数的所有权
-
-`camera`、`mot_camera` 等是 Device Manager 安装的 named instances，它们可以是不同 `CameraAdapter` 实现。Camera Measurement/Calibration 只声明需要 `camera.adapter` capability，Workbench 在 Edit 中列出所有匹配实例供用户选择。
-
-exposure、ROI、repeat 等是 measurement request 的参数：
-
-```text
-Logic/Panel Edit shared row draft
-    -> build CameraMeasurementRequest(camera instance, exposure, ROI, repeat, ...)
-    -> resource arbitration
-    -> CameraMeasurement configures selected CameraAdapter
-    -> adapter validates/snaps SDK constraints and returns actual readback
-    -> acquisition worker starts
-```
-
-Workbench 只负责表单/draft/selector 接线，不代表 exposure/ROI 属于一个独立“device working-point”层。Device Manager 保存安装信息和默认值；每个 measurement run 的 exposure/ROI 以它自己冻结的 request 为准。
-
-### 7.2 唯一 row draft
-
-- 每个 Logic row 只有一份 draft，包含 node 参数、input binding 和 named device 选择。
-- Logic Edit 和该 producer 所有 Panel Edit 投影同一份 draft。一处改动立即同步到其他打开表单，但不偷改当前运行中的 request。
-- Logic Edit 只用 `Start`，已运行或已 terminal 时显示 `Restart`。
-- Panel Edit 若投影 Producer 参数，只修改同一共享 draft，并复用同一个 `Start/Restart` action；不能换名再造 `Apply` 按钮或第二个 endpoint。
-
-### 7.3 Start/Restart transaction
-
-1. 校验整份 draft 并构建新 request。
-2. request 合法后，停止当前同 row 的旧 run，以及与新 run 设备 claim 冲突的其他 Logic Node。
-3. 等旧 owner 释放设备。
-4. measurement 用 request 配置所选 device，读回 actual 参数，立即启动 worker。
-5. 成功后创建新 signal generation；node id 和 signal key 不变。
-6. 失败时明确显示 stopped/error，不发布伪成功数据，不猜测硬件 rollback。
-
-一个已经 terminal 的 generation 必须在下一次 `Start/Restart` 时被新
-generation 原子取代；它不能因为 FINAL 数据仍可读而阻止同一 row 再次运行。
-`Remove` 后用同一 node id 重建也遵守同一规则。只有旧 generation 仍 LIVE
-时才拒绝并发启动。
-
-下游的 row 和 input binding 保留。原本 active 的 processor 在新 source generation 来时重新校验；不相容则显示 blocked/incompatible，不继续用旧 calibration 偷跑。
-
-### 7.4 Selector 联动
-
-- `zlc_plot` 发出带坐标语义的 committed selection 和 viewport；viewport 由 plot owner 同时给出 canonical data range 与 display range，Workbench 不重复推断轴或单位。
-- `zlc_atom` 的 logic descriptor 声明哪类 selection 可以更新哪个 measurement 字段，例如 Image Area -> Camera Measurement ROI。映射是 data-only，不返回 QWidget 或 device instance。
-- `zlc_workbench` 沿 panel -> signal -> producer row 把 selection/zoom/pan 路由到同一个 descriptor mapping，更新同一 measurement draft，并把同一 display viewport 投影给 live/Edit 两张 surface。这个 seam 也供以后的 measurement 使用，不在 Workbench 写死 camera `if`。
-- Image Area 用当前 ROI origin/binning 把显示坐标转回 sensor 坐标，adapter 在 Start/Restart 时做硬件 increment 对齐。
-- selector 只更新共享 draft；用户按同一个 `Restart` 后，才用新 ROI/exposure 重启 measurement。
-- ROI 数据和 fit 参数同时是 data plane 中的普通 typed Dataset。Logic input 可以声明一个固定 contract，也可以显式声明 source-neutral；后一种由插件用实际 Dataset schema 和自己的动态 artifact/request 判断是否可用。Occupancy 属于后一种，因为可用 frame shape 由所选 Calibration 决定，Workbench 不得用 producer 名称或固定 `camera.frames` 字符串提前隐藏 ROI/fit signal。
-- 每个可派生 Panel 在 Logic tab 中有一条稳定的 publisher row；它属于 Panel，不是可 Start/Stop 的 Logic Node，也不能换 source。该行的 Edit 只把同一 `PanelState.published_outputs` 投影成 switch，选择哪些 ROI/fit Dataset 真正进入 data plane；没有当前 selection/fit 或全部关闭时，该行和 Edit 入口也不得消失。
-- ROI 输出词汇和数学只由 `zlc_runtime` 的 selection catalog 声明一次。Image Area 的稳定输出为裁剪后的 `roi_frame`、逐 `(repeat, point)` 的 `roi_mean`/`roi_min`/`roi_max`，以及 ROI 内最低/最高至多 10 个有效有限像素均值 `roi_min_10_mean`/`roi_max_10_mean`；无有效像素时结果 invalid。Workbench/UI 只投影目录标签和开关，不复写字段名、统计公式或另算一遍。Fit 输出词汇来自当前 `zlc_plot` fit model 的 parameter declarations；新 revision 只更新值，不重建 publisher form。
-- Plot selector/viewport 的轴身份按 producer schema 解析：具名轴携带 AxisId，repeat 与 point-row ordinal 作为结构轴跨 seam，不能因 `axis_id=None` 被误报成“无 upstream name”，也不能伪造一个叫 `repeat` 的名字。Rolling 的 x 是 plot-local 跨 revision history，不是当前 source snapshot 的 upstream axis，因此它的 range/viewport 不反向派生 Dataset 或 producer draft，也不显示失败。
-
-## 8. 目标 Logic Node
-
-### 8.1 Calibration Task
-
-Calibration 不接受 grid rows、columns、site count 或预先 `SiteLayout`。Site 数量、位置和排序是 calibration 要测出的结果，不是输入真相。
-
-建议的分析边界：
-
-1. 按所选 calibration pulse/protocol 采集样本帧；“bracket”不作为 UI 概念或用户参数。
-2. 从标定图像自动发现 site candidates，根据局部对比度/噪声、最小间距和 spot 尺度去重。
-3. 精修每个 site 的 pixel center，生成稳定 site id/排序。若能从坐标推断拓扑，拓扑也是输出，不是必需输入。
-4. 只生成一份 site labels 和 train/held-out split，以同一 site axis 同时训练三种 `ReadoutModelKind`：`box`、`psf` (per-site PSF) 和 `uniform_psf`。每个模型都保存自己的 integration feature/PSF、threshold、usable/quality，artifact 另存一个 `default_model_kind`。
-5. 运行中通过 NodeHost 发布 progress 和当前 `capture_preview`。Preview 只投影最近一个完整 cycle 的最后一张二维 camera image，固定为 `R=1, P=1`；采集历史属于本次 Calibration result，不得把 `samples x 3 x Y x X` 累计数组冒充“当前图”反复交给 Monitor。循环完成后计算一次包含 SiteMap、三种模型及各模型诊断数据的 Calibration result。
-
-Calibration 的 `Reference exposure` 与 `Readout exposure` 是显式 protocol 参数：相机 adapter 以 reference exposure 配置本次 run 的最大积分时间，编译后的 long/readout/long 外部门宽分别使用两项 authored 值。外部门宽可以按真实物理缩短某个 frame 的有效曝光，但不能把已配置的 camera exposure 延长；普通 Camera Measurement 仍只由自己的 request 配置 exposure，不能被一个无声明的 pulse metadata 替代。这样三帧继续共享同一 shot occupancy，同时 exposure 归属没有第二份隐式真相。
-
-Calibration Edit 的 pulse/template 参数是一个以 project `pulses` 目录为起点的
-文件选择控件，显示所选 JSON 的明确路径；不能用只显示裸文件名、看不出目录的
-ComboBox。默认选择 `imaging_template.json`。该文件使用唯一的 `zlc_pulse`
-tree 格式 `format: "zlc.pulse.v1"`：`slots` 只表示 scan 维度，三项
-Calibration duration 则由显式 `PulseApiParameter/api_parameters` 分别绑定
-`reference_probe_duration_before`、`readout_probe_duration`、
-`reference_probe_duration_after`。只有用户 Start Calibration 时，Calibration
-Logic 才通过 `sequence_from_tree()`、`resolve_api_parameters()` 和连接板卡的
-`BoardDescription` 编译；未解析 API parameter 的 sequence 不能被 compile。
-不得另造 `PulseDocument`、按名字前缀猜 API/scan、把 API parameter 塞进 scan
-table，或保留第二套 pulse model。产品链不把 Python module 当 pulse 文档，也不
-由 TaskConsole 启动或 Device Manager `Init devices` 偷偷预载 Calibration pulse。
-
-Pulse 的唯一文件写路径是 `PulseEditorState -> state_to_tree() -> sequence_to_tree() -> write_readable_json()`，读路径严格反向。标量 list 保持紧凑并在可读宽度换行，带结构的 list 才展开。Shipped `imaging_template.json`、Pulse UI Save 和以后的 template generator 都必须经这一条序列化路径；不得手写第二套 `json.dump` 排版，也不得恢复 `.py` pulse 文档。
-
-`SiteMap` 至少包含：
-
-- stable site id/axis；
-- sensor/image coordinate frame；
-- center `(x, y)`；
-- 可选的自动推断 topology/order；
-- 每个 site 的 validity/quality。
-
-SiteMap 只负责“site 在哪里、身份如何对齐”。科学积分框/PSF kernel 和 threshold 属于 readout models，不塞进 SiteMap。Calibration artifact 同时保存 SiteMap、与其 site axis 对齐的三种 readout models、`default_model_kind` 及实际 frame contract（camera、sensor shape、ROI、binning、exposure/readout mode）。Occupancy 显式选择 default 或其中一种模型提取各 site 读数并套该模型 threshold。
-
-Calibration result 中的所有 site 数据共享 SiteMap 的实际 `site_ids` 和同一 pixel coordinate frame。每种模型都在这个结果中保存自己的 held-out samples、fidelity、thresholds 和 fit 所需数据；不能只保留 default model 后再重算另外两种模型。
-
-循环结束后的代码路径保持直接：Calibration Task 先把该结果写成 calibration JSON，然后把同一个 Python result 交给现有 `zlc_plot` 公开 API，保存六张 report 图片：(1) site-map image + centers；(2) 三种 readout model 的 per-site held-out fidelity；(3–5) box、per-site PSF、uniform PSF 三个 classifier distribution grids；(6) per-site PSF kernel `FacetGrid[Image]`。三个 Distribution grid 都启用 plot-owned threshold classifier，并在同一次 `configure()` 中使用该 readout model 已算出的 per-site thresholds；不得再启用普通 `bimodal_gaussian` fit 伪装 classifier。JSON 和六张图是同一次 Calibration result 的两种文件投影，不是两次分析。TaskConsole 不显示、挂载或自动打开 report；Monitor 只显示循环中的 measurement-linked preview。Calibration Task 决定 report 内容，`zlc_plot` 实现绘图；Task 不持有 Qt、TaskConsole panel state 或另一个 renderer，也不为这一条路径引入通用 report registry/coordinator/transaction 框架。
-
-`SiteMap` 不是 plot kind，UI 中也不存在 `SiteMap Plot`。它是 Calibration artifact 里的 domain data。Occupancy 在与 `frame_judged` 相同的 publication 中显式发布 typed `site_overlay` sibling：canonical site ids、人类短标签、pixel centers 和当前 status。固定的 `Image` panel 分别选择 Image signal 与可选 Overlay signal；Workbench 只核对二者属于同一 publication，不从 run record 偷读 calibration JSON，也不从 signal 名称猜 SiteMap。`zlc_plot` 只把这份通用 point-overlay data 画成 markers。绘图圈半径是 Image display 属性（可由 point spacing 自动给出），不与科学 integration half-width 混为一个参数。
-
-输出文件由 Experiment workspace 选择目录和不重复文件名，例如 `calibration_20260808_153012_01.json`。这只是避免依赖 process cwd 和无提示覆盖，不是版本/安全机制。
-
-### 8.2 Camera Measurement
-
-Edit 中的理想参数：
-
-| 参数 | 语义 |
-|---|---|
-| Camera | 从所有满足 runtime-checkable `CameraAdapter` 的 named instances 中选择 |
-| Exposure | 本次 measurement 的 exposure，传给选中 camera |
-| ROI | 本次 measurement 的 sensor ROI，可由 Image selector 反写 |
-| Repeat | `0 = infinite`，正数为 finite cycles |
-| Frames per cycle | 每个外部时序 cycle 期望的 frame 数 |
-
-Camera Measurement 按本次 authored `Frames per cycle` 声明
-`frame_0 ... frame_N`。每个输出都是一个普通二维 image Dataset signal；同一 cycle
-内的不同 frame 不塞进一个额外 data axis，也不由 `zlc_plot` 解释 camera-specific
-`frame_index`。signal chooser 逐项列出这些 signals，并在每项旁显示 dataset shape。
-`frames_per_cycle` 的 shot 分组只有一个所有者：Camera Measurement 的共同采集实现。
-所有 `CameraAdapter` 只交付按物理采集顺序编号的 `CameraFrameRecord`，不得在丢帧后
-重新编号成无缺口序列；共同实现按连续且对齐的 source ordinal 组装完整 cycle，任何
-缺帧、错位或 overrun 都不能跨 shot 补齐。只有完整 tuple 才一次发布全部 sibling，
-`Repeat=0` 的 latest slot 也只以完整 tuple 为单位覆盖，因此慢 consumer 最多跳过完整
-cycle，不会把不同 shot 的 frame 拼在一起。Virtual/DCAM/Pylon 只负责把各自 driver 的
-frame counter、buffer overrun 和 failed grab 如实投影到该共同契约，不各自实现
-`frames_per_cycle` 业务规则。`Repeat=0` 且每 cycle 只有一帧时，Pylon 使用真正的
-source-less free-running `LatestImageOnly` 预览；每 cycle 多帧时没有可靠的物理 shot id，
-因此仍使用 external-triggered ordered stream，不能按返回数量伪造 same-shot group。
-连续采集的内部 raw buffer 固定容纳四个完整 cycle，容量始终是
-`4 * frames_per_cycle`。该容量由 Camera Measurement 一次决定，并传给 adapter 的实际
-driver buffer；它不是用户参数，也不改变 latest-only 的完整-cycle发布语义。这个四-cycle
-裁决已经结束，不得在后续修复中继续增大。
-等待/触发超时属于 adapter/session 内部采集策略，不作为普通用户 authoring 字段。
-
-Camera Measurement 不驱动 pulse。它监听外部时序，独占 camera、最多只读 sequencer 状态。Driver/internal buffer 大小不进用户表单。
-
-### 8.3 Stepped Scan Measurement
-
-Stepped Scan 是一个 finite Measurement，不是 Processor，也不是 Pulse Editor 的第二套
-scan engine。Logic Edit 中的 plan 绑定 pulse API parameter 与明确暴露的 device tuning
-port；Start 只消费这份 plan，不让 Workbench 执行扫描科学逻辑。
-
-用户另选一个当前 LIVE Dataset signal。Start 冻结其 generation、建立一次 lossless tap，
-并独占所选 `sequencer.streamer`。`Repeats` 是最外层的完整 plan 重扫；每个 point 只
-`safe/settle`、应用 device/API point、compile/load 和 fire 一次。`Shots per point` 是这个
-运行时 pulse 副本最外层 whole-pulse bracket 的有限 repeat count：`1` 不加 bracket，
-`>1` 新增或改写覆盖首尾的 bracket。模板已有局部 bracket 时不能再嵌套第二层，
-`Shots > 1` 必须明确拒绝，不能覆盖模板的科学含义。单个 period 本身有正时长，允许
-用 start=end 的 bracket 重复；禁止的是 count=1，而不是单-period region。
-
-Pulse-driven source 由 pulse timing 保证，每个 outer iteration 保留一条 publication，直到
-收满 `Shots per point`。Free-running source 以 fire 时刻为共同原点，在每个
-`shot_index * 单次 pulse 长度 + Free-run delay` 的 deadline 清掉此前已完成的 publication，
-丢弃跨越该采样边界的下一条，再保留一条；deadline 不能由连续 sleep 累加，否则软件
-耗时会使采样相位逐 shot 漂移。Stop、source restart、signal terminal 或 schema 改变都结束
-本次 Measurement，不能跨 generation 混合数据。
-
-完成后只发布一个 FINAL `scan` Dataset：保留所选 signal 的 repeat axis、cell schema、
-validity、PointTable 与已有 topology，并为每个 scan axis 增加 typed
-`SCAN_POINT` coordinate 和组合后的 `GridTopology`。因此 scalar、image、site vector 等
-普通 Dataset 都能沿现有 plot semantic 展示；插件不按 signal 名称或 producer 类型猜
-数据含义。Workbench 只做 generic Logic draft/source/device/UI-contribution 接线，不写
-`stepped_scan` 分支；这条功能不增加 manager、registry、scan DTO 或第二个执行器。
-
-### 8.4 Occupancy Processor
-
-Edit 中的理想参数：
-
-| 参数 | 语义 |
-|---|---|
-| Frames signal | 显式选择一个 contract-compatible image/frame signal |
-| Calibration file | 显式选择 calibration JSON path |
-| Readout model | `default` / `box` / `psf` / `uniform_psf`；`default` 解析 artifact 的 `default_model_kind` |
-
-没有 device、finite/infinite extent mode、buffer 或 loss 参数。Readout-model choice 是 Occupancy 必须显式拥有的科学算法模式，不是被删除的 extent mode。Start 时加载 calibration，只拒绝 frame shape、sensor、ROI、binning 等会破坏像素与 site 对齐的结构差异；exposure、camera id 和 readout mode 继续保存在 frame contract 作为 provenance，但不限制同一几何 calibration 的使用。随后按 SiteMap + 所选 readout model 的 feature/threshold 产生 per-site counts/occupied/rate 等 dataset。Finite source 顺序处理/可处理已完成的 frozen dataset；infinite source 只处理 latest。
-
-### 8.5 Temperature survival Task
-
-Occupancy 的唯一职责止于每个 frame、每个 site 的 `counts/occupied/valid` 事实；它不配对 frame，不计算 survival，也不承载 temperature 实验。Temperature concrete Task 自己执行作者写下的 load/probe/trap-off/probe pulse，并逐 cycle 复用同一个 `OccupancyProcessor.evaluate()` 结果。只有 before/after 都 valid 且 before occupied 的 site 才形成一条 survival 事实；before empty、任一 readout invalid 或尚未采到的 cell 都是 invalid，不得写成 loss。
-
-Temperature 只发布两份数据：带 repeat、trap-off scan point 与 SITE 轴的二元 `survival`，以及按每个 trap-off 点联合 pooling repeats/sites 得到的 `survival_rate`。后者用普通 curve preview 显示 survival 对 authored trap-off time。Task 与 artifact 不拟合温度、寿命或衰减模型，也不计算 1/e crossing；这些需要本节点没有声明的物理模型，不能从二元比例额外推断。
-
-## 9. TaskConsole Logic UI
-
-### 9.1 Add/Edit 生命周期
-
-- TaskConsole header 只有权威 v1 的一个 combined 下拉框和一个 `Add Panel` 按钮。下拉框依次列 `Plot`、`Measurement`、`Processor`、`Task`；不得新增独立 `Add Logic` 按钮或 modal logic chooser。
-- 选中 Measurement/Processor/Task 后，同一个 `Add Panel` 按钮把 catalog `api_name` 送入唯一 `add_logic` endpoint，创建 stopped row，并立即切换到对应 Logic Edit tab。
-- Logic Edit 实时编辑 row draft，包含本 node 的所有 measurement/task/processor 参数和 input binding。
-- 按钮是 `Start/Restart`、`Stop`、`Remove`；产品 UI 没有 `Apply`。
-- 新 Logic Node 启动时按第 3 节的 claim 规则停掉占用冲突设备的旧 node。
-
-### 9.2 三个 node 在 Edit 中的字段
-
-| Node | 字段 | 明确不显示 |
-|---|---|---|
-| Calibration | Camera instance；Sequencer instance；以 project `pulses` 为起点的 JSON file picker；Samples（默认 300）；Reference exposure；Readout exposure；Camera ROI；默认 readout model；box/PSF 训练参数；必要的高级检测参数；完成后只读 Detected sites | grid rows/columns/site count；`bracket`；timeout；用户填写的 output signal |
-| Camera Measurement | Camera instance；Exposure；ROI；Repeat (`0=infinite`)；Frames per cycle | 独立 mode；user buffer；loss 计数；pulse drive；普通用户 timeout |
-| Stepped Scan | Pulse JSON file picker；scan plan；任意当前 LIVE Signal；Sequencer instance；Settle time；Gating；Free-run delay | 第二 scan engine；source producer device；用户填写 output signal |
-| Occupancy | Frames signal；Calibration file；Readout model (`default` / `box` / `psf` / `uniform_psf`)；只读输出摘要 | Device；finite/infinite extent mode；buffer；隐式“current calibration” |
-
-Calibration 中所谓“必要的高级检测参数”只能是算法确实需要暴露的噪声门限、最小间距或 spot 尺度之类调整项；它们不能变相成“用户先告诉 site 数量/形状”。默认自动模式应当不需要用户调它们。
-
-### 9.3 Task takeover、LIVE preview 与 terminal 清理
-
-- Calibration 循环中的 `capture_preview` 是唯一自动加入 Monitor 的 measurement-linked panel；它显示最新一张二维 camera image，不携带累计采集维度。循环完成后，Calibration Task 直接把 result 交给 `zlc_plot` 保存 site map、fidelity、三个 classifier grids 和 PSF kernels 六张 report 图片。Workbench 只显示 Task 的进度和运行中 preview，不组装、不显示、不自动打开 report。
-- Task active 时，TaskConsole header 的可操作区切换为唯一的 task status strip：显示当前阶段、进度和唯一 `Stop Task`。所有会改变系统状态的 header controls、logic rows/cards、Setting/Edit controls、Add/Start/Restart/Stop/Remove 都禁用，不能与 exclusive Task 并行改写 draft 或设备状态。
-- Monitor 中 selector、zoom、pan、fit inspection 只允许 view-only；Task active 时 selector commit 不能回写任何 producer draft。
-- 每个 task generation 的 LIVE preview 都带明确生命周期。它只在该 Task host 正在运行时允许自动创建；terminal、Stop、失败或取消统一移除 transient preview，后续 beat 即使仍能读到该 generation 的最后 publication 也不得重建。下一次 Restart 的新 generation 才能创建新的 preview。
-- Monitor 左侧作为一个整体滚动区域响应鼠标滚轮；不能只有某个子控件吃掉滚动而使 logic/panel 列表无法上下移动。仅让 plot widget `ignore()` wheel 不足以证明这一点：Selectors 关闭时，Panel Card 必须把 surface 上的 Wheel 事件明确交给唯一的祖先 board scroll owner。
-
-## 10. Plot Panel UI
-
-### 10.1 Add Panel
-
-TaskConsole 的 Plot catalog 顺序和标签固定为：`2D image` (`Image`)、`1D vector` (`Curve`)、`Rolling trace` (`Rolling`)、`Distribution` (`Histogram`)、`Site grid` (`FacetGrid`，cell kind 固定为 Curve)。`PulseTimeline` 属于 Pulse UI，不得出现在 TaskConsole catalog。
-
-在 header combined 下拉框选中 `Plot: ...` 后，同一个 `Add Panel` 按钮只创建该固定 kind 的 blank panel；它不要求 signal 已存在，也不自动挑 signal。空卡显示 `Pick a signal in Setting`，随后由 Setting/Edit 选择 signal。Plot kind 一旦创建就固定；Setting/Edit 只读显示，需要另一种 kind 就新建 panel。
-
-### 10.2 Setting frame
-
-Setting 是 monitor board 上的完整初始配置面，而不是第一次修改后才补齐字段的简化表单。它从同一份 `zlc_plot` kind schema 构造，blank panel 创建时就显示全部 data-independent 参数：
-
-- Plot kind（只读）；
-- Signal；
-- Panel size；
-- Display interval：只用有限值 `100 / 200 / 400 / 800 ms` 的 ComboBox，默认 `100 ms`，不能用可输入非法值的 SpinBox；
-- title/labels、limits 和当前 kind 声明的全部 data-independent display/interaction 参数；
-- Edit / Remove。
-
-Panel frame name 与图内 title 是两个事实：frame name 默认包含所选 signal 以便在 Monitor 中辨认，也可单独重命名；图内 title、axis labels、units 和 limits 仍是 `zlc_plot` 的 display 参数。凡 plot schema 声明 `None` 为 automatic 的字段，Setting 与 Panel Edit 都用一个带短名称的 switch 直接占据该行的 label 位置，不再另放一条冗长 label；switch 自身显示 `Auto …` 或 `Manual …`，开启 Auto 时禁用手工 editor并使用 PlotSpec/data 默认，关闭时提交手工值。不得再由 Workbench 用 frame name 覆盖 plot title。
-
-依赖 dataset schema 的 axis/reduction/group/facet choices 和依赖真实数据的 fit action 也按稳定位置显示，但在没有 compatible signal 时禁用并说明原因，不能因为 signal 为空而让其他设置消失。每个 signal label 同时显示人类可读名称和当前 dataset shape。Camera cycle 的各个 frame 已经是普通独立 signals，plot 参数层不再增加 camera-specific frame choice。Display interval 只控制 panel display scheduler；TaskConsole app beat 独立驱动 scheduler，二者不是同一个可编辑数值。
-
-Setting 使用现有 `FluentPopup` 和 `FluentSettingsPopupAnchor` 锚在所属 panel 的 Setting 按钮旁；宽度不与 panel preset 绑定，而由当前完整 form 的控件 `sizeHint`、必要 label/switch 文本和 popup margin 得出能完整显示所有 widget 的最窄宽度，再受可用屏幕宽度约束，绝不能截断 editor。`Qt.Popup` 负责点击外部关闭，标题条允许拖动，内容放不下时在 popup 内滚动，外间距复用 Fluent popup gap。popup 从创建时就以 card 为 parent，form/button/control 从创建时就以 Setting body/popup 为 parent；只允许这个有身份的预期 popup 收到 top-level Show，禁止先显示无 parent 临时窗口再 reparent。Setting 没有 `Apply` 按钮：每个已完成编辑/choice commit 立即替换同一 `PanelState`；同一 signal/schema 的完整目标配置一次提交给当前 `zlc_plot` host，Display interval 也必须立即生效。
-
-Monitor 的 `Selectors` 默认关闭，与 v1 一致。关闭时 plot widget 不消费 wheel，Panel Card 把 wheel 明确路由到外层 board scroll；打开后 wheel 才属于 plot 的 zoom/selection interaction。这个开关直接调用同一 plot widget 的 interaction gate，不重建 panel。
-
-改 Signal 只换这个 panel 的绑定，不改 Occupancy 等 Logic Node 的 input binding，也不改 plot kind。
-
-每个 panel 只有一份 Workbench-owned `PanelState`，其中包含 signal binding、size、update interval、plot semantic/display/fit 参数和固定 plot kind。Setting frame 和 Panel Edit 都是这一份 state 的 view/controller，不各自保存副本。
-
-Monitor board 的几何只由 `zlc_ui` 的一条二维重力规则决定。拖动时卡片自由移动、其他卡片不 live reflow；松手时先用被拖卡片的真实左上角选择 settled board 上欧氏距离最近的二维格点，再把该卡固定在这个格点，让其他卡片保持相对顺序并向西北收敛。占用中的左上格点仍可选择，语义是把原卡挤开；某卡左下方的空格点也同等参与距离比较，不能先把落点压成一维 insertion index。窗口变窄时只对固定卡片的显示 x 做必要 clamp，不覆盖 authored anchor，因此再次放宽会恢复操作者选择的行。几何 owner 不进入 Workbench、`PanelState` 或科学 layout codec。
-
-### 10.3 Panel Edit tab
-
-Edit 是一个 tab，不是 modal。它包含：
-
-- Plot kind（只读）、Signal、Panel size、有限值 Display interval ComboBox；后三个可编辑字段与 Setting 重复显示，两处直接绑定同一 `PanelState`；
-- 当前图形和 `Refresh snapshot`；
-- 完整 semantic/display/fit 参数和结果；
-- selector/zoom/pan；
-- direct producer 的完整 Logic parameter form，它是 producer row draft 的另一个投影；
-- 与 producer row 共用的 `Start/Restart` action；
-- `Save Fig`：保存这个 panel 当前图像和对应数据。
-
-这种重复是有意的：用户在图上做 Area/range selection 或 zoom/pan 时，可以同时看到 ROI/range 等 producer 参数更新，然后调用同一个 `Restart`。
-
-Setting 或 Edit 从任一边提交修改时，controller 立即替换同一 `PanelState`，两个 view 和 monitor panel 都收到同一次更新。不写“Setting -> Edit”和“Edit -> Setting”两套手工拷贝逻辑。Edit 中的 frozen data snapshot 与 `PanelState` 分开：参数始终同步；如果换了 signal，旧 frozen 图标为 stale，用户 Refresh 后取新 signal 的 snapshot。
-
-Panel Setting/Edit 每次字段 commit 都把完整目标配置一次交给 `zlc_plot`：semantic mapping、整张 display parameter mapping、size、Image overlay 和 fit choice。Workbench 不判断哪一个字段能原位更新，也不循环调用单字段 setter；`zlc_plot` 用当前 `PlotSpec`、`ParameterSchema`、layout、overlay 和 fit 状态比较差异，合并需要的 render effects，并在同一个 worker job 中最多发布一张同步 front。只要 signal/schema 兼容，就保留同一个 host 和 Figure；只有 signal 改变、generation 改变或 schema 不兼容才替换 host。Fit 求解本身继续是异步科学计算，完成后再发布 fit overlay。owner thread 不调用 `.result()` 等待，旧的完整配置 job 由同一 coalescing key 淘汰。产品 UI 不存在 `Apply`；measurement 重配只走同一个 `Start/Restart` endpoint。
-
-Live fit 不改变外部 data API：有无 fit 都只调用同一个 `RasterPlotHost.update_data()`。每个新 revision 先投影并发布 data front，取消前一 solver，只在 `zlc_plot` 的既有 analysis worker 中重新求出当前最新数据的参数；这一步科学计算不可用旧参数代替。显示层在同一 fit model 和同一 artist topology 下保留既有 artists，在新结果到达前把它们视为 lagging，新结果通过 revision/request-generation 校验后只更新 line data、glyph geometry 和 annotation；只有 fit model 或 artist topology 改变才移除并重建 artists。最终 raster 仍由现有 renderer 一次同步 draw，不新增第二条 blit/lifecycle。`LivePlotController` 只提供 capacity-one/latest ingress 与 cadence，不拥有第二套 fit 状态机，也不要求 data 等 fit 完成后才显示。
-
-Distribution 的 threshold classifier 是该 plot kind 自己的 boolean display 参数，和通用 fit 完全独立。打开后由 `zlc_plot` 自己执行 bimodal Gaussian classification fit，显示左右 Gaussian、总和、可拖动 threshold，以及当前 threshold 对应的 fitted population 左/右占比（两者严格合计 100%）和 balanced fidelity；初值是 equal-prior 最优 threshold。普通 fit 的启停、model、结果和状态不得创建、移动或清除 classifier，classifier 也不得写普通 `fit_status`。FacetGrid[Histogram] 对每个 cell 使用同一 classifier，overview 中保留三条曲线、threshold 和较小字号的三项数值；focus 后只把该 cell 的 threshold 变成可交互 selector。外部若已有模型 threshold，就把 toggle 与整组 canonical thresholds 放进同一次 `configure()`，不先画静态线再另跑普通 fit。
-
-### 10.4 各 plot kind 的理想参数
-
-| TaskConsole label / kind | schema 中的 semantic 参数 | schema 中的 display/interaction | Setting 初始 data-independent surface |
-|---|---|---|---|
-| `2D image` / Image | X/Y axes；Reduction；optional typed Overlay signal | colormap；color limits；interpolation；colorbar；optional small point labels；marker radius/style；empty/occupied/invalid colors；Area selector；2-D fit | title；colormap；color limits；interpolation；colorbar；all overlay/marker styling；selector display |
-| `1D vector` / Curve | X axis；Group by；Reduction | labels/units；grid；limits；X-range selector；compatible fit | title；X/Y labels；units；grid；limits；selector display |
-| `Distribution` / Histogram | value/reduction selection | bins；density；cumulative；log Y；range selector；独立 threshold-classifier switch/selector；compatible fit | title；bins；density；cumulative；log Y；classifier switch；range/limits |
-| `Rolling trace` / Rolling | Group by；Reduction | window；Y limits；side distribution；X-range；compatible fit | title；window；Y limits；grid；side-distribution display；selector display |
-| `Site grid` / FacetGrid[Curve] | Facet axis；fixed Curve cell semantic parameters | packing；focus cell；cell selector；compatible per-cell fit | title；facet unit；packing；focus/cell display；Curve display parameters |
-
-Fit model 和参数兼容性由 `zlc_plot` 声明，UI 不写死列表。Overlay 不是 `zlc_plot` 的 Off/Centers/Occupancy mode 参数；它是 panel 的第二个显式 signal binding。producer 决定坐标、身份和状态，`zlc_plot` 只按 typed overlay contract 绘制，不从 grid shape 或 domain artifact 生成圈。
-Site 旁边不得显示长 site id；若开启标签，最多在 marker 左上角显示小号 ordinal 数字。数字颜色和透明度跟对应 site 圈完全一致，使 empty/occupied/invalid 仍可由同一状态色区分；vacant/empty 必须明显淡于 occupied，不能成为画面的第一视觉层。
-
-## 11. 三种 Save（必须分开）
-
-| 用户动作 | 保存什么 | 不保存什么 |
-|---|---|---|
-| TaskConsole header `Save Layout` | pipeline/layout JSON：nodes、各 row draft、named device 选择、signal 接线、panels 的固定 plot kind/spec/size/interval/order | panel dataset、running state、generation/revision、device snapshot |
-| TaskConsole header `Save Screenshot` | 整个当前 TaskConsole GUI 的一张普通图片 | layout JSON、科学数据、provenance |
-| Panel Edit `Save Fig` | 该 panel 当前 frozen snapshot 的 image + data archive + 对应 plot state + 本次 run 调用链参数/device snapshots | 整个 monitor tab 或其他 panels 的数据 |
-
-`Save Layout` 加载后恢复相同节点、`camera_measurement -> occupancy` 接线、panel signal/plot kind 和布局，但全部是 stopped draft。加载 layout 不打开或配置设备。
-
-Panel `Save Fig` 只围绕当前 panel：
-
-- 数据是 Edit tab 正在显示的同一 frozen snapshot，不在 Save 时又抓一份 latest；
-- 调用链参数是该 run 真正启动时冻结的值：例如 camera instance/exposure/ROI/repeat，Occupancy 的 source/calibration path，以及上游 task/pulse 参数；
-- device snapshot 是 run 配置/采集时从公开 adapter API 读回的 actual state，不是点 Save 时临时拍可能已经变化的状态；
-- 如果该 `Image` panel 选择了 Overlay signal，重画所需的 typed coordinates/ids/labels/status 作为该 Image plot 的 data/annotation 保存；不创建 SiteMap plot kind，也不复制 calibration artifact；
-- calibration 在调用链中按实际 `calibration_path` 记录，不内嵌另一份 calibration JSON，不考虑我之前臆造的“移动 panel 数据”场景；
-- 不新增 fingerprint/hash。
-
-Calibration Task 自身的 JSON/report 是第四个业务文件，但不是 TaskConsole Save 按钮：它在 Task 成功时由 workspace 自动写出。
-
-## 12. 状态更换时的行为
-
-| 动作 | 设备 | Signal | Panel | Processor |
-|---|---|---|---|---|
-| 修改 draft | 不变 | 不变 | 继续显示旧 run | 继续处理旧 run |
-| Logic/Producer Restart | 停冲突 owner，用新 request 重配并启动 | key 不变，generation 更换 | 保留绑定，新数据到达时替换 host | active row 重新校验；不相容则 blocked |
-| 新 Logic Node 占用同一 device | 旧冲突 node 被停止 | 旧 generation terminal | 可保留明确 frozen/stale 图 | 依赖该 source 的 active processor 停止/等新 source |
-| Panel 换 Signal | 不变 | Logic signal 不变 | 该 panel 换绑 | 不变 |
-
-## 13. 当前实现和验收状态
-
-本文不作完成声明。此前基于六个 sites、旧 plot surface 和旧 Calibration artifact/report 的所谓正式 UI 验收已经撤销，不能作为当前树的产品证据；virtual apparatus 的默认验收目标是 `5 x 7 = 35` sites 和 `96 x 128` frames。
-
-最新实现完成后必须从根 `bin\experiment.bat` 重新走一次真实按钮路径，而不是调用 presenter/private API 代替点击：Device Manager `Init devices` -> 同 session 只自动出现 TaskConsole -> loaded sequencer card `Control` 按需打开 Pulse UI且重复点击只 raise 同一窗口 -> Calibration Task takeover/progress/唯一 Monitor LIVE preview/Stop Task -> 确认 JSON 和六张 report 图片已写出且 UI 未创建 report panel/tab/window -> `Repeat=0` Camera Measurement -> Pulse JSON Load/On -> Occupancy readout-model choice -> 五种固定 panel kind 的 blank/full-schema/finite interval/即时 Setting commit -> signal/overlay/selector/Producer Restart -> 三种 Save -> Stop Pulse -> 关闭 Pulse GUI 而 device/session 保持 -> 再次由 card 打开 -> close session。随后还必须验证全部 control window、session、workers、claims 和项目 Python 进程归零。当前真实按钮复验、性能复验、受影响测试和全树测试的未完成状态只记录在 `IMPLEMENTATION_PLAN.md` Checkpoint。
-
-## 14. 本轮 review 的结论和非问题
-
-以下已经定案，实施时不应再当成待决定项：
-
-- Calibration 自动发现 sites；无 grid shape/count 输入。
-- Calibration 用同一 labels/split 训练 `box`、per-site `psf`、`uniform_psf` 三种模型；Occupancy 显式选择 default/具体模型。
-- Calibration 跑一次采集循环并计算一次结果；同一结果写 JSON 后直接交给 `zlc_plot` 保存 site-map、fidelity、三模型 classifier grids 和 PSF kernel grid 六张 report 图片。Monitor 只含循环中的 preview；Workbench 不显示 report。Task active 时 header takeover 并阻止所有状态改写，只保留 `Stop Task`。
-- Virtual devices 只位于独立 simulation package，满足与真实设备相同的 `CameraAdapter`/`SequencerDevice` 契约，默认 `5 x 7 = 35` sites、`96 x 128` image。
-- Pulse 文件只有 `zlc.pulse.v1` JSON 和一条 readable writer/readback 路径，不存在 `.py` pulse 或第二套排版。
-- exposure/ROI 是 measurement 参数，由 UI 接线层维护共享 draft 并在 Start/Restart 时传给 device。
-- `Repeat=0` 是 infinite。
-- combined `Add Panel` 选择 Logic entry 后创建 stopped row 并自动进 Edit tab；没有独立 `Add Logic` 按钮或弹窗。
-- Plot kind 在 Add Panel 时固定。
-- TaskConsole 只提供五种固定 plot kind；Display interval 是有限 ComboBox，blank panel 初始即显示完整 schema，Setting 无 Apply、字段 commit 立即异步准备并拒绝 stale result。
-- Panel Edit 重复显示 panel 参数和 direct producer 参数，selector 更新同一 measurement draft，Producer Restart 调用同一个 Start/Restart endpoint。
-- Setting frame 和 Panel Edit 直接绑定同一 `PanelState`，对应参数天然双向同步；不存在两份 panel config。
-- SiteMap 是 calibration domain data，不是 plot kind；Occupancy 显式发布同-publication typed overlay sibling，固定 `Image` panel 选择 optional Overlay signal，`zlc_plot` 只绘制通用 annotation。
-- 设备可多方只读，只有 exclusive Logic Node 单占；新冲突 node 停旧 node。
-- TaskConsole/Pulse Editor 使用同一 Experiment session，不引入 IPC；Pulse Editor 只由 loaded sequencer card 的 `Control` 按需打开，不随 Init 自动打开。
-- Header Layout Save、Header Screenshot 和 Panel Save Fig 三者语义分开。
-- Panel archive 不复制 calibration JSON，不增 hash/fingerprint。
-
-实施期间遇到任何未预见问题、新矛盾或现有代码与本架构冲突时，不停下询问、不把决策退回给用户。执行者必须按“用户已裁决的产品语义 > 本架构文档 > 整条科学数据链正确 > 最简单可维护的实现 > v2 现状 > v1 参考”自主作出最优决定，在实施记录中简要记录理由，然后继续运行直到交付定义全部满足。v1 或当前 v2 的错误实现不能重新打开本文已定案的决定。
+- 正式transport只有Hamamatsu USB SDK；DVI production/discovery/UI/tests/docs删除。
+- Initial command state是unknown，只有成功write/display/readback/settle后才known。
+- Side effect失败区分known-old、known-new和unknown outcome。
+- Correction mutation取得同一DeviceUse claim并冻结mapping revision。
+- Profile记录model、serial、wavelength、phase curve来源和settle语义；不新增hash。
+- Editor明确区分authoring draft与device command；external Task后旧Send不得静默覆盖。
+
+### 8.2 Context与artifacts
+
+- Target保存intensity和objective。
+- Science Context保存numeric pupil、Pattern/base、operator wavefront和system correction引用。
+- Command receipt保存USB/profile/wavelength/orientation/correction/outcome。
+- `SystemCorrectionArtifact`明确区分pupil phase map与target response map；不得把per-geometry site weights冒充通用wavefront correction。
+
+### 8.3 Solver与Feedback
+
+- 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
+- Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
+- Current Feedback observable是all-shot fluorescence，不宣称trap depth。
+- SLM Feedback复用canonical Camera Measurement `repeat=N`及同一Runtime dataset/projection；不另写camera average。
+- Controller使用uncertainty、step clip、trust、rollback和invalid stop。
+- 100 shots是coarse；final validation根据实测variance自适应并有最大time/shots，输出estimate、uncertainty或inconclusive。
+- Stop接受并apply本run confidence-best phase；异常failure只在incoming known时恢复。
+- Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
+
+## 9. Calibration、Scan与Simulation
+
+- 不重设计Calibration对外流程、主要artifact、默认raw policy或三帧report。
+- 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
+- Scan正常完成、Stop或失败都默认restore pre-run device values。
+- SimulationWorld保持一个类和一个state owner，不拆层。
+- Simulation参数在init前通过单一API/immutable config确定；可读取workspace-local profile，Device Manager Init不运行时改写。
+- Tests使用config override，不修改public mutable world attributes；hidden truth不泄漏给production算法。
+
+## 10. Deployment、Evidence与Docs
+
+- 一个可安装ZLC distribution，内部八层不独立发wheel。
+- 一份product manifest、一份dependency lock、一组正式entrypoints。
+- 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。
+- Mock/virtual/offscreen证据不得冒充真hardware/optical acceptance。
+- Root Architecture只保存目标不变量；Implementation Plan只保存当前Checkpoint、milestone状态和最新证据。
+- 旧package GOAL、survey、acceptance和历史contracts删除或重写；不在活文档尾部追加修补记录。
+
+## 11. 当前实现状态
+
+本文描述批准目标，不代表当前HEAD已实现。准确状态、已完成commit、测试和下一步见`IMPLEMENTATION_PLAN.md`的持久Checkpoint。
