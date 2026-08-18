@@ -92,6 +92,59 @@ def test_discovery_automatically_collects_a_synthetic_leaf_without_graph_changes
     assert calls == ["closed"]
 
 
+def test_duplicate_device_keys_are_rejected_before_world_or_factory_side_effects() -> None:
+    made: list[int] = []
+    closed: list[int] = []
+    world_calls: list[int] = []
+
+    def world_config(_values):
+        world_calls.append(1)
+        return None
+
+    def factory(_context, key, _values):
+        ordinal = len(made)
+        made.append(ordinal)
+        return InstalledLeaf(
+            key,
+            "test.duplicate-key",
+            object(),
+            {},
+            closer=lambda: closed.append(ordinal),
+        )
+
+    descriptor = DeviceTypeDescriptor(
+        "test.duplicate-key",
+        "test",
+        AuthoringSchema(()),
+        (),
+        factory=factory,
+        world_config=world_config,
+    )
+    catalog = DeviceCatalogSnapshot((descriptor,), ())
+    installation = None
+    try:
+        installation = create_installation(
+            (
+                DeviceSpec("same", descriptor.type_id),
+                DeviceSpec("same", descriptor.type_id),
+            ),
+            catalog=catalog,
+        )
+    except ValueError as error:
+        assert "duplicate device key" in str(error)
+    else:
+        # On the old implementation both factories ran, the second leaf
+        # replaced the first in the dict, and close could only see leaf 1.
+        installation.close()
+        pytest.fail(
+            "duplicate key was accepted: "
+            f"world_calls={world_calls}, made={made}, closed={closed}"
+        )
+    assert world_calls == []
+    assert made == []
+    assert closed == []
+
+
 def test_installation_rejects_wrong_capability_instances_and_uses_one_registry() -> None:
     assert DeviceBroker.CAPABILITY_TYPES is CAPABILITY_TYPES
 

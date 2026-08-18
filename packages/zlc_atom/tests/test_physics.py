@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -81,6 +82,86 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     np.testing.assert_allclose(loaded.select_model().dark_mean, [1.0])
     np.testing.assert_allclose(loaded.select_model().bright_mean, [9.0])
     np.testing.assert_allclose(loaded.signals(image), [5.0])
+
+
+def test_calibration_document_is_actual_json_data_not_python_container_aliases() -> None:
+    payload = replace(
+        _calibration(),
+        report={"nested": {"values": (np.float64(1.5), np.int64(2))}},
+    ).to_dict()
+    assert payload["frame_contract"]["image_shape"] == [3, 3]
+    assert payload["report"] == {"nested": {"values": [1.5, 2]}}
+    json.dumps(payload, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda payload: payload.update(extra=True), "unknown TrapCalibration fields"),
+        (
+            lambda payload: payload["site_map"].update(extra=True),
+            "unknown SiteMap fields",
+        ),
+        (
+            lambda payload: payload["models"][0].update(extra=True),
+            "unknown ReadoutModel fields",
+        ),
+        (
+            lambda payload: payload["models"][0]["integration"].update(extra=True),
+            "unknown ReadoutModel.integration fields",
+        ),
+        (
+            lambda payload: payload["frame_contract"].update(extra=True),
+            "unknown FrameContract fields",
+        ),
+        (
+            lambda payload: payload["site_map"].update(valid_sites=[1]),
+            "valid_sites.*boolean",
+        ),
+        (
+            lambda payload: payload["models"][0].update(thresholds=["5.0"]),
+            "thresholds.*number",
+        ),
+        (
+            lambda payload: payload["models"][0]["integration"].update(half_width=1.0),
+            "half_width.*integer",
+        ),
+    ),
+)
+def test_calibration_tree_rejects_unknown_fields_and_type_coercion(
+    mutation,
+    message: str,
+) -> None:
+    payload = _calibration().to_dict()
+    mutation(payload)
+    with pytest.raises((TypeError, ValueError), match=message):
+        TrapCalibration.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    (
+        (
+            '{"site_map": {}, "site_map": {}, "models": [], '
+            '"default_model_kind": "box", "frame_contract": {}, "report": {}}',
+            "duplicate key.*site_map",
+        ),
+        (
+            '{"site_map": {}, "models": [], "default_model_kind": "box", '
+            '"frame_contract": {}, "report": {"bad": NaN}}',
+            "non-finite JSON constant.*NaN",
+        ),
+    ),
+)
+def test_calibration_load_rejects_duplicate_keys_and_nonfinite_json(
+    tmp_path: Path,
+    document: str,
+    message: str,
+) -> None:
+    path = tmp_path / "corrupt.json"
+    path.write_text(document, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        TrapCalibration.load(path)
 
 
 def test_usable_readout_requires_a_finite_positive_response() -> None:

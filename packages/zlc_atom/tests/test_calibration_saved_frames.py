@@ -11,13 +11,16 @@ import numpy as np
 import pytest
 
 from zlc_atom.install import create_installation
+from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
 from zlc_atom.nodes.calibration.outputs import CAPTURE_PREVIEW_DECLARATION
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
     CalibrationRequest,
+    SampleWriter,
     CalibrationTask,
     read_saved_samples,
 )
+from zlc_data import StreamGenerationId
 from zlc_data.figure_archive import read_archive, read_dataset
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
@@ -40,6 +43,54 @@ def _task(request: CalibrationRequest, directory: Path) -> CalibrationTask:
     )
 
 
+def _sample_writer(folder: Path, *, run: str, generation: str) -> SampleWriter:
+    point = CameraWorkingPoint(
+        "EXTERNAL_TRIGGERED",
+        (2, 2),
+        (2, 2),
+        (0, 0),
+        (2, 2),
+        (1, 1),
+        np.dtype("<u2"),
+        "count",
+        0.005,
+        0.006,
+        0.0,
+        1.0,
+        "default",
+    )
+    return SampleWriter(
+        folder,
+        working_point=point,
+        run_record={"run": run},
+        generation=StreamGenerationId(generation),
+    )
+
+
+def _sample_cycle(offset: int = 0) -> tuple[CameraFrameRecord, ...]:
+    return tuple(
+        CameraFrameRecord(np.full((2, 2), offset + index, dtype="<u2"), index)
+        for index in range(3)
+    )
+
+
+def test_saved_sample_replay_rejects_gaps_and_mixed_runs(tmp_path: Path) -> None:
+    folder = tmp_path / "frames"
+    writer = _sample_writer(folder, run="one", generation="run-one")
+    writer.write(0, _sample_cycle())
+    writer.write(1, _sample_cycle(10))
+
+    (folder / "sample_0000.npz").unlink()
+    with pytest.raises(ValueError, match="contiguous from zero"):
+        read_saved_samples(folder)
+
+    writer.write(0, _sample_cycle())
+    other = _sample_writer(folder, run="two", generation="run-two")
+    other.write(1, _sample_cycle(20))
+    with pytest.raises(ValueError, match="different saved capture"):
+        read_saved_samples(folder)
+
+
 def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     tmp_path: Path,
 ) -> None:
@@ -47,9 +98,9 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
 
     Every sample is written in the acquisition loop, not after it, so a run
     that is cancelled or that fails its analysis still leaves the frames it
-    paid atoms for.  Each file is the archive Panel Edit writes -- the picture
-    and the numbers behind it -- so the same viewer opens them, and the run
-    record inside is where the crop and the exposure are.
+    paid atoms for.  Each file uses the shared figure archive -- the picture
+    and the typed numbers behind it -- so the same viewer opens them, and the
+    run record inside is where the crop and the exposure are.
     """
 
     request = replace(_calibration_request(repeats=12), save_frames=True)
@@ -65,6 +116,7 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     snapshot = read_dataset(info, arrays, "data")
     assert np.asarray(snapshot.block.values).shape[:2] == (1, 3)
     assert info["sections"]["run_chain"], "the crop and exposure travel with the frames"
+    assert "panel" not in info["sections"], "Calibration must not copy Workbench panel state"
 
     # Read straight back: the same three frames per sample, in order.
     cycles, run_record = read_saved_samples(folder)

@@ -2641,8 +2641,13 @@ class PulseEditorPresenter:
             self._warn("there is no scan table to save")
             return ""
         folder = Path(self.path).parent if self.path else Path.cwd()
-        target = unique_path(folder, f"{(self.sequence.name if self.sequence else 'scan')}-scan", ".npy")
-        np.save(target, np.asarray(self._state.scan_rows, dtype=np.int64))
+        values = np.asarray(self._state.scan_rows, dtype=np.int64)
+        target = unique_path(
+            folder,
+            f"{(self.sequence.name if self.sequence else 'scan')}-scan",
+            ".npy",
+            writer=lambda temporary: np.save(temporary, values),
+        )
         self._scan_progress = f"saved {target.name}"
         self._refresh_scan_page()
         return str(target)
@@ -3047,7 +3052,6 @@ class PulseEditorPresenter:
             return ""
         name = (self.sequence.name if self.sequence is not None else "pulse") or "pulse"
         folder = Path(self.path).parent if self.path else Path.cwd()
-        target = unique_path(folder, name, ".png")
         # The HOST writes the file.  The widget is a Qt view onto it and has
         # never had a save(), so this always answered "cannot save itself" in
         # the shipped window while the test substituted a fake that could.
@@ -3055,10 +3059,14 @@ class PulseEditorPresenter:
         if not callable(save):
             self._warn("this preview cannot save itself")
             return ""
-        try:
-            result = save(target)
+
+        def write(temporary: Path) -> None:
+            result = save(temporary)
             if hasattr(result, "result"):
                 result.result()
+
+        try:
+            target = unique_path(folder, name, ".png", writer=write)
         except Exception as error:
             self._warn(f"cannot save the preview: {error}")
             return ""

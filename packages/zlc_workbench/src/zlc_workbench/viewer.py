@@ -316,9 +316,8 @@ class FigureViewerPresenter:
             return None
 
         # Resolved, not stored as spelled.  Where an archive IS is an absolute
-        # fact; how a caller happened to write it is not.  A relative path came
-        # straight through to unique_path, which rightly refuses one -- out of
-        # a Qt slot, so Save image ended the process instead of writing a file.
+        # fact; how a caller happened to write it is not.  Derived saves must
+        # keep landing beside this file even if the process cwd later changes.
         self.path = Path(path).resolve()
         self.description = description
         # Kept so switching datasets does not re-read the file; an archive is
@@ -483,17 +482,23 @@ class FigureViewerPresenter:
         if self._host is None or self.path is None:
             self.view.set_status("there is no figure to save", error=True)
             return ""
-        target = unique_path(
-            self.path.parent, f"{self.path.stem}-{self.dataset or 'figure'}", ".png"
-        )
         save = getattr(self._host, "save", None)
         if not callable(save):
             self.view.set_status("this figure cannot save itself", error=True)
             return ""
-        try:
-            result = save(target)
+
+        def write(temporary: Path) -> None:
+            result = save(temporary)
             if hasattr(result, "result"):
                 result.result()
+
+        try:
+            target = unique_path(
+                self.path.parent,
+                f"{self.path.stem}-{self.dataset or 'figure'}",
+                ".png",
+                writer=write,
+            )
         except Exception as error:
             self.view.set_status(f"cannot save: {error}", error=True)
             return ""

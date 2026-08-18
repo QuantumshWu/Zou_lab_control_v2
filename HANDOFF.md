@@ -8,4 +8,4 @@
 
 恢复任务时依次完整读取上述三份文件，再读取当前Checkpoint所引用的`AUDIT/`报告并核对HEAD/dirty state。Package README、旧GOAL、survey、acceptance、历史contracts和旧tests不是实施authority。
 
-当前用户边界：只执行到Milestone 1完成并commit；随后停止，等待用户确认后才可进入Milestone 2。
+当前用户边界：Milestone 2已完成并commit后停止；等待用户明确确认后才可进入Milestone 3。

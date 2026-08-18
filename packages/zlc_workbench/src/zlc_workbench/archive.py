@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date as _date
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -56,9 +55,6 @@ __all__ = [
     "write_figure_file",
 ]
 
-
-#: Bumped when the layout of ``info`` changes in a way a reader must notice.
-FIGURE_SCHEMA = "zlc.figure/v1"
 
 def write_figure_file(
     path: str | os.PathLike[str],
@@ -99,9 +95,11 @@ def write_figure(
     """
 
     folder = day_folder(save_root, _date.today() if when is None else when)
-    path = unique_path(folder, name, ".npz")
-    atomic_write_bytes(
-        path,
-        figure_bytes(name, arrays=arrays, sections=sections),
+    return unique_path(
+        folder,
+        name,
+        ".npz",
+        writer=lambda temporary: temporary.write_bytes(
+            figure_bytes(name, arrays=arrays, sections=sections)
+        ),
     )
-    return path

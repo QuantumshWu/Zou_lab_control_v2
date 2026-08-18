@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
+import warnings
+import zipfile
 
 import numpy as np
 import pytest
 
 from zlc_data.axis import AxisId, AxisSpec, REPEAT, SITE, SPATIAL_X
+from zlc_data.figure_archive import FIGURE_SCHEMA, figure_bytes, read_archive, read_dataset
 from zlc_data.io import NPZFormatError, load_npz, save_npz
 from zlc_data.schema import (
     DatasetSchema,
@@ -285,3 +289,144 @@ def test_npz_rejects_unknown_validity_kind(tmp_path: Path):
 
     with pytest.raises(NPZFormatError, match="invalid validity kind"):
         load_npz(malformed)
+
+
+def _figure_members(payload: bytes) -> dict[str, np.ndarray]:
+    with np.load(BytesIO(payload), allow_pickle=False) as archive:
+        return {name: np.asarray(archive[name]) for name in archive.files}
+
+
+def _figure_payload(members: dict[str, np.ndarray]) -> bytes:
+    stream = BytesIO()
+    np.savez_compressed(stream, **members)
+    return stream.getvalue()
+
+
+def test_figure_archive_round_trip_validates_version_members_and_dataset_shape():
+    snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
+    payload = figure_bytes(
+        "strict figure",
+        arrays={"data": snapshot, "trace": np.arange(3, dtype="<f4")},
+        sections={"panel": {"kind": "image"}},
+    )
+
+    info, arrays = read_archive(BytesIO(payload))
+
+    assert info["schema"] == FIGURE_SCHEMA
+    assert info["version"] == 2
+    assert set(info["members"]) == {"data", "data.validity", "trace"}
+    assert set(arrays) == {"data", "data.validity", "trace"}
+    assert read_dataset(info, arrays, "data").exactly_equals(snapshot)
+
+
+def test_figure_writer_preplans_snapshot_member_namespace():
+    snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
+
+    with pytest.raises(ValueError, match="member name collision.*data.validity"):
+        figure_bytes(
+            "collision",
+            arrays={"data": snapshot, "data.validity": np.ones((1,), dtype=bool)},
+            sections={},
+        )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        object(),
+        {1: "numeric key"},
+        {"items": {1, 2}},
+        ("tuple", "is not JSON"),
+        np.int64(1),
+    ],
+)
+def test_figure_writer_rejects_unknown_or_lossy_metadata(bad):
+    with pytest.raises(TypeError, match="metadata"):
+        figure_bytes(
+            "bad metadata",
+            arrays={"trace": np.arange(2)},
+            sections={"bad": bad},
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (("schema", "other-format"), ("version", 99)),
+)
+def test_figure_reader_rejects_wrong_format_or_version(field, value):
+    members = _figure_members(
+        figure_bytes("format", arrays={"trace": np.arange(2)}, sections={})
+    )
+    info = json.loads(str(members["info"].item()))
+    info[field] = value
+    members["info"] = np.asarray(json.dumps(info, sort_keys=True))
+
+    with pytest.raises(ValueError, match="unsupported figure format"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+
+def test_figure_reader_rejects_extra_and_shape_changed_members():
+    original = _figure_members(
+        figure_bytes("members", arrays={"trace": np.arange(2)}, sections={})
+    )
+    members = dict(original)
+    members["extra"] = np.arange(1)
+    with pytest.raises(ValueError, match="members mismatch"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+    members = dict(original)
+    members.pop("trace")
+    with pytest.raises(ValueError, match="members mismatch"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+    members = dict(original)
+    members["trace"] = np.arange(3)
+    with pytest.raises(ValueError, match="shape"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+    members = dict(original)
+    members["trace"] = np.arange(2, dtype=np.float64)
+    with pytest.raises(ValueError, match="dtype"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+
+def test_figure_reader_rejects_duplicate_zip_members():
+    stream = BytesIO(
+        figure_bytes("duplicates", arrays={"trace": np.arange(2)}, sections={})
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(stream, "a") as archive:
+            encoded = archive.read("trace.npy")
+            archive.writestr("trace.npy", encoded)
+
+    with pytest.raises(ValueError, match="duplicate.*trace"):
+        read_archive(BytesIO(stream.getvalue()))
+
+
+def test_figure_reader_rejects_duplicate_keys_and_nonfinite_metadata():
+    members = _figure_members(
+        figure_bytes("metadata", arrays={"trace": np.arange(2)}, sections={})
+    )
+    text = str(members["info"].item())
+    duplicate = text.replace('"version":2', '"version":2,"version":2', 1)
+    assert duplicate != text
+    members["info"] = np.asarray(duplicate)
+    with pytest.raises(ValueError, match="duplicate metadata key"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+    nonfinite = text.replace('"sections":{}', '"sections":{"bad":NaN}', 1)
+    assert nonfinite != text
+    members["info"] = np.asarray(nonfinite)
+    with pytest.raises(ValueError, match="non-finite metadata"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+
+def test_figure_reader_validates_embedded_dataset_before_returning():
+    members = _figure_members(
+        figure_bytes("dataset", arrays={"data": _snapshot()}, sections={})
+    )
+    members["data"] = np.zeros((1,), dtype="<f4")
+
+    with pytest.raises(ValueError, match="shape"):
+        read_archive(BytesIO(_figure_payload(members)))

@@ -6,12 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
-from math import sqrt
+from math import isfinite, sqrt
 
 from scipy import ndimage
 import json
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 import numpy as np
 
@@ -35,6 +35,113 @@ READOUT_MODEL_CHOICES = (
     DEFAULT_READOUT_MODEL_CHOICE,
     *(kind.value for kind in ReadoutModelKind),
 )
+
+
+def _exact_fields(
+    value: object,
+    name: str,
+    fields: frozenset[str],
+) -> Mapping[str, Any]:
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an object")
+    unknown = set(value) - fields
+    missing = fields - set(value)
+    if unknown:
+        raise ValueError(f"unknown {name} fields: {sorted(unknown, key=str)}")
+    if missing:
+        raise ValueError(f"missing {name} fields: {sorted(missing)}")
+    return value
+
+
+_JSON_TYPE_NAME = {
+    bool: "boolean",
+    int: "integer",
+    float: "number",
+    str: "string",
+    list: "array",
+    dict: "object",
+    type(None): "null",
+}
+
+
+def _canonical_mismatch(expected: object, observed: object, path: str) -> str | None:
+    if type(expected) is not type(observed):
+        return (
+            f"{path} must be {_JSON_TYPE_NAME.get(type(expected), type(expected).__name__)}, "
+            f"got {_JSON_TYPE_NAME.get(type(observed), type(observed).__name__)}"
+        )
+    if type(expected) is dict:
+        expected_mapping = expected
+        observed_mapping = observed
+        if set(expected_mapping) != set(observed_mapping):
+            return f"{path} fields changed while decoding"
+        for key in expected_mapping:
+            mismatch = _canonical_mismatch(
+                expected_mapping[key], observed_mapping[key], f"{path}.{key}"
+            )
+            if mismatch is not None:
+                return mismatch
+        return None
+    if type(expected) is list:
+        expected_items = expected
+        observed_items = observed
+        if len(expected_items) != len(observed_items):
+            return f"{path} array length changed while decoding"
+        for index, (wanted, actual) in enumerate(
+            zip(expected_items, observed_items, strict=True)
+        ):
+            mismatch = _canonical_mismatch(wanted, actual, f"{path}[{index}]")
+            if mismatch is not None:
+                return mismatch
+        return None
+    return None if expected == observed else f"{path} changed while decoding"
+
+
+def _require_canonical(expected: object, observed: object, name: str) -> None:
+    mismatch = _canonical_mismatch(expected, observed, name)
+    if mismatch is not None:
+        raise TypeError(f"non-canonical {name} document: {mismatch}")
+
+
+def _plain_json_value(value: object, name: str) -> Any:
+    """Project an owned domain value into the exact JSON value vocabulary."""
+
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if not isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        return value
+    if isinstance(value, np.generic):
+        return _plain_json_value(value.item(), name)
+    if isinstance(value, np.ndarray):
+        return _plain_json_value(value.tolist(), name)
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be strings")
+            result[key] = _plain_json_value(item, f"{name}.{key}")
+        return result
+    if isinstance(value, (list, tuple)):
+        return [
+            _plain_json_value(item, f"{name}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(f"{name} is not JSON-serializable domain data")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key in calibration JSON: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant in calibration: {value}")
 
 
 def readout_model_kind_from_choice(
@@ -113,12 +220,18 @@ class FrameContract:
             if self.sensor_shape is not None and (roi[0] + roi[2] > self.sensor_shape[1] or roi[1] + roi[3] > self.sensor_shape[0]):
                 raise ValueError("roi_xywh lies outside sensor_shape")
             object.__setattr__(self, "roi_xywh", roi)
-        if self.exposure_seconds is not None and (not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0):
-            raise ValueError("exposure_seconds must be finite and positive")
+        if self.exposure_seconds is not None:
+            exposure = float(self.exposure_seconds)
+            if not np.isfinite(exposure) or exposure <= 0:
+                raise ValueError("exposure_seconds must be finite and positive")
+            object.__setattr__(self, "exposure_seconds", exposure)
         for name in ("camera_id", "readout_mode"):
             value = getattr(self, name)
-            if value is not None and not str(value).strip():
-                raise ValueError(f"{name} cannot be blank")
+            if value is not None:
+                if type(value) is not str:
+                    raise TypeError(f"{name} must be a string or None")
+                if not value.strip():
+                    raise ValueError(f"{name} cannot be blank")
 
     def assert_image(self, image: object) -> np.ndarray:
         payload = image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image
@@ -129,10 +242,10 @@ class FrameContract:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "image_shape": self.image_shape,
-            "sensor_shape": self.sensor_shape,
-            "roi_xywh": self.roi_xywh,
-            "binning_yx": self.binning_yx,
+            "image_shape": list(self.image_shape),
+            "sensor_shape": None if self.sensor_shape is None else list(self.sensor_shape),
+            "roi_xywh": None if self.roi_xywh is None else list(self.roi_xywh),
+            "binning_yx": list(self.binning_yx),
             "exposure_seconds": self.exposure_seconds,
             "camera_id": self.camera_id,
             "readout_mode": self.readout_mode,
@@ -140,7 +253,24 @@ class FrameContract:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "FrameContract":
-        return cls(**dict(payload))
+        values = _exact_fields(
+            payload,
+            "FrameContract",
+            frozenset(
+                {
+                    "image_shape",
+                    "sensor_shape",
+                    "roi_xywh",
+                    "binning_yx",
+                    "exposure_seconds",
+                    "camera_id",
+                    "readout_mode",
+                }
+            ),
+        )
+        result = cls(**dict(values))
+        _require_canonical(result.to_dict(), dict(values), "FrameContract")
+        return result
 
 
 @dataclass(frozen=True)
@@ -439,19 +569,35 @@ class SiteMap:
             "valid_sites": self.valid_sites.tolist(),
             "quality": _nullable_floats(self.quality),
             "coordinate_frame": self.coordinate_frame,
-            "topology": self.topology,
+            "topology": _plain_json_value(self.topology, "topology"),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "SiteMap":
-        return cls(
-            tuple(payload["site_ids"]),
-            np.asarray(payload["centers_xy"]),
-            np.asarray(payload["valid_sites"]),
-            _floats_from_json(payload["quality"]),
-            str(payload["coordinate_frame"]),
-            payload["topology"],
+        values = _exact_fields(
+            payload,
+            "SiteMap",
+            frozenset(
+                {
+                    "site_ids",
+                    "centers_xy",
+                    "valid_sites",
+                    "quality",
+                    "coordinate_frame",
+                    "topology",
+                }
+            ),
         )
+        result = cls(
+            tuple(values["site_ids"]),
+            np.asarray(values["centers_xy"]),
+            np.asarray(values["valid_sites"]),
+            _floats_from_json(values["quality"]),
+            values["coordinate_frame"],
+            values["topology"],
+        )
+        _require_canonical(result.to_dict(), dict(values), "SiteMap")
+        return result
 
 
 @dataclass(frozen=True)
@@ -571,23 +717,55 @@ class ReadoutModel:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ReadoutModel":
-        integration = payload["integration"]
-        return cls(
-            tuple(payload["site_ids"]),
-            _floats_from_json(payload["thresholds"]),
-            _floats_from_json(payload["dark_mean"]),
-            _floats_from_json(payload["bright_mean"]),
-            np.asarray(payload["usable_sites"]),
-            _floats_from_json(payload["quality"]),
-            kind=ReadoutModelKind(payload["kind"]),
+        values = _exact_fields(
+            payload,
+            "ReadoutModel",
+            frozenset(
+                {
+                    "kind",
+                    "site_ids",
+                    "thresholds",
+                    "dark_mean",
+                    "bright_mean",
+                    "usable_sites",
+                    "quality",
+                    "threshold_method",
+                    "integration",
+                }
+            ),
+        )
+        integration = _exact_fields(
+            values["integration"],
+            "ReadoutModel.integration",
+            frozenset(
+                {
+                    "half_width",
+                    "reducer",
+                    "psf_weights",
+                    "psf_boxes",
+                    "background",
+                    "padding",
+                }
+            ),
+        )
+        result = cls(
+            tuple(values["site_ids"]),
+            _floats_from_json(values["thresholds"]),
+            _floats_from_json(values["dark_mean"]),
+            _floats_from_json(values["bright_mean"]),
+            np.asarray(values["usable_sites"]),
+            _floats_from_json(values["quality"]),
+            kind=ReadoutModelKind(values["kind"]),
             integration_half_width=integration["half_width"],
             reducer=integration["reducer"],
-            threshold_method=payload["threshold_method"],
+            threshold_method=values["threshold_method"],
             psf_weights=None if integration["psf_weights"] is None else np.asarray(integration["psf_weights"]),
             psf_boxes=None if integration["psf_boxes"] is None else np.asarray(integration["psf_boxes"]),
             background=integration["background"],
             psf_padding=integration["padding"],
         )
+        _require_canonical(result.to_dict(), dict(values), "ReadoutModel")
+        return result
 
 
 @dataclass(frozen=True)
@@ -770,18 +948,39 @@ class TrapCalibration:
             "models": [model.to_dict() for model in self.models],
             "default_model_kind": self.default_model_kind.value,
             "frame_contract": self.frame_contract.to_dict(),
-            "report": dict(self.report),
+            "report": _plain_json_value(self.report, "report"),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "TrapCalibration":
-        return cls(
-            SiteMap.from_dict(payload["site_map"]),
-            tuple(ReadoutModel.from_dict(model) for model in payload["models"]),
-            ReadoutModelKind(payload["default_model_kind"]),
-            FrameContract.from_dict(payload["frame_contract"]),
-            payload["report"],
+        values = _exact_fields(
+            payload,
+            "TrapCalibration",
+            frozenset(
+                {
+                    "site_map",
+                    "models",
+                    "default_model_kind",
+                    "frame_contract",
+                    "report",
+                }
+            ),
         )
+        models = values["models"]
+        if type(models) is not list:
+            raise TypeError("models must be an array")
+        report = values["report"]
+        if type(report) is not dict:
+            raise TypeError("report must be an object")
+        result = cls(
+            SiteMap.from_dict(values["site_map"]),
+            tuple(ReadoutModel.from_dict(model) for model in models),
+            ReadoutModelKind(values["default_model_kind"]),
+            FrameContract.from_dict(values["frame_contract"]),
+            report,
+        )
+        _require_canonical(result.to_dict(), dict(values), "TrapCalibration")
+        return result
 
     def save(self, path: str | Path) -> Path:
         target = Path(path)
@@ -790,7 +989,13 @@ class TrapCalibration:
 
     @classmethod
     def load(cls, path: str | Path) -> "TrapCalibration":
-        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        return cls.from_dict(
+            json.loads(
+                Path(path).read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        )
 
 
 @dataclass(frozen=True)

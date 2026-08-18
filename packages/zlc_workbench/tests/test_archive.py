@@ -122,11 +122,12 @@ def test_an_interrupted_save_does_not_destroy_the_previous_archive(tmp_path, mon
     def explode(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(archive_module, "atomic_write_bytes", explode)
+    monkeypatch.setattr(archive_module, "figure_bytes", explode)
     with pytest.raises(OSError):
         write_figure(tmp_path, "keep", arrays={"y": np.zeros(3)}, sections={}, when=date(2026, 8, 5))
 
     assert good.read_bytes() == before
+    assert not (good.parent / "keep-2.npz").exists()
 
 
 def test_an_array_in_device_state_is_refused_with_the_reason() -> None:

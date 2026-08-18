@@ -20,6 +20,7 @@ should.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,10 @@ WIDTH = 96
 def readable_json(tree: Any, *, indent: int = 2) -> str:
     """One JSON document, laid out for a reader.  Ends with a newline."""
 
-    return _render(tree, int(indent), 0) + "\n"
+    if isinstance(indent, bool) or not isinstance(indent, int) or indent < 0:
+        raise TypeError("indent must be a non-negative integer")
+    _validate(tree, "$")
+    return _render(tree, indent, 0) + "\n"
 
 
 def readable_json_bytes(tree: Any, *, indent: int = 2) -> bytes:
@@ -54,29 +58,47 @@ def write_readable_json(path: str | Path, tree: Any, *, indent: int = 2) -> Path
     experiment is resumed from.
     """
 
-    target = Path(path)
-    atomic_write_bytes(target, readable_json_bytes(tree, indent=indent))
-    return target
+    return atomic_write_bytes(path, readable_json_bytes(tree, indent=indent))
 
 
 def _scalar(value: Any) -> bool:
-    return value is None or isinstance(value, (bool, int, float, str))
+    return value is None or type(value) in (bool, int, float, str)
+
+
+def _validate(value: Any, path: str) -> None:
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} JSON object keys must be str")
+            _validate(item, f"{path}.{key}")
+        return
+    if type(value) is list:
+        for index, item in enumerate(value):
+            _validate(item, f"{path}[{index}]")
+        return
+    if value is None or type(value) in (bool, int, str):
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must be finite")
+        return
+    raise TypeError(f"{path} is not a plain JSON value")
 
 
 def _render(value: Any, indent: int, depth: int) -> str:
     pad = " " * (indent * depth)
     inner = " " * (indent * (depth + 1))
-    if isinstance(value, dict):
+    if type(value) is dict:
         if not value:
             return "{}"
         items = [
-            f"{inner}{json.dumps(str(key), ensure_ascii=False)}: "
+            f"{inner}{json.dumps(key, ensure_ascii=False)}: "
             f"{_render(item, indent, depth + 1)}"
             for key, item in value.items()
         ]
         return "{\n" + ",\n".join(items) + "\n" + pad + "}"
-    if isinstance(value, (list, tuple)):
-        items = list(value)
+    if type(value) is list:
+        items = value
         if not items:
             return "[]"
         if all(_scalar(item) for item in items):

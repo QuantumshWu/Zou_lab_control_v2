@@ -40,7 +40,7 @@ from pathlib import Path
 
 import numpy as np
 from zlc_data import SCAN_POINT, SITE, AxisId, PointColumn
-from zlc_durable import unique_path, write_readable_json
+from zlc_durable import readable_json_bytes, unique_path
 from zlc_pulse import TIME_UNIT_TO_NS, PulseSequence
 from zlc_runtime import (
     DatasetCoverage,
@@ -435,18 +435,22 @@ class TemperatureTask:
                 record,
             ),
         }
-        artifact_path = unique_path(self._artifact_directory, "temperature", ".json")
         context.report_progress("Saving survival")
-        write_readable_json(
-            artifact_path,
-            {
-                "format": TEMPERATURE_ARTIFACT_CONTRACT,
-                "t_off": {
-                    "unit": self._port.unit,
-                    "values": [float(value) for value in self._t_off],
-                },
-                "run_record": record,
+        artifact = {
+            "format": TEMPERATURE_ARTIFACT_CONTRACT,
+            "t_off": {
+                "unit": self._port.unit,
+                "values": [float(value) for value in self._t_off],
             },
+            "run_record": record,
+        }
+        artifact_path = unique_path(
+            self._artifact_directory,
+            "temperature",
+            ".json",
+            writer=lambda temporary: temporary.write_bytes(
+                readable_json_bytes(artifact)
+            ),
         )
         context.publish_final(outputs)
         return {"artifact_path": artifact_path}

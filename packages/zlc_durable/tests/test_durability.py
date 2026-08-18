@@ -98,8 +98,28 @@ def test_readable_json_has_one_unicode_text_bytes_and_file_representation(
     assert b"\\u6210" not in payload
     assert '"channels": ["cooling", "trap", "emCCD"]' in expected
     assert json.loads(payload) == tree
-    assert write_readable_json(target, tree) == target
+    assert write_readable_json(target, tree) == target.resolve()
     assert target.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("tree", "message"),
+    [
+        ({1: "integer", "1": "text"}, "JSON object keys must be str"),
+        ({"nested": (1, 2)}, "not a plain JSON value"),
+        ({"nested": float("nan")}, "must be finite"),
+        ({"nested": float("inf")}, "must be finite"),
+    ],
+)
+def test_readable_json_rejects_coercion_and_nonfinite_values(tree, message) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        readable_json(tree)
+
+
+def test_readable_json_rejects_coerced_indent_values() -> None:
+    for value in (True, 2.0, "2", -1):
+        with pytest.raises(TypeError, match="indent"):
+            readable_json({}, indent=value)
 
 
 def test_atomic_write_file_cleans_temporary_and_preserves_target_on_failure(
@@ -117,6 +137,22 @@ def test_atomic_write_file_cleans_temporary_and_preserves_target_on_failure(
 
     assert target.read_bytes() == b"old"
     assert not tuple(tmp_path.glob(f".{target.name}.*.tmp"))
+
+
+def test_post_replace_flush_failure_reports_visible_new_content(tmp_path, monkeypatch) -> None:
+    import zlc_durable.durability as durability
+
+    target = tmp_path / "record.json"
+    target.write_bytes(b"old")
+
+    def fail_flush(_directory):
+        raise durability.DirectoryDurabilityError("flush failed")
+
+    monkeypatch.setattr(durability, "flush_directory", fail_flush)
+    with pytest.raises(durability.DirectoryDurabilityError, match="flush failed"):
+        atomic_write_text(target, "new")
+
+    assert target.read_bytes() == b"new"
 
 
 def test_durable_mkdir_flushes_one_child_before_its_existing_parent(

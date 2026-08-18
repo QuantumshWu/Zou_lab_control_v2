@@ -35,17 +35,22 @@ class PanelFigureFiles:
 
 
 def _plain(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or type(value) in (str, bool, int, float):
         return value
     if isinstance(value, (np.integer, np.floating, np.bool_)):
         return value.item()
     if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("panel archive keys must be strings")
+            result[key] = _plain(item)
+        return result
     if isinstance(value, (tuple, list)):
         return [_plain(item) for item in value]
     if isinstance(value, np.ndarray):
         return [_plain(item) for item in value.tolist()]
-    return str(value)
+    raise TypeError(f"panel archive contains non-plain {type(value).__name__}")
 
 
 def capture_run_chain(

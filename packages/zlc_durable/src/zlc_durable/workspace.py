@@ -17,8 +17,9 @@ from datetime import date as _date
 import os
 from pathlib import Path
 import re
+from typing import Callable, Iterator
 
-from .durability import durable_makedirs
+from .durability import _atomic_write_unique_path, durable_makedirs, flush_directory
 from .paths import resolve_under
 
 
@@ -32,7 +33,12 @@ __all__ = [
 
 DAY_FOLDER_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}$")
 
-_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_UNSAFE = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*\s]+')
+_SUFFIX = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_WINDOWS_RESERVED = re.compile(
+    r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?\Z",
+    re.IGNORECASE,
+)
 
 
 def day_folder_name(when: _date) -> str:
@@ -51,35 +57,68 @@ def day_folder(save_root: str | os.PathLike[str], when: _date) -> Path:
     data into a new tree.
     """
 
-    root = Path(save_root)
+    root = Path(save_root).expanduser().resolve()
     if not root.is_dir():
         raise NotADirectoryError(f"save root does not exist: {root}")
     return durable_makedirs(resolve_under(root, day_folder_name(when)))
 
 
-def unique_path(folder: str | os.PathLike[str], stem: str, suffix: str) -> Path:
-    """A path in ``folder`` that nothing occupies yet.
+def unique_path(
+    folder: str | os.PathLike[str],
+    stem: str,
+    suffix: str,
+    *,
+    writer: Callable[[Path], object] | None = None,
+) -> Path:
+    """Create one uniquely named file or directory and return its final path.
 
-    Returns ``<stem><suffix>`` when free, otherwise ``<stem>-2<suffix>``,
-    ``-3`` and so on.  Saving twice in one day must never overwrite the morning's
-    data, and asking the caller to invent unique names invites exactly that.
+    A file writer receives a same-directory temporary path bearing the requested
+    suffix.  Only after the writer returns and that file is flushed is its full
+    content published, without replacement, at ``<stem><suffix>`` or the first
+    free numbered variant.  Concurrent processes therefore cannot select or
+    overwrite the same artifact.
 
-    An EMPTY suffix asks for a directory, and creates it: a run that leaves
-    several files leaves one folder holding them, and the name it takes is
-    taken against files and folders alike so the two can never collide.  One
-    rule for both, because "a name nothing here has" is one question.
+    An empty suffix creates a directory by the same numbered-name rule.  It has
+    no writer because the successful ``mkdir`` is itself the atomic allocation.
     """
 
-    directory = Path(folder)
+    directory = Path(folder).expanduser().resolve()
     if not directory.is_dir():
         raise NotADirectoryError(f"not a directory: {directory}")
-    safe = _UNSAFE.sub("-", str(stem)).strip("-") or "untitled"
-    if suffix and not suffix.startswith("."):
-        raise ValueError("suffix must start with a dot")
+    if not isinstance(stem, str):
+        raise TypeError("stem must be str")
+    if not isinstance(suffix, str):
+        raise TypeError("suffix must be str")
+    safe = _UNSAFE.sub("-", stem).strip(" .-") or "untitled"
+    if _WINDOWS_RESERVED.fullmatch(safe):
+        safe = f"_{safe}"
 
-    candidate = resolve_under(directory, f"{safe}{suffix}")
-    ordinal = 2
-    while candidate.exists():
-        candidate = resolve_under(directory, f"{safe}-{ordinal}{suffix}")
-        ordinal += 1
-    return durable_makedirs(candidate) if not suffix else candidate
+    def candidates() -> Iterator[Path]:
+        ordinal = 1
+        while True:
+            numbered = safe if ordinal == 1 else f"{safe}-{ordinal}"
+            yield resolve_under(directory, f"{numbered}{suffix}")
+            ordinal += 1
+
+    if not suffix:
+        if writer is not None:
+            raise TypeError("a directory allocation does not accept a writer")
+        for candidate in candidates():
+            try:
+                candidate.mkdir()
+            except FileExistsError:
+                continue
+            flush_directory(candidate)
+            flush_directory(directory)
+            return candidate
+
+    if _SUFFIX.fullmatch(suffix) is None:
+        raise ValueError("suffix must be one dotted file extension, not a path")
+    if writer is None:
+        raise TypeError("a file allocation requires writer")
+    return _atomic_write_unique_path(
+        candidates(),
+        writer,
+        temporary_prefix=f".{safe}.",
+        temporary_suffix=suffix,
+    )

@@ -394,14 +394,7 @@ def test_a_dataset_with_no_panel_record_keeps_the_archive_s_own_name(
 
 
 def test_saving_an_image_works_however_the_archive_was_spelled(presenter, saved) -> None:
-    """Where an archive IS is a fact; how it was written down is not.
-
-    The path was kept exactly as handed over, so opening one by a relative
-    name -- which is what a shell, a launcher and the console's own Open all
-    do -- left every path-derived action holding a relative root.  unique_path
-    rightly refuses one, and the refusal left a Qt slot: Save image closed the
-    window instead of writing a file, saying nothing on the way out.
-    """
+    """A relative Open spelling still establishes one absolute archive home."""
 
     path, _snapshot = saved
     here = os.getcwd()

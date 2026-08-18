@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 
@@ -10,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "zlc_atom"
 PARALLEL_ROOTS = ("zlc_runtime", "zlc_pulse")
 VIEW_ROOTS = ("PyQt5", "matplotlib", "zlc_plot", "zlc_ui")
+COMPOSITION_ROOT = "zlc_workbench"
+
+
 def _python_files(*packages: str) -> tuple[Path, ...]:
     paths = tuple(path for package in packages for path in (SRC / package).rglob("*.py"))
     assert paths, f"source scan found no Python files under {packages!r}"
@@ -65,6 +69,40 @@ def test_foundation_stays_headless_while_concrete_plugins_may_own_views() -> Non
         if imported.split(".", 1)[0] in VIEW_ROOTS
     }
     assert (Path("nodes/calibration/task.py"), "zlc_plot") in plugin_view_imports
+
+
+def test_calibration_does_not_depend_on_the_workbench_composition_root() -> None:
+    imports = tuple(
+        (path.relative_to(SRC), imported)
+        for path in _python_files("nodes/calibration")
+        for imported in _absolute_imports(path)
+        if imported.split(".", 1)[0] == COMPOSITION_ROOT
+    )
+    assert imports == ()
+
+    script = r'''
+import sys
+import zou_lab_control_v2
+import zlc_atom
+print(zou_lab_control_v2.ROOT)
+print(zlc_atom.__file__)
+class BlockWorkbench:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] == "zlc_workbench":
+            raise ModuleNotFoundError("blocked composition root")
+        return None
+sys.meta_path.insert(0, BlockWorkbench())
+import zlc_atom.nodes.calibration
+assert "zlc_workbench" not in sys.modules
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT.parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_b_half_parallel_import_policy_is_explicit() -> None:

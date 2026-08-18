@@ -33,6 +33,7 @@ _STDLIB_ALLOWED = {
     "ctypes",
     "datetime",
     "json",
+    "math",
     "os",
     "pathlib",
     "re",

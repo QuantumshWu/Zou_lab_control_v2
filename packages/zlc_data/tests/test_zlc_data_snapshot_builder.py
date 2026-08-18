@@ -170,6 +170,25 @@ def test_direct_constructor_rejects_wrong_dense_validity_shape():
         )
 
 
+@pytest.mark.parametrize(
+    "validity",
+    (
+        np.ones((2, 2, 3), dtype=np.uint8),
+        np.ones((2, 2, 3), dtype=np.float32),
+    ),
+)
+def test_direct_constructor_rejects_numeric_truthiness_validity(validity):
+    schema = _schema(component_validity=True)
+
+    with pytest.raises(TypeError, match="validity mask dtype must be bool"):
+        owned_snapshot_from_arrays(
+            schema,
+            np.zeros(schema.physical_shape, dtype="<f4"),
+            0,
+            validity=validity,
+        )
+
+
 def test_snapshot_validity_expander_rejects_other_objects():
     with pytest.raises(TypeError, match="OwnedSnapshot"):
         expand_snapshot_validity(object())  # type: ignore[arg-type]

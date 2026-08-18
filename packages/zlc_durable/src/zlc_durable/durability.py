@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterable
 
 
 class DirectoryDurabilityError(RuntimeError):
@@ -125,6 +125,51 @@ def atomic_write_file(
             pass
         raise
     return destination
+
+
+def _atomic_write_unique_path(
+    candidates: Iterable[Path],
+    writer: Callable[[Path], object],
+    *,
+    temporary_prefix: str,
+    temporary_suffix: str,
+) -> Path:
+    """Write once, then atomically publish at the first unoccupied candidate."""
+
+    if not callable(writer):
+        raise TypeError("writer must be callable")
+    choices = iter(candidates)
+    try:
+        first = next(choices)
+    except StopIteration as exc:
+        raise ValueError("candidates must not be empty") from exc
+    parent = first.parent
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=temporary_prefix,
+        suffix=temporary_suffix,
+        dir=parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        writer(temporary)
+        with temporary.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        destination = first
+        while True:
+            try:
+                os.link(temporary, destination)
+            except FileExistsError:
+                destination = next(choices)
+                continue
+            temporary.unlink()
+            flush_directory(parent)
+            return destination
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def atomic_write_bytes(

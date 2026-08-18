@@ -7,7 +7,13 @@ from dataclasses import replace
 
 import numpy as np
 
-from .axis import SCAN_POINT, AxisId, AxisSpec, point_ordinal_axis
+from .axis import (
+    SCAN_POINT,
+    AxisId,
+    AxisSpec,
+    canonical_coordinate_scalar,
+    point_ordinal_axis,
+)
 from .schema import DatasetSchema, GridTopology, PointColumn, PointTable, ValueSchema
 from .selection import (
     IndexSelection,
@@ -117,6 +123,7 @@ def axis_catalog(
             column.values,
             column.unit,
             column.coordinate_frame,
+            coordinate_labels=column.coordinate_labels,
         )
         catalog.extend(
             (
@@ -214,6 +221,11 @@ def selection_indices(
 
 
 def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
+    labels = (
+        None
+        if axis.coordinate_labels is None
+        else tuple(axis.coordinate_labels[index] for index in indices)
+    )
     if isinstance(indices, range) and axis.coordinates is None:
         # An implicit axis cropped to a contiguous run is still implicit: it
         # starts later.  Writing the coordinates out here undid, one layer
@@ -223,6 +235,7 @@ def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
             axis,
             size=len(indices),
             index_origin=axis.index_origin + indices.start,
+            coordinate_labels=labels,
         )
     coordinates = tuple(axis.coordinate_at(index) for index in indices)
     return AxisSpec(
@@ -233,6 +246,7 @@ def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
         coordinates,
         axis.unit,
         axis.coordinate_frame,
+        coordinate_labels=labels,
     )
 
 
@@ -251,6 +265,9 @@ def _subset_point_table(
                 tuple(column.values[index] for index in indices),
                 column.unit,
                 column.coordinate_frame,
+                None
+                if column.coordinate_labels is None
+                else tuple(column.coordinate_labels[index] for index in indices),
             )
             for column in point_table.columns
         ),
@@ -313,7 +330,7 @@ def restricted_values(
 
 def value_selection(
     schema: DatasetSchema,
-    terms: Mapping[str, object],
+    terms: Mapping[str | AxisId, object],
 ) -> Selection:
     """Keep one named coordinate on each named axis.
 
@@ -324,17 +341,38 @@ def value_selection(
     a range over floats would only be a longer way to say so.
     """
 
-    catalog = {label: axis for label, _id, axis, _kind in axis_catalog(schema)}
+    catalog = list(axis_catalog(schema))
     ordinal = point_ordinal_axis(schema.point_table.row_count)
-    catalog.setdefault(ordinal.axis_id.value, ordinal)
-    catalog.setdefault(ordinal.name, ordinal)
+    catalog.extend(
+        (
+            (ordinal.axis_id.value, ordinal.axis_id, ordinal, "point"),
+            (ordinal.name, ordinal.axis_id, ordinal, "point"),
+        )
+    )
     resolved: list[object] = []
     for label, value in terms.items():
-        axis = catalog.get(str(label))
-        if axis is None:
+        if not isinstance(label, (str, AxisId)):
+            raise TypeError("selection axis reference must be text or AxisId")
+        matches = (
+            [entry for entry in catalog if entry[1] == label]
+            if isinstance(label, AxisId)
+            else [entry for entry in catalog if entry[0] == label]
+        )
+        axis_ids = {entry[1] for entry in matches}
+        if not matches:
             raise ValueError(f"selection axis {label!r} is absent from source schema")
+        if len(axis_ids) != 1:
+            raise ValueError(
+                f"selection axis {label!r} is not uniquely present in the source schema"
+            )
+        axis = matches[0][2]
+        coordinate = canonical_coordinate_scalar(value, f"axis {axis.axis_id} coordinate")
         if axis.coordinates is None:
-            index = int(value) - int(axis.index_origin)
+            if not isinstance(coordinate, int):
+                raise TypeError(
+                    f"implicit axis {axis.axis_id} requires an integer coordinate"
+                )
+            index = coordinate - axis.index_origin
             if not 0 <= index < axis.size:
                 raise ValueError(
                     f"axis {label!r} has no index {value!r}: it runs "
@@ -345,8 +383,8 @@ def value_selection(
             resolved.append(
                 Selection.coordinate_range(
                     axis.axis_id,
-                    float(value),
-                    float(value),
+                    coordinate,
+                    coordinate,
                     coordinate_frame=axis.coordinate_frame,
                 ).terms[0]
             )

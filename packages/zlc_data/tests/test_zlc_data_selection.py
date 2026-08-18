@@ -1,4 +1,12 @@
+from __future__ import annotations
+
+import numpy as np
 import pytest
+
+from zlc_data.axis import AxisId, AxisSpec, REPEAT, SITE, SPATIAL_X
+from zlc_data.schema import DatasetSchema, PointColumn, PointTable, ValueSchema
+from zlc_data.snapshot_projection import axis_catalog, selection_indices, value_selection
+from zlc_data.validity import ValidityContract
 
 
 
@@ -51,3 +59,100 @@ def test_a_coordinate_selection_off_an_implicit_axis_is_refused() -> None:
         resolve_selection_indices(
             axis, CoordinateRangeSelection(AxisId("cam.x"), 10.0, 20.0, None)
         )
+
+
+def test_value_selection_resolves_axis_id_and_text_coordinate() -> None:
+    site_id = AxisId("measurement.site")
+    schema = DatasetSchema(
+        AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,)),
+        PointTable(
+            3,
+            (
+                PointColumn(
+                    site_id,
+                    "site",
+                    SITE,
+                    PointColumn.TEXT,
+                    ("dark", "bright", "dark"),
+                ),
+            ),
+        ),
+        None,
+        ValueSchema.scalar(np.dtype("<f4"), "count"),
+    )
+
+    selection = value_selection(schema, {site_id: "dark"})
+    _repeat, points, _data = selection_indices(schema, selection)
+
+    assert points == (0, 2)
+
+
+def test_value_selection_rejects_non_unique_human_axis_name() -> None:
+    schema = DatasetSchema(
+        AxisSpec(AxisId("measurement.repeat"), "shared", REPEAT, 2, (0, 1)),
+        PointTable(1),
+        None,
+        ValueSchema(
+            (
+                AxisSpec(
+                    AxisId("camera.x"),
+                    "shared",
+                    SPATIAL_X,
+                    2,
+                    (0, 1),
+                ),
+            ),
+            ValidityContract.value(),
+            np.dtype("<f4"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not uniquely present"):
+        value_selection(schema, {"shared": 0})
+
+
+def test_numeric_coordinate_range_skips_missing_coordinates() -> None:
+    from zlc_data.selection import CoordinateRangeSelection, resolve_selection_indices
+
+    axis = AxisSpec(
+        AxisId("scan.frequency"),
+        "frequency",
+        SPATIAL_X,
+        3,
+        (0.0, None, 2.0),
+    )
+
+    indices, dropped = resolve_selection_indices(
+        axis,
+        CoordinateRangeSelection(axis.axis_id, 0.0, 2.0, None),
+    )
+
+    assert indices == (0, 2)
+    assert dropped is False
+
+
+def test_axis_catalog_preserves_point_coordinate_labels() -> None:
+    site_id = AxisId("measurement.site")
+    schema = DatasetSchema(
+        AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,)),
+        PointTable(
+            2,
+            (
+                PointColumn(
+                    site_id,
+                    "site",
+                    SITE,
+                    PointColumn.TEXT,
+                    ("site-a", "site-b"),
+                    coordinate_labels=("A", "B"),
+                ),
+            ),
+        ),
+        None,
+        ValueSchema.scalar(np.dtype("<f4"), "count"),
+    )
+
+    axis = next(item[2] for item in axis_catalog(schema) if item[1] == site_id)
+
+    assert axis.coordinates == ("site-a", "site-b")
+    assert axis.coordinate_labels == ("A", "B")

@@ -272,7 +272,9 @@ def compact_dataset_validity(
 ) -> Valid | Invalid | CellValidity | DatasetComponentValidity:
     """Compact one full physical validity mask under its Dataset contract."""
 
-    array = np.asarray(mask, dtype=np.bool_)
+    array = np.asarray(mask)
+    if array.dtype != np.dtype(np.bool_):
+        raise TypeError(f"validity mask dtype must be bool, got {array.dtype}")
     if array.shape != schema.physical_shape:
         raise ValueError("dataset validity mask shape disagrees with schema")
     if bool(np.all(array)):

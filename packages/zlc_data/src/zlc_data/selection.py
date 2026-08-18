@@ -6,21 +6,19 @@ from dataclasses import dataclass
 from enum import Enum
 from math import ceil, floor
 from numbers import Real
-from typing import Any
 
 import numpy as np
 
 from ._diagnostic import exact_integer_text
-from ._tree import encode as _encode
 from .validation import (
     integer,
-    exact_mapping as _exact_map,
     nonnegative_integer,
 )
 from .axis import (
     AxisId,
     AxisSpec,
     CoordinateFrameId,
+    CoordinateScalar,
     canonical_coordinate_scalar,
 )
 
@@ -80,11 +78,11 @@ class IndexRangeSelection:
 
 @dataclass(frozen=True)
 class CoordinateRangeSelection:
-    """Retain coordinates in the closed interval ``[lower, upper]``."""
+    """Retain a numeric closed interval or one exact text/null coordinate."""
 
     axis_id: AxisId
-    lower: int | float
-    upper: int | float
+    lower: CoordinateScalar
+    upper: CoordinateScalar
     coordinate_frame: CoordinateFrameId | None
 
     def __post_init__(self) -> None:
@@ -92,15 +90,20 @@ class CoordinateRangeSelection:
             raise TypeError("axis_id must be AxisId")
         for name, value in (("lower", self.lower), ("upper", self.upper)):
             normalized = canonical_coordinate_scalar(value, f"coordinate {name}")
-            if not isinstance(normalized, (int, float)):
-                raise TypeError(f"coordinate {name} must be numeric")
             object.__setattr__(
                 self,
                 name,
                 normalized,
             )
-        if self.lower > self.upper:
+        numeric = isinstance(self.lower, (int, float)) and isinstance(
+            self.upper, (int, float)
+        )
+        if numeric and self.lower > self.upper:
             raise ValueError("coordinate range lower bound cannot exceed upper bound")
+        if not numeric and self.lower != self.upper:
+            raise ValueError(
+                "text or null coordinate selection must name one exact value"
+            )
         if self.coordinate_frame is not None and not isinstance(
             self.coordinate_frame, CoordinateFrameId
         ):
@@ -108,7 +111,6 @@ class CoordinateRangeSelection:
 
 
 SelectionTerm = IndexSelection | IndexRangeSelection | CoordinateRangeSelection
-SELECTION_SCHEMA = "zlc_data.Selection"
 
 
 @dataclass(frozen=True)
@@ -153,8 +155,8 @@ class Selection:
     def coordinate_range(
         cls,
         axis_id: AxisId,
-        lower: int | float,
-        upper: int | float,
+        lower: CoordinateScalar,
+        upper: CoordinateScalar,
         *,
         coordinate_frame: CoordinateFrameId | None,
     ) -> "Selection":
@@ -167,10 +169,10 @@ class Selection:
         cls,
         x_axis_id: AxisId,
         y_axis_id: AxisId,
-        x_lower: int | float,
-        x_upper: int | float,
-        y_lower: int | float,
-        y_upper: int | float,
+        x_lower: CoordinateScalar,
+        x_upper: CoordinateScalar,
+        y_lower: CoordinateScalar,
+        y_upper: CoordinateScalar,
         *,
         coordinate_frame: CoordinateFrameId | None,
     ) -> "Selection":
@@ -195,6 +197,8 @@ def take_indices(
 ) -> np.ndarray:
     """Index one axis while retaining a view for a contiguous selection."""
 
+    if isinstance(indices, range) and indices.step != 1:
+        raise ValueError("selection range step must be 1")
     if drop:
         return np.take(array, indices[0], axis=axis)
     if isinstance(indices, range):
@@ -240,119 +244,42 @@ def resolve_selection_indices(
         # meant a box drawn on a camera frame only worked because the producer
         # had written out the very tuple this axis exists to avoid.  They are
         # increasing, so the answer is arithmetic rather than a scan.
+        if not isinstance(term.lower, (int, float)) or not isinstance(
+            term.upper, (int, float)
+        ):
+            raise TypeError(
+                f"implicit axis {axis.axis_id} accepts only numeric coordinates"
+            )
         lower = max(0, ceil(term.lower - axis.index_origin))
         upper = min(axis.size - 1, floor(term.upper - axis.index_origin))
         if upper < lower:
             raise ValueError(f"coordinate selection is empty on axis {axis.axis_id}")
         return range(lower, upper + 1), False
-    if any(
-        value is None or isinstance(value, (bool, str)) or not isinstance(value, Real)
-        for value in axis.coordinates
+    if isinstance(term.lower, (int, float)) and isinstance(
+        term.upper, (int, float)
     ):
-        raise TypeError(f"axis {axis.axis_id} coordinates are not entirely numeric")
-    indices = tuple(
-        index
-        for index, value in enumerate(axis.coordinates)
-        if term.lower <= value <= term.upper
-    )
+        if any(
+            value is not None
+            and (isinstance(value, (bool, str)) or not isinstance(value, Real))
+            for value in axis.coordinates
+        ):
+            raise TypeError(f"axis {axis.axis_id} coordinates are not entirely numeric")
+        indices = tuple(
+            index
+            for index, value in enumerate(axis.coordinates)
+            if value is not None and term.lower <= value <= term.upper
+        )
+    else:
+        indices = tuple(
+            index
+            for index, value in enumerate(axis.coordinates)
+            if value == term.lower
+        )
     if not indices:
         raise ValueError(f"coordinate selection is empty on axis {axis.axis_id}")
     if indices[-1] - indices[0] + 1 == len(indices):
         return range(indices[0], indices[-1] + 1), False
     return indices, False
-
-
-def selection_to_tree(selection: Selection) -> dict[str, Any]:
-    if not isinstance(selection, Selection):
-        raise TypeError("selection must be Selection")
-    terms: list[dict[str, Any]] = []
-    for term in selection.terms:
-        if isinstance(term, IndexSelection):
-            terms.append(
-                {"kind": "INDEX", "axis_id": term.axis_id.value, "index": term.index}
-            )
-        elif isinstance(term, IndexRangeSelection):
-            terms.append(
-                {
-                    "kind": "INDEX_RANGE",
-                    "axis_id": term.axis_id.value,
-                    "start": term.start,
-                    "stop": term.stop,
-                }
-            )
-        elif isinstance(term, CoordinateRangeSelection):
-            terms.append(
-                {
-                    "kind": "COORDINATE_RANGE",
-                    "axis_id": term.axis_id.value,
-                    "lower": term.lower,
-                    "upper": term.upper,
-                    "coordinate_frame": None
-                    if term.coordinate_frame is None
-                    else term.coordinate_frame.value,
-                }
-            )
-        else:  # pragma: no cover - Selection validates the closed union
-            raise TypeError(f"unsupported selection term {type(term).__name__}")
-    return {"schema": SELECTION_SCHEMA, "terms": terms}
-
-
-def selection_from_tree(tree: Any) -> Selection:
-    data = _exact_map(tree, {"schema", "terms"}, SELECTION_SCHEMA)
-    raw_terms = data["terms"]
-    if not isinstance(raw_terms, list):
-        raise ValueError("Selection terms must be a list")
-    terms: list[SelectionTerm] = []
-    for raw in raw_terms:
-        if not isinstance(raw, dict) or not isinstance(raw.get("kind"), str):
-            raise ValueError("selection term must be a tagged map")
-        kind = raw["kind"]
-        if kind == "INDEX":
-            item = _exact_map(
-                raw,
-                {"kind", "axis_id", "index"},
-                "INDEX",
-                discriminator="kind",
-            )
-            terms.append(
-                IndexSelection(AxisId(item["axis_id"]), item["index"])
-            )
-        elif kind == "INDEX_RANGE":
-            item = _exact_map(
-                raw,
-                {"kind", "axis_id", "start", "stop"},
-                "INDEX_RANGE",
-                discriminator="kind",
-            )
-            terms.append(
-                IndexRangeSelection(
-                    AxisId(item["axis_id"]),
-                    item["start"],
-                    item["stop"],
-                )
-            )
-        elif kind == "COORDINATE_RANGE":
-            item = _exact_map(
-                raw,
-                {"kind", "axis_id", "lower", "upper", "coordinate_frame"},
-                "COORDINATE_RANGE",
-                discriminator="kind",
-            )
-            frame = item["coordinate_frame"]
-            terms.append(
-                CoordinateRangeSelection(
-                    AxisId(item["axis_id"]),
-                    item["lower"],
-                    item["upper"],
-                    None if frame is None else CoordinateFrameId(frame),
-                )
-            )
-        else:
-            raise ValueError(f"invalid selection term for kind {kind!r}")
-    selection = Selection(tuple(terms))
-    if _encode(selection_to_tree(selection)) != _encode(tree):
-        raise ValueError("Selection tree is typed but non-canonical")
-    return selection
 
 
 __all__ = [
@@ -363,7 +290,5 @@ __all__ = [
     "Selection",
     "SelectionTerm",
     "resolve_selection_indices",
-    "selection_from_tree",
-    "selection_to_tree",
     "take_indices",
 ]

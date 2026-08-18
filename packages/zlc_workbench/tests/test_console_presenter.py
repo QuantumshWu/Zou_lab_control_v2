@@ -2115,7 +2115,7 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
 
 
 def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
-    assert presenter.apply_layout({"format": "zlc.figure/v1"}) is False
+    assert presenter.apply_layout({"format": "zlc.figure"}) is False
     assert any("not a saved board" in text for _severity, text in presenter.view.status)
 
     old_layout = presenter.layout()

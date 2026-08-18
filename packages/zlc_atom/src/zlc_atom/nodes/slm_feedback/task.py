@@ -660,23 +660,24 @@ class SlmFeedbackTask:
                 _check_cancelled(context)
                 applied = self._apply_exact(current_phase)
                 candidate_number = iteration + 1
+                applied_metadata = self._candidate_metadata(
+                    candidate=candidate_number,
+                    status="applied",
+                    history=history,
+                )
                 artifact_path = unique_path(
                     self.artifact_directory,
                     f"slm_feedback_candidate_{candidate_number:04d}",
                     ".npz",
+                    writer=lambda temporary: save_phase(
+                        temporary,
+                        applied,
+                        applied_metadata,
+                    ),
                 )
                 # The phase file exists before the first camera trigger.  A
                 # Stop during that measurement therefore never leaves an
                 # unrepeatable phase on the device with no durable source.
-                save_phase(
-                    artifact_path,
-                    applied,
-                    self._candidate_metadata(
-                        candidate=candidate_number,
-                        status="applied",
-                        history=history,
-                    ),
-                )
                 durable_candidate = {
                     "candidate": candidate_number,
                     "phase": np.array(applied, copy=True),

@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import date
+from threading import Barrier
 
 import pytest
 
 from zlc_durable import day_folder, day_folder_name, unique_path
 from zlc_durable.workspace import DAY_FOLDER_PATTERN
+
+
+def _commit_process_payload(arguments: tuple[str, int]) -> tuple[str, bytes]:
+    folder, index = arguments
+    payload = f"process-{index}".encode()
+    path = unique_path(
+        folder,
+        "shot",
+        ".npz",
+        writer=lambda temporary: temporary.write_bytes(payload),
+    )
+    return path.name, path.read_bytes()
 
 
 def test_day_folder_name_is_zero_padded_and_matches_the_declared_pattern() -> None:
@@ -35,28 +49,111 @@ def test_day_folder_refuses_a_save_root_that_does_not_exist(tmp_path) -> None:
 def test_unique_path_never_returns_an_occupied_name(tmp_path) -> None:
     """Saving twice in one day must not overwrite the morning's data."""
 
-    first = unique_path(tmp_path, "scan", ".npz")
+    first = unique_path(
+        tmp_path,
+        "scan",
+        ".npz",
+        writer=lambda temporary: temporary.write_bytes(b"first"),
+    )
     assert first.name == "scan.npz"
-    first.write_bytes(b"")
 
-    second = unique_path(tmp_path, "scan", ".npz")
+    second = unique_path(
+        tmp_path,
+        "scan",
+        ".npz",
+        writer=lambda temporary: temporary.write_bytes(b"second"),
+    )
     assert second.name == "scan-2.npz"
-    second.write_bytes(b"")
+    third = unique_path(
+        tmp_path,
+        "scan",
+        ".npz",
+        writer=lambda temporary: temporary.write_bytes(b"third"),
+    )
+    assert third.name == "scan-3.npz"
+    assert [path.read_bytes() for path in (first, second, third)] == [
+        b"first",
+        b"second",
+        b"third",
+    ]
 
-    assert unique_path(tmp_path, "scan", ".npz").name == "scan-3.npz"
+
+def test_unique_file_allocation_does_not_collapse_under_concurrency(tmp_path) -> None:
+    callers = 32
+    barrier = Barrier(callers)
+
+    def allocate(_: int):
+        barrier.wait()
+        return unique_path(
+            tmp_path,
+            "shot",
+            ".npz",
+            writer=lambda temporary: temporary.write_bytes(b"complete"),
+        )
+
+    with ThreadPoolExecutor(max_workers=callers) as executor:
+        paths = tuple(executor.map(allocate, range(callers)))
+
+    assert len(set(paths)) == callers
+    assert all(path.read_bytes() == b"complete" for path in paths)
+
+
+def test_unique_file_commit_is_process_safe(tmp_path) -> None:
+    callers = 16
+    with ProcessPoolExecutor(max_workers=8) as executor:
+        results = tuple(
+            executor.map(
+                _commit_process_payload,
+                ((str(tmp_path), index) for index in range(callers)),
+            )
+        )
+
+    names = [name for name, _ in results]
+    assert len(set(names)) == callers
+    assert {payload for _, payload in results} == {
+        f"process-{index}".encode() for index in range(callers)
+    }
 
 
 def test_unique_path_sanitises_a_name_that_would_escape_or_break_the_folder(tmp_path) -> None:
-    assert unique_path(tmp_path, "../../etc/passwd", ".npz").parent == tmp_path
-    assert unique_path(tmp_path, "MOT loading: 3 ms", ".npz").name == "MOT-loading-3-ms.npz"
-    assert unique_path(tmp_path, "///", ".npz").name == "untitled.npz"
+    write = lambda temporary: temporary.write_bytes(b"data")
+    escaped = unique_path(tmp_path, "../../etc/passwd", ".npz", writer=write)
+    assert escaped.parent == tmp_path
+    assert (
+        unique_path(tmp_path, "MOT loading: 3 ms", ".npz", writer=write).name
+        == "MOT-loading-3-ms.npz"
+    )
+    assert unique_path(tmp_path, "///", ".npz", writer=write).name == "untitled.npz"
+    assert unique_path(tmp_path, "神芯", ".npz", writer=write).name == "神芯.npz"
+    assert unique_path(tmp_path, "CON", ".json", writer=write).name == "_CON.json"
 
 
 def test_unique_path_requires_a_dotted_suffix_and_a_real_folder(tmp_path) -> None:
     with pytest.raises(ValueError):
-        unique_path(tmp_path, "scan", "npz")
+        unique_path(tmp_path, "scan", "npz", writer=lambda path: None)
+    with pytest.raises(ValueError):
+        unique_path(tmp_path, "scan", ".x/inside", writer=lambda path: None)
+    with pytest.raises(TypeError, match="requires writer"):
+        unique_path(tmp_path, "scan", ".npz")
     with pytest.raises(NotADirectoryError):
-        unique_path(tmp_path / "absent", "scan", ".npz")
+        unique_path(
+            tmp_path / "absent",
+            "scan",
+            ".npz",
+            writer=lambda path: None,
+        )
+
+
+def test_unique_file_writer_failure_publishes_nothing(tmp_path) -> None:
+    def fail(temporary):
+        temporary.write_bytes(b"partial")
+        raise RuntimeError("writer failed")
+
+    with pytest.raises(RuntimeError, match="writer failed"):
+        unique_path(tmp_path, "shot", ".npz", writer=fail)
+
+    assert not tuple(tmp_path.glob("shot*.npz"))
+    assert not tuple(tmp_path.glob(".shot.*.npz"))
 
 
 def test_a_run_folder_takes_a_free_name_and_is_created(tmp_path) -> None:
@@ -74,4 +171,12 @@ def test_a_run_folder_takes_a_free_name_and_is_created(tmp_path) -> None:
     # A file of the same stem takes the name too, so neither shadows the other.
     (tmp_path / "report").write_text("x", encoding="utf-8")
     assert unique_path(tmp_path, "report", "").name == "report-2"
-    assert unique_path(tmp_path, "calibration", ".json").name == "calibration.json"
+    assert (
+        unique_path(
+            tmp_path,
+            "calibration",
+            ".json",
+            writer=lambda temporary: temporary.write_text("{}", encoding="utf-8"),
+        ).name
+        == "calibration.json"
+    )

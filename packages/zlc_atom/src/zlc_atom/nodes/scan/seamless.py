@@ -214,7 +214,7 @@ class SeamlessScanMeasurement:
             **self.source.describe(),
             "pulse": self.sequence.name,
             "plan": self.plan.to_tree(),
-            "scan_shape": self.plan.shape,
+            "scan_shape": list(self.plan.shape),
             "repeats": self.repeats,
             "shots_per_point": self.shots_per_point,
             "settle_seconds": self.settle_seconds,

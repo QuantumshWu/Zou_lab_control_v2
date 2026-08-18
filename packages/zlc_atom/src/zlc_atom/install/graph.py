@@ -175,6 +175,14 @@ def create_installation(
 
         specs = installation_config_from_template(snapshot, specs).specs()
     normalized = tuple(spec if isinstance(spec, DeviceSpec) else DeviceSpec(**spec) for spec in specs)  # type: ignore[arg-type]
+    seen_keys: set[str] = set()
+    duplicate_keys: set[str] = set()
+    for spec in normalized:
+        if spec.key in seen_keys:
+            duplicate_keys.add(spec.key)
+        seen_keys.add(spec.key)
+    if duplicate_keys:
+        raise ValueError(f"duplicate device key(s): {sorted(duplicate_keys)}")
     found = snapshot.available
     by_type = {value.type_id: value for value in found}
     unknown = {spec.type_id for spec in normalized} - set(by_type)

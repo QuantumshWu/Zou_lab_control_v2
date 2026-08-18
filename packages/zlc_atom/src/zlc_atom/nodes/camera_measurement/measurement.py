@@ -198,11 +198,11 @@ def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, objec
     mode = getattr(point.acquisition_mode, "value", point.acquisition_mode)
     return {
         "acquisition_mode": str(mode),
-        "frame_shape_yx": tuple(int(value) for value in point.frame_shape_yx),
-        "sensor_shape_yx": tuple(int(value) for value in point.sensor_shape_yx),
-        "roi_origin_yx": tuple(int(value) for value in point.roi_origin_yx),
-        "roi_shape_yx": tuple(int(value) for value in point.roi_shape_yx),
-        "binning_yx": tuple(int(value) for value in point.binning_yx),
+        "frame_shape_yx": [int(value) for value in point.frame_shape_yx],
+        "sensor_shape_yx": [int(value) for value in point.sensor_shape_yx],
+        "roi_origin_yx": [int(value) for value in point.roi_origin_yx],
+        "roi_shape_yx": [int(value) for value in point.roi_shape_yx],
+        "binning_yx": [int(value) for value in point.binning_yx],
         "dtype": point.dtype.str,
         "count_unit": str(point.count_unit),
         "offset_counts": (
@@ -840,7 +840,11 @@ class CameraMeasurementNode:
             "node": self.instance_id,
             "parameters": {
                 "exposure_seconds": self.request.exposure_seconds,
-                "roi_xywh": self.request.roi_xywh,
+                "roi_xywh": (
+                    None
+                    if self.request.roi_xywh is None
+                    else list(self.request.roi_xywh)
+                ),
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
                 PHOTOELECTRONS: self.request.photoelectrons,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +15,14 @@ from zlc_data import (
     SPATIAL_Y,
     AxisId,
     AxisSpec,
-    OwnedSnapshot,
 )
-from zlc_data.figure_archive import read_archive, read_dataset
-from zlc_durable import unique_path, write_readable_json
-from zlc_workbench.panel_save import save_panel_data, save_panel_image
-from zlc_workbench.panel_state import PanelFrozenData, PanelState
+from zlc_data.figure_archive import figure_bytes, read_archive, read_dataset
+from zlc_durable import (
+    atomic_write_bytes,
+    durable_makedirs,
+    unique_path,
+    write_readable_json,
+)
 from zlc_pulse import PulseSequence, convert_time
 
 from zlc_atom.devices.camera.contract import (
@@ -66,23 +68,9 @@ FRAMES_FROM_CAMERA = "new"
 FRAMES_FROM_FOLDER = "saved"
 _FRAME_SOURCES = frozenset({FRAMES_FROM_CAMERA, FRAMES_FROM_FOLDER})
 
-#: What one saved sample is called, and what it is: the Panel Edit archive --
-#: the picture and the numbers behind it, in the one format the figure viewer
-#: opens.
+#: What one saved sample is called: one typed figure archive plus its rendered
+#: picture, in the shared format the figure viewer opens.
 SAVED_SAMPLE_STEM = "sample"
-
-#: How a saved sample is drawn: its three frames side by side, as images.
-#: Stated once, so the picture written beside the numbers and the picture the
-#: viewer draws when the file is reopened are the same picture.
-_SAMPLE_PANEL_STATE = PanelState(
-    signal=CAPTURE_PREVIEW_DECLARATION.name,
-    kind="facet_grid",
-    size="4x4",
-    interval_ms=100,
-    title="calibration sample",
-    cell_kind="image",
-)
-
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
 _REDUCERS = {"mean", "sum", "median", "max"}
@@ -275,19 +263,6 @@ REFERENCE_FRAME_INDICES = (0, 2)
 READOUT_FRAME_INDEX = 1
 
 
-def _sample_host(plot_input: object, _signal: str, _kind: str, _cell_kind: str) -> object:
-    """The panel host every card mounts through, for a panel nobody mounted.
-
-    The console's own builder: a saved sample must come out looking like the
-    panel it declares itself to be, and a second way of turning a state into
-    a host is a second way for that to be wrong.
-    """
-
-    from zlc_workbench.apps.task_console import build_panel_host
-
-    return build_panel_host(plot_input, _SAMPLE_PANEL_STATE)
-
-
 class SampleWriter:
     """Every acquired sample on disk, written as it arrives.
 
@@ -311,29 +286,24 @@ class SampleWriter:
         generation: object,
     ) -> None:
         self.folder = Path(folder)
-        self.folder.mkdir(parents=True, exist_ok=True)
+        durable_makedirs(self.folder)
         self._point = working_point
         self._run_record = dict(run_record)
         self._generation = generation
-        self._samples: dict[int, tuple[PanelState, OwnedSnapshot]] = {}
+        self._samples: dict[int, Path] = {}
 
-    def _panel(self, index: int) -> tuple[Path, PanelState, PanelFrozenData]:
+    def _paths(self, index: int) -> tuple[Path, Path]:
         name = f"{SAVED_SAMPLE_STEM}_{int(index):04d}"
-        state, snapshot = self._samples[int(index)]
-        return self.folder / f"{name}.png", state, PanelFrozenData(
-            state.signal,
-            None,
-            snapshot,
-            run_chain=(self._run_record,),
-        )
+        image_path = self.folder / f"{name}.png"
+        return image_path, image_path.with_suffix(".npz")
 
     def write(self, index: int, cycle: Sequence[CameraFrameRecord]) -> Path:
         """Write one sample's numbers, and hold it for its picture afterwards.
 
-        Through the same save Panel Edit uses, so what lands here is the file
-        the figure viewer already opens -- the dataset with its axes, the
-        panel it is configured as, and the run it came out of, which is where
-        the exposure, the ROI and the binning are recorded.
+        The shared figure encoder stores the typed dataset and its run record,
+        so the figure viewer can reopen the numbers with their exact axes and
+        the replay can recover the exposure, ROI and binning without importing
+        Workbench panel state into this science plugin.
         """
 
         snapshot = cycle_snapshot(
@@ -344,28 +314,40 @@ class SampleWriter:
             generation=self._generation,
             revision=int(index) + 1,
         )
-        self._samples[int(index)] = (
-            replace(
-                _SAMPLE_PANEL_STATE,
-                title=f"calibration {SAVED_SAMPLE_STEM}_{int(index):04d}",
+        image_path, archive_path = self._paths(index)
+        atomic_write_bytes(
+            archive_path,
+            figure_bytes(
+                image_path.name,
+                arrays={"data": snapshot},
+                sections={"run_chain": [dict(self._run_record)]},
             ),
-            snapshot,
         )
-        base, state, frozen = self._panel(int(index))
-        return save_panel_data(base, state=state, frozen=frozen)
+        self._samples[int(index)] = archive_path
+        return archive_path
 
     def render(self) -> int:
         """Draw every written sample, once the camera is no longer waiting."""
 
-        for index in sorted(self._samples):
-            base, state, frozen = self._panel(index)
-            save_panel_image(
-                base,
-                state=state,
-                frozen=frozen,
-                make_host=_sample_host,
-                configure_host=lambda _host, _state, _overlay: None,
-            )
+        from zlc_plot import AxisRef, ImagePlot, PlotLabels, facet_grid
+
+        for index, archive_path in sorted(self._samples.items()):
+            info, arrays = read_archive(archive_path)
+            snapshot = read_dataset(info, arrays, "data")
+            image_path, _archive_path = self._paths(index)
+            with facet_grid(
+                snapshot,
+                AxisRef.point("calibration.capture_preview.frame"),
+                ImagePlot(
+                    AxisRef.data("calibration.image.x"),
+                    AxisRef.data("calibration.image.y"),
+                ),
+                labels=PlotLabels(
+                    title=f"calibration {SAVED_SAMPLE_STEM}_{int(index):04d}"
+                ),
+                size="4x4",
+            ) as plot:
+                plot.save(image_path)
         return len(self._samples)
 
 
@@ -385,8 +367,17 @@ def read_saved_samples(
     directory = Path(folder).expanduser().resolve()
     if not directory.is_dir():
         raise ValueError(f"saved frames folder does not exist: {directory}")
-    paths = sorted(directory.glob(f"{SAVED_SAMPLE_STEM}_*.npz"))
-    if not paths:
+    indexed_paths: list[tuple[int, Path]] = []
+    for path in directory.glob(f"{SAVED_SAMPLE_STEM}_*.npz"):
+        index_text = path.stem.removeprefix(f"{SAVED_SAMPLE_STEM}_")
+        if not index_text.isdigit():
+            raise ValueError(f"saved sample has a non-numeric index: {path.name}")
+        index = int(index_text)
+        if path.name != f"{SAVED_SAMPLE_STEM}_{index:04d}.npz":
+            raise ValueError(f"saved sample has a non-canonical name: {path.name}")
+        indexed_paths.append((index, path))
+    indexed_paths.sort()
+    if not indexed_paths:
         raise ValueError(
             f"{directory} holds no saved calibration samples "
             f"({SAVED_SAMPLE_STEM}_*.npz)"
@@ -395,9 +386,31 @@ def read_saved_samples(
         tuple[CameraFrameRecord, CameraFrameRecord, CameraFrameRecord]
     ] = []
     run_record: dict[str, object] | None = None
-    for ordinal, path in enumerate(paths):
+    first_schema = None
+    first_block_id = None
+    first_generation = None
+    for ordinal, (saved_index, path) in enumerate(indexed_paths):
+        if saved_index != ordinal:
+            raise ValueError(
+                "saved calibration sample indices must be contiguous from zero; "
+                f"expected {ordinal:04d}, got {saved_index:04d}"
+            )
         info, arrays = read_archive(path)
         snapshot = read_dataset(info, arrays, "data")
+        if info["name"] != f"{SAVED_SAMPLE_STEM}_{ordinal:04d}.png":
+            raise ValueError(f"{path.name} metadata names another sample")
+        if snapshot.ref.revision.value != ordinal + 1:
+            raise ValueError(f"{path.name} carries the wrong dataset revision")
+        if first_schema is None:
+            first_schema = snapshot.block.schema
+            first_block_id = snapshot.ref.block_id
+            first_generation = snapshot.ref.stream_generation
+        elif (
+            snapshot.block.schema != first_schema
+            or snapshot.ref.block_id != first_block_id
+            or snapshot.ref.stream_generation != first_generation
+        ):
+            raise ValueError(f"{path.name} belongs to a different saved capture")
         values = np.asarray(snapshot.block.values)
         if values.ndim != 4 or values.shape[0] != 1 or values.shape[1] != 3:
             raise ValueError(
@@ -411,14 +424,20 @@ def read_saved_samples(
                 CameraFrameRecord(values[0, 2], ordinal * 3 + 2),
             )
         )
+        chain = info["sections"].get("run_chain")
+        if (
+            type(chain) is not list
+            or len(chain) != 1
+            or type(chain[0]) is not dict
+        ):
+            raise ValueError(
+                f"{path.name} must carry exactly one calibration run record"
+            )
+        observed_record = dict(chain[0])
         if run_record is None:
-            chain = info.get("sections", {}).get("run_chain") or []
-            if not chain:
-                raise ValueError(
-                    f"{path.name} carries no run record, so the crop and "
-                    "exposure it was taken with are unknown"
-                )
-            run_record = dict(chain[0])
+            run_record = observed_record
+        elif observed_record != run_record:
+            raise ValueError(f"{path.name} carries a different calibration run record")
     assert run_record is not None
     return tuple(cycles), run_record
 
@@ -749,20 +768,24 @@ def _camera_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
         "binning_yx": list(point.binning_yx),
         "dtype": point.dtype.str,
         "count_unit": point.count_unit,
-        "exposure_seconds": point.exposure_seconds,
+        "exposure_seconds": float(point.exposure_seconds),
         "required_external_trigger_interval_seconds": (
-            point.required_external_trigger_interval_seconds
+            None
+            if point.required_external_trigger_interval_seconds is None
+            else float(point.required_external_trigger_interval_seconds)
         ),
         "external_trigger_integration_start_offset_seconds": (
-            point.external_trigger_integration_start_offset_seconds
+            None
+            if point.external_trigger_integration_start_offset_seconds is None
+            else float(point.external_trigger_integration_start_offset_seconds)
         ),
-        "gain": point.gain,
+        "gain": float(point.gain),
         "readout_mode": point.readout_mode,
     }
 
 
 def _plain(value: object) -> object:
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or type(value) in (str, bool, int, float):
         return value
     if isinstance(value, np.generic):
         return value.item()
@@ -771,7 +794,12 @@ def _plain(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("device snapshot keys must be strings")
+            result[key] = _plain(item)
+        return result
     if isinstance(value, (tuple, list)):
         return [_plain(item) for item in value]
     raise TypeError(f"device snapshot contains non-plain {type(value).__name__}")
