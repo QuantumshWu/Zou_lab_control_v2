@@ -16,16 +16,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.calibration import (
     FrameContract,
     ReadoutModelKind,
     calibrate,
     classify_threshold,
 )
-
-from tests.fakes import camera_cycle_snapshot
-
 
 RUN = Path(__file__).parent / "fixtures" / "main_readout_oracle.npz"
 
@@ -84,28 +80,3 @@ def test_reading_the_threshold_the_wrong_way_round_makes_it_wrong() -> None:
     )
     assert not np.array_equal(flipped, honest)
     assert float((flipped == truth).mean()) < float((honest == truth).mean())
-
-
-def test_the_published_rate_is_the_occupied_fraction_and_not_its_inverse() -> None:
-    """The rate a panel plots is what the judgements say, counted."""
-
-    data = _run()
-    result = _calibrate(data)
-    frames = data["input_short_frames"][:6].reshape(2, 3, 34, 40)
-
-    occupancy = OccupancyProcessor(result.calibration).process(
-        camera_cycle_snapshot(frames),
-    )
-    occupied = np.asarray(occupancy.occupied, dtype=bool)
-    valid = np.asarray(
-        occupancy.artifacts["occupied"].expanded_validity(),
-        dtype=bool,
-    )
-    counted = np.where(valid, occupied, np.nan).astype(float)
-
-    np.testing.assert_allclose(
-        occupancy.rate, np.nanmean(counted, axis=-1), rtol=1e-12, atol=2e-12
-    )
-    np.testing.assert_array_equal(occupancy.frame_judged, frames)
-    with pytest.raises(AssertionError):
-        np.testing.assert_allclose(1.0 - occupancy.rate, np.nanmean(counted, axis=-1))

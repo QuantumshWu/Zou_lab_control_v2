@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_runtime.presentation import HarmonicClock, SurfaceBatchArbiter
-from zlc_workbench.presentation import PlotPanelPort as _PlotPanelPort
+from zlc_workbench.presentation import PlotPanelPort
 
 
 def _submit_now(work):
@@ -28,11 +28,6 @@ def _submit_now(work):
     except BaseException as error:
         completed.set_exception(error)
     return completed
-
-
-def PlotPanelPort(*args, **kwargs):
-    kwargs.setdefault("submit_projection", _submit_now)
-    return _PlotPanelPort(*args, **kwargs)
 
 
 class _Host:
@@ -48,6 +43,13 @@ class _Host:
 
         self.received.append(plot_input)
         return Future()
+
+
+def _stage_on(host):
+    def replace_host(plot_input, _value, _publication):
+        return host, host.update_data(plot_input)
+
+    return replace_host
 
 
 def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
@@ -82,11 +84,13 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
         def follower_edges(self):
             return frozenset()
 
+    host = _Host()
     port = PlotPanelPort(
         "panel-1",
         "@logic/camera/frames",
-        _Host(),
         display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=_stage_on(host),
         companion_signals=lambda: ("@logic/occupancy/occupied",),
     )
     plane = _Plane()
@@ -133,11 +137,13 @@ def test_the_projection_is_handed_the_front_it_was_prepared_from() -> None:
         seen.append(given)
         raise _Reached
 
+    host = _Host()
     port = PlotPanelPort(
         "panel-1",
         "camera/frames",
-        _Host(),
         display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=_stage_on(host),
         project_input=project,
     )
 

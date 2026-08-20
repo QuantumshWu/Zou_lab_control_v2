@@ -365,21 +365,21 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         # legislate the exposure of any later run.
         assert result.calibration.frame_contract.exposure_seconds == 0.02
         assert result.calibration.frame_contract.camera_id == "camera"
-        json.dumps(result.run_record)
+        # The runtime view is recursively immutable; the artifact codec owns
+        # the independent plain JSON projection.
+        json.dumps(result.calibration.to_dict()["report"]["run_record"])
         occupancy_node = OccupancyProcessor(
             result.calibration,
         )
         # 30 cycles, each holding the one readout frame this task judged.
         occupancy = occupancy_node.process(
-            camera_cycle_snapshot([(record,) for record in result.short]),
+            camera_cycle_snapshot([(record,) for record in result.capture.short]),
         )
-        np.testing.assert_array_equal(occupancy.rate, np.mean(occupancy.occupied, axis=-1))
         assert occupancy.counts.shape == (30, 1, 35)
-        assert occupancy.rate.shape == (30, 1)
         np.testing.assert_array_equal(occupancy.artifacts["counts"].block.values, occupancy.counts)
         assert len(result.capture.frames) == 90
-        assert sum(len(group) for group in result.reference) == 60
-        assert len(result.short) == 30
+        assert sum(len(group) for group in result.capture.reference) == 60
+        assert len(result.capture.short) == 30
     finally:
         plane.close()
         installation.close()
@@ -400,14 +400,12 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             signal_plane=FakePlane(),
             artifact_directory=tmp_path,
         ).run()
-        frames = camera_cycle_snapshot([(record,) for record in result.short])
+        frames = camera_cycle_snapshot([(record,) for record in result.capture.short])
         occupancy = OccupancyProcessor(result.calibration).process(
             frames,
         )
         assert occupancy.counts.shape == (30, 1, 35)
-        assert occupancy.rate.shape == (30, 1)
         counts_artifact = occupancy.artifacts["counts"]
-        rate_artifact = occupancy.artifacts["rate"]
         assert isinstance(counts_artifact, OwnedSnapshot)
         assert counts_artifact.block.schema.repeat_axis.role is REPEAT
         # The point axis is the parent's, verbatim -- not rebuilt, not guessed
@@ -429,9 +427,6 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             range(1, len(result.calibration.site_map.site_ids) + 1)
         )
         assert counts_artifact.block.values.shape == (30, 1, 35)
-        assert rate_artifact.block.schema.cell_schema.is_scalar
-        assert rate_artifact.block.schema.point_table.columns == (parent_column,)
-        assert rate_artifact.block.values.shape == (30, 1, 1)
     finally:
         plane.close()
         installation.close()

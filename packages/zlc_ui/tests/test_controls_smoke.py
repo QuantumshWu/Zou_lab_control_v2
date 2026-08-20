@@ -110,13 +110,11 @@ def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)
 
 
-def test_figure_info_and_owner_wake_construct() -> None:
+def test_figure_info_construct() -> None:
     _run_qt_smoke(
         """
-import time
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.concurrency import QtOwnerWake
 from zlc_ui.fluent import InfoPane
 app = ensure_qt_app(['zlc-ui-tests'])
 pane = InfoPane(
@@ -125,13 +123,5 @@ pane = InfoPane(
 )
 assert pane.info_tabs.count() == 2
 assert pane._tab_layouts['Raw'].itemAt(0).widget().findChild(QtWidgets.QPlainTextEdit).toPlainText() == '{}'
-wake = QtOwnerWake()
-called = []
-wake.bind(lambda: called.append(True))
-wake.request_owner_wake()
-deadline = time.monotonic() + 1.0
-while not called and time.monotonic() < deadline:
-    app.processEvents()
-assert called == [True]
 """
     )

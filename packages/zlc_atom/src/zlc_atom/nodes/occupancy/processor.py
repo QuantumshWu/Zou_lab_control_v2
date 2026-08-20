@@ -33,7 +33,6 @@ from zlc_atom.nodes.calibration.calibration import classify_threshold
 OCCUPANCY_OUTPUTS = (
     DatasetOutputDeclaration("counts", "occupancy.counts.v1"),
     DatasetOutputDeclaration("occupied", IMAGE_POINT_OVERLAY_CONTRACT),
-    DatasetOutputDeclaration("rate", "occupancy.rate.v1"),
     DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged.v1"),
 )
 
@@ -60,10 +59,6 @@ class OccupancyResult:
     @property
     def occupied(self) -> np.ndarray:
         return self.artifacts["occupied"].block.values
-
-    @property
-    def rate(self) -> np.ndarray:
-        return self.artifacts["rate"].block.values[..., 0]
 
     @property
     def frame_judged(self) -> np.ndarray:
@@ -266,7 +261,6 @@ class OccupancyProcessor:
             "occupied": with_cell(
                 ValueSchema((site_axis,), site_validity, np.dtype("?"), "1")
             ),
-            "rate": with_cell(ValueSchema.scalar(np.dtype("<f8"), "1")),
         }
 
     @staticmethod
@@ -317,25 +311,11 @@ class OccupancyProcessor:
         counts = counts.reshape((repeats, points, n_sites))
         occupied = occupied.reshape((repeats, points, n_sites))
         valid = valid.reshape((repeats, points, n_sites))
-        valid_count = np.sum(valid, axis=-1)
-        rate = np.divide(
-            np.sum(occupied, axis=-1, dtype=float),
-            valid_count,
-            out=np.full(valid_count.shape, np.nan, dtype="<f8"),
-            where=valid_count > 0,
-        )
         schemas = self._output_schemas(frames.block.schema)
-        rate_valid = (valid_count > 0)[..., None]
         artifacts = {
             "counts": self._snapshot(frames, schemas["counts"], counts, valid),
             "occupied": self._snapshot(
                 frames, schemas["occupied"], occupied, valid
-            ),
-            "rate": self._snapshot(
-                frames,
-                schemas["rate"],
-                rate[..., None],
-                rate_valid,
             ),
             # The source event already owns these immutable bytes, axes and
             # validity.  Runtime restamps the sibling under the processor's

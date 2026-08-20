@@ -11,6 +11,7 @@ from math import isfinite, sqrt
 from scipy import ndimage
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable
 
 import numpy as np
@@ -129,6 +130,22 @@ def _plain_json_value(value: object, name: str) -> Any:
             for index, item in enumerate(value)
         ]
     raise TypeError(f"{name} is not JSON-serializable domain data")
+
+
+def _freeze_json_value(value: object) -> object:
+    """Recursively own one already-plain JSON value as immutable truth."""
+
+    if type(value) is dict:
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if type(value) is list:
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _immutable_json_value(value: object, name: str) -> object:
+    return _freeze_json_value(_plain_json_value(value, name))
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -520,7 +537,15 @@ class SiteMap:
         object.__setattr__(self, "valid_sites", valid)
         object.__setattr__(self, "quality", quality)
         object.__setattr__(self, "coordinate_frame", frame)
-        object.__setattr__(self, "topology", None if self.topology is None else dict(self.topology))
+        object.__setattr__(
+            self,
+            "topology",
+            (
+                None
+                if self.topology is None
+                else _immutable_json_value(self.topology, "topology")
+            ),
+        )
 
     @property
     def n_sites(self) -> int:
@@ -884,8 +909,14 @@ class TrapCalibration:
             raise ValueError("default_model_kind must name a stored model")
         if any(self.site_map.site_ids != model.site_ids for model in models):
             raise ValueError("SiteMap and every ReadoutModel site_ids must align")
+        if not isinstance(self.report, Mapping):
+            raise TypeError("report must be a mapping")
         object.__setattr__(self, "models", models)
-        object.__setattr__(self, "report", dict(self.report))
+        object.__setattr__(
+            self,
+            "report",
+            _immutable_json_value(self.report, "report"),
+        )
 
     @property
     def n_sites(self) -> int:
@@ -983,9 +1014,7 @@ class TrapCalibration:
         return result
 
     def save(self, path: str | Path) -> Path:
-        target = Path(path)
-        write_readable_json(target, self.to_dict())
-        return target
+        return write_readable_json(path, self.to_dict())
 
     @classmethod
     def load(cls, path: str | Path) -> "TrapCalibration":

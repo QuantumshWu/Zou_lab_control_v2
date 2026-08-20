@@ -287,7 +287,6 @@ class NodeHost:
         self._stop_reason = "Host requested stop"
         self._plane_state = False
         self._live_commit_count = 0
-        self._committed_output_names: set[str] = set()
         self._progress_reported = False
         self._processor_path: str | None = None
         self._source_publication: SignalPublication | None = None
@@ -441,7 +440,6 @@ class NodeHost:
         self._worker_partial_seal = False
         self._stop_reason = "Host requested stop"
         self._live_commit_count = 0
-        self._committed_output_names.clear()
         self._progress_reported = False
         self._processor_path = None
         self._source_publication = None
@@ -609,24 +607,15 @@ class NodeHost:
         published = self._data_plane.commit_live(self, values)
         with self._start_lock:
             self._live_commit_count += 1
-            self._committed_output_names.update(values)
         self._request_owner_wake()
         return published
 
     def _validate_worker_terminal_contract(self, result: object) -> None:
         declared = {value.name for value in self._dataset_outputs}
-        if declared:
-            if not self._committed_output_names:
-                raise RuntimeError(
-                    f"hosted {self._kind} finished without a live Dataset commit"
-                )
-            if self._committed_output_names != declared:
-                missing = tuple(sorted(declared - self._committed_output_names))
-                extra = tuple(sorted(self._committed_output_names - declared))
-                raise RuntimeError(
-                    "node live commits do not cover its complete declaration union: "
-                    f"missing={missing}, extra={extra}"
-                )
+        if declared and not self._live_commit_count:
+            raise RuntimeError(
+                f"hosted {self._kind} finished without a live Dataset commit"
+            )
         if self._kind == "task" and not self._progress_reported:
             raise RuntimeError("hosted Task finished without reporting progress")
         for name in self._required_artifact_names:

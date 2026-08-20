@@ -16,28 +16,13 @@ the renders arrived in, and regardless of Pause.
 from __future__ import annotations
 
 from concurrent.futures import Future
+import time
 from types import SimpleNamespace
 
 from zlc_runtime import LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.board import LiveBoard
-from zlc_workbench.presentation import PlotPanelPort as _PlotPanelPort
-
-
-def _submit_now(work):
-    from concurrent.futures import Future
-
-    completed = Future()
-    try:
-        completed.set_result(work())
-    except BaseException as error:
-        completed.set_exception(error)
-    return completed
-
-
-def PlotPanelPort(*args, **kwargs):
-    kwargs.setdefault("submit_projection", _submit_now)
-    return _PlotPanelPort(*args, **kwargs)
+from zlc_workbench.presentation import PlotPanelPort
 
 from test_signal_front import _output
 
@@ -68,6 +53,13 @@ class _RenderHost:
         future = self.futures[index]
         front = SimpleNamespace(sequence=len(self.rendered))
         future.set_result(SimpleNamespace(value=None, front=front))
+
+
+def _stage_on(host):
+    def replace_host(plot_input, _value, _publication):
+        return host, host.update_data(plot_input)
+
+    return replace_host
 
 
 class _Bench:
@@ -140,30 +132,43 @@ def _bench_board(bench: _Bench):
     frame_host = _RenderHost("frame")
     occupancy_host = _RenderHost("occupancy")
     presents: list[tuple[str, object]] = []
+    ports: list[PlotPanelPort] = []
+    board = LiveBoard(
+        bench.plane,
+        lambda: tuple(ports),
+        intervals=(100, 200, 400, 800),
+    )
     frame_port = PlotPanelPort(
         "panel-frame",
         FRAME,
-        frame_host,
         display_interval_ms=100,
+        submit_projection=board.submit_projection,
+        replace_host=_stage_on(frame_host),
         present=lambda operation: presents.append(("panel-frame", operation.front)),
     )
     occupancy_port = PlotPanelPort(
         "panel-occupancy",
         OCCUPANCY,
-        occupancy_host,
         display_interval_ms=100,
+        submit_projection=board.submit_projection,
+        replace_host=_stage_on(occupancy_host),
         present=lambda operation: presents.append(("panel-occupancy", operation.front)),
     )
-    board = LiveBoard(
-        bench.plane,
-        lambda: (frame_port, occupancy_port),
-        intervals=(100, 200, 400, 800),
-    )
+    ports.extend((frame_port, occupancy_port))
     return board, frame_host, occupancy_host, frame_port, occupancy_port, presents
 
 
 def _assert_same_shot(frame_port, occupancy_port) -> None:
     assert _shot_of(frame_port) == _shot_of(occupancy_port)
+
+
+def _wait_staged(count: int, *hosts: _RenderHost) -> None:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if all(len(host.futures) >= count for host in hosts):
+            return
+        time.sleep(0.001)
+    raise AssertionError("presentation projection did not stage")
 
 
 def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> None:
@@ -173,6 +178,7 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
     )
     try:
         board.tick()
+        _wait_staged(1, frame_host, occupancy_host)
         assert len(frame_host.futures) == len(occupancy_host.futures) == 1
 
         # The derived member lands FIRST; its partner is still rendering, so
@@ -196,6 +202,7 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
         bench.publish_shot()
         bench.publish_derived()
         board.tick()
+        _wait_staged(2, frame_host, occupancy_host)
         assert len(frame_host.futures) == len(occupancy_host.futures) == 2
         first_shot = _shot_of(frame_port)
         frame_host.complete()
@@ -226,6 +233,7 @@ def test_pause_leaves_every_group_member_on_the_same_shot() -> None:
     )
     try:
         board.tick()
+        _wait_staged(1, frame_host, occupancy_host)
         frame_host.complete()
         occupancy_host.complete()
         board.commit()
@@ -234,6 +242,7 @@ def test_pause_leaves_every_group_member_on_the_same_shot() -> None:
         bench.publish_shot()
         bench.publish_derived()
         board.tick()
+        _wait_staged(2, frame_host, occupancy_host)
 
         # Pause NOW: no more ticks.  One member has landed, one is mid-render.
         frame_host.complete()
@@ -265,6 +274,7 @@ def test_a_lagging_member_defers_its_partner_by_at_most_one_refresh() -> None:
     )
     try:
         board.tick()
+        _wait_staged(1, frame_host, occupancy_host)
         # Shot 2 arrives before shot 1's occupancy render finished; the host
         # coalesces the queued render away, cancelling its future.
         bench.publish_shot()
@@ -272,6 +282,7 @@ def test_a_lagging_member_defers_its_partner_by_at_most_one_refresh() -> None:
         frame_host.complete()  # shot 1's frame DID render
         assert occupancy_host.futures[0].cancel()
         board.tick()
+        _wait_staged(2, frame_host, occupancy_host)
         assert len(frame_host.futures) == len(occupancy_host.futures) == 2
 
         board.commit()

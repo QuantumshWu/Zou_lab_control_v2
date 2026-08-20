@@ -6,7 +6,7 @@ records.  The plotting package never imports those domain layers.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
@@ -30,7 +30,7 @@ from .data_contract import snapshot_revision
 from .kinds import AxisDomain, AxisRef
 
 from ._validation import finite_real as _finite
-from ._validation import integer, text as _text
+from ._validation import integer
 
 
 def _text(value: object, name: str) -> str:
@@ -86,12 +86,16 @@ def _axis_coordinates(axis: object, positions: np.ndarray) -> np.ndarray:
     )
     if not np.all(np.isfinite(coordinates)):
         raise ValueError("image overlay axis coordinates must be finite")
-    step = 1.0
-    if coordinates.size > 1:
-        differences = np.diff(coordinates)
-        if not np.allclose(differences, differences[0]):
-            raise ValueError("image overlay axes must be affine")
-        step = float(differences[0])
+    if coordinates.size == 1:
+        if not np.all(np.asarray(positions) == 0):
+            raise ValueError(
+                "a single-pixel image axis cannot infer an affine step"
+            )
+        return np.full(np.asarray(positions).shape, coordinates[0])
+    differences = np.diff(coordinates)
+    if not np.allclose(differences, differences[0]):
+        raise ValueError("image overlay axes must be affine")
+    step = float(differences[0])
     return float(coordinates[0]) + step * positions
 
 
@@ -197,7 +201,15 @@ def _validated_overlay_geometry(
         or str(geometry["y_axis_id"]) != str(y_axis.axis_id)
     ):
         raise ValueError("image overlay geometry differs from image axes")
-    status_axes = tuple(status.block.schema.cell_schema.data_axes)
+    image_schema = image.block.schema
+    status_schema = status.block.schema
+    if (
+        status_schema.repeat_axis != image_schema.repeat_axis
+        or status_schema.point_table != image_schema.point_table
+        or status_schema.grid_topology != image_schema.grid_topology
+    ):
+        raise ValueError("image overlay status leading geometry differs from image")
+    status_axes = tuple(status_schema.cell_schema.data_axes)
     if len(status_axes) != 1:
         raise ValueError("image overlay status must declare one trailing axis")
     status_axis = status_axes[0]
@@ -210,24 +222,6 @@ def _validated_overlay_geometry(
     ):
         raise ValueError("image overlay geometry differs from status axis")
     return ids, centers, labels
-
-
-@dataclass(frozen=True, slots=True)
-class PointMarker:
-    point_id: str
-    x: float
-    y: float
-    status: PointStatus = PointStatus.UNKNOWN
-    label: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "point_id", _text(self.point_id, "point_id"))
-        object.__setattr__(self, "x", _finite(self.x, "point x"))
-        object.__setattr__(self, "y", _finite(self.y, "point y"))
-        if not isinstance(self.status, PointStatus):
-            raise TypeError("status must be PointStatus")
-        if self.label is not None:
-            object.__setattr__(self, "label", _text(self.label, "point label"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,30 +420,6 @@ class ImagePointOverlay:
         """Create a revisioned empty layer for an explicit clear operation."""
 
         return cls(revision=revision, coordinates=np.empty((0, 2), dtype=np.float64))
-
-    @classmethod
-    def from_markers(
-        cls,
-        revision: int,
-        markers: Iterable[PointMarker],
-    ) -> "ImagePointOverlay":
-        """Build the array contract from ergonomic typed point records."""
-
-        values = tuple(markers)
-        if any(not isinstance(marker, PointMarker) for marker in values):
-            raise TypeError("markers must contain PointMarker values")
-        coordinates = np.asarray(
-            tuple((marker.x, marker.y) for marker in values),
-            dtype=np.float64,
-        ).reshape((-1, 2))
-        return cls(
-            revision=revision,
-            coordinates=coordinates,
-            point_ids=tuple(marker.point_id for marker in values),
-            labels=tuple(marker.label for marker in values),
-            static_statuses=tuple(marker.status for marker in values),
-        )
-
 
 def image_point_overlay_from_signal(
     geometry: Mapping[str, object],
@@ -732,7 +702,6 @@ __all__ = [
     "ImageFrame",
     "ImagePointOverlay",
     "PlotInput",
-    "PointMarker",
     "PointStatus",
     "image_point_overlay_from_signal",
     "image_point_overlay_geometry",

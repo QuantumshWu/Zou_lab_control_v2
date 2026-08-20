@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .descriptors import CAPABILITY_TYPES, DeviceTypeDescriptor, InstallationFactoryContext, InstalledLeaf
 from .discovery import DeviceCatalogSnapshot, discover_device_catalog
+from .configuration import _freeze_plain
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,13 @@ class DeviceSpec:
     def __post_init__(self) -> None:
         if not self.key or not self.type_id:
             raise ValueError("DeviceSpec requires key and type_id")
-        object.__setattr__(self, "config", dict(self.config or {}))
+        if self.config is not None and not isinstance(self.config, Mapping):
+            raise TypeError("DeviceSpec config must be a mapping or None")
+        object.__setattr__(
+            self,
+            "config",
+            _freeze_plain(dict(self.config or {}), "device config"),
+        )
 
 
 class Installation:

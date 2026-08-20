@@ -135,7 +135,6 @@ class _Port:
         self.updates = []
         self.pending = []
         self.fronts = []
-        self.observed = []
         self.accepted = []
         self.rejected = []
         self.finished = []
@@ -179,9 +178,6 @@ class _Port:
         self.pending.append(update)
         self.futures.append(future)
         return update
-
-    def observe(self, update, operation):
-        self.observed.append((update, operation))
 
     def can_accept(self, _update, _operation):
         return self.acceptable
@@ -515,8 +511,17 @@ class _Plane:
         self.freezes += 1
         return self.front
 
-    def direct_parent_publications(self, publication):
-        return self.parents.get(publication, ())
+    def publication_roots(self, publication):
+        roots = set()
+        pending = [publication]
+        while pending:
+            current = pending.pop()
+            parents = self.parents.get(current, ())
+            if parents:
+                pending.extend(parents)
+            else:
+                roots.add(current.event_ref)
+        return frozenset(roots)
 
     def follower_edges(self):
         return self.edges

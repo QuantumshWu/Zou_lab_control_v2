@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -49,6 +50,7 @@ from .calibration import (
     TrapCalibration,
     calibrate,
 )
+from .bimodal import BimodalFit
 from .summary import readout_summary, summary_lines
 from .outputs import (
     CAPTURE_PREVIEW_DECLARATION,
@@ -479,6 +481,38 @@ class CalibrationCapture:
         return tuple(cycle[READOUT_FRAME_INDEX] for cycle in self.cycles)
 
 
+def _immutable_result_value(value: object, name: str) -> object:
+    """Deep-own one result payload without expanding numeric arrays to lists."""
+
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise TypeError(f"{name} cannot contain an object array")
+        result = np.array(value, copy=True)
+        result.setflags(write=False)
+        return result
+    if isinstance(value, Path):
+        return Path(value)
+    if isinstance(value, BimodalFit):
+        return value
+    if isinstance(value, Mapping):
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be strings")
+            frozen[key] = _immutable_result_value(item, f"{name}.{key}")
+        return MappingProxyType(frozen)
+    if isinstance(value, (tuple, list)):
+        return tuple(
+            _immutable_result_value(item, f"{name}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise TypeError(f"{name} contains non-plain {type(value).__name__}")
+
+
 @dataclass(frozen=True)
 class CalibrationRunResult:
     """Artifact and in-memory analysis returned by one task run."""
@@ -487,8 +521,6 @@ class CalibrationRunResult:
     calibration: TrapCalibration
     report: Mapping[str, Any]
     capture: CalibrationCapture
-    reference: tuple[tuple[CameraFrameRecord, CameraFrameRecord], ...]
-    short: tuple[CameraFrameRecord, ...]
     pulse: Mapping[str, object]
     run_record: Mapping[str, object]
     #: The headline numbers -- fidelity, the two error rates, separation --
@@ -501,12 +533,30 @@ class CalibrationRunResult:
             raise TypeError("calibration must be TrapCalibration")
         if not isinstance(self.capture, CalibrationCapture):
             raise TypeError("capture must be CalibrationCapture")
+        for name in ("report", "pulse", "run_record", "summary"):
+            if not isinstance(getattr(self, name), Mapping):
+                raise TypeError(f"{name} must be a mapping")
         object.__setattr__(self, "artifact_path", Path(self.artifact_path).resolve())
-        object.__setattr__(self, "report", dict(self.report))
-        object.__setattr__(self, "reference", tuple(tuple(group) for group in self.reference))
-        object.__setattr__(self, "short", tuple(self.short))
-        object.__setattr__(self, "pulse", dict(self.pulse))
-        object.__setattr__(self, "run_record", dict(self.run_record))
+        object.__setattr__(
+            self,
+            "report",
+            _immutable_result_value(self.report, "report"),
+        )
+        object.__setattr__(
+            self,
+            "pulse",
+            _immutable_result_value(self.pulse, "pulse"),
+        )
+        object.__setattr__(
+            self,
+            "run_record",
+            _immutable_result_value(self.run_record, "run_record"),
+        )
+        object.__setattr__(
+            self,
+            "summary",
+            _immutable_result_value(self.summary, "summary"),
+        )
 
 
 def _save_report(result: CalibrationRunResult) -> Path:
@@ -519,7 +569,7 @@ def _save_report(result: CalibrationRunResult) -> Path:
 
     report_root = result.artifact_path.parent / "report"
     report_root.mkdir(parents=True)
-    write_readable_json(report_root / "summary.json", result.summary)
+    write_readable_json(report_root / "summary.json", _plain(result.summary))
     (report_root / "summary.txt").write_text(
         "\n".join(summary_lines(result.summary)) + "\n", encoding="utf-8"
     )
@@ -1339,8 +1389,6 @@ class CalibrationTask:
                 calibration,
                 analysis.report,
                 capture,
-                capture.reference,
-                capture.short,
                 pulse_facts,
                 run_record,
                 readout_summary(analysis, run_chain=(run_record,)),

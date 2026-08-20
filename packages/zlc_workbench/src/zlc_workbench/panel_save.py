@@ -268,23 +268,28 @@ def save_panel_figure(
 ) -> PanelFigureFiles:
     """Save the Edit tab's exact frozen input without asking the plane again.
 
-    Both halves, for the caller that wants them together.  They are separately
-    callable because a producer saving as it acquires wants them apart.
+    Secure the irreplaceable archive before rendering its derived image.  If
+    rendering fails, the raised error names the archive that was already saved.
     """
 
-    image_path = save_panel_image(
-        base_path,
-        state=state,
-        frozen=frozen,
-        make_host=make_host,
-        configure_host=configure_host,
-    )
     written = save_panel_data(
         base_path,
         state=state,
         frozen=frozen,
         annotations=annotations,
     )
+    try:
+        image_path = save_panel_image(
+            base_path,
+            state=state,
+            frozen=frozen,
+            make_host=make_host,
+            configure_host=configure_host,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"panel archive {written} was saved, but image rendering failed: {error}"
+        ) from error
     return PanelFigureFiles(image_path, written)
 
 
@@ -321,7 +326,7 @@ def restore_panel_plot_input(
     status = (
         None
         if "status" not in section
-        else snapshot_from_manifest(section["status"], arrays)
+        else snapshot_from_manifest(section["status"], arrays, embedded=True)
     )
     overlay = ImagePointOverlay(
         int(section.get("revision", 0)),

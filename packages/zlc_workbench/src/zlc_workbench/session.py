@@ -21,11 +21,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-from zlc_data import OwnedSnapshot
 from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
 
-from .archive import write_figure
 from .device_use import DeviceClaim, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse
 
@@ -444,29 +441,6 @@ class ExperimentSession:
         """
 
         return day_folder(self.workspace.data, _date.today())
-
-    def save_figure(
-        self,
-        name: str,
-        *,
-        arrays: Mapping[str, np.ndarray | OwnedSnapshot],
-        panel: Mapping[str, Any] | None = None,
-    ) -> Path:
-        """Save arrays together with everything needed to explain them.
-
-        Typed snapshots carry their own dataset identity; the current pulse
-        describes the stimulus.  Panel Edit's dedicated save path additionally
-        records the selected publication's run chain.
-        """
-
-        sections: dict[str, Any] = {}
-        pulse = getattr(self, "_pulse", None)
-        if pulse is not None:
-            sections["pulse"] = pulse
-        if panel:
-            sections["panel"] = dict(panel)
-
-        return write_figure(self.workspace.data, name, arrays=arrays, sections=sections)
 
     # ----------------------------------------------------------------- closing
 

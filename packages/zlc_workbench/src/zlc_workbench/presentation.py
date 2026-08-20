@@ -59,10 +59,8 @@ class PlotPanelPort:
         self,
         panel_id: str,
         signal_name: str,
-        host: Any,
         *,
         display_interval_ms: int,
-        shown: object | None = None,
         companion_signals: Callable[[], tuple[str, ...]] | None = None,
         project_input: Callable[[object, object, object], object] | None = None,
         submit_projection: Callable[[Callable[[], object]], Future],
@@ -79,14 +77,12 @@ class PlotPanelPort:
     ) -> None:
         self._panel_id = str(panel_id)
         self._signal_name = str(signal_name)
-        self._host = host
-        self._host_token = (
-            object() if host is None else getattr(host, "host_id")
-        )
+        self._host = None
+        self._host_token = object()
         self._interval_ms = int(display_interval_ms)
         self._presented: object | None = None
         self._presented_front_refs: tuple[object, ...] = ()
-        self._presented_input: object | None = shown
+        self._presented_input: object | None = None
         self._project_input = project_input
         #: Signals this panel READS besides the one it shows -- an image's
         #: annotation.  Asked per tick because the operator can change it;
@@ -107,12 +103,7 @@ class PlotPanelPort:
         #: group land as one shot.  ``None`` keeps the port presentation-free
         #: for hosts whose widgets present their own fronts.
         self._present = present
-        #: What the host was BUILT from.  A host constructed from a snapshot is
-        #: already holding that revision, and handing it the same one back is
-        #: refused -- correctly, but the refusal then arrived as an error on
-        #: the card once per beat, forever, because the delivery was never
-        #: accepted and so was retried on every tick.
-        self._shown_revision = _revision_of(shown)
+        self._shown_revision = None
         self._shown_generation: object | None = None
         #: The newest revision ever handed to the host, per generation.  The
         #: port is the host's sole feeder and the host's revisions are
@@ -122,9 +113,7 @@ class PlotPanelPort:
         #: "data revision must increase" refusal on the card once per beat
         #: until the next shot arrived.
         self._staged_generation: object | None = None
-        self._staged_revision: int | None = self._revision_value(
-            _revision_of(shown)
-        )
+        self._staged_revision: int | None = None
         self._staged_front_refs: tuple[object, ...] = ()
         self._serial = 0
         self._pending: dict[int, _Prepared] = {}
@@ -341,77 +330,65 @@ class PlotPanelPort:
                         )
                     return None
 
+            replacing_generation = (
+                self._shown_generation is not None
+                and publication_generation != self._shown_generation
+            )
+            if replacing_generation:
+                if self._replace_host is None:
+                    raise RuntimeError(
+                        "signal generation changed; the panel host must be replaced"
+                    )
+                if any(
+                    _publication_generation(prepared.publication)
+                    != self._shown_generation
+                    for prepared in self._pending.values()
+                ):
+                    return None
+
             if (
-                self._shown_generation is None
+                publication_generation == self._shown_generation
                 and revision is not None
                 and revision == self._shown_revision
             ):
-                self._shown_generation = publication_generation
-                self._staged_generation = publication_generation
-                self._presented = publication
-                self._presented_front_refs = front_refs
-                self._staged_front_refs = front_refs
-                notify_presented = (publication, self._presented_input)
-            else:
-                replacing_generation = (
-                    self._shown_generation is not None
-                    and publication_generation != self._shown_generation
-                )
-                if replacing_generation:
-                    if self._replace_host is None:
-                        raise RuntimeError(
-                            "signal generation changed; the panel host must be replaced"
-                        )
-                    if any(
-                        _publication_generation(prepared.publication)
-                        != self._shown_generation
-                        for prepared in self._pending.values()
-                    ):
-                        return None
-
                 if (
-                    publication_generation == self._shown_generation
-                    and revision is not None
-                    and revision == self._shown_revision
+                    not self._pending
+                    and self._presented is not publication
+                    and front_refs[1:] == self._presented_front_refs[1:]
                 ):
-                    if (
-                        not self._pending
-                        and self._presented is not publication
-                        and front_refs[1:] == self._presented_front_refs[1:]
-                    ):
-                        self._presented = publication
-                        self._presented_front_refs = front_refs
-                        notify_presented = (publication, self._presented_input)
-                    elif front_refs == self._presented_front_refs:
-                        return None
+                    self._presented = publication
+                    self._presented_front_refs = front_refs
+                    notify_presented = (publication, self._presented_input)
+                elif front_refs == self._presented_front_refs:
+                    return None
 
-                if notify_presented is None:
-                    if any(
-                        prepared.front_refs == front_refs
-                        for prepared in self._pending.values()
-                    ):
-                        return None
-                    if front_refs == self._staged_front_refs:
-                        return None
-                    staged_revision = self._revision_value(revision)
-                    if (
-                        staged_revision is not None
-                        and self._staged_revision is not None
-                        and publication_generation == self._staged_generation
-                        and staged_revision <= self._staged_revision
-                        and publication is not self._presented
-                    ):
-                        return None
+            if notify_presented is None:
+                if any(
+                    prepared.front_refs == front_refs
+                    for prepared in self._pending.values()
+                ):
+                    return None
+                if front_refs == self._staged_front_refs:
+                    return None
+                staged_revision = self._revision_value(revision)
+                if (
+                    staged_revision is not None
+                    and self._staged_revision is not None
+                    and publication_generation == self._staged_generation
+                    and staged_revision <= self._staged_revision
+                    and publication is not self._presented
+                ):
+                    return None
 
-                    self._serial += 1
-                    serial = self._serial
-                    host_token = self._host_token
-                    self._pending[serial] = _Prepared(
-                        publication,
-                        value.snapshot,
-                        front_refs,
-                        completion=completion,
-                    )
+                self._serial += 1
+                serial = self._serial
+                host_token = self._host_token
+                self._pending[serial] = _Prepared(
+                    publication,
+                    value.snapshot,
+                    front_refs,
+                    completion=completion,
+                )
 
         if notify_presented is not None:
             if self._on_presented is not None:
@@ -580,9 +557,6 @@ class PlotPanelPort:
             future=completion,
         )
 
-    def observe(self, update: SurfaceUpdate, operation: object) -> None:
-        """Note that a prepared surface completed, drawn or not."""
-
     def can_accept(self, update: SurfaceUpdate, operation: object) -> bool:
         """Whether this panel will still show that update.
 
@@ -591,7 +565,11 @@ class PlotPanelPort:
         """
 
         with self._state_lock:
-            return not self._closed and update.host_token == self._host_token
+            return (
+                not self._closed
+                and update.host_token == self._host_token
+                and update.serial in self._pending
+            )
 
     def _advance_staged(
         self,
@@ -632,21 +610,17 @@ class PlotPanelPort:
             if self._closed or update.host_token != self._host_token:
                 return False
             prepared = self._pending.pop(update.serial, None)
-            publication = (
-                update.publication if prepared is None else prepared.publication
-            )
-            replacement = None if prepared is None else prepared.replacement_host
+            if prepared is None:
+                return False
+            publication = prepared.publication
+            replacement = prepared.replacement_host
             old_host = self._host
             if replacement is not None:
                 self._host = replacement
                 self._host_token = replacement.host_id
             self._presented = publication
-            self._presented_input = (
-                update.value.snapshot if prepared is None else prepared.plot_input
-            )
-            accepted_refs = (
-                update.front_refs if prepared is None else prepared.front_refs
-            )
+            self._presented_input = prepared.plot_input
+            accepted_refs = prepared.front_refs
             self._shown_generation = _publication_generation(publication)
             self._shown_revision = _revision_of(self._presented_input)
             self._presented_front_refs = accepted_refs

@@ -24,7 +24,7 @@ trigger scheduling, expected-frame accounting, or point-by-point reconciliation.
 `write_slots()` updates one row, while `write_scan_table()` preloads a multi-row
 table and lets the observer refill the frozen ping-pong banks.
 
-For a separated FPGA machine, `fpga\run_server.bat` starts the thin
+For a separated FPGA machine, the repository-level `bin\run_server.bat` starts the thin
 length-prefixed-JSON façade. The launcher prints the listen bind and the local
 client endpoint before starting Python. The Python process then prints
 `HARDWARE CONNECTED` only after the geometry handshake and SAFE readback pass,
@@ -49,7 +49,7 @@ The server backend defaults to `auto`: it enumerates serial ports (or uses
 `--uart-port` when supplied), probes each at 3 Mbaud through the existing
 word63 geometry handshake, and selects UART only after a matching fingerprint.
 If every probe fails, it records the per-port reason and falls back to
-JTAG-to-AXI. Use `fpga\run_server.bat --backend jtag-axi|uart|memory` for an
+JTAG-to-AXI. Use `bin\run_server.bat --backend jtag-axi|uart|memory` for an
 explicit choice; an explicitly requested UART failure is an error and never
 silently falls back. The JTAG path keeps a resident Vivado process (roughly
 1–2 GB), so UART is preferred on memory-constrained hosts.
@@ -62,7 +62,7 @@ the target from XDC, model the sequence, compile it, and show the local
 transport choices without opening hardware.
 
 The notebook ends with an explicit real-hardware all-channel loop. Start
-`fpga\run_server.bat` on the same machine first, then run the final cell: it
+`bin\run_server.bat` on the same machine first, then run the final cell: it
 connects directly to `127.0.0.1:18861`, loads the program, and starts all 18 TTL
 outputs alternating high/low every 1 µs while all four 10-bit DAC buses ramp
 between signed codes −512 and +511. Stop it later with
@@ -70,5 +70,10 @@ between signed codes −512 and +511. Stop it later with
 SAFE-released after five minutes by default; override it with
 `--client-idle-timeout SECONDS` when needed.
 
-The RTL and bitstream are external frozen artifacts. This repository does not
-build or program them.
+This repository tracks the RTL, board description, Vivado Tcl, and simulations
+under `packages\zlc_pulse\fpga\`; `bin\build_and_program.bat` is the explicit
+build/program entry for an approved hardware recovery or deployment. Generated
+Vivado products, the deployed `.bit`/`.ltx`, and the FPGA's volatile or flash
+programmed state are external machine artifacts, not Python package data.
+Normal experiment startup uses the already deployed bitstream and never builds
+or programs hardware.

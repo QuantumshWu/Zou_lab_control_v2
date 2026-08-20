@@ -7,23 +7,9 @@
 
 ## Top-level names
 
-The supported convenience namespace is deliberately small. The complete,
-machine-checked list is in [`docs/contract.md`](contract.md); it is reproduced
-here so copied examples and API reviews have one visible name set:
-
-```text
-AxisRef  BackendUnavailableError  CurvePlot  DEFAULTS  DEFAULT_UNITS
-FacetGridPlot  FitCancelled  FitEvent  FitModelSpec  FitTarget  HistogramPlot
-ImageFrame  ImagePlot  ImagePointOverlay
-NumericRange  PlotKind  PlotLabels  PlotSession  PlotSpec  PointStatus
-PulseAnalogTrace  PulseBlock  PulseChannel  PulseDacScanSegment
-PulseRepeatMarker  PulseScanRegion  PulseTimelineData  PulseTimelinePlot
-PulseTimelineSelectionData  Qt5ParameterPanel  Qt5PlotWidget  RasterPlotHost
-Reduction  RollingPlot  SelectionChange  SelectorData  SelectorKind  Unit
-UnitRegistry  __version__  curve  describe_semantics  ensure_qt5_application
-facet_grid  histogram  image  parameter_controls  pulse_timeline  resolve_unit
-rolling  schema_summary  show  updated_spec
-```
+The supported convenience namespace is deliberately small. Its executable
+source of truth is `zlc_plot.__all__`; the examples below import only from that
+facade. Extension interfaces remain in their owning submodules.
 
 Fit-engine result records, raster packets, semantic internals and the remaining exception types
 stay available from their owning submodules and are intentionally absent from
@@ -159,9 +145,9 @@ overlay = ImagePointOverlay(
     ),
     point_ids=("point-01", "point-02", "point-03"),
     labels=("A", "B", "C"),
-    statuses={
-        None: (PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID)
-    },
+    static_statuses=(
+        PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID
+    ),
 )
 image_session.update_image_overlay(overlay)
 image_session.set_parameter("show_point_labels", True)
@@ -175,18 +161,29 @@ image_session.update_image_overlay(ImagePointOverlay.empty(revision=1))
 ```
 
 `coordinates` always contain canonical x then y. IDs and labels are optional
-parallel metadata. `statuses` maps the facet coordinate a painted surface
-shows to that surface's statuses; the key `None` names the surface that shows
-no single coordinate -- a standalone image, or a facet over an axis this
-overlay does not describe -- and is the fallback for any other coordinate. A
-grid faceted over a camera cycle therefore draws one geometry with each
-cell's own frame states. An overlay-only update must have a strictly newer
-revision; it updates the point artists without changing or reprojecting the
-image snapshot. Point ring size is derived from canonical coordinate spacing
-and the immutable package style. Occupied rings are the primary annotation;
-empty rings deliberately use much lower opacity, and each optional ordinal is
-drawn at the ring's upper-left with exactly the same colour and opacity as its
-ring. An `ImageFrame` always contains a
+parallel metadata. `static_statuses` is the immutable marker form used by
+hand-authored or calibration annotations.
+
+A signal-driven layer instead stores one canonical bool/0-or-1 status
+`OwnedSnapshot` in `ImagePointOverlay.status`. The producer declares
+`IMAGE_POINT_OVERLAY_CONTRACT` and writes the strict image-axis, point-identity,
+coordinate, and status-axis document returned by
+`image_point_overlay_geometry(...)` into its run record. The application
+validates and constructs the layer with
+`image_point_overlay_from_signal(geometry, status, image, revision=...)`.
+Status values express EMPTY/OCCUPIED and Dataset validity expresses INVALID.
+The status Dataset must share the image's repeat/point topology and have one
+complete trailing point axis. The renderer applies the Image/FacetGrid
+PlotSpec scope and facet to those leading axes; it draws a judgement only for
+one exact repeat/point cell, while a pooled surface remains UNKNOWN rather
+than inventing a consensus.
+
+An overlay-only update must have a strictly newer revision; it updates the
+point artists without changing or reprojecting the image snapshot. Point ring
+size is derived from canonical coordinate spacing and the immutable package
+style. Occupied rings are the primary annotation; empty rings deliberately use
+much lower opacity, and each optional ordinal is drawn at the ring's upper-left
+with exactly the same colour and opacity as its ring. An `ImageFrame` always contains a
 revisioned overlay, including an explicit empty layer. Reusing the identical
 overlay revision in later frames is allowed; the same revision cannot identify
 different content. A prepared frame also compares the point-layer authority at

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 
@@ -58,6 +59,23 @@ def _plain(value: object, what: str) -> Any:
     raise TypeError(f"{what} cannot hold {type(value).__name__}; a configuration is plain data")
 
 
+def _freeze_plain(value: object, what: str) -> object:
+    """Validate, deep-own, and freeze one device-configuration value."""
+
+    plain = _plain(value, what)
+
+    def freeze(item: object) -> object:
+        if type(item) is dict:
+            return MappingProxyType(
+                {key: freeze(child) for key, child in item.items()}
+            )
+        if type(item) is list:
+            return tuple(freeze(child) for child in item)
+        return item
+
+    return freeze(plain)
+
+
 @dataclass(frozen=True)
 class DeviceInstanceConfig:
     """One named device in an apparatus: what it is, and how it is set up."""
@@ -76,14 +94,18 @@ class DeviceInstanceConfig:
         object.__setattr__(self, "type_id", _text(self.type_id, "device type_id"))
         if not isinstance(self.parameters, Mapping):
             raise TypeError("device parameters must be a mapping")
-        object.__setattr__(self, "parameters", _plain(dict(self.parameters), "device parameters"))
+        object.__setattr__(
+            self,
+            "parameters",
+            _freeze_plain(dict(self.parameters), "device parameters"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "instance_id": self.instance_id,
             "role": self.role,
             "type_id": self.type_id,
-            "parameters": dict(self.parameters),
+            "parameters": _plain(self.parameters, "device parameters"),
         }
 
     @classmethod
@@ -136,7 +158,11 @@ class InstallationConfig:
         """The device specs ``create_installation`` takes."""
 
         return tuple(
-            {"key": item.instance_id, "type_id": item.type_id, "config": dict(item.parameters)}
+            {
+                "key": item.instance_id,
+                "type_id": item.type_id,
+                "config": _plain(item.parameters, "device parameters"),
+            }
             for item in self.devices
         )
 

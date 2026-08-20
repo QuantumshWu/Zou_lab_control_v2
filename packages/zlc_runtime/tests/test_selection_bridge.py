@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from threading import Event
+from threading import Event, Thread
 import time
 
 import numpy as np
@@ -423,6 +423,101 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         assert float(front.value("@logic/image/roi_mean").snapshot.block.values.reshape(-1)[0]) == 109.0
     finally:
         _close(bridge, plane, source)
+
+
+@pytest.mark.parametrize("phase", ("commit", "processor"))
+def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
+    monkeypatch, phase: str,
+) -> None:
+    schema = _image_schema()
+    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
+    plane, source, _slot, source_state, _initial = _source_setup(schema, values)
+    events = _Events()
+    bridge = SelectionBridge(
+        plane,
+        "camera/frame",
+        events,
+        events,
+        bridge_id="close-race",
+    )
+    bridge.start()
+    entered = Event()
+    release = Event()
+    close_done = Event()
+    callback_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("x", 0.0, 1.0),
+            SelectionRange("y", 20.0, 30.0),
+        ),
+        revision=1,
+    )
+    if phase == "processor":
+        events.emit_selection(SelectionChange.COMMITTED, selection)
+    real_materialize = bridge._materialize_selection_outputs
+
+    def gated_materialize(snapshot, state):
+        entered.set()
+        if not release.wait(2.0):
+            raise TimeoutError("selection materialization gate did not open")
+        return real_materialize(snapshot, state)
+
+    monkeypatch.setattr(
+        bridge,
+        "_materialize_selection_outputs",
+        gated_materialize,
+    )
+
+    def commit_selection() -> None:
+        try:
+            if phase == "commit":
+                events.emit_selection(SelectionChange.COMMITTED, selection)
+            else:
+                source_state["frame"] = LiveDatasetOutput(
+                    source_state["frame"].declaration,
+                    _snapshot("frame", 2, schema, values + 1.0),
+                    MonitorCoverage(1, 1),
+                )
+                _commit_source(plane, source, source_state)
+                deadline = time.monotonic() + 1.0
+                while not entered.is_set() and time.monotonic() < deadline:
+                    plane.freeze()
+                    bridge.wait_for_wake(0.01)
+        except BaseException as error:
+            callback_errors.append(error)
+
+    worker = Thread(target=commit_selection, daemon=True)
+
+    def close_bridge() -> None:
+        try:
+            bridge.close()
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_done.set()
+
+    closer = Thread(target=close_bridge, daemon=True)
+    worker.start()
+    assert entered.wait(1.0), callback_errors
+    closer.start()
+    closed_without_waiting = close_done.wait(0.5)
+    release.set()
+    worker.join(2.0)
+    closer.join(2.0)
+    try:
+        assert closed_without_waiting, "SelectionBridge.close waited on numeric work"
+        assert not callback_errors
+        assert not close_errors
+        assert (
+            plane.latest_publication("@logic/close-race/roi_frame") is None
+        ), "materialization completed after close and published a stale result"
+    finally:
+        bridge.close()
+        plane.retire(source)
+        plane.close()
 
 
 def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk() -> None:

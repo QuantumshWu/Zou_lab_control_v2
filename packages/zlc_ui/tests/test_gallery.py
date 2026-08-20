@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -124,23 +123,3 @@ app.processEvents()
         check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_usage_notebook_has_one_direct_cell_per_complete_gui() -> None:
-    notebook = json.loads((ROOT / "notebooks" / "usage.ipynb").read_text(encoding="utf-8"))
-    cells = {cell.get("id"): "".join(cell.get("source", ())) for cell in notebook["cells"]}
-    expected = {
-        "gallery": "create_gallery_window()",
-        "console-demo": "create_console_window()",
-        "pulse-demo": "create_pulse_window()",
-        "figure-demo": "create_figure_window()",
-        "device-demo": "create_device_window()",
-    }
-    for cell_id, call in expected.items():
-        assert cell_id in cells, cell_id
-        assert call in cells[cell_id], (cell_id, call)
-        assert "close_demo_windows()" in cells[cell_id], cell_id
-
-    assert "capture_window(" in cells["capture"]
-    assert all(cell.get("execution_count") is None for cell in notebook["cells"] if cell["cell_type"] == "code")
-    assert all(not cell.get("outputs") for cell in notebook["cells"] if cell["cell_type"] == "code")

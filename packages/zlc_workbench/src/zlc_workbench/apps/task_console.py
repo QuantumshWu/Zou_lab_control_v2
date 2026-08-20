@@ -484,7 +484,7 @@ def create_experiment_flow(
     ).open()
 
 
-def create_console_window(
+def create_window(
     *,
     workspace=None,
     template=None,
@@ -493,9 +493,9 @@ def create_console_window(
 ):
     """Open only TaskConsole for notebook and acceptance-capture callers.
 
-    This compatibility helper owns the session it creates.  The experiment
-    launcher does not use it: ``main`` uses :func:`create_experiment_flow` so
-    DeviceManager creates one session; its cards open controls on demand.
+    This entry owns the session it creates. The experiment launcher does not
+    use it: ``main`` uses :func:`create_experiment_flow` so DeviceManager
+    creates one session; its cards open controls on demand.
     """
 
     from ..board import attach_qt
@@ -555,23 +555,6 @@ def create_console_window(
     window.session = session
     window.set_close_guard(_guard)
     return window
-
-
-def create_window(
-    *,
-    workspace=None,
-    template=None,
-    interval_ms=None,
-    window_ratio=None,
-):
-    """Compatibility entry for callers that explicitly request one console."""
-
-    return create_console_window(
-        workspace=workspace,
-        template=template,
-        interval_ms=interval_ms,
-        window_ratio=window_ratio,
-    )
 
 
 def _open_saved_figure(parent: object, start: str) -> object | None:

@@ -1,6 +1,6 @@
 # ZLC v2 Architecture Convergence — Implementation Goal
 
-状态：READY；只有用户以后明确发送本Goal要求执行时才开始。当前不得实施代码。
+状态：ACTIVE；用户已授权执行。Milestone 1–3与residual closure完成，Milestone 4在独立fix commit之后开始；准确状态看`IMPLEMENTATION_PLAN.md`。
 
 ## 1. 唯一目标
 
@@ -149,6 +149,7 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 - 先写能杀死旧错误的行为测试，再实现；明确obsolete tests直接删除，不迁就旧结构；
 - 每个milestone完成代码、tests、docs和证据后一次commit；不为小修改碎片commit；
 - milestone内允许较大diff，但结束时只有一条production路径、worktree清楚、focused tests通过；
+- 每个milestone提交前必须做start→candidate residual sweep：重建production consumer graph，删除旧API/alias/重复owner，按production/tests/docs解释净LOC，逐项删除或合并duplicate、white-box、self-test与obsolete-behaviour tests，并把所有有意延期项写入Checkpoint；测试通过不能代替这道删除gate；
 - 不用一个巨大最终commit掩盖阶段边界；建议8个milestone commits（含authority/checkpoint阶段）；
 - 每个commit message说明删除了哪个旧truth、建立了哪个唯一owner、运行了哪些证据；
 - 不自动push或创建PR，除非用户以后明确要求。

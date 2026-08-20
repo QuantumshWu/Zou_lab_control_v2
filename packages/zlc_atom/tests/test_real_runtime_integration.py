@@ -121,10 +121,11 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             task_result.calibration,
         )
         occupancy = occupancy_node.process(
-            camera_cycle_snapshot([(record,) for record in task_result.short]),
+            camera_cycle_snapshot(
+                [(record,) for record in task_result.capture.short]
+            ),
         )
         assert occupancy.counts.shape == (30, 1, 35)
-        np.testing.assert_allclose(occupancy.artifacts["rate"].block.values[:, :, 0], occupancy.rate)
 
         oracle = _oracle()
         result = calibrate(

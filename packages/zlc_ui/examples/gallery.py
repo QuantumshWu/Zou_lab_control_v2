@@ -21,7 +21,6 @@ if str(ROOT) not in sys.path:
 
 from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-import zlc_ui.concurrency as _concurrency  # noqa: E402
 import zlc_ui.console as _console  # noqa: E402
 import zlc_ui.fluent as _fluent  # noqa: E402
 import zlc_ui.form as _form  # noqa: E402
@@ -35,7 +34,6 @@ from zlc_ui import (  # noqa: E402
     ensure_qt_app,
 )
 
-QtOwnerWake = _concurrency.QtOwnerWake
 ConsoleBoardView = _console.ConsoleBoardView
 PanelCardView = _console.PanelCardView
 ACCENT = _fluent.ACCENT
@@ -163,9 +161,6 @@ class _GalleryBody(QtWidgets.QWidget):
         shell.setSpacing(0)
         shell.addWidget(self.scroll)
 
-        # Non-visual public primitives are still constructed here so a human
-        # review can verify the gallery has no hidden domain dependency.
-        self._owner_wake = QtOwnerWake(self)
         self._popup = FluentPopup(self)
         self._popup.resize(280, 120)
         self._popup.hide()

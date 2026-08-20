@@ -1,34 +1,13 @@
-"""Saving a figure with everything needed to explain it.
+"""Write the formal figure archive to the path selected by Panel Save.
 
-One file per saved figure, filed under the day it was taken:
-
-    <save_root>/2026_08_05/mot-loading.npz
-
-The arrays go in as arrays.  Everything else -- what the apparatus was doing,
-which pulse drove it, which node computed it, how the panel was configured --
-goes in as ONE JSON string under ``info``.
-
-That single choice is what makes the archive outlive us.  ``np.load`` refuses to
-unpickle by default, and rightly: an archive whose metadata is pickled Python
-objects can only be read by the code that wrote it, and stops opening the day a
-class is renamed.  JSON reads with the standard library, forever, from any
-language.  The rule this package holds itself to is that a reader needs numpy
-and nothing else:
-
-    with np.load(path) as archive:                 # allow_pickle stays False
-        info = json.loads(str(archive["info"]))
-        frames = archive["frames"]
-
-The composition root writes archives because it is the only place that can see
-an experiment whole.  It does NOT invent their contents: each section is
-produced by the package that owns that subject, and this module only assembles
-the sections and puts the file on disk.
+``zlc_data.figure_archive`` owns the format.  Workbench supplies the panel's
+typed datasets and records, then commits those bytes atomically to the explicit
+Save As path.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date as _date
 import os
 from pathlib import Path
 from typing import Any
@@ -44,14 +23,13 @@ from zlc_data.figure_archive import (
     read_archive,
     read_dataset,
 )
-from zlc_durable import atomic_write_bytes, day_folder, unique_path
+from zlc_durable import atomic_write_bytes
 
 
 __all__ = [
     "FIGURE_SCHEMA",
     "read_archive",
     "read_dataset",
-    "write_figure",
     "write_figure_file",
 ]
 
@@ -78,28 +56,3 @@ def write_figure_file(
         ),
     )
     return target
-
-
-def write_figure(
-    save_root: str | os.PathLike[str],
-    name: str,
-    *,
-    arrays: Mapping[str, np.ndarray | OwnedSnapshot],
-    sections: Mapping[str, Any],
-    when: _date | None = None,
-) -> Path:
-    """Write one uniquely named figure archive and return where it landed.
-
-    The file is written atomically, so an interrupted save leaves the previous
-    archive intact rather than a truncated one.
-    """
-
-    folder = day_folder(save_root, _date.today() if when is None else when)
-    return unique_path(
-        folder,
-        name,
-        ".npz",
-        writer=lambda temporary: temporary.write_bytes(
-            figure_bytes(name, arrays=arrays, sections=sections)
-        ),
-    )

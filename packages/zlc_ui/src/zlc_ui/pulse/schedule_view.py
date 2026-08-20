@@ -980,11 +980,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         layout.addWidget(dataset_frame, 1)
         self.dataset_panes = dataset_frame
 
-        # Compatibility name retained for callers of the first extracted
-        # version; v1's canonical public pieces are left_scroll/timeline_scroll.
-        self.dataset_scroll = self.left_scroll
-        self.dataset_body = left_body
-
         # Bottom bar: the original three titled cards.  Control is a 3×3 grid;
         # Connection and Ports retain their fixed widths so the timeline gets
         # the remaining space instead of forcing a second row.

@@ -23,6 +23,7 @@ from zlc_atom.install import (
     create_installation,
     discover_device_catalog,
 )
+from zlc_atom.install.configuration import DeviceInstanceConfig, InstallationConfig
 
 
 def test_a_failed_device_close_is_retried_before_installation_is_terminal() -> None:
@@ -143,6 +144,32 @@ def test_duplicate_device_keys_are_rejected_before_world_or_factory_side_effects
     assert world_calls == []
     assert made == []
     assert closed == []
+
+
+def test_device_specs_and_config_documents_deep_own_nested_parameters() -> None:
+    parameters = {"camera": {"gain": [1.0, 2.0]}}
+    spec = DeviceSpec("camera", "camera.virtual", parameters)
+    configured = DeviceInstanceConfig(
+        "camera",
+        "camera",
+        "camera.virtual",
+        parameters,
+    )
+
+    parameters["camera"]["gain"][0] = 99.0
+    assert spec.config["camera"]["gain"] == (1.0, 2.0)
+    assert configured.parameters["camera"]["gain"] == (1.0, 2.0)
+    with pytest.raises(TypeError):
+        spec.config["camera"]["gain"][0] = 99.0
+    with pytest.raises(TypeError):
+        configured.parameters["camera"]["gain"][0] = 99.0
+
+    document = configured.to_dict()
+    document["parameters"]["camera"]["gain"][0] = 99.0
+    assert configured.parameters["camera"]["gain"] == (1.0, 2.0)
+    specs = InstallationConfig((configured,)).specs()
+    specs[0]["config"]["camera"]["gain"][0] = 99.0
+    assert configured.parameters["camera"]["gain"] == (1.0, 2.0)
 
 
 def test_installation_rejects_wrong_capability_instances_and_uses_one_registry() -> None:

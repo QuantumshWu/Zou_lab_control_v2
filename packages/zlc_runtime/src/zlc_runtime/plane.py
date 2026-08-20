@@ -98,8 +98,6 @@ def _freeze_run_record_value(value: object, path: str) -> object:
 
 
 def _freeze_run_record(value: Mapping[str, object]) -> Mapping[str, object]:
-    if isinstance(value, MappingProxyType):
-        return value
     frozen = _freeze_run_record_value(value, "run_record")
     assert isinstance(frozen, Mapping)
     return frozen
@@ -478,10 +476,17 @@ class _GenerationState:
     publication_stream: AcquisitionStream[SignalPublication] | None = None
     exact_outputs: frozenset[str] | None = None
     canonical_schemas: Mapping[str, DatasetSchema] = field(default_factory=dict)
-    commit_values: dict[str, list[tuple[int, SignalValue]]] = field(
-        default_factory=dict
-    )
-    commit_origins: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+    commit_chunks: dict[
+        str,
+        list[
+            tuple[
+                int,
+                SignalValue,
+                tuple[int, int],
+                tuple[SignalPublication, ...],
+            ]
+        ],
+    ] = field(default_factory=dict)
     occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
     materialized: dict[str, tuple[int, OwnedSnapshot]] = field(default_factory=dict)
     committed_run_record: Mapping[str, object] | None = None
@@ -1004,10 +1009,8 @@ class SignalDataPlane:
             raise RuntimeError("signal has no canonical Dataset schema")
         chunks = tuple(
             (value.snapshot, origin)
-            for (commit_sequence, value), origin in zip(
-                state.commit_values.get(signal_name, ()),
-                state.commit_origins.get(signal_name, ()),
-                strict=True,
+            for commit_sequence, value, origin, _parents in state.commit_chunks.get(
+                signal_name, ()
             )
             if commit_sequence <= sequence
         )
@@ -1269,6 +1272,14 @@ class SignalDataPlane:
                 parents=parents,
                 notify=False,
             )
+            replay_parents = tuple(
+                self._slim_publication_locked(
+                    parent,
+                    state.source_name,
+                    {},
+                )
+                for parent in parents
+            )
             for qualified, mask, target in occupied_updates:
                 mask[target] = True
                 occupied_cells[qualified] = mask
@@ -1280,11 +1291,13 @@ class SignalDataPlane:
                 state.last_parent_sequence = source_publication.event_ref.sequence
                 state.last_parent_trigger = trigger
             for qualified in exact_qualified:
-                state.commit_values.setdefault(qualified, []).append(
-                    (sequence, publication.signals[qualified])
-                )
-                state.commit_origins.setdefault(qualified, []).append(
-                    origins[qualified]
+                state.commit_chunks.setdefault(qualified, []).append(
+                    (
+                        sequence,
+                        publication.signals[qualified],
+                        origins[qualified],
+                        replay_parents,
+                    )
                 )
             producer = state.publication_stream
             if producer is not None:
@@ -1325,7 +1338,9 @@ class SignalDataPlane:
             sequence = selected.event_ref.sequence
             if not any(
                 commit_sequence == sequence
-                for commit_sequence, _value in state.commit_values[name]
+                for commit_sequence, _value, _origin, _parents in state.commit_chunks[
+                    name
+                ]
             ):
                 raise ValueError("publication is not a canonical commit of this run")
             cached = state.materialized.get(name)
@@ -1554,9 +1569,9 @@ class SignalDataPlane:
         stream = self._ensure_publication_stream_locked(state)
         retained: list[tuple[int, SignalPublication]] = []
         if replay:
-            committed = state.commit_values.get(signal_name, ())
+            committed = state.commit_chunks.get(signal_name, ())
             if committed:
-                for sequence, value in committed:
+                for sequence, value, _origin, parents in committed:
                     if (
                         state.publication is not None
                         and state.publication.event_ref.sequence == sequence
@@ -1571,9 +1586,12 @@ class SignalDataPlane:
                             ),
                             {signal_name: value},
                             self._publication_issuer,
+                            direct_parent_refs=tuple(
+                                parent.event_ref for parent in parents
+                            ),
                             run_record=value.run_record,
                         )
-                        self._publication_parents[publication] = ()
+                        self._publication_parents[publication] = parents
                     retained.append((sequence, publication))
             elif state.publication is not None:
                 retained.append(
@@ -1639,6 +1657,20 @@ class SignalDataPlane:
 
         with self._lock:
             return self._resolved_direct_parents_locked(publication)
+
+    def publication_roots(
+        self,
+        publication: SignalPublication,
+    ) -> frozenset[EventRef]:
+        """Return the parentless event refs in one publication's causal chain."""
+
+        from .front import _publication_roots
+
+        with self._lock:
+            return _publication_roots(
+                publication,
+                self._resolved_direct_parents_locked,
+            )
 
     def attach_latest_only_processor(
         self,
@@ -1808,6 +1840,44 @@ class SignalDataPlane:
             raise TypeError("signal parent must be SignalPublication")
         if publication._issuer is not self._publication_issuer:
             raise ValueError("signal publication was not issued by this data plane")
+
+    def _slim_publication_locked(
+        self,
+        publication: SignalPublication,
+        selected_signal: str | None,
+        memo: dict[SignalPublication, SignalPublication],
+    ) -> SignalPublication:
+        """Retain one causal route without retaining unconsumed siblings."""
+
+        existing = memo.get(publication)
+        if existing is not None:
+            return existing
+        if selected_signal is None:
+            raise RuntimeError("derived publication has no selected source signal")
+        value = publication.value(selected_signal)
+        if value is None:
+            raise RuntimeError("causal parent lost its selected source signal")
+        parents = self._resolved_direct_parents_locked(publication)
+        state = self._states.get(publication.event_ref.stream_id.value)
+        parent_signal = (
+            None
+            if state is None or state.generation != publication.event_ref.generation
+            else state.source_name
+        )
+        slim_parents = tuple(
+            self._slim_publication_locked(parent, parent_signal, memo)
+            for parent in parents
+        )
+        slim = SignalPublication(
+            publication.event_ref,
+            {selected_signal: value},
+            self._publication_issuer,
+            direct_parent_refs=tuple(parent.event_ref for parent in slim_parents),
+            run_record=publication.run_record,
+        )
+        memo[publication] = slim
+        self._publication_parents[slim] = slim_parents
+        return slim
 
     def _resolved_direct_parents_locked(
         self,

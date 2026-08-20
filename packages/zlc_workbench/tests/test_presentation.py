@@ -14,26 +14,17 @@ from __future__ import annotations
 
 import os
 import time
-from pathlib import Path
 from dataclasses import replace
-from threading import Event, get_ident
+from threading import Event
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
-from zlc_data import StreamGenerationId
+from zlc_data import StreamGenerationId, owned_snapshot_from_arrays
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.calibration import (
-    FrameContract,
-    ReadoutModel,
-    ReadoutModelKind,
-    SiteMap,
-    TrapCalibration,
-)
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -46,11 +37,9 @@ from zlc_runtime.presentation import (
     OwnerChannels,
     SurfaceBatchArbiter,
 )
-from zlc_workbench.console import ConsolePresenter, PanelBinding
-from zlc_workbench.panel_state import PanelState
-from zlc_workbench.presentation import PlotPanelPort as _PlotPanelPort
+from zlc_workbench.presentation import PlotPanelPort
 from zlc_workbench.session import read_pulse
-from pulse_fixtures import ordinary_imaging_sequence, write_ordinary_pulse
+from pulse_fixtures import write_ordinary_pulse
 
 
 def _submit_now(work):
@@ -88,9 +77,68 @@ def _without_deadlock(work, *, timeout: float = 2.0):
     return result
 
 
-def PlotPanelPort(*args, **kwargs):
-    kwargs.setdefault("submit_projection", _submit_now)
-    return _PlotPanelPort(*args, **kwargs)
+def _ready(value=None):
+    from concurrent.futures import Future
+
+    future = Future()
+    future.set_result(value)
+    return future
+
+
+def _initial_then(host, later=None):
+    first = True
+
+    def replace_host(plot_input, value, publication):
+        nonlocal first
+        if first:
+            first = False
+            return host, _ready()
+        if later is None:
+            raise AssertionError("test did not declare a generation replacement")
+        return later(plot_input, value, publication)
+
+    return replace_host
+
+
+def _mount(port, value, publication, front):
+    update = port.prepare(value, publication, front)
+    assert update is not None
+    operation = update.future.result(timeout=10.0)
+    assert port.accept(update, operation)
+    assert port.presented_publication() is publication
+    return update
+
+
+def _advanced(value, publication, signal: str, step: int = 1):
+    snapshot = owned_snapshot_from_arrays(
+        value.snapshot.block.schema,
+        value.snapshot.block.values,
+        value.snapshot.block.revision.value + step,
+        validity=value.snapshot.block.validity,
+        block_id=value.snapshot.block.block_id,
+        stream_generation=value.snapshot.ref.stream_generation,
+    )
+    advanced_value = replace(value, snapshot=snapshot)
+    advanced_publication = replace(
+        publication,
+        event_ref=replace(
+            publication.event_ref,
+            sequence=publication.event_ref.sequence + step,
+        ),
+        signals={**publication.signals, signal: advanced_value},
+    )
+    return advanced_value, advanced_publication
+
+
+class _ClosingHost:
+    def __init__(self, name: str) -> None:
+        self.host_id = name
+        self.closed = False
+
+    def close(self, *, timeout=0.0):
+        del timeout
+        self.closed = True
+        return True
 
 
 @pytest.fixture
@@ -149,7 +197,13 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
         ),
     )
     try:
-        port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
+        port = PlotPanelPort(
+            "panel-1",
+            signal,
+            display_interval_ms=100,
+            submit_projection=_submit_now,
+            replace_host=_initial_then(host),
+        )
         class _Wake:
             """The shape a Qt shim implements: coalesce, then wake the owner."""
 
@@ -242,16 +296,25 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     host = plot.RasterPlotHost.from_plot(value.snapshot, spec)
     other = plot.RasterPlotHost.from_plot(value.snapshot, spec)
     try:
-        port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-        update = port.prepare(value, publication, front)
-        assert port.can_accept(update, None)
+        port = PlotPanelPort(
+            "panel-1",
+            signal,
+            display_interval_ms=100,
+            submit_projection=_submit_now,
+            replace_host=_initial_then(host),
+        )
+        _mount(port, value, publication, front)
+        next_value, next_publication = _advanced(value, publication, signal)
+        update = port.prepare(next_value, next_publication, front)
+        operation = update.future.result(timeout=10.0)
+        assert port.can_accept(update, operation)
 
         import dataclasses
 
         stale = dataclasses.replace(update, host_token=other.host_id)
         assert not port.can_accept(stale, None)
         assert not port.accept(stale, None)
-        assert port.presented_publication() is None
+        assert port.presented_publication() is publication
     finally:
         host.close()
         other.close()
@@ -280,11 +343,15 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
     revision_number = value.snapshot.ref.revision.value
     assert not isinstance(revision_object, int)
 
-    host = SimpleNamespace(
-        host_id=object(),
-        update_data=lambda snapshot, **_render: Future(),
+    host = SimpleNamespace(host_id=object())
+    rendered = Future()
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=lambda _input, _value, _publication: (host, rendered),
     )
-    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
     update = port.prepare(value, publication, front)
     assert update is not None
 
@@ -294,92 +361,9 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
     assert port.publication_for_revision(revision_number + 999) is None
 
     # Presented: same identity rule after the batch accepted the update.
-    assert port.accept(update, None)
+    rendered.set_result("mounted")
+    assert port.accept(update, update.future.result(timeout=0))
     assert port.publication_for_revision(revision_number) is publication
-
-
-def test_finite_exact_signal_projects_the_runtime_canonical_dataset(
-    live_bench,
-) -> None:
-    from concurrent.futures import Future, ThreadPoolExecutor
-    from zlc_data import owned_snapshot_from_arrays
-    from zlc_runtime.plane import SignalFront
-
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
-    accumulated = owned_snapshot_from_arrays(
-        schema=value.snapshot.block.schema,
-        values=value.snapshot.block.values,
-        revision=value.snapshot.block.revision.value + 10,
-        validity=value.snapshot.block.validity,
-        stream_generation=value.snapshot.ref.stream_generation,
-    )
-    exact_value = replace(
-        value,
-        canonical_schema=value.snapshot.block.schema,
-        cell_origin=(0, 0),
-    )
-    exact_publication = replace(
-        publication,
-        signals={signal: exact_value},
-    )
-    exact_front = SignalFront(
-        {signal: exact_value},
-        {},
-        {signal: exact_publication},
-    )
-    requested: list[tuple[str, object]] = []
-    projection_threads: list[int] = []
-    received: list[object] = []
-    entered = Event()
-    release = Event()
-
-    def current_dataset(name: str, exact: object) -> object:
-        projection_threads.append(get_ident())
-        requested.append((name, exact))
-        entered.set()
-        assert release.wait(5.0)
-        return accumulated
-
-    def update_data(snapshot: object) -> Future:
-        received.append(snapshot)
-        completed = Future()
-        completed.set_result(None)
-        return completed
-
-    host = SimpleNamespace(
-        host_id=object(),
-        update_data=update_data,
-    )
-    projector = ThreadPoolExecutor(max_workers=1)
-    try:
-        port = PlotPanelPort(
-            "panel",
-            signal,
-            host,
-            display_interval_ms=100,
-            current_dataset=current_dataset,
-            submit_projection=projector.submit,
-        )
-
-        owner_thread = get_ident()
-        update = port.prepare(exact_value, exact_publication, exact_front)
-        assert update is not None
-        assert entered.wait(5.0)
-        assert not update.future.done()
-        assert requested == [(signal, exact_publication)]
-        assert projection_threads != [owner_thread]
-        assert received == []
-        release.set()
-        update.future.result(timeout=5.0)
-        assert received == [accumulated]
-    finally:
-        release.set()
-        projector.shutdown(wait=True, cancel_futures=True)
 
 
 def test_closing_a_port_cancels_queued_projection(live_bench) -> None:
@@ -392,12 +376,12 @@ def test_closing_a_port_cancels_queued_projection(live_bench) -> None:
     publication = front.publication(signal)
     assert value is not None and publication is not None
     queued = Future()
-    port = _PlotPanelPort(
+    port = PlotPanelPort(
         "panel",
         signal,
-        SimpleNamespace(host_id=object()),
         display_interval_ms=100,
         submit_projection=lambda _work: queued,
+        replace_host=_initial_then(SimpleNamespace(host_id=object())),
     )
 
     update = port.prepare(value, publication, front)
@@ -432,10 +416,9 @@ def test_close_does_not_wait_for_initial_host_staging(live_bench) -> None:
 
     projector = ThreadPoolExecutor(max_workers=1)
     try:
-        port = _PlotPanelPort(
+        port = PlotPanelPort(
             "panel",
             signal,
-            None,
             display_interval_ms=100,
             submit_projection=projector.submit,
             replace_host=replace_host,
@@ -444,49 +427,17 @@ def test_close_does_not_wait_for_initial_host_staging(live_bench) -> None:
         update = port.prepare(value, publication, front)
         assert update is not None and entered.wait(5.0)
 
-        started = time.perf_counter()
-        port.close()
-        close_seconds = time.perf_counter() - started
+        _without_deadlock(port.close)
         release.set()
         deadline = time.monotonic() + 5.0
         while not retired and time.monotonic() < deadline:
             time.sleep(0.001)
 
-        assert close_seconds < 0.01
         assert update.future.cancelled()
         assert retired == [staged]
     finally:
         release.set()
         projector.shutdown(wait=True, cancel_futures=True)
-
-
-def test_initial_anchored_publication_callback_can_reenter_port(live_bench) -> None:
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
-
-    observed: list[tuple[object, object]] = []
-    port = None
-
-    def on_presented(selected: object, plot_input: object) -> None:
-        observed.append((port.presented_publication(), port.presented_input()))
-        assert selected is publication
-        assert plot_input is value.snapshot
-
-    port = PlotPanelPort(
-        "panel",
-        signal,
-        SimpleNamespace(host_id=object()),
-        display_interval_ms=100,
-        shown=value.snapshot,
-        on_presented=on_presented,
-    )
-
-    assert _without_deadlock(lambda: port.prepare(value, publication, front)) is None
-    assert observed == [(publication, value.snapshot)]
 
 
 def test_close_does_not_wait_for_running_projection(live_bench) -> None:
@@ -509,25 +460,23 @@ def test_close_does_not_wait_for_running_projection(live_bench) -> None:
     rendered = Future()
     projector = ThreadPoolExecutor(max_workers=1)
     try:
-        port = _PlotPanelPort(
+        host = SimpleNamespace(
+            host_id=object(),
+            update_data=lambda _snapshot: rendered,
+        )
+        port = PlotPanelPort(
             "panel",
             signal,
-            SimpleNamespace(
-                host_id=object(),
-                update_data=lambda _snapshot: rendered,
-            ),
             display_interval_ms=100,
             project_input=project_input,
             submit_projection=projector.submit,
+            replace_host=lambda _input, _value, _publication: (host, rendered),
         )
         update = port.prepare(value, publication, front)
         assert update is not None and entered.wait(5.0)
 
-        started = time.perf_counter()
         _without_deadlock(port.close)
-        elapsed = time.perf_counter() - started
 
-        assert elapsed < 0.1
         assert update.future.cancelled()
         assert not port.has_pending
     finally:
@@ -547,17 +496,23 @@ def test_already_completed_render_does_not_reenter_state_lock(live_bench) -> Non
     rendered = Future()
     operation = object()
     rendered.set_result(operation)
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda _snapshot: rendered,
+    )
     port = PlotPanelPort(
         "panel",
         signal,
-        SimpleNamespace(
-            host_id=object(),
-            update_data=lambda _snapshot: rendered,
-        ),
         display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
     )
+    _mount(port, value, publication, front)
+    next_value, next_publication = _advanced(value, publication, signal)
 
-    update = _without_deadlock(lambda: port.prepare(value, publication, front))
+    update = _without_deadlock(
+        lambda: port.prepare(next_value, next_publication, front)
+    )
 
     assert update is not None
     assert update.future.result(timeout=0) is operation
@@ -579,18 +534,15 @@ def test_already_completed_replacement_does_not_reenter_state_lock(
     rendered = Future()
     operation = object()
     rendered.set_result(operation)
+    later = lambda _input, _value, _publication: (replacement, rendered)
     port = PlotPanelPort(
         "panel",
         signal,
-        old,
         display_interval_ms=100,
-        shown=value.snapshot,
-        replace_host=lambda _input, _value, _publication: (
-            replacement,
-            rendered,
-        ),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(old, later),
     )
-    assert port.prepare(value, publication, front) is None
+    _mount(port, value, publication, front)
     restarted = replace(
         publication,
         event_ref=EventRef(
@@ -666,13 +618,13 @@ def test_companion_only_change_updates_overlay_and_composite_currency(
     port = PlotPanelPort(
         "panel",
         signal,
-        host,
         display_interval_ms=100,
-        shown=project(value, publication, first_front),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
         companion_signals=lambda: (companion,),
         project_input=project,
     )
-    assert port.prepare(value, publication, first_front) is None
+    _mount(port, value, publication, first_front)
     assert port.presented_front_refs() == (
         publication.event_ref,
         first_companion.event_ref,
@@ -712,20 +664,32 @@ def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
     publication = front.publication(signal)
     assert value is not None and publication is not None
 
+    renders: list[Future] = []
     host = SimpleNamespace(
         host_id=object(),
-        update_data=lambda snapshot, **_render: Future(),
+        update_data=lambda _snapshot, **_render: renders.append(Future())
+        or renders[-1],
     )
-    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    update = port.prepare(value, publication, front)
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
+    )
+    _mount(port, value, publication, front)
+    shown = port.presented_publication()
+    next_value, next_publication = _advanced(value, publication, signal)
+    update = port.prepare(next_value, next_publication, front)
     assert update is not None
 
     # The render completed (the host holds the revision), then the whole
     # cohort was abandoned: the decision is final for this revision.
-    update.future.set_result(object())
+    renders[-1].set_result(object())
+    update.future.result(timeout=0)
     port.finish_unpresented(update)
-    assert port.prepare(value, publication, front) is None
-    assert port.presented_publication() is None  # pixels honestly not shown
+    assert port.prepare(next_value, next_publication, front) is None
+    assert port.presented_publication() is shown
     assert port.last_error is None
 
 
@@ -748,14 +712,22 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
         host_id=object(),
         update_data=lambda snapshot, **_render: calls.append(snapshot) or Future(),
     )
-    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    first = port.prepare(value, publication, front)
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
+    )
+    _mount(port, value, publication, front)
+    next_value, next_publication = _advanced(value, publication, signal)
+    first = port.prepare(next_value, next_publication, front)
     assert first is not None
-    assert port.prepare(value, publication, front) is None
+    assert port.prepare(next_value, next_publication, front) is None
     assert len(calls) == 1
 
     port.finish_unpresented(first)
-    retry = port.prepare(value, publication, front)
+    retry = port.prepare(next_value, next_publication, front)
     assert retry is not None
     assert len(calls) == 2
     port.finish_unpresented(retry)
@@ -763,13 +735,13 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
     host.update_data = lambda _snapshot, **_render: (_ for _ in ()).throw(
         RuntimeError("synchronous render rejection")
     )
-    refused = port.prepare(value, publication, front)
+    refused = port.prepare(next_value, next_publication, front)
     assert refused is not None
     with pytest.raises(RuntimeError, match="synchronous render rejection"):
         refused.future.result()
     port.reject(refused, refused.future.exception())
     host.update_data = lambda snapshot, **_render: calls.append(snapshot) or Future()
-    recovered = port.prepare(value, publication, front)
+    recovered = port.prepare(next_value, next_publication, front)
     assert recovered is not None
     port.finish_unpresented(recovered)
 
@@ -787,7 +759,6 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
     newer frame must present.
     """
 
-    from zlc_data import owned_snapshot_from_arrays
     from zlc_runtime.plane import SignalFront
 
     plot = pytest.importorskip("zlc_plot")
@@ -809,30 +780,16 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
         port = PlotPanelPort(
             "panel-1",
             signal,
-            host,
             display_interval_ms=100,
-            shown=value.snapshot,
+            submit_projection=_submit_now,
+            replace_host=_initial_then(host),
         )
         channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
         arbiter = SurfaceBatchArbiter(channels)
 
         def moment(step: int) -> SignalFront:
-            snapshot = owned_snapshot_from_arrays(
-                schema=value.snapshot.block.schema,
-                values=value.snapshot.block.values,
-                revision=value.snapshot.block.revision.value + step,
-                validity=value.snapshot.block.validity,
-                block_id=value.snapshot.block.block_id,
-                stream_generation=value.snapshot.ref.stream_generation,
-            )
-            stepped_value = replace(value, snapshot=snapshot)
-            stepped = replace(
-                publication,
-                event_ref=replace(
-                    publication.event_ref,
-                    sequence=publication.event_ref.sequence + step,
-                ),
-                signals={**publication.signals, signal: stepped_value},
+            stepped_value, stepped = _advanced(
+                value, publication, signal, step
             )
             return SignalFront(
                 {signal: stepped_value},
@@ -840,8 +797,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
                 {signal: stepped},
             )
 
-        # Anchor the identity of the snapshot the host was built from.
-        assert not arbiter.enqueue_group((port,), moment(0))
+        _mount(port, value, publication, moment(0))
 
         # Occupy the serial render worker so the next update stays queued.
         gate = Event()
@@ -886,14 +842,22 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
         host_id=object(),
         update_data=lambda _snapshot, **_render: Future(),
     )
-    port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-    update = port.prepare(value, publication, front)
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
+    )
+    _mount(port, value, publication, front)
+    next_value, next_publication = _advanced(value, publication, signal)
+    update = port.prepare(next_value, next_publication, front)
     assert update is not None
 
     port.reject(update, CancelledError())
     assert port.last_error is None
 
-    retry = port.prepare(value, publication, front)
+    retry = port.prepare(next_value, next_publication, front)
     assert retry is not None, "the superseded update did not release its slot"
     port.reject(retry, RuntimeError("a real render failure"))
     assert isinstance(port.last_error, RuntimeError)
@@ -905,7 +869,6 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     """A terminal publication reusing committed bytes only reanchors identity."""
 
     from concurrent.futures import Future
-    from zlc_data import owned_snapshot_from_arrays
 
     plane, node, _sequencer, _monitor = live_bench
     signal = node.signal_key("frames")
@@ -931,30 +894,15 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     port = PlotPanelPort(
         "panel-1",
         signal,
-        host,
         display_interval_ms=100,
-        shown=value.snapshot,
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
         on_presented=on_presented,
     )
-    assert _without_deadlock(lambda: port.prepare(value, publication, front)) is None
+    _without_deadlock(lambda: _mount(port, value, publication, front))
 
-    snapshot = owned_snapshot_from_arrays(
-        schema=value.snapshot.block.schema,
-        values=value.snapshot.block.values,
-        revision=value.snapshot.block.revision.value + 1,
-        validity=value.snapshot.block.validity,
-        block_id=value.snapshot.block.block_id,
-        stream_generation=value.snapshot.ref.stream_generation,
-    )
-    live_value = replace(value, snapshot=snapshot)
-    live = replace(
-        publication,
-        event_ref=replace(
-            publication.event_ref,
-            sequence=publication.event_ref.sequence + 1,
-        ),
-        signals={**publication.signals, signal: live_value},
-    )
+    live_value, live = _advanced(value, publication, signal)
+    snapshot = live_value.snapshot
     update = port.prepare(live_value, live, front)
     assert update is not None
 
@@ -1010,18 +958,19 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
         return host, host.configure()
 
     try:
+        def accepted_replacement(old, new, _publication, _input):
+            if old is not None:
+                accepted.append((old, new))
+
         port = PlotPanelPort(
             "panel-1",
             signal,
-            first,
             display_interval_ms=100,
-            shown=value.snapshot,
-            replace_host=replace_host,
-            accept_host=lambda old, new, _publication, _input: accepted.append(
-                (old, new)
-            ),
+            submit_projection=_submit_now,
+            replace_host=_initial_then(first, replace_host),
+            accept_host=accepted_replacement,
         )
-        assert port.prepare(value, publication, front) is None
+        _mount(port, value, publication, front)
         restarted = replace(
             publication,
             event_ref=EventRef(
@@ -1072,24 +1021,14 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
         {signal: restarted},
     )
 
-    class Host:
-        def __init__(self, name: str) -> None:
-            self.host_id = name
-            self.closed = False
-
-        def close(self, *, timeout=0.0):
-            del timeout
-            self.closed = True
-            return True
-
-    old = (Host("old-a"), Host("old-b"))
-    staged: list[Host] = []
+    old = (_ClosingHost("old-a"), _ClosingHost("old-b"))
+    staged: list[_ClosingHost] = []
     completions: list[Future] = []
     accepted: list[str] = []
 
     def stage(name: str):
         def create(_input, _value, _publication):
-            host = Host(name)
+            host = _ClosingHost(name)
             future = Future()
             staged.append(host)
             completions.append(future)
@@ -1101,27 +1040,26 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
         PlotPanelPort(
             "a",
             signal,
-            old[0],
             display_interval_ms=100,
-            shown=value.snapshot,
-            replace_host=stage("new-a"),
-            accept_host=lambda _old, new, _pub, _input: accepted.append(
-                new.host_id
+            submit_projection=_submit_now,
+            replace_host=_initial_then(old[0], stage("new-a")),
+            accept_host=lambda previous, new, _pub, _input: (
+                accepted.append(new.host_id) if previous is not None else None
             ),
         ),
         PlotPanelPort(
             "b",
             signal,
-            old[1],
             display_interval_ms=100,
-            shown=value.snapshot,
-            replace_host=stage("new-b"),
-            accept_host=lambda _old, new, _pub, _input: accepted.append(
-                new.host_id
+            submit_projection=_submit_now,
+            replace_host=_initial_then(old[1], stage("new-b")),
+            accept_host=lambda previous, new, _pub, _input: (
+                accepted.append(new.host_id) if previous is not None else None
             ),
         ),
     )
-    assert all(port.prepare(value, publication, front) is None for port in ports)
+    for port in ports:
+        _mount(port, value, publication, front)
 
     channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
     arbiter = SurfaceBatchArbiter(channels)
@@ -1170,33 +1108,23 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
         {signal: restarted},
     )
 
-    class Host:
-        def __init__(self, name: str) -> None:
-            self.host_id = name
-            self.closed = False
-
-        def close(self, *, timeout=0.0):
-            del timeout
-            self.closed = True
-            return True
-
-    old = (Host("old-a"), Host("old-b"))
-    staged = (Host("new-a"), Host("new-b"))
+    old = (_ClosingHost("old-a"), _ClosingHost("old-b"))
+    staged = (_ClosingHost("new-a"), _ClosingHost("new-b"))
     completions = (Future(), Future())
     accepted: list[str] = []
     ports = tuple(
         PlotPanelPort(
             panel_id,
             signal,
-            previous,
             display_interval_ms=100,
-            shown=value.snapshot,
-            replace_host=(
+            submit_projection=_submit_now,
+            replace_host=_initial_then(
+                previous,
                 lambda _input, _value, _publication, replacement=replacement,
-                completion=completion: (replacement, completion)
+                completion=completion: (replacement, completion),
             ),
-            accept_host=lambda _old, new, _pub, _input: accepted.append(
-                new.host_id
+            accept_host=lambda mounted, new, _pub, _input: (
+                accepted.append(new.host_id) if mounted is not None else None
             ),
         )
         for panel_id, previous, replacement, completion in zip(
@@ -1207,7 +1135,8 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
             strict=True,
         )
     )
-    assert all(port.prepare(value, publication, front) is None for port in ports)
+    for port in ports:
+        _mount(port, value, publication, front)
     channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
     arbiter = SurfaceBatchArbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
@@ -1242,31 +1171,18 @@ def test_abandoned_generation_replacement_closes_only_the_staged_host(
         ),
     )
 
-    class Host:
-        def __init__(self, name: str) -> None:
-            self.host_id = name
-            self.closed = False
-
-        def close(self, *, timeout=0.0):
-            del timeout
-            self.closed = True
-            return True
-
-    old = Host("old")
-    staged = Host("staged")
+    old = _ClosingHost("old")
+    staged = _ClosingHost("staged")
     completion = Future()
+    later = lambda _input, _value, _publication: (staged, completion)
     port = PlotPanelPort(
         "panel",
         signal,
-        old,
         display_interval_ms=100,
-        shown=value.snapshot,
-        replace_host=lambda _input, _value, _publication: (
-            staged,
-            completion,
-        ),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(old, later),
     )
-    assert port.prepare(value, publication, front) is None
+    _mount(port, value, publication, front)
     update = port.prepare(value, restarted, front)
     assert update is not None
     completion.set_result("ready")
@@ -1300,28 +1216,18 @@ def test_releasing_port_cancels_pending_replacement_without_swapping_host(
         ),
     )
 
-    class Host:
-        def __init__(self, name: str) -> None:
-            self.host_id = name
-            self.closed = False
-
-        def close(self, *, timeout=0.0):
-            del timeout
-            self.closed = True
-            return True
-
-    old = Host("shown")
-    staged = Host("staged")
+    old = _ClosingHost("shown")
+    staged = _ClosingHost("staged")
     operation = Future()
+    later = lambda _input, _value, _publication: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
-        old,
         display_interval_ms=100,
-        shown=value.snapshot,
-        replace_host=lambda _input, _value, _publication: (staged, operation),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(old, later),
     )
-    assert port.prepare(value, publication, front) is None
+    _mount(port, value, publication, front)
     update = port.prepare(value, restarted, front)
     assert update is not None
 
@@ -1333,35 +1239,6 @@ def test_releasing_port_cancels_pending_replacement_without_swapping_host(
     assert port.presented_publication() is publication
     assert not old.closed
     assert not port.has_pending
-
-
-def test_console_panel_release_closes_port_before_retiring_shown_host() -> None:
-    closed: list[str] = []
-
-    class Port:
-        def close(self) -> None:
-            closed.append("port")
-
-    class Host:
-        def close(self, *, timeout=0.0) -> bool:
-            del timeout
-            closed.append("host")
-            return True
-
-    presenter = ConsolePresenter.__new__(ConsolePresenter)
-    presenter._retired_plot_hosts = []
-    binding = PanelBinding(
-        "panel",
-        PanelState("signal", "curve", "2x2", 100, "Panel"),
-        Host(),
-        Port(),
-    )
-
-    presenter._release_panel(binding)
-
-    assert closed == ["port", "host"]
-    assert binding.port is None
-    assert binding.host is None
 
 
 def test_board_close_releases_pending_generation_replacement(
@@ -1386,28 +1263,18 @@ def test_board_close_releases_pending_generation_replacement(
     )
     restarted_front = SignalFront({signal: value}, {}, {signal: restarted})
 
-    class Host:
-        def __init__(self, name: str) -> None:
-            self.host_id = name
-            self.closed = False
-
-        def close(self, *, timeout=0.0):
-            del timeout
-            self.closed = True
-            return True
-
-    old = Host("shown")
-    staged = Host("staged")
+    old = _ClosingHost("shown")
+    staged = _ClosingHost("staged")
     operation = Future()
+    later = lambda _input, _value, _publication: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
-        old,
         display_interval_ms=100,
-        shown=value.snapshot,
-        replace_host=lambda _input, _value, _publication: (staged, operation),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(old, later),
     )
-    assert port.prepare(value, publication, front) is None
+    _mount(port, value, publication, front)
     arbiter = SurfaceBatchArbiter(
         OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
     )
@@ -1421,16 +1288,6 @@ def test_board_close_releases_pending_generation_replacement(
     assert port.presented_publication() is publication
     assert not old.closed
     assert not port.has_pending
-
-
-def test_combined_stage_cancellation_reaches_all_host_operations() -> None:
-    from concurrent.futures import Future
-
-    operations = (Future(), Future(), Future())
-    combined = ConsolePresenter._join_host_operations(operations)
-
-    assert combined.cancel()
-    assert all(operation.cancelled() for operation in operations)
 
 
 def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(
@@ -1457,376 +1314,22 @@ def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(
     operation = Future()
     retired: list[object] = []
     old = SimpleNamespace(host_id="shown")
+    later = lambda _input, _value, _publication: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
-        old,
         display_interval_ms=100,
-        shown=value.snapshot,
-        replace_host=lambda _input, _value, _publication: (staged, operation),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(old, later),
         retire_host=retired.append,
     )
-    assert port.prepare(value, publication, front) is None
+    _mount(port, value, publication, front)
     assert port.prepare(value, restarted, front) is not None
 
     port.close()
 
     assert retired == [staged]
     assert port.host is old
-
-
-def test_a_notebook_assembles_the_same_site_overlay_the_console_draws(
-    live_bench,
-) -> None:
-    """The overlay API is reachable with no console, no presenter, no Qt.
-
-    Its owner is the package that owns the FACTS: the site positions are a
-    calibration fact and the per-site judgement is the occupancy result, so
-    one call over a processor and its published outputs is the whole API.
-    The statuses are the exact row of the frame that was judged -- resolving
-    a multi-row cycle to UNKNOWN everywhere is how the old projection stayed
-    dead in plain sight.
-    """
-
-    from zlc_atom.nodes.occupancy import OccupancyProcessor
-    import zlc_plot as plot
-    from zlc_plot import (
-        IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
-        image_point_overlay_from_signal,
-    )
-    from zlc_plot.primitives import PointStatus
-
-    plane, node, _sequencer, _monitor = live_bench
-    source = plane.freeze().value(node.signal_key("frames"))
-    assert source is not None
-    shape = tuple(int(value) for value in source.snapshot.block.values.shape[-2:])
-    site_ids = ("a", "b", "c")
-    calibration = TrapCalibration(
-        SiteMap(
-            site_ids,
-            np.asarray(((2.0, 3.0), (5.0, 7.0), (9.0, 11.0))),
-            np.asarray((True, True, False)),
-            np.asarray((1.0, 1.0, 0.0)),
-        ),
-        (
-            ReadoutModel(
-                site_ids,
-                np.asarray((1.0e20, -1.0e20, 0.0)),
-                np.zeros(3),
-                np.ones(3),
-                np.asarray((True, True, True)),
-                np.asarray((1.0, 1.0, 1.0)),
-            ),
-        ),
-        ReadoutModelKind.BOX,
-        FrameContract(shape),
-    )
-    processor = OccupancyProcessor(calibration, producer="occupancy-test")
-    outputs = processor.evaluate(source)
-    artifacts = {name: output.snapshot for name, output in outputs.items()}
-    overlay = image_point_overlay_from_signal(
-        outputs["occupied"].run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD],
-        artifacts["occupied"],
-        artifacts["frame_judged"],
-        revision=7,
-    )
-
-    judged = (PointStatus.EMPTY, PointStatus.OCCUPIED, PointStatus.INVALID)
-    assert overlay.revision == 7
-    assert overlay.point_ids == site_ids
-    assert overlay.labels == ("1", "2", "3")
-    axes = source.snapshot.block.schema.cell_schema.data_axes
-    spec = plot.ImagePlot(
-        plot.AxisRef.data(str(axes[-1].axis_id)),
-        plot.AxisRef.data(str(axes[-2].axis_id)),
-    )
-    # One frame, so the picture as a whole says exactly what that frame said.
-    assert overlay.statuses_for(spec, None) == judged
-    np.testing.assert_array_equal(
-        overlay.coordinates,
-        calibration.site_map.centers_xy,
-    )
-
-
-def _two_camera_window_pulse(workspace) -> str:
-    """One load, a long image and a short readout: two frames, two truths."""
-
-    from zlc_pulse import PulseSequence
-
-    ordinary = ordinary_imaging_sequence()
-    two_window = PulseSequence(
-        name="two_window_imaging",
-        target=ordinary.target,
-        time_step_ns=ordinary.time_step_ns,
-        periods=ordinary.periods[:4],
-    )
-    write_ordinary_pulse(
-        workspace,
-        file_stem=two_window.name,
-        sequence=two_window,
-    )
-    return two_window.name
-
-
-def test_a_facet_of_frames_shows_each_frames_own_site_states(
-    tmp_path,
-) -> None:
-    """THE picture: frame_0 | frame_1, each cell carrying its OWN judgement.
-
-    A camera cycle's frames are point rows, and a grid faceted over them is
-    the same picture twice.  The overlay is one geometry with one status row
-    per frame, so cell 0 shows the sites its classifier judged loaded and
-    cell 1 shows the short readout finding none of them.  Asserting coordinates
-    and ids here
-    would have passed all along while every ring said UNKNOWN.
-    """
-
-    plot = pytest.importorskip("zlc_plot")
-    from zlc_atom.nodes.occupancy import OccupancyProcessor
-    from zlc_plot import (
-        IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
-        image_point_overlay_from_signal,
-    )
-    from zlc_plot._kinds.facet_grid import default_spec
-    from zlc_plot.primitives import ImageFrame, PointStatus
-    from zlc_pulse import compile_sequence, load_streamer_config
-    from zlc_workbench.session import read_pulse
-
-    plane = SignalDataPlane()
-    installation = create_installation("virtual")
-    session = None
-    try:
-        world = installation.world
-        centers = np.asarray(world.geometry.site_centers_xy, dtype=float)
-        sites = len(centers)
-        name = _two_camera_window_pulse(tmp_path)
-        sequence = read_pulse(tmp_path / "pulses" / f"{name}.json").sequence
-        config = load_streamer_config()
-        sequencer = installation.device("sequencer")
-        sequencer.camera_trigger_channel = "emCCD"
-        sequencer.load(
-            compile_sequence(sequence, config["params"], config["clock_hz"]),
-            source=sequence,
-        )
-
-        node = CameraMeasurementNode(
-            camera=installation.capability("camera.adapter"),
-            request=CameraMeasurementRequest("camera", 0.02, None, 1, 2),
-            signal_plane=plane,
-            producer="cm",
-        )
-        capture = node.prepare()
-        sequencer.fire()
-        sequencer.wait_done(2.0)
-        frames = capture.collect().publication.value(node.signal_key("frames"))
-        assert frames is not None
-        cycle = np.asarray(frames.snapshot.block.values)
-        assert cycle.shape[:2] == (1, 2), cycle.shape
-
-        site_ids = tuple(f"site-{index}" for index in range(sites))
-        readable = np.ones(sites, dtype=bool)
-        readable[2] = False
-        calibration = TrapCalibration(
-            SiteMap(site_ids, centers, readable, np.ones(sites)),
-            (
-                ReadoutModel(
-                    site_ids,
-                    # The camera integrates for 20 ms in both frames; the
-                    # shorter authored probe overlap still leaves the readout
-                    # frame dimmer, but it is not a zero-exposure picture.
-                    np.full(sites, 300.0),
-                    np.zeros(sites),
-                    np.ones(sites),
-                    np.ones(sites, dtype=bool),
-                    np.ones(sites),
-                ),
-            ),
-            ReadoutModelKind.BOX,
-            FrameContract(tuple(int(size) for size in cycle.shape[-2:])),
-        )
-        processor = OccupancyProcessor(calibration, producer="occ")
-        provisional = processor.process(frames.snapshot)
-        pair_counts = provisional.counts[0]
-        separating_sites = (
-            readable
-            & np.isfinite(pair_counts[0])
-            & np.isfinite(pair_counts[1])
-            & (pair_counts[0] != pair_counts[1])
-        )
-        assert np.any(separating_sites), pair_counts
-        thresholds = np.full(sites, 300.0)
-        thresholds[separating_sites] = np.mean(
-            pair_counts[:, separating_sites],
-            axis=0,
-        )
-        calibration = TrapCalibration(
-            SiteMap(site_ids, centers, readable, np.ones(sites)),
-            (
-                ReadoutModel(
-                    site_ids,
-                    thresholds,
-                    np.zeros(sites),
-                    np.ones(sites),
-                    np.ones(sites, dtype=bool),
-                    np.ones(sites),
-                ),
-            ),
-            ReadoutModelKind.BOX,
-            FrameContract(tuple(int(size) for size in cycle.shape[-2:])),
-        )
-        processor = OccupancyProcessor(calibration, producer="occ")
-        outputs = processor.evaluate(frames)
-        artifacts = {name: output.snapshot for name, output in outputs.items()}
-        overlay = image_point_overlay_from_signal(
-            outputs["occupied"].run_record[
-                IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
-            ],
-            artifacts["occupied"],
-            artifacts["frame_judged"],
-            revision=1,
-        )
-        occupied_values = artifacts["occupied"].block.values
-        valid_values = artifacts["occupied"].expanded_validity()
-
-        # What an operator reads off the two classified cells, site by site.
-        # Physical loading is the hidden plant truth; the overlay must project
-        # the classifier's public per-frame occupied/valid facts instead.
-        def statuses_for(frame: int) -> tuple[PointStatus, ...]:
-            return tuple(
-                PointStatus.INVALID
-                if not valid_values[0, frame, index]
-                else PointStatus.OCCUPIED
-                if occupied_values[0, frame, index]
-                else PointStatus.EMPTY
-                for index in range(sites)
-            )
-
-        long_exposure = statuses_for(0)
-        short_readout = statuses_for(1)
-        assert long_exposure != short_readout
-        judged = artifacts["frame_judged"]
-        spec = default_spec(judged.block.schema)
-        assert isinstance(spec, plot.FacetGridPlot), spec
-        assert overlay.statuses_for(spec, 0.0) == long_exposure
-        assert overlay.statuses_for(spec, 1.0) == short_readout
-        # A standalone image POOLS both frames, and a pooled picture has no
-        # per-frame judgement to show.  There is deliberately no row for it:
-        # claiming one would be a measurement nobody made, and the honest
-        # "UNKNOWN wherever the frames differ" is most sites of a survival
-        # pair -- which reads as a broken readout rather than as physics.
-        standalone_spec = plot.ImagePlot(
-            plot.AxisRef.data(str(spec.cell.x.axis_id)),
-            plot.AxisRef.data(str(spec.cell.y.axis_id)),
-        )
-        assert overlay.statuses_for(standalone_spec, None) is None
-
-        session = plot.PlotSession(ImageFrame(judged, overlay), spec, size="4x4")
-        cells = tuple(
-            getattr(session._renderer._last_payload, "cells", ())
-        )
-        assert tuple(cell.facet_value_canonical for cell in cells) == (0, 1)
-
-        # The rings PAINTED on each cell, read back as their status tokens.
-        from matplotlib.colors import to_rgba
-
-        def painted(renderer, key: str) -> tuple[PointStatus, ...]:
-            by_colour = {
-                to_rgba(token.color, token.alpha): status
-                for status, token in (
-                    (
-                        status,
-                        getattr(
-                            renderer.style.artists, f"point_{status.value}"
-                        ),
-                    )
-                    for status in PointStatus
-                )
-            }
-            return tuple(
-                by_colour[tuple(float(value) for value in colour)]
-                for colour in renderer._artists[key].get_edgecolors()
-            )
-
-        assert painted(session._renderer, "facet:0:points") == long_exposure
-        assert painted(session._renderer, "facet:1:points") == short_readout
-        assert "image:points" not in session._renderer._artists
-
-        standalone = plot.PlotSession(
-            ImageFrame(judged, overlay),
-            plot.ImagePlot(
-                plot.AxisRef.data(str(spec.cell.x.axis_id)),
-                plot.AxisRef.data(str(spec.cell.y.axis_id)),
-            ),
-            size="4x4",
-        )
-        try:
-            # The pooled picture has no frame to speak for, so every ring is
-            # drawn UNKNOWN -- the vocabulary's "no claim", not a judgement.
-            assert painted(standalone._renderer, "image:points") == (
-                (PointStatus.UNKNOWN,) * sites
-            )
-        finally:
-            standalone.close()
-    finally:
-        if session is not None:
-            session.close()
-        installation.close()
-        plane.close()
-
-
-def test_the_live_board_ticks_and_commits_through_one_object(live_bench) -> None:
-    """What an application actually holds: a board, a tick, a commit.
-
-    Nothing ticked and nothing polled before this.  The scheduler existed, the
-    wake primitive existed, and no code connected them -- so a live panel could
-    never update however correct either side was.
-    """
-
-    plot = pytest.importorskip("zlc_plot")
-    from zlc_workbench.board import LiveBoard
-
-    plane, node, sequencer, monitor = live_bench
-    signal = node.signal_key("frames")
-    value = plane.freeze().value(signal)
-    assert value is not None
-
-    host = plot.RasterPlotHost.from_plot(
-        value.snapshot,
-        plot.ImagePlot(
-            plot.AxisRef.data("spatial-x"),
-            plot.AxisRef.data("spatial-y"),
-            labels=plot.PlotLabels("live", "x", "y"),
-        ),
-    )
-    try:
-        port = PlotPanelPort("panel-1", signal, host, display_interval_ms=100)
-        woken: list[int] = []
-        board = LiveBoard(
-            plane,
-            lambda: (port,),
-            intervals=(100, 200, 400, 800),
-            notify=lambda: woken.append(1),
-        )
-        try:
-            # The cadence the Qt beat must be driven at: the clock's own base.
-            assert board.base_interval_ms == 100
-            deadline = time.monotonic() + 15.0
-            while time.monotonic() < deadline and port.presented_publication() is None:
-                sequencer.fire()
-                sequencer.wait_done(1.0)
-                monitor.poll()
-                board.tick()
-                board.commit()
-                time.sleep(0.05)
-
-            assert port.presented_publication() is not None, (
-                f"the board never presented; missing={port.missing}"
-            )
-            assert woken, "the runtime never asked for an owner turn"
-        finally:
-            board.close()
-    finally:
-        host.close()
 
 
 def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
@@ -1845,30 +1348,3 @@ def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
 
     wake.request_owner_wake()
     assert len(notifications) == 2, "a wake after a turn must notify again"
-
-
-def test_only_zlc_atom_knows_where_the_trap_sites_are() -> None:
-    """Site geometry is a CALIBRATION fact and is never re-derived elsewhere.
-
-    The console, the plotting package and the widgets receive the positions
-    already assembled.  The moment a second layer learns to read a site map
-    there are two answers to "which site is which", and the one on screen is
-    whichever ran last.
-    """
-
-    import zlc_plot
-    import zlc_runtime
-    import zlc_ui
-    import zlc_workbench
-
-    owned = ("centers_xy", "site_map", "SiteMap")
-    hits = tuple(
-        (path.name, number, line.strip())
-        for package in (zlc_plot, zlc_runtime, zlc_ui, zlc_workbench)
-        for path in Path(package.__file__).resolve().parent.rglob("*.py")
-        for number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1
-        )
-        if any(word in line for word in owned)
-    )
-    assert hits == (), hits

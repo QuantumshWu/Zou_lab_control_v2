@@ -192,7 +192,7 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
         cell_origin=(0, 0),
     )
     outputs = processor.evaluate(source_event)
-    for name in ("counts", "occupied", "rate", "frame_judged"):
+    for name in ("counts", "occupied", "frame_judged"):
         output = outputs[name]
         assert output.snapshot.block.schema.repeat_axis.size == 1
         assert output.canonical_schema.repeat_axis.size == 3
@@ -217,7 +217,6 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     invalid = processor.evaluate(invalid_source)
     assert not np.any(invalid["occupied"].snapshot.block.values[:, 0])
     assert np.all(np.isnan(invalid["counts"].snapshot.block.values[:, 0]))
-    assert np.all(np.isnan(invalid["rate"].snapshot.block.values[:, 0]))
     assert not np.any(
         invalid["occupied"].snapshot.expanded_validity()[:, 0]
     )
@@ -455,7 +454,6 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         assert set(publication.signals) == {
             "@logic/occupancy/counts",
             "@logic/occupancy/occupied",
-            "@logic/occupancy/rate",
             "@logic/occupancy/frame_judged",
         }
         np.testing.assert_array_equal(
@@ -472,7 +470,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         # object: the frames it judged are the points it reports over.
         (parent_column,) = source.schema.point_table.columns
         assert parent_column.role is READOUT_EVENT
-        for name in ("counts", "occupied", "rate", "frame_judged"):
+        for name in ("counts", "occupied", "frame_judged"):
             value = publication.value(f"@logic/occupancy/{name}")
             assert value.schema.point_table.columns == (parent_column,), name
         # SITE is CELL data, carried by the calibration's one site axis.
@@ -487,12 +485,6 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             assert site_axis.coordinate_labels is None
             assert tuple(site_axis.coordinates) == tuple(range(1, len(site_ids) + 1))
             assert value.values.shape == (1, windows, 1), name
-        assert publication.value("@logic/occupancy/rate").schema.cell_schema.is_scalar
-        assert publication.value("@logic/occupancy/rate").values.shape == (
-            1,
-            windows,
-            1,
-        )
         from zlc_runtime import DatasetCoverage
 
         assert all(

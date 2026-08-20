@@ -1,38 +1,37 @@
 # zlc_ui
 
-`zlc_ui` is the monorepo owner of the reusable, domain-independent UI
-layer split out of ZLC v1. It is deliberately usable without a v1 checkout
-or any laboratory, plotting, data, or storage package installed.  Its only
+`zlc_ui` owns the reusable, domain-independent Qt view layer. It is usable
+without any laboratory, plotting, data, or storage package installed. Its only
 non-standard UI dependency beyond PyQt5 is the reference
-`PyQt5-Frameless-Window` shell used by the original Fluent layer.
+`PyQt5-Frameless-Window` shell used by the Fluent layer.
 
-## Boundary charter
+## Ownership boundary
 
 1. A component enters this repository only when it depends on PyQt5, the
    reference Qt-only `PyQt5-Frameless-Window` shell, and the Python standard
    library, and its public vocabulary contains no experiment, plotting, or
    data concepts such as `Dataset`, `Signal`, `Device`, `Pulse`, `Plot`,
    `matplotlib`, or `numpy`.
-2. This package owns the first two layers only:
-   - **Pure controls** (`fluent`, `form`, `board`, and
-     `concurrency`) are domain-independent building blocks.
+2. This package owns the view layer only:
+   - **Pure controls** (`fluent`, `form`, and `board`) are
+     domain-independent building blocks.
    - **Pure views** (`console` and other view packages) expose operator intent
      through `*_requested`, `*_picked`, and `*_committed` signals and accept
      idempotent `set_*` inputs.  They do not own data, experiment, scheduling,
      or plotting logic.
-   - Presentation scheduling and surface arbitration belong to `zlc_runtime`;
-     generation replacement and application wiring belong to `zlc_workbench`.
-     Views provide the handle/mount intents needed by those owners without
-     taking over runtime or plot state.
+   - Each feature view owns its Qt widget tree and widget-local interaction
+     state. Its public handle owns Qt mount, visibility, and close operations.
+     Presentation scheduling and surface arbitration belong to `zlc_runtime`;
+     application/session state and wiring belong to `zlc_workbench`.
 3. Public signal payloads and `set_*` arguments are restricted to `str`,
    `int`, `float`, `bool`, plain tuples, `QWidget`, and this package's own
    headless value types such as `FormSpec`.  Domain objects do not cross the
    boundary.
-4. This package directory in the `Zou_lab_control_v2` monorepo is the sole
-   owner of current UI code. The v1 `zlc_frontend` and the old standalone
-   package repositories are historical references, not alternate edit trees.
-5. The package name is intentionally `zlc_ui`, distinct from v1's
-   `zlc_frontend`, so a shadow import cannot silently select a legacy copy.
+4. `zlc_ui` is the sole owner of product widgets and window handles. Hosts
+   consume those handles and view-model inputs; they do not reach through a
+   handle to assemble or mutate an internal widget subtree.
+5. Importing the package creates no `QApplication` and opens no window.
+   `ensure_qt_app()` is the one explicit application-lifecycle entry.
 6. The package is independently testable and reviewable inside the monorepo;
    demos use fake data only. The interactive console demo echoes outgoing view
    intents in its in-window log and to stdout; the gallery is a compact control
@@ -63,8 +62,7 @@ from zlc_ui import (
 Use these names for the headless contracts and the Qt application lifecycle.
 Concrete feature views stay in their explicit modules (`zlc_ui.console`,
 `zlc_ui.pulse`, and so on), so the facade remains a discoverable, bounded API.
-The current complete allow-list is recorded in
-[`docs/contract.md`](docs/contract.md).
+The executable facade source of truth is `zlc_ui.__all__`.
 
 The desktop gallery and console demos live in `examples/`.  The offscreen
 environment is only for object-level automated tests; it does not produce a
@@ -115,7 +113,6 @@ The package is organized as follows:
   reusable `frameless_content_top_margin()` native-titlebar boundary metric.
 - `zlc_ui.form` — Qt-free form specifications plus their Qt projection.
 - `zlc_ui.board` — domain-independent card geometry.
-- `zlc_ui.concurrency` — reusable Qt owner-wake primitives.
 - `zlc_ui.ensure_qt_app` — the single QApplication/HiDPI/Fluent-scale entry
   point; call it before constructing any zlc_ui widget or enabling `%gui qt`.
   It rejects a pre-existing QApplication without the required Qt5 High-DPI
@@ -145,10 +142,10 @@ Dynamic choices or other host-owned values are supplied through the
 top-level facade).  The form engine never becomes a second owner of
 application data.
 
-## Deliberately not moved
+## Domain boundaries
 
-The Qt plot editors (`plot_parameters.py`, `plot_spec.py`, and `plot_fit.py`)
-remain on the `zlc_plot` side because they edit plot-domain specifications.
-The pulse document/controller and plot renderer remain in their domain-side
-packages.  `zlc_ui.pulse` contains only the pure Qt projection and its plain
-view-model seam; presentation runtime logic remains outside this package.
+Qt plot editors belong to `zlc_plot` because they edit plot-domain
+specifications. The pulse document/controller belongs to `zlc_pulse`, and plot
+rendering belongs to `zlc_plot`. `zlc_ui.pulse` contains only the Qt projection
+and its plain view-model seam; presentation runtime logic remains outside this
+package.

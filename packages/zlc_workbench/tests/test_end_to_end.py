@@ -1,19 +1,8 @@
-"""Take a shot, keep it, and open it again in a new process.
-
-This is the round the owner asked for by name: run one shot, save, restart, read
-it back, and see the device settings and the pulse that produced it.  It crosses
-every package -- devices and nodes from zlc_atom, the signal plane from
-zlc_runtime, the pulse from the workspace, durable writing from zlc_durable --
-which is the point: it is the first test that could have caught any of them
-disagreeing.
-"""
+"""Session, workspace, pulse, and virtual-device integration."""
 
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -91,74 +80,6 @@ def test_only_the_default_workspace_seeds_the_packaged_imaging_template(
     assert not (explicit.pulses / Workspace.IMAGING_TEMPLATE).exists()
 
 
-def test_one_shot_saved_and_read_back_in_a_new_process(session, tmp_path) -> None:
-    session.load_pulse(PULSE_NAME)
-
-    node = CameraMeasurementNode(
-        camera=session.camera,
-        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
-        signal_plane=session.signal_plane,
-        producer="cm",
-    )
-    node.sequencer = session.sequencer  # the record wants both devices
-
-    capture = node.prepare()
-    session.fire(shots=1)
-    result = capture.collect()
-    snapshot = result.publication.value(node.signal_key("frames")).snapshot
-
-    path = session.save_figure("first light", arrays={"frames": snapshot})
-    assert path.parent.parent == session.workspace.data
-    assert path.parent.name.count("_") == 2, "saved work groups by date"
-
-    # A NEW PROCESS, importing nothing of ours, reads it back.
-    reader = (
-        "import json, sys, numpy as np\n"
-        f"archive = np.load(r'{path}')\n"
-        "info = json.loads(str(archive['info']))\n"
-        "sections = info['sections']\n"
-        "print(json.dumps({\n"
-        "    'pulse': sections['pulse']['name'],\n"
-        "    'dataset': sorted(sections['dataset']),\n"
-        "    'frames': list(archive['frames'].shape),\n"
-        "}))\n"
-    )
-    completed = subprocess.run([sys.executable, "-c", reader], capture_output=True, text=True)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-
-    reopened = json.loads(completed.stdout)
-    assert reopened["pulse"] == PULSE_NAME
-    assert reopened["dataset"] == ["frames"]
-    # ONE frames signal: the whole cycle sits on the point axis of one block,
-    # (repeat, frame, y, x).
-    assert reopened["frames"] == [1, CAMERA_WINDOWS, 96, 128], (
-        f"unexpected block shape {reopened['frames']}"
-    )
-
-
-def test_three_shots_in_one_session_each_produce_a_figure(session) -> None:
-    """The session is reusable: the reason begin_generation exists."""
-
-    session.load_pulse(PULSE_NAME)
-    node = CameraMeasurementNode(
-        camera=session.camera,
-        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
-        signal_plane=session.signal_plane,
-        producer="cm",
-    )
-
-    saved = []
-    for _shot in range(3):
-        capture = node.prepare()
-        session.fire(shots=1)
-        result = capture.collect()
-        snapshot = result.publication.value(node.signal_key("frames")).snapshot
-        saved.append(session.save_figure("shot", arrays={"frames": snapshot}))
-
-    assert len({path.name for path in saved}) == 3, "an afternoon save must not overwrite the morning"
-    assert all(path.exists() for path in saved)
-
-
 def test_the_pulse_must_exist_in_the_workspace(session) -> None:
     with pytest.raises(FileNotFoundError, match="no pulse named"):
         session.load_pulse("does-not-exist")
@@ -234,7 +155,6 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
             capture.collect().publication.value(node.signal_key("frames")).snapshot.block.values
         )
         assert frames.size
-        assert session.save_figure("from-file", arrays={"frames": frames}).exists()
     finally:
         session.close()
 

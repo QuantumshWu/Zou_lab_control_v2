@@ -8,8 +8,8 @@ from threading import Barrier
 
 import pytest
 
-from zlc_durable import day_folder, day_folder_name, unique_path
-from zlc_durable.workspace import DAY_FOLDER_PATTERN
+from zlc_durable import day_folder, unique_path
+from zlc_durable.workspace import DAY_FOLDER_PATTERN, day_folder_name
 
 
 def _commit_process_payload(arguments: tuple[str, int]) -> tuple[str, bytes]:

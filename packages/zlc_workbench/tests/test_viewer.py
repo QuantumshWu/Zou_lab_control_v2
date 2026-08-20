@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,7 +25,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
-from zlc_workbench.archive import read_archive, read_dataset
+from zlc_workbench.archive import read_archive, read_dataset, write_figure_file
 from zlc_workbench.panel_save import save_panel_figure
 from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_workbench.plot_annotations import PanelPlotAnnotations
@@ -143,12 +144,12 @@ class _ViewerView:
 
 @pytest.fixture
 def saved(tmp_path):
-    """One real run, saved the way the console saves it."""
+    """One real typed run in the formal figure archive."""
 
     write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
-        session.load_pulse(PULSE_NAME)
+        pulse = session.load_pulse(PULSE_NAME)
         node = CameraMeasurementNode(
             camera=session.camera,
             request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
@@ -160,10 +161,14 @@ def saved(tmp_path):
         result = capture.collect()
         signal = node.signal_key("frames")
         snapshot = result.publication.value(signal).snapshot
-        path = session.save_figure(
-            "run",
+        path = write_figure_file(
+            tmp_path / "run.npz",
+            name="run",
             arrays={"panel-1": snapshot},
-            panel={"panel-1": {"signal": signal, "title": "camera"}},
+            sections={
+                "pulse": pulse,
+                "panel": {"panel-1": {"signal": signal, "title": "camera"}},
+            },
         )
         yield path, snapshot
     finally:
@@ -326,14 +331,17 @@ def saved_pair(tmp_path):
             session.fire(shots=1)
             result = capture.collect()
             arrays[name] = result.publication.value(node.signal_key("frames")).snapshot
-        yield session.save_figure(
-            "two",
+        yield write_figure_file(
+            tmp_path / "two.npz",
+            name="two",
             arrays=arrays,
             # What the console records beside each dataset: what the panel was
             # called and which signal it was showing.
-            panel={
-                "panel-1": {"title": "before", "signal": "@logic/panel1/frames"},
-                "panel-2": {"title": "after", "signal": "@logic/panel2/frames"},
+            sections={
+                "panel": {
+                    "panel-1": {"title": "before", "signal": "@logic/panel1/frames"},
+                    "panel-2": {"title": "after", "signal": "@logic/panel2/frames"},
+                },
             },
         )
     finally:
@@ -656,3 +664,67 @@ def test_panel_save_annotation_roundtrip_keeps_canonical_units(tmp_path) -> None
         assert str(description.display_state.values["value_display_unit"]) == "mV"
     finally:
         presenter.close()
+
+
+def test_panel_save_reports_that_the_archive_survived_an_image_failure(
+    saved,
+    tmp_path,
+) -> None:
+    _old_path, snapshot = saved
+    state = PanelState("camera", "image", "2x2", 400, "camera")
+    frozen = PanelFrozenData(state.signal, None, snapshot)
+
+    def fail_image(_path) -> None:
+        raise OSError("renderer failed")
+
+    with pytest.raises(RuntimeError, match="archive.*saved.*image") as failure:
+        save_panel_figure(
+            tmp_path / "failed-image",
+            state=state,
+            frozen=frozen,
+            make_host=lambda *_args: SimpleNamespace(
+                save=fail_image,
+                close=lambda: None,
+            ),
+            configure_host=lambda *_args: None,
+        )
+
+    archive = tmp_path / "failed-image.npz"
+    assert archive.exists()
+    assert str(archive) in str(failure.value)
+
+
+def test_panel_save_does_not_render_when_the_archive_fails(
+    saved,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import zlc_workbench.panel_save as panel_save_module
+
+    _old_path, snapshot = saved
+    state = PanelState("camera", "image", "2x2", 400, "camera")
+    frozen = PanelFrozenData(state.signal, None, snapshot)
+    rendered: list[Path] = []
+
+    def fail_archive(*_args, **_kwargs):
+        raise OSError("archive disk full")
+
+    def render(path) -> None:
+        rendered.append(Path(path))
+        Path(path).write_bytes(b"png")
+
+    monkeypatch.setattr(panel_save_module, "write_figure_file", fail_archive)
+    with pytest.raises(OSError, match="archive disk full"):
+        save_panel_figure(
+            tmp_path / "failed-archive",
+            state=state,
+            frozen=frozen,
+            make_host=lambda *_args: SimpleNamespace(
+                save=render,
+                close=lambda: None,
+            ),
+            configure_host=lambda *_args: None,
+        )
+
+    assert rendered == []
+    assert not (tmp_path / "failed-archive.png").exists()

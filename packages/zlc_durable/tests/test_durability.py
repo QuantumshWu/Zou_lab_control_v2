@@ -8,18 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from zlc_durable import (
-    durable_mkdir,
-    flush_directory,
-    readable_json,
-    readable_json_bytes,
-    write_readable_json,
-)
+from zlc_durable import readable_json_bytes, write_readable_json
 from zlc_durable.durability import (
     atomic_write_bytes,
     atomic_write_file,
     atomic_write_text,
+    durable_mkdir,
+    flush_directory,
 )
+from zlc_durable.readable import readable_json
 
 
 def test_atomic_writers_replace_through_a_same_directory_temporary(

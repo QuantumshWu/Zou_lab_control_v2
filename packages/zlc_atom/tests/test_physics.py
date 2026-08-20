@@ -94,6 +94,45 @@ def test_calibration_document_is_actual_json_data_not_python_container_aliases()
     json.dumps(payload, allow_nan=False)
 
 
+def test_calibration_owns_nested_topology_and_report_truth(tmp_path, monkeypatch) -> None:
+    topology = {"grid": {"rows": [0, 1]}}
+    report = {
+        "run_record": {"request": {"photoelectrons": False}},
+        "diagnostics": {"scores": np.asarray([1.0, 2.0])},
+    }
+    original = _calibration()
+    with pytest.raises(TypeError, match="report must be a mapping"):
+        replace(original, report=[])
+    calibration = replace(
+        original,
+        site_map=replace(original.site_map, topology=topology),
+        report=report,
+    )
+
+    topology["grid"]["rows"][0] = 99
+    report["run_record"]["request"]["photoelectrons"] = True
+    report["diagnostics"]["scores"][0] = 99.0
+    assert calibration.site_map.topology["grid"]["rows"] == (0, 1)
+    assert calibration.report["run_record"]["request"]["photoelectrons"] is False
+    assert calibration.report["diagnostics"]["scores"] == (1.0, 2.0)
+
+    with pytest.raises(TypeError):
+        calibration.report["run_record"]["request"]["photoelectrons"] = True
+    with pytest.raises(TypeError):
+        calibration.site_map.topology["grid"]["rows"][0] = 99
+
+    document = calibration.to_dict()
+    document["report"]["run_record"]["request"]["photoelectrons"] = True
+    document["site_map"]["topology"]["grid"]["rows"][0] = 99
+    assert calibration.report["run_record"]["request"]["photoelectrons"] is False
+    assert calibration.site_map.topology["grid"]["rows"] == (0, 1)
+
+    monkeypatch.chdir(tmp_path)
+    written = calibration.save("relative-calibration.json")
+    assert written == (tmp_path / "relative-calibration.json").resolve()
+    assert written.is_file()
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (

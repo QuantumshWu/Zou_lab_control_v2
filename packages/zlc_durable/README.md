@@ -21,14 +21,17 @@ path = unique_path(
 
 ## What is here
 
-| | |
+The top-level facade contains only these names:
+
+| Public name | Purpose |
 |---|---|
-| `atomic_write_file` / `_bytes` / `_text` | temp file in the same directory, fsync, `os.replace`, then flush the directory — a reader never sees a half-written file |
-| `durable_mkdir` / `durable_makedirs` | create a directory and flush its parent, so the entry survives a crash |
-| `flush_directory` | the platform-specific directory flush the above rely on |
-| `resolve_under` | resolve a relative path under a root and refuse anything that escapes it |
-| `day_folder` / `day_folder_name` | the save layout: one folder per calendar day |
+| `atomic_write_file`, `atomic_write_bytes`, `atomic_write_text` | publish complete content by same-directory temporary, fsync, replace, and directory flush |
+| `readable_json_bytes`, `write_readable_json` | validate a plain JSON tree and encode or durably write its readable UTF-8 representation |
+| `durable_makedirs` | durably create every missing level of a directory tree |
+| `day_folder` | create or open one calendar-day folder beneath an existing save root |
 | `unique_path` | atomically publish a complete file at the first free numbered name, or exclusively create a uniquely named run directory |
+| `DirectoryDurabilityError` | report that a directory entry could not be made crash-durable |
+| `__version__` | identify the installed package version |
 
 ## Where things live
 
@@ -43,10 +46,6 @@ Saved work groups **by date**, with no per-run subdirectory:
 You look for today's data under today's date. `save_root` is yours to choose;
 this package only creates the day folder beneath it, and refuses a root that
 does not exist so a typo cannot scatter data into a new tree.
-
-Date routing lives here rather than in the composition root because deciding
-where a file goes and putting it there safely are one concern — and because a
-notebook calls these functions directly, with no application in the process.
 
 For a file, `unique_path` requires a `writer`. The writer receives a hidden
 same-directory temporary path with the requested suffix, so path-based encoders

@@ -79,6 +79,10 @@ class LiveDatasetOutput:
                 "canonical_schema and cell_origin must be supplied together"
             )
         if self.canonical_schema is None:
+            if not isinstance(self.coverage, MonitorCoverage):
+                raise ValueError(
+                    "a finite Dataset event requires canonical placement"
+                )
             total = (
                 self.snapshot.block.schema.repeat_axis.size
                 * self.snapshot.block.schema.point_table.row_count

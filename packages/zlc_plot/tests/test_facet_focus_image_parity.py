@@ -608,6 +608,50 @@ def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
             revision=1,
         )
 
+    for incompatible_image in (
+        _frames_scan_snapshot(repeats=2),
+        _single_frame_snapshot(),
+    ):
+        incompatible_geometry = image_point_overlay_geometry(
+            incompatible_image,
+            overlay.coordinates,
+            overlay.point_ids,
+            status_axis=status_axis,
+        )
+        with pytest.raises(ValueError, match="leading geometry"):
+            image_point_overlay_from_signal(
+                incompatible_geometry,
+                status,
+                incompatible_image,
+                revision=1,
+            )
+
+
+def test_single_pixel_overlay_axis_never_invents_an_affine_step() -> None:
+    from zlc_plot import image_point_overlay_geometry
+
+    y_axis = Axis.create("sy", values=(7.0,), role=SPATIAL_Y)
+    x_axis = Axis.create("sx", values=(5.0,), role=SPATIAL_X)
+    image = DatasetSnapshot(
+        DatasetSchema.create(
+            Axis.create("repeat", size=1),
+            PointTable.from_columns({"point": [0.0]}),
+            data_axes=(y_axis, x_axis),
+            dtype=np.float64,
+        ),
+        np.zeros((1, 1, 1, 1), dtype=np.float64),
+        revision=1,
+    )
+    status_axis = Axis.create("site", size=1, role=SITE)
+    with pytest.raises(ValueError, match="single-pixel"):
+        image_point_overlay_geometry(
+            image,
+            ((0.25, 0.0),),
+            ("site-0",),
+            status_axis=status_axis,
+            coordinates_are_indices=True,
+        )
+
 
 def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
     """Which judgement one painted surface's rings actually say."""

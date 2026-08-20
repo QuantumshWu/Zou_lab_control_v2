@@ -399,29 +399,24 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert expected_outputs == {
             stable_signal_key("occupancy", "counts"),
             stable_signal_key("occupancy", "occupied"),
-            stable_signal_key("occupancy", "rate"),
             stable_signal_key("occupancy", "frame_judged"),
         }
         counts = occupancy_publication.value(counts_signal)
         occupied = occupancy_publication.value(
             occupancy_host.signal_key("occupied")
         )
-        rate = occupancy_publication.value(occupancy_host.signal_key("rate"))
         frame_judged = occupancy_publication.value(
             occupancy_host.signal_key("frame_judged")
         )
         assert all(
             value is not None
-            for value in (counts, occupied, rate, frame_judged)
+            for value in (counts, occupied, frame_judged)
         )
         n_sites = first_calibration.calibration.site_map.n_sites
         # (repeat cycles, frame points, sites): the classifier inherits the
         # camera's point axis and returns a site-shaped datum per frame.
         assert counts.shape == occupied.shape == (3, 1, n_sites)
         assert occupied.snapshot.expanded_validity().shape == occupied.shape
-        # The same (repeat, frame) pair over a SCALAR cell -- one occupied
-        # fraction per frame, not a site-shaped datum.
-        assert rate.shape == (3, 1, 1)
         # frame_judged mirrors its input: both blocks are (repeat, frame, y, x),
         # so a one-frame cycle's judged block equals the camera block directly.
         np.testing.assert_array_equal(

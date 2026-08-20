@@ -7,18 +7,18 @@
 更新时间：2026-08-20
 启动HEAD：`92089f5fc037f8a87e8efe834ccf83139aaf4383`
 Branch：`master`
-用户执行边界：用户在真实UI验收中拒绝Milestone 3的event-default显示策略；canonical full presentation根源修复已完成并由一个follow-up commit落盘。Milestone 4不得开始，等待用户确认。
+用户执行边界：用户已授权Milestone 4；M1–M3 post-milestone residual sweep及全部发现项已完成，先由`Fix post-milestone residuals`单独落盘，随后才开始Milestone 4。
 
 ### 当前状态
 
 - 审计：完成；逐文件证据在`AUDIT/`。
 - 用户裁决：完成；记录在`AUDIT/USER-DECISIONS-2026-08-17.md`与根Goal。
-- Production代码：Milestone 1、2、3已完成；Milestone 4尚未开始。
+- Production代码：Milestone 1、2、3及其residual closure均已完成；Milestone 4尚未开始。
 - Hardware：未访问；本Goal不授权program/flash或实验机device操作。
 - Milestone 0：`COMPLETE` — commit `e854ddf`（`Establish approved architecture and implementation checkpoint`）；唯一Architecture、Plan、Handoff、Goal与Audit证据已纳入版本控制，未改production。
-- Milestone 1：`COMPLETE` — 本milestone commit `Prune dead frameworks and historical product surfaces`；删除dead Runtime/Data/Plot/UI/Pulse/Atom surfaces、self-tests、重复launchers与历史docs，保留所有核实的真实consumer路径。
-- Milestone 2：`COMPLETE` — strict Dataset/Figure/JSON truth、并发原子artifact命名、duplicate-device preflight与Calibration dependency/corruption修复；随本milestone commit落盘。
-- Milestone 3：`COMPLETE` — backend commit `ca66c7d`加follow-up `Fix canonical full signal presentation`；finite exact的event chunk只供exact Processor，所有UI/display统一canonical full view，Monitor仍latest event。
+- Milestone 1：`COMPLETE / SWEEP COMPLETE` — test-owned Pulse engine、dead Qt wake、compat aliases、false-green API/notebook/dependency tests与重复contract docs已删除。
+- Milestone 2：`COMPLETE / SWEEP COMPLETE` — nested immutable truth、strict embedded manifest grammar、archive-first Panel Save与唯一Figure入口已闭合。
+- Milestone 3：`COMPLETE / SWEEP COMPLETE` — replay lineage、selection lock域、canonical presentation/overlay alignment、Refresh/layout lifecycle及测试残余已闭合。
 - Milestone 4–7：`PENDING`；本次不得开始。
 
 ### Milestone 3完成边界
@@ -27,16 +27,16 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 3已经完成；立即停止，不设计或实施Milestone 4。下一动作仅是等待用户确认。用户新报告的Selector Off与FacetGrid overview交互已记录在Milestone 4，不混入本次canonical signal commit。
+先提交`Fix post-milestone residuals`并确认worktree clean；随后将Milestone 4标为`IN PROGRESS`。用户新报告的Selector Off与FacetGrid overview交互属于Milestone 4第一批行为修复。
 
 ## 2. Milestone状态
 
 | Milestone | Scope | Status | Evidence / Commit |
 |---|---|---|---|
 | 0 | Approved Architecture、current Plan/Checkpoint、Handoff、Audit evidence | COMPLETE | `e854ddf`；docs/link/diff check，未跑测试 |
-| 1 | Dead framework、parallel pipeline、test-only surface、duplicate launcher/docs/tests删除 | COMPLETE | 本milestone commit；见下方证据 |
-| 2 | Data/Durable/Installation truth | COMPLETE | `Make dataset, archive, path, and installation truth strict`；见§6 |
-| 3 | Canonical Runtime live与Logic Node contract | COMPLETE | `ca66c7d` + `Fix canonical full signal presentation`；见§7 |
+| 1 | Dead framework、parallel pipeline、test-only surface、duplicate launcher/docs/tests删除 | COMPLETE / SWEEP COMPLETE | 原commit + residual fix；见§8 |
+| 2 | Data/Durable/Installation truth | COMPLETE / SWEEP COMPLETE | 原commit + residual fix；见§8 |
+| 3 | Canonical Runtime live与Logic Node contract | COMPLETE / SWEEP COMPLETE | 两个M3 commits + residual fix；见§8 |
 | 4 | Exact Data/Fit/Overlay与Qt lifecycle | PENDING | 已记录Selector边界：Off禁用plot全部pointer gesture；FacetGrid overview即使On也只允许focus，不允许area |
 | 5 | Pulse/Camera/Remote/FPGA | PENDING | — |
 | 6 | USB-only SLM与robust Feedback | PENDING | — |
@@ -101,11 +101,11 @@ Milestone 1建议commit：`Prune dead frameworks and historical product surfaces
 
 - Current consumer audit由三条独立package scope完成；所有删除名在production全树零命中，唯一保留同名是AXI内部私有`_record_diagnostic`与UI自身合法`set_panel_kinds`。
 - Runtime/Data：约11,632行旧builder/exact/monitor/live-port/value clusters删除；保留Coverage、ordered future FollowTap、NodeHost/Plane真实路径。Focused 51 passed in 0.72s；Atom/Workbench真实consumer imports通过。
-- Plot/UI：dead live controller/channel、FitNumericTable、Graph/FormGrid、test-only methods与self-tests删除；保留`LiveDefaults`、`_session_live.py`、`QtOwnerWake`。Plot 10 passed，UI 15 passed，Workbench selector 2 passed。
+- Plot/UI：dead live controller/channel、FitNumericTable、Graph/FormGrid、test-only methods与self-tests删除；保留`LiveDefaults`与`_session_live.py`；回溯又删除零consumer `QtOwnerWake`及其self-test/aliases。Plot/UI/Workbench closure focused 66 passed。
 - Pulse/Atom：test-only engine model/lease/dead transport与descriptor动态面/fakes/oracles删除。Pulse focused 26 passed；Pulse remote/Atom focused 42 passed；SLM descriptor passed。
 - Workbench integration：六个直接文件运行得到193 passed/1个旧Host convenience断言失败；该测试改为真实terminal+draft source后精确节点1 passed；另外8个DeviceClaim/make_host/preview集成节点passed，device-control正式节点1 passed。
 - 全部438个剩余Python文件AST解析通过；八包从当前checkout import成功；7个Logic descriptors与LogicCatalog projection成功。
-- 全树`pytest --collect-only -q`成功，1395 tests collected，无删除API import/collection错误。
+- 最终全树`pytest --collect-only -q`成功；精确current数量见§8，不以旧collection数字作当前证据。
 - 当前Markdown file links、notebook JSON、nested pyproject readme targets均有效。
 - `git diff --check`无whitespace error；只存在既有line-ending conversion warnings。
 - 当前Milestone diff共206 files、739 insertions、22,750 deletions；未新增production file/class/framework。
@@ -127,10 +127,10 @@ Milestone 1建议commit：`Prune dead frameworks and historical product surfaces
 
 - Old-red根因：32个并发file callers旧实现全部得到同一路径；duplicate DeviceSpec旧实现执行两个factory且只close第二个；figure member可覆盖snapshot validity；numeric validity、duplicate axis name、text coordinate与Calibration corrupt JSON均被旧路径接受或误解。
 - 新durable直接证据：32 threads得到32个完整payload；16个独立Python process得到16个唯一文件/不同payload；32-thread directory分配得到32个目录；writer failure无final/temp残余。
-- 当前checkout production-path probes通过：Data projection/selection/strict Figure roundtrip与corruption、Workbench archive sequential naming、strict JSON、duplicate-install preflight、Calibration save/load/import boundary/saved-sample replay integrity、panel archive metadata与camera run metadata。
-- 当前checkout 420个Python source/test文件`compileall`通过；八个package顶层均从本repo import成功；删除名、旧Figure常量、第二selection codec、Calibration→Workbench import及未迁移file `unique_path`调用的repo搜索均为零。
+- 当前checkout production-path tests通过：Data projection/selection/strict Figure roundtrip与corruption、formal explicit-path Panel archive、strict JSON、duplicate-install preflight、Calibration save/load/import boundary/saved-sample replay integrity、panel archive metadata与camera run metadata。
+- 八个package顶层均从本repo import成功；删除名、旧Figure常量、第二selection codec、Calibration→Workbench import及未迁移file `unique_path`调用的repo搜索均为零。最终AST/collection数字见§8。
 - `git diff --check`无whitespace error；只有既有line-ending conversion warning。没有新增production file/class/framework/hash、安全层、GPU路径或兼容实现；未访问hardware。
-- 当前desktop bundled Python没有pytest、SciPy或Matplotlib，且机器没有另一可运行product interpreter；因此新增focused pytest nodes和三帧PNG真实render未正式执行。它们已完整写入既有test files；本milestone不把compile/direct probes冒充pytest、GUI或hardware evidence。
+- 回溯环境已具备当前checkout pytest/SciPy/Matplotlib；strict Data/Durable/Calibration/Installation与formal Panel Save行为均已实际执行，精确结果见§8。仍未访问hardware。
 
 ### Commit与停止门
 
@@ -153,7 +153,7 @@ Milestone 2 commit：`Make dataset, archive, path, and installation truth strict
 - Camera finite/monitor每次只提交一个complete cycle；finite由Runtime形成固定run geometry，Stop partial与Panel/freeze/Processor订阅无关。Repeat=100不再每次stack全部历史。
 - Stepped/Seamless Scan只保留schema/placement planner，逐point commit；Runtime拥有future validity与最终Dataset。Temperature的raw scan与per-shot/per-site `survival`同EventRef，删除第二份`survival_rate` Dataset和私有history；preview/artifact从同一survival truth投影。
 - Calibration long/readout/long三帧每cycle直接commit为Monitor preview；删除私有preview slot，terminal按Runtime存在性retire；artifact save前进入不可取消terminal边界。
-- Occupancy只处理source event chunk，严格传播source validity；counts/occupied/rate/frame_judged继承canonical placement。`occupied` bool Dataset自身component validity是site readability的唯一truth，不再发布第二个valid signal。Generic image-point contract、geometry validator与adapter归`zlc_plot`；Workbench只按contract路由，不import Occupancy。
+- Occupancy只处理source event chunk，严格传播source validity；counts/occupied/frame_judged继承canonical placement。`occupied` bool Dataset自身component validity是site readability的唯一truth；不再发布第二个valid或可由它直接求得的rate signal。Generic image-point contract、geometry validator与adapter归`zlc_plot`；Workbench只按contract和causal lineage路由，不import Occupancy。
 - Descriptor outputs直接使用`DatasetOutputDeclaration`；Processor delivery显式为exact/latest；Task必须显式声明preview或`()`. 所有production Measurement都声明live Dataset和auto-preview，Host在terminal强制完整declaration union、Task progress与artifact存在。
 - SLM Feedback每个coarse/validation使用稳定`<task>/camera`的canonical Camera Measurement `repeat=N` generation。Estimator与preview共用readout frame coordinate 1；preview对同一raw Dataset执行repeat mean。删除私有camera average/readout signal。Task own outputs只保留latest candidate phase与完整history projection；Stop接受并保存本run最好有效测量phase，真实失败恢复incoming。
 
@@ -169,7 +169,7 @@ Milestone 2 commit：`Make dataset, archive, path, and installation truth strict
 
 ### Evidence
 
-- Runtime全套：`93 passed`；含canonical repeat与point/grid geometry、publication-prefix race、跨generation拒绝、exact replay/EOS、mixed exact+Monitor、nonblocking materialization、Stop seal failure、跨Processor并行与节点内串行/latest coalesce。
+- Runtime全套：`96 passed`；含canonical repeat与point/grid geometry、publication-prefix race、跨generation拒绝、late exact replay causal roots、mixed exact+Monitor GC、nonblocking materialization/Selection close、Stop seal failure、跨Processor并行与节点内串行/latest coalesce。
 - Repeat=100 deterministic证据：commit/freeze期间prefix materialization为0；100个float event只发布800 bytes，Runtime只保留100个one-cell event及100-cell occupancy mask（values+validity共1000 array bytes）；第一次`current_dataset()`只materialize一次，seal不重复。Camera 96×128 uint16的100个cycle event总payload为2.34375 MiB，而旧prefix-stack路径累计约234.375 MiB。
 - Atom直接受影响组`46 passed, 1 deselected`；Camera/Scan/SLM/Occupancy/Temperature和generic geometry的定向组通过。唯一deselect是既有Calibration完整报告纵向仍超过原10秒deadline；它未作为通过证据，也未用增加timeout或改产品逻辑掩盖。
 - Workbench Console/Task/preview/presentation/same-shot/Guard-A/Guard-C/Viewer相关整组`144 passed`；`zlc_ui` console views `30 passed`。Repeat=30真实virtual Camera证明event保持单cycle、Logic/full Panel为30 repeats，axis fate在同host/同publication即时生效；gated materializer下owner update为2.489 ms、beat submission为0.666 ms，copy发生在另一线程。
@@ -184,7 +184,42 @@ Milestone 3 commits：`Unify Runtime live data and task previews`；验收follow
 
 本Checkpoint随follow-up commit落盘；commit后立即停止，不进入Milestone 4，等待用户明确确认。
 
-## 8. Checkpoint更新规则
+## 8. M1–M3 post-milestone residual closure
+
+### M1 closure
+
+- 删除从production `engine_model.py`搬入tests的218行Python engine oracle及其self-simulating wrap/refill/underflow tests；这些行为只能由后续RTL/hardware evidence证明。
+- 删除零consumer `zlc_ui.concurrency/QtOwnerWake`、Handle `show()` aliases、Pulse dataset aliases、第二TaskConsole window入口、arbitrary API cap、source-token/doc-`__all__`同步、saved-output notebook与手抄dependency tests。
+- Durable内部functions撤出root facade；两份重复contract name lists删除。Data headless subprocess显式绑定并打印current checkout。
+
+### M2 closure
+
+- Calibration topology/report/summary/pulse/run record与Installation config全部deep-own并递归immutable；plain codec输出独立tree；`TrapCalibration.save()`返回durable resolved path。
+- `snapshot_from_manifest()`不再用字段缺失猜grammar：standalone manifest严格要求schema fingerprint，embedded figure manifest显式声明并禁止重复fingerprint。
+- 删除`ExperimentSession.save_figure`与Workbench legacy `write_figure`第二保存入口。Formal Panel Save先原子写不可重算`.npz`，再render image；image失败明确报告archive已保存，archive失败不启动render。
+
+### M3 closure
+
+- Exact replay保留slim causal parent chain，late Processor仍追溯原producer且未消费Monitor sibling可GC；run record始终deep-freeze；commit value/origin表合并。
+- SelectionBridge numeric materialization移出RLock并以epoch CAS拒绝迟到结果；close不等待大Dataset/ROI。
+- Generic overlay严格核repeat/PointTable/GridTopology/status axis与same-shot lineage；删除零consumer `PointMarker`与Occupancy rate。单pixel axis不再猜affine step。
+- Panel layout首帧回到cohort atomic present；三份Port wiring收成一个owner；Refresh在新surface接受前保留旧Edit/Save snapshot，同revision重复Refresh为no-op；tests-only host/shown Port路径及event-snapshot fallback删除。
+- 原用户场景现由真实running Camera gate证明：首个shot后Logic/Panel已经是完整repeat=30 geometry、future invalid，运行中改fate不Restart，后续shots继续填同一个host；point/grid亦在mounted状态继续增量。
+
+### Closure evidence与净变化
+
+- Fix candidate相对`0cbc514`：73 files，`+1840/-2910`，净删1070行；其中production净删67、tests净删825、docs/notebook净删173、其它净删5。相对M3起点`23e820d`，production净增556、tests净增1993，但top-level test函数只净增18项；新增主要是Runtime/Qt/lineage真实纵向，不再含tests-only Port/engine/private-helper保活。
+- Runtime `96 passed`；Data `43 passed`；Plot `17 passed`；Pulse+Durable `33 passed`；M1 UI focused `12 passed`；Workbench changed-path组`164 passed`后两条正式Qt subprocess回归修正并`2 passed`；Atom M1–M3 focused组`57 passed`，最新Calibration immutable/result定向`3 passed`。
+- 全仓collection：`1462 tests collected`。八包current-checkout imports、changed Python AST、active relative links、notebook JSON和`git diff --check`在commit前最终复核。
+
+### 已明确归属后续milestone，不算未记录残余
+
+- M4：Plot-owned原子PanelState operation、首mount多front、exact data+fit queue、selector Off/FacetGrid overview、Viewer唯一PanelState parser、Qt/executor bounded close与whole-archive bytes materialization的性能/owner收口。
+- M7：单distribution package-data（含scan JSON templates）、fresh notebook lane、`save_npz(path)` persistence/public-API policy、Calibration/figure format version migration与最终安装文档。
+
+Fix commit：`Fix post-milestone residuals`。该commit之后才允许把Milestone 4改为`IN PROGRESS`。
+
+## 9. Checkpoint更新规则
 
 每个milestone开始/完成、长测试前或新用户裁决后立即更新：
 

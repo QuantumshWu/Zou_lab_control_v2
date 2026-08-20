@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import Any
 
 from zlc_runtime import (
@@ -51,6 +52,7 @@ class OwnerWake:
     """
 
     def __init__(self, notify: Callable[[], None] | None = None) -> None:
+        self._lock = Lock()
         self._pending = False
         self._notify = notify
 
@@ -63,23 +65,32 @@ class OwnerWake:
         behavior every test drives.
         """
 
-        self._notify = notify
+        with self._lock:
+            self._notify = notify
+            pending = self._pending
+        if pending and notify is not None:
+            notify()
 
     def request_owner_wake(self) -> None:
-        already = self._pending
-        self._pending = True
-        if not already and self._notify is not None:
-            self._notify()
+        with self._lock:
+            if self._pending:
+                return
+            self._pending = True
+            notify = self._notify
+        if notify is not None:
+            notify()
 
     def take(self) -> bool:
         """Claim a pending wake, if there is one."""
 
-        pending, self._pending = self._pending, False
-        return pending
+        with self._lock:
+            pending, self._pending = self._pending, False
+            return pending
 
     @property
     def pending(self) -> bool:
-        return self._pending
+        with self._lock:
+            return self._pending
 
 
 class LiveBoard:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import threading
+from types import MappingProxyType
 from types import SimpleNamespace
 import weakref
 
@@ -13,6 +14,7 @@ import pytest
 from zlc_data import (
     REPEAT,
     SCAN_POINT,
+    SPATIAL_X,
     AxisId,
     AxisSpec,
     BlockId,
@@ -25,6 +27,7 @@ from zlc_data import (
     PointColumn,
     PointTable,
     StreamGenerationId,
+    ValidityContract,
     ValueSchema,
 )
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
@@ -103,6 +106,46 @@ def _latest(
     )
 
 
+def _large_latest(
+    declaration: DatasetOutputDeclaration,
+    value: float,
+) -> LiveDatasetOutput:
+    scalar = _event(declaration.name, value)
+    data_axis = AxisSpec(
+        AxisId(f"{declaration.name}.sample"),
+        "sample",
+        SPATIAL_X,
+        200_000,
+    )
+    schema = DatasetSchema(
+        scalar.block.schema.repeat_axis,
+        scalar.block.schema.point_table,
+        None,
+        ValueSchema(
+            (data_axis,),
+            ValidityContract.value(),
+            np.dtype("float64"),
+            "count",
+        ),
+    )
+    block = DataBlock(
+        BlockId(f"{declaration.name}.large"),
+        DatasetRevision(77),
+        np.full((1, 1, 200_000), value, dtype=np.float64),
+        CellValidity(np.ones((1, 1), dtype=np.bool_)),
+        schema,
+    )
+    snapshot = OwnedSnapshot(
+        block.ref(StreamGenerationId("plugin-generation")),
+        block,
+    )
+    return LiveDatasetOutput(
+        declaration,
+        snapshot,
+        MonitorCoverage(1, 1),
+    )
+
+
 def _finite_grid_point(
     declaration: DatasetOutputDeclaration,
     *,
@@ -161,8 +204,15 @@ def _node(instance_id: str, *declarations: DatasetOutputDeclaration):
 
 def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
+    with pytest.raises(ValueError, match="requires canonical placement"):
+        LiveDatasetOutput(
+            declaration,
+            _event("unplaced", 0.0),
+            DatasetCoverage(1, 1),
+        )
     node = _node("camera", declaration)
-    record = {"camera": {"gain": 1}, "shape": [1, 1]}
+    mutable = {"camera": {"gain": 1}, "shape": [1, 1]}
+    record = MappingProxyType(mutable)
     plane = SignalDataPlane()
     try:
         generation = plane.reserve(node)
@@ -179,8 +229,12 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
                 )
             },
         )["camera/frame"]
-        record["camera"]["gain"] = 9
+        mutable["camera"]["gain"] = 9
+        mutable["new"] = "late"
         assert value.run_record["camera"]["gain"] == 1
+        assert "new" not in value.run_record
+        assert isinstance(value.run_record, MappingProxyType)
+        assert isinstance(value.run_record["camera"], MappingProxyType)
         assert value.snapshot.ref.stream_generation == generation
         assert value.snapshot.ref.revision.value == 1
         assert value.snapshot.ref.block_id == BlockId("camera/frame.event")
@@ -518,7 +572,9 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         state = plane._states["linear"]
         retained = [
             value
-            for _sequence, value in state.commit_values["linear/frame"]
+            for _sequence, value, _origin, _parents in state.commit_chunks[
+                "linear/frame"
+            ]
         ]
         assert len(retained) == 100
         assert state.materialized == {}
@@ -645,6 +701,117 @@ def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> 
         ]
         assert plane.seal_committed(node)
     finally:
+        plane.close()
+
+
+def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -> None:
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    history_declaration = DatasetOutputDeclaration("history", "test.history")
+    phase_declaration = DatasetOutputDeclaration("phase", "test.phase")
+    source = _node("causal-source", source_declaration)
+    first_processor = _node(
+        "causal-first",
+        history_declaration,
+        phase_declaration,
+    )
+    downstream = _node(
+        "causal-downstream",
+        DatasetOutputDeclaration("result", "test.result"),
+    )
+    plane = SignalDataPlane()
+    first_tap = None
+    downstream_tap = None
+    try:
+        plane.reserve(source)
+        plane.commit_live(
+            source,
+            {
+                "frame": _finite(
+                    source_declaration,
+                    value=1.0,
+                    total=2,
+                    origin=0,
+                    written=1,
+                )
+            },
+        )
+        first_root = plane.latest_publication("causal-source/frame")
+        assert first_root is not None
+        first_tap = plane.reserve_follow_processor(
+            first_processor,
+            source_name="causal-source/frame",
+            source_publication=first_root,
+        )
+        plane.commit_processor(
+            first_processor,
+            {
+                "history": _finite(
+                    history_declaration,
+                    value=10.0,
+                    total=2,
+                    origin=0,
+                    written=1,
+                ),
+                "phase": _large_latest(phase_declaration, 100.0),
+            },
+            source_publication=first_root,
+        )
+        first_derived = plane.latest_publication("causal-first/history")
+        assert first_derived is not None
+        phase = first_derived.value("causal-first/phase")
+        assert phase is not None
+        phase_array = weakref.ref(phase.snapshot.block.values)
+
+        plane.commit_live(
+            source,
+            {
+                "frame": _finite(
+                    source_declaration,
+                    value=2.0,
+                    total=2,
+                    origin=1,
+                    written=2,
+                )
+            },
+        )
+        second_root = plane.latest_publication("causal-source/frame")
+        assert second_root is not None
+        plane.commit_processor(
+            first_processor,
+            {
+                "history": _finite(
+                    history_declaration,
+                    value=20.0,
+                    total=2,
+                    origin=1,
+                    written=2,
+                ),
+                "phase": _large_latest(phase_declaration, 200.0),
+            },
+            source_publication=second_root,
+        )
+        latest_derived = plane.latest_publication("causal-first/history")
+        assert latest_derived is not None
+        del phase, first_derived
+        gc.collect()
+        assert phase_array() is None
+
+        downstream_tap = plane.reserve_follow_processor(
+            downstream,
+            source_name="causal-first/history",
+            source_publication=latest_derived,
+        )
+        replayed = downstream_tap.next(timeout=0.0)
+        assert replayed.event_ref.sequence == 1
+        assert replayed.direct_parent_refs == (first_root.event_ref,)
+        assert plane.publication_roots(replayed) == frozenset(
+            {first_root.event_ref}
+        )
+    finally:
+        if downstream_tap is not None:
+            downstream_tap.close()
+        if first_tap is not None:
+            first_tap.close()
         plane.close()
 
 

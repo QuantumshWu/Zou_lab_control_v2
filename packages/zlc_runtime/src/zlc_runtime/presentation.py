@@ -274,8 +274,6 @@ class SurfacePort(Protocol):
         front: SignalFront,
     ) -> SurfaceUpdate | None: ...
 
-    def observe(self, update: SurfaceUpdate, operation: object) -> None: ...
-
     def can_accept(self, update: SurfaceUpdate, operation: object) -> bool: ...
 
     def accept(self, update: SurfaceUpdate, operation: object) -> bool: ...
@@ -629,13 +627,6 @@ class SurfaceBatchArbiter:
                 blamed = blamed or update
                 records.append((port, update, error, False))
                 continue
-            try:
-                port.observe(update, operation)
-            except BaseException as error:
-                batch_error = batch_error or error
-                blamed = blamed or update
-                records.append((port, update, error, False))
-                continue
             records.append((port, update, operation, True))
 
         if batch_error is None:
@@ -749,7 +740,6 @@ class BoardScheduler:
         if (
             not callable(getattr(plane, "freeze", None))
             or not callable(getattr(plane, "set_front_signals", None))
-            or not callable(getattr(plane, "direct_parent_publications", None))
             or not callable(getattr(plane, "follower_edges", None))
         ):
             raise TypeError("board scheduler requires a signal data plane")
@@ -806,26 +796,16 @@ class BoardScheduler:
     ) -> frozenset | None:
         """The shot-root event refs one publication descends from.
 
-        Walking ``direct_parent_publications`` terminates at the parentless
-        producers (the shot's cameras); a derived or follower publication
-        therefore stamps the SAME roots as its source, which is what lets
-        the arbiter assemble them into one cohort.  None means the lineage
-        could not be resolved — the batch presents solo rather than guessing.
+        Runtime owns publication lineage, including replayed exact events.  A
+        derived or follower publication therefore receives the SAME roots as
+        its source.  None means lineage could not be resolved, so the batch
+        presents solo rather than guessing.
         """
 
-        roots: set[object] = set()
-        stack = [publication]
-        while stack:
-            current = stack.pop()
-            refs = current.direct_parent_refs
-            if not refs:
-                roots.add(current.event_ref)
-                continue
-            parents = self._plane.direct_parent_publications(current)
-            if len(parents) != len(refs):
-                return None
-            stack.extend(parents)
-        return frozenset(roots)
+        try:
+            return self._plane.publication_roots(publication)
+        except RuntimeError:
+            return None
 
     def on_tick(self) -> SignalFront:
         if self._closed:

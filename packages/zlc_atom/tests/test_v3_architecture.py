@@ -473,8 +473,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "uniform_psf.png",
         )
         assert len(task_result.capture.frames) == 90
-        assert sum(len(group) for group in task_result.reference) == 60
-        assert len(task_result.short) == 30
+        assert sum(len(group) for group in task_result.capture.reference) == 60
+        assert len(task_result.capture.short) == 30
         # Through the camera measurement, which points the camera at the
         # geometry this run asks for -- and it asks for the geometry that is
         # already there, so a tuned ROI survives a calibration.
@@ -518,7 +518,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert occupancy_node.calibration_path == calibration_path.resolve()
         assert occupancy_node.model.kind is ReadoutModelKind.UNIFORM_PSF
         occupancy_result = occupancy_node.process(
-            camera_cycle_snapshot([(record,) for record in task_result.short]),
+            camera_cycle_snapshot([(record,) for record in task_result.capture.short]),
         )
         assert occupancy_result.counts.shape == (30, 1, 35)
         assert (
@@ -604,7 +604,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(output.name for output in descriptors["occupancy"].outputs) == (
             "counts",
             "occupied",
-            "rate",
             "frame_judged",
         )
         with pytest.raises((TypeError, ValueError)):

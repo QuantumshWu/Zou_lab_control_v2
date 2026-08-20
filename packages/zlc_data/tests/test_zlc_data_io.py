@@ -214,6 +214,15 @@ def test_npz_missing_value_member_is_rejected(tmp_path: Path):
     with pytest.raises(NPZFormatError, match="missing array|members mismatch"):
         load_npz(malformed)
 
+    missing_ref = tmp_path / "missing-ref-fingerprint.npz"
+    arrays = _archive_members(original)
+    manifest = json.loads(str(arrays["manifest"].item()))
+    manifest["ref"].pop("schema_fingerprint")
+    arrays["manifest"] = np.asarray(json.dumps(manifest, sort_keys=True))
+    np.savez_compressed(missing_ref, **arrays)
+    with pytest.raises(NPZFormatError, match="missing schema_fingerprint"):
+        load_npz(missing_ref)
+
 
 def test_npz_extra_member_is_rejected(tmp_path: Path):
     source = _snapshot()
@@ -429,4 +438,14 @@ def test_figure_reader_validates_embedded_dataset_before_returning():
     members["data"] = np.zeros((1,), dtype="<f4")
 
     with pytest.raises(ValueError, match="shape"):
+        read_archive(BytesIO(_figure_payload(members)))
+
+    members = _figure_members(
+        figure_bytes("dataset", arrays={"data": _snapshot()}, sections={})
+    )
+    info = json.loads(str(members["info"].item()))
+    manifest = info["sections"]["dataset"]["data"]
+    manifest["ref"]["schema_fingerprint"] = "unexpected"
+    members["info"] = np.asarray(json.dumps(info, sort_keys=True))
+    with pytest.raises(ValueError, match="must not repeat schema_fingerprint"):
         read_archive(BytesIO(_figure_payload(members)))

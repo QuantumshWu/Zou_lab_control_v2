@@ -43,9 +43,6 @@ class DeviceControlHandle(QtCore.QObject):
         if hasattr(target, "activateWindow"):
             target.activateWindow()
 
-    def show(self) -> None:
-        self.restore()
-
     def close(self) -> None:
         target = self._window if self._window is not None else self._view
         target.close()
@@ -162,11 +159,6 @@ class DeviceManagerHandle(QtCore.QObject):
             target.raise_()
         if hasattr(target, "activateWindow"):
             target.activateWindow()
-
-    def show(self) -> None:
-        """Compatibility spelling for hosts that do not reserve ``show``."""
-
-        self.restore()
 
     def window_size(self) -> tuple[int, int]:
         target = self._window if self._window is not None else self._view

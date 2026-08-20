@@ -175,4 +175,4 @@ This tree is the product. The eight standalone repositories beside it
 (`Github/zlc_data`, `Github/zlc_ui`, …) are where it was built and are kept for
 their history; they are not a second place to edit. If `import zlc_data`
 resolves to one of them, this checkout is not the one running — which
-`packages/zlc_data/tests/test_package_guards.py` will say out loud.
+`python -m zou_lab_control_v2 check` reports explicitly.

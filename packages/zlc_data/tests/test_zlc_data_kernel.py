@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import sys
+import os
 import subprocess
+import sys
 from fractions import Fraction
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -453,13 +455,38 @@ def test_repeat_role_has_exactly_one_structural_owner():
 
 
 def test_import_is_headless_and_does_not_pull_legacy_domain():
+    repo_root = Path(__file__).resolve().parents[3]
+    environment = dict(os.environ)
+    python_paths = [
+        str(repo_root),
+        str(repo_root / "packages" / "zlc_data" / "src"),
+    ]
+    if inherited := environment.get("PYTHONPATH"):
+        python_paths.append(inherited)
+    environment["PYTHONPATH"] = os.pathsep.join(python_paths)
     code = """
+from pathlib import Path
 import sys
+
+import zou_lab_control_v2
 import zlc_data
+
+repo_root = Path(sys.argv[1]).resolve()
+root_file = Path(zou_lab_control_v2.__file__).resolve()
+data_file = Path(zlc_data.__file__).resolve()
+print("root", root_file)
+print("zlc_data", data_file)
+assert root_file == repo_root / "zou_lab_control_v2" / "__init__.py"
+assert data_file == repo_root / "packages" / "zlc_data" / "src" / "zlc_data" / "__init__.py"
 for forbidden in ('matplotlib', 'PyQt5', 'Zou_lab_control'):
     assert forbidden not in sys.modules, (forbidden, sorted(sys.modules))
 """
-    subprocess.run([sys.executable, "-c", code], check=True)
+    subprocess.run(
+        [sys.executable, "-c", code, str(repo_root)],
+        check=True,
+        cwd=repo_root,
+        env=environment,
+    )
 
 
 def test_a_schema_is_not_named_until_someone_asks() -> None:

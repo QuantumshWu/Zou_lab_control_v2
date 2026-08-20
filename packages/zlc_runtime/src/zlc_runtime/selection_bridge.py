@@ -478,9 +478,7 @@ class _TriggeredOutputs(dict[str, LiveDatasetOutput]):
 
 
 class _StaleFit(RuntimeError):
-    def __init__(self, trigger_revision: int) -> None:
-        super().__init__("fit result is stale for the current source publication")
-        self.trigger_revision = trigger_revision
+    pass
 
 
 class _BridgeProcessor:
@@ -584,6 +582,7 @@ class SelectionBridge:
         self._started = False
         self._closed = False
         self._selection: SelectionState | None = None
+        self._selection_epoch = 0
         self._selection_processor: _BridgeProcessor | None = None
         self._fit_processor: _BridgeProcessor | None = None
         self._fit_event: FitEventValue | None = None
@@ -669,6 +668,7 @@ class SelectionBridge:
             old_fit = self._fit_processor if fit_changed else None
             if selection_changed:
                 self._selection = None
+                self._selection_epoch += 1
                 self._selection_processor = None
             if fit_changed:
                 self._fit_processor = None
@@ -721,6 +721,7 @@ class SelectionBridge:
             self._selection_processor = None
             self._fit_processor = None
             self._selection = None
+            self._selection_epoch += 1
             self._fit_event = None
             self._fit_publication = None
         for unsubscribe in subscriptions:
@@ -745,6 +746,7 @@ class SelectionBridge:
         if change is SelectionChange.REMOVED:
             with self._lock:
                 self._selection = None
+                self._selection_epoch += 1
                 processor = self._selection_processor
                 self._selection_processor = None
             if processor is not None:
@@ -831,6 +833,8 @@ class SelectionBridge:
         source = publication.value(self._source_signal)
         assert source is not None
         with self._lock:
+            if self._closed or not self._started:
+                return
             if accept_revision and (
                 self._last_fit_batch_revision is not None
                 and event.batch_revision <= self._last_fit_batch_revision
@@ -870,6 +874,14 @@ class SelectionBridge:
             self._source_snapshot(publication),
             event,
         )
+        with self._lock:
+            if (
+                self._closed
+                or not self._started
+                or self._fit_event is not event
+                or self._fit_trigger_revision != trigger_revision
+            ):
+                return
         if not self._plane.is_generation_live(self._source_signal):
             if processor is not None:
                 with self._lock:
@@ -886,35 +898,47 @@ class SelectionBridge:
             self._publish_terminal("fit", outputs, publication)
             return
         with self._lock:
-            if self._fit_processor is None:
+            if (
+                self._closed
+                or not self._started
+                or self._fit_event is not event
+                or self._fit_trigger_revision != trigger_revision
+            ):
+                return
+            processor = self._fit_processor
+            attach = processor is None
+            if attach:
                 processor = self._new_processor("fit", output_names)
-                self._fit_processor = processor
-                # Attaching binds the route and demands the exact CURRENT
-                # publication; the publication the fit derived from may
-                # already be one behind it, and is what gets published.
-                current = self._current_source_publication()
-                if current is None:
-                    self._fit_processor = None
-                    self._record_error(
-                        RuntimeError("fit route lost its source while attaching")
-                    )
-                    return
-                # A fit signal is a presentation-paced follower: it advances
-                # only after its source panel PRESENTS and its live fit
-                # accepts (the lane recompute raises _StaleFit on any newer
-                # parent).  It must therefore never hold its source in the
-                # same-shot front -- consuming a fit signal on one panel
-                # would freeze the source panel, which freezes the fit, which
-                # freezes everything in the component.
-                self._plane.attach_latest_only_processor(
-                    processor,
-                    source_name=self._source_signal,
-                    initial_publication=current,
-                    coherent=False,
-                )
-            else:
-                processor = self._fit_processor
         assert processor is not None
+        if attach:
+            # A fit signal is a presentation-paced follower: it advances only
+            # after its source presents, so it retains lineage but does not
+            # hold the source's coherent front waiting for itself.
+            current = self._current_source_publication()
+            if current is None:
+                self._record_error(
+                    RuntimeError("fit route lost its source while attaching")
+                )
+                return
+            self._plane.attach_latest_only_processor(
+                processor,
+                source_name=self._source_signal,
+                initial_publication=current,
+                coherent=False,
+            )
+            with self._lock:
+                install = (
+                    not self._closed
+                    and self._started
+                    and self._fit_event is event
+                    and self._fit_trigger_revision == trigger_revision
+                    and self._fit_processor is None
+                )
+                if install:
+                    self._fit_processor = processor
+            if not install:
+                self._withdraw_processor(processor)
+                return
         try:
             self._commit_processor(
                 processor,
@@ -924,6 +948,17 @@ class SelectionBridge:
             )
         except RuntimeError as error:
             if "obsolete parent" in str(error):
+                return
+            with self._lock:
+                stale = (
+                    self._closed
+                    or self._fit_event is not event
+                    or self._fit_trigger_revision != trigger_revision
+                )
+                if self._fit_processor is processor:
+                    self._fit_processor = None
+            if stale:
+                self._withdraw_processor(processor)
                 return
             raise
 
@@ -935,6 +970,11 @@ class SelectionBridge:
             if previous is not None and state.revision <= previous.revision:
                 raise ValueError("selection revisions must increase")
             output_names = self._selection_output_names(state)
+            self._selection_epoch += 1
+            selection_epoch = self._selection_epoch
+        publication = None
+        outputs = None
+        if output_names:
             publication = self._current_source_publication()
             if publication is None:
                 raise RuntimeError(
@@ -942,12 +982,20 @@ class SelectionBridge:
                 )
             source = publication.value(self._source_signal)
             if source is None:
-                raise RuntimeError("current source publication has no selected signal")
+                raise RuntimeError(
+                    "current source publication has no selected signal"
+                )
             outputs = self._materialize_selection_outputs(
                 self._source_snapshot(publication),
                 state,
             )
-
+        with self._lock:
+            if (
+                self._closed
+                or not self._started
+                or self._selection_epoch != selection_epoch
+            ):
+                return
             # A committed image selection may change the derived sub-box
             # schema.  The plane deliberately freezes schemas per generation,
             # so every committed selection starts a fresh latest-only
@@ -960,6 +1008,7 @@ class SelectionBridge:
             self._withdraw_processor(old_processor)
         if not output_names:
             return
+        assert publication is not None and outputs is not None
 
         # A box drawn on a run that has already finished is not a live
         # derivation and cannot be one: no further parent publication will ever
@@ -970,37 +1019,45 @@ class SelectionBridge:
             self._publish_terminal("selection", outputs, publication)
             return
 
-        with self._lock:
-            if self._closed or not self._started:
-                return
-            latest = self._current_source_publication()
-            if latest is None:
+        latest = self._current_source_publication()
+        if latest is None:
+            raise RuntimeError("committed selection arrived before source publication")
+        if latest is not publication:
+            publication = latest
+            source = publication.value(self._source_signal)
+            if source is None:
                 raise RuntimeError(
-                    "committed selection arrived before source publication"
+                    "current source publication has no selected signal"
                 )
-            if latest is not publication:
-                publication = latest
-                source = publication.value(self._source_signal)
-                if source is None:
-                    raise RuntimeError(
-                        "current source publication has no selected signal"
-                    )
-                outputs = self._materialize_selection_outputs(
-                    self._source_snapshot(publication),
-                    state,
-                )
+            outputs = self._materialize_selection_outputs(
+                self._source_snapshot(publication),
+                state,
+            )
+        with self._lock:
+            if (
+                self._closed
+                or not self._started
+                or self._selection is not state
+            ):
+                return
             processor = self._new_processor("selection", output_names)
-            self._selection_processor = processor
-            try:
-                self._plane.attach_latest_only_processor(
-                    processor,
-                    source_name=self._source_signal,
-                    initial_publication=publication,
-                )
-            except BaseException:
-                if self._selection_processor is processor:
-                    self._selection_processor = None
-                raise
+        self._plane.attach_latest_only_processor(
+            processor,
+            source_name=self._source_signal,
+            initial_publication=publication,
+        )
+        with self._lock:
+            install = (
+                not self._closed
+                and self._started
+                and self._selection is state
+                and self._selection_processor is None
+            )
+            if install:
+                self._selection_processor = processor
+        if not install:
+            self._withdraw_processor(processor)
+            return
 
         try:
             self._commit_processor(
@@ -1013,9 +1070,12 @@ class SelectionBridge:
             if "obsolete parent" in str(error):
                 return
             with self._lock:
+                stale = self._closed or self._selection is not state
                 if self._selection_processor is processor:
                     self._selection_processor = None
             self._withdraw_processor(processor)
+            if stale:
+                return
             raise
 
     def _publish_terminal(
@@ -1034,16 +1094,34 @@ class SelectionBridge:
             if self._closed or not self._started:
                 return
             owner = self._new_processor(role, tuple(outputs))
-            if role == "selection":
-                self._selection_processor = owner
-            else:
-                self._fit_processor = owner
+            expected = self._selection if role == "selection" else self._fit_event
         try:
             self._plane.reserve_frozen_processor(
                 owner,
                 source_name=self._source_signal,
                 source_publication=source_publication,
             )
+            with self._lock:
+                current = self._selection if role == "selection" else self._fit_event
+                install = (
+                    not self._closed
+                    and self._started
+                    and current is expected
+                    and (
+                        self._selection_processor
+                        if role == "selection"
+                        else self._fit_processor
+                    )
+                    is None
+                )
+                if install:
+                    if role == "selection":
+                        self._selection_processor = owner
+                    else:
+                        self._fit_processor = owner
+            if not install:
+                self._withdraw_processor(owner)
+                return
             self._plane.commit_processor(
                 owner,
                 outputs,
@@ -1053,13 +1131,21 @@ class SelectionBridge:
             self._plane.seal_processor(owner)
         except BaseException:
             with self._lock:
+                current = self._selection if role == "selection" else self._fit_event
+                stale = self._closed or current is not expected
                 if self._selection_processor is owner:
                     self._selection_processor = None
                 if self._fit_processor is owner:
                     self._fit_processor = None
             self._withdraw_processor(owner)
+            if stale:
+                return
             raise
-        self._processor_wake()
+        with self._lock:
+            current = self._selection if role == "selection" else self._fit_event
+            wake = not self._closed and current is expected
+        if wake:
+            self._processor_wake()
 
     def _evaluate_processor(
         self,
@@ -1073,20 +1159,25 @@ class SelectionBridge:
                 state = self._selection
                 if state is None:
                     raise RuntimeError("SelectionBridge has no committed selection")
-                return _TriggeredOutputs(
-                    self._materialize_selection_outputs(snapshot, state),
-                    ("selection", state.revision),
-                )
-            event = self._fit_event
-            trigger_revision = self._fit_trigger_revision
-            if event is None:
-                raise RuntimeError("SelectionBridge has no accepted fit event")
-            if snapshot.ref.revision.value != event.source_revision:
-                raise _StaleFit(trigger_revision)
-            return _TriggeredOutputs(
-                self._materialize_fit_outputs(snapshot, event),
-                ("fit", trigger_revision),
-            )
+                trigger = ("selection", state.revision)
+                event = None
+            else:
+                state = None
+                event = self._fit_event
+                trigger_revision = self._fit_trigger_revision
+                if event is None:
+                    raise RuntimeError("SelectionBridge has no accepted fit event")
+                if snapshot.ref.revision.value != event.source_revision:
+                    raise _StaleFit(
+                        "fit result is stale for the current source publication"
+                    )
+                trigger = ("fit", trigger_revision)
+        outputs = (
+            self._materialize_selection_outputs(snapshot, state)
+            if state is not None
+            else self._materialize_fit_outputs(snapshot, event)
+        )
+        return _TriggeredOutputs(outputs, trigger)
 
     def _source_snapshot(
         self,

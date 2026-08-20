@@ -20,7 +20,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
+from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
 
 
 @pytest.fixture
@@ -198,65 +198,6 @@ def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     completed = _run(workspace, "--check")
     assert completed.returncode == 2
     assert "template='virtual'" in completed.stderr
-
-
-def test_the_figure_viewer_opens_what_the_session_saved(workspace) -> None:
-    """The other half of saving: a file nobody can reopen was not kept.
-
-    Deliberately a separate process with no session, no devices and no
-    apparatus file -- which is the situation a figure is actually read in.
-    """
-
-    write_ordinary_pulse(workspace)
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
-    )
-    write = (
-        "import zou_lab_control_v2;"
-        "import numpy as np, sys;"
-        "from pathlib import Path;"
-        "from zlc_workbench import session as tested_module;"
-        "print(tested_module.__file__);"
-        "from zlc_atom.nodes.camera_measurement.measurement import CameraMeasurementNode, CameraMeasurementRequest;"
-        "from zlc_workbench.session import ExperimentSession;"
-        "root = Path(r'%s');"
-        "session = ExperimentSession.open(root, template='virtual');"
-        "session.load_pulse('%s');"
-        "node = CameraMeasurementNode(camera=session.camera,"
-        " request=CameraMeasurementRequest('camera', 0.02, None, 1, %d),"
-        " signal_plane=session.signal_plane, producer='cm');"
-        "capture = node.prepare();"
-        "session.fire(shots=1);"
-        "result = capture.collect();"
-        "signal = node.signal_key('frames');"
-        "path = session.save_figure('run', arrays={'panel-1': result.publication.value(signal).snapshot},"
-        " panel={'panel-1': {'signal': signal, 'title': 'camera'}});"
-        "print(path);"
-        "session.close()"
-    ) % (workspace, PULSE_NAME, CAMERA_WINDOWS)
-    written = subprocess.run(
-        [sys.executable, "-c", write],
-        capture_output=True, text=True, env=environment, timeout=300,
-    )
-    assert written.returncode == 0, written.stderr
-    archive = written.stdout.strip().splitlines()[-1]
-
-    viewer_script = (
-        "import zou_lab_control_v2\n"
-        "from zlc_workbench.apps import figure_viewer as tested_module\n"
-        "print(tested_module.__file__)\n"
-        f"raise SystemExit(tested_module.main(['--path', {archive!r}, '--check']))\n"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", viewer_script],
-        capture_output=True, text=True, env=environment, timeout=300,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "figure ready: 'run'" in completed.stdout
-    assert "1 dataset(s)" in completed.stdout
 
 
 def test_the_figure_viewer_starts_without_an_archive() -> None:
@@ -519,7 +460,12 @@ assert not view._rows['calibration'].stop_button.isVisible()
 assert 'calibration:' in view._view.status_strip.text()
 
 preview_signal = '@logic/calibration/capture_preview'
-until(lambda: any(panel.state.signal == preview_signal for panel in presenter.panels.values()))
+until(lambda: any(
+    panel.state.signal == preview_signal
+    and panel.host is not None
+    and panel.port is not None
+    for panel in presenter.panels.values()
+))
 preview = next(panel for panel in presenter.panels.values() if panel.state.signal == preview_signal)
 assert preview.host is not None and preview.port is not None
 assert preview_signal in presenter.session.signal_plane.freeze().names()
@@ -700,7 +646,7 @@ third_artifact_path = Path(
 assert third_artifact_path not in {first_artifact_path, second_artifact_path}
 
 front = presenter.session.signal_plane.freeze()
-assert tuple(front.names()) == (capture_signal,)
+assert capture_signal not in front.names()
 assert all(
     panel.state.signal == capture_signal
     for panel in presenter.panels.values()

@@ -168,9 +168,6 @@ class PulseEditorHandle(QtCore.QObject):
         if hasattr(target, "activateWindow"):
             target.activateWindow()
 
-    def show(self) -> None:
-        self.restore()
-
     def window_size(self) -> tuple[int, int]:
         """Width and height of the window, for acceptance to check the rule."""
 

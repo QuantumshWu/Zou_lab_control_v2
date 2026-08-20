@@ -262,7 +262,7 @@ def _validate_datasets(
             raise ValueError("figure dataset names must be non-empty text")
         if not isinstance(manifest, Mapping) or manifest.get("values_key") != name:
             raise ValueError(f"figure dataset {name!r} must own its same-named array")
-        snapshot_from_manifest(manifest, arrays)
+        snapshot_from_manifest(manifest, arrays, embedded=True)
         keys = manifest_array_keys(manifest)
         if keys not in ((name,), (name, f"{name}.validity")):
             raise ValueError(f"figure dataset {name!r} uses non-canonical member names")
@@ -332,4 +332,4 @@ def read_dataset(
     manifest = manifests.get(name)
     if manifest is None:
         raise KeyError(f"{name!r} was saved as a bare array")
-    return snapshot_from_manifest(manifest, arrays)
+    return snapshot_from_manifest(manifest, arrays, embedded=True)

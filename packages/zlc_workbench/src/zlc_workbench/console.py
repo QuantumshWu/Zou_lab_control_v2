@@ -153,6 +153,9 @@ class PanelBinding:
     #: Edit deliberately keeps one frozen data revision until Refresh.  It is
     #: not panel configuration and therefore does not live in ``PanelState``.
     frozen_data: PanelFrozenData | None = None
+    #: Refresh waits for the next surface the live port actually accepts.
+    #: Until then Edit/Save keep the previous accepted snapshot.
+    refresh_requested: bool = False
     #: Panel Edit owns a second, frozen plotting surface.  It is deliberately
     #: not the live monitor host and therefore has no PlotPanelPort.
     editor_host: Any = None
@@ -600,32 +603,7 @@ class ConsolePresenter:
             None,
             parameter_surface=self._unbound_panel_parameters(state),
         )
-        port = PlotPanelPort(
-            panel_id,
-            state.signal,
-            None,
-            display_interval_ms=state.interval_ms,
-            shown=None,
-            companion_signals=lambda: self._panel_companion_signals(binding),
-            project_input=lambda value, pub, front: self._project_panel_input(
-                binding, value, pub, front
-            ),
-            current_dataset=self.session.signal_plane.current_dataset,
-            submit_projection=self.board.submit_projection,
-            replace_host=lambda projected, value, pub: self._stage_panel_host(
-                binding, projected, value, pub
-            ),
-            accept_host=lambda old, new, pub, projected: self._accept_panel_host(
-                binding, old, new, pub, projected
-            ),
-            retire_host=self._retire_plot_host,
-            on_presented=lambda pub, projected: self._panel_presented(
-                binding, pub, projected
-            ),
-            present=lambda operation: self._present_panel_operation(
-                binding, operation
-            ),
-        )
+        port = self._make_panel_port(binding)
         binding.port = port
         self.panels[panel_id] = binding
 
@@ -651,6 +629,34 @@ class ConsolePresenter:
 
         overlay = binding.state.overlay_signal
         return (overlay,) if overlay else ()
+
+    def _make_panel_port(self, binding: PanelBinding) -> PlotPanelPort:
+        """Wire one panel to the board through the single product path."""
+
+        return PlotPanelPort(
+            binding.panel_id,
+            binding.state.signal,
+            display_interval_ms=binding.state.interval_ms,
+            companion_signals=lambda: self._panel_companion_signals(binding),
+            project_input=lambda value, pub, front: self._project_panel_input(
+                binding, value, pub, front
+            ),
+            current_dataset=self.session.signal_plane.current_dataset,
+            submit_projection=self.board.submit_projection,
+            replace_host=lambda projected, value, pub: self._stage_panel_host(
+                binding, projected, value, pub
+            ),
+            accept_host=lambda old, new, pub, projected: self._accept_panel_host(
+                binding, old, new, pub, projected
+            ),
+            retire_host=self._retire_plot_host,
+            on_presented=lambda pub, projected: self._panel_presented(
+                binding, pub, projected
+            ),
+            present=lambda operation: self._present_panel_operation(
+                binding, operation
+            ),
+        )
 
     def _presentation_snapshot(
         self,
@@ -710,6 +716,7 @@ class ConsolePresenter:
             return snapshot
         overlay = self._image_point_overlay(
             front,
+            publication,
             selected.overlay_signal,
             snapshot,
             binding.overlay_revision + 1,
@@ -722,6 +729,7 @@ class ConsolePresenter:
     def _image_point_overlay(
         self,
         front: object,
+        image_publication: object,
         overlay_signal: str,
         image_snapshot: object,
         revision: int,
@@ -736,6 +744,10 @@ class ConsolePresenter:
         overlay_publication = front.publication(overlay_signal)
         if overlay_publication is None:
             return None
+        if self.session.signal_plane.publication_roots(
+            image_publication
+        ) != self.session.signal_plane.publication_roots(overlay_publication):
+            raise ValueError("image overlay publication is not from the image shot")
         status = overlay_publication.value(overlay_signal)
         if status is None:
             return None
@@ -753,13 +765,6 @@ class ConsolePresenter:
             image_snapshot,
             revision=int(revision),
         )
-
-    @staticmethod
-    def _initial_plot_input(plot_input: object, state: PanelState) -> object:
-        """Return the already-composed first plot input."""
-
-        del state
-        return plot_input
 
     @staticmethod
     def _overlay_annotation(
@@ -807,8 +812,9 @@ class ConsolePresenter:
         """Track the exact live event separately from Panel Edit's frozen one."""
 
         binding.display_publication = publication
-        if binding.frozen_data is not None:
+        if binding.frozen_data is not None and not binding.refresh_requested:
             return
+        binding.refresh_requested = False
         snapshot = getattr(plot_input, "snapshot", plot_input)
         binding.frozen_data = self._panel_frozen_data(
             binding,
@@ -1154,9 +1160,7 @@ class ConsolePresenter:
 
         del value
 
-        host = self._make_host(
-            self._initial_plot_input(plot_input, binding.state), binding.state
-        )
+        host = self._make_host(plot_input, binding.state)
         staged = replace(
             binding,
             host=host,
@@ -1199,9 +1203,18 @@ class ConsolePresenter:
             try:
                 result = future.result()
             except BaseException as error:
+                failed = False
                 with lock:
                     if not combined.done():
                         combined.set_exception(error)
+                        failed = True
+                if failed:
+                    for sibling in futures:
+                        if sibling is not future:
+                            try:
+                                sibling.cancel()
+                            except BaseException:
+                                pass
                 return
             with lock:
                 if combined.done():
@@ -1349,6 +1362,12 @@ class ConsolePresenter:
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
 
+    def _publication_families(self, publication: object) -> frozenset[tuple]:
+        return frozenset(
+            (root.stream_id, root.generation)
+            for root in self.session.signal_plane.publication_roots(publication)
+        )
+
     def overlay_signal_groups(
         self,
         signal: str,
@@ -1367,6 +1386,11 @@ class ConsolePresenter:
         if not selected or publication is None:
             return ()
 
+        try:
+            primary_families = self._publication_families(publication)
+        except (LookupError, RuntimeError, ValueError):
+            return ()
+
         contracts = dict(self._external_signal_contracts())
         for binding in self.logic.values():
             for output in self._logic_outputs(binding):
@@ -1377,7 +1401,16 @@ class ConsolePresenter:
         for name, label, _state, producer, _derived in self.offered_signals(
             include_shown=True
         ):
-            if contracts.get(name) == IMAGE_POINT_OVERLAY_CONTRACT:
+            if contracts.get(name) != IMAGE_POINT_OVERLAY_CONTRACT:
+                continue
+            candidate = self.session.signal_plane.latest_publication(name)
+            if candidate is None:
+                continue
+            try:
+                candidate_families = self._publication_families(candidate)
+            except (LookupError, RuntimeError, ValueError):
+                continue
+            if candidate_families == primary_families:
                 groups.setdefault(producer or "signals", []).append((label, name))
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
@@ -1705,32 +1738,7 @@ class ConsolePresenter:
             binding.host = None
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.configuration = None
-            binding.port = PlotPanelPort(
-                panel_id,
-                candidate.signal,
-                None,
-                display_interval_ms=candidate.interval_ms,
-                shown=None,
-                companion_signals=lambda: self._panel_companion_signals(binding),
-                project_input=lambda current_value, pub, front: (
-                    self._project_panel_input(binding, current_value, pub, front)
-                ),
-                current_dataset=self.session.signal_plane.current_dataset,
-                submit_projection=self.board.submit_projection,
-                replace_host=lambda projected, current_value, pub: self._stage_panel_host(
-                    binding, projected, current_value, pub
-                ),
-                accept_host=lambda old, new, pub, projected: self._accept_panel_host(
-                    binding, old, new, pub, projected
-                ),
-                retire_host=self._retire_plot_host,
-                on_presented=lambda pub, projected: self._panel_presented(
-                    binding, pub, projected
-                ),
-                present=lambda operation: self._present_panel_operation(
-                    binding, operation
-                ),
-            )
+            binding.port = self._make_panel_port(binding)
             binding.initial_presented = False
             binding.display_publication = None
             self.view.show_panel(panel_id, None)
@@ -2311,9 +2319,7 @@ class ConsolePresenter:
         plot_input = (
             frozen.snapshot if frozen.plot_input is None else frozen.plot_input
         )
-        host = self._make_host(
-            self._initial_plot_input(plot_input, binding.state), binding.state
-        )
+        host = self._make_host(plot_input, binding.state)
 
         mount = getattr(self.view, "show_panel_editor", None)
         if not callable(mount):
@@ -2460,16 +2466,14 @@ class ConsolePresenter:
                 front=front,
             )
             binding.frozen_data = frozen
+            binding.refresh_requested = False
             if binding.editor_host is not None:
-                previous_ref = getattr(
-                    getattr(previous, "publication", None),
-                    "event_ref",
-                    None,
-                )
-                current_ref = publication.event_ref
-                if (
-                    previous_ref is not None
-                    and previous_ref.generation == current_ref.generation
+                if previous is not None and previous.plot_input is shown_input:
+                    self._refresh_panel_editor_selection(binding)
+                elif (
+                    previous is not None
+                    and previous.publication.event_ref.generation
+                    == publication.event_ref.generation
                 ):
                     update = (
                         binding.editor_host.update_image_frame
@@ -2486,7 +2490,7 @@ class ConsolePresenter:
         # canonical projection; materialization and rendering remain on the
         # board/plot workers, and _panel_presented installs the frozen record
         # when that same-shot surface is accepted.
-        binding.frozen_data = None
+        binding.refresh_requested = True
         self.board.tick()
         return True
 
@@ -2672,6 +2676,7 @@ class ConsolePresenter:
             binding.bridge.close()
         binding.bridge = binding.selections = None
         binding.configuration = None
+        binding.refresh_requested = False
         host = binding.host
         port = binding.port
         binding.host = None
@@ -2942,33 +2947,7 @@ class ConsolePresenter:
                     continue
                 binding.state = state
                 binding.parameter_surface = self._unbound_panel_parameters(state)
-                binding.port = PlotPanelPort(
-                    panel_id,
-                    state.signal,
-                    None,
-                    display_interval_ms=state.interval_ms,
-                    shown=None,
-                    companion_signals=lambda item=binding: (
-                        self._panel_companion_signals(item)
-                    ),
-                    project_input=lambda current, pub, front, item=binding: (
-                        self._project_panel_input(item, current, pub, front)
-                    ),
-                    current_dataset=self.session.signal_plane.current_dataset,
-                    submit_projection=self.board.submit_projection,
-                    replace_host=lambda projected, current, pub, item=binding: (
-                        self._stage_panel_host(item, projected, current, pub)
-                    ),
-                    accept_host=lambda old, new, pub, projected, item=binding: (
-                        self._accept_panel_host(
-                            item, old, new, pub, projected
-                        )
-                    ),
-                    retire_host=self._retire_plot_host,
-                    on_presented=lambda pub, projected, item=binding: (
-                        self._panel_presented(item, pub, projected)
-                    ),
-                )
+                binding.port = self._make_panel_port(binding)
         except Exception as error:
             for binding in panels:
                 if binding.host is not None:

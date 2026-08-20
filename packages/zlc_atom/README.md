@@ -113,7 +113,7 @@ The runtime has one direction of responsibility:
 | Device | camera/sequencer protocols, buffers, trigger routing, virtual imaging world | calibration policy or analysis |
 | Measurement | arm/read/finish observation and publication of camera frames | pulse selection or `sequencer.load/fire` |
 | Task | pulse resolution, sequencer load/fire, repeated capture, progress/current preview, calibration, JSON artifact, and its six report-image saves | reusable readout mathematics or renderer internals |
-| Processor | consume a frames signal plus calibration and derive counts/occupied/rate with lineage | excitation or camera control |
+| Processor | consume a frames signal plus calibration and publish counts, occupied validity, and the exact frame judged with lineage | excitation or camera control |
 
 For a manually controlled experiment, the notebook calls `resolve_pulse`,
 `sequencer.load`, and `sequencer.fire` around a pure camera measurement. For
@@ -128,11 +128,14 @@ opens those report files, and no calibration object/report blob is put on the
 signal plane.
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
-It owns only each frame's per-site counts, one occupied boolean Dataset, and
-the pooled occupancy rate. The occupied Dataset's component validity is the
-only truth for whether each site was readable; there is no separate validity
-signal. Its generic `zlc_plot` overlay contract and same-run geometry document
-let any compatible presenter draw those numeric statuses without knowing the
+It publishes three same-publication Dataset siblings: per-site photoelectron
+`counts`; per-site boolean `occupied`, whose component validity is the sole
+truth for whether each site was readable; and `frame_judged`, the exact source
+camera-frame snapshot that was classified. `frame_judged` preserves the source
+bytes, axes, and validity rather than creating a second image truth. There is
+no separate validity signal and no occupancy-rate output. The generic
+`zlc_plot` overlay declaration and same-run geometry document let any
+compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. The concrete Temperature Task reuses the occupied values and
 their expanded validity for its authored before/trap-off/after cycles: only a
 valid, initially occupied pair is a survival trial. It publishes the binary

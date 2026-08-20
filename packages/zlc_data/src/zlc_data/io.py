@@ -155,9 +155,13 @@ def manifest_array_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
 def snapshot_from_manifest(
     manifest: Mapping[str, Any],
     arrays: Mapping[str, Any],
+    *,
+    embedded: bool = False,
 ) -> OwnedSnapshot:
     """Rebuild one snapshot from its manifest and the arrays it names."""
 
+    if type(embedded) is not bool:
+        raise TypeError("embedded must be bool")
     if not isinstance(manifest, Mapping):
         raise NPZFormatError("manifest root must be an object")
     _exact_keys(
@@ -178,11 +182,15 @@ def snapshot_from_manifest(
     referenced: set[str] = set()
     schema = dataset_schema_from_tree(manifest["schema"])
     ref_tree = dict(manifest["ref"])
-    if "schema_fingerprint" not in ref_tree:
-        # Composite figure archives already carry the complete schema.  Reuse
-        # its in-memory identity instead of requiring a redundant persisted
-        # digest solely to rebuild the DatasetRevisionRef.
+    has_fingerprint = "schema_fingerprint" in ref_tree
+    if embedded:
+        if has_fingerprint:
+            raise NPZFormatError(
+                "embedded manifest ref must not repeat schema_fingerprint"
+            )
         ref_tree["schema_fingerprint"] = schema.fingerprint
+    elif not has_fingerprint:
+        raise NPZFormatError("manifest.ref is missing schema_fingerprint")
     ref = dataset_revision_ref_from_tree(ref_tree)
     values = _array(arrays, manifest["values_key"], referenced, "manifest.values_key")
     validity = _validity_from_manifest(manifest["validity"], arrays, referenced)

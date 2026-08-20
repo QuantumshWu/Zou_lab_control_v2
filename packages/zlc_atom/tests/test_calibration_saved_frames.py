@@ -17,6 +17,7 @@ from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGI
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
     CalibrationRequest,
+    CalibrationRunResult,
     SampleWriter,
     CalibrationTask,
     read_saved_samples,
@@ -228,6 +229,49 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
     result = _task(_calibration_request(repeats=8), tmp_path).run()
     assert not (result.artifact_path.parent / "frames").exists()
+
+
+def test_calibration_run_result_deep_owns_nested_plain_truth(tmp_path: Path) -> None:
+    base = _task(_calibration_request(repeats=4), tmp_path).run()
+    report = {
+        "nested": {"values": [1, 2]},
+        "array": np.asarray([3.0, 4.0]),
+    }
+    pulse = {"program": {"slots": [1, 2, 3]}}
+    run_record = {"request": {"photoelectrons": False}}
+    summary = {"headline": {"fidelity": [0.9]}}
+    result = CalibrationRunResult(
+        base.artifact_path,
+        base.calibration,
+        report,
+        base.capture,
+        pulse,
+        run_record,
+        summary,
+    )
+
+    report["nested"]["values"][0] = 99
+    report["array"][0] = 99.0
+    pulse["program"]["slots"][0] = 99
+    run_record["request"]["photoelectrons"] = True
+    summary["headline"]["fidelity"][0] = 0.0
+    assert result.report["nested"]["values"] == (1, 2)
+    np.testing.assert_array_equal(result.report["array"], [3.0, 4.0])
+    assert result.report["array"].flags.writeable is False
+    assert result.pulse["program"]["slots"] == (1, 2, 3)
+    assert result.run_record["request"]["photoelectrons"] is False
+    assert result.summary["headline"]["fidelity"] == (0.9,)
+
+    with pytest.raises(TypeError):
+        result.report["nested"]["values"][0] = 99
+    with pytest.raises(TypeError):
+        result.pulse["program"]["slots"][0] = 99
+    with pytest.raises(TypeError):
+        result.run_record["request"]["photoelectrons"] = True
+    with pytest.raises(TypeError, match="report must be a mapping"):
+        replace(result, report=7)
+    with pytest.raises(TypeError, match="summary must be a mapping"):
+        replace(result, summary=[])
 
 
 def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:
