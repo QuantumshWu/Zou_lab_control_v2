@@ -446,19 +446,6 @@ class _Source:
         return f"camera/{name}"
 
 
-class _Slot:
-    notification_failure = None
-
-    def __init__(self, state: dict) -> None:
-        self.state = state
-
-    def freeze_live_outputs(self):
-        return dict(self.state)
-
-    def close(self) -> None:
-        return None
-
-
 def _heatmap_snapshot(repeats: int = 2) -> OwnedSnapshot:
     """A 3x3 scan grid: scalar cells over dimensions (bias_x, grad)."""
 
@@ -538,13 +525,14 @@ def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
         * snapshot.block.schema.point_table.row_count
     )
     source_node = _Source(declaration)
-    slot = _Slot(
-        {"frame": LiveDatasetOutput(declaration, snapshot, MonitorCoverage(total, total))}
+    output = LiveDatasetOutput(
+        declaration,
+        snapshot,
+        MonitorCoverage(total, total),
     )
     plane = SignalDataPlane()
     plane.reserve(source_node)
-    plane.attach(source_node, slot)
-    plane.mark_changed(source_node, slot)
+    plane.commit_live(source_node, {"frame": output})
     plane.freeze()
     plane.set_front_signals({"camera/frame", *front_signals})
     return plane, source_node

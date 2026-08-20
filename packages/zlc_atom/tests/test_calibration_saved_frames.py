@@ -13,6 +13,7 @@ import pytest
 from zlc_atom.install import create_installation
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
 from zlc_atom.nodes.calibration.outputs import CAPTURE_PREVIEW_DECLARATION
+from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
     CalibrationRequest,
@@ -192,7 +193,15 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
             tmp_path,
         )
         task.signal_plane = plane
-        host = NodeHost(task, plane, Event().set)
+        host = NodeHost(
+            task,
+            plane,
+            Event().set,
+            instance_id="calibration-replay",
+            kind="task",
+            dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+            required_artifact_names=("artifact_path",),
+        )
         host.start()
         deadline = time.monotonic() + 120.0
         while time.monotonic() < deadline:
@@ -205,10 +214,11 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
             f"replay ended in {observation.phase}: {observation.error}"
         )
         key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
-        publication = plane.latest_publication(key)
-        assert publication is not None, "the frames read back were never published"
-        value = publication.value(key)
-        assert np.asarray(value.snapshot.block.values).shape[:2] == (1, 3)
+        # A successful Task proves every declared output committed at least
+        # once.  This preview is deliberately Monitor/latest-only, so Runtime
+        # retires it at terminal instead of preserving one arbitrary sample as
+        # the calibration's scientific final dataset.
+        assert plane.latest_publication(key) is None
     finally:
         if host is not None:
             host.shutdown()

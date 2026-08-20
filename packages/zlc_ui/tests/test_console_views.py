@@ -1192,6 +1192,26 @@ assert editor.parameter_forms['display'].spec.keys == (
     'colormap', 'show_colorbar', 'interpolation'
 )
 assert editor.parameter_forms['fit'].spec.keys == ('model',)
+locked_surface = dict(surface, science_locked=True)
+handle.set_panel_projection('panel-1', state, locked_surface)
+assert handle.update_panel_editor(
+    'panel-1', dict(projection, parameter_surface=locked_surface)
+)
+assert not card._settings_form.widget_for('signal').isEnabled()
+assert not card._settings_form.widget_for('overlay_signal').isEnabled()
+assert not card._settings_form.widget_for('semantic__x').isEnabled()
+assert card._settings_form.widget_for('size').isEnabled()
+assert card._settings_form.widget_for('display__colormap').isEnabled()
+assert card._settings_form.widget_for('fit__model').isEnabled()
+assert not editor.panel_form.widget_for('signal').isEnabled()
+assert not editor.panel_form.widget_for('overlay_signal').isEnabled()
+assert not editor.parameter_forms['semantic'].isEnabled()
+assert editor.parameter_forms['display'].isEnabled()
+assert editor.parameter_forms['fit'].isEnabled()
+assert not editor._producer_editor.form.isEnabled()
+handle.set_panel_projection('panel-1', state, surface)
+assert handle.update_panel_editor('panel-1', projection)
+assert editor.parameter_forms['semantic'].isEnabled()
 title_auto = editor.parameter_forms['display'].auto_switch_for('title')
 title_edit = editor.parameter_forms['display'].widget_for('title')
 assert title_auto.isChecked()
@@ -1470,9 +1490,7 @@ assert ('pause', True) in events
 assert ('screenshot',) in events
 assert ('layout',) in events
 
-# A running Task owns the console through one status-strip command surface.
-# Drive the actual widgets: disabled controls must not emit around the
-# presenter gate, while Stop task must still emit its one dedicated intent.
+# A running Task freezes Logic identity, not the monitor window.
 handle.add_panel('task-preview', 'Capture preview')
 handle.add_logic_row('calibration', 'task')
 handle.add_logic_row('camera', 'measurement')
@@ -1484,15 +1502,15 @@ camera_row = handle._rows['camera']
 handle.set_task_takeover(True)
 assert view.status_strip.action_button is not None
 assert view.status_strip.action_button.isVisible()
-assert not view.name_edit.isEnabled()
-assert not view.kind_combo.isEnabled()
+assert view.name_edit.isEnabled()
+assert view.kind_combo.isEnabled()
 assert not view.add_panel_button.isEnabled()
-assert not view.save_layout_button.isEnabled()
+assert view.save_layout_button.isEnabled()
 assert not view.load_layout_button.isEnabled()
 assert view.selectors_switch.isEnabled()
 assert view.pause_switch.isEnabled()
 assert view.save_screenshot_button.isEnabled()
-assert not preview.settings_button.isEnabled()
+assert preview.settings_button.isEnabled()
 for row in (task_row, camera_row):
     assert not row.start_button.isEnabled()
     assert not row.stop_button.isEnabled()
@@ -1503,6 +1521,11 @@ before = list(events)
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(camera_row.start_button, QtCore.Qt.LeftButton)
 assert events == before
+view.kind_combo.setCurrentIndex(0)
+assert view.kind_combo.currentData()[0] == 'plot'
+assert view.add_panel_button.isEnabled()
+QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+assert events[-1] == ('panel', 'curve')
 QtTest.QTest.mouseClick(view.status_strip.action_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('stop-task',)
 

@@ -177,6 +177,9 @@ class TaskConsoleView(QtWidgets.QWidget):
         outer.addWidget(self.tabs, 1)
 
         self.add_panel_button.clicked.connect(self._add_current_selection)
+        self.kind_combo.currentIndexChanged[int].connect(
+            lambda _index: self._update_add_button()
+        )
         self.pause_switch.clicked.connect(
             lambda _checked=False: self.pause_toggled.emit(not self._paused)
         )
@@ -237,8 +240,17 @@ class TaskConsoleView(QtWidgets.QWidget):
             if index >= 0:
                 self.kind_combo.setCurrentIndex(index)
         self.kind_combo.blockSignals(False)
+        self._update_add_button()
+
+    def _update_add_button(self) -> None:
+        selected = self.kind_combo.currentData()
+        blocked_logic = bool(
+            self._task_takeover
+            and selected is not None
+            and selected[0] == "logic"
+        )
         self.add_panel_button.setEnabled(
-            self.kind_combo.count() > 0 and not self._task_takeover
+            self.kind_combo.count() > 0 and not blocked_logic
         )
 
     def _add_current_selection(self) -> None:
@@ -248,7 +260,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         family, key = selected
         if family == "plot":
             self.add_panel_requested.emit(str(key))
-        elif family == "logic":
+        elif family == "logic" and not self._task_takeover:
             self.add_logic_requested.emit(str(key))
 
     def set_cards(self, cards: tuple[PanelCardView, ...]) -> None:
@@ -298,15 +310,8 @@ class TaskConsoleView(QtWidgets.QWidget):
         """Project the console-wide Task command gate onto header chrome."""
 
         self._task_takeover = bool(active)
-        enabled = not self._task_takeover
-        for widget in (
-            self.name_edit,
-            self.kind_combo,
-            self.save_layout_button,
-            self.load_layout_button,
-        ):
-            widget.setEnabled(enabled)
-        self.add_panel_button.setEnabled(enabled and self.kind_combo.count() > 0)
+        self.load_layout_button.setEnabled(not self._task_takeover)
+        self._update_add_button()
         self.status_strip.set_action_visible(self._task_takeover)
 
     def set_summary(self, text: str) -> None:

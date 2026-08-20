@@ -19,11 +19,11 @@ What this file guards, beyond "it runs":
   and nothing else -- no camera node to start first, no signal to hand over,
   no exposure to keep in step by hand;
 * the PAIRING is per site and per shot: survival is 1, 0, or "not a fact",
-  never a brightness ratio, and the published rate IS the pooled fraction of
+  never a brightness ratio, and its mean projection is the pooled fraction of
   the loaded sites that came back;
 * the SITE axis survives into the output, so one dead trap can still be seen;
 * the release times reach the dataset as its point axis, with their unit;
-* the Task's results are FINAL: they are still on the plane after the run is
+* the Task's sealed results are retained: they stay on the plane after the run is
   terminal and the host is shut down, which is what keeps a panel alive;
 * the saved artifact's curve is the same curve the dataset published, in
   SECONDS, with no temperature model, fit, or extra crossing conclusion.
@@ -57,6 +57,19 @@ T_OFF_MS = (0.004, 0.010, 0.016, 0.024)
 REPEATS = 8
 
 
+def _host(descriptor: object, node: object, plane: SignalDataPlane) -> NodeHost:
+    return NodeHost(
+        node,
+        plane,
+        instance_id=node.instance_id,
+        kind=descriptor.kind.value,
+        dataset_output_declarations=descriptor.outputs,
+        required_artifact_names=tuple(
+            output.name for output in descriptor.artifact_outputs
+        ),
+    )
+
+
 def _wait_terminal(host: object, *, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and not host.observation.terminal:
@@ -74,9 +87,15 @@ def test_the_temperature_task_publishes_release_recapture_survival(
     plane = SignalDataPlane()
     descriptors = {value.api_name: value for value in discover_logic_nodes()}
     assert [
-        (preview.output_name, preview.plot_kind)
+        (preview.output.name, preview.plot_kind)
         for preview in descriptors["temperature"].node_previews
-    ] == [("survival_rate", "curve")]
+    ] == [("survival", "curve")]
+    assert dict(descriptors["temperature"].node_previews[0].semantic) == {
+        "fate:t_off": "x",
+        "fate:repeat": "reduce",
+        "fate:Site": "reduce",
+        "reduction": "mean",
+    }
     sequencer = installation.device("sequencer")
     camera = installation.device("camera")
     host = None
@@ -93,7 +112,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             artifact_directory=tmp_path,
             repeats=30,
         )
-        calibration_host = NodeHost(calibration_node, plane)
+        calibration_host = _host(
+            descriptors["calibration"], calibration_node, plane
+        )
         calibration_host.start()
         _wait_terminal(calibration_host, timeout=120.0)
         calibration_host.shutdown()
@@ -133,7 +154,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             == calibration.value.frame_contract.exposure_seconds
         ), "the Task judges frames at the exposure its thresholds were measured at"
 
-        host = NodeHost(task, plane)
+        host = _host(descriptors["temperature"], task, plane)
         host.start()
         deadline = time.monotonic() + 420.0
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -144,16 +165,21 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         assert observed.error is None, observed.error
         assert observed.terminal
 
-        rate_signal = host.signal_key("survival_rate")
-        survival_value = plane.freeze().value(host.signal_key("survival"))
-        rate_value = plane.freeze().value(rate_signal)
-        assert survival_value is not None and rate_value is not None, (
-            "the Task published no survival"
-        )
+        survival_signal = host.signal_key("survival")
+        survival_value = plane.current_dataset(survival_signal)
 
         # --- The axes: repeats x release times x sites, and the site axis is
         #     kept so one dead trap is still visible.
-        schema = survival_value.snapshot.block.schema
+        schema = survival_value.block.schema
+        from zlc_plot.semantics import composed_spec
+        from zlc_workbench.panel_catalog import task_console_fitting_spec
+
+        preview = descriptors["temperature"].node_previews[0]
+        composed_spec(
+            schema,
+            task_console_fitting_spec(schema, preview.plot_kind, ""),
+            preview.semantic,
+        )
         assert schema.repeat_axis.size == REPEATS
         assert schema.point_table.row_count == len(T_OFF_MS)
         column = schema.point_table.columns[0]
@@ -174,7 +200,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         survival = np.asarray(survival_value.block.values, dtype=float)
         assert survival.shape == (REPEATS, len(T_OFF_MS), calibration.value.n_sites)
         np.testing.assert_array_equal(
-            survival_value.snapshot.expanded_validity(),
+            survival_value.expanded_validity(),
             np.isfinite(survival),
         )
         judged = survival[np.isfinite(survival)]
@@ -187,24 +213,11 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             "an empty trap answers nothing about recapture and must stay NaN"
         )
 
-        # --- The rate IS the pooled fraction of every loaded site, and it is
-        #     pooled ONCE: there is no repeat axis left for a panel to average
-        #     differently from the artifact.
-        assert rate_value.snapshot.block.schema.repeat_axis.size == 1, (
-            "the rate is pooled across repeats, so nothing is left to reduce"
-        )
-        rate = np.asarray(rate_value.block.values, dtype=float).reshape(
-            1, len(T_OFF_MS)
-        )
-        np.testing.assert_array_equal(
-            rate_value.snapshot.expanded_validity(),
-            np.isfinite(rate).reshape(rate_value.block.values.shape),
-        )
+        # --- The curve is the mean projection of this one Dataset: validity
+        #     is the loaded-pair denominator and no second rate history exists.
         loaded = np.count_nonzero(np.isfinite(survival), axis=(0, 2))
         recaptured = np.nansum(survival, axis=(0, 2))
-        np.testing.assert_allclose(
-            rate[0], recaptured / loaded, rtol=0, atol=1e-12
-        )
+        rate = recaptured / loaded
 
         # --- The measured observable: survival falls as trap-off grows.  No
         #     escape/temperature model is evaluated or fitted here.
@@ -225,7 +238,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         payload = json.loads(saved.read_text(encoding="utf-8"))
         assert payload["t_off"] == {"unit": "ms", "values": list(T_OFF_MS)}
         curve = payload["run_record"]["curve"]
-        np.testing.assert_allclose(curve["survival_rate"], rate[0], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(curve["survival_rate"], rate, rtol=0, atol=1e-12)
         assert sum(curve["loaded_pairs"]) == judged.size
         np.testing.assert_allclose(
             curve["t_off_seconds"],
@@ -241,10 +254,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
 
         # --- A Task's results outlive its run: the panel that watched them is
         #     still holding data after the host is gone.
-        assert rate_value.coverage is None and not rate_value.transient
         host.shutdown()
         host = None
-        assert plane.freeze().value(rate_signal) is not None, (
+        assert plane.current_dataset(survival_signal) is survival_value, (
             "a Task's results must outlive the run that produced them"
         )
     finally:

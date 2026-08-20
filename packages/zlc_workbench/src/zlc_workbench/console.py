@@ -14,9 +14,11 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from queue import Empty, SimpleQueue
+from threading import Lock
 import time
 from typing import Any
 
@@ -273,9 +275,10 @@ class ConsolePresenter:
         # phase and progress continue to come exclusively from the row's host.
         self._active_task_id: str | None = None
         self._shown_task_takeover: bool | None = None
-        # Only auto-created transient previews are removed with their Task.
-        # User-authored panels and FINAL previews remain ordinary board state.
-        self._transient_task_previews: dict[str, dict[str, str]] = {}
+        # Auto-created Task previews are reconciled against Runtime terminal
+        # truth: an absent signal retires, a sealed signal remains ordinary.
+        self._auto_task_previews: dict[str, dict[str, str]] = {}
+        self._preview_errors: dict[str, set[str]] = {}
         self._artifact_completion_order = 0
         self.panels: dict[str, PanelBinding] = {}
         # Raster callbacks run on the plot worker.  Their translated, immutable
@@ -598,9 +601,14 @@ class ConsolePresenter:
             project_input=lambda value, pub, front: self._project_panel_input(
                 binding, value, pub, front
             ),
-            replace_host=lambda projected, value, pub: self._replace_panel_host(
+            current_dataset=self.session.signal_plane.current_dataset,
+            replace_host=lambda projected, value, pub: self._stage_panel_host(
                 binding, projected, value, pub
             ),
+            accept_host=lambda old, new, pub, projected: self._accept_panel_host(
+                binding, old, new, pub, projected
+            ),
+            retire_host=self._retire_plot_host,
             on_presented=lambda pub, projected: self._panel_presented(
                 binding, pub, projected
             ),
@@ -613,7 +621,7 @@ class ConsolePresenter:
         binding.display_publication = publication
         binding.frozen_data = self._panel_frozen_data(
             binding,
-            snapshot=initial,
+            snapshot=getattr(plot_input, "snapshot", plot_input),
             publication=publication,
             plot_input=plot_input,
             front=front,
@@ -665,6 +673,15 @@ class ConsolePresenter:
         snapshot = getattr(value, "snapshot", None)
         if snapshot is None:
             raise TypeError("a panel signal value must carry an OwnedSnapshot")
+        repeat_projection = any(
+            str(name) in {"fate:repeat", "scope:repeat"}
+            for name in selected.semantic
+        )
+        if bool(getattr(value, "growing", False)) or repeat_projection:
+            snapshot = self.session.signal_plane.current_dataset(
+                selected.signal,
+                publication,
+            )
         if not selected.overlay_signal or front is None:
             return snapshot
         # The SEMANTIC surface, not the outer kind: a FacetGrid of image cells
@@ -799,6 +816,7 @@ class ConsolePresenter:
         models: object = None,
         present: bool = False,
         live: bool = True,
+        operations: list[object] | None = None,
     ) -> object:
         """Make one of this panel's hosts show what the panel says.
 
@@ -838,10 +856,14 @@ class ConsolePresenter:
         if overlay is not _UNCHANGED:
             configuration["image_overlay"] = overlay
         pending = host.configure(**configuration)
+        if operations is not None:
+            operations.append(pending)
 
         def _also(operation: object) -> None:
             if operation is None:
                 return
+            if operations is not None:
+                operations.append(operation)
             if present:
                 self._present_when_done(binding, operation)
             elif not live and hasattr(operation, "result"):
@@ -1042,7 +1064,8 @@ class ConsolePresenter:
     ) -> None:
         """Present the exact front painted by one completed host operation."""
 
-        self._present_panel_front(binding, getattr(operation, "front", None))
+        if self._present_panel_front(binding, getattr(operation, "front", None)):
+            binding.initial_presented = True
 
     def _present_mounted_front(self, binding: PanelBinding) -> None:
         """Fill a just-mounted staged widget from the host's current front.
@@ -1090,38 +1113,152 @@ class ConsolePresenter:
         add(completed)
         return operation
 
-    def _replace_panel_host(
+    def _stage_panel_host(
         self,
         binding: PanelBinding,
         plot_input: object,
         value: object,
         publication: object,
-    ) -> object:
-        """Replace a plot host at a signal-generation boundary."""
+    ) -> tuple[object, object]:
+        """Fully configure a replacement without changing the mounted panel."""
+
+        del value
 
         host = self._make_host(
             self._initial_plot_input(plot_input, binding.state), binding.state
         )
-        binding.parameter_surface = self._unbound_panel_parameters(binding.state)
+        staged = replace(
+            binding,
+            host=host,
+            bridge=None,
+            selections=None,
+            display_publication=publication,
+        )
+        operations: list[object] = []
+        try:
+            self._match_host_to_panel(
+                staged,
+                host,
+                operations=operations,
+            )
+            operation = self._join_host_operations(operations)
+        except BaseException:
+            self._retire_plot_host(host)
+            raise
+        return host, operation
 
-        old_host = binding.host
-        if binding.selections is not None:
-            binding.selections.close()
-        if binding.bridge is not None:
-            binding.bridge.close()
+    @staticmethod
+    def _join_host_operations(operations: Sequence[object]) -> Future:
+        """Resolve with the newest front only after every staged operation."""
+
+        futures = tuple(
+            operation
+            for operation in operations
+            if callable(getattr(operation, "add_done_callback", None))
+        )
+        if not futures:
+            raise RuntimeError("staged host configuration produced no operation")
+        combined = Future()
+        lock = Lock()
+        remaining = len(futures)
+        results: list[object | None] = [None] * remaining
+
+        def completed(index: int, future: object) -> None:
+            nonlocal remaining
+            try:
+                result = future.result()
+            except BaseException as error:
+                with lock:
+                    if not combined.done():
+                        combined.set_exception(error)
+                return
+            with lock:
+                if combined.done():
+                    return
+                results[index] = result
+                remaining -= 1
+                if remaining:
+                    return
+                candidates = tuple(
+                    value
+                    for value in results
+                    if getattr(value, "front", None) is not None
+                )
+                if not candidates:
+                    combined.set_exception(
+                        RuntimeError("staged host configuration produced no front")
+                    )
+                    return
+                combined.set_result(
+                    max(
+                        candidates,
+                        key=lambda value: value.front.identity.sequence,
+                    )
+                )
+
+        for index, future in enumerate(futures):
+            future.add_done_callback(
+                lambda resolved, position=index: completed(position, resolved)
+            )
+
+        def cancel_children(resolved: Future) -> None:
+            if not resolved.cancelled():
+                return
+            for future in futures:
+                try:
+                    future.cancel()
+                except BaseException:
+                    pass
+
+        combined.add_done_callback(cancel_children)
+        return combined
+
+    def _accept_panel_host(
+        self,
+        binding: PanelBinding,
+        old_host: object,
+        host: object,
+        publication: object,
+        _plot_input: object,
+    ) -> None:
+        """Swap one staged generation without throwing out of cohort accept."""
+
+        errors: list[BaseException] = []
+        if binding.host is not old_host:
+            errors.append(
+                RuntimeError("panel host changed before replacement acceptance")
+            )
+        for resource in (binding.selections, binding.bridge):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except BaseException as error:
+                errors.append(error)
         binding.bridge = binding.selections = None
         binding.host = host
         binding.initial_presented = False
-        self._match_host_to_panel(binding, host, present=True)
+        binding.parameter_surface = self._unbound_panel_parameters(binding.state)
+        binding.configuration = None
         binding.display_publication = publication
         # This host shows a new run, so Edit's frozen picture is now of the run
         # that just ended -- said out loud, because the Edit tab's stale mark,
         # its Save gate and its selection routing all read the projection.
-        self._publish_panel_state(binding)
-        self._present_mounted_front(binding)
+        try:
+            self._publish_panel_state(binding)
+        except BaseException as error:
+            errors.append(error)
         if old_host is not None:
-            self._retire_plot_host(old_host)
-        return host
+            try:
+                self._retire_plot_host(old_host)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            binding.reported_error = errors[0]
+            self._report(
+                f"{binding.title}: {_error_text(errors[0])}",
+                severity="error",
+            )
 
     def reorder_panels(self, order: Sequence[str]) -> bool:
         """Take the order the operator dragged the cards into.
@@ -1343,6 +1480,12 @@ class ConsolePresenter:
             )
             return False
         current = binding.state
+        science_fields = {"signal", "overlay_signal", "cell_kind", "semantic"}
+        if science_fields.intersection(changes) and self._task_panel_science_blocked(
+            binding,
+            "changing signal, overlay, or data projection",
+        ):
+            return False
         if "kind" in changes and str(changes["kind"]) != current.kind:
             self._report(
                 f"{panel_id}: plot kind is fixed; add another panel to use "
@@ -1531,9 +1674,14 @@ class ConsolePresenter:
                 project_input=lambda current_value, pub, front: (
                     self._project_panel_input(binding, current_value, pub, front)
                 ),
-                replace_host=lambda projected, current_value, pub: self._replace_panel_host(
+                current_dataset=self.session.signal_plane.current_dataset,
+                replace_host=lambda projected, current_value, pub: self._stage_panel_host(
                     binding, projected, current_value, pub
                 ),
+                accept_host=lambda old, new, pub, projected: self._accept_panel_host(
+                    binding, old, new, pub, projected
+                ),
+                retire_host=self._retire_plot_host,
                 on_presented=lambda pub, projected: self._panel_presented(
                     binding, pub, projected
                 ),
@@ -1546,7 +1694,7 @@ class ConsolePresenter:
             if binding.frozen_data is None:
                 binding.frozen_data = self._panel_frozen_data(
                     binding,
-                    snapshot=value.snapshot,
+                    snapshot=getattr(plot_input, "snapshot", plot_input),
                     publication=publication,
                     plot_input=plot_input,
                     state=candidate,
@@ -2135,6 +2283,7 @@ class ConsolePresenter:
             "pending": False,
             "can_start": False,
             "can_stop": False,
+            "science_locked": self._task_science_locked(binding),
             "issues": (),
             "error": "",
             "status": "",
@@ -2177,6 +2326,11 @@ class ConsolePresenter:
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
+            return False
+        if self._task_panel_science_blocked(
+            binding,
+            "changing derived panel outputs",
+        ):
             return False
         published = dict(binding.state.published_outputs)
         published.update({str(name): bool(enabled) for name, enabled in values.items()})
@@ -2335,7 +2489,7 @@ class ConsolePresenter:
         plot_input = self._project_panel_input(binding, value, publication, front)
         frozen = self._panel_frozen_data(
             binding,
-            snapshot=value.snapshot,
+            snapshot=getattr(plot_input, "snapshot", plot_input),
             publication=publication,
             plot_input=plot_input,
             front=front,
@@ -2527,6 +2681,8 @@ class ConsolePresenter:
         """Push one accepted replacement to every view of the same state."""
 
         surface = dict(binding.parameter_surface)
+        science_locked = self._task_science_locked(binding)
+        surface["science_locked"] = science_locked
         surface["paints_images"] = self._paints_image_surfaces(binding)
         for section in ("semantic", "display", "fit"):
             authored = dict(getattr(binding.state, section))
@@ -2548,6 +2704,10 @@ class ConsolePresenter:
                 binding.state,
                 binding.parameter_surface,
             )
+        self.view.set_panel_selectors_enabled(
+            binding.panel_id,
+            self._deriving and not science_locked,
+        )
         self._offer_panel(binding.panel_id)
         self.refresh_panel_editor(binding.panel_id)
         self.refresh_panel_publisher_editor(binding.panel_id)
@@ -2562,8 +2722,11 @@ class ConsolePresenter:
         binding.bridge = binding.selections = None
         binding.configuration = None
         host = binding.host
+        port = binding.port
         binding.host = None
         binding.port = None
+        if port is not None:
+            port.close()
         if host is not None:
             self._retire_plot_host(host)
 
@@ -2639,7 +2802,7 @@ class ConsolePresenter:
             close_publisher(key)
         self._release_panel(binding)
         self.view.remove_panel(key)
-        for previews in self._transient_task_previews.values():
+        for previews in self._auto_task_previews.values():
             previews.pop(key, None)
         return True
 
@@ -2671,7 +2834,10 @@ class ConsolePresenter:
             self._apply_deriving(binding)
             # And the card, whose switch gates only selector-starting
             # gestures on the mounted plot surface.
-            self.view.set_panel_selectors_enabled(panel_id, self._deriving)
+            self.view.set_panel_selectors_enabled(
+                panel_id,
+                self._deriving and not self._task_science_locked(binding),
+            )
         self._report(
             "selectors enabled" if self._deriving else "selectors disabled",
             severity="task",
@@ -2847,9 +3013,16 @@ class ConsolePresenter:
                     project_input=lambda current, pub, front, item=binding: (
                         self._project_panel_input(item, current, pub, front)
                     ),
+                    current_dataset=self.session.signal_plane.current_dataset,
                     replace_host=lambda projected, current, pub, item=binding: (
-                        self._replace_panel_host(item, projected, current, pub)
+                        self._stage_panel_host(item, projected, current, pub)
                     ),
+                    accept_host=lambda old, new, pub, projected, item=binding: (
+                        self._accept_panel_host(
+                            item, old, new, pub, projected
+                        )
+                    ),
+                    retire_host=self._retire_plot_host,
                     on_presented=lambda pub, projected, item=binding: (
                         self._panel_presented(item, pub, projected)
                     ),
@@ -2857,7 +3030,7 @@ class ConsolePresenter:
                 binding.display_publication = publication
                 binding.frozen_data = self._panel_frozen_data(
                     binding,
-                    snapshot=value.snapshot,
+                    snapshot=getattr(plot_input, "snapshot", plot_input),
                     publication=publication,
                     plot_input=plot_input,
                     front=front,
@@ -3121,6 +3294,11 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
+        if self._task_panel_science_blocked(
+            binding,
+            "changing classifier selection",
+        ):
+            return
         remembered = panel_threshold_from_document(binding.state.classifier_threshold)
         if _same_panel_threshold(remembered, selector):
             return
@@ -3242,6 +3420,14 @@ class ConsolePresenter:
             return
         if binding.port is None:
             return
+        if (
+            viewport is _UNCHANGED
+            and self._task_panel_science_blocked(
+                binding,
+                "changing selector science state",
+            )
+        ):
+            return
         selection = self._synchronize_panel_interaction(
             binding, binding.editor_host, selection, viewport
         )
@@ -3278,6 +3464,14 @@ class ConsolePresenter:
             or binding.editor_host is not host
             or binding.frozen_data is not frozen
             or binding.frozen_stale
+        ):
+            return
+        if (
+            viewport is _UNCHANGED
+            and self._task_panel_science_blocked(
+                binding,
+                "changing selector science state",
+            )
         ):
             return
         selection = self._synchronize_panel_interaction(
@@ -3472,24 +3666,57 @@ class ConsolePresenter:
         task_id = self._active_task_id
         return None if task_id is None else self.logic.get(task_id)
 
+    def _task_protected_signals(self) -> frozenset[str]:
+        active = self._active_task()
+        if active is None:
+            return frozenset()
+        names = set(
+            ()
+            if active.host is None
+            else active.host.published_signals()
+        )
+        for preview in active.preview_specs:
+            producer = (
+                active.node_id
+                if not preview.producer
+                else f"{active.node_id}/{preview.producer}"
+            )
+            names.add(stable_signal_key(producer, preview.output.name))
+        return frozenset(names)
+
+    def _task_science_locked(self, binding: PanelBinding) -> bool:
+        protected = self._task_protected_signals()
+        return bool(
+            protected
+            and (
+                binding.state.signal in protected
+                or binding.state.overlay_signal in protected
+            )
+        )
+
+    def _task_panel_science_blocked(
+        self,
+        binding: PanelBinding,
+        action: str,
+    ) -> bool:
+        if not self._task_science_locked(binding):
+            return False
+        active = self._active_task()
+        assert active is not None
+        self._report(
+            f"{active.node_id}: preview science identity is frozen while "
+            f"the Task runs; use Stop task before {action}",
+            severity="task",
+        )
+        return True
+
     def _task_command_blocked(self, action: str, *, node_id: str = "") -> bool:
-        """What a running Task refuses, and it is not much.
-
-        A Task holds its devices exclusively, so nothing else can be STARTED
-        while it runs; and its run is defined by the draft it started from, so
-        that row cannot be re-drafted or removed under it.  Pass ``node_id``
-        for an action aimed at one row: another row's own business is its own.
-
-        Everything else the window does -- panels, layouts, figures, editors --
-        costs the Task nothing.  Refusing all of it meant an operator could not
-        open a plot to watch the very run they had just started.
-        """
+        """Reject Logic/hardware identity changes while one Task is active."""
 
         active = self._active_task()
         if active is None:
             return False
-        if node_id and str(node_id) != active.node_id:
-            return False
+        del node_id
         _state, status = self._logic_state(active)
         self._report(
             f"{active.node_id}: {status}; use Stop task before {action}",
@@ -3503,9 +3730,11 @@ class ConsolePresenter:
         if takeover != self._shown_task_takeover:
             self.view.set_task_takeover(takeover)
             self._shown_task_takeover = takeover
-        if active is not None:
-            _state, status = self._logic_state(active)
-            self._report(f"{active.node_id}: {status}", severity="task")
+            for panel in tuple(self.panels.values()):
+                self._publish_panel_state(panel)
+            if active is not None:
+                _state, status = self._logic_state(active)
+                self._report(f"{active.node_id}: {status}", severity="task")
 
     def _begin_task_takeover(self, binding: LogicBinding) -> None:
         if not self._is_task(binding):
@@ -3527,6 +3756,8 @@ class ConsolePresenter:
 
         binding = self.logic.get(str(node_id))
         if binding is None:
+            return
+        if self._task_command_blocked("changing preview policy"):
             return
         binding.auto_preview = bool(enabled)
         self._refresh_console_projection()
@@ -3552,60 +3783,91 @@ class ConsolePresenter:
             # preview the operator closed stays closed until the next Start.
             binding.preview_host = binding.host
             binding.previewed = ()
+            self._preview_errors[binding.node_id] = set()
         pending = tuple(
             preview
             for preview in previews
-            if str(preview.output_name) not in binding.previewed
+            if stable_signal_key(
+                (
+                    binding.node_id
+                    if not preview.producer
+                    else f"{binding.node_id}/{preview.producer}"
+                ),
+                preview.output.name,
+            )
+            not in binding.previewed
         )
         if not pending:
             return
         front = self.session.signal_plane.freeze()
         for preview in pending:
-            output_name = str(preview.output_name)
-            signal = stable_signal_key(binding.node_id, output_name)
+            output_name = preview.output.name
+            producer = (
+                binding.node_id
+                if not preview.producer
+                else f"{binding.node_id}/{preview.producer}"
+            )
+            signal = stable_signal_key(producer, output_name)
             value = front.value(signal)
             # Nothing published yet is not an answer -- a run that ends in one
             # tick publishes on the same poll that stops it, and gating on
             # "still running" is how that node's plot never appeared.
             if value is None:
                 continue
-            binding.previewed += (output_name,)
             if any(panel.state.signal == signal for panel in self.panels.values()):
+                binding.previewed += (signal,)
                 continue
             publication = front.publication(signal)
             # The node names the kind it means; this exact dataset may not be
-            # drawable that way -- a scan of one axis over one number is a
-            # curve, not a grid of one cell -- and then the panel opens as
-            # what the data proves rather than refusing to open at all.
+            # drawable that way is a broken node declaration, not permission
+            # for Workbench to silently choose different science semantics.
             kind = str(preview.plot_kind)
-            if kind and self._spec_for(value.snapshot, kind, "") is None:
-                kind = ""
-            panel = self.add_panel(
-                signal,
-                value.snapshot,
-                # The card's name says WHERE the numbers came from, and for a
-                # preview the node opened that is the signal key itself.  A
-                # prettified output name ("Frames") names the same thing twice
-                # over and says neither which node nor which run.
-                title=signal,
-                kind=kind,
-                initial_publication=publication,
-            )
-            if value.transient:
-                self._transient_task_previews.setdefault(binding.node_id, {})[
+            if self._spec_for(value.snapshot, kind, "") is None:
+                error_key = f"{signal}|{kind}"
+                errors = self._preview_errors.setdefault(binding.node_id, set())
+                if error_key not in errors:
+                    errors.add(error_key)
+                    self._report(
+                        f"{binding.node_id}: preview {signal!r} is incompatible "
+                        f"with declared plot kind {kind!r}",
+                        severity="error",
+                    )
+                continue
+            try:
+                panel = self.add_panel(
+                    signal,
+                    value.snapshot,
+                    title=signal,
+                    kind=kind,
+                    semantic=preview.semantic,
+                    initial_publication=publication,
+                )
+            except Exception as error:
+                error_key = f"{signal}|{type(error).__name__}:{error}"
+                errors = self._preview_errors.setdefault(binding.node_id, set())
+                if error_key not in errors:
+                    errors.add(error_key)
+                    self._report(
+                        f"{binding.node_id}: cannot open preview {signal!r}: "
+                        f"{_error_text(error)}",
+                        severity="error",
+                    )
+                continue
+            binding.previewed += (signal,)
+            if self._is_task(binding):
+                self._auto_task_previews.setdefault(binding.node_id, {})[
                     panel.panel_id
                 ] = signal
 
-    def _remove_task_transient_previews(self, binding: LogicBinding) -> None:
-        tracked = self._transient_task_previews.pop(binding.node_id, {})
+    def _reconcile_task_previews(self, binding: LogicBinding) -> None:
+        tracked = self._auto_task_previews.pop(binding.node_id, {})
         if not tracked:
             return
         front = self.session.signal_plane.freeze()
         for panel_id, signal in tracked.items():
-            current = front.value(signal)
-            # A Task may promote the same declared output to FINAL at terminal.
-            # Such a panel has become ordinary retained board state.
-            if current is not None and not current.transient:
+            # Runtime has already sealed or retired the generation.  Existence
+            # is the terminal fact; a payload's old live flag is not.
+            if front.value(signal) is not None:
                 continue
             self._remove_panel_now(panel_id)
 
@@ -3618,7 +3880,7 @@ class ConsolePresenter:
     ) -> None:
         if self._active_task_id != binding.node_id:
             return
-        self._remove_task_transient_previews(binding)
+        self._reconcile_task_previews(binding)
         self._active_task_id = None
         self._project_task_takeover()
         self._report(f"{binding.node_id}: {status}", severity=severity)
@@ -3667,6 +3929,9 @@ class ConsolePresenter:
         open_editor: bool = True,
     ) -> str:
         """Create one stopped row draft; Start is the first build boundary."""
+
+        if self._task_command_blocked("adding a Logic Node"):
+            return ""
 
         descriptor = self.catalog.get(api_name)
         if descriptor is None:
@@ -4090,6 +4355,7 @@ class ConsolePresenter:
             binding.lease.release()
             binding.lease = None
         self.logic.pop(binding.node_id, None)
+        self._preview_errors.pop(binding.node_id, None)
         close_editor = getattr(self.view, "close_logic_editor", None)
         if callable(close_editor):
             close_editor(binding.node_id)
@@ -4138,7 +4404,7 @@ class ConsolePresenter:
     @staticmethod
     def _observation_status(observed: object) -> str:
         phase = str(getattr(observed, "phase", "") or "running")
-        if phase == "stopping":
+        if bool(getattr(observed, "terminal", False)) or phase == "stopping":
             return phase
         progress = getattr(observed, "progress", None)
         text = str(getattr(progress, "text", "") or "")
@@ -4201,15 +4467,10 @@ class ConsolePresenter:
         published = []
         for name in names:
             description = descriptions.get(name)
-            lifecycle = (
-                "live"
-                if (
-                    description.live
-                    if description is not None
-                    else host is not None and host.running
-                )
-                else "held"
-            )
+            if description is None or description.shape is None:
+                lifecycle = "waiting"
+            else:
+                lifecycle = "live" if description.live else "finished"
             published.append(
                 (
                     name.rsplit("/", 1)[-1] or name,
@@ -4335,6 +4596,7 @@ class ConsolePresenter:
             node,
             signal_plane=self.session.signal_plane,
             instance_id=binding.node_id,
+            source_signal=finalization.source_signal or None,
             request_owner_wake=self.board.wake.request_owner_wake,
         )
         claims = tuple(

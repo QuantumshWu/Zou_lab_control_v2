@@ -23,7 +23,6 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
     NodePreviewSpec,
-    OutputSpec,
     ResolvedWorkspaceResource,
 )
 from zlc_atom.nodes.scan import (
@@ -152,12 +151,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     "seamless_scan",
     NodeKind.MEASUREMENT,
     SEAMLESS_SCAN_SCHEMA,
-    input_specs=(DatasetInputSpec("signal", None),),
-    outputs=(OutputSpec(SCAN_OUTPUT.name, SCAN_OUTPUT.contract_id),),
+    input_specs=(DatasetInputSpec("signal", None, "exact"),),
+    outputs=(SCAN_OUTPUT,),
     # A scan is one measurement per point, so its plot is one cell per
     # point.  A plan that leaves nothing to face -- one axis over one
     # number per point -- opens as the curve it is.
-    node_previews=(NodePreviewSpec(SCAN_OUTPUT.name, "facet_grid"),),
+    node_previews=(NodePreviewSpec(SCAN_OUTPUT, "facet_grid"),),
     device_requirements=(
         DeviceRequirement("sequencer.streamer", "sequencer"),
     ),

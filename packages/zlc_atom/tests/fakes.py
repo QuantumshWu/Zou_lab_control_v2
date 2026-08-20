@@ -17,7 +17,6 @@ from zlc_data import (
     SPATIAL_Y,
 )
 from zlc_runtime import SignalDataPlane as RuntimeSignalDataPlane
-from zlc_runtime.plane import SignalPublication
 from zlc_pulse.device import DoneReport, SafeReadback
 
 from zlc_atom.data import snapshot_from_array
@@ -89,30 +88,6 @@ class FakePlane(RuntimeSignalDataPlane):
     def retire(self, producer: object):
         self.calls.append(("retire", (producer,), {}))
         return super().retire(producer)
-
-    def mark_changed(self, producer: object, live_slot: object) -> None:
-        self.calls.append(("mark_changed", (producer, live_slot), {}))
-        super().mark_changed(producer, live_slot)
-
-    def publish_final(self, producer: object, outputs: Mapping[str, object]):
-        self.calls.append(("publish_final", (producer, outputs), {}))
-        return super().publish_final(producer, outputs)  # type: ignore[arg-type]
-
-    def publish_processor(
-        self,
-        control: object,
-        outputs: Mapping[str, object],
-        *,
-        source_publication: SignalPublication,
-    ):
-        self.calls.append(
-            ("publish_processor", (control, outputs), {"source_publication": source_publication})
-        )
-        return super().publish_processor(  # type: ignore[arg-type]
-            control,
-            outputs,  # type: ignore[arg-type]
-            source_publication=source_publication,
-        )
 
     def cancel_latest_only_processor(self, control: object) -> bool:
         self.calls.append(("cancel_latest_only_processor", (control,), {}))

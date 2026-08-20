@@ -183,7 +183,7 @@ def test_a_measurement_declares_the_plot_its_own_start_opens() -> None:
     descriptors = {value.api_name: value for value in discover_logic_nodes()}
     camera = descriptors["camera_measurement"]
     assert tuple(
-        (spec.output_name, spec.plot_kind) for spec in camera.node_previews
+        (spec.output.name, spec.plot_kind) for spec in camera.node_previews
     ) == (
         ("frames", "facet_grid"),
     )

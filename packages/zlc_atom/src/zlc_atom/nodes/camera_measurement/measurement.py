@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from time import monotonic
@@ -13,6 +13,7 @@ from zlc_data import (
     AxisRoleId,
     AxisSpec,
     CoordinateFrameId,
+    OwnedSnapshot,
     PointColumn,
     READOUT_EVENT,
     SPATIAL_X,
@@ -21,7 +22,6 @@ from zlc_data import (
 from zlc_runtime import DatasetCoverage, MonitorCoverage
 from zlc_runtime import (
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
     SignalValue,
 )
@@ -192,6 +192,95 @@ def frames_snapshot(
     )
 
 
+def _finite_cycle_output(
+    node: "CameraMeasurementNode",
+    cycle: Sequence[CameraFrameRecord],
+    index: int,
+) -> LiveDatasetOutput:
+    """One new cycle placed in the fixed authored finite run geometry."""
+
+    event = frames_snapshot(
+        (cycle,),
+        producer=node.instance_id,
+        generation=node.generation,
+        revision=index + 1,
+        working_point=node.actual_working_point,
+    )
+    canonical = replace(
+        event.block.schema,
+        repeat_axis=replace(
+            event.block.schema.repeat_axis,
+            size=node.repeat,
+        ),
+    )
+    frames = node.frames_per_cycle
+    return LiveDatasetOutput(
+        CAMERA_FRAMES_OUTPUT,
+        event,
+        DatasetCoverage((index + 1) * frames, node.repeat * frames),
+        node.run_record,
+        canonical,
+        (index, 0),
+    )
+
+
+def _monitor_cycle_output(
+    node: "CameraMeasurementNode",
+    cycle: Sequence[CameraFrameRecord],
+    revision: int,
+) -> LiveDatasetOutput:
+    event = frames_snapshot(
+        (cycle,),
+        producer=node.instance_id,
+        generation=node.generation,
+        revision=revision,
+        working_point=node.actual_working_point,
+    )
+    frames = node.frames_per_cycle
+    return LiveDatasetOutput(
+        CAMERA_FRAMES_OUTPUT,
+        event,
+        MonitorCoverage(frames, frames),
+        node.run_record,
+    )
+
+
+def _strict_cycle_ordinals(
+    records: Sequence[CameraFrameRecord],
+    *,
+    expected_start: int,
+    frames_per_cycle: int,
+) -> tuple[CameraFrameRecord, ...]:
+    cycle = tuple(records)
+    expected = tuple(range(expected_start, expected_start + frames_per_cycle))
+    observed = tuple(int(record.source_ordinal) for record in cycle)
+    if len(cycle) != frames_per_cycle or observed != expected:
+        raise RuntimeError(
+            "camera cycle source ordinals are not contiguous: "
+            f"expected {expected}, received {observed}"
+        )
+    return cycle
+
+
+def _strict_terminal(
+    terminal: CameraCaptureTerminalRecord,
+    *,
+    expected_frames: int,
+) -> CameraCaptureTerminalRecord:
+    if (
+        terminal.produced_count != expected_frames
+        or not terminal.source_stopped
+        or not terminal.no_more_frames
+        or not terminal.joined
+    ):
+        raise RuntimeError(
+            "camera did not prove exact capture completion: "
+            f"expected {expected_frames} frame(s), produced "
+            f"{terminal.produced_count}"
+        )
+    return terminal
+
+
 def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
     """Return the adapter readback as plain, archive-ready run metadata."""
 
@@ -276,107 +365,6 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
 
 
-class _CameraLiveSlot:
-    """What this node has taken so far, for whoever is watching it take it.
-
-    One live vocabulary, and one honest distinction: does this run have an
-    end.  A monitor does not -- it replaces its single latest cycle forever,
-    and what it shows IS all there is of it, which is a MonitorCoverage.  A
-    finite run does: its dataset is every cycle it will take, filling up, so
-    it states the whole geometry and counts the cells actually measured in a
-    DatasetCoverage.
-
-    That distinction is not cosmetic.  A generation whose live output is
-    monitor-shaped is DETACHED when it ends -- there is nothing to keep --
-    so a finite run that published its live cycles that way lost its final
-    dataset the moment it finished.
-    """
-
-    def __init__(
-        self,
-        node: "CameraMeasurementNode",
-        *,
-        total_cycles: int | None = None,
-    ) -> None:
-        self.node = node
-        self.total_cycles = None if total_cycles is None else int(total_cycles)
-        self.latest: tuple[tuple[CameraFrameRecord, ...], ...] | None = None
-        self.revision = 0
-        self.closed = False
-        self._change_listener: Callable[[], None] | None = None
-
-    def set_change_listener(self, listener: Callable[[], None]) -> None:
-        if self.closed:
-            raise RuntimeError("camera live slot is closed")
-        if not callable(listener):
-            raise TypeError("camera live slot change listener must be callable")
-        if self._change_listener is not None:
-            raise RuntimeError("camera live slot already has a change listener")
-        self._change_listener = listener
-
-    def update(self, cycles: "Sequence[Sequence[CameraFrameRecord]]") -> None:
-        if self.closed:
-            raise RuntimeError("camera live slot is closed")
-        listener = self._change_listener
-        if listener is None:
-            raise RuntimeError("camera live slot is not attached")
-        taken = tuple(tuple(cycle) for cycle in cycles)
-        if not taken or any(
-            len(cycle) != self.node.frames_per_cycle for cycle in taken
-        ):
-            raise ValueError("a camera live update must be complete cycles")
-        if self.total_cycles is not None and len(taken) > self.total_cycles:
-            raise ValueError("a finite run cannot take more cycles than it armed")
-        self.latest = taken
-        self.revision += 1
-        listener()
-
-    def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
-        if self.closed:
-            raise RuntimeError("camera live slot is closed")
-        taken = self.latest
-        if taken is None:
-            raise RuntimeError("camera live slot has no accepted cycle")
-        generation, revision = self.node._next_publication_stamp()
-        # Cells are repeat x point rows; a cycle's frames ARE its point rows.
-        written = sum(len(cycle) for cycle in taken)
-        if self.total_cycles is None:
-            cycles = taken[-1:]
-            coverage = MonitorCoverage(written_cells=written, total_cells=written)
-        else:
-            # The geometry a finite run will HAVE, so a panel keeps one
-            # dataset filling up instead of replacing it every cycle.  The
-            # cells not yet measured are blank, and the coverage is what says
-            # they are not measurements.
-            blank = np.zeros_like(np.asarray(taken[0][0].image))
-            cycles = taken + tuple(
-                tuple(replace(record, image=blank) for record in taken[0])
-                for _ in range(self.total_cycles - len(taken))
-            )
-            coverage = DatasetCoverage(
-                written_cells=written,
-                total_cells=self.total_cycles * self.node.frames_per_cycle,
-            )
-        return {
-            CAMERA_FRAMES_OUTPUT.name: LiveDatasetOutput(
-                CAMERA_FRAMES_OUTPUT,
-                frames_snapshot(
-                    cycles,
-                    producer=self.node.instance_id,
-                    generation=generation,
-                    revision=revision,
-                    working_point=self.node.actual_working_point,
-                ),
-                coverage,
-                self.node.run_record,
-            )
-        }
-
-    def close(self) -> None:
-        self.closed = True
-        self._change_listener = None
-
-
 class CameraCycleSource:
     """The point's value is the cycle of frames the fired program triggered.
 
@@ -458,16 +446,7 @@ class CameraCycleSource:
         capture, self._capture = self._capture, None
         if capture is None:
             return None
-        terminal = capture.close()
-        request = self.camera_node.request
-        if self._taken == request.repeat and (
-            terminal.produced_count != request.repeat * request.frames_per_cycle
-            or not terminal.source_stopped
-            or not terminal.no_more_frames
-            or not terminal.joined
-        ):
-            raise RuntimeError("camera did not prove exact cycle-source completion")
-        return terminal
+        return capture.close()
 
     def describe(self) -> dict[str, object]:
         request = self.camera_node.request
@@ -480,6 +459,8 @@ class CameraCycleSource:
 @dataclass(frozen=True)
 class MeasurementResult:
     cycles: tuple[tuple[CameraFrameRecord, ...], ...]
+    cycle_count: int
+    snapshot: OwnedSnapshot
     publication: SignalPublication
     terminal: CameraCaptureTerminalRecord
 
@@ -498,6 +479,7 @@ class FiniteCapture:
         repeat: int,
         frames_per_cycle: int,
         timeout: float,
+        owns_generation: bool,
         should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.node = node
@@ -505,56 +487,90 @@ class FiniteCapture:
         self.repeat = int(repeat)
         self.frames_per_cycle = int(frames_per_cycle)
         self.timeout = float(timeout)
+        self.owns_generation = bool(owns_generation)
         #: Asked between reads, and only by a caller that has someone to ask
         #: -- a hosted run has the host's cancel, a notebook has nobody.
         self.should_stop = should_stop
         self.closed = False
         self.collected: MeasurementResult | None = None
+        self.completed_cycles = 0
+        self.terminal: CameraCaptureTerminalRecord | None = None
 
     def collect(
         self,
         *,
-        publish: object | None = None,
-        on_cycle: Callable[
-            [tuple[tuple[CameraFrameRecord, ...], ...]], None
-        ] | None = None,
+        commit_cycle: Callable[[tuple[CameraFrameRecord, ...], int], None]
+        | None = None,
+        retain_cycles: bool | None = None,
     ) -> MeasurementResult | None:
         """Read the armed cycles and publish them.
 
-        ``publish`` is the host's context publisher when hosted, and None when
-        the caller owns the plane directly.  Only the destination differs; the
-        acquisition is one implementation.
-
-        ``on_cycle`` is handed the cycles taken SO FAR as each one lands,
-        which is what puts a finite run on screen while it runs instead of at
-        the end of it.  A run
+        ``commit_cycle`` receives only the newly completed cycle and its run
+        index.  Runtime owns every prior cycle and the fixed authored shape;
+        handing the whole prefix back to a plugin is the O(N^2) path this
+        method replaces.  A run
         that is asked to stop keeps the cycles it took -- they were measured
-        -- and publishes those; one stopped before its first cycle has nothing
-        to publish and returns None.
+        -- while one stopped before its first cycle has nothing to publish.
         """
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
         if self.collected is not None:
             return self.collected
-        cycles: list[tuple[CameraFrameRecord, ...]] = []
+        if commit_cycle is None:
+            if not self.owns_generation:
+                raise TypeError("hosted finite capture requires commit_cycle")
+            commit_cycle = self.node._commit_direct_cycle
+        if not callable(commit_cycle):
+            raise TypeError("commit_cycle must be callable")
+        keep = self.owns_generation if retain_cycles is None else bool(retain_cycles)
+        retained: list[tuple[CameraFrameRecord, ...]] = []
         try:
-            for _repeat in range(self.repeat):
+            for index in range(self.repeat):
                 cycle = self.next_cycle()
                 if cycle is None:
                     break
-                cycles.append(cycle)
-                if on_cycle is not None:
-                    on_cycle(tuple(cycles))
+                commit_cycle(cycle, index)
+                if keep:
+                    retained.append(cycle)
             terminal = self.camera.finish_record_capture()
+            _strict_terminal(
+                terminal,
+                expected_frames=self.completed_cycles * self.frames_per_cycle,
+            )
+            self.terminal = terminal
         except BaseException:
             self.camera.finish_record_capture()
             self.closed = True
+            if self.owns_generation:
+                self.node.signal_plane.retire(self.node)
             raise
         self.closed = True
-        if not cycles:
+        if not self.completed_cycles:
+            if self.owns_generation:
+                self.node.signal_plane.retire(self.node)
             return None
-        self.collected = self.node._publish_finite(tuple(cycles), terminal, publish=publish)
+        if self.owns_generation:
+            self.node.signal_plane.seal_committed(
+                self.node,
+                cut_short=self.completed_cycles < self.repeat,
+            )
+        publication = self.node.signal_plane.latest_publication(
+            self.node.signal_key(CAMERA_FRAMES_OUTPUT.name)
+        )
+        if not isinstance(publication, SignalPublication):
+            raise RuntimeError("signal plane did not retain the camera commit")
+        snapshot = self.node.signal_plane.current_dataset(
+            self.node.signal_key(CAMERA_FRAMES_OUTPUT.name),
+            publication,
+        )
+        self.collected = MeasurementResult(
+            tuple(retained),
+            self.completed_cycles,
+            snapshot,
+            publication,
+            terminal,
+        )
         return self.collected
 
     def next_cycle(self) -> tuple[CameraFrameRecord, ...] | None:
@@ -610,13 +626,26 @@ class FiniteCapture:
                 "must space its camera windows by more than that, or the "
                 "exposure must come down"
             )
-        return records
+        expected = self.completed_cycles * self.frames_per_cycle
+        cycle = _strict_cycle_ordinals(
+            records,
+            expected_start=expected,
+            frames_per_cycle=self.frames_per_cycle,
+        )
+        self.completed_cycles += 1
+        return cycle
 
     def close(self) -> CameraCaptureTerminalRecord:
         if self.closed:
-            return CameraCaptureTerminalRecord(0, True, True, True)
+            if self.terminal is None:
+                raise RuntimeError("finite capture closed without terminal evidence")
+            return self.terminal
         self.closed = True
-        return self.camera.finish_record_capture()
+        self.terminal = _strict_terminal(
+            self.camera.finish_record_capture(),
+            expected_frames=self.completed_cycles * self.frames_per_cycle,
+        )
+        return self.terminal
 
 
 class MonitorCapture:
@@ -628,7 +657,7 @@ class MonitorCapture:
         *,
         node: "CameraMeasurementNode",
         owns_generation: bool,
-        attach_live_outputs: Callable[[object], None] | None,
+        commit_live: Callable[..., Mapping[str, SignalValue]] | None,
     ) -> None:
         self.camera = camera
         self.node = node
@@ -636,18 +665,15 @@ class MonitorCapture:
         self.closed = False
         self.latest_record: CameraFrameRecord | None = None
         self._pending_records: list[CameraFrameRecord] = []
-        self.slot = _CameraLiveSlot(node)
+        self._revision = 0
         if self.owns_generation:
-            if attach_live_outputs is not None:
-                raise ValueError("a direct monitor cannot use a host live-output attachment")
-            self.slot.set_change_listener(
-                lambda: self.node.signal_plane.mark_changed(self.node, self.slot)
-            )
-            self.node.signal_plane.attach(self.node, self.slot)
+            if commit_live is not None:
+                raise ValueError("a direct monitor cannot use a host commit function")
+            self._commit_live = self.node._commit_direct_outputs
         else:
-            if not callable(attach_live_outputs):
-                raise TypeError("a hosted monitor requires attach_live_outputs")
-            attach_live_outputs(self.slot)
+            if not callable(commit_live):
+                raise TypeError("a hosted monitor requires commit_live")
+            self._commit_live = commit_live
 
     def poll(self) -> CameraFrameRecord | None:
         if self.closed:
@@ -680,8 +706,22 @@ class MonitorCapture:
                     return
             pending.append(record)
         if len(pending) == cycle_size:
-            self.slot.update((tuple(pending),))
+            cycle = _strict_cycle_ordinals(
+                pending,
+                expected_start=int(pending[0].source_ordinal),
+                frames_per_cycle=cycle_size,
+            )
             pending.clear()
+            self._revision += 1
+            self._commit_live(
+                {
+                    CAMERA_FRAMES_OUTPUT.name: _monitor_cycle_output(
+                        self.node,
+                        cycle,
+                        self._revision,
+                    )
+                }
+            )
 
     def close(self) -> CameraCaptureTerminalRecord:
         """Release this capture and always disarm the camera.
@@ -695,20 +735,23 @@ class MonitorCapture:
         if self.closed:
             return CameraCaptureTerminalRecord(0, True, True, True)
         self.closed = True
-        detached: BaseException | None = None
+        sealed: BaseException | None = None
         if self.owns_generation:
             try:
-                self.node.signal_plane.detach_live(self.node)
+                if self._revision:
+                    self.node.signal_plane.seal_committed(self.node)
+                else:
+                    self.node.signal_plane.retire(self.node)
             except BaseException as error:  # noqa: BLE001 - the camera still goes
-                detached = error
+                sealed = error
         terminal = self.camera.finish_record_capture()
-        if detached is not None:
-            raise detached
+        if sealed is not None:
+            raise sealed
         return terminal
 
 
 class CameraMeasurementNode:
-    """One atomic camera cycle publishes one ordinary signal per frame."""
+    """Commit each atomic camera cycle to one stable ``frames`` signal."""
 
     def __init__(
         self,
@@ -732,11 +775,7 @@ class CameraMeasurementNode:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
-        self.producer = self.instance_id
-        # Live frames and final publications share one counter, which continues
-        # across runs so a consumer never sees this producer go backwards.
         self._generation: object | None = None
-        self._revision = 0
 
     @property
     def request(self) -> CameraMeasurementRequest:
@@ -745,6 +784,12 @@ class CameraMeasurementNode:
     @property
     def actual_working_point(self) -> CameraWorkingPoint | None:
         return self._actual_working_point
+
+    @property
+    def generation(self) -> object:
+        if self._generation is None:
+            raise RuntimeError("camera acquisition has no active generation")
+        return self._generation
 
     @property
     def camera_key(self) -> str:
@@ -866,12 +911,32 @@ class CameraMeasurementNode:
             raise RuntimeError("camera run record was not frozen after arm")
         return record
 
-    def _next_publication_stamp(self) -> tuple[str, int]:
-        generation = self._generation
-        if generation is None:
-            raise RuntimeError("camera publication requires an active generation")
-        self._revision += 1
-        return str(getattr(generation, "value", generation)), self._revision
+    def _commit_direct_outputs(
+        self,
+        outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        growing_outputs: Sequence[str] = (),
+    ) -> Mapping[str, SignalValue]:
+        return self.signal_plane.commit_live(
+            self,
+            outputs,
+            growing_outputs=growing_outputs,
+        )
+
+    def _commit_direct_cycle(
+        self,
+        cycle: tuple[CameraFrameRecord, ...],
+        index: int,
+    ) -> None:
+        self._commit_direct_outputs(
+            {
+                CAMERA_FRAMES_OUTPUT.name: _finite_cycle_output(
+                    self,
+                    cycle,
+                    index,
+                )
+            }
+        )
 
     def prepare(
         self,
@@ -890,35 +955,42 @@ class CameraMeasurementNode:
 
         if self.request.repeat <= 0:
             raise ValueError("finite prepare requires request.repeat greater than zero")
+        owns_generation = bool(owns_generation)
         if owns_generation:
             self._generation = self.signal_plane.begin_generation(self)
-        self._configure_for_run()
-        timeout = float(self.camera.timeout)
-        total = self.request.repeat * self.request.frames_per_cycle
-        groups = (self.request.frames_per_cycle,) * self.request.repeat
-        self.camera.arm(
-            total,
-            source_group_sizes=groups,
-            buffer_frame_count=total,
-            timeout=timeout,
-        )
         try:
+            self._configure_for_run()
+            timeout = float(self.camera.timeout)
+            total = self.request.repeat * self.request.frames_per_cycle
+            groups = (self.request.frames_per_cycle,) * self.request.repeat
+            self.camera.arm(
+                total,
+                source_group_sizes=groups,
+                buffer_frame_count=total,
+                timeout=timeout,
+            )
             self._freeze_working_point(self.camera.working_point())
             return FiniteCapture(
                 self,
                 repeat=self.request.repeat,
                 frames_per_cycle=self.request.frames_per_cycle,
                 timeout=timeout,
+                owns_generation=owns_generation,
                 should_stop=should_stop,
             )
         except BaseException:
             self.camera.finish_record_capture()
+            if owns_generation:
+                self.signal_plane.retire(self)
             raise
 
     def measure(self) -> MeasurementResult:
         """Collect externally triggered frames into one final publication."""
 
-        return self.prepare().collect()
+        result = self.prepare().collect()
+        if result is None:
+            raise RuntimeError("finite camera measurement ended without a cycle")
+        return result
 
     def execute(self, context: object) -> dict[str, object]:
         """Hosted entry point: the same acquisition, published through the host.
@@ -934,7 +1006,7 @@ class CameraMeasurementNode:
         if self.repeat == 0:
             capture = self.monitor(
                 owns_generation=False,
-                attach_live_outputs=context.attach_live_outputs,
+                commit_live=context.commit_live,
             )
             try:
                 while not context.cancel_requested():
@@ -951,20 +1023,20 @@ class CameraMeasurementNode:
             owns_generation=False,
             should_stop=context.cancel_requested,
         )
-        # The same live channel a monitor publishes through: an operator
-        # watching a finite run had nothing on screen at all until its LAST
-        # cycle had been taken, and a run of two hundred repeats is a blank
-        # panel for as long as it takes.
-        slot = _CameraLiveSlot(self, total_cycles=self.request.repeat)
-        context.attach_live_outputs(slot)
-        # The host owns the slot's lifetime from here: it is what finishes the
-        # live generation and keeps the final dataset attached to it.
         result = capture.collect(
-            publish=context.publish_final,
-            on_cycle=slot.update,
+            commit_cycle=lambda cycle, index: context.commit_live(
+                {
+                    CAMERA_FRAMES_OUTPUT.name: _finite_cycle_output(
+                        self,
+                        cycle,
+                        index,
+                    )
+                }
+            ),
+            retain_cycles=False,
         )
         return {
-            "cycles": 0 if result is None else len(result.cycles),
+            "cycles": 0 if result is None else result.cycle_count,
             "signals": tuple(
                 self.signal_key(value.name)
                 for value in self.dataset_output_declarations
@@ -975,7 +1047,7 @@ class CameraMeasurementNode:
         self,
         *,
         owns_generation: bool = True,
-        attach_live_outputs: Callable[[object], None] | None = None,
+        commit_live: Callable[..., Mapping[str, SignalValue]] | None = None,
     ) -> MonitorCapture:
         cycle_size = self.frames_per_cycle
         buffer_frames = 4 * cycle_size
@@ -983,65 +1055,34 @@ class CameraMeasurementNode:
             raise ValueError("monitor requires request.repeat equal to zero")
         owns_generation = bool(owns_generation)
         if owns_generation:
-            if attach_live_outputs is not None:
-                raise ValueError("a direct monitor cannot use a host live-output attachment")
+            if commit_live is not None:
+                raise ValueError("a direct monitor cannot use a host commit function")
             self._generation = self.signal_plane.begin_generation(self)
-        elif not callable(attach_live_outputs):
-            raise TypeError("a hosted monitor requires attach_live_outputs")
-        self._configure_for_run()
-        # The camera's own timeout still governs ARMING -- how long the device
-        # may take to become ready is the device's fact.
-        timeout = float(self.camera.timeout)
-        self.camera.arm(
-            None,
-            source_group_sizes=None if cycle_size == 1 else (cycle_size,),
-            buffer_frame_count=buffer_frames,
-            timeout=timeout,
-        )
+        elif not callable(commit_live):
+            raise TypeError("a hosted monitor requires commit_live")
         try:
+            self._configure_for_run()
+            # The camera's own timeout still governs ARMING -- how long the
+            # device may take to become ready is the device's fact.
+            timeout = float(self.camera.timeout)
+            self.camera.arm(
+                None,
+                source_group_sizes=None if cycle_size == 1 else (cycle_size,),
+                buffer_frame_count=buffer_frames,
+                timeout=timeout,
+            )
             self._freeze_working_point(self.camera.working_point())
             return MonitorCapture(
                 self.camera,
                 node=self,
                 owns_generation=owns_generation,
-                attach_live_outputs=attach_live_outputs,
+                commit_live=commit_live,
             )
         except BaseException:
             self.camera.finish_record_capture()
+            if owns_generation:
+                self.signal_plane.retire(self)
             raise
-
-    def _publish_finite(
-        self,
-        cycles: tuple[tuple[CameraFrameRecord, ...], ...],
-        terminal: CameraCaptureTerminalRecord,
-        *,
-        publish: object | None = None,
-    ) -> MeasurementResult:
-        if not cycles:
-            raise ValueError("camera publication requires at least one cycle")
-        generation, revision = self._next_publication_stamp()
-        outputs = {
-            CAMERA_FRAMES_OUTPUT.name: FinalDatasetOutput(
-                CAMERA_FRAMES_OUTPUT,
-                frames_snapshot(
-                    cycles,
-                    producer=self.instance_id,
-                    generation=generation,
-                    revision=revision,
-                    working_point=self.actual_working_point,
-                ),
-                self.run_record,
-            )
-        }
-        published = publish(outputs) if publish is not None else self.signal_plane.publish_final(self, outputs)
-        if not isinstance(published, dict) and not hasattr(published, "keys"):
-            raise TypeError("signal_plane.publish_final must return a signal mapping")
-        publication = self.signal_plane.latest_publication(
-            self.signal_key(CAMERA_FRAMES_OUTPUT.name)
-        )
-        if not isinstance(publication, SignalPublication):
-            raise RuntimeError("signal plane did not expose the final camera publication")
-        return MeasurementResult(cycles, publication, terminal)
 
 
 __all__ = [

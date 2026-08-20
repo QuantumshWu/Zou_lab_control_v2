@@ -95,8 +95,6 @@ def test_the_published_rate_is_the_occupied_fraction_and_not_its_inverse() -> No
 
     occupancy = OccupancyProcessor(result.calibration).process(
         camera_cycle_snapshot(frames),
-        generation="mutation-guard",
-        revision=1,
     )
     occupied = np.asarray(occupancy.occupied, dtype=bool)
     valid = np.asarray(occupancy.valid, dtype=bool)

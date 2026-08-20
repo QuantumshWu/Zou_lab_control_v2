@@ -2162,7 +2162,7 @@ def test_panel_edit_projects_the_direct_producer_restarts_it_and_ages(
     assert started == [node_id]
 
 
-def test_a_running_task_owns_the_bench_and_not_the_window(
+def test_a_running_task_freezes_logic_identity_but_not_panels(
     presenter, monkeypatch
 ) -> None:
     """What a Task refuses is what it actually owns.
@@ -2227,7 +2227,7 @@ def test_a_running_task_owns_the_bench_and_not_the_window(
             return self.observation
 
         def published_signals(self) -> tuple[str, ...]:
-            return ()
+            return ("@logic/calibration/capture_preview",)
 
         def shutdown(self) -> None:
             self.running = False
@@ -2240,7 +2240,11 @@ def test_a_running_task_owns_the_bench_and_not_the_window(
     monkeypatch.setattr(
         presenter,
         "_build_logic_candidate",
-        lambda _binding, _finalization: LogicCandidate(object(), host, ()),
+        lambda binding, _finalization: LogicCandidate(
+            object(),
+            host,
+            tuple(binding.descriptor.node_previews),
+        ),
     )
 
     presenter.view.logic_start_requested.emit(task_id)
@@ -2248,16 +2252,54 @@ def test_a_running_task_owns_the_bench_and_not_the_window(
     assert presenter._active_task_id == task_id
     assert presenter.view.status[-1] == ("task", "calibration: Capturing 2/5")
 
-    # The window keeps working: a panel for the run in flight, a row prepared
-    # for what comes after it, and the panel that is no longer wanted closed.
+    previous_repeat = presenter.logic[other_id].draft.values["repeat"]
+    # Panel monitoring remains usable, while the Logic graph and every draft
+    # keep the identity with which the Task took the bench.
     presenter.view.add_panel_requested.emit("curve")
     presenter.view.add_logic_requested.emit("occupancy")
     presenter.view.panel_remove_requested.emit(panel.panel_id)
     presenter.view.logic_draft_changed.emit(other_id, {"values": {"repeat": 3}})
     assert panel.panel_id not in presenter.panels, "a panel could not be closed"
     assert len(presenter.panels) == 1, "a panel could not be opened"
-    assert "occupancy" in " ".join(presenter.logic), "a row could not be added"
-    assert presenter.logic[other_id].draft.values["repeat"] == 3
+    assert "occupancy" not in " ".join(presenter.logic)
+    assert presenter.logic[other_id].draft.values["repeat"] == previous_repeat
+
+    preview = presenter.add_blank_panel(
+        "facet_grid",
+        signal="@logic/calibration/capture_preview",
+    )
+    assert preview is not None
+    assert presenter.update_panel_state(
+        preview.panel_id,
+        {"title": "Still monitorable", "display": {"colormap": "viridis"}},
+    )
+    assert not presenter.update_panel_state(
+        preview.panel_id,
+        {"semantic": {"fate:repeat": "reduce"}},
+    )
+    assert not presenter.update_panel_state(
+        preview.panel_id,
+        {"signal": "another/signal"},
+    )
+    assert not presenter.update_panel_published_outputs(
+        preview.panel_id,
+        {"roi": True},
+    )
+    preview.port = object()
+    remembered_selector = dict(preview.state.selector)
+    remembered_threshold = dict(preview.state.classifier_threshold)
+    presenter._route_panel_selection(preview.panel_id, object())
+    presenter._settle_panel_threshold(preview.panel_id, None, object())
+    assert dict(preview.state.selector) == remembered_selector
+    assert dict(preview.state.classifier_threshold) == remembered_threshold
+    viewport = object()
+    presenter._route_panel_selection(
+        preview.panel_id,
+        object(),
+        viewport=viewport,
+    )
+    assert preview.interaction_viewport[1] is viewport
+    preview.port = None
 
     # The bench does not: nothing else may take the devices, and the Task's
     # own draft is the run it is already performing.
@@ -2284,6 +2326,160 @@ def test_a_running_task_owns_the_bench_and_not_the_window(
     assert presenter.view.task_takeover is False
     assert presenter.view.status[-1] == ("error", "calibration: camera fault")
     assert presenter.logic_editor_projection(task_id)["error"] == "camera fault"
+
+
+def test_running_row_waits_for_first_publication_and_terminal_phase_wins(
+    presenter,
+) -> None:
+    from types import SimpleNamespace
+    from zlc_runtime.host import LogicNodeObservation, NodeProgress
+    from zlc_workbench.logic import stable_signal_key
+
+    node_id = presenter.add_logic("camera_measurement", open_editor=False)
+    binding = presenter.logic[node_id]
+    signal = stable_signal_key(node_id, "frames")
+    binding.host = SimpleNamespace(
+        running=False,
+        observation=LogicNodeObservation(True, False, "running"),
+        published_signals=lambda: (signal,),
+        dataset_output_declarations=binding.descriptor.outputs,
+    )
+    binding.shown = ()
+    try:
+        presenter._show_logic(binding)
+    finally:
+        binding.host = None
+    row = next(row for row in presenter.view.logic_rows if row.title == node_id)
+    assert row.publishes == (("frames", "—", f"waiting · {signal}"),)
+
+    terminal = LogicNodeObservation(
+        False,
+        True,
+        "done",
+        progress=NodeProgress("Saving stale progress"),
+    )
+    assert presenter._observation_status(terminal) == "done"
+
+
+def test_incompatible_preview_reports_once_and_is_never_marked_successful(
+    presenter,
+    session,
+) -> None:
+    from types import SimpleNamespace
+    from zlc_atom.nodes import NodePreviewSpec
+    from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
+
+    node_id = "preview-task"
+    presenter.add_logic(
+        "camera_measurement",
+        node_id=node_id,
+        open_editor=False,
+    )
+    binding = presenter.logic[node_id]
+    binding.host = SimpleNamespace(running=True)
+    binding.preview_specs = (
+        NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "pulse_timeline"),
+    )
+    _one_shot(session, producer=node_id)
+
+    presenter._ensure_node_previews(binding)
+    presenter._ensure_node_previews(binding)
+    binding.host = None
+    errors = [
+        text
+        for severity, text in presenter.view.status
+        if severity == "error" and "incompatible" in text
+    ]
+    assert len(errors) == 1
+    assert binding.previewed == ()
+    assert not presenter.panels
+
+
+def test_explicit_repeat_semantics_reads_runtime_history_but_default_stays_event(
+    presenter,
+    session,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+    from zlc_data import DatasetSchema, owned_snapshot_from_arrays
+
+    _node, event = _one_shot(session, producer="event-camera")
+    event_schema = event.block.schema
+    full_schema = DatasetSchema(
+        replace(
+            event_schema.repeat_axis,
+            size=3,
+            coordinates=(0, 1, 2),
+        ),
+        event_schema.point_table,
+        event_schema.grid_topology,
+        event_schema.cell_schema,
+    )
+    full = owned_snapshot_from_arrays(
+        full_schema,
+        np.repeat(event.block.values, 3, axis=0),
+        event.block.revision.value + 1,
+        validity=np.ones(full_schema.physical_shape, dtype=np.bool_),
+        stream_generation=event.ref.stream_generation,
+    )
+    calls: list[tuple[str, object]] = []
+
+    def current_dataset(_plane, signal, publication):
+        calls.append((signal, publication))
+        return full
+
+    monkeypatch.setattr(
+        type(session.signal_plane),
+        "current_dataset",
+        current_dataset,
+    )
+    panel = presenter.add_blank_panel("image")
+    assert panel is not None
+    panel.state = replace(panel.state, signal="event-camera/frames")
+    value = SimpleNamespace(snapshot=event, growing=False)
+    publication = object()
+
+    assert presenter._project_panel_input(panel, value, publication) is event
+    assert calls == []
+    panel.state = replace(
+        panel.state,
+        semantic={"fate:repeat": "reduce"},
+    )
+    assert presenter._project_panel_input(panel, value, publication) is full
+    assert calls == [("event-camera/frames", publication)]
+    panel.state = replace(
+        panel.state,
+        semantic={"scope:repeat": 1},
+    )
+    assert presenter._project_panel_input(panel, value, publication) is full
+    assert calls == [
+        ("event-camera/frames", publication),
+        ("event-camera/frames", publication),
+    ]
+
+
+def test_task_preview_retirement_uses_runtime_signal_existence(
+    presenter,
+    session,
+) -> None:
+    node, snapshot = _one_shot(session, producer="sealed-preview")
+    sealed_signal = node.signal_key("frames")
+    retained = presenter.add_panel(sealed_signal, snapshot)
+    missing = presenter.add_blank_panel(
+        "image",
+        signal="@logic/task/retired-preview",
+    )
+    assert missing is not None
+    task_id = presenter.add_logic("calibration", open_editor=False)
+    task = presenter.logic[task_id]
+    presenter._auto_task_previews[task_id] = {
+        retained.panel_id: sealed_signal,
+        missing.panel_id: "@logic/task/retired-preview",
+    }
+
+    presenter._reconcile_task_previews(task)
+    assert retained.panel_id in presenter.panels
+    assert missing.panel_id not in presenter.panels
 
 
 def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
@@ -2436,7 +2632,7 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
 
     binding = presenter.logic[camera_id]
     declared = tuple(
-        (spec.output_name, spec.plot_kind)
+        (spec.output.name, spec.plot_kind)
         for spec in binding.descriptor.node_previews
     )
     assert declared == (("frames", "facet_grid"),), (

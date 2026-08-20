@@ -5,7 +5,6 @@ __version__ = "0.1.0"
 from .dataset import DatasetCoverage, MonitorCoverage
 from .dataset_output import (
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 from .plane import (
@@ -35,7 +34,6 @@ __all__ = (
     "BoardScheduler",
     "DatasetCoverage",
     "DatasetOutputDeclaration",
-    "FinalDatasetOutput",
     "HarmonicClock",
     "LiveDatasetOutput",
     "MonitorCoverage",

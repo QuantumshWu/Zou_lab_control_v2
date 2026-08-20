@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 from zlc_data import (
+    DatasetSchema,
     OwnedSnapshot,
     PointColumn,
-    SITE,
     SPATIAL_X,
     SPATIAL_Y,
+    ValidityContract,
+    ValueSchema,
+    owned_snapshot_from_arrays,
 )
-from zlc_runtime import DatasetCoverage
+from zlc_runtime import DatasetCoverage, MonitorCoverage
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime import SignalValue
 
-from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
@@ -29,7 +32,7 @@ from zlc_atom.nodes.calibration.calibration import classify_threshold
 #: must not learn a second spelling of this one.
 SITE_STATUS_CONTRACT = "occupancy.occupied.v1"
 
-_OUTPUT_DECLARATIONS = (
+OCCUPANCY_OUTPUTS = (
     DatasetOutputDeclaration("counts", "occupancy.counts.v1"),
     DatasetOutputDeclaration("occupied", SITE_STATUS_CONTRACT),
     DatasetOutputDeclaration("valid", "occupancy.valid.v1"),
@@ -40,60 +43,38 @@ _OUTPUT_DECLARATIONS = (
 
 @dataclass(frozen=True)
 class OccupancyResult:
-    #: All four share the parent's ``(repeat, point)`` leading pair: this
-    #: classifier judges one frame at a time and changes no point set, so it
-    #: INHERITS the point axis of the frames it read.  Sites are cell data --
-    #: an image resampled onto the trap lattice, not something anyone scanned.
-    counts: np.ndarray
-    occupied: np.ndarray
-    valid: np.ndarray
-    rate: np.ndarray
-    frame_judged: np.ndarray
-    artifacts: dict[str, OwnedSnapshot] = field(default_factory=dict)
+    #: The typed snapshots are the result truth.  Array conveniences below
+    #: are views of them, never a second stored copy.
+    artifacts: Mapping[str, OwnedSnapshot]
 
     def __post_init__(self) -> None:
-        counts = np.asarray(self.counts, dtype="<f8")
-        occupied = np.asarray(self.occupied, dtype=bool)
-        valid = np.asarray(self.valid, dtype=bool)
-        rate = np.asarray(self.rate, dtype="<f8")
-        frame_judged = np.asarray(self.frame_judged)
-        if (
-            counts.ndim != 3
-            or counts.shape != occupied.shape
-            or counts.shape != valid.shape
-            or rate.shape != counts.shape[:2]
-            or frame_judged.ndim != 4
-            or frame_judged.shape[:2] != counts.shape[:2]
+        artifacts = dict(self.artifacts)
+        expected = {output.name for output in OCCUPANCY_OUTPUTS}
+        if set(artifacts) != expected or any(
+            not isinstance(value, OwnedSnapshot) for value in artifacts.values()
         ):
-            raise ValueError(
-                "occupancy outputs are (repeat, point, sites) beside "
-                "(repeat, point) and (repeat, point, y, x)"
-            )
-        for value in (counts, occupied, valid, rate, frame_judged):
-            value.setflags(write=False)
-        object.__setattr__(self, "counts", counts)
-        object.__setattr__(self, "occupied", occupied)
-        object.__setattr__(self, "valid", valid)
-        object.__setattr__(self, "rate", rate)
-        object.__setattr__(self, "frame_judged", frame_judged)
-        object.__setattr__(self, "artifacts", dict(self.artifacts))
+            raise ValueError("occupancy result must contain every typed output snapshot")
+        object.__setattr__(self, "artifacts", MappingProxyType(artifacts))
 
+    @property
+    def counts(self) -> np.ndarray:
+        return self.artifacts["counts"].block.values
 
-def inherited_stamps(snapshot: object) -> dict[str, object]:
-    """The run stamps a derived signal takes from the data it describes.
+    @property
+    def occupied(self) -> np.ndarray:
+        return self.artifacts["occupied"].block.values
 
-    A derived signal that counted independently would drift out of step with its
-    parent, and the same-shot family would stop lining up.
+    @property
+    def valid(self) -> np.ndarray:
+        return self.artifacts["valid"].block.values
 
-    Public because ``process`` requires them: an offline caller holds the
-    publication its frames came from and must say which run it is deriving.
-    """
+    @property
+    def rate(self) -> np.ndarray:
+        return self.artifacts["rate"].block.values[..., 0]
 
-    ref = snapshot.ref
-    return {
-        "generation": str(getattr(ref.stream_generation, "value", ref.stream_generation)),
-        "revision": int(getattr(ref.revision, "value", ref.revision)),
-    }
+    @property
+    def frame_judged(self) -> np.ndarray:
+        return self.artifacts["frame_judged"].block.values
 
 
 class OccupancyProcessor:
@@ -128,7 +109,6 @@ class OccupancyProcessor:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
-        self.producer = self.instance_id
         self.source_signal = None if source_signal is None else str(source_signal).strip()
 
     def _source_point_column(self, snapshot: OwnedSnapshot) -> PointColumn:
@@ -258,140 +238,128 @@ class OccupancyProcessor:
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
-        return _OUTPUT_DECLARATIONS
+        return OCCUPANCY_OUTPUTS
 
     def signal_key(self, output_name: str) -> str:
-        names = {declaration.name for declaration in _OUTPUT_DECLARATIONS}
+        names = {declaration.name for declaration in OCCUPANCY_OUTPUTS}
         if str(output_name) not in names:
             raise KeyError(f"unknown occupancy output {output_name!r}")
         return f"@logic/{self.instance_id}/{output_name}"
 
-    def process(
+    def _output_schemas(
         self,
-        frames: OwnedSnapshot,
-        *,
-        generation: str,
-        revision: int,
-    ) -> OccupancyResult:
-        """Derive occupancy from a published cycle, stamped with its run.
+        source: DatasetSchema,
+    ) -> dict[str, DatasetSchema]:
+        site_axis = self.readout.site_map.site_axis
 
-        ``frames`` is the parent's SNAPSHOT, not a bare array: the point axis
-        this derivation inherits is a schema fact, and there is no way to
-        recover a point column from a block of numbers.
+        def with_cell(cell: ValueSchema) -> DatasetSchema:
+            return DatasetSchema(
+                source.repeat_axis,
+                source.point_table,
+                source.grid_topology,
+                cell,
+            )
 
-        The stamps are INHERITED rather than invented: a derived signal that
-        counted independently would drift out of step with the frames it
-        describes, and the same-shot family would no longer line up.
+        site_validity = ValidityContract.components(site_axis.axis_id)
+        return {
+            "counts": with_cell(
+                ValueSchema(
+                    (site_axis,),
+                    site_validity,
+                    np.dtype("<f8"),
+                    source.cell_schema.value_unit,
+                )
+            ),
+            "occupied": with_cell(
+                ValueSchema((site_axis,), site_validity, np.dtype("?"), "1")
+            ),
+            "valid": with_cell(
+                ValueSchema((site_axis,), site_validity, np.dtype("?"), "1")
+            ),
+            "rate": with_cell(ValueSchema.scalar(np.dtype("<f8"), "1")),
+        }
 
-        Required, with no default.  They defaulted to a constant that only the
-        offline callers ever accepted -- the same constant ``snapshot_from_array``
-        had its defaults removed for, because a publication stamped generation
-        "0" forever freezes every live plot downstream, which rejects a revision
-        that is not newer than the one it holds.
-        """
+    @staticmethod
+    def _snapshot(
+        source: OwnedSnapshot,
+        schema: DatasetSchema,
+        values: object,
+        validity: object,
+    ) -> OwnedSnapshot:
+        return owned_snapshot_from_arrays(
+            schema,
+            values,
+            source.block.revision,
+            validity=validity,
+            stream_generation=source.ref.stream_generation,
+        )
+
+    def process(self, frames: OwnedSnapshot) -> OccupancyResult:
+        """Classify one source event snapshot without reconstructing history."""
 
         if not isinstance(frames, OwnedSnapshot):
             raise TypeError("occupancy process requires zlc_data.OwnedSnapshot")
-        point_column = self._source_point_column(frames)
-        point_role = point_column.role
+        self._source_point_column(frames)
         images = np.asarray(frames.block.values)
-        repeats, points = images.shape[0], images.shape[1]
+        repeats, points = images.shape[:2]
         n_sites = self.readout.n_sites
         flat = images.reshape((repeats * points, *images.shape[2:]))
-        # Extracted once.  detect() begins by calling signals(), so asking for
-        # counts and then for occupancy ran the box or PSF extraction over every
-        # site of every frame twice -- for a classification that is one
-        # comparison against the thresholds the calibration already carries.
-        counts = np.asarray(
-            [
-                self.readout.signals(image, model_kind=self.model.kind)
-                for image in flat
-            ],
-            dtype="<f8",
-        )
+        source_validity = frames.expanded_validity()
+        cell_valid = np.all(
+            source_validity,
+            axis=tuple(range(2, source_validity.ndim)),
+        ).reshape(-1)
+        counts = np.full((flat.shape[0], n_sites), np.nan, dtype="<f8")
+        for index in np.flatnonzero(cell_valid):
+            counts[index] = self.readout.signals(
+                flat[index],
+                model_kind=self.model.kind,
+            )
         model = self.model
-        site_valid = (
+        site_usable = (
             self.readout.site_map.valid_sites
             & model.usable_sites
             & np.isfinite(model.thresholds)
         )
-        counts[:, ~site_valid] = np.nan
-        occupied = classify_threshold(counts, model.thresholds)
-        valid = np.broadcast_to(site_valid, counts.shape).copy()
+        valid = cell_valid[:, None] & site_usable[None, :]
+        counts[~valid] = np.nan
+        occupied = classify_threshold(counts, model.thresholds) & valid
         counts = counts.reshape((repeats, points, n_sites))
         occupied = occupied.reshape((repeats, points, n_sites))
         valid = valid.reshape((repeats, points, n_sites))
         valid_count = np.sum(valid, axis=-1)
         rate = np.divide(
-            np.sum(occupied & valid, axis=-1, dtype=float),
+            np.sum(occupied, axis=-1, dtype=float),
             valid_count,
             out=np.full(valid_count.shape, np.nan, dtype="<f8"),
             where=valid_count > 0,
         )
-        site_axis = self.readout.site_map.site_axis
+        schemas = self._output_schemas(frames.block.schema)
+        rate_valid = (valid_count > 0)[..., None]
         artifacts = {
-            "counts": snapshot_from_array(
-                counts,
-                producer=self.producer,
-                signal="counts",
-                roles=(point_role, SITE),
-                axis_specs={SITE: site_axis},
-                point_columns={point_role: point_column},
-                generation=generation,
-                revision=revision,
+            "counts": self._snapshot(frames, schemas["counts"], counts, valid),
+            "occupied": self._snapshot(
+                frames, schemas["occupied"], occupied, valid
             ),
-            "occupied": snapshot_from_array(
-                occupied,
-                producer=self.producer,
-                signal="occupied",
-                roles=(point_role, SITE),
-                axis_specs={SITE: site_axis},
-                point_columns={point_role: point_column},
-                generation=generation,
-                revision=revision,
+            "valid": self._snapshot(frames, schemas["valid"], valid, valid),
+            "rate": self._snapshot(
+                frames,
+                schemas["rate"],
+                rate[..., None],
+                rate_valid,
             ),
-            "valid": snapshot_from_array(
-                valid,
-                producer=self.producer,
-                signal="valid",
-                roles=(point_role, SITE),
-                axis_specs={SITE: site_axis},
-                point_columns={point_role: point_column},
-                generation=generation,
-                revision=revision,
-            ),
-            "rate": snapshot_from_array(
-                rate,
-                producer=self.producer,
-                signal="rate",
-                roles=(point_role,),
-                point_columns={point_role: point_column},
-                generation=generation,
-                revision=revision,
-            ),
-            "frame_judged": snapshot_from_array(
-                images,
-                producer=self.producer,
-                signal="frame_judged",
-                roles=(point_role, SPATIAL_Y, SPATIAL_X),
-                point_columns={point_role: point_column},
-                generation=generation,
-                revision=revision,
-            ),
+            # The source event already owns these immutable bytes, axes and
+            # validity.  Runtime restamps the sibling under the processor's
+            # route; copying it here would create a second frame truth.
+            "frame_judged": frames,
         }
-        return OccupancyResult(
-            counts,
-            occupied,
-            valid,
-            rate,
-            images,
-            artifacts=artifacts,
-        )
+        return OccupancyResult(artifacts)
 
     def _live_outputs(
         self,
         result: OccupancyResult,
         *,
+        source: SignalValue,
         frames_signal: str,
     ) -> dict[str, LiveDatasetOutput]:
         run_record = {
@@ -406,15 +374,45 @@ class OccupancyProcessor:
                 "model_kind": self.model.kind.value,
             },
         }
+        event_schema = source.snapshot.block.schema
+        event_cells = (
+            event_schema.repeat_axis.size * event_schema.point_table.row_count
+        )
+        exact = isinstance(source.coverage, DatasetCoverage)
+        if exact:
+            if source.canonical_schema is None or source.cell_origin is None:
+                raise ValueError("finite source event lacks canonical placement")
+            canonical = self._output_schemas(source.canonical_schema)
+            origin = source.cell_origin
+        elif source.coverage is None:
+            exact = True
+            canonical = self._output_schemas(event_schema)
+            origin = (0, 0)
+        else:
+            canonical = {}
+            origin = None
         outputs: dict[str, LiveDatasetOutput] = {}
-        for declaration in _OUTPUT_DECLARATIONS:
+        for declaration in OCCUPANCY_OUTPUTS:
             snapshot = result.artifacts[declaration.name]
-            total = snapshot.block.schema.repeat_axis.size * snapshot.block.schema.point_table.row_count
+            if declaration.name == "frame_judged":
+                coverage = MonitorCoverage(event_cells, event_cells)
+                output_schema = None
+                output_origin = None
+            else:
+                coverage = (
+                    DatasetCoverage(event_cells, event_cells)
+                    if source.coverage is None
+                    else source.coverage
+                )
+                output_schema = canonical.get(declaration.name) if exact else None
+                output_origin = origin if exact else None
             outputs[declaration.name] = LiveDatasetOutput(
                 declaration,
                 snapshot,
-                DatasetCoverage(total, total),
+                coverage,
                 run_record,
+                output_schema,
+                output_origin,
             )
         return outputs
 
@@ -431,10 +429,16 @@ class OccupancyProcessor:
         # translation it needed had been computed.
         self._validate_source_run_record(signal_value)
         self._source_point_column(snapshot)
-        result = self.process(snapshot, **inherited_stamps(snapshot))
+        result = self.process(snapshot)
         return self._live_outputs(
             result,
+            source=signal_value,
             frames_signal=self.source_signal or signal_value.name,
         )
 
-__all__ = ["SITE_STATUS_CONTRACT", "OccupancyProcessor", "OccupancyResult"]
+__all__ = [
+    "OCCUPANCY_OUTPUTS",
+    "SITE_STATUS_CONTRACT",
+    "OccupancyProcessor",
+    "OccupancyResult",
+]

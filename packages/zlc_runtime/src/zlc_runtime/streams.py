@@ -6,21 +6,14 @@ from collections import deque
 from dataclasses import dataclass
 import threading
 import time
-from typing import Generic, Protocol, TypeVar
-import uuid
+from typing import Generic, Iterable, TypeVar
 
 from zlc_data import StreamGenerationId
-from zlc_data import canonical_text, finite_real, nonnegative_integer
+from zlc_data import canonical_text, nonnegative_integer
 
 
 PayloadT = TypeVar("PayloadT")
 _FOLLOW_TOKEN = object()
-
-
-class PayloadContract(Protocol[PayloadT]):
-    def snapshot(self, payload: PayloadT) -> PayloadT: ...
-
-    def validate(self, payload: PayloadT) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,39 +45,6 @@ class EventRef:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class Envelope(Generic[PayloadT]):
-    event_ref: EventRef
-    payload: PayloadT
-    emitted_at: float
-    captured_at: float
-    direct_parent_refs: tuple[EventRef, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.event_ref, EventRef):
-            raise TypeError("envelope event_ref must be EventRef")
-        object.__setattr__(
-            self,
-            "emitted_at",
-            finite_real(self.emitted_at, "emitted_at"),
-        )
-        object.__setattr__(
-            self,
-            "captured_at",
-            finite_real(self.captured_at, "captured_at"),
-        )
-        parents = tuple(self.direct_parent_refs)
-        if any(not isinstance(parent, EventRef) for parent in parents):
-            raise TypeError("direct_parent_refs must contain EventRef values")
-        if len(set(parents)) != len(parents):
-            raise ValueError("direct_parent_refs cannot contain duplicates")
-        object.__setattr__(self, "direct_parent_refs", parents)
-
-    @property
-    def sequence(self) -> int:
-        return self.event_ref.sequence
-
-
 class StreamError(RuntimeError):
     pass
 
@@ -107,7 +67,7 @@ class SourceFailed(StreamError):
 
 
 class FollowTap(Generic[PayloadT]):
-    """Lossless ordered delivery of events published after subscription."""
+    """Lossless ordered delivery of source payloads without another identity."""
 
     def __init__(
         self,
@@ -115,28 +75,29 @@ class FollowTap(Generic[PayloadT]):
         *,
         stream: "AcquisitionStream[PayloadT]",
         start_sequence: int,
+        replay: tuple[tuple[int, PayloadT], ...] = (),
     ) -> None:
         if authority is not _FOLLOW_TOKEN:
             raise PermissionError("FollowTap can only be minted by AcquisitionStream")
         self._stream = stream
         self._condition = threading.Condition()
-        self._queue: deque[Envelope[PayloadT]] = deque()
+        self._queue: deque[tuple[int, PayloadT]] = deque(replay)
         self._next_sequence = start_sequence
         self._closed = False
         self._source_finished = False
         self._terminal_error: StreamError | None = None
 
-    def _offer(self, envelope: Envelope[PayloadT]) -> None:
+    def _offer(self, sequence: int, payload: PayloadT) -> None:
         with self._condition:
             if self._closed or self._source_finished:
                 return
             expected = self._next_sequence + len(self._queue)
-            if envelope.sequence != expected:
-                raise StreamGap(expected, envelope.sequence)
-            self._queue.append(envelope)
+            if sequence != expected:
+                raise StreamGap(expected, sequence)
+            self._queue.append((sequence, payload))
             self._condition.notify()
 
-    def next(self, timeout: float | None = None) -> Envelope[PayloadT]:
+    def next(self, timeout: float | None = None) -> PayloadT:
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         with self._condition:
             while not self._queue:
@@ -153,11 +114,11 @@ class FollowTap(Generic[PayloadT]):
                 if remaining <= 0:
                     raise TimeoutError("timed out waiting for followed event")
                 self._condition.wait(remaining)
-            envelope = self._queue.popleft()
-            if envelope.sequence != self._next_sequence:
-                raise StreamGap(self._next_sequence, envelope.sequence)
+            sequence, payload = self._queue.popleft()
+            if sequence != self._next_sequence:
+                raise StreamGap(self._next_sequence, sequence)
             self._next_sequence += 1
-            return envelope
+            return payload
 
     def _source_ended(self, error: StreamError | None) -> None:
         with self._condition:
@@ -173,129 +134,88 @@ class FollowTap(Generic[PayloadT]):
             self._condition.notify_all()
 
 
-class AcquisitionProducer(Generic[PayloadT]):
-    """Exclusive write authority for the plane-local future stream."""
+class AcquisitionStream(Generic[PayloadT]):
+    """One ordered direct-payload source used only by Plane followers."""
 
-    def __init__(self, stream: "AcquisitionStream[PayloadT]", authority: object) -> None:
-        self._stream = stream
-        self._authority = authority
+    def __init__(
+        self,
+        next_sequence: int,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._next_sequence = nonnegative_integer(
+            next_sequence,
+            "next source sequence",
+        )
+        self._followers: set[FollowTap[PayloadT]] = set()
+        self._closed = False
+        self._terminal_error: StreamError | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        next_sequence: int,
+    ) -> "AcquisitionStream[PayloadT]":
+        return cls(next_sequence)
+
+    def follow(
+        self,
+        replay: Iterable[tuple[int, PayloadT]] = (),
+    ) -> FollowTap[PayloadT]:
+        retained = tuple(replay)
+        with self._lock:
+            if self._closed:
+                if self._terminal_error is not None:
+                    raise self._terminal_error
+                raise StreamEndedEarly("cannot follow a closed stream")
+            start = self._next_sequence
+            if retained:
+                start = retained[0][0]
+                expected = start
+                for sequence, _payload in retained:
+                    if sequence != expected:
+                        raise StreamGap(expected, sequence)
+                    expected += 1
+                if expected != self._next_sequence:
+                    raise StreamGap(self._next_sequence, expected)
+            tap = FollowTap(
+                _FOLLOW_TOKEN,
+                stream=self,
+                start_sequence=start,
+                replay=retained,
+            )
+            self._followers.add(tap)
+            return tap
 
     def emit(
         self,
         payload: PayloadT,
         *,
-        captured_at: float,
-        direct_parent_refs: tuple[EventRef, ...] = (),
-    ) -> Envelope[PayloadT]:
-        return self._stream._emit(
-            self._authority,
-            payload,
-            captured_at=captured_at,
-            direct_parent_refs=direct_parent_refs,
-        )
-
-    def finish(self) -> None:
-        self._stream._finish(self._authority)
-
-    def fail(self, error: StreamError) -> None:
-        self._stream._fail(self._authority, error)
-
-
-class AcquisitionStream(Generic[PayloadT]):
-    """One generation feeding only ordered future subscribers."""
-
-    def __init__(
-        self,
-        stream_id: StreamId,
-        generation: StreamGenerationId,
-        payload_contract: PayloadContract[PayloadT],
-    ) -> None:
-        if not isinstance(stream_id, StreamId):
-            raise TypeError("stream_id must be StreamId")
-        if not isinstance(generation, StreamGenerationId):
-            raise TypeError("generation must be StreamGenerationId")
-        if not callable(getattr(payload_contract, "snapshot", None)):
-            raise TypeError("payload_contract.snapshot must be callable")
-        if not callable(getattr(payload_contract, "validate", None)):
-            raise TypeError("payload_contract.validate must be callable")
-        self.stream_id = stream_id
-        self.generation = generation
-        self._payload_contract = payload_contract
-        self._condition = threading.Condition()
-        self._next_sequence = 0
-        self._followers: set[FollowTap[PayloadT]] = set()
-        self._closed = False
-        self._terminal_error: StreamError | None = None
-        self._producer_authority = object()
-
-    @classmethod
-    def create(
-        cls,
-        stream_id: StreamId,
-        payload_contract: PayloadContract[PayloadT],
-    ) -> tuple["AcquisitionStream[PayloadT]", AcquisitionProducer[PayloadT]]:
-        stream = cls(
-            stream_id,
-            StreamGenerationId(uuid.uuid4().hex),
-            payload_contract,
-        )
-        return stream, AcquisitionProducer(stream, stream._producer_authority)
-
-    def follow(self) -> FollowTap[PayloadT]:
-        with self._condition:
-            if self._closed:
-                if self._terminal_error is not None:
-                    raise self._terminal_error
-                raise StreamEndedEarly("cannot follow a closed stream")
-            tap = FollowTap(
-                _FOLLOW_TOKEN,
-                stream=self,
-                start_sequence=self._next_sequence,
-            )
-            self._followers.add(tap)
-            return tap
-
-    def _emit(
-        self,
-        authority: object,
-        payload: PayloadT,
-        *,
-        captured_at: float,
-        direct_parent_refs: tuple[EventRef, ...],
-    ) -> Envelope[PayloadT]:
-        if authority is not self._producer_authority:
-            raise PermissionError("stream write authority belongs to another producer")
-        payload = self._payload_contract.snapshot(payload)
-        self._payload_contract.validate(payload)
-        with self._condition:
+        sequence: int,
+    ) -> PayloadT:
+        sequence = nonnegative_integer(sequence, "source sequence")
+        with self._lock:
             if self._closed:
                 if self._terminal_error is not None:
                     raise self._terminal_error
                 raise StreamEndedEarly("cannot emit after end-of-stream")
-            envelope = Envelope(
-                EventRef(self.stream_id, self.generation, self._next_sequence),
-                payload,
-                time.time(),
-                captured_at,
-                direct_parent_refs,
-            )
+            if sequence != self._next_sequence:
+                raise StreamGap(self._next_sequence, sequence)
             self._next_sequence += 1
             for follower in tuple(self._followers):
-                follower._offer(envelope)
-            return envelope
+                follower._offer(sequence, payload)
+            return payload
 
-    def _finish(self, authority: object) -> None:
-        self._close(authority, None)
+    def finish(self) -> None:
+        self._close(None)
 
-    def _fail(self, authority: object, error: StreamError) -> None:
+    def fail(self, error: StreamError) -> None:
         if not isinstance(error, StreamError):
             raise TypeError("source failure must be a StreamError")
-        self._close(authority, error)
+        self._close(error)
 
-    def _close(self, authority: object, error: StreamError | None) -> None:
-        if authority is not self._producer_authority:
-            raise PermissionError("stream terminal authority belongs to another producer")
-        with self._condition:
+    def _close(self, error: StreamError | None) -> None:
+        with self._lock:
             if self._closed:
                 if self._terminal_error is error and error is not None:
                     return
@@ -310,20 +230,15 @@ class AcquisitionStream(Generic[PayloadT]):
             self._followers.clear()
             for follower in followers:
                 follower._source_ended(error)
-            self._condition.notify_all()
 
     def _remove_follower(self, follower: FollowTap[PayloadT]) -> None:
-        with self._condition:
+        with self._lock:
             self._followers.discard(follower)
 
 
 __all__ = [
-    "AcquisitionProducer",
-    "AcquisitionStream",
-    "Envelope",
     "EventRef",
     "FollowTap",
-    "PayloadContract",
     "SourceFailed",
     "StreamEndedEarly",
     "StreamError",

@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import pytest
 from zlc_data import OwnedSnapshot, READOUT_EVENT, REPEAT, SITE
+from zlc_runtime import DatasetOutputDeclaration
 
 from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_catalog
 from zlc_atom.nodes import discover_logic_nodes
@@ -181,6 +182,81 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "stepped_scan",
         "temperature",
     )
+    assert all(
+        isinstance(output, DatasetOutputDeclaration)
+        for descriptor in descriptors
+        for output in descriptor.outputs
+    )
+    assert all(
+        preview.producer
+        or any(preview.output is output for output in descriptor.outputs)
+        for descriptor in descriptors
+        for preview in descriptor.node_previews
+    )
+    assert {
+        input_spec.delivery
+        for descriptor in descriptors
+        for input_spec in descriptor.input_specs
+        if hasattr(input_spec, "delivery")
+    } == {"exact"}
+
+
+def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes._framework.descriptor import (
+        LogicNodeDescriptor,
+        NodeKind,
+        NodePreviewSpec,
+    )
+
+    with pytest.raises(ValueError, match="explicitly declare node_previews"):
+        LogicNodeDescriptor("silent", NodeKind.TASK, AuthoringSchema())
+
+    explicit_none = LogicNodeDescriptor(
+        "artifact-only",
+        NodeKind.TASK,
+        AuthoringSchema(),
+        node_previews=(),
+    )
+    assert explicit_none.node_previews == ()
+
+    output = DatasetOutputDeclaration("frames", "camera.frames.v1")
+    own_preview = NodePreviewSpec(output, "facet_grid")
+    descriptor = LogicNodeDescriptor(
+        "camera-task",
+        NodeKind.TASK,
+        AuthoringSchema(),
+        outputs=(output,),
+        node_previews=(own_preview,),
+    )
+    assert descriptor.outputs[0] is descriptor.node_previews[0].output
+
+    copied_declaration = DatasetOutputDeclaration("frames", "camera.frames.v1")
+    with pytest.raises(ValueError, match="undeclared outputs"):
+        LogicNodeDescriptor(
+            "copied-output",
+            NodeKind.TASK,
+            AuthoringSchema(),
+            outputs=(output,),
+            node_previews=(NodePreviewSpec(copied_declaration, "image"),),
+        )
+
+    companion = DatasetOutputDeclaration("frames", "camera.frames.v1")
+    companion_preview = NodePreviewSpec(
+        companion,
+        "image",
+        {"fate:frame": 1},
+        producer="camera",
+    )
+    companion_task = LogicNodeDescriptor(
+        "feedback",
+        NodeKind.TASK,
+        AuthoringSchema(),
+        node_previews=(companion_preview,),
+    )
+    assert companion_task.node_previews[0].producer == "camera"
+    with pytest.raises(TypeError):
+        companion_task.node_previews[0].semantic["fate:frame"] = 2
 
 
 def test_device_requirements_name_build_arguments() -> None:
@@ -296,8 +372,6 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         # 30 cycles, each holding the one readout frame this task judged.
         occupancy = occupancy_node.process(
             camera_cycle_snapshot([(record,) for record in result.short]),
-            generation="calibration-task",
-            revision=1,
         )
         np.testing.assert_array_equal(occupancy.rate, np.mean(occupancy.occupied, axis=-1))
         assert occupancy.counts.shape == (30, 1, 35)
@@ -329,8 +403,6 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         frames = camera_cycle_snapshot([(record,) for record in result.short])
         occupancy = OccupancyProcessor(result.calibration).process(
             frames,
-            generation="calibration-task",
-            revision=1,
         )
         assert occupancy.counts.shape == (30, 1, 35)
         assert occupancy.rate.shape == (30, 1)
@@ -399,6 +471,30 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
         f"only checked {checked}: a build with no return annotation was skipped"
     )
     assert not undriveable, undriveable
+
+
+def test_every_discovered_measurement_declares_live_data_and_a_preview() -> None:
+    """A new Measurement cannot silently become a final-only black box.
+
+    Runtime enforces the actual commit at terminal and the hosted vertical
+    tests exercise publication before terminal.  Discovery owns the earlier,
+    deterministic part of the contract: every product Measurement must name
+    both the Dataset it publishes while running and what Start opens to watch.
+    """
+
+    from zlc_atom.nodes._framework.descriptor import NodeKind
+
+    measurements = tuple(
+        descriptor
+        for descriptor in discover_logic_nodes()
+        if descriptor.kind is NodeKind.MEASUREMENT
+    )
+    assert measurements, "the product discovery found no Measurements"
+    for descriptor in measurements:
+        assert descriptor.outputs, f"{descriptor.api_name} declares no live Dataset"
+        assert descriptor.node_previews, (
+            f"{descriptor.api_name} declares no preview for its live Dataset"
+        )
 
 
 def test_a_device_family_that_cannot_import_is_reported_not_raised(monkeypatch) -> None:

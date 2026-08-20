@@ -36,6 +36,22 @@ example Image Area to sensor ROI); Workbench contains no camera-SDK coordinate
 branch. A new run keeps its stable signal key, gets a new generation, and causes
 the panel to replace its plot host.
 
+Logic descriptors also declare typed `NodePreviewSpec` values: the exact output
+declaration, plot kind, initial semantic projection, and optionally a stable
+companion-producer suffix. Workbench opens no preview until that producer's
+first real publication, then binds the panel to the declared signal rather than
+reconstructing plugin data. For example, SLM Feedback's qCMOS panel binds to
+the companion `camera/frames` output and applies the descriptor's
+readout-frame/repeat-mean semantic; its candidate phase and history remain the
+Task's own outputs. At Task terminal, auto-preview panels whose Monitor signals
+retire are removed, while a retained Runtime camera dataset and the durable
+Task artifact keep their respective data and product truth.
+
+While a Task runs, Add Logic and that Task's source/preview identities and data
+projection are frozen. Other panels and pure display controls remain usable;
+Workbench does not duplicate Task lifecycle or scientific state to enforce
+this.
+
 ## Save boundaries
 
 - Header **Save Layout** writes stopped node drafts, named-device choices,

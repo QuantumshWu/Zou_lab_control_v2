@@ -109,12 +109,10 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert measurement.actual_working_point is not None
         assert measurement.actual_working_point.roi_origin_yx == (3, 2)
         assert any(call[0] == "reserve" for call in plane.calls)
-        assert any(call[0] == "mark_changed" for call in plane.calls)
         front = plane.freeze()
         assert signal_key in front.signals
         terminal = monitor.close()
         assert terminal.source_stopped and terminal.joined
-        assert monitor.slot.closed
         assert measurement.camera.capture_state() is False
         assert plane.latest_publication(signal_key) is None
     finally:
@@ -162,7 +160,7 @@ def test_repeated_freezes_share_one_schema_and_retain_the_frame_bytes() -> None:
     assert other.ref.schema_fingerprint != first.ref.schema_fingerprint
 
 
-def test_direct_monitor_disarms_when_live_detach_fails() -> None:
+def test_direct_monitor_disarms_when_empty_generation_retire_fails() -> None:
     installation = create_installation("virtual")
     plane = FakePlane()
     try:
@@ -180,11 +178,11 @@ def test_direct_monitor_disarms_when_live_detach_fails() -> None:
         )
         monitor = measurement.monitor()
 
-        def fail_detach(_node: object) -> None:
-            raise RuntimeError("synthetic detach failure")
+        def fail_retire(_node: object) -> None:
+            raise RuntimeError("synthetic retire failure")
 
-        plane.detach_live = fail_detach  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError, match="synthetic detach failure"):
+        plane.retire = fail_retire  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="synthetic retire failure"):
             monitor.close()
         assert camera.capture_state() is False
     finally:

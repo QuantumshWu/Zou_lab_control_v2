@@ -19,7 +19,6 @@ consumer and stays in ``stepped_scan`` until it has two.
 from .dataset import (
     SCAN_OUTPUT,
     ScanDatasetWriter,
-    ScanLiveSlot,
     scan_dataset_schema,
 )
 from .seamless import SeamlessScanMeasurement
@@ -52,7 +51,6 @@ __all__ = [
     "SCAN_PULSE_RESOURCE",
     "ScanAxis",
     "ScanDatasetWriter",
-    "ScanLiveSlot",
     "ScanPlan",
     "ScanPort",
     "SeamlessScanMeasurement",

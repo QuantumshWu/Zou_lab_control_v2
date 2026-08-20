@@ -14,6 +14,7 @@ exist and this file states which is which so nobody "fixes" the boundary away.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 import time
 from pathlib import Path
@@ -36,11 +37,14 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
 )
 from zlc_atom.nodes.camera_measurement.measurement import (
+    CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_LOGIC_NODE
-from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
+from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS, OccupancyProcessor
+from zlc_data import DatasetSchema, owned_snapshot_from_arrays
+from zlc_runtime import DatasetCoverage, LiveDatasetOutput, MonitorCoverage
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
@@ -75,35 +79,14 @@ def _finished_shot(plane, camera, sequencer, windows):
     return node, capture.collect()
 
 
-def test_a_finished_measurement_carries_no_coverage_and_that_is_correct(bench) -> None:
-    plane, camera, sequencer, windows = bench
-    node, result = _finished_shot(plane, camera, sequencer, windows)
-    value = result.publication.value(node.signal_key("frames"))
-    assert value.coverage is None, "a finished dataset has nothing left to keep up with"
-
-
-def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: Path) -> None:
-    plane, camera, sequencer, windows = bench
-    node, result = _finished_shot(plane, camera, sequencer, windows)
-    source_name = node.signal_key("frames")
-    source = result.publication.value(source_name)
-    assert source is not None
+def _single_site_calibration(node, source) -> TrapCalibration:
     height, width = source.values.shape[-2:]
     actual = node.actual_working_point
     assert actual is not None
     roi_y, roi_x = actual.roi_origin_yx
     roi_height, roi_width = actual.roi_shape_yx
-    frame_contract = FrameContract(
-        (height, width),
-        sensor_shape=actual.sensor_shape_yx,
-        roi_xywh=(roi_x, roi_y, roi_width, roi_height),
-        binning_yx=actual.binning_yx,
-        exposure_seconds=actual.exposure_seconds,
-        camera_id=node.camera_key,
-        readout_mode=actual.readout_mode,
-    )
     site_ids = ("site_0000",)
-    calibration = TrapCalibration(
+    return TrapCalibration(
         SiteMap(
             site_ids,
             np.asarray([[width // 2, height // 2]], dtype=float),
@@ -112,8 +95,185 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         ),
         (ReadoutModel(site_ids, [0.0], [-1.0], [1.0], [True], [1.0]),),
         ReadoutModelKind.BOX,
-        frame_contract,
+        FrameContract(
+            (height, width),
+            sensor_shape=actual.sensor_shape_yx,
+            roi_xywh=(roi_x, roi_y, roi_width, roi_height),
+            binning_yx=actual.binning_yx,
+            exposure_seconds=actual.exposure_seconds,
+            camera_id=node.camera_key,
+            readout_mode=actual.readout_mode,
+        ),
     )
+
+
+def test_a_finished_measurement_keeps_extent_while_runtime_owns_terminal(bench) -> None:
+    plane, camera, sequencer, windows = bench
+    node, result = _finished_shot(plane, camera, sequencer, windows)
+    signal = node.signal_key("frames")
+    value = result.publication.value(signal)
+    assert isinstance(value.coverage, DatasetCoverage) and value.coverage.complete
+    assert not plane.is_generation_live(signal)
+    assert plane.current_dataset(signal) is result.snapshot
+
+
+def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
+    bench,
+) -> None:
+    plane, camera, sequencer, windows = bench
+    node, result = _finished_shot(plane, camera, sequencer, windows)
+    source = result.publication.value(node.signal_key("frames"))
+    assert source is not None
+    calibration = _single_site_calibration(node, source)
+    processor = OccupancyProcessor(
+        calibration,
+        source_signal="event-camera/frames",
+        producer="event-occupancy",
+    )
+    assert processor.dataset_output_declarations is OCCUPANCY_OUTPUTS
+    assert OCCUPANCY_LOGIC_NODE.outputs is OCCUPANCY_OUTPUTS
+    event_schema = source.snapshot.block.schema
+    canonical_schema = DatasetSchema(
+        replace(
+            event_schema.repeat_axis,
+            size=3,
+            coordinates=(0, 1, 2),
+        ),
+        event_schema.point_table,
+        event_schema.grid_topology,
+        event_schema.cell_schema,
+    )
+    event_cells = event_schema.repeat_axis.size * event_schema.point_table.row_count
+    coverage = DatasetCoverage(event_cells, 3 * event_cells)
+    source_event = replace(
+        source,
+        coverage=coverage,
+        growing=True,
+        canonical_schema=canonical_schema,
+        cell_origin=(0, 0),
+    )
+    outputs = processor.evaluate(source_event)
+    for name in ("counts", "occupied", "valid", "rate"):
+        output = outputs[name]
+        assert output.snapshot.block.schema.repeat_axis.size == 1
+        assert output.canonical_schema.repeat_axis.size == 3
+        assert output.cell_origin == (0, 0)
+        assert output.coverage == coverage
+    assert isinstance(outputs["frame_judged"].coverage, MonitorCoverage)
+    assert outputs["frame_judged"].snapshot is source.snapshot
+
+    validity = np.ones(source.snapshot.block.values.shape, dtype=np.bool_)
+    validity[:, 0] = False
+    invalid_snapshot = owned_snapshot_from_arrays(
+        event_schema,
+        source.snapshot.block.values,
+        source.snapshot.block.revision,
+        validity=validity,
+        stream_generation=source.snapshot.ref.stream_generation,
+    )
+    invalid_source = replace(
+        source,
+        snapshot=invalid_snapshot,
+        coverage=MonitorCoverage(event_cells, event_cells),
+    )
+    invalid = processor.evaluate(invalid_source)
+    assert not np.any(invalid["valid"].snapshot.block.values[:, 0])
+    assert not np.any(invalid["occupied"].snapshot.block.values[:, 0])
+    assert np.all(np.isnan(invalid["counts"].snapshot.block.values[:, 0]))
+    assert np.all(np.isnan(invalid["rate"].snapshot.block.values[:, 0]))
+    assert not np.any(
+        invalid["occupied"].snapshot.expanded_validity()[:, 0]
+    )
+
+    class EventCamera:
+        instance_id = "event-camera"
+        dataset_output_declarations = (CAMERA_FRAMES_OUTPUT,)
+
+        @staticmethod
+        def signal_key(name: str) -> str:
+            return f"event-camera/{name}"
+
+    event_plane = SignalDataPlane()
+    camera_owner = EventCamera()
+    event_host = None
+    try:
+        event_plane.begin_generation(camera_owner)
+        event_plane.commit_live(
+            camera_owner,
+            {
+                "frames": LiveDatasetOutput(
+                    CAMERA_FRAMES_OUTPUT,
+                    source.snapshot,
+                    coverage,
+                    source.run_record,
+                    canonical_schema,
+                    (0, 0),
+                )
+            },
+            growing_outputs=("frames",),
+        )
+        wake = Event()
+        event_host = NodeHost(
+            processor,
+            event_plane,
+            wake.set,
+            instance_id=processor.instance_id,
+            kind="processor",
+            dataset_output_declarations=OCCUPANCY_OUTPUTS,
+            input_signal="event-camera/frames",
+            input_delivery="exact",
+        )
+        event_host.start()
+        counts_signal = event_host.signal_key("counts")
+        deadline = time.monotonic() + 5.0
+        current = None
+        while current is None and time.monotonic() < deadline:
+            event_host.poll()
+            try:
+                current = event_plane.current_dataset(counts_signal)
+            except LookupError:
+                wake.wait(0.01)
+                wake.clear()
+        assert current is not None
+        assert current.block.values.shape == (3, windows, 1)
+        current_validity = current.expanded_validity()
+        assert np.all(current_validity[0])
+        assert not np.any(current_validity[1:])
+        latest = event_plane.latest_publication(counts_signal)
+        assert latest is not None
+        assert latest.value(counts_signal).snapshot.block.values.shape == (
+            1,
+            windows,
+            1,
+        )
+        event_plane.seal_committed(camera_owner, cut_short=True)
+        deadline = time.monotonic() + 5.0
+        while event_host.running and time.monotonic() < deadline:
+            event_host.poll()
+            wake.wait(0.01)
+            wake.clear()
+        assert event_host.poll().phase == "done"
+    finally:
+        if event_host is not None:
+            if event_host.running:
+                event_host.cancel("cleanup")
+                event_host.poll()
+            if not event_host.running:
+                event_host.shutdown()
+        event_plane.close()
+
+
+def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: Path) -> None:
+    plane, camera, sequencer, windows = bench
+    node, result = _finished_shot(plane, camera, sequencer, windows)
+    source_name = node.signal_key("frames")
+    source = result.publication.value(source_name)
+    assert source is not None
+    actual = node.actual_working_point
+    assert actual is not None
+    calibration = _single_site_calibration(node, source)
+    frame_contract = calibration.frame_contract
+    site_ids = ("site_0000",)
     calibration_path = calibration.save(tmp_path / "calibration.json")
     processor = OCCUPANCY_LOGIC_NODE.instantiate(
         calibration=CALIBRATION_ARTIFACT_CODEC.resolve(calibration_path),
@@ -231,7 +391,16 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     with pytest.raises(ValueError, match="does not cover"):
         uncovered_processor.evaluate(source)
     wake = Event()
-    host = NodeHost(processor, plane, wake.set)
+    host = NodeHost(
+        processor,
+        plane,
+        wake.set,
+        instance_id=processor.instance_id,
+        kind="processor",
+        dataset_output_declarations=OCCUPANCY_OUTPUTS,
+        input_signal=source_name,
+        input_delivery="exact",
+    )
 
     try:
         host.start()
@@ -287,8 +456,11 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             windows,
             1,
         )
+        from zlc_runtime import DatasetCoverage
+
         assert all(
-            value.coverage is None and value.transient is False
+            isinstance(value.coverage, DatasetCoverage)
+            and value.coverage.complete
             for value in publication.signals.values()
         )
         expected_record = {

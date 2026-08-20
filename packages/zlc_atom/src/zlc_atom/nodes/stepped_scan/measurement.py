@@ -39,14 +39,11 @@ from zlc_pulse import (
     pulse_field_value,
     resolve_api_parameters,
 )
-from zlc_runtime import FinalDatasetOutput
-
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_OUTPUT,
     ScanDatasetWriter,
-    ScanLiveSlot,
     ScanPlan,
     ScanPort,
     check_cancelled,
@@ -161,14 +158,23 @@ class SteppedScanMeasurement:
         board = self.sequencer.describe()
         rows = self.plan.rows()
         shots = self.shots_per_point
+        run_record = {
+            **self.source.describe(),
+            "pulse": self.sequence.name,
+            "plan": self.plan.to_tree(),
+            "scan_shape": self.plan.shape,
+            "repeats": self.repeats,
+            "shots_per_point": shots,
+            "settle_seconds": self.settle_seconds,
+            "gating": self.gating,
+            "free_run_delay_seconds": self.free_run_delay_seconds,
+        }
         writer = ScanDatasetWriter(
             rows,
             [(port.label, port.unit) for port in self.ports],
             visits=self.repeats * shots,
-            generation=context.generation,
+            run_record=run_record,
         )
-        slot = ScanLiveSlot()
-        context.attach_live_outputs(slot)
         self.source.open(context, cycles=self.repeats * len(rows) * shots)
         try:
             # Sweeps are the OUTERMOST loop.  Shots are the pulse program's
@@ -183,37 +189,18 @@ class SteppedScanMeasurement:
                     self._collect(
                         context,
                         writer,
-                        slot,
                         program,
                         index,
                         sweep,
                         total_shots,
                     )
         finally:
-            self.source.close()
-            self.sequencer.safe()
+            try:
+                self.source.close()
+            finally:
+                self.sequencer.safe()
         check_cancelled(context)
-        snapshot = writer.snapshot()
-        context.publish_final(
-            {
-                SCAN_OUTPUT.name: FinalDatasetOutput(
-                    SCAN_OUTPUT,
-                    snapshot,
-                    {
-                        **self.source.describe(),
-                        "pulse": self.sequence.name,
-                        "plan": self.plan.to_tree(),
-                        "scan_shape": self.plan.shape,
-                        "repeats": self.repeats,
-                        "shots_per_point": shots,
-                        "settle_seconds": self.settle_seconds,
-                        "gating": self.gating,
-                        "free_run_delay_seconds": self.free_run_delay_seconds,
-                    },
-                )
-            }
-        )
-        return snapshot
+        return context.current_dataset(SCAN_OUTPUT.name)
 
     def _apply(self, row: Sequence[float], board: object):
         """Stop the pulse, settle, move the knobs, load this point's program."""
@@ -257,7 +244,6 @@ class SteppedScanMeasurement:
         self,
         context: object,
         writer: ScanDatasetWriter,
-        slot: ScanLiveSlot,
         program: object,
         index: int,
         sweep: int,
@@ -285,13 +271,13 @@ class SteppedScanMeasurement:
                 self.source.discard_pending()
                 self.source.next_value(context)
                 self._capture_shot(
-                    context, writer, slot, index, sweep, shot, total_shots
+                    context, writer, index, sweep, shot, total_shots
                 )
             wait_for_board(self.sequencer, context)
             return
         for shot in range(shots):
             self._capture_shot(
-                context, writer, slot, index, sweep, shot, total_shots
+                context, writer, index, sweep, shot, total_shots
             )
         wait_for_board(self.sequencer, context)
 
@@ -299,7 +285,6 @@ class SteppedScanMeasurement:
         self,
         context: object,
         writer: ScanDatasetWriter,
-        slot: ScanLiveSlot,
         index: int,
         sweep: int,
         shot: int,
@@ -307,14 +292,16 @@ class SteppedScanMeasurement:
     ) -> None:
         value = self.source.next_value(context)
         visit = sweep * self.shots_per_point + shot
-        writer.write(value, row=index, visit=visit)
-        slot.publish({SCAN_OUTPUT.name: writer.live_output()})
-        completed = (
-            (sweep * len(self.plan.rows()) + index) * self.shots_per_point
-            + shot
-            + 1
+        output = writer.write(value, row=index, visit=visit)
+        context.commit_live(
+            {SCAN_OUTPUT.name: output},
+            growing_outputs=(SCAN_OUTPUT.name,),
         )
-        context.report_progress("Scanning", current=completed, total=total_shots)
+        context.report_progress(
+            "Scanning",
+            current=writer.written,
+            total=total_shots,
+        )
 
 
 __all__ = ["GATING_MODES", "SteppedScanMeasurement"]

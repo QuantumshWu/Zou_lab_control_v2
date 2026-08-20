@@ -46,6 +46,8 @@ from zlc_runtime.presentation import (
     OwnerChannels,
     SurfaceBatchArbiter,
 )
+from zlc_workbench.console import ConsolePresenter, PanelBinding
+from zlc_workbench.panel_state import PanelState
 from zlc_workbench.presentation import PlotPanelPort
 from zlc_workbench.session import read_pulse
 from pulse_fixtures import ordinary_imaging_sequence, write_ordinary_pulse
@@ -256,6 +258,139 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
     assert port.publication_for_revision(revision_number) is publication
 
 
+def test_growing_signal_projects_the_exact_runtime_current_dataset(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+    from zlc_data import owned_snapshot_from_arrays
+    from zlc_runtime.plane import SignalFront
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    accumulated = owned_snapshot_from_arrays(
+        schema=value.snapshot.block.schema,
+        values=value.snapshot.block.values,
+        revision=value.snapshot.block.revision.value + 10,
+        validity=value.snapshot.block.validity,
+        stream_generation=value.snapshot.ref.stream_generation,
+    )
+    growing_value = replace(value, growing=True)
+    growing_publication = replace(
+        publication,
+        signals={signal: growing_value},
+    )
+    growing_front = SignalFront(
+        {signal: growing_value},
+        {},
+        {signal: growing_publication},
+    )
+    requested: list[tuple[str, object]] = []
+    received: list[object] = []
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda snapshot: received.append(snapshot) or Future(),
+    )
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        host,
+        display_interval_ms=100,
+        current_dataset=lambda name, exact: (
+            requested.append((name, exact)) or accumulated
+        ),
+    )
+
+    update = port.prepare(growing_value, growing_publication, growing_front)
+    assert update is not None
+    assert requested == [(signal, growing_publication)]
+    assert received == [accumulated]
+
+
+def test_companion_only_change_updates_overlay_and_composite_currency(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+    from zlc_plot.primitives import ImageFrame, ImagePointOverlay
+    from zlc_runtime.plane import SignalFront
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    companion = "@logic/occupancy/occupied"
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    companion_value = replace(value, name=companion)
+
+    def with_companion(sequence: int) -> tuple[SignalFront, object]:
+        companion_publication = replace(
+            publication,
+            event_ref=replace(publication.event_ref, sequence=sequence),
+            signals={companion: companion_value},
+        )
+        return (
+            SignalFront(
+                {signal: value, companion: companion_value},
+                {},
+                {
+                    signal: publication,
+                    companion: companion_publication,
+                },
+            ),
+            companion_publication,
+        )
+
+    first_front, first_companion = with_companion(101)
+    second_front, second_companion = with_companion(102)
+    overlay_calls: list[object] = []
+    completion = Future()
+    host = SimpleNamespace(
+        host_id=object(),
+        update_data=lambda _input: (_ for _ in ()).throw(
+            AssertionError("companion-only change redrew unchanged data")
+        ),
+        update_image_overlay=lambda overlay: (
+            overlay_calls.append(overlay) or completion
+        ),
+    )
+
+    def project(primary, _publication, exact_front):
+        companion_publication = exact_front.publication(companion)
+        return ImageFrame(
+            primary.snapshot,
+            ImagePointOverlay.empty(companion_publication.event_ref.sequence),
+        )
+
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        host,
+        display_interval_ms=100,
+        shown=project(value, publication, first_front),
+        companion_signals=lambda: (companion,),
+        project_input=project,
+    )
+    assert port.prepare(value, publication, first_front) is None
+    assert port.presented_front_refs() == (
+        publication.event_ref,
+        first_companion.event_ref,
+    )
+
+    update = port.prepare(value, publication, second_front)
+    assert update is not None
+    assert len(overlay_calls) == 1
+    completion.set_result("overlay")
+    assert port.accept(update, "overlay")
+    assert port.presented_front_refs() == (
+        publication.event_ref,
+        second_companion.event_ref,
+    )
+
+
 def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
     live_bench,
 ) -> None:
@@ -389,7 +524,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
                 block_id=value.snapshot.block.block_id,
                 stream_generation=value.snapshot.ref.stream_generation,
             )
-            stepped_value = replace(value, snapshot=snapshot, transient=True)
+            stepped_value = replace(value, snapshot=snapshot)
             stepped = replace(
                 publication,
                 event_ref=replace(
@@ -463,10 +598,10 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
     assert isinstance(port.last_error, RuntimeError)
 
 
-def test_same_snapshot_final_reanchors_pending_and_presented_identity(
+def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     live_bench,
 ) -> None:
-    """A reused FINAL snapshot neither redraws nor regresses to LIVE identity."""
+    """A terminal publication reusing committed bytes only reanchors identity."""
 
     from concurrent.futures import Future
     from zlc_data import owned_snapshot_from_arrays
@@ -503,7 +638,7 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
         block_id=value.snapshot.block.block_id,
         stream_generation=value.snapshot.ref.stream_generation,
     )
-    live_value = replace(value, snapshot=snapshot, transient=True)
+    live_value = replace(value, snapshot=snapshot)
     live = replace(
         publication,
         event_ref=replace(
@@ -515,19 +650,19 @@ def test_same_snapshot_final_reanchors_pending_and_presented_identity(
     update = port.prepare(live_value, live, front)
     assert update is not None
 
-    final_value = replace(live_value, transient=False)
+    final_value = live_value
     final = replace(
         live,
         event_ref=replace(live.event_ref, sequence=live.event_ref.sequence + 1),
         signals={**live.signals, signal: final_value},
     )
     assert port.prepare(final_value, final, front) is None
-    assert calls == [snapshot], "FINAL must coalesce with the identical pending render"
+    assert calls == [snapshot], "terminal identity must reuse the pending render"
 
     completion.set_result(object())
     assert port.accept(update, object()) is True
     assert port.presented_publication() is final
-    assert port.presented_publication().value(signal).transient is False
+    assert port.presented_front_refs() == (final.event_ref,)
     assert presented[-1] is final
 
     terminal_record = replace(
@@ -557,11 +692,12 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
     )
     first = plot.RasterPlotHost.from_plot(value.snapshot, spec)
     replacements: list[object] = []
+    accepted: list[tuple[object, object]] = []
 
     def replace_host(plot_input, _value, _publication):
         host = plot.RasterPlotHost.from_plot(plot_input, spec)
         replacements.append(host)
-        return host
+        return host, host.configure()
 
     try:
         port = PlotPanelPort(
@@ -571,6 +707,9 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
             display_interval_ms=100,
             shown=value.snapshot,
             replace_host=replace_host,
+            accept_host=lambda old, new, _publication, _input: accepted.append(
+                (old, new)
+            ),
         )
         assert port.prepare(value, publication, front) is None
         restarted = replace(
@@ -581,14 +720,449 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
                 publication.event_ref.sequence,
             ),
         )
-        assert port.prepare(value, restarted, front) is None
+        update = port.prepare(value, restarted, front)
+        assert update is not None
         assert len(replacements) == 1
+        assert port.host is first
+        assert port.presented_publication() is publication
+        operation = update.future.result(timeout=10.0)
+        assert port.accept(update, operation)
+        assert accepted == [(first, replacements[0])]
         assert port.host is replacements[0]
         assert port.presented_publication() is restarted
     finally:
         first.close()
         for host in replacements:
             host.close()
+
+
+def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+    from zlc_runtime.plane import SignalFront
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    restarted = replace(
+        publication,
+        event_ref=EventRef(
+            publication.event_ref.stream_id,
+            StreamGenerationId("cohort-replacement-run"),
+            publication.event_ref.sequence,
+        ),
+    )
+    restarted_front = SignalFront(
+        {signal: value},
+        {},
+        {signal: restarted},
+    )
+
+    class Host:
+        def __init__(self, name: str) -> None:
+            self.host_id = name
+            self.closed = False
+
+        def close(self, *, timeout=0.0):
+            del timeout
+            self.closed = True
+            return True
+
+    old = (Host("old-a"), Host("old-b"))
+    staged: list[Host] = []
+    completions: list[Future] = []
+    accepted: list[str] = []
+
+    def stage(name: str):
+        def create(_input, _value, _publication):
+            host = Host(name)
+            future = Future()
+            staged.append(host)
+            completions.append(future)
+            return host, future
+
+        return create
+
+    ports = (
+        PlotPanelPort(
+            "a",
+            signal,
+            old[0],
+            display_interval_ms=100,
+            shown=value.snapshot,
+            replace_host=stage("new-a"),
+            accept_host=lambda _old, new, _pub, _input: accepted.append(
+                new.host_id
+            ),
+        ),
+        PlotPanelPort(
+            "b",
+            signal,
+            old[1],
+            display_interval_ms=100,
+            shown=value.snapshot,
+            replace_host=stage("new-b"),
+            accept_host=lambda _old, new, _pub, _input: accepted.append(
+                new.host_id
+            ),
+        ),
+    )
+    assert all(port.prepare(value, publication, front) is None for port in ports)
+
+    channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+    arbiter = SurfaceBatchArbiter(channels)
+    assert arbiter.enqueue_group(ports, restarted_front)
+    assert tuple(port.host for port in ports) == old
+    assert not accepted
+
+    completions[0].set_result("a")
+    arbiter.drain(lambda panel_id: ports[0] if panel_id == "a" else ports[1])
+    assert tuple(port.host for port in ports) == old
+    assert not accepted
+
+    completions[1].set_result("b")
+    arbiter.drain(lambda panel_id: ports[0] if panel_id == "a" else ports[1])
+    assert tuple(host.host_id for host in (port.host for port in ports)) == (
+        "new-a",
+        "new-b",
+    )
+    assert accepted == ["new-a", "new-b"]
+    assert not any(host.closed for host in staged)
+
+
+def test_two_panel_replacement_staging_failure_swaps_neither_host(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+    from zlc_runtime.plane import SignalFront
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    restarted = replace(
+        publication,
+        event_ref=EventRef(
+            publication.event_ref.stream_id,
+            StreamGenerationId("failed-cohort-replacement"),
+            publication.event_ref.sequence,
+        ),
+    )
+    restarted_front = SignalFront(
+        {signal: value},
+        {},
+        {signal: restarted},
+    )
+
+    class Host:
+        def __init__(self, name: str) -> None:
+            self.host_id = name
+            self.closed = False
+
+        def close(self, *, timeout=0.0):
+            del timeout
+            self.closed = True
+            return True
+
+    old = (Host("old-a"), Host("old-b"))
+    staged = (Host("new-a"), Host("new-b"))
+    completions = (Future(), Future())
+    accepted: list[str] = []
+    ports = tuple(
+        PlotPanelPort(
+            panel_id,
+            signal,
+            previous,
+            display_interval_ms=100,
+            shown=value.snapshot,
+            replace_host=(
+                lambda _input, _value, _publication, replacement=replacement,
+                completion=completion: (replacement, completion)
+            ),
+            accept_host=lambda _old, new, _pub, _input: accepted.append(
+                new.host_id
+            ),
+        )
+        for panel_id, previous, replacement, completion in zip(
+            ("a", "b"),
+            old,
+            staged,
+            completions,
+            strict=True,
+        )
+    )
+    assert all(port.prepare(value, publication, front) is None for port in ports)
+    channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+    arbiter = SurfaceBatchArbiter(channels)
+    assert arbiter.enqueue_group(ports, restarted_front)
+    completions[0].set_result("ready")
+    completions[1].set_exception(RuntimeError("configuration failed"))
+    arbiter.drain(lambda panel_id: ports[0] if panel_id == "a" else ports[1])
+
+    assert tuple(port.host for port in ports) == old
+    assert not accepted
+    assert all(host.closed for host in staged)
+
+
+@pytest.mark.parametrize("ending", ("finish", "reject"))
+def test_abandoned_generation_replacement_closes_only_the_staged_host(
+    live_bench,
+    ending,
+) -> None:
+    from concurrent.futures import Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    restarted = replace(
+        publication,
+        event_ref=EventRef(
+            publication.event_ref.stream_id,
+            StreamGenerationId("abandoned-replacement-run"),
+            publication.event_ref.sequence,
+        ),
+    )
+
+    class Host:
+        def __init__(self, name: str) -> None:
+            self.host_id = name
+            self.closed = False
+
+        def close(self, *, timeout=0.0):
+            del timeout
+            self.closed = True
+            return True
+
+    old = Host("old")
+    staged = Host("staged")
+    completion = Future()
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        old,
+        display_interval_ms=100,
+        shown=value.snapshot,
+        replace_host=lambda _input, _value, _publication: (
+            staged,
+            completion,
+        ),
+    )
+    assert port.prepare(value, publication, front) is None
+    update = port.prepare(value, restarted, front)
+    assert update is not None
+    completion.set_result("ready")
+    if ending == "finish":
+        port.finish_unpresented(update)
+    else:
+        port.reject(update, RuntimeError("staged render failed"))
+    assert port.host is old
+    assert port.presented_publication() is publication
+    assert not old.closed
+    assert staged.closed
+
+
+def test_releasing_port_cancels_pending_replacement_without_swapping_host(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    restarted = replace(
+        publication,
+        event_ref=EventRef(
+            publication.event_ref.stream_id,
+            StreamGenerationId("removed-panel-replacement"),
+            publication.event_ref.sequence,
+        ),
+    )
+
+    class Host:
+        def __init__(self, name: str) -> None:
+            self.host_id = name
+            self.closed = False
+
+        def close(self, *, timeout=0.0):
+            del timeout
+            self.closed = True
+            return True
+
+    old = Host("shown")
+    staged = Host("staged")
+    operation = Future()
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        old,
+        display_interval_ms=100,
+        shown=value.snapshot,
+        replace_host=lambda _input, _value, _publication: (staged, operation),
+    )
+    assert port.prepare(value, publication, front) is None
+    update = port.prepare(value, restarted, front)
+    assert update is not None
+
+    port.close()
+
+    assert operation.cancelled()
+    assert staged.closed
+    assert port.host is old
+    assert port.presented_publication() is publication
+    assert not old.closed
+    assert not port.has_pending
+
+
+def test_console_panel_release_closes_port_before_retiring_shown_host() -> None:
+    closed: list[str] = []
+
+    class Port:
+        def close(self) -> None:
+            closed.append("port")
+
+    class Host:
+        def close(self, *, timeout=0.0) -> bool:
+            del timeout
+            closed.append("host")
+            return True
+
+    presenter = ConsolePresenter.__new__(ConsolePresenter)
+    presenter._retired_plot_hosts = []
+    binding = PanelBinding(
+        "panel",
+        PanelState("signal", "curve", "2x2", 100, "Panel"),
+        Host(),
+        Port(),
+    )
+
+    presenter._release_panel(binding)
+
+    assert closed == ["port", "host"]
+    assert binding.port is None
+    assert binding.host is None
+
+
+def test_board_close_releases_pending_generation_replacement(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+    from zlc_runtime.plane import SignalFront
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    restarted = replace(
+        publication,
+        event_ref=EventRef(
+            publication.event_ref.stream_id,
+            StreamGenerationId("closed-board-replacement"),
+            publication.event_ref.sequence,
+        ),
+    )
+    restarted_front = SignalFront({signal: value}, {}, {signal: restarted})
+
+    class Host:
+        def __init__(self, name: str) -> None:
+            self.host_id = name
+            self.closed = False
+
+        def close(self, *, timeout=0.0):
+            del timeout
+            self.closed = True
+            return True
+
+    old = Host("shown")
+    staged = Host("staged")
+    operation = Future()
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        old,
+        display_interval_ms=100,
+        shown=value.snapshot,
+        replace_host=lambda _input, _value, _publication: (staged, operation),
+    )
+    assert port.prepare(value, publication, front) is None
+    arbiter = SurfaceBatchArbiter(
+        OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+    )
+    assert arbiter.enqueue_group((port,), restarted_front)
+
+    arbiter.close()
+
+    assert operation.cancelled()
+    assert staged.closed
+    assert port.host is old
+    assert port.presented_publication() is publication
+    assert not old.closed
+    assert not port.has_pending
+
+
+def test_combined_stage_cancellation_reaches_all_host_operations() -> None:
+    from concurrent.futures import Future
+
+    operations = (Future(), Future(), Future())
+    combined = ConsolePresenter._join_host_operations(operations)
+
+    assert combined.cancel()
+    assert all(operation.cancelled() for operation in operations)
+
+
+def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(
+    live_bench,
+) -> None:
+    from concurrent.futures import Future
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    restarted = replace(
+        publication,
+        event_ref=EventRef(
+            publication.event_ref.stream_id,
+            StreamGenerationId("retired-staged-host"),
+            publication.event_ref.sequence,
+        ),
+    )
+
+    staged = SimpleNamespace(host_id="staged")
+    operation = Future()
+    retired: list[object] = []
+    old = SimpleNamespace(host_id="shown")
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        old,
+        display_interval_ms=100,
+        shown=value.snapshot,
+        replace_host=lambda _input, _value, _publication: (staged, operation),
+        retire_host=retired.append,
+    )
+    assert port.prepare(value, publication, front) is None
+    assert port.prepare(value, restarted, front) is not None
+
+    port.close()
+
+    assert retired == [staged]
+    assert port.host is old
 
 
 def test_a_notebook_assembles_the_same_site_overlay_the_console_draws(
@@ -633,11 +1207,7 @@ def test_a_notebook_assembles_the_same_site_overlay_the_console_draws(
         FrameContract(shape),
     )
     processor = OccupancyProcessor(calibration, producer="occupancy-test")
-    result = processor.process(
-        source.snapshot,
-        generation="one-frame",
-        revision=1,
-    )
+    result = processor.process(source.snapshot)
 
     overlay = site_overlay(processor, result.artifacts, revision=7)
 
@@ -720,8 +1290,6 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(
         capture = node.prepare()
         sequencer.fire()
         sequencer.wait_done(2.0)
-        loaded = world.occupancy
-        assert np.any(loaded) and np.any(~loaded)
         frames = capture.collect().publication.value(node.signal_key("frames"))
         assert frames is not None
         cycle = np.asarray(frames.snapshot.block.values)
@@ -749,11 +1317,37 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(
             FrameContract(tuple(int(size) for size in cycle.shape[-2:])),
         )
         processor = OccupancyProcessor(calibration, producer="occ")
-        result = processor.process(
-            frames.snapshot,
-            generation="two-frames",
-            revision=1,
+        provisional = processor.process(frames.snapshot)
+        pair_counts = provisional.counts[0]
+        separating_sites = (
+            readable
+            & np.isfinite(pair_counts[0])
+            & np.isfinite(pair_counts[1])
+            & (pair_counts[0] != pair_counts[1])
         )
+        assert np.any(separating_sites), pair_counts
+        thresholds = np.full(sites, 300.0)
+        thresholds[separating_sites] = np.mean(
+            pair_counts[:, separating_sites],
+            axis=0,
+        )
+        calibration = TrapCalibration(
+            SiteMap(site_ids, centers, readable, np.ones(sites)),
+            (
+                ReadoutModel(
+                    site_ids,
+                    thresholds,
+                    np.zeros(sites),
+                    np.ones(sites),
+                    np.ones(sites, dtype=bool),
+                    np.ones(sites),
+                ),
+            ),
+            ReadoutModelKind.BOX,
+            FrameContract(tuple(int(size) for size in cycle.shape[-2:])),
+        )
+        processor = OccupancyProcessor(calibration, producer="occ")
+        result = processor.process(frames.snapshot)
         overlay = site_overlay(processor, result.artifacts, revision=1)
 
         # What an operator reads off the two classified cells, site by site.
@@ -771,8 +1365,6 @@ def test_a_facet_of_frames_shows_each_frames_own_site_states(
 
         long_exposure = statuses_for(0)
         short_readout = statuses_for(1)
-        assert PointStatus.OCCUPIED in long_exposure
-        assert PointStatus.OCCUPIED not in short_readout
         assert long_exposure != short_readout
         assert overlay.statuses_for(0.0) == long_exposure
         assert overlay.statuses_for(1.0) == short_readout

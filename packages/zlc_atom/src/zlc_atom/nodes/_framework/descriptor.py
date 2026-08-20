@@ -6,11 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable
 
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.install.descriptors import CAPABILITY_TYPES
-from zlc_runtime import SelectionState
+from zlc_runtime import DatasetOutputDeclaration, SelectionState
 
 
 class NodeKind(str, Enum):
@@ -25,10 +26,15 @@ class NodeKind(str, Enum):
 class DatasetInputSpec:
     name: str
     contract_id: str | None
+    delivery: str
 
     def __post_init__(self) -> None:
         if not self.name or (self.contract_id is not None and not self.contract_id):
             raise ValueError("dataset input requires a name and a contract or None")
+        delivery = str(self.delivery).strip()
+        if delivery not in {"exact", "latest"}:
+            raise ValueError("dataset input delivery must be 'exact' or 'latest'")
+        object.__setattr__(self, "delivery", delivery)
 
     def accepts(self, contract_id: str | None) -> bool:
         return contract_id is not None and (
@@ -176,16 +182,6 @@ class WorkspaceResourceSpec:
 
 
 @dataclass(frozen=True)
-class OutputSpec:
-    name: str
-    contract_id: str
-
-    def __post_init__(self) -> None:
-        if not self.name or not self.contract_id:
-            raise ValueError("output requires name and contract_id")
-
-
-@dataclass(frozen=True)
 class ArtifactOutputSpec:
     """One saved-artifact path attribute exposed by semantic contract."""
 
@@ -199,7 +195,7 @@ class ArtifactOutputSpec:
 
 @dataclass(frozen=True, slots=True)
 class NodePreviewSpec:
-    """UI-neutral request to preview one declared output of this node.
+    """UI-neutral request to preview one typed output declaration.
 
     A node with eight outputs knows which one an operator came to watch, and
     nothing else does.  The same is true of HOW it is watched: the plotting
@@ -208,17 +204,34 @@ class NodePreviewSpec:
     averaging them is a perfectly sensible thing to do with three point rows
     -- but they are a long reference, a short readout and a long reference,
     and the only reason to look at them is side by side.  The node states the
-    kind because the node is what knows that.  Left empty, the kind is read
-    off the data, which is the right answer only where a node genuinely has
-    no opinion.
+    kind because the node is what knows that.  ``producer`` is empty for the
+    node's own output; a plain suffix names a stable companion producer owned
+    by the same run.  ``semantic`` is the existing plot projection assignment,
+    shared unchanged with any estimator that consumes the same publication.
     """
 
-    output_name: str
+    output: DatasetOutputDeclaration
     plot_kind: str
+    semantic: Mapping[str, object] = field(default_factory=dict)
+    producer: str = ""
 
     def __post_init__(self) -> None:
-        if not self.output_name or not self.plot_kind:
-            raise ValueError("node preview requires output_name and plot_kind")
+        if not isinstance(self.output, DatasetOutputDeclaration):
+            raise TypeError("node preview output must be DatasetOutputDeclaration")
+        plot_kind = str(self.plot_kind).strip()
+        if not plot_kind:
+            raise ValueError("node preview requires a plot kind")
+        if not isinstance(self.semantic, Mapping):
+            raise TypeError("node preview semantic assignment must be a mapping")
+        semantic = dict(self.semantic)
+        if any(not isinstance(name, str) or not name.strip() for name in semantic):
+            raise TypeError("node preview semantic names must be non-empty text")
+        producer = str(self.producer).strip()
+        if producer and ("/" in producer or "\\" in producer):
+            raise ValueError("node preview producer must be a plain owner suffix")
+        object.__setattr__(self, "plot_kind", plot_kind)
+        object.__setattr__(self, "semantic", MappingProxyType(semantic))
+        object.__setattr__(self, "producer", producer)
 
 
 @dataclass(frozen=True)
@@ -274,10 +287,10 @@ class LogicNodeDescriptor:
     kind: NodeKind
     authoring_schema: AuthoringSchema
     input_specs: tuple[DatasetInputSpec | ArtifactInputSpec, ...] = ()
-    outputs: tuple[OutputSpec, ...] = ()
+    outputs: tuple[DatasetOutputDeclaration, ...] = ()
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
-    node_previews: tuple[NodePreviewSpec, ...] = ()
+    node_previews: tuple[NodePreviewSpec, ...] | None = None
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -297,13 +310,7 @@ class LogicNodeDescriptor:
 
     @property
     def offers_a_preview(self) -> bool:
-        """Whether Start can put this node's own output on screen.
-
-        Declared either way -- a fixed preview, or one resolved from the
-        authored values -- and asking only about the fixed tuple is why the
-        camera measurement's preview switch was invisible while its preview
-        opened perfectly well.
-        """
+        """Whether Start can put a declared output on screen."""
 
         return bool(self.node_previews)
 
@@ -314,15 +321,21 @@ class LogicNodeDescriptor:
             raise TypeError("authoring_schema must be AuthoringSchema")
         inputs = tuple(self.input_specs)
         outputs = tuple(self.outputs)
-        node_previews = tuple(self.node_previews)
+        if self.kind is NodeKind.TASK and self.node_previews is None:
+            raise ValueError(
+                "a Task must explicitly declare node_previews, using () when it has none"
+            )
+        node_previews = (
+            () if self.node_previews is None else tuple(self.node_previews)
+        )
         artifact_outputs = tuple(self.artifact_outputs)
         requirements = tuple(self.device_requirements)
         selection_mappings = tuple(self.selection_mappings)
         workspace_resources = tuple(self.workspace_resources)
         if any(not isinstance(value, (DatasetInputSpec, ArtifactInputSpec)) for value in inputs):
             raise TypeError("input_specs contain an unsupported input type")
-        if any(not isinstance(value, OutputSpec) for value in outputs):
-            raise TypeError("outputs must contain OutputSpec values")
+        if any(not isinstance(value, DatasetOutputDeclaration) for value in outputs):
+            raise TypeError("outputs must contain DatasetOutputDeclaration values")
         if any(not isinstance(value, NodePreviewSpec) for value in node_previews):
             raise TypeError("node_previews must contain NodePreviewSpec values")
         if self.resolve_field_availability is not None and not callable(
@@ -349,10 +362,16 @@ class LogicNodeDescriptor:
             raise ValueError("input names must be unique")
         if len({value.name for value in outputs}) != len(outputs):
             raise ValueError("output names must be unique")
-        if len({value.output_name for value in node_previews}) != len(node_previews):
-            raise ValueError("node preview output names must be unique")
-        unknown_previews = {value.output_name for value in node_previews} - {
-            value.name for value in outputs
+        preview_keys = tuple(
+            (value.producer, value.output.name) for value in node_previews
+        )
+        if len(set(preview_keys)) != len(preview_keys):
+            raise ValueError("node preview producer/output pairs must be unique")
+        unknown_previews = {
+            value.output.name
+            for value in node_previews
+            if not value.producer
+            and not any(value.output is output for output in outputs)
         }
         if unknown_previews:
             raise ValueError(
@@ -502,7 +521,6 @@ __all__ = [
     "LogicNodeDescriptor",
     "NodeKind",
     "NodePreviewSpec",
-    "OutputSpec",
     "ResolvedArtifact",
     "ResolvedWorkspaceResource",
     "SelectionMapping",

@@ -17,7 +17,7 @@ from zlc_atom.nodes import (
 from zlc_atom.nodes.calibration import logic_node as calibration_logic_node
 from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
 from zlc_atom.nodes.occupancy import logic_node as occupancy_logic_node
-from zlc_runtime import MonitorCoverage, SignalDataPlane
+from zlc_runtime import DatasetCoverage, MonitorCoverage, SignalDataPlane
 import zlc_runtime.host as runtime_host
 from zlc_workbench.logic import (
     LogicCatalog,
@@ -185,6 +185,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             calibration_node,
             signal_plane=plane,
             instance_id="calibration",
+            source_signal=None,
         )
         hosts.append(calibration_host)
 
@@ -251,15 +252,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         ]["repeats"]
         assert set(record["actual_devices"]) == {"camera", "sequencer"}
         assert record["actual_devices"]["camera"]["exposure_seconds"] > 0.0
-        # A finished exact generation is KEPT until it is retired: the frames
-        # it published are what a panel, an Edit snapshot and a Save read
-        # after the run ends.  (This used to be empty here, because a run
-        # that began and ended between two polls lost its publication.)
+        # Calibration's three-frame facet is a monitor preview, not a second
+        # scientific result.  Runtime retires it when the Task seals; the
+        # artifact above is the terminal truth.
         preview_signal = calibration_host.signal_key("capture_preview")
-        assert set(plane.freeze().signals) == {preview_signal}
-
-        plane.retire(calibration_host)
-        assert plane.freeze().signals == {}
+        assert preview_signal not in plane.freeze().signals
         calibration_host.start()
         _wait_terminal(calibration_host, phase="done")
         second_calibration = calibration_host.final_result
@@ -285,9 +282,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "uniform_psf.png",
             "psf_kernels.png",
         }
-        assert set(plane.freeze().signals) == {preview_signal}
-        plane.retire(calibration_host)
-        assert plane.freeze().signals == {}
+        assert preview_signal not in plane.freeze().signals
 
         one_window_program = _one_camera_window_program()
         sequencer.load(one_window_program)
@@ -319,6 +314,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             finite_node,
             signal_plane=plane,
             instance_id="camera_measurement",
+            source_signal=None,
         )
         hosts.append(finite_host)
         finite_host.start()
@@ -339,10 +335,12 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         frames_publication = finite_front.publication(frames_signal)
         frames_value = finite_front.value(frames_signal)
         assert frames_publication is not None and frames_value is not None
-        assert frames_value.coverage is None
-        assert frames_value.transient is False
+        assert isinstance(frames_value.coverage, DatasetCoverage)
+        assert frames_value.coverage.complete
+        assert frames_value.shape[:2] == (1, 1)
+        frames_snapshot = plane.current_dataset(frames_signal)
         # (repeat, frame): three cycles of one frame each on the point axis.
-        assert frames_value.shape[:2] == (3, 1)
+        assert frames_snapshot.block.values.shape[:2] == (3, 1)
         assert not plane.is_generation_live(frames_signal)
 
         occupancy_descriptor = catalog.get("occupancy")
@@ -383,6 +381,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             occupancy_node,
             signal_plane=plane,
             instance_id="occupancy",
+            source_signal=frames_signal,
         )
         hosts.append(occupancy_host)
         occupancy_host.start()
@@ -428,11 +427,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         # so a one-frame cycle's judged block equals the camera block directly.
         np.testing.assert_array_equal(
             frame_judged.values,
-            frames_value.values,
+            frames_snapshot.block.values,
         )
         assert all(
-            value.coverage is None and value.transient is False
-            for value in occupancy_publication.signals.values()
+            not plane.is_generation_live(name)
+            for name in occupancy_publication.signals
         )
         assert plane.direct_parent_publications(occupancy_publication) == (
             frames_publication,
@@ -475,6 +474,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             infinite_node,
             signal_plane=plane,
             instance_id="camera_measurement",
+            source_signal=None,
         )
         hosts.append(infinite_host)
         infinite_host.start()
@@ -493,7 +493,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
                 after=previous_revision,
             )
             assert isinstance(live_value.coverage, MonitorCoverage)
-            assert live_value.transient is True
+            assert plane.is_generation_live(live_signal)
             assert live_value.run_record["parameters"]["repeat"] == 0
             generation = live_publication.event_ref.generation
             if live_generation is None:

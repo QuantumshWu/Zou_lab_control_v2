@@ -1,15 +1,14 @@
-"""The dataset a scan writes, and the live slot it publishes through.
+"""Scan schema and placement planning over Runtime-owned committed chunks.
 
 Both scan engines -- the board-advanced one and the host-advanced one -- write
 here, because the dataset is the same object either way.  What differs is who
 moves the plan from point to point; what a point MEANS in the data does not.
 
-THE DATASET IS THE SAME OBJECT LIVE AND FINAL.  The plan's coordinates are
-known before any data, so the whole dataset is allocated at the first capture
-and every point fills its slice; unfilled cells are simply invalid.  Each
-capture publishes the growing dataset through the run's live slot -- a panel
-attaching mid-scan sees every point so far -- and the finished run publishes
-the very same arrays as the FINAL result.
+The plan's coordinates are known before any data.  Once the first source event
+supplies its schema, this module computes the fixed scan schema and the slice
+where each later event belongs.  Runtime owns the chunks, invalid future cells,
+current materialization and terminal seal; this module never copies full scan
+history.
 
 REPEATS AND SHOTS SHARE THE REPEAT AXIS.  ``shots_per_point`` runs S complete
 adjacent trials of one point; ``repeats`` walks the WHOLE plan R more times.
@@ -30,11 +29,9 @@ everything later hangs from: a box drawn on the plot's x axis is a range of
 
 from __future__ import annotations
 
-import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
-import numpy as np
 from zlc_data import (
     AxisId,
     AxisSpec,
@@ -44,7 +41,6 @@ from zlc_data import (
     PointTable,
     REPEAT,
     SCAN_POINT,
-    owned_snapshot_from_arrays,
 )
 from .plan import scan_axis_id
 from zlc_runtime import (
@@ -228,13 +224,12 @@ def scan_dataset_schema(
 
 
 class ScanDatasetWriter:
-    """The scan's dataset, allocated whole at the first capture, filled per point.
+    """Plan one source event's canonical scan placement and reject duplicates.
 
     The plan's coordinates are the writer's from birth; the SOURCE schema
     belongs to the watched signal and is only knowable from its first captured
-    value, so allocation happens then and every later capture must match it.
-    ``snapshot()`` freezes the current fill level -- the live front mid-scan
-    and the FINAL result at the end are this same dataset.
+    value, so schema planning happens then and every later capture must match
+    it.  Values and validity remain in immutable event chunks owned by Runtime.
     """
 
     def __init__(
@@ -243,7 +238,7 @@ class ScanDatasetWriter:
         axes: Sequence[tuple[str, str]],
         *,
         visits: int = 1,
-        generation: object,
+        run_record: Mapping[str, object] | None = None,
     ) -> None:
         self._rows = tuple(tuple(float(value) for value in row) for row in rows)
         if not self._rows:
@@ -252,12 +247,10 @@ class ScanDatasetWriter:
         self._visits = int(visits)
         if self._visits < 1:
             raise ValueError("every plan point is visited at least once")
-        self._generation = generation
+        self._run_record = dict(run_record or {})
         self._source_schema: DatasetSchema | None = None
         self._schema: DatasetSchema | None = None
-        self._values: np.ndarray | None = None
-        self._validity: np.ndarray | None = None
-        self._filled: np.ndarray | None = None
+        self._filled: set[tuple[int, int]] = set()
         self._source_points = 0
         self._source_repeats = 0
         self._written = 0
@@ -270,8 +263,14 @@ class ScanDatasetWriter:
     def total(self) -> int:
         return len(self._rows) * self._visits
 
-    def write(self, value: SignalValue, *, row: int, visit: int) -> None:
-        """One capture into its (visit, plan row) slot of the repeat axis."""
+    def write(
+        self,
+        value: SignalValue,
+        *,
+        row: int,
+        visit: int,
+    ) -> LiveDatasetOutput:
+        """Return one event chunk placed at its visit/plan-row destination."""
 
         row = int(row)
         visit = int(visit)
@@ -283,18 +282,26 @@ class ScanDatasetWriter:
             self._allocate(value)
         elif value.schema != self._source_schema:
             raise ValueError("the source dataset schema changed during the scan")
-        if self._filled[visit, row]:
+        address = (visit, row)
+        if address in self._filled:
             raise ValueError("this visit already captured this plan point")
         repeats = self._source_repeats
         points = self._source_points
-        repeat_slice = slice(visit * repeats, (visit + 1) * repeats)
-        point_slice = slice(row * points, (row + 1) * points)
-        self._values[repeat_slice, point_slice] = value.block.values
-        self._validity[repeat_slice, point_slice] = (
-            value.snapshot.expanded_validity()
-        )
-        self._filled[visit, row] = True
+        self._filled.add(address)
         self._written += 1
+        cells_per_write = repeats * points
+        assert self._schema is not None
+        return LiveDatasetOutput(
+            SCAN_OUTPUT,
+            value.snapshot,
+            DatasetCoverage(
+                self._written * cells_per_write,
+                self.total * cells_per_write,
+            ),
+            self._run_record,
+            self._schema,
+            (visit * repeats, row * points),
+        )
 
     def _allocate(self, value: SignalValue) -> None:
         source_schema = value.schema
@@ -304,95 +311,10 @@ class ScanDatasetWriter:
         )
         self._source_points = source_schema.point_table.row_count
         self._source_repeats = source_schema.repeat_axis.size
-        block_values = value.block.values
-        validity = value.snapshot.expanded_validity()
-        points = len(self._rows) * self._source_points
-        repeats = self._visits * self._source_repeats
-        self._values = np.zeros(
-            (repeats, points, *block_values.shape[2:]),
-            dtype=block_values.dtype,
-        )
-        self._validity = np.zeros(
-            (repeats, points, *validity.shape[2:]),
-            dtype=bool,
-        )
-        self._filled = np.zeros((self._visits, len(self._rows)), dtype=bool)
-
-    def snapshot(self):
-        if self._schema is None:
-            raise RuntimeError("the scan has not captured a point yet")
-        return owned_snapshot_from_arrays(
-            self._schema,
-            self._values,
-            self._written,
-            validity=self._validity,
-            block_id="scan",
-            stream_generation=self._generation,
-        )
-
-    def live_output(self) -> LiveDatasetOutput:
-        snapshot = self.snapshot()
-        cells_per_write = self._source_repeats * self._source_points
-        return LiveDatasetOutput(
-            SCAN_OUTPUT,
-            snapshot,
-            DatasetCoverage(
-                self._written * cells_per_write,
-                self.total * cells_per_write,
-            ),
-        )
-
-
-class ScanLiveSlot:
-    """Application-owned live slot: one immutable front, replaced per capture.
-
-    The worker builds each front after a point lands; the plane freezes it
-    from whichever thread freezes.  The handoff is one reference under one
-    lock -- the front itself is immutable.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._listener = None
-        self._front: dict[str, LiveDatasetOutput] | None = None
-        self._closed = False
-
-    def set_change_listener(self, listener) -> None:
-        if not callable(listener):
-            raise TypeError("scan live slot listener must be callable")
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("scan live slot is closed")
-            if self._listener is not None:
-                raise RuntimeError("scan live slot already has a change listener")
-            self._listener = listener
-
-    def publish(self, front: dict[str, LiveDatasetOutput]) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._front = dict(front)
-            listener = self._listener
-        if listener is not None:
-            listener()
-
-    def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("scan live slot is closed")
-            if self._front is None:
-                raise RuntimeError("scan live slot has no captured point")
-            return dict(self._front)
-
-    def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            self._listener = None
 
 
 __all__ = [
     "SCAN_OUTPUT",
     "ScanDatasetWriter",
-    "ScanLiveSlot",
     "scan_dataset_schema",
 ]

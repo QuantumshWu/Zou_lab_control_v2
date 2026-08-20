@@ -26,7 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from zlc_runtime import DatasetOutputDeclaration, NodeHost
+from zlc_runtime import NodeHost
 
 from .device_use import DeviceClaim, DeviceLease, LogicReservation
 
@@ -540,6 +540,7 @@ def make_host(
     *,
     signal_plane: Any,
     instance_id: str,
+    source_signal: str | None,
     request_owner_wake: Callable[[], None] | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
@@ -547,13 +548,26 @@ def make_host(
     The descriptor's frozen output declarations are the sole signal vocabulary.
     """
 
+    inputs = dataset_inputs(descriptor)
+    if len(inputs) > 1:
+        raise ValueError("NodeHost supports exactly one declared Dataset input")
+    kind = str(getattr(descriptor.kind, "value", descriptor.kind))
+    processor_input = bool(inputs) and kind == "processor"
+    selected_source = (
+        str(source_signal or "").strip() if processor_input else None
+    )
     return NodeHost(
         node,
         signal_plane,
         request_owner_wake,
         instance_id=str(instance_id),
-        dataset_output_declarations=tuple(
-            DatasetOutputDeclaration(output.name, output.contract_id)
-            for output in descriptor.outputs
+        kind=kind,
+        dataset_output_declarations=tuple(descriptor.outputs),
+        input_signal=selected_source,
+        input_delivery=(
+            str(inputs[0].delivery) if processor_input else None
+        ),
+        required_artifact_names=tuple(
+            output.name for output in descriptor.artifact_outputs
         ),
     )

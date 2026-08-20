@@ -893,8 +893,24 @@ class PanelCardView(FluentGroupBox):
             spec = self._form_spec()
             self._settings_form.reconcile(spec, self._form_values())
             self._settings_form.refresh()
-            self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
+            science_locked = bool(self._parameter_surface.get("science_locked"))
+            self._settings_form.widget_for("signal").setEnabled(
+                bool(self._groups) and not science_locked
+            )
             self._settings_form.widget_for("kind").setEnabled(False)
+            for key in ("overlay_signal", "cell_kind"):
+                if key in self._settings_form.spec.keys:
+                    self._settings_form.widget_for(key).setEnabled(
+                        not science_locked
+                    )
+            if science_locked:
+                for field in parameter_fields(
+                    self._parameter_surface,
+                    "semantic",
+                ):
+                    key = f"semantic__{field['key']}"
+                    if key in self._settings_form.spec.keys:
+                        self._settings_form.widget_for(key).setEnabled(False)
             for section in ("semantic", "display", "fit"):
                 key = f"{section}_unavailable"
                 if key in self._settings_form.spec.keys:

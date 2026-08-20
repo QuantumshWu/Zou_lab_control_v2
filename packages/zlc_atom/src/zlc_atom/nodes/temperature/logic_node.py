@@ -16,6 +16,7 @@ thing, and it was the way that could not tell you the board refuses 0.
 from __future__ import annotations
 
 from zlc_pulse import PulseSequence
+from zlc_plot import Reduction
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
@@ -25,7 +26,6 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
     NodePreviewSpec,
-    OutputSpec,
     ResolvedArtifact,
     ResolvedWorkspaceResource,
 )
@@ -45,7 +45,6 @@ from zlc_atom.nodes.scan import (
 
 from .task import (
     SURVIVAL_OUTPUT,
-    SURVIVAL_RATE_OUTPUT,
     TEMPERATURE_ARTIFACT_CONTRACT,
     T_OFF_PARAMETER,
     TemperatureTask,
@@ -189,15 +188,23 @@ LOGIC_NODE = LogicNodeDescriptor(
         ),
     ),
     outputs=(
-        OutputSpec(SCAN_OUTPUT.name, SCAN_OUTPUT.contract_id),
-        OutputSpec(SURVIVAL_OUTPUT.name, SURVIVAL_OUTPUT.contract_id),
-        OutputSpec(SURVIVAL_RATE_OUTPUT.name, SURVIVAL_RATE_OUTPUT.contract_id),
+        SCAN_OUTPUT,
+        SURVIVAL_OUTPUT,
     ),
-    # Three outputs, and the one an operator opens the node to watch is the
-    # curve: the recapture fraction against the release time.  Per-site
-    # survival and the frames themselves are what you go looking for once it
-    # surprises you.
-    node_previews=(NodePreviewSpec(SURVIVAL_RATE_OUTPUT.name, "curve"),),
+    # The watched curve is a projection of the per-shot, per-site survival
+    # truth, not a second accumulated rate Dataset.
+    node_previews=(
+        NodePreviewSpec(
+            SURVIVAL_OUTPUT,
+            "curve",
+            semantic={
+                "fate:t_off": "x",
+                "fate:repeat": "reduce",
+                "fate:Site": "reduce",
+                "reduction": Reduction.MEAN,
+            },
+        ),
+    ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", TEMPERATURE_ARTIFACT_CONTRACT),
     ),

@@ -14,11 +14,12 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
-from zlc_runtime import NodeHost, SignalDataPlane
+from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
 from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
 from zlc_atom.install import create_installation, tunable_devices
@@ -31,12 +32,18 @@ from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_PULSE_CONTRACT,
+    SCAN_OUTPUT,
     ScanAxis,
+    ScanDatasetWriter,
     ScanPlan,
 )
 from zlc_atom.nodes.stepped_scan import GATING_MODES, STEPPED_SCAN_SCHEMA
 
-from tests.fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench
+from tests.fakes import (
+    SCRIPTED_SEED_VALUE,
+    ScriptedScanBench,
+    camera_cycle_snapshot,
+)
 
 
 TEMPLATE_NAME = "mot_field_template.json"
@@ -46,6 +53,25 @@ BIAS_PORTS = tuple(
 )
 #: Long enough that no scheduling jitter could produce it, short enough to pay.
 AUTHORED_SETTLE_SECONDS = 0.37
+
+
+def _scan_host(node: object, plane: SignalDataPlane) -> NodeHost:
+    return NodeHost(
+        node,
+        plane,
+        instance_id=node.instance_id,
+        kind="measurement",
+        dataset_output_declarations=(SCAN_OUTPUT,),
+    )
+
+
+def _source_value(size: int = 64) -> SignalValue:
+    snapshot = camera_cycle_snapshot(
+        ((np.ones((size, size), dtype=np.uint16),),),
+        producer="scan-source",
+        revision=1,
+    )
+    return SignalValue("@logic/source/frames", snapshot, MonitorCoverage(1, 1))
 
 
 def _template_sequence():
@@ -130,7 +156,7 @@ def _scripted_run(
             gating=gating,
             free_run_delay_seconds=0.002 if gating == "sw_gated" else 0.0,
         )
-        host = NodeHost(node, plane)
+        host = _scan_host(node, plane)
         host.start()
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -141,8 +167,8 @@ def _scripted_run(
             "the stepped scan never finished; it published "
             f"{bench.published} and kept waiting"
         )
-        value = plane.freeze().value(host.signal_key("scan"))
-        assert value is not None, "the scan published nothing"
+        signal = host.signal_key("scan")
+        value = plane.current_dataset(signal)
         block = np.asarray(value.block.values, dtype=float)
         # (visit, plan row, y, x): every pixel of a scripted frame carries the
         # publication's index, so the cell mean IS the shot that landed there.
@@ -279,7 +305,7 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
             settle_seconds=0.02,
             tunable_devices=tunable_devices(installation),
         )
-        host = NodeHost(scan_node, plane)
+        host = _scan_host(scan_node, plane)
         host.start()
         deadline = time.monotonic() + 240.0
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -290,9 +316,7 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
         assert observed.error is None, observed.error
         assert observed.terminal
 
-        frozen = plane.freeze()
-        value = frozen.value(host.signal_key("scan"))
-        assert value is not None, "the scan published nothing"
+        value = plane.current_dataset(host.signal_key("scan"))
         frames = np.asarray(value.block.values, dtype=float)
         assert frames.shape[1] == len(exposures)
         pooled = np.clip(frames - 12.0, 0.0, None)
@@ -355,7 +379,7 @@ def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
             shots_per_point=1,
             settle_seconds=0.02,
         )
-        host = NodeHost(scan_node, plane)
+        host = _scan_host(scan_node, plane)
         host.start()
         scan_signal = host.signal_key("scan")
         live_fill_levels: set[int] = set()
@@ -384,9 +408,7 @@ def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
             f"observed fill levels: {sorted(live_fill_levels)}"
         )
 
-        frozen = plane.freeze()
-        value = frozen.value(scan_signal)
-        assert value is not None, "the scan published nothing"
+        value = plane.current_dataset(scan_signal)
 
         frames = np.asarray(value.block.values, dtype=float)
         # (repeat, scan points, event, y, x): one MOT cycle per grid point,
@@ -419,3 +441,55 @@ def test_scanning_the_bias_dacs_finds_the_planted_mot_optimum() -> None:
         if monitor is not None:
             monitor.close()
         installation.close()
+
+
+def test_scan_planner_keeps_chunk_storage_linear_for_50_and_100_points() -> None:
+    source = _source_value()
+
+    def committed_bytes(points: int) -> int:
+        writer = ScanDatasetWriter(
+            tuple((float(index),) for index in range(points)),
+            (("x", ""),),
+        )
+        payload = 0
+        for row in range(points):
+            output = writer.write(source, row=row, visit=0)
+            assert output.snapshot is source.snapshot
+            assert output.cell_origin == (0, row)
+            payload += output.snapshot.block.values.nbytes
+        assert not hasattr(writer, "_values")
+        assert not hasattr(writer, "snapshot")
+        return payload
+
+    fifty = committed_bytes(50)
+    hundred = committed_bytes(100)
+    assert hundred == 2 * fifty
+
+
+def test_partial_scan_current_dataset_has_invalid_future_points() -> None:
+    source = _source_value(size=8)
+    writer = ScanDatasetWriter(
+        ((0.0,), (1.0,), (2.0,), (3.0,)),
+        (("x", ""),),
+    )
+    producer = SimpleNamespace(
+        instance_id="partial-scan",
+        dataset_output_declarations=(SCAN_OUTPUT,),
+        signal_key=lambda name: f"@logic/partial-scan/{name}",
+    )
+    plane = SignalDataPlane()
+    try:
+        plane.begin_generation(producer)
+        for row in range(2):
+            plane.commit_live(
+                producer,
+                {SCAN_OUTPUT.name: writer.write(source, row=row, visit=0)},
+                growing_outputs=(SCAN_OUTPUT.name,),
+            )
+        assert plane.seal_committed(producer, cut_short=True)
+        current = plane.current_dataset(producer.signal_key(SCAN_OUTPUT.name))
+        valid = current.expanded_validity()
+        assert valid[:, :2].all()
+        assert not valid[:, 2:].any()
+    finally:
+        plane.close()

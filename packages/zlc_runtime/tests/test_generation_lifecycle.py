@@ -1,10 +1,8 @@
 """A node can be run more than once.
 
 A producer generation belongs to ONE run, but the node that performs the run is
-a reusable object.  Something must decide when the previous generation ends, and
-it cannot be ``publish_final``: the result has to stay readable afterwards,
-which is precisely why nothing ever retired it and why a second run was
-impossible.
+a reusable object.  ``seal_committed`` retains one finished result;
+``begin_generation`` replaces it only when the next run starts.
 
 ``begin_generation`` is that decision, in one place.  Before it existed the
 policy lived only inside NodeHost as a retire-then-reserve pair, so every other
@@ -17,8 +15,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zlc_runtime.dataset_output import DatasetOutputDeclaration, FinalDatasetOutput
+from zlc_data import AxisSpec, DatasetSchema
+from zlc_runtime.dataset import DatasetCoverage
+from zlc_runtime.dataset_output import (
+    DatasetOutputDeclaration,
+    LiveDatasetOutput,
+)
 from zlc_runtime.plane import SignalDataPlane
+from zlc_runtime.streams import StreamEndedEarly
 
 from _snapshots import snapshot
 
@@ -38,9 +42,41 @@ class _Producer:
 
 
 def _publish(plane: SignalDataPlane, node: _Producer, revision: int) -> None:
-    plane.publish_final(
+    plane.commit_live(
         node,
-        {"frames": FinalDatasetOutput(node.declaration, snapshot("probe", revision))},
+        {"frames": _commit(node, revision=revision, total=1, origin=0)},
+    )
+    plane.seal_committed(node)
+
+
+def _commit(
+    node: _Producer,
+    *,
+    revision: int,
+    total: int,
+    origin: int,
+) -> LiveDatasetOutput:
+    event = snapshot("probe", revision)
+    event_schema = event.block.schema
+    repeat = event_schema.repeat_axis
+    canonical = DatasetSchema(
+        AxisSpec(
+            repeat.axis_id,
+            repeat.name,
+            repeat.role,
+            total,
+            tuple(range(total)),
+        ),
+        event_schema.point_table,
+        event_schema.grid_topology,
+        event_schema.cell_schema,
+    )
+    return LiveDatasetOutput(
+        node.declaration,
+        event,
+        DatasetCoverage(origin + 1, total),
+        canonical_schema=canonical,
+        cell_origin=(origin, 0),
     )
 
 
@@ -106,7 +142,7 @@ def test_a_node_runs_three_times_in_a_row() -> None:
 
 
 def test_a_finished_result_stays_readable_until_the_next_run_starts() -> None:
-    """Why the generation cannot end at publish_final.
+    """A sealed result remains until the next run replaces its generation.
 
     The caller reads its result after the run completes.  Superseding happens at
     the START of the next run, not at the end of the previous one.
@@ -144,5 +180,109 @@ def test_reserve_stays_idempotent_before_anything_is_published() -> None:
     node = _Producer()
     try:
         assert plane.reserve(node) == plane.reserve(node)
+    finally:
+        plane.close()
+
+
+def test_committed_seal_closes_follow_without_a_duplicate_full_event() -> None:
+    plane = SignalDataPlane()
+    node = _Producer()
+    received = []
+    try:
+        plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=81, total=3, origin=0)},
+        )
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=81, total=3, origin=1)},
+        )
+        baseline, tap = plane.follow_publications(node.signal_key("frames"))
+        assert baseline.event_ref.sequence == 2
+
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=81, total=3, origin=2)},
+        )
+        first = tap.next(1.0)
+        replayed = tap.next(1.0)
+        publication = tap.next(1.0)
+        assert [
+            first.event_ref.sequence,
+            replayed.event_ref.sequence,
+            publication.event_ref.sequence,
+        ] == [1, 2, 3]
+        assert not hasattr(publication, "payload")
+        received.append(
+            plane.current_dataset(node.signal_key("frames"), publication)
+        )
+        assert received[0].block.values.reshape(-1).tolist() == [81.0] * 3
+        assert plane.seal_committed(node)
+        with pytest.raises(StreamEndedEarly):
+            tap.next(0.0)
+        latest = plane.latest_publication(node.signal_key("frames"))
+        assert latest is publication
+        assert latest.event_ref.sequence == 3
+        assert not plane.is_generation_live(node.signal_key("frames"))
+    finally:
+        plane.close()
+
+
+def test_sealed_commit_generation_is_superseded_by_the_next_run() -> None:
+    plane = SignalDataPlane()
+    node = _Producer()
+    try:
+        first = plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=1, total=1, origin=0)},
+        )
+        plane.seal_committed(node)
+        assert plane.current_dataset(node.signal_key("frames")).block.values.item() == 1
+
+        second = plane.begin_generation(node)
+        assert second != first
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=2, total=1, origin=0)},
+        )
+        plane.seal_committed(node)
+        assert plane.current_dataset(node.signal_key("frames")).block.values.item() == 2
+    finally:
+        plane.close()
+
+
+def test_current_dataset_rejects_a_same_sequence_publication_from_the_old_run() -> None:
+    """A sequence number is meaningful only inside its exact stream generation."""
+
+    plane = SignalDataPlane()
+    node = _Producer()
+    try:
+        plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=1, total=1, origin=0)},
+        )
+        old_publication = plane.latest_publication(node.signal_key("frames"))
+        assert old_publication is not None
+        assert old_publication.event_ref.sequence == 1
+        plane.seal_committed(node)
+
+        plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=2, total=1, origin=0)},
+        )
+        current_publication = plane.latest_publication(node.signal_key("frames"))
+        assert current_publication is not None
+        assert current_publication.event_ref.sequence == 1
+        assert (
+            current_publication.event_ref.generation
+            != old_publication.event_ref.generation
+        )
+
+        with pytest.raises(ValueError, match="another signal generation"):
+            plane.current_dataset(node.signal_key("frames"), old_publication)
     finally:
         plane.close()

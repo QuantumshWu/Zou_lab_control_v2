@@ -62,9 +62,10 @@ passes that same result directly to the public `zlc_plot` API for six report
 images. The Atom foundation does not depend on plotting; this plugin-local
 report belongs to the Calibration task itself.
 
-Node results also expose `zlc-data` role-axis `OwnedSnapshot` artifacts, so
-repeat, site, and readout-event meaning is carried by `DatasetSchema` rather
-than inferred from array shape.
+Logic Nodes commit `zlc-data` role-axis event chunks, so repeat, site, and
+readout-event meaning is carried by `DatasetSchema` rather than inferred from
+array shape. Runtime owns their accumulated current/partial/final
+`OwnedSnapshot`; a plugin does not keep a second live history.
 
 ## Leaf pattern
 
@@ -131,27 +132,30 @@ It owns only each frame's per-site counts, occupied boolean, validity, and
 pooled occupancy rate. The concrete Temperature Task reuses those facts for
 its authored before/trap-off/after cycles: only a valid, initially occupied
 pair is a survival trial. It publishes the binary per-site `survival` dataset
-and pooled `survival_rate` against trap-off time, whose declared preview is an
-ordinary curve. It does not fit a temperature or lifetime and does not derive
-a 1/e crossing.
+only. Its declared preview and artifact both pool that same dataset and its
+validity into survival rate against trap-off time; there is no second rate
+history. It does not fit a temperature or lifetime and does not derive a 1/e
+crossing.
 
-The `slm_feedback` Task accepts one complete 5 x 7 sparse target aligned to the
-35 calibrated atom sites. It extracts the same per-site BOX feature as
-Calibration and averages the raw finite values only for shots that the shared
-`OccupancyProcessor` marks occupied; empty shots never enter the denominator,
-and the loop does not divide by each site's dark/bright response. This is the
-direct qCMOS observable requested by the experiment, not a claim that one
-atom's PSF brightness is hidden trap truth. The Task directly
-updates `w_i *= (GM(F) / F_i) ** 0.45`; it performs no Zernike, modal, hidden
-aberration, or continuous-wavefront fit, and it makes no claim about pixels
-between the qCMOS-observed sites. Success reapplies and saves the independently
-validated phase; Stop or failure restores the incoming phase.
-The shipped defaults are functional acquisition defaults, not evidence of 1%
-finite-shot acceptance. Earlier shot-count screens depended on a rejected
-depth-dependent loading model and are not current evidence. The raw occupied
-BOX observable must pass fresh exact-qCMOS, multi-seed validation; until then
-the Task fails honestly when its authored budget is insufficient rather than
-lowering the criterion or reading virtual hidden truth.
+The `slm_feedback` Task accepts one sparse target point per calibrated site.
+Every coarse or validation measurement is a canonical Camera Measurement
+generation under the stable companion producer `<task>/camera`: it commits all
+`repeat=N` three-frame cycles, seals them, selects readout-event `frame=1`, and
+uses every shot in the repeat statistics. The displayed camera preview applies
+that same frame selection and repeat mean. The estimator subtracts each BOX
+model's dark mean but does not threshold shots through Occupancy; loading and
+occupied-atom brightness both remain part of the measured all-shot
+fluorescence observable.
+
+The controller updates `w_i *= (GM(F) / F_i) ** 0.25`; it performs no Zernike,
+modal, hidden-aberration, or continuous-wavefront fit and makes no claim about
+pixels between measured sites. The Task's own typed previews are the latest
+candidate phase and the complete uniformity-history curve. Success reapplies
+and saves the independently validated phase. Stop accepts the best valid
+measured phase available, republishes that phase beside the current history,
+applies it, and returns its durable artifact; a genuine failure restores the
+incoming phase. The default 100 coarse and 100 validation shots are acquisition
+defaults, not proof that a finite run must reach 1%.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,
@@ -185,11 +189,11 @@ pytest -q
 ```
 
 The formal virtual guard uses the real `zlc_runtime.SignalDataPlane`, catalog,
-descriptor and `NodeHost` paths. Finite processors drain ordered `FollowTap`
-events or consume a retained final snapshot once; infinite sources expose only
-latest data and no loss telemetry. `zlc_pulse` remains a separate protocol
-package, and the virtual sequencer has no alternate analysis path or
-`if virtual` branch.
+descriptor and `NodeHost` paths. Exact processors replay and then follow each
+committed event chunk; latest display processors explicitly coalesce. A
+processor started on a sealed generation consumes its canonical
+`current_dataset()` once. `zlc_pulse` remains a separate protocol package, and
+the virtual sequencer has no alternate analysis path or `if virtual` branch.
 
 ## Current package boundary
 

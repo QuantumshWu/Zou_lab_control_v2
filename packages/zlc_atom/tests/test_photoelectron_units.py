@@ -200,8 +200,6 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
     processor._validate_source_run_record(_Source())
     published = processor.process(
         camera_cycle_snapshot(frames),
-        generation="unit-guard",
-        revision=1,
     )
     assert np.asarray(published.occupied).shape[-1] == calibration.calibration.n_sites
 
@@ -260,6 +258,7 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
 
     def _published(units: bool) -> np.ndarray:
         installation = create_installation("virtual")
+        plane = FakePlane()
         try:
             node = CameraMeasurementNode(
                 camera=installation.device("camera"),
@@ -271,7 +270,7 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
                     frames_per_cycle=1,
                     photoelectrons=units,
                 ),
-                signal_plane=FakePlane(),
+                signal_plane=plane,
                 producer="monitor-units",
             )
             capture = node.monitor()
@@ -279,15 +278,18 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
             sensor = camera.working_point().sensor_shape_yx
             camera.trigger(4, frame=np.full(sensor, dark, dtype=np.uint16))
             deadline = time.monotonic() + 5.0
-            while capture.slot.latest is None and time.monotonic() < deadline:
+            signal = node.signal_key("frames")
+            publication = None
+            while publication is None and time.monotonic() < deadline:
                 capture.poll()
-            latest = capture.slot.latest
+                publication = plane.latest_publication(signal)
             capture.close()
-            assert latest is not None, "the monitor published nothing"
-            # The slot holds CYCLES; a monitor's is always the single latest.
-            assert len(latest) == 1
-            return np.asarray(latest[0][0].image)
+            assert publication is not None, "the monitor published nothing"
+            value = publication.value(signal)
+            assert value is not None
+            return np.asarray(value.snapshot.block.values[0, 0])
         finally:
+            plane.close()
             installation.close()
 
     counts = _published(False)

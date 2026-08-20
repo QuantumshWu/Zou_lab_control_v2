@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -70,6 +71,24 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(session) ->
     assert row.state == "finished"
     assert row.derived_from == ""
     assert not row.shown
+
+
+def test_a_reserved_output_waits_until_its_first_publication() -> None:
+    plane = SimpleNamespace(
+        describe_signals=lambda: (
+            SimpleNamespace(
+                name="@logic/camera/frames",
+                owner_id="camera",
+                shape=None,
+                failure=None,
+                live=True,
+                source_name=None,
+            ),
+        )
+    )
+    (row,) = project_signals(plane)
+    assert row.state == "waiting"
+    assert row.label == "frames  [—]"
 
 
 def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:

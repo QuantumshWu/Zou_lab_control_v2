@@ -4,31 +4,32 @@
 
 ## 1. Persistent Checkpoint
 
-更新时间：2026-08-18
+更新时间：2026-08-19
 启动HEAD：`92089f5fc037f8a87e8efe834ccf83139aaf4383`
 Branch：`master`
-用户执行边界：已确认进入Milestone 2；完成Milestone 2并commit后必须停下，等待用户确认；不得进入Milestone 3。
+用户执行边界：Milestone 3已完成并随本次commit落盘；必须停下等待用户确认，不得进入Milestone 4。
 
 ### 当前状态
 
 - 审计：完成；逐文件证据在`AUDIT/`。
 - 用户裁决：完成；记录在`AUDIT/USER-DECISIONS-2026-08-17.md`与根Goal。
-- Production代码：Milestone 1与2已实现；Milestone 3尚未开始。
+- Production代码：Milestone 1、2、3已实现；Milestone 4尚未开始。
 - Hardware：未访问；本Goal不授权program/flash或实验机device操作。
 - Milestone 0：`COMPLETE` — commit `e854ddf`（`Establish approved architecture and implementation checkpoint`）；唯一Architecture、Plan、Handoff、Goal与Audit证据已纳入版本控制，未改production。
 - Milestone 1：`COMPLETE` — 本milestone commit `Prune dead frameworks and historical product surfaces`；删除dead Runtime/Data/Plot/UI/Pulse/Atom surfaces、self-tests、重复launchers与历史docs，保留所有核实的真实consumer路径。
 - Milestone 2：`COMPLETE` — strict Dataset/Figure/JSON truth、并发原子artifact命名、duplicate-device preflight与Calibration dependency/corruption修复；随本milestone commit落盘。
-- Milestone 3–7：`PENDING`；必须停下等待用户确认。
+- Milestone 3：`COMPLETE` — Canonical Runtime chunk/current/seal、exact/latest Processor、typed preview/Task contract与真实plugin迁移已收口；commit subject见下方。
+- Milestone 4–7：`PENDING`；本次不得开始。
 
-### 当前工作树基线
+### Milestone 3基线与完成边界
 
-Milestone 2从clean HEAD `fba46f4`开始；没有继承未归属的production/test修改，也未访问hardware。
+Milestone 3从clean HEAD `23e820d`开始；没有继承未归属的production/test修改，也未访问hardware。完成commit：`Unify Runtime live data and task previews`。
 
 ### 当前下一步
 
-1. 停止实施并向用户报告Milestone 2的范围、证据与未运行边界。
-2. 等待用户明确确认后，才可把Milestone 3改为`IN PROGRESS`。
-3. 确认前不得设计、编辑或验证Milestone 3。
+1. 停止实施，不开始Milestone 4设计或代码。
+2. 等待用户明确确认进入Milestone 4。
+3. 用户确认后从本commit的clean HEAD恢复，先完整读取Goal、Architecture与本Checkpoint。
 
 ## 2. Milestone状态
 
@@ -37,7 +38,7 @@ Milestone 2从clean HEAD `fba46f4`开始；没有继承未归属的production/te
 | 0 | Approved Architecture、current Plan/Checkpoint、Handoff、Audit evidence | COMPLETE | `e854ddf`；docs/link/diff check，未跑测试 |
 | 1 | Dead framework、parallel pipeline、test-only surface、duplicate launcher/docs/tests删除 | COMPLETE | 本milestone commit；见下方证据 |
 | 2 | Data/Durable/Installation truth | COMPLETE | `Make dataset, archive, path, and installation truth strict`；见§6 |
-| 3 | Canonical Runtime live与Logic Node contract | PENDING | — |
+| 3 | Canonical Runtime live与Logic Node contract | COMPLETE | `Unify Runtime live data and task previews`；见§7 |
 | 4 | Exact Data/Fit/Overlay与Qt lifecycle | PENDING | — |
 | 5 | Pulse/Camera/Remote/FPGA | PENDING | — |
 | 6 | USB-only SLM与robust Feedback | PENDING | — |
@@ -139,7 +140,49 @@ Milestone 2 commit：`Make dataset, archive, path, and installation truth strict
 
 本Checkpoint随该commit落盘；commit后立即停止，不进入Milestone 3。
 
-## 7. Checkpoint更新规则
+## 7. Milestone 3范围与完成证据
+
+### 唯一Runtime truth
+
+- Logic Node只提交本次新增的immutable event chunk；`SignalDataPlane`统一分配generation/revision、冻结declaration/run record，并按固定canonical schema与`(repeat, point)` origin累计run Dataset。
+- `current_dataset()`按指定publication materialize当前prefix并缓存；未写位置保持invalid。传入publication必须属于当前owner stream与generation，旧run同sequence不能串入新run。
+- terminal只seal同一commit history，不再发布第二份Final replacement。正常Stop保留partial；partial materialization失败明确进入`failed`，不伪装成cancelled。
+- Exact Processor replay既有event后逐event follow；latest Processor只保留pending latest。不同Processor可并行，同一Processor严格串行。
+- UI `freeze()`只投影已提交publication，不调用plugin materializer。旧slot/listener/dirty/pull、`FinalDatasetOutput`、`publish_final`与`SignalValue.transient`路径全部删除，无compatibility alias或双写。
+
+### Plugin与Node contract迁移
+
+- Camera finite/monitor每次只提交一个complete cycle；finite由Runtime形成固定run geometry，Stop partial与Panel/freeze/Processor订阅无关。Repeat=100不再每次stack全部历史。
+- Stepped/Seamless Scan只保留schema/placement planner，逐point commit；Runtime拥有future validity与最终Dataset。Temperature的raw scan与per-shot/per-site `survival`同EventRef，删除第二份`survival_rate` Dataset和私有history；preview/artifact从同一survival truth投影。
+- Calibration long/readout/long三帧每cycle直接commit为Monitor preview；删除私有preview slot，terminal按Runtime存在性retire；artifact save前进入不可取消terminal边界。
+- Occupancy只处理source event chunk，严格传播source validity；counts/occupied/valid/rate继承canonical placement，`frame_judged`复用source bytes。Descriptor与processor复用同一`OCCUPANCY_OUTPUTS` typed vocabulary。
+- Descriptor outputs直接使用`DatasetOutputDeclaration`；Processor delivery显式为exact/latest；Task必须显式声明preview或`()`. 所有production Measurement都声明live Dataset和auto-preview，Host在terminal强制完整declaration union、Task progress与artifact存在。
+- SLM Feedback每个coarse/validation使用稳定`<task>/camera`的canonical Camera Measurement `repeat=N` generation。Estimator与preview共用readout frame coordinate 1；preview对同一raw Dataset执行repeat mean。删除私有camera average/readout signal。Task own outputs只保留latest candidate phase与完整history projection；Stop接受并保存本run最好有效测量phase，真实失败恢复incoming。
+
+### Workbench与presentation
+
+- Panel currency由primary与全部companion EventRef共同决定；companion-only变化会更新。Generation replacement先在detached host完成完整配置，再由same-shot cohort统一accept；失败、panel remove、resolver丢失或board close都会关闭/retire staged host，不提前替换当前画面。
+- Typed `NodePreviewSpec`的output/producer/semantic由Workbench完整消费；首个真实publication前signal显示waiting，explicit incompatible kind报错且不伪装成功。Terminal progress清除，preview按Runtime signal存在性retain/retire。
+- Task运行期间禁止Add/Start/Remove Logic与改变Logic draft/device/source/preview policy；允许新增与操作其它Panel。Task own/companion/overlay Panel冻结signal、overlay、cell kind、semantic、selector与threshold，保留title/size/interval/display/fit/viewport/save等纯显示操作。Calibration仍显示三帧facet。
+- 默认Camera/event Panel显示latest event；显式`fate:repeat`/`scope:repeat`才读取Runtime current Dataset进行全history reduction/scope，避免普通preview自动走O(N²)路径。
+
+### Evidence
+
+- Runtime全套：`85 passed`；含跨generation publication拒绝、exact replay/EOS、mixed exact+Monitor、nonblocking materialization、Stop seal failure、无订阅/五次freeze+current读取/exact Processor三种Stop partial完全一致、跨Processor并行与节点内串行/latest coalesce。
+- Repeat=100 deterministic证据：commit/freeze期间prefix materialization为0；100个float event只发布800 bytes，Runtime只保留100个one-cell event及100-cell occupancy mask（values+validity共1000 array bytes）；第一次`current_dataset()`只materialize一次，seal不重复。Camera 96×128 uint16的100个cycle event总payload为2.34375 MiB，而旧prefix-stack路径累计约234.375 MiB。
+- Atom主纵向在最终修复前后累计验证：Camera/Scan/Calibration/Occupancy/Temperature组73项通过；SLM及直接受影响Camera/Scan/Temperature最终组54项通过，其中SLM完整26项通过。真实virtual Calibration→Temperature、SLM canonical Camera/plot semantic、Stop-before-first/accepted/failure与artifact/device一致均覆盖。
+- Workbench/Runtime presentation、same-shot、selection、Logic/Task/preview与Guard-A组最终`159 passed`；`zlc_ui` console views `30 passed`。Staged replacement lifecycle old-red 6项在修复前失败，修复后remove/close/cancel/reaper/cohort回归10项通过。
+- 全仓`pytest --collect-only -q`成功，`1465 tests collected`；250个production Python文件AST解析通过；八包current-checkout import与active README links通过。
+- Production legacy API搜索为0；仅一个测试保留“Camera execute源码不得重新引入旧API”的负断言。`git diff --check`无whitespace error，只有既有line-ending warning。
+- 未运行full 1465-test suite、real-screen、real camera/SLM/FPGA、Vivado/RTL或任何hardware side effect；本milestone不把focused virtual evidence冒充实验机验收。
+
+### Commit与停止门
+
+Milestone 3 commit：`Unify Runtime live data and task previews`。
+
+本Checkpoint随该commit落盘；commit后立即停止，不进入Milestone 4，等待用户明确确认。
+
+## 8. Checkpoint更新规则
 
 每个milestone开始/完成、长测试前或新用户裁决后立即更新：
 

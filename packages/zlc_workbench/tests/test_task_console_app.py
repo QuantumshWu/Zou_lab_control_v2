@@ -512,7 +512,7 @@ QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
 application.processEvents()
 assert presenter._active_task_id == 'calibration'
 assert view._view.status_strip.action_button.isVisible()
-assert not view._view.kind_combo.isEnabled()
+assert view._view.kind_combo.isEnabled()
 assert not view._view.add_panel_button.isEnabled()
 assert not view._rows['calibration'].start_button.isEnabled()
 assert not view._rows['calibration'].stop_button.isVisible()
@@ -523,7 +523,7 @@ until(lambda: any(panel.state.signal == preview_signal for panel in presenter.pa
 preview = next(panel for panel in presenter.panels.values() if panel.state.signal == preview_signal)
 assert preview.host is not None and preview.port is not None
 assert preview_signal in presenter.session.signal_plane.freeze().names()
-assert not view._cards[preview.panel_id].settings_button.isEnabled()
+assert view._cards[preview.panel_id].settings_button.isEnabled()
 
 QtTest.QTest.mouseClick(
     view._view.status_strip.action_button,

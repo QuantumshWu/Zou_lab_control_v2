@@ -24,7 +24,7 @@ from zlc_data import (
     ValueSchema,
 )
 
-from zlc_runtime.dataset import DatasetCoverage
+from zlc_runtime.dataset import MonitorCoverage
 from zlc_runtime.front import build_front
 from zlc_runtime.plane import (
     SignalDataPlane,
@@ -69,7 +69,7 @@ def _output(name: str, revision: int) -> LiveDatasetOutput:
     return LiveDatasetOutput(
         DatasetOutputDeclaration(name, f"test.{name}"),
         snapshot,
-        DatasetCoverage(1, 1),
+        MonitorCoverage(1, 1),
     )
 
 
@@ -81,7 +81,7 @@ def _publication(
     parents: tuple[SignalPublication, ...] = (),
 ) -> SignalPublication:
     output = _output(name.replace("/", "_"), sequence)
-    value = SignalValue(name, output.snapshot, output.coverage, transient=True)
+    value = SignalValue(name, output.snapshot, output.coverage)
     return SignalPublication(
         EventRef(StreamId(stream), StreamGenerationId(generation), sequence),
         {name: value},
@@ -222,18 +222,12 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         dataset_output_declarations=(output.declaration,),
         signal_key=lambda name: f"camera/{name}",
     )
-    slot = SimpleNamespace(
-        freeze_live_outputs=lambda: dict(state),
-        close=lambda: None,
-        notification_failure=None,
-    )
     roi_tap = None
     fit_tap = None
     try:
         plane.reserve(node)
-        plane.attach(node, slot)
         plane.set_front_signals({"camera/frame", "roi/value", "fit/value"})
-        plane.mark_changed(node, slot)
+        plane.commit_live(node, state)
         first_front = plane.freeze()
         root = first_front.publication("camera/frame")
         assert root is not None
@@ -248,7 +242,8 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
             source_name="camera/frame",
             source_publication=root,
         )
-        plane.publish_processor(
+        assert roi_tap.next(0.0).event_ref == root.event_ref
+        plane.commit_processor(
             roi_node,
             {"roi": _output("roi", 1)},
             source_publication=root,
@@ -265,7 +260,8 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
             source_name="roi/value",
             source_publication=roi,
         )
-        plane.publish_processor(
+        assert fit_tap.next(0.0).event_ref == roi.event_ref
+        plane.commit_processor(
             fit_node,
             {"fit": _output("fit", 1)},
             source_publication=roi,
@@ -277,19 +273,19 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         roi_reference = weakref.ref(roi)
         fit_reference = weakref.ref(first_fit)
         state["frame"] = _output("frame", 2)
-        plane.mark_changed(node, slot)
+        plane.commit_live(node, state)
         held_front = plane.freeze()
         root2 = plane.latest_publication("camera/frame")
         assert root2 is not None
         assert held_front.value("camera/frame").snapshot.ref.revision.value == 1
-        plane.publish_processor(
+        plane.commit_processor(
             roi_node,
             {"roi": _output("roi", 2)},
             source_publication=root2,
         )
         roi2 = plane.latest_publication("roi/value")
         assert roi2 is not None
-        plane.publish_processor(
+        plane.commit_processor(
             fit_node,
             {"fit": _output("fit", 2)},
             source_publication=roi2,

@@ -36,6 +36,7 @@ from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_PULSE_CONTRACT,
+    SCAN_OUTPUT,
     ScanAxis,
     ScanPlan,
 )
@@ -48,6 +49,16 @@ TEMPLATE_NAME = "mot_field_template.json"
 BIAS_X_PORT = PULSE_PARAM_FAMILY + "da_bias_x"
 #: Long enough that no scheduling jitter could produce it, short enough to pay.
 AUTHORED_SETTLE_SECONDS = 0.37
+
+
+def _scan_host(node: object, plane: SignalDataPlane) -> NodeHost:
+    return NodeHost(
+        node,
+        plane,
+        instance_id=node.instance_id,
+        kind="measurement",
+        dataset_output_declarations=(SCAN_OUTPUT,),
+    )
 
 
 def _template_sequence():
@@ -96,7 +107,7 @@ def _scripted_run(
             shots_per_point=shots,
             settle_seconds=settle,
         )
-        host = NodeHost(node, plane)
+        host = _scan_host(node, plane)
         host.start()
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -107,8 +118,7 @@ def _scripted_run(
             "the seamless scan never finished; it published "
             f"{bench.published} and kept waiting"
         )
-        value = plane.freeze().value(host.signal_key("scan"))
-        assert value is not None, "the scan published nothing"
+        value = plane.current_dataset(host.signal_key("scan"))
         block = np.asarray(value.block.values, dtype=float)
         # (visit, plan row, y, x): every pixel of a scripted frame carries the
         # publication's index, so the cell mean IS the shot that landed there.
@@ -289,7 +299,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
             shots_per_point=shots,
             settle_seconds=0.05,
         )
-        host = NodeHost(scan_node, plane)
+        host = _scan_host(scan_node, plane)
         host.start()
         deadline = time.monotonic() + 240.0
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -300,8 +310,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         assert observed.error is None, observed.error
         assert observed.terminal
 
-        value = plane.freeze().value(host.signal_key("scan"))
-        assert value is not None, "the scan published nothing"
+        value = plane.current_dataset(host.signal_key("scan"))
         block = np.asarray(value.block.values, dtype=float)
         # (shots, t_off points x probe frames, y, x).
         assert block.shape[:2] == (shots, 2 * len(t_offs))

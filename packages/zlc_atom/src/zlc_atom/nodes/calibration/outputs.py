@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Callable
 
 import numpy as np
 from zlc_data import (
@@ -23,9 +22,9 @@ from zlc_data import (
     ValueSchema,
 )
 from zlc_runtime import (
-    DatasetCoverage,
     DatasetOutputDeclaration,
     LiveDatasetOutput,
+    MonitorCoverage,
 )
 
 from zlc_atom.data import snapshot_from_array
@@ -238,92 +237,42 @@ def cycle_snapshot(
     )
 
 
-class CalibrationCapturePreviewSlot:
-    """The latest complete camera image from one running Calibration."""
+def capture_preview_output(
+    cycle: Sequence[CameraFrameRecord],
+    *,
+    frame_shape: tuple[int, int],
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    generation: object,
+    revision: int,
+    run_record: Mapping[str, object],
+) -> LiveDatasetOutput:
+    """Translate one complete long/readout/long cycle into its live event.
 
-    def __init__(
-        self,
-        *,
-        repeats: int,
-        frame_shape: tuple[int, int],
-        origin_yx: tuple[int, int],
-        binning_yx: tuple[int, int],
-        generation: object,
-        run_record: Mapping[str, object],
-    ) -> None:
-        self.repeats = int(repeats)
-        if self.repeats <= 0:
-            raise ValueError("calibration preview repeats must be positive")
-        self.frame_shape = tuple(int(value) for value in frame_shape)
-        if len(self.frame_shape) != 2 or any(value <= 0 for value in self.frame_shape):
-            raise ValueError("calibration preview frame_shape must be positive Y,X")
-        self.origin_yx = tuple(int(value) for value in origin_yx)
-        self.binning_yx = tuple(max(1, int(value)) for value in binning_yx)
-        self.generation = generation
-        self.run_record = dict(run_record)
-        self._latest_cycle: tuple[CameraFrameRecord, ...] | None = None
-        self._written = 0
-        self._revision = 0
-        self._listener: Callable[[], None] | None = None
-        self._closed = False
+    Calibration keeps no mutable preview history.  The acquisition thread
+    commits this immutable three-frame event directly; Runtime owns its
+    publication identity and the Monitor keeps only the newest complete
+    cycle.
+    """
 
-    @property
-    def written_cycles(self) -> int:
-        return self._written
-
-    def set_change_listener(self, listener: Callable[[], None]) -> None:
-        if self._closed:
-            raise RuntimeError("calibration preview slot is closed")
-        if not callable(listener):
-            raise TypeError("calibration preview listener must be callable")
-        if self._listener is not None:
-            raise RuntimeError("calibration preview listener is already attached")
-        self._listener = listener
-
-    def update(self, cycle: Sequence[CameraFrameRecord]) -> None:
-        if self._closed:
-            raise RuntimeError("calibration preview slot is closed")
-        if self._listener is None:
-            raise RuntimeError("calibration preview slot is not attached")
-        if self._written >= self.repeats:
-            raise RuntimeError("calibration preview received too many cycles")
-        # Validated here, where the cycle arrives, so a bad one is refused
-        # at the source rather than at the next reader.
-        _cycle_array(cycle, self.frame_shape)
-        self._latest_cycle = tuple(cycle)
-        self._written += 1
-        self._revision += 1
-        self._listener()
-
-    def freeze_live_outputs(self) -> dict[str, LiveDatasetOutput]:
-        if self._closed or self._latest_cycle is None:
-            raise RuntimeError("calibration preview has no readable cycle")
-        snapshot = cycle_snapshot(
-            self._latest_cycle,
-            frame_shape=self.frame_shape,
-            origin_yx=self.origin_yx,
-            binning_yx=self.binning_yx,
-            generation=self.generation,
-            revision=self._revision,
-        )
-        # One publication is one COMPLETE cycle, and a cycle's frames are its
-        # point rows -- the same accounting the camera monitor keeps.
-        return {
-            CAPTURE_PREVIEW_DECLARATION.name: LiveDatasetOutput(
-                CAPTURE_PREVIEW_DECLARATION,
-                snapshot,
-                DatasetCoverage(_PREVIEW_FRAMES, _PREVIEW_FRAMES),
-                self.run_record,
-            )
-        }
-
-    def close(self) -> None:
-        self._closed = True
-        self._listener = None
+    snapshot = cycle_snapshot(
+        cycle,
+        frame_shape=frame_shape,
+        origin_yx=origin_yx,
+        binning_yx=binning_yx,
+        generation=generation,
+        revision=revision,
+    )
+    return LiveDatasetOutput(
+        CAPTURE_PREVIEW_DECLARATION,
+        snapshot,
+        MonitorCoverage(_PREVIEW_FRAMES, _PREVIEW_FRAMES),
+        run_record,
+    )
 
 
 __all__ = [
     "CAPTURE_PREVIEW_DECLARATION",
-    "CalibrationCapturePreviewSlot",
+    "capture_preview_output",
     "cycle_snapshot",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zlc_pulse import PulseSequence
+from zlc_plot import Reduction
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.slm.solver import load_target
@@ -14,17 +15,17 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodePreviewSpec,
     NodeKind,
-    OutputSpec,
     ResolvedArtifact,
     ResolvedWorkspaceResource,
     WorkspaceResourceSpec,
 )
 from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC, TrapCalibration
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
+from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
 
 from .task import (
     CANDIDATE_PHASE_OUTPUT,
-    READOUT_AVERAGE_OUTPUT,
+    READOUT_FRAME_COORDINATE,
     SLM_PHASE_ARTIFACT_CONTRACT,
     SlmFeedbackTask,
     UNIFORMITY_HISTORY_OUTPUT,
@@ -117,17 +118,22 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactInputSpec("target_path", "SLM target", TARGET_CODEC, argument_name="target"),
     ),
     outputs=(
-        OutputSpec(READOUT_AVERAGE_OUTPUT.name, READOUT_AVERAGE_OUTPUT.contract_id),
-        OutputSpec(CANDIDATE_PHASE_OUTPUT.name, CANDIDATE_PHASE_OUTPUT.contract_id),
-        OutputSpec(
-            UNIFORMITY_HISTORY_OUTPUT.name,
-            UNIFORMITY_HISTORY_OUTPUT.contract_id,
-        ),
+        CANDIDATE_PHASE_OUTPUT,
+        UNIFORMITY_HISTORY_OUTPUT,
     ),
     node_previews=(
-        NodePreviewSpec(READOUT_AVERAGE_OUTPUT.name, "image"),
-        NodePreviewSpec(CANDIDATE_PHASE_OUTPUT.name, "image"),
-        NodePreviewSpec(UNIFORMITY_HISTORY_OUTPUT.name, "curve"),
+        NodePreviewSpec(
+            CAMERA_FRAMES_OUTPUT,
+            "image",
+            semantic={
+                "fate:frame": READOUT_FRAME_COORDINATE,
+                "fate:repeat": "reduce",
+                "reduction": Reduction.MEAN,
+            },
+            producer="camera",
+        ),
+        NodePreviewSpec(CANDIDATE_PHASE_OUTPUT, "image"),
+        NodePreviewSpec(UNIFORMITY_HISTORY_OUTPUT, "curve"),
     ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", SLM_PHASE_ARTIFACT_CONTRACT),

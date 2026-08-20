@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 import threading
 
-from zlc_data import canonical_text
+from zlc_data import OwnedSnapshot, canonical_text
 
-from .dataset import DatasetCoverage, MonitorCoverage
 from .dataset_output import (
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 from .owner_mailbox import RunOwnerMailbox
@@ -28,6 +27,9 @@ __all__ = [
 
 
 _UNRESOLVED = object()
+_WORKER_KINDS = frozenset(("measurement", "task"))
+_NODE_KINDS = _WORKER_KINDS | {"processor"}
+_INPUT_DELIVERIES = frozenset(("exact", "latest"))
 
 
 class _StartSuppressed(Exception):
@@ -103,10 +105,21 @@ class NodeExecutionContext:
 
         return self._host.generation
 
+    @property
+    def instance_id(self) -> str:
+        """The descriptor-owned instance identity of this exact run."""
+
+        return self._host.instance_id
+
     def cancel_requested(self) -> bool:
         return self._host.cancel_requested
 
-    def seal_terminal(self) -> None:
+    def seal_terminal(
+        self,
+        *,
+        accept_stop: bool = False,
+        partial: bool = False,
+    ) -> None:
         """Atomically enter a worker's non-cancellable terminal commit.
 
         A Stop that was accepted first rejects the seal.  Once the seal
@@ -114,18 +127,39 @@ class NodeExecutionContext:
         side effects as cancellation; an exception still ends as failure.
         """
 
-        self._host._seal_worker_terminal()
+        if type(accept_stop) is not bool:
+            raise TypeError("accept_stop must be bool")
+        if type(partial) is not bool:
+            raise TypeError("partial must be bool")
+        self._host._seal_worker_terminal(
+            accept_stop=accept_stop,
+            partial=partial,
+        )
 
-    def attach_live_outputs(self, slot: object) -> None:
-        """Attach one application-owned live output slot to this generation."""
-
-        self._host._attach_live(slot)
-
-    def publish_final(
+    def commit_live(
         self,
-        outputs: Mapping[str, FinalDatasetOutput],
+        outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        growing_outputs: Iterable[str] = (),
     ) -> Mapping[str, SignalValue]:
-        return self._host._publish_final(outputs)
+        """Commit one new immutable event bundle into this run's datasets."""
+
+        return self._host._commit_live(
+            outputs,
+            growing_outputs=growing_outputs,
+        )
+
+    def current_dataset(
+        self,
+        output_name: str,
+        publication: SignalPublication | None = None,
+    ) -> OwnedSnapshot:
+        """Materialize one of this node's declared output prefixes."""
+
+        return self._host._data_plane.current_dataset(
+            self._host.signal_key(output_name),
+            publication,
+        )
 
     def report_progress(
         self,
@@ -147,11 +181,12 @@ class NodeHost:
         data_plane: SignalDataPlane,
         request_owner_wake: Callable[[], None] | None = None,
         *,
-        instance_id: str | None = None,
-        dataset_output_declarations: Iterable[DatasetOutputDeclaration] | None = None,
-        dataset_output_names: Iterable[str] | None = None,
-        output_names: Iterable[str] | None = None,
+        instance_id: str,
+        kind: str,
+        dataset_output_declarations: Iterable[DatasetOutputDeclaration],
         input_signal: str | None = None,
+        input_delivery: str | None = None,
+        required_artifact_names: Iterable[str] = (),
         signal_namer: Callable[[str, str], str] | None = None,
     ) -> None:
         if not callable(getattr(data_plane, "freeze", None)):
@@ -165,30 +200,70 @@ class NodeHost:
         if not callable(signal_namer):
             raise TypeError("signal_namer must be callable")
 
-        source_signal = self._resolve_source_signal(node, input_signal)
-        mode = "processor" if source_signal is not None else "worker"
-
-        identity = instance_id
-        if identity is None:
-            identity = getattr(node, "instance_id", None)
-        if identity is None:
-            raise ValueError("node instance_id is required")
-        identity = canonical_text(identity, "node instance_id")
-
-        declarations = self._resolve_declarations(
-            node,
-            identity,
-            dataset_output_declarations,
-            dataset_output_names if dataset_output_names is not None else output_names,
+        identity = canonical_text(instance_id, "node instance_id")
+        normalized_kind = canonical_text(
+            str(getattr(kind, "value", kind)),
+            "node kind",
         )
+        if normalized_kind not in _NODE_KINDS:
+            raise ValueError(f"node kind must be one of {tuple(sorted(_NODE_KINDS))}")
+        mode = "processor" if normalized_kind == "processor" else "worker"
+
+        declarations = tuple(dataset_output_declarations)
+        if any(
+            not isinstance(value, DatasetOutputDeclaration)
+            for value in declarations
+        ):
+            raise TypeError(
+                "dataset_output_declarations must contain DatasetOutputDeclaration values"
+            )
+        if len({value.name for value in declarations}) != len(declarations):
+            raise ValueError("Dataset output declarations must be unique")
         if mode == "processor" and not declarations:
             raise ValueError("processor must declare at least one Dataset output")
 
+        source_signal = (
+            None
+            if input_signal is None
+            else canonical_text(input_signal, "processor input signal")
+        )
+        delivery = (
+            None
+            if input_delivery is None
+            else canonical_text(
+                str(getattr(input_delivery, "value", input_delivery)),
+                "processor input delivery",
+            )
+        )
+        if mode == "processor":
+            if source_signal is None:
+                raise ValueError("processor input_signal is required")
+            if delivery not in _INPUT_DELIVERIES:
+                raise ValueError(
+                    "processor input_delivery must be 'exact' or 'latest'"
+                )
+        elif (source_signal is None) != (delivery is None):
+            raise ValueError(
+                "worker input_signal and input_delivery must be supplied together"
+            )
+        elif delivery is not None and delivery not in _INPUT_DELIVERIES:
+            raise ValueError("worker input_delivery must be 'exact' or 'latest'")
+
+        artifacts = tuple(
+            canonical_text(value, "required artifact name")
+            for value in required_artifact_names
+        )
+        if len(set(artifacts)) != len(artifacts):
+            raise ValueError("required artifact names must be unique")
+
         self._node = node
         self._mode = mode
+        self._kind = normalized_kind
         self.instance_id = identity
         self._dataset_outputs = declarations
         self._source_signal = source_signal
+        self._input_delivery = delivery
+        self._required_artifact_names = artifacts
         self._data_plane = data_plane
         self._request_owner_wake = request_owner_wake
         self._signal_namer = signal_namer
@@ -212,81 +287,17 @@ class NodeHost:
         self._stop_event = threading.Event()
         self._start_lock = threading.Lock()
         self._worker_stop_sealed = False
+        self._worker_stop_accepted = False
+        self._worker_partial_seal = False
         self._stop_reason = "Host requested stop"
         self._plane_state = False
-        self._live_opened = False
-        self._final_published = False
+        self._live_commit_count = 0
+        self._committed_output_names: set[str] = set()
+        self._progress_reported = False
         self._processor_path: str | None = None
         self._source_publication: SignalPublication | None = None
+        self._terminal_source: SignalValue | None = None
         self._follow_tap: FollowTap[SignalPublication] | None = None
-
-    @staticmethod
-    def _resolve_names(
-        explicit: Iterable[str],
-        fallback: Iterable[str],
-        *,
-        field: str,
-    ) -> tuple[str, ...]:
-        explicit_values = tuple(explicit)
-        values = explicit_values if explicit_values else tuple(fallback)
-        normalized = tuple(canonical_text(value, field) for value in values)
-        if len(set(normalized)) != len(normalized):
-            raise ValueError(f"{field}s must be unique")
-        return normalized
-
-    @classmethod
-    def _resolve_declarations(
-        cls,
-        node: object,
-        instance_id: str,
-        explicit: Iterable[DatasetOutputDeclaration] | None,
-        names: Iterable[str] | None,
-    ) -> tuple[DatasetOutputDeclaration, ...]:
-        candidate = explicit
-        if candidate is None:
-            candidate = getattr(node, "dataset_output_declarations", None)
-        if candidate is not None:
-            values = tuple(candidate)
-            if values and all(isinstance(value, DatasetOutputDeclaration) for value in values):
-                if len({value.name for value in values}) != len(values):
-                    raise ValueError("Dataset output declarations must be unique")
-                return values
-            if values and any(not isinstance(value, str) for value in values):
-                raise TypeError("dataset_output_declarations must contain declarations")
-            if values:
-                names = values
-            elif explicit is not None:
-                names = () if names is None else names
-        if names is None:
-            names = getattr(node, "dataset_output_names", None)
-        if names is None:
-            names = getattr(node, "output_names", ())
-        output_names = cls._resolve_names(names, (), field="Dataset output name")
-        return tuple(
-            DatasetOutputDeclaration(name, f"runtime.{instance_id}.{name}")
-            for name in output_names
-        )
-
-    @staticmethod
-    def _resolve_source_signal(node: object, explicit: str | None) -> str | None:
-        candidate: object = explicit
-        if candidate is None:
-            candidate = getattr(node, "input_signal", None)
-        if candidate is None:
-            candidate = getattr(node, "source_signal", None)
-        if candidate is None:
-            candidate = getattr(node, "input_signals", None)
-        if candidate is None:
-            return None
-        if isinstance(candidate, Mapping):
-            values = tuple(candidate.values())
-        elif isinstance(candidate, (tuple, list, set, frozenset)):
-            values = tuple(candidate)
-        else:
-            values = (candidate,)
-        if len(values) != 1:
-            raise ValueError("processor must declare exactly one input signal key")
-        return canonical_text(values[0], "processor input signal")
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -410,7 +421,6 @@ class NodeHost:
             self._data_plane.withdraw_processor(self)
             self._plane_state = False
         elif self._plane_state:
-            self._data_plane.detach_live(self)
             self._plane_state = False
         if self._owner is not None:
             self._owner.shutdown()
@@ -432,11 +442,15 @@ class NodeHost:
         self._result = _UNRESOLVED
         self._stop_event.clear()
         self._worker_stop_sealed = False
+        self._worker_stop_accepted = False
+        self._worker_partial_seal = False
         self._stop_reason = "Host requested stop"
-        self._live_opened = False
-        self._final_published = False
+        self._live_commit_count = 0
+        self._committed_output_names.clear()
+        self._progress_reported = False
         self._processor_path = None
         self._source_publication = None
+        self._terminal_source = None
         self._follow_tap = None
 
     def _start_worker(self) -> None:
@@ -452,6 +466,7 @@ class NodeHost:
                 self._execute_worker,
                 generation=generation,
             )
+            self._phase = "running"
         except BaseException:
             self._active = False
             self._terminal = True
@@ -485,11 +500,10 @@ class NodeHost:
                 continue
             if error is None:
                 result = completion.future.result()
-                if self.cancel_requested:
+                if self.cancel_requested and not self._worker_stop_accepted:
                     self._finish_worker_cancelled()
                 else:
-                    self._result = result
-                    self._finish_worker_success()
+                    self._finish_worker_success(result)
             else:
                 self._finish_worker_failure(error)
             self._owner.mark_owner_reaped()
@@ -515,45 +529,42 @@ class NodeHost:
         """
 
         kept = False
-        if phase == "cancelled" and self._live_opened:
+        terminal_phase = phase
+        terminal_error = error
+        if phase == "cancelled" and self._live_commit_count:
             try:
-                self._finish_live_plane_state(cut_short=True)
-                kept = True
-            except BaseException:
-                # A generation that cannot be closed cleanly is not left
-                # half-attached to the plane; it goes, and the operator is not
-                # told a second, unrelated story about why.
+                self._seal_committed_plane_state(cut_short=True)
+                kept = self._plane_state
+            except BaseException as seal_error:
                 kept = False
+                terminal_phase = "failed"
+                terminal_error = (
+                    "stopped partial Dataset could not be sealed: "
+                    f"{type(seal_error).__name__}: {seal_error}"
+                )
         if not kept:
             self._retire_plane_state()
         self._result = _UNRESOLVED
-        self._phase = phase
-        self._error = error
+        self._phase = terminal_phase
+        self._error = terminal_error
+        self._progress = None
         self._active = False
         self._terminal = True
 
-    def _finish_worker_success(self) -> None:
-        if self._dataset_outputs and not self._final_published:
-            if self._live_opened:
-                try:
-                    self._finish_live_plane_state()
-                except BaseException as error:
-                    self._finish_worker_failure(error)
-                    return
-            else:
-                self._finish_worker_failure(
-                    RuntimeError(
-                        "node declared Dataset outputs but did not publish final outputs"
-                    )
+    def _finish_worker_success(self, result: object) -> None:
+        try:
+            self._validate_worker_terminal_contract(result)
+            if self._live_commit_count:
+                self._seal_committed_plane_state(
+                    cut_short=self._worker_partial_seal
                 )
-                return
-        elif self._live_opened:
-            try:
-                self._finish_live_plane_state()
-            except BaseException as error:
-                self._finish_worker_failure(error)
-                return
+        except BaseException as error:
+            self._finish_worker_failure(error)
+            return
+        self._result = result
         self._phase = "done"
+        self._error = None
+        self._progress = None
         self._active = False
         self._terminal = True
 
@@ -561,55 +572,108 @@ class NodeHost:
         # An error raised out of a run the operator STOPPED is the stop: the
         # node was interrupted in the middle of a step, which is what Stop
         # does.  It ends the same way a stop caught between steps ends.
-        if isinstance(error, _StartSuppressed) or self.cancel_requested:
+        if isinstance(error, _StartSuppressed) or (
+            self.cancel_requested and not self._worker_stop_accepted
+        ):
             self._end_run("cancelled", None)
             return
         self._end_run("failed", f"{type(error).__name__}: {error}")
 
-    def _seal_worker_terminal(self) -> None:
+    def _seal_worker_terminal(
+        self,
+        *,
+        accept_stop: bool = False,
+        partial: bool = False,
+    ) -> None:
         with self._start_lock:
             if self._mode != "worker" or not self._active:
                 raise RuntimeError("only an active worker can seal its terminal commit")
-            if self._stop_event.is_set():
+            stopped = self._stop_event.is_set()
+            if stopped and not accept_stop:
                 raise _StartSuppressed()
+            self._worker_stop_accepted = stopped and accept_stop
+            self._worker_partial_seal = partial
             self._worker_stop_sealed = True
 
-    def _publish_final(
+    def _commit_live(
         self,
-        outputs: Mapping[str, FinalDatasetOutput],
+        outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        growing_outputs: Iterable[str],
     ) -> Mapping[str, SignalValue]:
         if self._mode != "worker":
             raise RuntimeError("processor outputs publish through their source publication")
         if not self._active or not self._plane_state:
             raise RuntimeError("node Dataset generation is not active")
-        if self._final_published:
-            raise RuntimeError("node final outputs were already published")
         if not isinstance(outputs, Mapping) or not outputs:
-            raise TypeError("final outputs must be a non-empty mapping")
-        if not set(outputs).issubset({value.name for value in self._dataset_outputs}):
-            raise ValueError("final outputs contain an undeclared name")
-        published = self._data_plane.publish_final(self, outputs)
-        self._final_published = True
+            raise TypeError("live outputs must be a non-empty mapping")
+        values = dict(outputs)
+        if any(not isinstance(value, LiveDatasetOutput) for value in values.values()):
+            raise TypeError("live output values must be LiveDatasetOutput")
+        declared = {value.name for value in self._dataset_outputs}
+        if not set(values).issubset(declared):
+            raise ValueError("live outputs contain an undeclared name")
+        growing = tuple(
+            canonical_text(value, "growing output name")
+            for value in growing_outputs
+        )
+        if len(set(growing)) != len(growing):
+            raise ValueError("growing output names must be unique")
+        if not set(growing).issubset(values):
+            raise ValueError("growing outputs must be present in this commit")
+        published = self._data_plane.commit_live(
+            self,
+            values,
+            growing_outputs=growing,
+        )
+        for name in growing:
+            self._data_plane.current_dataset(self.signal_key(name))
+        with self._start_lock:
+            self._live_commit_count += 1
+            self._committed_output_names.update(values)
+        self._request_owner_wake()
         return published
 
-    def _attach_live(self, slot: object) -> None:
-        if self._mode == "processor":
-            raise RuntimeError("processor output is owned by the latest-only lane")
-        if self._live_opened:
-            raise RuntimeError("one Node generation may open one live Dataset")
-        if not self._plane_state:
-            raise RuntimeError("node Dataset generation is not reserved")
-        if not callable(getattr(slot, "set_change_listener", None)):
-            raise TypeError("live Dataset slot must support set_change_listener")
-        if not callable(getattr(slot, "freeze_live_outputs", None)):
-            raise TypeError("live Dataset slot must materialize typed outputs")
-        try:
-            slot.set_change_listener(lambda: self._data_plane.mark_changed(self, slot))
-            self._data_plane.attach(self, slot)
-        except BaseException:
-            slot.close()
-            raise
-        self._live_opened = True
+    def _validate_worker_terminal_contract(self, result: object) -> None:
+        declared = {value.name for value in self._dataset_outputs}
+        if declared:
+            if not self._committed_output_names:
+                raise RuntimeError(
+                    f"hosted {self._kind} finished without a live Dataset commit"
+                )
+            if self._committed_output_names != declared:
+                missing = tuple(sorted(declared - self._committed_output_names))
+                extra = tuple(sorted(self._committed_output_names - declared))
+                raise RuntimeError(
+                    "node live commits do not cover its complete declaration union: "
+                    f"missing={missing}, extra={extra}"
+                )
+        if self._kind == "task" and not self._progress_reported:
+            raise RuntimeError("hosted Task finished without reporting progress")
+        for name in self._required_artifact_names:
+            value = (
+                result.get(name)
+                if isinstance(result, Mapping)
+                else getattr(result, name, None)
+            )
+            if value is None:
+                raise RuntimeError(
+                    f"node result lacks required artifact {name!r}"
+                )
+            if isinstance(value, str) and not value.strip():
+                raise RuntimeError(
+                    f"required artifact {name!r} is an empty path"
+                )
+            try:
+                path = Path(value).expanduser().resolve()
+            except TypeError as error:
+                raise TypeError(
+                    f"required artifact {name!r} must be a filesystem path"
+                ) from error
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"required artifact {name!r} is not a file: {path}"
+                )
 
     def _retire_plane_state(self) -> None:
         if not self._plane_state:
@@ -619,21 +683,15 @@ class NodeHost:
         else:
             self._data_plane.retire(self)
         self._plane_state = False
-        self._live_opened = False
 
-    def _detach_plane_state(self) -> None:
+    def _seal_committed_plane_state(self, *, cut_short: bool = False) -> None:
         if not self._plane_state:
             return
-        self._data_plane.detach_live(self)
-        self._plane_state = False
-        self._live_opened = False
-
-    def _finish_live_plane_state(self, *, cut_short: bool = False) -> None:
-        if not self._plane_state:
-            return
-        retained = self._data_plane.finish_live(self, cut_short=cut_short)
+        retained = self._data_plane.seal_committed(
+            self,
+            cut_short=cut_short,
+        )
         self._plane_state = retained
-        self._live_opened = False
 
     def _start_processor(self) -> None:
         assert self._source_signal is not None
@@ -649,19 +707,29 @@ class NodeHost:
             self._terminal = True
             self._error = "processor publication lost its selected input signal"
             raise RuntimeError(self._error)
-        if isinstance(source.coverage, MonitorCoverage):
+        if not self._data_plane.is_generation_live(self._source_signal):
+            snapshot = self._data_plane.current_dataset(
+                self._source_signal,
+                publication,
+            )
+            self._terminal_source = SignalValue(
+                self._source_signal,
+                snapshot,
+                None,
+                run_record=publication.run_record,
+            )
+            self._processor_path = "frozen"
+            self._start_frozen_processor(publication, self._terminal_source)
+            return
+        if self._input_delivery == "latest":
             self._processor_path = "latest"
             self._start_latest_processor(publication)
             return
-        if source.coverage is None:
-            self._processor_path = "frozen"
-            self._start_frozen_processor(publication, source)
-            return
-        if isinstance(source.coverage, DatasetCoverage):
+        if self._input_delivery == "exact":
             self._processor_path = "follow"
             self._start_follow_processor(publication, source)
             return
-        raise TypeError("processor source has an unknown coverage type")
+        raise RuntimeError("processor input delivery is not configured")
 
     def _start_latest_processor(self, publication: SignalPublication) -> None:
         assert self._source_signal is not None
@@ -688,8 +756,8 @@ class NodeHost:
         source: SignalValue,
     ) -> None:
         assert self._source_signal is not None
-        if source.name != self._source_signal or source.coverage is not None:
-            raise ValueError("frozen Processor requires its selected FINAL signal")
+        if source.name != self._source_signal:
+            raise ValueError("frozen Processor received another input signal")
         self._data_plane.reserve_frozen_processor(
             self,
             source_name=self._source_signal,
@@ -720,12 +788,9 @@ class NodeHost:
         if self._stop_event.is_set():
             raise _StartSuppressed()
         publication = self._source_publication
-        source_name = self._source_signal
-        if publication is None or source_name is None:
+        source = self._terminal_source
+        if publication is None or source is None:
             raise RuntimeError("frozen Processor lost its exact source publication")
-        source = publication.value(source_name)
-        if source is None or source.coverage is not None:
-            raise RuntimeError("frozen Processor source is not a FINAL signal")
         return self._evaluate_processor_outputs(source)
 
     def _poll_frozen_processor(self) -> None:
@@ -758,11 +823,13 @@ class NodeHost:
                 owner.mark_owner_reaped()
                 continue
             try:
-                self._data_plane.publish_terminal_processor(
+                self._data_plane.commit_processor(
                     self,
                     outputs,
                     source_publication=publication,
+                    retain=True,
                 )
+                self._data_plane.seal_processor(self)
             except BaseException as error:
                 self._finish_frozen_processor_failure(error)
             else:
@@ -770,6 +837,7 @@ class NodeHost:
                 self._terminal = True
                 self._phase = "done"
                 self._error = None
+                self._progress = None
             owner.mark_owner_reaped()
 
     def _finish_frozen_processor_cancelled(self) -> None:
@@ -779,6 +847,7 @@ class NodeHost:
         self._terminal = True
         self._phase = "cancelled"
         self._error = None
+        self._progress = None
 
     def _finish_frozen_processor_failure(self, error: BaseException) -> None:
         if isinstance(error, _StartSuppressed) or self.cancel_requested:
@@ -790,6 +859,7 @@ class NodeHost:
         self._terminal = True
         self._phase = "failed"
         self._error = f"{type(error).__name__}: {error}"
+        self._progress = None
 
     def _start_follow_processor(
         self,
@@ -832,50 +902,41 @@ class NodeHost:
             raise TypeError("Follow Processor input must be SignalValue")
         if source.name != self._source_signal:
             raise ValueError("Follow Processor received another input signal")
-        if not isinstance(source.coverage, DatasetCoverage):
-            raise ValueError("Follow Processor input must have DatasetCoverage")
         return source
 
     def _run_follow_processor(self) -> None:
-        publication = self._source_publication
         tap = self._follow_tap
         source_name = self._source_signal
-        if publication is None or tap is None or source_name is None:
+        if tap is None or source_name is None:
             raise RuntimeError("Follow Processor lost its exact source binding")
         last_publication: SignalPublication | None = None
-        last_outputs: Mapping[str, LiveDatasetOutput] | None = None
         try:
             while True:
                 if self._stop_event.is_set():
                     raise _StartSuppressed()
+                try:
+                    publication = tap.next()
+                except StreamEndedEarly:
+                    if self._stop_event.is_set():
+                        raise _StartSuppressed()
+                    if last_publication is None:
+                        raise RuntimeError(
+                            "Follow Processor source ended without a publishable result"
+                        )
+                    self._data_plane.seal_processor(self)
+                    self._request_owner_wake()
+                    return
                 source = self._validate_follow_source(publication.value(source_name))
                 outputs = self._evaluate_processor_outputs(source)
                 if self._stop_event.is_set():
                     raise _StartSuppressed()
-                self._data_plane.publish_processor(
+                self._data_plane.commit_processor(
                     self,
                     outputs,
                     source_publication=publication,
                 )
                 self._request_owner_wake()
                 last_publication = publication
-                last_outputs = outputs
-                try:
-                    publication = tap.next().payload
-                except StreamEndedEarly:
-                    if self._stop_event.is_set():
-                        raise _StartSuppressed()
-                    if last_publication is None or last_outputs is None:
-                        raise RuntimeError(
-                            "Follow Processor source ended without a publishable result"
-                        )
-                    self._data_plane.publish_terminal_processor(
-                        self,
-                        last_outputs,
-                        source_publication=last_publication,
-                    )
-                    self._request_owner_wake()
-                    return
         finally:
             tap.close()
 
@@ -902,6 +963,7 @@ class NodeHost:
                 self._terminal = True
                 self._phase = "done"
                 self._error = None
+                self._progress = None
             owner.mark_owner_reaped()
 
     def _finish_follow_processor_cancelled(self) -> None:
@@ -915,6 +977,7 @@ class NodeHost:
         self._terminal = True
         self._phase = "cancelled"
         self._error = None
+        self._progress = None
 
     def _finish_follow_processor_failure(self, error: BaseException) -> None:
         if isinstance(error, _StartSuppressed) or self.cancel_requested:
@@ -930,28 +993,15 @@ class NodeHost:
         self._terminal = True
         self._phase = "failed"
         self._error = f"{type(error).__name__}: {error}"
+        self._progress = None
 
     def validate_processor_source(self, source: SignalValue | None) -> None:
-        """A processor subscribes to a LIVE signal, never to a finished one.
-
-        Latest-only semantics means keeping only the signal's current value.
-        Monitor coverage describes completeness of that visible value; it does
-        not count values replaced before processing.  A finished measurement
-        has no coverage because there is nothing left to keep up with --
-        deriving from it is a one-shot computation, not a subscription.
-        """
+        """Validate identity only; the descriptor owns exact/latest delivery."""
 
         if not isinstance(source, SignalValue):
             raise TypeError("processor input must be SignalValue")
         if source.name != self._source_signal:
             raise ValueError("processor received another input signal")
-        if not isinstance(source.coverage, MonitorCoverage):
-            raise ValueError(
-                f"a processor subscribes to a live signal, but "
-                f"{source.name!r} is a finished measurement (no monitor "
-                f"coverage); derive from it directly instead of hosting a "
-                f"processor on it"
-            )
 
     def evaluate_processor(self, source: SignalValue) -> Mapping[str, LiveDatasetOutput]:
         self.validate_processor_source(source)
@@ -978,7 +1028,7 @@ class NodeHost:
         if not self._active or self.cancel_requested:
             return
         self.validate_processor_source(source)
-        self._data_plane.publish_processor(
+        self._data_plane.commit_processor(
             self,
             outputs,
             source_publication=source_publication,
@@ -993,6 +1043,7 @@ class NodeHost:
         self._terminal = True
         self._phase = "failed"
         self._error = f"{type(error).__name__}: {error}"
+        self._progress = None
 
     def accept_processor_cancelled(self) -> None:
         if not self._active:
@@ -1002,6 +1053,7 @@ class NodeHost:
         self._terminal = True
         self._phase = "cancelled"
         self._error = None
+        self._progress = None
 
     def request_processor_owner_wake(self) -> None:
         self._request_owner_wake()
@@ -1013,4 +1065,5 @@ class NodeHost:
             raise RuntimeError("inactive node cannot report progress")
         with self._start_lock:
             self._progress = progress
+            self._progress_reported = True
         self._request_owner_wake()

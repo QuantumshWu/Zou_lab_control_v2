@@ -48,7 +48,7 @@ def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
         block.ref(StreamGenerationId(f"{name}-generation")),
         block,
     )
-    value = SignalValue(name, snapshot, None, transient=True)
+    value = SignalValue(name, snapshot, None)
     publication = SignalPublication(
         EventRef(StreamId("camera"), StreamGenerationId("generation"), sequence),
         {name: value},
@@ -122,11 +122,14 @@ class _Port:
         *,
         interval: int = 100,
         fail_prepare: int = 0,
+        companions: tuple[str, ...] = (),
     ) -> None:
         self.panel_id = panel_id
         self.signal_name = signal_name
+        self.front_signals = (signal_name, *companions)
         self.display_interval_ms = interval
         self.presented = None
+        self.presented_refs: tuple[EventRef, ...] = ()
         self.fail_prepare = fail_prepare
         self.acceptable = True
         self.updates = []
@@ -141,6 +144,9 @@ class _Port:
 
     def presented_publication(self):
         return self.presented
+
+    def presented_front_refs(self):
+        return self.presented_refs
 
     def prepare(self, value, publication, front):
         # The front is the coherent freeze this update is drawn from; a port
@@ -163,6 +169,10 @@ class _Port:
             object(),
             publication,
             value,
+            tuple(
+                front.publication(name).event_ref
+                for name in self.front_signals
+            ),
             future,
         )
         self.updates.append(update)
@@ -178,6 +188,7 @@ class _Port:
 
     def accept(self, update, operation):
         self.presented = update.publication
+        self.presented_refs = update.front_refs
         self.accepted.append((update, operation))
         if update in self.pending:
             self.pending.remove(update)
@@ -195,6 +206,48 @@ class _Port:
 
     def report_waiting(self, missing_signal):
         self.waiting.append(missing_signal)
+
+
+def test_companion_only_currency_change_schedules_the_panel_again() -> None:
+    primary = _front("camera/frame", sequence=7)
+    first_companion = _front("occupancy/occupied", sequence=11)
+
+    def combined(companion: SignalFront) -> SignalFront:
+        signals = {
+            "camera/frame": primary.value("camera/frame"),
+            "occupancy/occupied": companion.value("occupancy/occupied"),
+        }
+        publications = {
+            "camera/frame": primary.publication("camera/frame"),
+            "occupancy/occupied": companion.publication("occupancy/occupied"),
+        }
+        return SignalFront(signals, {}, publications)
+
+    plane = _Plane(combined(first_companion))
+    channels = OwnerChannels(_Sink())
+    arbiter = SurfaceBatchArbiter(channels)
+    port = _Port(
+        "camera",
+        "camera/frame",
+        companions=("occupancy/occupied",),
+    )
+    scheduler = BoardScheduler(
+        plane,
+        HarmonicClock((100, 200, 400, 800)),
+        arbiter,
+        lambda: (port,),
+    )
+
+    scheduler.on_tick()
+    port.futures[-1].set_result("first")
+    scheduler.on_owner_turn(lambda: None)
+    assert len(port.updates) == 1
+
+    plane.front = combined(_front("occupancy/occupied", sequence=12))
+    scheduler.on_tick()
+    assert len(port.updates) == 2, (
+        "a companion EventRef changed while the primary stayed current"
+    )
 
 
 def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
@@ -221,6 +274,33 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
     assert arbiter.pending_cohorts == 0
 
 
+def test_surface_arbiter_releases_origin_when_panel_disappears() -> None:
+    front = _front()
+    port = _Port("panel", "camera/frame")
+    arbiter = SurfaceBatchArbiter(OwnerChannels(_Sink()))
+
+    assert arbiter.enqueue_group((port,), front)
+    port.futures[0].set_result("ready")
+    arbiter.drain(lambda _panel_id: None)
+
+    assert port.finished == [port.updates[0]]
+    assert not port.pending
+
+
+def test_surface_arbiter_close_releases_running_origin_operation() -> None:
+    front = _front()
+    port = _Port("panel", "camera/frame")
+    arbiter = SurfaceBatchArbiter(OwnerChannels(_Sink()))
+
+    assert arbiter.enqueue_group((port,), front)
+    assert port.futures[0].set_running_or_notify_cancel()
+    arbiter.close()
+
+    assert not port.futures[0].cancelled()
+    assert port.finished == [port.updates[0]]
+    assert not port.pending
+
+
 def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
     """Sibling signals of one publication present as one atomic cohort.
 
@@ -236,7 +316,6 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
         "occupancy/counts",
         first_value.snapshot,
         None,
-        transient=True,
         run_record=first_value.run_record,
     )
     publication = SignalPublication(

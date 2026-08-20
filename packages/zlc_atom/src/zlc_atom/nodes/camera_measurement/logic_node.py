@@ -20,7 +20,6 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
     NodePreviewSpec,
-    OutputSpec,
     SelectionMapping,
 )
 
@@ -237,8 +236,8 @@ LOGIC_NODE = LogicNodeDescriptor(
     # One output whatever the cycle size: the frames live on the dataset's
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with
     # the acquisition configuration.
-    outputs=(OutputSpec(CAMERA_FRAMES_OUTPUT.name, CAMERA_FRAMES_OUTPUT.contract_id),),
-    node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT.name, "facet_grid"),),
+    outputs=(CAMERA_FRAMES_OUTPUT,),
+    node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera"),
     ),

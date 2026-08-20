@@ -37,9 +37,8 @@ class SignalRow:
     label: str
     #: The producer's group heading.
     producer: str
-    #: "live" while more data can arrive, "finished" once it cannot, and
-    #: "failed" when its producer reported one -- three states an operator acts
-    #: on differently, which is why this is not a bool.
+    #: "waiting" before the first publication, "live" while more data can
+    #: arrive, "finished" once it cannot, and "failed" on producer failure.
     state: str
     #: The signal this one was cut from, or "" when it was acquired.
     derived_from: str
@@ -75,7 +74,10 @@ def project_signals(
         )
         for description in plane.describe_signals()
     ]
-    return tuple(sorted(rows, key=lambda row: (row.state != "live", row.producer, row.name)))
+    order = {"live": 0, "waiting": 1, "finished": 2, "failed": 3}
+    return tuple(
+        sorted(rows, key=lambda row: (order[row.state], row.producer, row.name))
+    )
 
 
 def format_signal_shape(shape: object) -> str:
@@ -93,6 +95,8 @@ def format_signal_shape(shape: object) -> str:
 def _state(description: object) -> str:
     if getattr(description, "failure", None):
         return "failed"
+    if getattr(description, "shape", None) is None:
+        return "waiting"
     return "live" if description.live else "finished"
 
 

@@ -18,12 +18,10 @@ fired table, so such a plan is refused when it is bound -- by name, pointing
 at the node that can run it.
 
 THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
-``acquire`` plays the plan and hands back the dataset it filled; ``execute``
-is that plus the one sentence the ``seamless_scan`` NODE adds -- publish it as
-this run's FINAL scan.  A Task that scans for a reason of its own publishes
-something else: the ``temperature`` Task's finals are survival per site and
-per point, and the frames are the evidence underneath.  Both run this loop, so
-neither can drift from the other about what a played point means.
+``acquire`` plays the plan and commits each point; Runtime hands back the
+current canonical scan.  A Task that scans for a reason of its own commits its
+typed companions in the same event bundle, so neither can drift from the
+other about what a played point means.
 """
 
 from __future__ import annotations
@@ -42,9 +40,7 @@ from zlc_pulse import (
     scan_rows_to_wire,
     validate_scan_table,
 )
-from zlc_runtime import FinalDatasetOutput
-
-from .dataset import SCAN_OUTPUT, ScanDatasetWriter, ScanLiveSlot
+from .dataset import SCAN_OUTPUT, ScanDatasetWriter
 from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
 from .source import check_cancelled, wait_for_board
 
@@ -156,14 +152,13 @@ class SeamlessScanMeasurement:
         rows = self.plan.rows()
         shots = self.shots_per_point
         cycles = self.repeats * len(rows) * shots
+        run_record = self.run_record()
         writer = ScanDatasetWriter(
             rows,
             [(port.label, port.unit) for port in self.ports],
             visits=self.repeats * shots,
-            generation=context.generation,
+            run_record=run_record,
         )
-        slot = ScanLiveSlot()
-        context.attach_live_outputs(slot)
         # The apparatus is stopped ONCE, because the whole table plays from
         # one fire: the settle is what the world is given to reach the state
         # the first point starts from.
@@ -185,15 +180,29 @@ class SeamlessScanMeasurement:
                 row_index, shot = divmod(rest, shots)
                 value = self.source.next_value(context)
                 visit = sweep * shots + shot
-                writer.write(value, row=row_index, visit=visit)
-                front = {SCAN_OUTPUT.name: writer.live_output()}
+                front = {
+                    SCAN_OUTPUT.name: writer.write(
+                        value,
+                        row=row_index,
+                        visit=visit,
+                    )
+                }
                 if on_point is not None:
                     # Whatever the reader made of this point travels in the
                     # SAME front as the frames it was read from: they are one
                     # shot, and two publications could show a panel a survival
                     # that its own evidence has not arrived for yet.
-                    front.update(on_point(value, row=row_index, visit=visit) or {})
-                slot.publish(front)
+                    companions = on_point(value, row=row_index, visit=visit) or {}
+                    front.update(
+                        {
+                            name: replace(output, run_record=run_record)
+                            for name, output in companions.items()
+                        }
+                    )
+                context.commit_live(
+                    front,
+                    growing_outputs=tuple(front),
+                )
                 if (played + 1) % shots == 0:
                     context.report_progress(
                         "Scanning",
@@ -202,10 +211,12 @@ class SeamlessScanMeasurement:
                     )
             wait_for_board(self.sequencer, context)
         finally:
-            self.source.close()
-            self.sequencer.safe()
+            try:
+                self.source.close()
+            finally:
+                self.sequencer.safe()
         check_cancelled(context)
-        return writer.snapshot()
+        return context.current_dataset(SCAN_OUTPUT.name)
 
     def run_record(self) -> dict[str, object]:
         """What this run WAS, in the words of the plan that drove it."""
@@ -221,17 +232,7 @@ class SeamlessScanMeasurement:
         }
 
     def execute(self, context: object):
-        snapshot = self.acquire(context)
-        context.publish_final(
-            {
-                SCAN_OUTPUT.name: FinalDatasetOutput(
-                    SCAN_OUTPUT,
-                    snapshot,
-                    self.run_record(),
-                )
-            }
-        )
-        return snapshot
+        return self.acquire(context)
 
 
 __all__ = ["SeamlessScanMeasurement"]

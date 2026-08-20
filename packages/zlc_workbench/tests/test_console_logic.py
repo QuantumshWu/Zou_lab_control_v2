@@ -25,6 +25,7 @@ from zlc_workbench.logic import (
     build_arguments,
     device_key_options,
     finalize_logic_draft,
+    make_host,
     stable_signal_key,
 )
 from zlc_workbench.panel_catalog import task_console_fitting_spec
@@ -279,7 +280,7 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     presenter.beat()
     presenter.poll_logic()
     assert tuple(
-        (spec.output_name, spec.plot_kind)
+        (spec.output.name, spec.plot_kind)
         for spec in presenter.logic[node_id].preview_specs
     ) == (("frames", "facet_grid"),), "the running node's declaration is the run's"
     presenter.stop_logic(node_id)
@@ -705,14 +706,15 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         DatasetInputSpec,
         LogicNodeDescriptor,
         NodeKind,
-        OutputSpec,
     )
+    from zlc_runtime import DatasetOutputDeclaration
 
     produced = presenter.session.day_folder() / "declared-calibration.json"
     produced.write_text("{}", encoding="utf-8")
 
     class _Task:
-        def execute(self, _context):
+        def execute(self, context):
+            context.report_progress("artifact saved")
             return SimpleNamespace(artifact_path=produced)
 
     built_in: list[Path] = []
@@ -728,6 +730,7 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         artifact_outputs=(
             ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
         ),
+        node_previews=(),
         build=_build,
     )
     consumer = LogicNodeDescriptor(
@@ -735,7 +738,7 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         NodeKind.PROCESSOR,
         AuthoringSchema(),
         input_specs=(
-            DatasetInputSpec("frames", "camera.frames.v1"),
+            DatasetInputSpec("frames", "camera.frames.v1", "exact"),
             ArtifactInputSpec(
                 "calibration_path",
                 "Calibration artifact",
@@ -748,7 +751,7 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
                 argument_name="calibration",
             ),
         ),
-        outputs=(OutputSpec("judged", "judged.v1"),),
+        outputs=(DatasetOutputDeclaration("judged", "judged.v1"),),
         build=lambda *, calibration, source_signal, signal_plane: object(),
     )
     presenter.catalog = LogicCatalog((descriptor, consumer))
@@ -844,6 +847,63 @@ def test_an_unresolved_processor_source_disables_start_before_click(presenter) -
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is None
     assert "source_signal" in presenter.logic[node_id].draft_error
+
+
+def test_make_host_passes_descriptor_contract_without_reading_node_attributes() -> None:
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
+    from zlc_runtime import DatasetOutputDeclaration, SignalDataPlane
+
+    output = DatasetOutputDeclaration("judged", "occupancy.judged.v1")
+    descriptor = LogicNodeDescriptor(
+        "explicit_processor",
+        NodeKind.PROCESSOR,
+        AuthoringSchema(),
+        input_specs=(DatasetInputSpec("frames", "camera.frames.v1", "exact"),),
+        outputs=(output,),
+        build=lambda **_values: object(),
+    )
+    plane = SignalDataPlane()
+    host = make_host(
+        descriptor,
+        object(),
+        signal_plane=plane,
+        instance_id="processor-7",
+        source_signal="@logic/camera-2/frames",
+    )
+    try:
+        assert host.instance_id == "processor-7"
+        assert host.dataset_output_declarations == (output,)
+        assert host._source_signal == "@logic/camera-2/frames"
+        assert host._input_delivery == "exact"
+
+        scan_output = DatasetOutputDeclaration("scan", "scan.result")
+        scan_descriptor = LogicNodeDescriptor(
+            "explicit_scan",
+            NodeKind.MEASUREMENT,
+            AuthoringSchema(),
+            input_specs=(
+                DatasetInputSpec("source", None, "exact"),
+            ),
+            outputs=(scan_output,),
+            build=lambda **_values: object(),
+        )
+        scan_host = make_host(
+            scan_descriptor,
+            object(),
+            signal_plane=plane,
+            instance_id="scan-3",
+            source_signal="@logic/camera-2/frames",
+        )
+        try:
+            assert scan_host._mode == "worker"
+            assert scan_host._source_signal is None
+            assert scan_host._input_delivery is None
+        finally:
+            scan_host.shutdown()
+    finally:
+        host.shutdown()
+        plane.close()
 
 
 def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
@@ -944,6 +1004,7 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
                 ),
             ),
         ),
+        node_previews=(),
         build=build,
     )
     presenter.catalog = LogicCatalog((descriptor,))

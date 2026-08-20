@@ -10,6 +10,7 @@ from threading import Lock
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from .plane import SignalDataPlane, SignalFront, SignalPublication, SignalValue
+from .streams import EventRef
 
 
 def _positive_int(value: object, field: str) -> int:
@@ -230,6 +231,7 @@ class SurfaceUpdate:
     host_token: object
     publication: SignalPublication
     value: SignalValue
+    front_refs: tuple[EventRef, ...]
     future: Future
 
     def __post_init__(self) -> None:
@@ -244,6 +246,10 @@ class SurfaceUpdate:
             raise TypeError("surface update requires SignalValue")
         if self.publication.value(self.value.name) is not self.value:
             raise ValueError("surface update value is not owned by its publication")
+        refs = tuple(self.front_refs)
+        if not refs or any(not isinstance(value, EventRef) for value in refs):
+            raise TypeError("surface update front_refs must contain EventRef values")
+        object.__setattr__(self, "front_refs", refs)
         if not isinstance(self.future, Future):
             raise TypeError("surface update future must be Future")
 
@@ -259,7 +265,7 @@ class SurfacePort(Protocol):
     @property
     def display_interval_ms(self) -> int: ...
 
-    def presented_publication(self) -> SignalPublication | None: ...
+    def presented_front_refs(self) -> tuple[EventRef, ...]: ...
 
     def prepare(
         self,
@@ -306,7 +312,7 @@ class _ShotCohort:
     boundaries_left: int
     sealed: bool
     abandoned: bool
-    updates: list[SurfaceUpdate]
+    updates: list[tuple[SurfacePort, SurfaceUpdate]]
 
 
 class SurfaceBatchArbiter:
@@ -371,6 +377,19 @@ class SurfaceBatchArbiter:
         return tuple(dict.fromkeys(names))
 
     @staticmethod
+    def _front_refs(
+        port: SurfacePort,
+        front: SignalFront,
+    ) -> tuple[EventRef, ...] | None:
+        refs: list[EventRef] = []
+        for name in SurfaceBatchArbiter._front_signals(port):
+            publication = front.publication(name)
+            if publication is None:
+                return None
+            refs.append(publication.event_ref)
+        return tuple(refs)
+
+    @staticmethod
     def _finish_unpresented(
         submitted: Sequence[tuple[SurfacePort, SurfaceUpdate]],
     ) -> None:
@@ -401,6 +420,15 @@ class SurfaceBatchArbiter:
 
         inputs: list[tuple[SurfacePort, SignalValue, SignalPublication]] = []
         for port, panel_id in zip(members, panel_ids, strict=True):
+            front_refs = self._front_refs(port, front)
+            if front_refs is None:
+                missing = next(
+                    name
+                    for name in self._front_signals(port)
+                    if front.publication(name) is None
+                )
+                port.report_waiting(missing)
+                return False
             signal_name = self._signal_name(port)
             value = front.value(signal_name)
             publication = front.publication(signal_name)
@@ -419,6 +447,9 @@ class SurfaceBatchArbiter:
                     raise TypeError("surface port prepare() must return SurfaceUpdate or None")
                 if update.panel_id != self._panel_id(port):
                     raise ValueError("surface update belongs to another panel")
+                expected_refs = self._front_refs(port, front)
+                if expected_refs is None or update.front_refs != expected_refs:
+                    raise ValueError("surface update currency differs from its front")
                 submitted.append((port, update))
         except BaseException:
             self._finish_unpresented(submitted)
@@ -426,7 +457,6 @@ class SurfaceBatchArbiter:
         if not submitted:
             return False
 
-        batch = tuple(update for _port, update in submitted)
         cohort: _ShotCohort | None = None
         if shot_roots is not None:
             for candidate in self._cohorts:
@@ -449,14 +479,18 @@ class SurfaceBatchArbiter:
                 updates=[],
             )
             self._cohorts.append(cohort)
-        cohort.updates.extend(batch)
+        # Keep the submitting port beside its operation.  The board's current
+        # resolver may stop returning it while the render is in flight (panel
+        # removal or replacement), but that original port still owns the
+        # pending entry and any staged generation host that must be retired.
+        cohort.updates.extend(submitted)
         if not cohort.sealed and cohort.window_panels and cohort.window_panels <= {
-            update.panel_id for update in cohort.updates
+            update.panel_id for _port, update in cohort.updates
         }:
             # Every displayed follower is aboard: nothing else can join this
             # shot, so seal now rather than waiting out the fallback window.
             cohort.sealed = True
-        for update in batch:
+        for _port, update in submitted:
             update.future.add_done_callback(
                 lambda _future: self._channels.notify_surface()
             )
@@ -482,7 +516,7 @@ class SurfaceBatchArbiter:
             if cohort.sealed:
                 continue
             if cohort.window_panels and not all(
-                update.future.done() for update in cohort.updates
+                update.future.done() for _port, update in cohort.updates
             ):
                 continue
             cohort.boundaries_left -= 1
@@ -531,13 +565,15 @@ class SurfaceBatchArbiter:
             # solo panel cannot throttle the rest of the board.
             blocked_panels: set[str] = set()
             for cohort in tuple(self._cohorts):
-                panel_ids = {update.panel_id for update in cohort.updates}
+                panel_ids = {
+                    update.panel_id for _port, update in cohort.updates
+                }
                 if panel_ids & blocked_panels:
                     blocked_panels |= panel_ids
                     continue
                 if not cohort.abandoned and any(
                     update.future.done() and self._superseded(update.future)
-                    for update in cohort.updates
+                    for _port, update in cohort.updates
                 ):
                     # One member was coalesced away for a newer frame: the
                     # WHOLE shot leaves unpresented and the group jumps to
@@ -545,20 +581,12 @@ class SurfaceBatchArbiter:
                     # ahead of the other half.
                     cohort.abandoned = True
                 if not cohort.sealed or not all(
-                    update.future.done() for update in cohort.updates
+                    update.future.done() for _port, update in cohort.updates
                 ):
                     blocked_panels |= panel_ids
                     continue
                 if cohort.abandoned:
-                    resolved: list[tuple[SurfacePort, SurfaceUpdate]] = []
-                    for update in cohort.updates:
-                        try:
-                            port = resolve(update.panel_id)
-                        except BaseException:
-                            port = None
-                        if port is not None:
-                            resolved.append((port, update))
-                    self._finish_unpresented(resolved)
+                    self._finish_unpresented(cohort.updates)
                     self._cohorts.remove(cohort)
                     progressed = True
                     continue
@@ -578,18 +606,20 @@ class SurfaceBatchArbiter:
         ] = []
         batch_error: BaseException | None = None
         blamed: SurfaceUpdate | None = None
-        for update in cohort.updates:
+        for origin, update in cohort.updates:
             try:
                 port = resolve(update.panel_id)
             except BaseException as error:
                 port = None
                 batch_error = batch_error or error
                 blamed = blamed or update
-            if port is None:
+            if port is not origin:
                 batch_error = batch_error or RuntimeError(
-                    f"surface port {update.panel_id!r} no longer exists"
+                    f"surface port {update.panel_id!r} no longer resolves "
+                    "to its submitting port"
                 )
                 blamed = blamed or update
+                self._finish_unpresented(((origin, update),))
                 records.append((None, update, None, False))
                 continue
             try:
@@ -682,11 +712,12 @@ class SurfaceBatchArbiter:
     def cancel_all(self) -> None:
         while self._cohorts:
             cohort = self._cohorts.pop()
-            for update in cohort.updates:
+            for _port, update in cohort.updates:
                 try:
                     update.future.cancel()
                 except BaseException:
                     pass
+            self._finish_unpresented(cohort.updates)
 
     def close(self) -> None:
         if self._closed:
@@ -745,13 +776,16 @@ class BoardScheduler:
         return self._last_front
 
     @staticmethod
-    def _presented_publication(port: SurfacePort) -> SignalPublication | None:
-        value = getattr(port, "presented_publication", None)
-        if callable(value):
-            value = value()
-        if value is not None and not isinstance(value, SignalPublication):
-            raise TypeError("surface port presented_publication must be SignalPublication or None")
-        return value
+    def _presented_front_refs(port: SurfacePort) -> tuple[EventRef, ...]:
+        value = getattr(port, "presented_front_refs", None)
+        if not callable(value):
+            raise TypeError("surface port must provide presented_front_refs()")
+        refs = tuple(value())
+        if any(not isinstance(item, EventRef) for item in refs):
+            raise TypeError(
+                "surface port presented_front_refs must contain EventRef values"
+            )
+        return refs
 
     def _port_map(self) -> dict[str, SurfacePort]:
         values = tuple(self._ports())
@@ -832,7 +866,10 @@ class BoardScheduler:
         window_panels = frozenset(
             SurfaceBatchArbiter._panel_id(port)
             for port in ports
-            if SurfaceBatchArbiter._signal_name(port) in follower_outputs
+            if any(
+                name in follower_outputs
+                for name in SurfaceBatchArbiter._front_signals(port)
+            )
         )
         # Panels stage individually; the arbiter couples exactly what
         # causality couples by assembling equal shot-root batches into one
@@ -842,9 +879,10 @@ class BoardScheduler:
             signal_name = SurfaceBatchArbiter._signal_name(port)
             panel_id = SurfaceBatchArbiter._panel_id(port)
             publication = front.publication(signal_name)
+            front_refs = SurfaceBatchArbiter._front_refs(port, front)
             if (
-                publication is not None
-                and self._presented_publication(port) is publication
+                front_refs is not None
+                and self._presented_front_refs(port) == front_refs
             ):
                 self._owed.pop(panel_id, None)
                 continue
@@ -858,8 +896,8 @@ class BoardScheduler:
                 front,
                 shot_roots=(
                     None
-                    if publication is None
-                    else self._shot_roots(publication)
+                    if front_refs is None
+                    else self._port_shot_roots(port, front)
                 ),
                 window_panels=(
                     window_panels if publication is not None else frozenset()
@@ -876,6 +914,22 @@ class BoardScheduler:
                 self._owed.pop(panel_id, None)
         self._arbiter.tick_boundary()
         return front
+
+    def _port_shot_roots(
+        self,
+        port: SurfacePort,
+        front: SignalFront,
+    ) -> frozenset | None:
+        roots: set[object] = set()
+        for name in SurfaceBatchArbiter._front_signals(port):
+            publication = front.publication(name)
+            if publication is None:
+                return None
+            current = self._shot_roots(publication)
+            if current is None:
+                return None
+            roots.update(current)
+        return frozenset(roots)
 
     def on_owner_turn(self, poll_lifecycle: Callable[[], None]) -> None:
         if not callable(poll_lifecycle):

@@ -1,14 +1,10 @@
-"""Headless signal plane with producer-local causal coherence.
+"""Headless committed signal plane with producer-local causal coherence.
 
-A hosted producer publishes through its application-owned live output slot;
-this plane freezes only sources that reported a new revision. Each source is one producer
-transaction. Combining their latest immutable fronts for one consumer cycle
-does not assert that independent producers observed the same physical event.
-
-Freeze-latest, not a bus.  Each changed slot materialises its own atomic
-transaction exactly once; unchanged slots reuse their immutable fronts.  Independent
-producers still advance independently.  Within one explicit source -> Processor
-component, however, a newer source and its active descendants replace the previous
+Each producer commits one immutable event transaction.  Runtime accumulates
+finite datasets, seals their terminal state, and projects a coherent visible
+front without calling back into plugin materializers.  Independent producers
+advance independently.  Within one explicit source -> Processor component,
+however, a newer source and its active descendants replace the previous
 component together. A slow Processor therefore cannot expose source revision N
 beside its own derived revision N-1.
 
@@ -22,21 +18,25 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+import math
 import threading
-import time
 from types import MappingProxyType
-from typing import Callable, Mapping, Protocol, runtime_checkable
+from typing import Callable, Iterable, Mapping, Protocol, runtime_checkable
 import uuid
 from weakref import WeakKeyDictionary
 
+import numpy as np
 from zlc_data import (
+    BlockId,
+    DataBlock,
+    DatasetRevision,
     DatasetSchema,
     OwnedSnapshot,
     StreamGenerationId,
+    owned_snapshot_from_arrays,
 )
 from .dataset_output import (
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 from .dataset import (
@@ -44,7 +44,6 @@ from .dataset import (
     MonitorCoverage,
 )
 from .streams import (
-    AcquisitionProducer,
     AcquisitionStream,
     EventRef,
     FollowTap,
@@ -72,6 +71,38 @@ def _run_records_equal(
         return dict(left) == dict(right)
     except (TypeError, ValueError):
         return False
+
+
+def _freeze_run_record_value(value: object, path: str) -> object:
+    """Take one strict, recursively immutable run-record snapshot."""
+
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise TypeError(f"{path} contains a non-finite number")
+        return value
+    if isinstance(value, Mapping):
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} keys must be text")
+            frozen[key] = _freeze_run_record_value(item, f"{path}.{key}")
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            _freeze_run_record_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise TypeError(f"{path} contains unsupported {type(value).__name__}")
+
+
+def _freeze_run_record(value: Mapping[str, object]) -> Mapping[str, object]:
+    if isinstance(value, MappingProxyType):
+        return value
+    frozen = _freeze_run_record_value(value, "run_record")
+    assert isinstance(frozen, Mapping)
+    return frozen
 
 
 @runtime_checkable
@@ -122,8 +153,10 @@ class SignalValue:
     name: str
     snapshot: OwnedSnapshot
     coverage: DatasetCoverage | MonitorCoverage | None
-    transient: bool = False         # withdrawn with its live producer
     run_record: Mapping[str, object] = field(default_factory=dict)
+    growing: bool = False
+    canonical_schema: DatasetSchema | None = None
+    cell_origin: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         name = canonical_text(self.name, "signal name")
@@ -134,16 +167,23 @@ class SignalValue:
             (DatasetCoverage, MonitorCoverage),
         ):
             raise TypeError("signal coverage has an unknown type")
-        if not isinstance(self.transient, bool):
-            raise TypeError("signal transient flag must be bool")
+        if type(self.growing) is not bool:
+            raise TypeError("signal growing flag must be bool")
+        if (self.canonical_schema is None) != (self.cell_origin is None):
+            raise ValueError(
+                "signal canonical_schema and cell_origin must appear together"
+            )
+        if self.canonical_schema is not None:
+            if not isinstance(self.canonical_schema, DatasetSchema):
+                raise TypeError("signal canonical_schema must be DatasetSchema")
+            origin = tuple(self.cell_origin)
+            if len(origin) != 2 or any(type(value) is not int for value in origin):
+                raise TypeError("signal cell_origin must contain two integers")
+            object.__setattr__(self, "cell_origin", origin)
         if not isinstance(self.run_record, Mapping):
             raise TypeError("signal value run_record must be a mapping")
         object.__setattr__(self, "name", name)
-        object.__setattr__(
-            self,
-            "run_record",
-            MappingProxyType(dict(self.run_record)),
-        )
+        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
 
     # The block is the value; these read off it rather than copying, so two
     # consumers describing "the same signal" cannot describe different data.
@@ -255,7 +295,7 @@ class SignalPublication:
             raise ValueError("signal publication parent refs must be unique")
         if not isinstance(self.run_record, Mapping):
             raise TypeError("signal publication run_record must be a mapping")
-        run_record = dict(self.run_record)
+        run_record = _freeze_run_record(self.run_record)
         if any(
             not _run_records_equal(value.run_record, run_record)
             for value in signals.values()
@@ -265,30 +305,10 @@ class SignalPublication:
             )
         object.__setattr__(self, "signals", MappingProxyType(signals))
         object.__setattr__(self, "direct_parent_refs", parents)
-        object.__setattr__(
-            self,
-            "run_record",
-            MappingProxyType(run_record),
-        )
+        object.__setattr__(self, "run_record", run_record)
 
     def value(self, name: str) -> SignalValue | None:
         return self.signals.get(str(name))
-
-
-class _SignalPublicationPayloadContract:
-    """Immutable payload contract for a generation's lossless FollowTap."""
-
-    @staticmethod
-    def snapshot(payload: SignalPublication) -> SignalPublication:
-        return payload
-
-    @staticmethod
-    def validate(payload: SignalPublication) -> None:
-        if not isinstance(payload, SignalPublication):
-            raise TypeError("followed signal payload must be SignalPublication")
-
-
-_SIGNAL_PUBLICATION_CONTRACT = _SignalPublicationPayloadContract()
 
 
 @dataclass(frozen=True)
@@ -356,7 +376,7 @@ def _declared_outputs(declarations) -> dict[str, DatasetOutputDeclaration]:
 
 def _require_published_declaration(
     route_name: str,
-    output: FinalDatasetOutput | LiveDatasetOutput,
+    output: LiveDatasetOutput,
     declared: Mapping[str, DatasetOutputDeclaration],
 ) -> None:
     if output.name != route_name:
@@ -375,7 +395,7 @@ def _require_published_declaration(
 def _shared_run_record(
     outputs: Mapping[
         str,
-        FinalDatasetOutput | LiveDatasetOutput | SignalValue,
+        LiveDatasetOutput | SignalValue,
     ],
 ) -> Mapping[str, object]:
     """Copy the one run record shared by an atomic sibling output bundle."""
@@ -384,14 +404,10 @@ def _shared_run_record(
     for output in outputs.values():
         if not isinstance(
             output,
-            (FinalDatasetOutput, LiveDatasetOutput, SignalValue),
+            (LiveDatasetOutput, SignalValue),
         ):
             raise TypeError("run_record carrier has an unknown output type")
-        record = (
-            {}
-            if output.run_record is None
-            else dict(output.run_record)
-        )
+        record = {} if output.run_record is None else output.run_record
         if shared is None:
             shared = record
             continue
@@ -413,6 +429,25 @@ def _node_instance_id(node: object) -> str:
     return canonical_text(producer.instance_id, "signal producer instance_id")
 
 
+def _restamp_snapshot(
+    snapshot: OwnedSnapshot,
+    *,
+    block_id: str,
+    generation: StreamGenerationId,
+    revision: int,
+) -> OwnedSnapshot:
+    """Give committed immutable bytes their Runtime-owned content identity."""
+
+    block = DataBlock(
+        BlockId(block_id),
+        DatasetRevision(revision),
+        snapshot.block.values,
+        snapshot.block.validity,
+        snapshot.block.schema,
+    )
+    return OwnedSnapshot(block.ref(generation), block)
+
+
 @dataclass(slots=True)
 class _GenerationState:
     """The sole mutable state for one process-local signal generation."""
@@ -422,8 +457,8 @@ class _GenerationState:
     kind: str
     output_names: tuple[str, ...]
     bare_names: Mapping[str, str]
+    declarations: Mapping[str, DatasetOutputDeclaration]
     node: object | None = None
-    slot: object | None = None
     source_name: str | None = None
     #: Whether this route participates in same-shot front coherence.  False
     #: for presentation-paced followers (a panel's accepted-fit signals):
@@ -443,7 +478,17 @@ class _GenerationState:
     terminal: bool = False
     retired: bool = False
     publication_stream: AcquisitionStream[SignalPublication] | None = None
-    publication_producer: AcquisitionProducer[SignalPublication] | None = None
+    exact_outputs: frozenset[str] | None = None
+    canonical_schemas: Mapping[str, DatasetSchema] = field(default_factory=dict)
+    growing_outputs: frozenset[str] = frozenset()
+    commit_values: dict[str, list[tuple[int, SignalValue]]] = field(
+        default_factory=dict
+    )
+    commit_origins: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+    occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
+    materialized: dict[str, tuple[int, OwnedSnapshot]] = field(default_factory=dict)
+    committed_run_record: Mapping[str, object] | None = None
+    sealing: bool = False
 
 
 @dataclass(slots=True)
@@ -473,7 +518,6 @@ class _LatestOnlyProcessorLane:
 
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(
-            max_workers=1,
             thread_name_prefix="signal-latest-processor",
         )
         self._lock = threading.Lock()
@@ -676,7 +720,6 @@ class SignalDataPlane:
             tuple[SignalPublication, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
-        self._dirty: set[str] = set()
         self._front_signals: frozenset[str] = frozenset()
         self._membership_changed = False
         self._closed = False
@@ -768,7 +811,6 @@ class SignalDataPlane:
         state.retired = True
         state.publication = None
         state.failure = None
-        self._dirty.discard(state.owner_id)
 
     def _install_state_locked(
         self,
@@ -778,7 +820,6 @@ class SignalDataPlane:
         output_names: tuple[str, ...],
         bare_names: Mapping[str, str],
         node: object | None = None,
-        slot: object | None = None,
         source_name: str | None = None,
         coherent: bool = True,
     ) -> _GenerationState:
@@ -800,6 +841,22 @@ class SignalDataPlane:
             for value in bare.values()
         ):
             raise ValueError("signal generation bare names must be canonical text")
+        if node is None:
+            declarations: Mapping[str, DatasetOutputDeclaration] = MappingProxyType({})
+        else:
+            declared = _declared_outputs(
+                _require_signal_producer(node).dataset_output_declarations
+            )
+            if set(declared) != set(bare.values()):
+                raise ValueError(
+                    "signal generation declarations differ from its output names"
+                )
+            declarations = MappingProxyType(
+                {
+                    qualified: declared[bare_name]
+                    for qualified, bare_name in bare.items()
+                }
+            )
         source_state = None
         if source_name is not None:
             source_name = canonical_text(source_name, "signal route source name")
@@ -815,8 +872,8 @@ class SignalDataPlane:
             kind=kind,
             output_names=names,
             bare_names=MappingProxyType(bare),
+            declarations=declarations,
             node=node,
-            slot=slot,
             source_name=source_name,
             coherent=bool(coherent),
             source_owner_id=(
@@ -836,12 +893,10 @@ class SignalDataPlane:
     ) -> AcquisitionStream[SignalPublication]:
         stream = state.publication_stream
         if stream is None:
-            stream, producer = AcquisitionStream.create(
-                StreamId(f"{state.owner_id}:signal-publications"),
-                _SIGNAL_PUBLICATION_CONTRACT,
+            stream = AcquisitionStream.create(
+                next_sequence=state.next_sequence,
             )
             state.publication_stream = stream
-            state.publication_producer = producer
         return stream
 
     @staticmethod
@@ -869,10 +924,9 @@ class SignalDataPlane:
     def reserve(self, node: object) -> StreamGenerationId:
         """Reserve one producer generation before its worker can publish.
 
-        The composition owner performs this before submitting a run.  A later
-        live attachment upgrades the same state in place; a FINAL-only run uses
-        it directly.  Publication can therefore never recreate a generation
-        after retirement.
+        The composition owner performs this before submitting a run.  Every
+        event then enters through ``commit_live``; publication can therefore
+        never recreate a generation after retirement.
         """
 
         owner_id = _node_instance_id(node)
@@ -889,7 +943,6 @@ class SignalDataPlane:
                     and existing.node is node
                     and existing.output_names == output_names
                     and dict(existing.bare_names) == dict(bare_names)
-                    and existing.slot is None
                 ):
                     return existing.generation
                 raise RuntimeError("producer generation is already active")
@@ -906,10 +959,9 @@ class SignalDataPlane:
         """Start a producer generation, superseding a FINISHED predecessor.
 
         A generation belongs to one run, but the node that performs the run is a
-        reusable object, so something has to decide when the previous run's
-        generation ends.  It cannot end at ``publish_final``: the result must
-        stay readable afterwards, which is exactly why nobody retires it.  It
-        ends when the next run begins -- and that is this method.
+        reusable object, so something has to decide when the previous retained
+        generation is replaced.  It ends when the next run begins -- and that
+        is this method.
 
         Use this to START a run.  ``reserve`` is the lower-level operation that
         refuses to touch an existing generation at all; a caller that reserves
@@ -930,19 +982,158 @@ class SignalDataPlane:
             self._withdraw_owner(owner_id)
         return self.reserve(node)
 
-    def attach(
-        self,
-        node,
-        slot,
-    ) -> None:
-        if slot is None:
-            raise ValueError("a monitor slot is required")
-        if not callable(getattr(slot, "freeze_live_outputs", None)):
-            raise TypeError(
-                "live slot must expose application-owned freeze_live_outputs()"
+    @staticmethod
+    def _declarations_by_bare(
+        state: _GenerationState,
+    ) -> dict[str, DatasetOutputDeclaration]:
+        return {
+            state.bare_names[qualified]: declaration
+            for qualified, declaration in state.declarations.items()
+        }
+
+    @staticmethod
+    def _materialization_input_locked(
+        state: _GenerationState,
+        signal_name: str,
+        sequence: int,
+    ) -> tuple[
+        DatasetSchema,
+        StreamGenerationId,
+        tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+    ]:
+        schema = state.canonical_schemas.get(signal_name)
+        if not isinstance(schema, DatasetSchema):
+            raise RuntimeError("signal has no canonical Dataset schema")
+        chunks = tuple(
+            (value.snapshot, origin)
+            for (commit_sequence, value), origin in zip(
+                state.commit_values.get(signal_name, ()),
+                state.commit_origins.get(signal_name, ()),
+                strict=True,
             )
+            if commit_sequence <= sequence
+        )
+        return schema, state.generation, chunks
+
+    @staticmethod
+    def _materialize_dataset(
+        signal_name: str,
+        sequence: int,
+        schema: DatasetSchema,
+        generation: StreamGenerationId,
+        chunks: tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+    ) -> OwnedSnapshot:
+        values = np.zeros(schema.physical_shape, dtype=schema.cell_schema.dtype)
+        validity = np.zeros(schema.physical_shape, dtype=np.bool_)
+        for chunk, origin in chunks:
+            repeat_origin, point_origin = origin
+            chunk_schema = chunk.block.schema
+            repeat_stop = repeat_origin + chunk_schema.repeat_axis.size
+            point_stop = point_origin + chunk_schema.point_table.row_count
+            target = (
+                slice(repeat_origin, repeat_stop),
+                slice(point_origin, point_stop),
+                *(slice(None) for _axis in schema.cell_schema.data_axes),
+            )
+            values[target] = chunk.block.values
+            validity[target] = chunk.expanded_validity()
+        return owned_snapshot_from_arrays(
+            schema,
+            values,
+            sequence,
+            validity=validity,
+            block_id=BlockId(f"{signal_name}.run"),
+            stream_generation=generation,
+        )
+
+    def commit_live(
+        self,
+        node: object,
+        outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        growing_outputs: Iterable[str] = (),
+    ) -> Mapping[str, SignalValue]:
+        return self._commit_outputs(
+            node,
+            outputs,
+            growing_outputs=growing_outputs,
+        )
+
+    def commit_processor(
+        self,
+        node: object,
+        outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        source_publication: SignalPublication,
+        growing_outputs: Iterable[str] = (),
+        trigger: tuple[str, int] | None = None,
+        retain: bool = False,
+    ) -> Mapping[str, SignalValue]:
+        """Commit one derived bundle with its exact causal parent."""
+
+        if not isinstance(source_publication, SignalPublication):
+            raise TypeError("Processor commit requires its exact parent")
+        if type(retain) is not bool:
+            raise TypeError("retain must be bool")
+        if trigger is not None:
+            if (
+                not isinstance(trigger, tuple)
+                or len(trigger) != 2
+                or type(trigger[0]) is not str
+                or not trigger[0].strip()
+                or type(trigger[1]) is not int
+                or trigger[1] < 0
+            ):
+                raise TypeError(
+                    "processor trigger must be (non-empty text, non-negative int)"
+                )
+            trigger = (trigger[0].strip(), trigger[1])
+        selected = dict(outputs)
+        if retain:
+            for name, output in tuple(selected.items()):
+                if not isinstance(output, LiveDatasetOutput):
+                    raise TypeError("processor outputs must be LiveDatasetOutput")
+                if isinstance(output.coverage, MonitorCoverage):
+                    schema = output.snapshot.block.schema
+                    total = (
+                        schema.repeat_axis.size
+                        * schema.point_table.row_count
+                    )
+                    selected[name] = LiveDatasetOutput(
+                        output.declaration,
+                        output.snapshot,
+                        DatasetCoverage(total, total),
+                        output.run_record,
+                        schema,
+                        (0, 0),
+                    )
+        return self._commit_outputs(
+            node,
+            selected,
+            growing_outputs=growing_outputs,
+            source_publication=source_publication,
+            trigger=trigger,
+        )
+
+    def _commit_outputs(
+        self,
+        node: object,
+        outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        growing_outputs: Iterable[str],
+        source_publication: SignalPublication | None = None,
+        trigger: tuple[str, int] | None = None,
+    ) -> Mapping[str, SignalValue]:
+        """Commit one immutable sibling bundle into Runtime-owned run state."""
+
+        if not isinstance(outputs, Mapping) or not outputs:
+            raise TypeError("live commit outputs must be a non-empty mapping")
+        growing = frozenset(
+            canonical_text(name, "growing output name")
+            for name in growing_outputs
+        )
         owner_id = _node_instance_id(node)
-        output_names, bare_names = self._node_route_names(node)
+        kind = "producer" if source_publication is None else "processor"
         with self._lock:
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
@@ -951,97 +1142,359 @@ class SignalDataPlane:
                 state is None
                 or state.retired
                 or state.terminal
-                or state.kind != "producer"
+                or state.sealing
                 or state.node is not node
-                or state.output_names != output_names
-                or dict(state.bare_names) != dict(bare_names)
-                or state.slot is not None
+                or state.kind != kind
             ):
-                raise RuntimeError(
-                    "live output requires the producer's reserved generation"
+                raise RuntimeError("live commit requires the reserved generation")
+            if state.publication is not None and state.exact_outputs is None:
+                raise RuntimeError("one generation cannot mix publication paths")
+            if source_publication is not None:
+                self._require_route_parent_locked(state, source_publication)
+                source_sequence = source_publication.event_ref.sequence
+                if source_sequence < state.last_parent_sequence or (
+                    source_sequence == state.last_parent_sequence
+                    and (trigger is None or trigger == state.last_parent_trigger)
+                ):
+                    raise RuntimeError(
+                        "Processor result belongs to an obsolete parent"
+                    )
+
+            declared = self._declarations_by_bare(state)
+            if set(outputs) != set(declared):
+                raise ValueError(
+                    "live commit must cover the complete frozen output vocabulary"
                 )
-            state.slot = slot
-            self._membership_changed = True
+            if not growing.issubset(declared):
+                raise ValueError("growing outputs contain an undeclared name")
 
-    def mark_changed(self, node, slot) -> None:
-        """Dirty only the exact live slot that emitted this wake.
+            if any(
+                not isinstance(output, LiveDatasetOutput)
+                for output in outputs.values()
+            ):
+                raise TypeError("live commit values must be LiveDatasetOutput")
+            exact_bare = frozenset(
+                bare
+                for bare, output in outputs.items()
+                if isinstance(output.coverage, DatasetCoverage)
+            )
+            if not growing.issubset(exact_bare):
+                raise ValueError("only finite exact outputs may use a growing view")
+            exact_qualified = frozenset(
+                qualified
+                for qualified in state.output_names
+                if state.bare_names[qualified] in exact_bare
+            )
+            if (
+                state.exact_outputs is not None
+                and state.exact_outputs != exact_qualified
+            ):
+                raise ValueError("live extent kinds changed inside one generation")
+            if state.exact_outputs is not None and growing != state.growing_outputs:
+                raise ValueError("growing output choice changed inside one generation")
 
-        A FOLLOWER asked for every event this slot emits; a display asks for
-        the newest one it can get.  Both were served by freeze alone, so a
-        burst -- a board playing a whole scan table from one fire -- collapsed
-        into a single publication, and the earlier cycles' pixels were
-        overwritten in the slot before anything could read them.  A followed
-        slot therefore materialises HERE, on the producer's own thread, and
-        leaves nothing behind for freeze to publish twice.
-        """
+            run_record = _freeze_run_record(_shared_run_record(outputs))
+            if (
+                state.committed_run_record is not None
+                and not _run_records_equal(state.committed_run_record, run_record)
+            ):
+                raise ValueError("run_record changed inside one generation")
 
-        if slot is None:
-            raise ValueError("changed live slot must not be None")
+            canonical_schemas = dict(state.canonical_schemas)
+            occupied_cells = dict(state.occupied_cells)
+            occupied_updates: list[
+                tuple[str, np.ndarray, tuple[slice, slice]]
+            ] = []
+            origins: dict[str, tuple[int, int]] = {}
+            values: dict[str, SignalValue] = {}
+            sequence = state.next_sequence
+
+            for qualified in state.output_names:
+                bare = state.bare_names[qualified]
+                output = outputs[bare]
+                if not isinstance(output, LiveDatasetOutput):
+                    raise TypeError("live commit values must be LiveDatasetOutput")
+                _require_published_declaration(bare, output, declared)
+                event = _restamp_snapshot(
+                    output.snapshot,
+                    block_id=f"{qualified}.event",
+                    generation=state.generation,
+                    revision=sequence,
+                )
+                if qualified in exact_qualified:
+                    schema = output.canonical_schema
+                    origin = output.cell_origin
+                    if not isinstance(schema, DatasetSchema) or origin is None:
+                        raise ValueError(
+                            "finite live commit requires canonical placement"
+                        )
+                    previous_schema = canonical_schemas.get(qualified)
+                    if previous_schema is not None and previous_schema != schema:
+                        raise ValueError(
+                            "canonical Dataset schema changed inside one generation"
+                        )
+                    canonical_schemas[qualified] = schema
+                    origins[qualified] = origin
+                    mask = occupied_cells.get(qualified)
+                    if mask is None:
+                        mask = np.zeros(
+                            (
+                                schema.repeat_axis.size,
+                                schema.point_table.row_count,
+                            ),
+                            dtype=np.bool_,
+                        )
+                    repeat_origin, point_origin = origin
+                    event_schema = event.block.schema
+                    target = (
+                        slice(
+                            repeat_origin,
+                            repeat_origin + event_schema.repeat_axis.size,
+                        ),
+                        slice(
+                            point_origin,
+                            point_origin + event_schema.point_table.row_count,
+                        ),
+                    )
+                    if bool(np.any(mask[target])):
+                        raise ValueError("live commit overlaps already written cells")
+                    previous = (
+                        None
+                        if state.publication is None
+                        else state.publication.value(qualified)
+                    )
+                    written = (
+                        0
+                        if previous is None
+                        else previous.coverage.written_cells
+                    ) + (
+                        + event_schema.repeat_axis.size
+                        * event_schema.point_table.row_count
+                    )
+                    if output.coverage.written_cells != written:
+                        raise ValueError(
+                            "finite coverage does not equal committed cell extent"
+                    )
+                    occupied_updates.append((qualified, mask, target))
+                values[qualified] = SignalValue(
+                    name=qualified,
+                    snapshot=event,
+                    coverage=output.coverage,
+                    run_record=run_record,
+                    growing=bare in growing,
+                    canonical_schema=output.canonical_schema,
+                    cell_origin=output.cell_origin,
+                )
+
+            parents = () if source_publication is None else (source_publication,)
+            publication = self._publish_locked(
+                state,
+                values,
+                parents=parents,
+                notify=False,
+            )
+            for qualified, mask, target in occupied_updates:
+                mask[target] = True
+                occupied_cells[qualified] = mask
+            state.exact_outputs = exact_qualified
+            state.canonical_schemas = MappingProxyType(canonical_schemas)
+            state.growing_outputs = growing
+            state.occupied_cells = occupied_cells
+            state.committed_run_record = run_record
+            if source_publication is not None:
+                state.last_parent_sequence = source_publication.event_ref.sequence
+                state.last_parent_trigger = trigger
+            for qualified in exact_qualified:
+                state.commit_values.setdefault(qualified, []).append(
+                    (sequence, publication.signals[qualified])
+                )
+                state.commit_origins.setdefault(qualified, []).append(
+                    origins[qualified]
+                )
+            if exact_qualified:
+                state.materialized = {}
+            producer = state.publication_stream
+            if producer is not None:
+                producer.emit(
+                    publication,
+                    sequence=publication.event_ref.sequence,
+                )
+            return publication.signals
+
+    def current_dataset(
+        self,
+        signal_name: str,
+        publication: SignalPublication | None = None,
+    ) -> OwnedSnapshot:
+        """Materialize one exact committed run prefix, never from UI freeze."""
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            state = self._state_for_signal_locked(name)
+            if state is None or state.retired:
+                raise LookupError(f"signal {name!r} is not retained")
+            selected = state.publication if publication is None else publication
+            if selected is None:
+                raise LookupError(f"signal {name!r} has no committed data")
+            self._require_issued_publication_locked(selected)
+            if (
+                selected.event_ref.stream_id.value != state.owner_id
+                or selected.event_ref.generation != state.generation
+            ):
+                raise ValueError(
+                    "publication belongs to another signal generation"
+                )
+            value = selected.value(name)
+            if value is None:
+                raise ValueError("publication does not contain the selected signal")
+            if state.exact_outputs is None or name not in state.exact_outputs:
+                return value.snapshot
+            sequence = selected.event_ref.sequence
+            if not any(
+                commit_sequence == sequence
+                for commit_sequence, _value in state.commit_values[name]
+            ):
+                raise ValueError("publication is not a canonical commit of this run")
+            cached = state.materialized.get(name)
+            if cached is not None and cached[0] == sequence:
+                return cached[1]
+            materialization = self._materialization_input_locked(
+                state,
+                name,
+                sequence,
+            )
+        snapshot = self._materialize_dataset(name, sequence, *materialization)
+        with self._lock:
+            if (
+                self._states.get(state.owner_id) is state
+                and not state.retired
+                and selected is state.publication
+                and state.publication.event_ref.sequence == sequence
+            ):
+                state.materialized[name] = (sequence, snapshot)
+        return snapshot
+
+    def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
+        """Seal one commit generation without publishing a duplicate full event."""
+
+        if type(cut_short) is not bool:
+            raise TypeError("cut_short must be bool")
         owner_id = _node_instance_id(node)
+        producer = None
+        state = None
+        sequence = 0
+        materialized: dict[str, tuple[int, OwnedSnapshot]] = {}
+        pending: dict[
+            str,
+            tuple[
+                DatasetSchema,
+                StreamGenerationId,
+                tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+            ],
+        ] = {}
         with self._lock:
             state = self._states.get(owner_id)
             if (
                 state is None
                 or state.retired
                 or state.terminal
+                or state.sealing
                 or state.node is not node
-                or state.slot is not slot
+                or state.exact_outputs is None
+                or state.publication is None
             ):
-                return
-            self._dirty.add(owner_id)
-            followed = state.publication_stream is not None
-            output_names = frozenset(state.output_names)
-            wake = (
-                self._request_owner_wake
-                if any(
-                    candidate.source_name in output_names
-                    for candidate in self._states.values()
-                    if (
-                        not candidate.retired
-                        and candidate.kind == "processor"
+                raise RuntimeError("committed generation is not active")
+            exact_outputs = state.exact_outputs
+            if exact_outputs:
+                if not cut_short and not all(
+                    isinstance(state.publication.signals[name].coverage, DatasetCoverage)
+                    and state.publication.signals[name].coverage.complete
+                    for name in exact_outputs
+                ):
+                    raise RuntimeError(
+                        "exact committed terminal Dataset coverage is incomplete"
                     )
-                )
-                else None
-            )
-        if followed:
-            self._publish_followed(owner_id, state)
-        if wake is not None:
-            wake()
-
-    def _publish_followed(self, owner_id: str, state: _GenerationState) -> None:
-        """Materialise one followed slot's current values right now.
-
-        The same two steps freeze takes for a dirty state -- read the slot
-        outside the lock, publish inside it -- so a follower and a display
-        cannot disagree about what a publication is.  The dirty mark is
-        cleared with the publication and the front is marked for rebuild, so
-        the next freeze shows this value without emitting it a second time.
-        """
-
+                state.sealing = True
+                sequence = state.publication.event_ref.sequence
+                for name in exact_outputs:
+                    cached = state.materialized.get(name)
+                    if cached is not None and cached[0] == sequence:
+                        materialized[name] = cached
+                    else:
+                        pending[name] = self._materialization_input_locked(
+                            state,
+                            name,
+                            sequence,
+                        )
+            else:
+                producer = state.publication_stream
+        if not exact_outputs:
+            if producer is not None:
+                producer.finish()
+            self._withdraw_owner(owner_id)
+            return False
         try:
-            values, warning = self._freeze_one(state)
-        except Exception as error:
+            for name, inputs in pending.items():
+                materialized[name] = (
+                    sequence,
+                    self._materialize_dataset(name, sequence, *inputs),
+                )
+        except BaseException:
             with self._lock:
-                if self._states.get(owner_id) is state and not state.retired:
-                    state.failure = f"{type(error).__name__}: {error}"
-                    self._membership_changed = True
-            return
+                if self._states.get(owner_id) is state:
+                    state.sealing = False
+            raise
         with self._lock:
             if (
                 self._states.get(owner_id) is not state
                 or state.retired
-                or state.terminal
-                or owner_id not in self._dirty
+                or not state.sealing
+                or state.publication is None
+                or state.publication.event_ref.sequence != sequence
             ):
-                return
-            self._dirty.discard(owner_id)
+                raise RuntimeError("committed generation changed while sealing")
+            state.materialized = materialized
+            state.sealing = False
+            state.terminal = True
             self._membership_changed = True
-            try:
-                self._publish_locked(state, values)
-            except Exception as error:
-                state.failure = f"{type(error).__name__}: {error}"
-                return
-            state.failure = warning
+            producer = state.publication_stream
+        if producer is not None:
+            producer.finish()
+        return True
+
+    def seal_processor(self, node: object) -> bool:
+        """Seal derived canonical state after its exact source reached EOS."""
+
+        owner_id = _node_instance_id(node)
+        with self._lock:
+            state = self._states.get(owner_id)
+            if (
+                state is None
+                or state.retired
+                or state.kind != "processor"
+                or state.node is not node
+                or state.source_owner_id is None
+                or state.exact_outputs is None
+                or state.publication is None
+            ):
+                raise RuntimeError("Processor generation is not committed")
+            source = self._states.get(state.source_owner_id)
+            if (
+                source is None
+                or source.retired
+                or not source.terminal
+                or source.generation != state.source_generation
+                or source.publication is None
+                or source.publication.event_ref.sequence
+                != state.last_parent_sequence
+            ):
+                raise RuntimeError("Processor source has not reached its exact terminal")
+            cut_short = any(
+                isinstance(state.publication.signals[name].coverage, DatasetCoverage)
+                and not state.publication.signals[name].coverage.complete
+                for name in state.exact_outputs
+            )
+        return self.seal_committed(node, cut_short=cut_short)
 
     def describe_signals(self) -> tuple["SignalDescription", ...]:
         """Every signal this plane currently carries, as plain values.
@@ -1059,18 +1512,8 @@ class SignalDataPlane:
             for state in states:
                 if state.retired:
                     continue
-                declarations = (
-                    {}
-                    if state.node is None
-                    else _declared_outputs(
-                        _require_signal_producer(
-                            state.node
-                        ).dataset_output_declarations
-                    )
-                )
                 for name in state.output_names:
-                    bare_name = state.bare_names.get(name)
-                    declaration = declarations.get(bare_name)
+                    declaration = state.declarations.get(name)
                     value = (
                         None
                         if state.publication is None
@@ -1120,11 +1563,53 @@ class SignalDataPlane:
             state = self._state_for_signal_locked(name)
             return None if state is None else state.publication
 
+    def _follow_tap_locked(
+        self,
+        state: _GenerationState,
+        signal_name: str,
+        *,
+        replay: bool,
+    ) -> FollowTap[SignalPublication]:
+        stream = self._ensure_publication_stream_locked(state)
+        retained: list[tuple[int, SignalPublication]] = []
+        if replay:
+            committed = state.commit_values.get(signal_name, ())
+            if committed:
+                for sequence, value in committed:
+                    if (
+                        state.publication is not None
+                        and state.publication.event_ref.sequence == sequence
+                    ):
+                        publication = state.publication
+                    else:
+                        publication = SignalPublication(
+                            EventRef(
+                                StreamId(state.owner_id),
+                                state.generation,
+                                sequence,
+                            ),
+                            {signal_name: value},
+                            self._publication_issuer,
+                            run_record=value.run_record,
+                        )
+                        self._publication_parents[publication] = ()
+                    retained.append((sequence, publication))
+            elif state.publication is not None:
+                retained.append(
+                    (state.publication.event_ref.sequence, state.publication)
+                )
+        return stream.follow(retained)
+
     def follow_publications(
         self,
         signal_name: str,
+        *,
+        replay: bool = True,
     ) -> tuple[SignalPublication, FollowTap[SignalPublication]]:
-        """Return one live signal's exact current event and every future event."""
+        """Return the current event and an ordered replay/future payload tap."""
+
+        if type(replay) is not bool:
+            raise TypeError("replay must be bool")
 
         name = canonical_text(signal_name, "signal name")
         with self._lock:
@@ -1135,8 +1620,11 @@ class SignalDataPlane:
                 raise LookupError(f"signal {name!r} has no current publication")
             if state.retired or state.terminal:
                 raise RuntimeError(f"signal {name!r} generation is not live")
-            stream = self._ensure_publication_stream_locked(state)
-            return state.publication, stream.follow()
+            return state.publication, self._follow_tap_locked(
+                state,
+                name,
+                replay=replay,
+            )
 
     def follower_edges(self) -> frozenset[tuple[str, str]]:
         """(source signal, follower signal) pairs of live presentation-paced routes.
@@ -1248,8 +1736,6 @@ class SignalDataPlane:
         source = source_publication.value(source_name)
         if source is None:
             raise ValueError("frozen Processor publication has no selected signal")
-        if source.coverage is not None:
-            raise ValueError("frozen Processor source must be a FINAL signal")
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
         with self._lock:
@@ -1290,8 +1776,6 @@ class SignalDataPlane:
         source = source_publication.value(source_name)
         if source is None:
             raise ValueError("Follow Processor publication has no selected signal")
-        if not isinstance(source.coverage, DatasetCoverage):
-            raise ValueError("Follow Processor source must have DatasetCoverage")
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
         with self._lock:
@@ -1308,8 +1792,11 @@ class SignalDataPlane:
                 )
             if source_state.terminal:
                 raise RuntimeError("Follow Processor source generation is not live")
-            stream = self._ensure_publication_stream_locked(source_state)
-            tap = stream.follow()
+            tap = self._follow_tap_locked(
+                source_state,
+                source_name,
+                replay=True,
+            )
             try:
                 self._install_state_locked(
                     owner_id=owner_id,
@@ -1426,6 +1913,7 @@ class SignalDataPlane:
         *,
         parents: tuple[SignalPublication, ...] = (),
         terminal: bool = False,
+        notify: bool = True,
     ) -> SignalPublication:
         if state.retired or self._states.get(state.owner_id) is not state:
             raise RuntimeError("signal generation is no longer active")
@@ -1464,254 +1952,16 @@ class SignalDataPlane:
         state.publication = publication
         state.failure = None
         state.terminal = terminal
-        if terminal:
-            self._dirty.discard(state.owner_id)
-        producer = state.publication_producer
-        if producer is not None:
+        producer = state.publication_stream
+        if notify and producer is not None:
             producer.emit(
                 publication,
-                captured_at=time.time(),
-                direct_parent_refs=publication.direct_parent_refs,
+                sequence=publication.event_ref.sequence,
             )
             if terminal:
                 producer.finish()
         self._membership_changed = True
         return publication
-
-    def publish_final(
-        self,
-        node,
-        outputs: Mapping[str, FinalDatasetOutput],
-    ) -> Mapping[str, SignalValue]:
-        if not isinstance(outputs, Mapping):
-            raise TypeError("FINAL signals must be a mapping")
-        owner_id = _node_instance_id(node)
-        output_names, bare_names = self._node_route_names(node)
-        declared = _declared_outputs(
-            _require_signal_producer(node).dataset_output_declarations
-        )
-        if not outputs or not set(outputs).issubset(declared):
-            raise ValueError(
-                "FINAL publication must be a non-empty declared output subset"
-            )
-        values: dict[str, SignalValue] = {}
-        by_bare = {bare: qualified for qualified, bare in bare_names.items()}
-        run_record = _shared_run_record(outputs)
-        for bare in declared:
-            if bare not in outputs:
-                continue
-            output = outputs[bare]
-            if not isinstance(output, FinalDatasetOutput):
-                raise TypeError("FINAL values must be FinalDatasetOutput")
-            _require_published_declaration(bare, output, declared)
-            qualified = by_bare[bare]
-            values[qualified] = SignalValue(
-                name=qualified,
-                snapshot=output.snapshot,
-                coverage=None,
-                transient=False,
-                run_record=run_record,
-            )
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
-            state = self._states.get(owner_id)
-            if (
-                state is None
-                or state.retired
-                or state.node is not node
-                or state.kind != "producer"
-                or state.output_names != output_names
-                or dict(state.bare_names) != dict(bare_names)
-            ):
-                raise RuntimeError("FINAL owner differs from its active generation")
-            publication = self._publish_locked(
-                state,
-                values,
-                terminal=True,
-            )
-        return publication.signals
-
-    def publish_processor(
-        self,
-        node,
-        outputs: Mapping[str, LiveDatasetOutput],
-        *,
-        source_publication: SignalPublication,
-        trigger: tuple[str, int] | None = None,
-    ) -> Mapping[str, SignalValue]:
-        if not isinstance(outputs, Mapping):
-            raise TypeError("processor outputs must be a mapping")
-        if not isinstance(source_publication, SignalPublication):
-            raise TypeError("Processor publication requires its exact parent")
-        if trigger is not None:
-            if (
-                not isinstance(trigger, tuple)
-                or len(trigger) != 2
-                or not isinstance(trigger[0], str)
-                or not trigger[0].strip()
-                or isinstance(trigger[1], bool)
-                or not isinstance(trigger[1], int)
-                or trigger[1] < 0
-            ):
-                raise TypeError(
-                    "processor trigger must be a (non-empty kind, non-negative revision) tuple"
-                )
-            trigger = (trigger[0].strip(), trigger[1])
-        owner_id = _node_instance_id(node)
-        declared = _declared_outputs(
-            _require_signal_producer(node).dataset_output_declarations
-        )
-        if set(outputs) != set(declared):
-            raise ValueError(
-                "Processor publication must cover its complete frozen output vocabulary"
-            )
-        with self._lock:
-            state = self._states.get(owner_id)
-            if (
-                state is None
-                or state.retired
-                or state.kind != "processor"
-                or state.node is not node
-            ):
-                raise RuntimeError("Processor generation is no longer active")
-            self._require_route_parent_locked(state, source_publication)
-            source_sequence = source_publication.event_ref.sequence
-            if source_sequence < state.last_parent_sequence:
-                raise RuntimeError("Processor result belongs to an obsolete parent")
-            if (
-                source_sequence == state.last_parent_sequence
-                and (
-                    trigger is None
-                    or trigger == state.last_parent_trigger
-                )
-            ):
-                raise RuntimeError("Processor result belongs to an obsolete parent")
-            source_name = state.source_name
-            bare_names = dict(state.bare_names)
-        assert source_name is not None
-        source = source_publication.value(source_name)
-        if source is None:
-            raise ValueError("Processor parent lacks its selected signal")
-        by_bare = {bare: qualified for qualified, bare in bare_names.items()}
-        values: dict[str, SignalValue] = {}
-        run_record = _shared_run_record(outputs)
-        for bare in declared:
-            output = outputs[bare]
-            if not isinstance(output, LiveDatasetOutput):
-                raise TypeError("processor outputs must be LiveDatasetOutput")
-            _require_published_declaration(bare, output, declared)
-            qualified = by_bare[bare]
-            values[qualified] = SignalValue(
-                name=qualified,
-                snapshot=output.snapshot,
-                coverage=output.coverage,
-                transient=True,
-                run_record=run_record,
-            )
-        with self._lock:
-            if self._states.get(owner_id) is not state or state.retired:
-                raise RuntimeError("Processor generation retired during publication")
-            self._require_route_parent_locked(state, source_publication)
-            source_sequence = source_publication.event_ref.sequence
-            if source_sequence < state.last_parent_sequence:
-                raise RuntimeError("Processor result belongs to an obsolete parent")
-            if (
-                source_sequence == state.last_parent_sequence
-                and (
-                    trigger is None
-                    or trigger == state.last_parent_trigger
-                )
-            ):
-                raise RuntimeError("Processor result belongs to an obsolete parent")
-            publication = self._publish_locked(
-                state,
-                values,
-                parents=(source_publication,),
-            )
-            state.last_parent_sequence = source_publication.event_ref.sequence
-            state.last_parent_trigger = trigger
-        return publication.signals
-
-    def publish_terminal_processor(
-        self,
-        node: object,
-        outputs: Mapping[str, LiveDatasetOutput],
-        *,
-        source_publication: SignalPublication,
-    ) -> Mapping[str, SignalValue]:
-        """Publish one terminal, retained Processor result with its exact parent."""
-
-        if not isinstance(outputs, Mapping):
-            raise TypeError("terminal Processor outputs must be a mapping")
-        if not isinstance(source_publication, SignalPublication):
-            raise TypeError("terminal Processor publication requires its exact parent")
-        owner_id = _node_instance_id(node)
-        declared = _declared_outputs(
-            _require_signal_producer(node).dataset_output_declarations
-        )
-        if set(outputs) != set(declared):
-            raise ValueError(
-                "terminal Processor publication must cover its complete output vocabulary"
-            )
-        output_names, bare_names = self._node_route_names(node)
-        by_bare = {bare: qualified for qualified, bare in bare_names.items()}
-        values: dict[str, SignalValue] = {}
-        run_record = _shared_run_record(outputs)
-        for bare in declared:
-            output = outputs[bare]
-            if not isinstance(output, LiveDatasetOutput):
-                raise TypeError("terminal Processor outputs must be LiveDatasetOutput")
-            _require_published_declaration(bare, output, declared)
-            qualified = by_bare[bare]
-            values[qualified] = SignalValue(
-                name=qualified,
-                snapshot=output.snapshot,
-                coverage=None,
-                transient=False,
-                run_record=run_record,
-            )
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
-            state = self._states.get(owner_id)
-            if (
-                state is None
-                or state.retired
-                or state.terminal
-                or state.kind != "processor"
-                or state.node is not node
-                or state.output_names != output_names
-                or dict(state.bare_names) != dict(bare_names)
-            ):
-                raise RuntimeError("terminal Processor generation is no longer active")
-            source = self._require_route_parent_locked(state, source_publication)
-            if source.coverage is not None and not isinstance(
-                source.coverage,
-                DatasetCoverage,
-            ):
-                raise ValueError(
-                    "terminal Processor parent must be FINAL or exact Dataset coverage"
-                )
-            source_state = self._states.get(state.source_owner_id or "")
-            if (
-                source_state is None
-                or source_state.retired
-                or not source_state.terminal
-                or source_state.generation != state.source_generation
-                or source_state.publication is not source_publication
-            ):
-                raise RuntimeError(
-                    "terminal Processor parent is not the retained source terminal"
-                )
-            publication = self._publish_locked(
-                state,
-                values,
-                parents=(source_publication,),
-                terminal=True,
-            )
-            state.last_parent_sequence = source_publication.event_ref.sequence
-        return publication.signals
 
     def _retirement_closure_locked(
         self,
@@ -1764,7 +2014,6 @@ class SignalDataPlane:
         self,
         states: tuple[_GenerationState, ...],
     ) -> tuple[BaseException, ...]:
-        slots = []
         producers = []
         for state in states:
             if state.kind == "processor" and state.node is not None:
@@ -1773,10 +2022,8 @@ class SignalDataPlane:
                 # Future completes so the node receives exactly one terminal
                 # acknowledgement from ``_cancelled_processor``.
                 self._lane.cancel_processor(state.node)
-            if state.slot is not None:
-                slots.append(state.slot)
-            if state.publication_producer is not None:
-                producers.append(state.publication_producer)
+            if state.publication_stream is not None:
+                producers.append(state.publication_stream)
         errors = []
         seen_producers = set()
         for producer in producers:
@@ -1789,15 +2036,6 @@ class SignalDataPlane:
                 pass
             except BaseException as error:
                 errors.append(error)
-        seen_slots = set()
-        for slot in slots:
-            if id(slot) in seen_slots:
-                continue
-            seen_slots.add(id(slot))
-            try:
-                slot.close()
-            except BaseException as error:
-                errors.append(error)
         return tuple(errors)
 
     def retire(self, node: object) -> frozenset[str]:
@@ -1807,186 +2045,6 @@ class SignalDataPlane:
             if state is not None and state.node is not node:
                 raise RuntimeError("signal owner id belongs to another generation")
         return self._withdraw_owner(owner_id)
-
-    def finish_live(self, node: object, *, cut_short: bool = False) -> bool:
-        """Retain an ended exact live generation and finish its FollowTaps.
-
-        Monitor/latest slots keep their existing detach behavior and return
-        ``False``.  Exact Dataset slots return ``True`` after their final
-        current snapshot is published and the generation becomes terminal.
-
-        ``cut_short`` is the operator pressing Stop.  A run that ran to the end
-        must have filled every cell -- that assertion below is what catches a
-        node which forgot to publish -- but a run that was STOPPED is
-        legitimately partial, and what it did measure is measured.  Ending a
-        run and un-measuring it are not the same act; treating them as one is
-        what made a stopped scan vanish from the bench, taking the panel that
-        was watching it, its Edit snapshot and its Save with it.
-        """
-
-        owner_id = _node_instance_id(node)
-        with self._lock:
-            state = self._states.get(owner_id)
-            if state is None or state.retired or state.node is not node:
-                raise RuntimeError("live owner differs from its active generation")
-            publication = state.publication
-            published_exact = bool(
-                publication is not None
-                and publication.signals
-                and all(
-                    isinstance(value.coverage, DatasetCoverage)
-                    for value in publication.signals.values()
-                )
-            )
-            slot = state.slot
-            # Changes this slot signalled that no pump has consumed yet.  A
-            # generation whose whole life fell between two polls has them all,
-            # and deciding below from its (absent) publication would count it
-            # as a monitor and detach everything it produced: that is how
-            # calibrating a folder of saved frames -- where there is no camera
-            # to wait for, so the run ends in milliseconds -- finished with an
-            # empty plane and a node that had published nothing.
-            unpumped = owner_id in self._dirty
-        if not published_exact and not unpumped:
-            self.detach_live(node)
-            return False
-        if slot is None:
-            raise RuntimeError("exact live generation lost its output slot")
-
-        values, warning = self._freeze_one(state)
-        if warning is not None:
-            raise RuntimeError(warning)
-        exact = bool(
-            values
-            and all(
-                isinstance(value.coverage, DatasetCoverage)
-                for value in values.values()
-            )
-        )
-        if not exact:
-            if published_exact:
-                raise RuntimeError("exact live terminal changed its coverage extent")
-            self.detach_live(node)
-            return False
-        if not cut_short and not all(
-            value.coverage.complete for value in values.values()
-        ):
-            raise RuntimeError("exact live terminal Dataset coverage is incomplete")
-        run_record = _shared_run_record(values)
-
-        producer = None
-        with self._lock:
-            if (
-                self._states.get(owner_id) is not state
-                or state.retired
-                or state.terminal
-                or state.slot is not slot
-            ):
-                raise RuntimeError("exact live generation changed while finishing")
-            current = state.publication
-            same_current = bool(
-                current is not None
-                and set(current.signals) == set(values)
-                and _run_records_equal(current.run_record, run_record)
-                and all(
-                    current.signals[name].snapshot.ref == value.snapshot.ref
-                    and current.signals[name].coverage == value.coverage
-                    for name, value in values.items()
-                )
-            )
-            if not same_current:
-                self._publish_locked(state, values)
-            state.terminal = True
-            state.slot = None
-            self._dirty.discard(owner_id)
-            self._membership_changed = True
-            producer = state.publication_producer
-        try:
-            slot.close()
-        finally:
-            if producer is not None:
-                producer.finish()
-        return True
-
-    def detach_live(self, node) -> None:
-        owner_id = _node_instance_id(node)
-        retained_slot = None
-        retired_states = ()
-        with self._lock:
-            state = self._states.get(owner_id)
-            if state is None:
-                return
-            if state.node is not node:
-                raise RuntimeError("signal owner id belongs to another generation")
-            retained_final = state.terminal or bool(
-                state.publication is not None
-                and all(
-                    not value.transient
-                    for value in state.publication.signals.values()
-                )
-            )
-            if retained_final:
-                retained_slot = state.slot
-                state.slot = None
-                self._dirty.discard(owner_id)
-            else:
-                # Withdraw this exact generation and its descendants before
-                # any slow slot close/join.  A replacement may then reserve
-                # safely; cleanup below carries the retired state objects, not
-                # the reusable textual owner id.
-                retired_states = self._retirement_closure_locked(owner_id)
-        if retained_slot is not None:
-            retained_slot.close()
-        errors = self._cleanup_retired_states(retired_states)
-        if errors:
-            raise BaseExceptionGroup(
-                "signal generation cleanup failed",
-                list(errors),
-            )
-
-    def _freeze_one(
-        self,
-        state: _GenerationState,
-    ) -> tuple[Mapping[str, SignalValue], str | None]:
-        node = state.node
-        slot = state.slot
-        if node is None or slot is None:
-            raise RuntimeError("live generation lost its producer slot")
-        outputs = slot.freeze_live_outputs()
-        if not isinstance(outputs, Mapping) or not outputs:
-            raise ValueError("live output owner must return a non-empty mapping")
-        declared = _declared_outputs(
-            _require_signal_producer(node).dataset_output_declarations
-        )
-        if not set(outputs).issubset(declared):
-            raise ValueError(
-                "live publication contains an undeclared output"
-            )
-        by_bare = {
-            bare: qualified
-            for qualified, bare in state.bare_names.items()
-        }
-        frozen: dict[str, SignalValue] = {}
-        run_record = _shared_run_record(outputs)
-        for bare in declared:
-            if bare not in outputs:
-                continue
-            output = outputs[bare]
-            if not isinstance(output, LiveDatasetOutput):
-                raise TypeError("live output values must be LiveDatasetOutput")
-            _require_published_declaration(bare, output, declared)
-            qualified = by_bare[bare]
-            frozen[qualified] = SignalValue(
-                name=qualified,
-                snapshot=output.snapshot,
-                coverage=output.coverage,
-                transient=True,
-                run_record=run_record,
-            )
-        return (
-            MappingProxyType(frozen),
-            getattr(slot, "notification_failure", None),
-        )
 
     def _build_front_locked(self) -> SignalFront:
         from .front import build_front
@@ -1999,60 +2057,12 @@ class SignalDataPlane:
         )
 
     def freeze(self) -> SignalFront:
-        """Advance changed generations and return one immutable coherent front."""
+        """Return the coherent front of already-committed publications."""
 
         self._lane.drain_processors()
         with self._lock:
-            if not self._dirty and not self._membership_changed:
+            if not self._membership_changed:
                 return self._front
-            dirty = tuple(self._dirty)
-            self._dirty.clear()
-            states = {
-                owner_id: self._states.get(owner_id)
-                for owner_id in dirty
-            }
-            self._membership_changed = False
-
-        for owner_id, state in states.items():
-            if (
-                state is None
-                or state.retired
-                or state.terminal
-                or state.slot is None
-            ):
-                continue
-            try:
-                values, warning = self._freeze_one(state)
-            except Exception as error:
-                with self._lock:
-                    if (
-                        self._states.get(owner_id) is state
-                        and not state.retired
-                        and not state.terminal
-                    ):
-                        state.failure = f"{type(error).__name__}: {error}"
-                        self._membership_changed = True
-                continue
-            try:
-                with self._lock:
-                    if (
-                        self._states.get(owner_id) is state
-                        and not state.retired
-                        and not state.terminal
-                    ):
-                        self._publish_locked(state, values)
-                        state.failure = warning
-            except Exception as error:
-                with self._lock:
-                    if (
-                        self._states.get(owner_id) is state
-                        and not state.retired
-                        and not state.terminal
-                    ):
-                        state.failure = f"{type(error).__name__}: {error}"
-                        self._membership_changed = True
-
-        with self._lock:
             latest = {
                 name: publication
                 for state in self._states.values()
@@ -2062,6 +2072,7 @@ class SignalDataPlane:
                     for name in state.publication.signals
                 )
             }
+            self._membership_changed = False
         self._lane.route(latest)
         with self._lock:
             front = self._build_front_locked()
@@ -2076,7 +2087,6 @@ class SignalDataPlane:
             self._closed = True
             states = tuple(self._states.values())
             self._states.clear()
-            self._dirty.clear()
             self._front_signals = frozenset()
             self._request_owner_wake = None
             self._owner_wake_token = None
@@ -2086,10 +2096,3 @@ class SignalDataPlane:
         errors = list(self._cleanup_retired_states(states))
         if errors:
             raise BaseExceptionGroup("signal data plane close failed", errors)
-
-    def __len__(self) -> int:
-        with self._lock:
-            return sum(
-                state.slot is not None and not state.retired
-                for state in self._states.values()
-            )

@@ -8,7 +8,6 @@ from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
     LogicNodeDescriptor,
     NodeKind,
-    OutputSpec,
     ResolvedArtifact,
 )
 from zlc_atom.nodes.calibration import (
@@ -18,7 +17,7 @@ from zlc_atom.nodes.calibration import (
     readout_model_kind_from_choice,
 )
 
-from .processor import SITE_STATUS_CONTRACT, OccupancyProcessor
+from .processor import OCCUPANCY_OUTPUTS, OccupancyProcessor
 
 
 OCCUPANCY_SCHEMA = AuthoringSchema(
@@ -68,7 +67,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     NodeKind.PROCESSOR,
     OCCUPANCY_SCHEMA,
     input_specs=(
-        DatasetInputSpec("frames", None),
+        DatasetInputSpec("frames", None, "exact"),
         ArtifactInputSpec(
             "calibration_path",
             "Calibration artifact",
@@ -76,13 +75,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             argument_name="calibration",
         ),
     ),
-    outputs=(
-        OutputSpec("counts", "occupancy.counts.v1"),
-        OutputSpec("occupied", SITE_STATUS_CONTRACT),
-        OutputSpec("valid", "occupancy.valid.v1"),
-        OutputSpec("rate", "occupancy.rate.v1"),
-        OutputSpec("frame_judged", "occupancy.frame_judged.v1"),
-    ),
+    outputs=OCCUPANCY_OUTPUTS,
     build=_build,
 )
 

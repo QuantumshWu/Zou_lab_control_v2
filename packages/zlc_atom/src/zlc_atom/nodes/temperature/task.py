@@ -29,23 +29,22 @@ and their pooled fraction against the authored trap-off time.
 
 WHAT IT PUBLISHES.  Survival keeps the SITE axis -- per site, per release
 time, per repeat -- because a trap that never recaptures is a fact about that
-trap, and averaging it away is how you never find out.  The rate beside it is
-the per-point recapture fraction an operator watches the curve in.  All of it
-is FINAL: this Task's results outlive its run.
+trap, and averaging it away is how you never find out.  The operator's curve
+is the mean projection of this same truth, not a second accumulated Dataset.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
-from zlc_data import SCAN_POINT, SITE, AxisId, PointColumn
+from zlc_data import SCAN_POINT, SITE, AxisId, OwnedSnapshot, PointColumn, PointTable
 from zlc_durable import readable_json_bytes, unique_path
 from zlc_pulse import TIME_UNIT_TO_NS, PulseSequence
 from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 
@@ -78,13 +77,9 @@ T_OFF_PARAMETER = "t_off"
 #: when the camera is armed against it, rather than paired by guesswork.
 PROBE_FRAMES = 2
 
-#: Survival per (repeat, release time, site), and the recapture fraction per
-#: (repeat, release time).  Both keep the repeat axis, so the panel averages
-#: over repeats the same way it does for every other measurement.
+#: Survival per (repeat, release time, site).  Its validity is the loaded-pair
+#: denominator, so a mean projection is exactly the pooled recapture curve.
 SURVIVAL_OUTPUT = DatasetOutputDeclaration("survival", "temperature.survival.v1")
-SURVIVAL_RATE_OUTPUT = DatasetOutputDeclaration(
-    "survival_rate", "temperature.survival-rate.v1"
-)
 
 #: The saved result: the survival table against the authored trap-off time.
 TEMPERATURE_ARTIFACT_CONTRACT = "temperature.release-recapture.v1"
@@ -217,23 +212,14 @@ class TemperatureTask:
             settle_seconds=SETTLE_SECONDS,
             producer=self.instance_id,
         )
-        self._before = np.zeros(
-            (self._repeats, len(self._t_off), calibration.n_sites), dtype=bool
-        )
-        self._after = np.zeros_like(self._before)
-        self._before_valid = np.zeros_like(self._before)
-        self._after_valid = np.zeros_like(self._before)
-        #: Which (repeat, release time) cells have been judged, so a growing
-        #: publication can say how much of itself is measured.
-        self._seen = np.zeros(self._before.shape[:2], dtype=bool)
-        self._generation = ""
+        self._written = 0
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
         # The frames are published too: they are the evidence the survival
         # numbers were read from, and while the run is going they are the live
         # view of it.
-        return (SCAN_OUTPUT, SURVIVAL_OUTPUT, SURVIVAL_RATE_OUTPUT)
+        return (SCAN_OUTPUT, SURVIVAL_OUTPUT)
 
     def _judge(self, value: object, *, row: int, visit: int) -> dict[str, object]:
         """One landed cycle: which sites held an atom, and which held it still.
@@ -247,121 +233,70 @@ class TemperatureTask:
         it is already too late to change anything about the run.
         """
 
-        revision = visit * len(self._t_off) + row + 1
         outputs = self._occupancy.evaluate(value)
         occupied = np.asarray(
             outputs["occupied"].snapshot.block.values, dtype=bool
         )[0]
         valid = np.asarray(outputs["valid"].snapshot.block.values, dtype=bool)[0]
-        self._before[visit, row] = occupied[0]
-        self._after[visit, row] = occupied[1]
-        self._before_valid[visit, row] = valid[0]
-        self._after_valid[visit, row] = valid[1]
-        self._seen[visit, row] = True
-        loaded, _, fraction = self._pooled()
+        eligible = valid[0] & valid[1] & occupied[0]
+        survival = np.where(eligible, occupied[1].astype("<f8"), np.nan)
+        self._written += 1
+        event = snapshot_from_array(
+            survival[None, None, :],
+            producer=self.instance_id,
+            signal=SURVIVAL_OUTPUT.name,
+            roles=(SCAN_POINT, SITE),
+            axis_specs={SITE: self._calibration.site_map.site_axis},
+            point_columns={SCAN_POINT: self._event_point_column()},
+            generation="temperature-event",
+            revision=self._written,
+            validity=eligible[None, None, :],
+        )
+        schema = event.block.schema
+        canonical = replace(
+            schema,
+            repeat_axis=replace(
+                schema.repeat_axis,
+                size=self._repeats,
+            ),
+            point_table=PointTable(
+                len(self._t_off),
+                (self._point_column(),),
+            ),
+        )
         return {
             SURVIVAL_OUTPUT.name: LiveDatasetOutput(
                 SURVIVAL_OUTPUT,
-                self._survival_snapshot(self._survival(), revision),
+                event,
                 DatasetCoverage(
-                    written_cells=int(self._seen.sum()),
-                    total_cells=int(self._seen.size),
+                    written_cells=self._written,
+                    total_cells=self._repeats * len(self._t_off),
                 ),
-            ),
-            SURVIVAL_RATE_OUTPUT.name: LiveDatasetOutput(
-                SURVIVAL_RATE_OUTPUT,
-                self._rate_snapshot(fraction, loaded > 0, revision),
-                DatasetCoverage(
-                    written_cells=int(np.count_nonzero(self._seen.any(axis=0))),
-                    total_cells=int(len(self._t_off)),
-                ),
+                canonical_schema=canonical,
+                cell_origin=(visit, row),
             ),
         }
 
-    def _survival(self) -> np.ndarray:
-        """Survival per site, per release time, per repeat.
+    def _curve(self, snapshot: OwnedSnapshot) -> dict[str, object]:
+        """The pooled recapture fraction against the release time.
 
-        A site that held no atom before the release answers nothing about
-        recapture, so its survival is NaN -- not zero, which would be a
-        measured loss that never happened.
+        Pooled, not averaged over per-shot fractions: every loaded site is one
+        Bernoulli trial, and a shot that loaded three atoms says less than one
+        that loaded thirty.  The Dataset validity is exactly that denominator,
+        so this artifact calculation and the panel's mean projection read the
+        same committed truth.
         """
 
-        eligible = self._survival_validity()
-        return np.where(eligible, self._after.astype("<f8"), np.nan)
-
-    def _survival_validity(self) -> np.ndarray:
-        """Where a loaded atom has two valid readouts and thus one trial."""
-
-        return (
-            self._seen[..., None]
-            & self._before_valid
-            & self._after_valid
-            & self._before
-        )
-
-    def _pooled(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Loaded pairs, recaptured pairs, and their fraction per release time.
-
-        One computation, whether it is going on screen half-finished or into
-        the artifact at the end.
-        """
-
-        eligible = self._survival_validity()
-        loaded = np.sum(eligible, axis=(0, 2), dtype=float)
-        recaptured = np.sum(eligible & self._after, axis=(0, 2), dtype=float)
+        values = np.asarray(snapshot.block.values, dtype=float)
+        valid = np.asarray(snapshot.expanded_validity(), dtype=bool)
+        loaded = np.sum(valid, axis=(0, 2), dtype=float)
+        recaptured = np.sum(np.where(valid, values, 0.0), axis=(0, 2))
         fraction = np.divide(
             recaptured,
             loaded,
             out=np.full(loaded.shape, np.nan, dtype="<f8"),
             where=loaded > 0,
         )
-        return loaded, recaptured, fraction
-
-    def _survival_snapshot(self, survival: np.ndarray, revision: int):
-        return snapshot_from_array(
-            survival,
-            producer=self.instance_id,
-            signal=SURVIVAL_OUTPUT.name,
-            roles=(SCAN_POINT, SITE),
-            axis_specs={SITE: self._calibration.site_map.site_axis},
-            point_columns={SCAN_POINT: self._point_column()},
-            generation=self._generation,
-            revision=int(revision),
-            validity=self._survival_validity(),
-        )
-
-    def _rate_snapshot(
-        self,
-        fraction: np.ndarray,
-        validity: np.ndarray,
-        revision: int,
-    ):
-        # One repeat, because pooling IS across the repeats: there is nothing
-        # left for a panel to average, so what it draws cannot disagree with
-        # what was saved.
-        return snapshot_from_array(
-            np.asarray(fraction, dtype="<f8")[None, :],
-            producer=self.instance_id,
-            signal=SURVIVAL_RATE_OUTPUT.name,
-            roles=(SCAN_POINT,),
-            point_columns={SCAN_POINT: self._point_column()},
-            generation=self._generation,
-            revision=int(revision),
-            validity=np.asarray(validity, dtype=bool)[None, :],
-        )
-
-    def _curve(self) -> dict[str, object]:
-        """The pooled recapture fraction against the release time.
-
-        Pooled, not averaged over per-shot fractions: every loaded site is one
-        Bernoulli trial, and a shot that loaded three atoms says less than one
-        that loaded thirty.  This IS the published rate -- the signal reads
-        the list this record carries -- because two ways to average the same
-        run produce two different curves under one name, and the operator was
-        watching one while the artifact kept the other.
-        """
-
-        loaded, recaptured, fraction = self._pooled()
         seconds = _seconds(self._t_off, self._port.unit)
         return {
             "t_off_seconds": [float(value) for value in seconds],
@@ -372,6 +307,16 @@ class TemperatureTask:
             ],
             "atom": "Rb-87",
         }
+
+    @staticmethod
+    def _event_point_column() -> PointColumn:
+        return PointColumn(
+            AxisId("temperature.t_off"),
+            T_OFF_PARAMETER,
+            SCAN_POINT,
+            PointColumn.NUMERIC,
+            (0.0,),
+        )
 
     def _point_column(self) -> PointColumn:
         """The release times, as the point axis every output shares."""
@@ -411,31 +356,16 @@ class TemperatureTask:
         }
 
     def execute(self, context: object) -> dict[str, object]:
-        generation = str(getattr(context.generation, "value", context.generation))
-        self._generation = generation
-        frames = self._scan.acquire(context, on_point=self._judge)
+        self._written = 0
+        self._scan.acquire(context, on_point=self._judge)
         context.report_progress("Reading survival")
-        survival = self._survival()
-        curve = self._curve()
-        loaded, _, fraction = self._pooled()
+        survival = context.current_dataset(SURVIVAL_OUTPUT.name)
+        curve = self._curve(survival)
         record = self._run_record(curve)
-        # The last publication of a run that has been publishing all along,
-        # so its revision continues that count rather than restarting it.
-        revision = self._repeats * len(self._t_off) + 1
-        outputs = {
-            SCAN_OUTPUT.name: FinalDatasetOutput(SCAN_OUTPUT, frames, record),
-            SURVIVAL_OUTPUT.name: FinalDatasetOutput(
-                SURVIVAL_OUTPUT,
-                self._survival_snapshot(survival, revision),
-                record,
-            ),
-            SURVIVAL_RATE_OUTPUT.name: FinalDatasetOutput(
-                SURVIVAL_RATE_OUTPUT,
-                self._rate_snapshot(fraction, loaded > 0, revision),
-                record,
-            ),
-        }
         context.report_progress("Saving survival")
+        if context.cancel_requested():
+            raise RuntimeError("the temperature task was cancelled")
+        context.seal_terminal()
         artifact = {
             "format": TEMPERATURE_ARTIFACT_CONTRACT,
             "t_off": {
@@ -452,14 +382,12 @@ class TemperatureTask:
                 readable_json_bytes(artifact)
             ),
         )
-        context.publish_final(outputs)
         return {"artifact_path": artifact_path}
 
 
 __all__ = [
     "PROBE_FRAMES",
     "SURVIVAL_OUTPUT",
-    "SURVIVAL_RATE_OUTPUT",
     "TEMPERATURE_ARTIFACT_CONTRACT",
     "T_OFF_PARAMETER",
     "TemperatureTask",

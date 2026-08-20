@@ -1,923 +1,751 @@
-"""Worker and source-bound processor NodeHost lifecycle contracts."""
+"""Explicit Logic Node lifecycle contracts over the canonical signal plane."""
 
 from __future__ import annotations
 
-from concurrent.futures import Future
+from pathlib import Path
 from threading import Event, get_ident
-from types import SimpleNamespace
 import time
 
-import numpy as np
 import pytest
 
-
+from zlc_data import AxisSpec, DatasetSchema
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
-from zlc_runtime.dataset_output import (
-    DatasetOutputDeclaration,
-    FinalDatasetOutput,
-    LiveDatasetOutput,
-)
-from zlc_runtime.host import LogicNodeObservation, NodeHost, NodeProgress
-from zlc_runtime.owner_mailbox import OwnerCompletion
-from zlc_runtime.plane import SignalDataPlane
+from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_runtime.host import LogicNodeObservation, NodeHost
+from zlc_runtime.plane import SignalDataPlane, SignalValue
 
 from _snapshots import snapshot as _snapshot
 
 
-def _live_output(
-    name: str,
-    revision: int,
-    declaration: DatasetOutputDeclaration | None = None,
-    run_record: dict[str, object] | None = None,
-) -> LiveDatasetOutput:
-    declaration = declaration or DatasetOutputDeclaration(name, f"test.{name}")
-    return LiveDatasetOutput(
-        declaration,
-        _snapshot(name, revision),
-        MonitorCoverage(1, 1),
-        run_record,
-    )
-
-
-def _dataset_output(
-    name: str,
-    revision: int,
-    declaration: DatasetOutputDeclaration | None = None,
-    run_record: dict[str, object] | None = None,
-) -> LiveDatasetOutput:
-    declaration = declaration or DatasetOutputDeclaration(name, f"test.{name}")
-    return LiveDatasetOutput(
-        declaration,
-        _snapshot(name, revision),
-        DatasetCoverage(1, 1),
-        run_record,
-    )
-
-
-def _final_output(
-    name: str,
-    revision: int,
+def _monitor_output(
     declaration: DatasetOutputDeclaration,
-    run_record: dict[str, object] | None = None,
-) -> FinalDatasetOutput:
-    return FinalDatasetOutput(
+    revision: int,
+    *,
+    value: float | None = None,
+) -> LiveDatasetOutput:
+    return LiveDatasetOutput(
         declaration,
-        _snapshot(name, revision),
-        run_record,
+        _snapshot(declaration.name, revision, value=value),
+        MonitorCoverage(1, 1),
     )
 
 
-def _wait_worker(host: NodeHost, wake: Event) -> LogicNodeObservation:
-    deadline = time.monotonic() + 2.0
-    while not host.terminal:
-        observation = host.poll()
-        if observation.terminal:
-            return observation
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0 or not wake.wait(remaining):
-            break
+def _finite_output(
+    declaration: DatasetOutputDeclaration,
+    *,
+    value: float,
+    total: int,
+    origin: int,
+    written: int,
+) -> LiveDatasetOutput:
+    event = _snapshot(declaration.name, origin + 1, value=value)
+    schema = event.block.schema
+    repeat = schema.repeat_axis
+    canonical = DatasetSchema(
+        AxisSpec(
+            repeat.axis_id,
+            repeat.name,
+            repeat.role,
+            total,
+            tuple(range(total)),
+        ),
+        schema.point_table,
+        schema.grid_topology,
+        schema.cell_schema,
+    )
+    return LiveDatasetOutput(
+        declaration,
+        event,
+        DatasetCoverage(written, total),
+        canonical_schema=canonical,
+        cell_origin=(origin, 0),
+    )
+
+
+def _wait(host: NodeHost, wake: Event) -> LogicNodeObservation:
+    deadline = time.monotonic() + 3.0
+    while not host.terminal and time.monotonic() < deadline:
+        host.poll()
+        wake.wait(0.01)
         wake.clear()
     observation = host.poll()
-    assert observation.terminal
+    assert observation.terminal, observation
     return observation
 
 
-def _wait_processor(
+def _host(
+    node: object,
     plane: SignalDataPlane,
     wake: Event,
-    predicate,
-):
-    deadline = time.monotonic() + 2.0
-    while True:
-        front = plane.freeze()
-        if predicate(front):
-            return front
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0 or not wake.wait(remaining):
-            break
-        wake.clear()
-    front = plane.freeze()
-    assert predicate(front)
-    return front
+    *,
+    instance_id: str,
+    kind: str,
+    outputs: tuple[DatasetOutputDeclaration, ...] = (),
+    source: str | None = None,
+    delivery: str | None = None,
+    artifacts: tuple[str, ...] = (),
+) -> NodeHost:
+    return NodeHost(
+        node,
+        plane,
+        wake.set,
+        instance_id=instance_id,
+        kind=kind,
+        dataset_output_declarations=outputs,
+        input_signal=source,
+        input_delivery=delivery,
+        required_artifact_names=artifacts,
+    )
 
 
-def test_worker_without_kind_publishes_final_and_records_context_capabilities() -> None:
+def test_constructor_uses_only_the_explicit_descriptor_contract() -> None:
+    declaration = DatasetOutputDeclaration("declared", "test.declared")
+
+    class MisleadingNode:
+        instance_id = "wrong"
+        source_signal = "@logic/wrong/source"
+        dataset_output_declarations = (
+            DatasetOutputDeclaration("wrong", "test.wrong"),
+        )
+
+    plane = SignalDataPlane()
+    wake = Event()
+    try:
+        with pytest.raises(TypeError):
+            NodeHost(MisleadingNode(), plane)
+        host = _host(
+            MisleadingNode(),
+            plane,
+            wake,
+            instance_id="right",
+            kind="measurement",
+            outputs=(declaration,),
+        )
+        assert host.instance_id == "right"
+        assert host.dataset_output_declarations == (declaration,)
+        with pytest.raises(KeyError):
+            host.signal_key("wrong")
+        host.shutdown()
+        with pytest.raises(ValueError, match="input_delivery"):
+            _host(
+                object(),
+                plane,
+                wake,
+                instance_id="processor",
+                kind="processor",
+                outputs=(declaration,),
+                source="@logic/source/value",
+            )
+    finally:
+        plane.close()
+
+
+def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    run_record = {
-        "authored_parameters": {"exposure_us": 1250.0},
-        "named_devices": {"camera": "mot_camera"},
-        "actual_device_snapshots": {"camera": {"exposure_us": 1248.0}},
-    }
     wake = Event()
     plane = SignalDataPlane()
 
     class Node:
-        instance_id = "camera"
-        dataset_output_declarations = (declaration,)
-        artifact_output_names = ("report",)
-
         def execute(self, context):
-            assert all(
-                callable(getattr(context, name))
-                for name in (
-                    "cancel_requested",
-                    "seal_terminal",
-                    "attach_live_outputs",
-                    "publish_final",
-                    "report_progress",
-                )
+            assert context.instance_id == "camera"
+            context.report_progress("capturing", current=1, total=1)
+            context.commit_live(
+                {
+                    "frame": _finite_output(
+                        declaration,
+                        value=7.0,
+                        total=1,
+                        origin=0,
+                        written=1,
+                    )
+                }
             )
-            assert context.cancel_requested() is False
-            context.report_progress("capturing", current=2, total=5)
-            context.publish_final(
-                {"frame": _final_output("frame", 7, declaration, run_record)}
-            )
+            current = context.current_dataset("frame")
+            assert float(current.block.values[0, 0, 0]) == 7.0
             return {"status": "ok"}
 
-    node = Node()
-    host = NodeHost(node, plane, wake.set)
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="camera",
+        kind="measurement",
+        outputs=(declaration,),
+    )
     try:
         host.start()
-        observation = _wait_worker(host, wake)
-        assert observation == host.observation
+        assert host.observation.running and host.observation.phase == "running"
+        observation = _wait(host, wake)
         assert observation.phase == "done"
-        assert observation.progress == NodeProgress("capturing", current=2, total=5)
+        assert observation.progress is None
         assert host.final_result == {"status": "ok"}
-        assert host.signal_key("frame") == "@logic/camera/frame"
-        with pytest.raises(KeyError, match="undeclared node output"):
-            host.signal_key("report")
-        publication = plane.latest_publication("@logic/camera/frame")
-        assert publication is not None
-        value = publication.value("@logic/camera/frame")
-        assert value is not None
-        assert publication.run_record == run_record
-        assert value.run_record == run_record
-        run_record["late_mutation"] = True
-        assert "late_mutation" not in publication.run_record
-        assert "late_mutation" not in value.run_record
-        with pytest.raises(TypeError):
-            publication.run_record["forbidden"] = True
-        with pytest.raises(TypeError):
-            value.run_record["forbidden"] = True
-        assert host.worker_idle
+        signal = host.signal_key("frame")
+        assert not plane.is_generation_live(signal)
+        assert float(plane.current_dataset(signal).block.values[0, 0, 0]) == 7.0
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_growing_view_is_materialized_on_the_worker_before_owner_wake(
+    monkeypatch,
+) -> None:
+    declaration = DatasetOutputDeclaration("scan", "test.scan")
+    wake = Event()
+    plane = SignalDataPlane()
+    owner_thread = get_ident()
+    calls: list[tuple[int, object]] = []
+    current_dataset = plane.current_dataset
+
+    def observed(*args, **kwargs):
+        snapshot = current_dataset(*args, **kwargs)
+        calls.append((get_ident(), snapshot))
+        return snapshot
+
+    monkeypatch.setattr(plane, "current_dataset", observed)
+
+    class Node:
+        def execute(self, context):
+            context.commit_live(
+                {
+                    "scan": _finite_output(
+                        declaration,
+                        value=5.0,
+                        total=1,
+                        origin=0,
+                        written=1,
+                    )
+                },
+                growing_outputs=("scan",),
+            )
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="growing-scan",
+        kind="measurement",
+        outputs=(declaration,),
+    )
+    try:
+        host.start()
+        assert _wait(host, wake).phase == "done"
+        assert len(calls) == 1
+        assert calls[0][0] != owner_thread
+        assert current_dataset(host.signal_key("scan")) is calls[0][1]
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_measurement_and_task_terminal_contracts_fail_loudly(tmp_path: Path) -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    cases = (
+        (
+            "measurement",
+            (declaration,),
+            (),
+            lambda _context: None,
+            "without a live Dataset commit",
+        ),
+        (
+            "task",
+            (),
+            (),
+            lambda _context: {"ok": True},
+            "without reporting progress",
+        ),
+        (
+            "task",
+            (),
+            ("artifact_path",),
+            lambda context: (
+                context.report_progress("saving"),
+                {"artifact_path": tmp_path / "missing.json"},
+            )[1],
+            "is not a file",
+        ),
+        (
+            "task",
+            (),
+            ("artifact_path",),
+            lambda context: (
+                context.report_progress("saving"),
+                {"artifact_path": tmp_path},
+            )[1],
+            "is not a file",
+        ),
+    )
+    for index, (kind, outputs, artifacts, execute, message) in enumerate(cases):
+        wake = Event()
+        plane = SignalDataPlane()
+        node = type("Node", (), {"execute": staticmethod(execute)})()
+        host = _host(
+            node,
+            plane,
+            wake,
+            instance_id=f"bad-{index}",
+            kind=kind,
+            outputs=outputs,
+            artifacts=artifacts,
+        )
+        try:
+            host.start()
+            observation = _wait(host, wake)
+            assert observation.phase == "failed"
+            assert message in (observation.error or "")
+            assert observation.progress is None
+            assert not host.final_result_resolved
+        finally:
+            host.shutdown()
+            plane.close()
+
+
+def test_task_requires_and_preserves_an_existing_declared_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "result.json"
+    artifact.write_text("{}", encoding="utf-8")
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            context.report_progress("saved")
+            return {"artifact_path": artifact}
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="artifact-task",
+        kind="task",
+        artifacts=("artifact_path",),
+    )
+    try:
+        host.start()
+        assert _wait(host, wake).phase == "done"
+        assert host.final_result == {"artifact_path": artifact}
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+@pytest.mark.parametrize("observer", ("none", "panel-reads", "exact-processor"))
+def test_stop_seals_the_same_partial_dataset_independent_of_display(
+    observer: str,
+) -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("seen", "test.seen")
+    committed = Event()
+    wake = Event()
+    plane = SignalDataPlane()
+    processor: NodeHost | None = None
+    processor_seen = Event()
+
+    class Node:
+        def execute(self, context):
+            context.commit_live(
+                {
+                    "frame": _finite_output(
+                        declaration,
+                        value=3.0,
+                        total=2,
+                        origin=0,
+                        written=1,
+                    )
+                }
+            )
+            committed.set()
+            while not context.cancel_requested():
+                time.sleep(0.001)
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="partial-camera",
+        kind="measurement",
+        outputs=(declaration,),
+    )
+    try:
+        host.start()
+        assert committed.wait(2.0)
+        signal = host.signal_key("frame")
+        assert host.running
+        assert plane.latest_publication(signal) is not None
+
+        if observer == "panel-reads":
+            for _ in range(5):
+                front = plane.freeze()
+                assert front.value(signal) is not None
+                displayed = plane.current_dataset(signal)
+                assert displayed.block.values[:, 0, 0].tolist() == [3.0, 0.0]
+                assert displayed.expanded_validity()[:, 0, 0].tolist() == [
+                    True,
+                    False,
+                ]
+        elif observer == "exact-processor":
+
+            class Processor:
+                def evaluate(self, value: SignalValue):
+                    assert value.name == signal
+                    assert value.snapshot.block.values[:, 0, 0].tolist() == [3.0]
+                    processor_seen.set()
+                    return {
+                        "seen": _monitor_output(
+                            derived_declaration,
+                            1,
+                            value=3.0,
+                        )
+                    }
+
+            processor = _host(
+                Processor(),
+                plane,
+                wake,
+                instance_id="partial-observer",
+                kind="processor",
+                outputs=(derived_declaration,),
+                source=signal,
+                delivery="exact",
+            )
+            processor.start()
+            assert processor_seen.wait(2.0)
+
+        host.cancel("operator stop")
+        observation = _wait(host, wake)
+        assert observation.phase == "cancelled"
+        assert observation.progress is None
+        assert not host.final_result_resolved
+        partial = plane.current_dataset(signal)
+        assert partial.block.values[:, 0, 0].tolist() == [3.0, 0.0]
+        assert partial.expanded_validity()[:, 0, 0].tolist() == [True, False]
+        if processor is not None:
+            assert _wait(processor, wake).phase == "done"
+    finally:
+        if processor is not None:
+            processor.shutdown()
+        host.shutdown()
+        plane.close()
+
+
+def test_stop_reports_partial_seal_failure_instead_of_cancellation(
+    monkeypatch,
+) -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    committed = Event()
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            context.commit_live(
+                {
+                    "frame": _finite_output(
+                        declaration,
+                        value=3.0,
+                        total=2,
+                        origin=0,
+                        written=1,
+                    )
+                }
+            )
+            committed.set()
+            while not context.cancel_requested():
+                time.sleep(0.001)
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="failed-partial-seal",
+        kind="measurement",
+        outputs=(declaration,),
+    )
+    try:
+        host.start()
+        assert committed.wait(2.0)
+
+        def fail_seal(_node, *, cut_short=False):
+            assert cut_short is True
+            raise RuntimeError("seal exploded")
+
+        monkeypatch.setattr(plane, "seal_committed", fail_seal)
+        host.cancel("operator stop")
+        observation = _wait(host, wake)
+        assert observation.phase == "failed"
+        assert observation.error == (
+            "stopped partial Dataset could not be sealed: "
+            "RuntimeError: seal exploded"
+        )
+        assert observation.progress is None
+        assert not host.final_result_resolved
+        assert not plane.is_generation_live(host.signal_key("frame"))
     finally:
         host.shutdown()
         plane.close()
 
 
 @pytest.mark.parametrize(
-    "execute, expected",
-    [
-        (lambda _context: (_ for _ in ()).throw(ValueError("bad node")), "failed"),
-        (lambda _context: "missing final", "failed"),
-    ],
+    ("partial", "phase"),
+    ((False, "failed"), (True, "done")),
 )
-def test_worker_failure_and_declared_output_guard(execute, expected: str) -> None:
-    declaration = DatasetOutputDeclaration("frame", "test.frame")
+def test_successful_partial_exact_output_requires_explicit_terminal_intent(
+    partial: bool,
+    phase: str,
+) -> None:
+    declaration = DatasetOutputDeclaration("history", "test.history")
     wake = Event()
     plane = SignalDataPlane()
 
     class Node:
-        instance_id = "camera"
-        dataset_output_declarations = (declaration,)
-
         def execute(self, context):
-            return execute(context)
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == expected
-        assert observation.error is not None
-        if "bad node" in observation.error:
-            assert "ValueError" in observation.error
-        else:
-            assert "did not publish final outputs" in observation.error
-        assert plane.latest_publication("@logic/camera/frame") is None
-    finally:
-        host.shutdown()
-        plane.close()
-
-
-def test_worker_cancel_and_shutdown_refuses_pending_worker() -> None:
-    wake = Event()
-    started = Event()
-    release = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "slow"
-
-        def execute(self, context):
-            started.set()
-            release.wait(2.0)
-            if context.cancel_requested():
-                raise RuntimeError("cancelled by host")
-            return "unexpected"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert started.wait(2.0)
-        with pytest.raises(RuntimeError, match="before terminal"):
-            host.shutdown()
-        assert host.observation.phase == "stopping"
-        release.set()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == "cancelled"
-        assert not host.running
-        host.shutdown()
-    finally:
-        release.set()
-        if not host.terminal:
-            _wait_worker(host, wake)
-        if not getattr(host, "_closed", False):
-            host.shutdown()
-        plane.close()
-
-
-def test_stop_cannot_relabel_an_already_successful_worker_completion() -> None:
-    """Owner polling latency is not a second cancellation boundary."""
-
-    wake = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "completed-before-stop"
-
-        def execute(self, context):
-            assert not context.cancel_requested()
-            return "committed result"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        # The Future and its done callback have both completed, but the owner
-        # has deliberately not polled that mailbox completion yet.  A late
-        # Stop may transiently project "stopping" until that completion is
-        # drained, but it cannot rewrite the successful terminal fact.
-        assert wake.wait(2.0)
-        host.cancel("too late")
-        observation = host.poll()
-        assert observation.phase == "done"
-        assert host.final_result == "committed result"
-    finally:
-        if not host.terminal:
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-def test_stop_just_before_worker_return_remains_a_cooperative_cancel() -> None:
-    """The commit marker is set only after execute has actually returned."""
-
-    wake = Event()
-    ready = Event()
-    release = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "stop-before-return"
-
-        def execute(self, context):
-            ready.set()
-            release.wait(2.0)
-            if context.cancel_requested():
-                raise RuntimeError("cancelled before return")
-            return "unexpected success"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert ready.wait(2.0)
-        host.cancel("in time")
-        release.set()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == "cancelled"
-        assert not host.final_result_resolved
-    finally:
-        release.set()
-        if not host.terminal:
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-def test_stop_that_wins_the_worker_terminal_seal_remains_cancelled() -> None:
-    wake = Event()
-    ready = Event()
-    release = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "stop-before-terminal-seal"
-
-        def execute(self, context):
-            ready.set()
-            assert release.wait(2.0)
-            context.seal_terminal()
-            return "unexpected success"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert ready.wait(2.0)
-        host.cancel("before terminal seal")
-        release.set()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == "cancelled"
-        assert not host.final_result_resolved
-    finally:
-        release.set()
-        if not host.terminal:
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-@pytest.mark.parametrize("outcome", ("success", "failure"))
-def test_stop_after_worker_terminal_seal_cannot_relabel_outcome(outcome: str) -> None:
-    wake = Event()
-    sealed = Event()
-    release = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = f"terminal-seal-{outcome}"
-
-        def execute(self, context):
-            context.seal_terminal()
-            sealed.set()
-            assert release.wait(2.0)
-            if outcome == "failure":
-                raise ValueError("terminal write failed")
-            return "committed result"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert sealed.wait(2.0)
-        host.cancel("after terminal seal")
-        assert not host.cancel_requested
-        release.set()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == ("done" if outcome == "success" else "failed")
-        if outcome == "success":
-            assert host.final_result == "committed result"
-        else:
-            assert observation.error == "ValueError: terminal write failed"
-            assert not host.final_result_resolved
-    finally:
-        release.set()
-        if not host.terminal:
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-def test_stale_mailbox_completion_cannot_replace_new_generation() -> None:
-    wake = Event()
-    second_ready = Event()
-    second_release = Event()
-    calls = 0
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "restartable"
-
-        def execute(self, _context):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return "first"
-            second_ready.set()
-            second_release.wait(2.0)
-            return "second"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        _wait_worker(host, wake)
-        first_generation = host._owner.generation
-        host.start()
-        assert second_ready.wait(2.0)
-        stale = Future()
-        stale.set_result("stale")
-        mailbox = host._owner
-        with mailbox._lock:
-            mailbox._completions.append(
-                OwnerCompletion("execute", first_generation, stale)
+            context.commit_live(
+                {
+                    "history": _finite_output(
+                        declaration,
+                        value=1.0,
+                        total=2,
+                        origin=0,
+                        written=1,
+                    )
+                }
             )
-        wake.clear()
-        host.poll()
-        assert host.running
-        assert not host.final_result_resolved
-        second_release.set()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == "done"
-        assert host.final_result == "second"
+            context.seal_terminal(partial=partial)
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id=f"partial-{partial}",
+        kind="measurement",
+        outputs=(declaration,),
+    )
+    try:
+        host.start()
+        observation = _wait(host, wake)
+        assert observation.phase == phase
+        if partial:
+            snapshot = plane.current_dataset(host.signal_key("history"))
+            assert snapshot.expanded_validity()[:, 0, 0].tolist() == [True, False]
+        else:
+            assert "coverage is incomplete" in (observation.error or "")
     finally:
-        second_release.set()
-        if not host.terminal:
-            _wait_worker(host, wake)
         host.shutdown()
         plane.close()
 
 
-class _SourceSlot:
-    notification_failure = None
-
-    def __init__(self, state: dict[str, LiveDatasetOutput]) -> None:
-        self._state = state
-        self.closed = False
-
-    def freeze_live_outputs(self):
-        return dict(self._state)
-
-    def set_change_listener(self, listener) -> None:
-        self._listener = listener
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def _source_plane(*, run_record: dict[str, object] | None = None):
-    declaration = DatasetOutputDeclaration("frame", "test.frame")
-    state = {"frame": _live_output("frame", 1, declaration, run_record)}
-    source = SimpleNamespace(
-        instance_id="camera",
-        dataset_output_declarations=(declaration,),
-        signal_key=lambda name: f"camera/{name}",
-    )
-    plane = SignalDataPlane()
-    slot = _SourceSlot(state)
-    plane.reserve(source)
-    plane.attach(source, slot)
-    plane.mark_changed(source, slot)
-    first = plane.freeze()
-    return plane, source, slot, state, first
-
-
-def _final_source_plane():
-    declaration = DatasetOutputDeclaration("frame", "test.final.frame")
-    source = SimpleNamespace(
-        instance_id="final-camera",
-        dataset_output_declarations=(declaration,),
-        signal_key=lambda name: f"final-camera/{name}",
-    )
-    plane = SignalDataPlane()
-    plane.reserve(source)
-    plane.publish_final(
-        source,
-        {"frame": _final_output("frame", 1, declaration)},
-    )
-    publication = plane.latest_publication("final-camera/frame")
-    assert publication is not None
-    return plane, publication
-
-
-def test_source_bound_processor_without_kind_follows_latest_publication() -> None:
-    source_record = {"named_devices": {"camera": "camera"}}
-    processor_record = {"authored_parameters": {"roi": [2, 3, 8, 9]}}
-    plane, source, source_slot, state, first = _source_plane(
-        run_record=source_record,
-    )
+def test_task_can_accept_a_stop_inside_its_terminal_commit() -> None:
+    running = Event()
     wake = Event()
-    declaration = DatasetOutputDeclaration("roi", "test.roi")
-    revisions: list[int] = []
+    plane = SignalDataPlane()
 
     class Node:
-        instance_id = "roi"
-        input_signal = "camera/frame"
-        dataset_output_declarations = (declaration,)
+        def execute(self, context):
+            running.set()
+            while not context.cancel_requested():
+                time.sleep(0.001)
+            context.report_progress("retaining best candidate")
+            context.seal_terminal(accept_stop=True)
+            return {"accepted_stop": True}
 
-        def evaluate(self, value):
-            assert value.run_record == source_record
-            revision = value.snapshot.ref.revision.value
-            revisions.append(revision)
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="accept-stop",
+        kind="task",
+    )
+    try:
+        host.start()
+        assert running.wait(2.0)
+        host.cancel("accept best")
+        observation = _wait(host, wake)
+        assert observation.phase == "done"
+        assert observation.progress is None
+        assert host.final_result == {"accepted_stop": True}
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+class _Source:
+    def __init__(self, instance_id: str, declaration: DatasetOutputDeclaration) -> None:
+        self.instance_id = instance_id
+        self.dataset_output_declarations = (declaration,)
+
+    def signal_key(self, output_name: str) -> str:
+        return f"@logic/{self.instance_id}/{output_name}"
+
+
+@pytest.mark.parametrize("delivery", ("exact", "latest"))
+def test_terminal_processor_always_receives_runtime_current_dataset(delivery: str) -> None:
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+    source = _Source(f"source-{delivery}", source_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    plane.commit_live(
+        source,
+        {
+            "frame": _finite_output(
+                source_declaration,
+                value=1.0,
+                total=2,
+                origin=0,
+                written=1,
+            )
+        },
+    )
+    plane.commit_live(
+        source,
+        {
+            "frame": _finite_output(
+                source_declaration,
+                value=2.0,
+                total=2,
+                origin=1,
+                written=2,
+            )
+        },
+    )
+    plane.seal_committed(source)
+    seen: list[tuple[int, list[float]]] = []
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            seen.append(
+                (
+                    value.snapshot.block.schema.repeat_axis.size,
+                    value.snapshot.block.values[:, 0, 0].tolist(),
+                )
+            )
+            return {"derived": _monitor_output(derived_declaration, 1)}
+
+    wake = Event()
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id=f"processor-{delivery}",
+        kind="processor",
+        outputs=(derived_declaration,),
+        source=source.signal_key("frame"),
+        delivery=delivery,
+    )
+    try:
+        host.start()
+        assert _wait(host, wake).phase == "done"
+        assert seen == [(2, [1.0, 2.0])]
+        result = plane.current_dataset(host.signal_key("derived"))
+        assert result.block.values.reshape(-1).tolist() == [1.0]
+        assert not plane.is_generation_live(host.signal_key("derived"))
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> None:
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+    source = _Source("exact-source", source_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    plane.commit_live(
+        source,
+        {
+            "frame": _finite_output(
+                source_declaration,
+                value=4.0,
+                total=3,
+                origin=0,
+                written=1,
+            )
+        },
+    )
+    plane.commit_live(
+        source,
+        {
+            "frame": _finite_output(
+                source_declaration,
+                value=6.0,
+                total=3,
+                origin=1,
+                written=2,
+            )
+        },
+    )
+    seen: list[tuple[int, float, tuple[int, int] | None]] = []
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            seen.append(
+                (
+                    value.snapshot.block.schema.repeat_axis.size,
+                    float(value.snapshot.block.values[0, 0, 0]),
+                    value.cell_origin,
+                )
+            )
             return {
-                "roi": _live_output(
-                    "roi",
-                    revision,
-                    declaration,
-                    processor_record,
+                "derived": _finite_output(
+                    derived_declaration,
+                    value=float(len(seen)),
+                    total=3,
+                    origin=len(seen) - 1,
+                    written=len(seen),
                 )
             }
 
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        first_front = _wait_processor(
-            plane,
-            wake,
-            lambda front: front.value("@logic/roi/roi") is not None,
-        )
-        assert first_front.value("@logic/roi/roi").snapshot.ref.revision.value == 1
-
-        wake.clear()
-        state["frame"] = _live_output(
-            "frame",
-            2,
-            source.dataset_output_declarations[0],
-            source_record,
-        )
-        plane.mark_changed(source, source_slot)
-        plane.freeze()
-        second_front = _wait_processor(
-            plane,
-            wake,
-            lambda front: (
-                front.value("@logic/roi/roi") is not None
-                and front.value("@logic/roi/roi").snapshot.ref.revision.value == 2
-            ),
-        )
-        assert second_front.value("@logic/roi/roi").snapshot.ref.revision.value == 2
-        assert revisions == [1, 2]
-        child_publication = second_front.publication("@logic/roi/roi")
-        assert child_publication is not None
-        assert child_publication.run_record == processor_record
-        assert second_front.value("@logic/roi/roi").run_record == processor_record
-        (parent_publication,) = plane.direct_parent_publications(child_publication)
-        assert parent_publication.run_record == source_record
-        assert parent_publication.value("camera/frame").run_record == source_record
-        assert host.running
-        host.cancel("test cancellation")
-        assert host.terminal
-        assert host.observation.phase == "cancelled"
-    finally:
-        if not host.terminal:
-            host.cancel("cleanup")
-            plane.freeze()
-        host.shutdown()
-        plane.close()
-
-
-def test_processor_latest_only_skips_busy_intermediate_publications() -> None:
-    plane, source, source_slot, state, _first = _source_plane()
     wake = Event()
-    first_started = Event()
-    third_started = Event()
-    release_first = Event()
-    declaration = DatasetOutputDeclaration("roi", "test.roi.jump")
-    revisions: list[int] = []
-
-    class Node:
-        instance_id = "roi-jump"
-        input_signal = "camera/frame"
-        dataset_output_declarations = (declaration,)
-
-        def evaluate(self, value):
-            revision = value.snapshot.ref.revision.value
-            revisions.append(revision)
-            if revision == 1:
-                first_started.set()
-                assert release_first.wait(2.0)
-            elif revision == 3:
-                third_started.set()
-            return {"roi": _live_output("roi", revision, declaration)}
-
-    host = NodeHost(Node(), plane, wake.set)
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id="exact-processor",
+        kind="processor",
+        outputs=(derived_declaration,),
+        source=source.signal_key("frame"),
+        delivery="exact",
+    )
     try:
         host.start()
-        assert first_started.wait(2.0)
-        wake.clear()
-
-        state["frame"] = _live_output("frame", 2, source.dataset_output_declarations[0])
-        plane.mark_changed(source, source_slot)
-        plane.freeze()
-        state["frame"] = _live_output("frame", 3, source.dataset_output_declarations[0])
-        plane.mark_changed(source, source_slot)
-        plane.freeze()
-
-        release_first.set()
-        _wait_processor(plane, wake, lambda _front: third_started.is_set())
-        front = _wait_processor(
-            plane,
-            wake,
-            lambda current: (
-                current.value("@logic/roi-jump/roi") is not None
-                and current.value("@logic/roi-jump/roi").snapshot.ref.revision.value == 3
-            ),
+        deadline = time.monotonic() + 2.0
+        while len(seen) < 2 and time.monotonic() < deadline:
+            host.poll()
+            time.sleep(0.001)
+        partial = plane.current_dataset(host.signal_key("derived"))
+        assert partial.block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
+        assert partial.expanded_validity()[:, 0, 0].tolist() == [
+            True,
+            True,
+            False,
+        ]
+        plane.commit_live(
+            source,
+            {
+                "frame": _finite_output(
+                    source_declaration,
+                    value=9.0,
+                    total=3,
+                    origin=2,
+                    written=3,
+                )
+            },
         )
-        assert revisions == [1, 3]
-        result_publication = front.publication("@logic/roi-jump/roi")
-        source_publication = front.publication("camera/frame")
-        assert result_publication is not None and source_publication is not None
-        assert plane.direct_parent_publications(result_publication) == (
+        plane.seal_committed(source)
+        assert _wait(host, wake).phase == "done"
+        assert seen == [
+            (1, 4.0, (0, 0)),
+            (1, 6.0, (1, 0)),
+            (1, 9.0, (2, 0)),
+        ]
+        derived = plane.current_dataset(host.signal_key("derived"))
+        assert derived.block.values[:, 0, 0].tolist() == [1.0, 2.0, 3.0]
+        publication = plane.latest_publication(host.signal_key("derived"))
+        source_publication = plane.latest_publication(source.signal_key("frame"))
+        assert publication is not None and source_publication is not None
+        assert plane.direct_parent_publications(publication) == (
             source_publication,
         )
     finally:
-        release_first.set()
-        if not host.terminal:
-            host.cancel("cleanup")
-            plane.freeze()
         host.shutdown()
         plane.close()
-
-
-def test_worker_cancel_then_restart_resets_the_generation_stop_event() -> None:
-    wake = Event()
-    first_started = Event()
-    release_first = Event()
-    calls = 0
-    plane = SignalDataPlane()
-
-    class Node:
-        instance_id = "restart-stop"
-
-        def execute(self, context):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                first_started.set()
-                assert release_first.wait(2.0)
-                if context.cancel_requested():
-                    raise RuntimeError("first generation cancelled")
-            return calls
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert first_started.wait(2.0)
-        host.cancel("restart test")
-        release_first.set()
-        cancelled = _wait_worker(host, wake)
-        assert cancelled.phase == "cancelled"
-
-        host.start()
-        completed = _wait_worker(host, wake)
-        assert completed.phase == "done"
-        assert host.final_result == 2
-    finally:
-        release_first.set()
-        if not host.terminal:
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-def test_cancelled_worker_detaches_app_owned_live_outputs_before_terminal() -> None:
-    declaration = DatasetOutputDeclaration("frame", "test.live.final")
-    wake = Event()
-    started = Event()
-    release = Event()
-    plane = SignalDataPlane()
-    slot = _SourceSlot({"frame": _live_output("frame", 1, declaration)})
-
-    class Node:
-        instance_id = "live-terminal"
-        dataset_output_declarations = (declaration,)
-
-        def execute(self, context):
-            context.attach_live_outputs(slot)
-            started.set()
-            assert release.wait(2.0)
-            return "capture loop stopped"
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert started.wait(2.0)
-        host.cancel("stop infinite capture")
-        release.set()
-        observation = _wait_worker(host, wake)
-        assert observation.phase == "cancelled"
-        assert observation.error is None
-        assert not host.final_result_resolved
-        assert slot.closed
-        assert plane.latest_publication("@logic/live-terminal/frame") is None
-    finally:
-        release.set()
-        host.shutdown()
-        plane.close()
-
-
-def test_dataset_coverage_processor_follows_every_publication_then_finishes() -> None:
-    source_declaration = DatasetOutputDeclaration("frame", "test.exact.frame")
-    source_record = {
-        "authored_parameters": {"repeat": 3},
-        "actual_device_snapshots": {"camera": {"binning": [1, 1]}},
-    }
-    processor_record = {
-        "authored_parameters": {"calibration_path": "calibration.json"}
-    }
-    source_state = {
-        "frame": _dataset_output(
-            "frame",
-            1,
-            source_declaration,
-            source_record,
-        )
-    }
-    source = SimpleNamespace(
-        instance_id="exact-camera",
-        dataset_output_declarations=(source_declaration,),
-        signal_key=lambda name: f"exact-camera/{name}",
-    )
-    source_slot = _SourceSlot(source_state)
-    plane = SignalDataPlane()
-    plane.reserve(source)
-    plane.attach(source, source_slot)
-    plane.mark_changed(source, source_slot)
-    plane.freeze()
-
-    wake = Event()
-    first_started = Event()
-    release_first = Event()
-    declaration = DatasetOutputDeclaration("derived", "test.exact.derived")
-    revisions: list[int] = []
-
-    class Node:
-        instance_id = "exact-derived"
-        input_signal = "exact-camera/frame"
-        dataset_output_declarations = (declaration,)
-
-        def evaluate(self, value):
-            assert value.run_record == source_record
-            revision = value.snapshot.ref.revision.value
-            revisions.append(revision)
-            if revision == 1:
-                first_started.set()
-                assert release_first.wait(2.0)
-            return {
-                "derived": _dataset_output(
-                    "derived",
-                    revision,
-                    declaration,
-                    processor_record,
-                )
-            }
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert first_started.wait(2.0)
-        for revision in (2, 3):
-            source_state["frame"] = _dataset_output(
-                "frame",
-                revision,
-                source_declaration,
-                source_record,
-            )
-            plane.mark_changed(source, source_slot)
-            plane.freeze()
-        release_first.set()
-        plane.finish_live(source)
-        completed = _wait_worker(host, wake)
-        assert completed.phase == "done"
-        assert revisions == [1, 2, 3]
-
-        front = plane.freeze()
-        publication = front.publication("@logic/exact-derived/derived")
-        value = front.value("@logic/exact-derived/derived")
-        source_publication = plane.latest_publication("exact-camera/frame")
-        assert publication is not None and value is not None
-        assert source_publication is not None
-        assert value.coverage is None and value.transient is False
-        assert publication.run_record == processor_record
-        assert value.run_record == processor_record
-        assert source_publication.run_record == source_record
-        assert source_publication.value("exact-camera/frame").run_record == source_record
-        assert not plane.is_generation_live("@logic/exact-derived/derived")
-        assert plane.direct_parent_publications(publication) == (source_publication,)
-    finally:
-        release_first.set()
-        if host.running:
-            host.cancel("cleanup")
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-def test_frozen_final_processor_runs_once_on_worker_and_cleans_up() -> None:
-    plane, source_publication = _final_source_plane()
-    wake = Event()
-    started = Event()
-    release = Event()
-    declaration = DatasetOutputDeclaration("derived", "test.frozen.derived")
-    caller_thread = get_ident()
-    behavior = "success"
-    processor_record = {"authored_parameters": {"mode": "frozen"}}
-    calls: list[tuple[str, int]] = []
-
-    class Node:
-        instance_id = "frozen"
-        input_signal = "final-camera/frame"
-        dataset_output_declarations = (declaration,)
-
-        def evaluate(self, value):
-            calls.append((behavior, get_ident()))
-            started.set()
-            if behavior == "failure":
-                raise ValueError("frozen processor failed")
-            assert release.wait(2.0)
-            return {
-                "derived": _live_output(
-                    "derived",
-                    1,
-                    declaration,
-                    processor_record,
-                )
-            }
-
-    host = NodeHost(Node(), plane, wake.set)
-    try:
-        host.start()
-        assert started.wait(2.0)
-        assert len(calls) == 1 and calls[0][0] == "success"
-        assert calls[0][1] != caller_thread
-        assert host.running
-        release.set()
-        completed = _wait_worker(host, wake)
-        assert completed.phase == "done"
-
-        front = plane.freeze()
-        value = front.value("@logic/frozen/derived")
-        publication = front.publication("@logic/frozen/derived")
-        assert value is not None and publication is not None
-        assert value.coverage is None
-        assert value.transient is False
-        assert value.run_record == processor_record
-        assert publication.run_record == processor_record
-        assert not plane.is_generation_live("@logic/frozen/derived")
-        assert plane.direct_parent_publications(publication) == (source_publication,)
-
-        behavior = "cancel"
-        started.clear()
-        release.clear()
-        host.start()
-        assert started.wait(2.0)
-        host.cancel("cancel frozen processor")
-        release.set()
-        cancelled = _wait_worker(host, wake)
-        assert cancelled.phase == "cancelled"
-        assert plane.latest_publication("@logic/frozen/derived") is None
-
-        behavior = "failure"
-        started.clear()
-        release.clear()
-        host.start()
-        assert started.wait(2.0)
-        failed = _wait_worker(host, wake)
-        assert failed.phase == "failed"
-        assert failed.error is not None and "frozen processor failed" in failed.error
-        assert plane.latest_publication("@logic/frozen/derived") is None
-    finally:
-        release.set()
-        if host.running:
-            host.cancel("cleanup")
-            _wait_worker(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-def test_processor_failure_and_inflight_cancel_are_terminal_callbacks() -> None:
-    for mode in ("failure", "cancel"):
-        plane, _source, _source_slot, _state, _first = _source_plane()
-        wake = Event()
-        evaluate_started = Event()
-        release = Event()
-        declaration = DatasetOutputDeclaration("roi", f"test.roi.{mode}")
-
-        class Node:
-            instance_id = f"roi-{mode}"
-            input_signal = "camera/frame"
-            dataset_output_declarations = (declaration,)
-
-            def evaluate(self, _value):
-                evaluate_started.set()
-                if mode == "failure":
-                    raise ValueError("processor failed")
-                release.wait(2.0)
-                return {"roi": _live_output("roi", 1, declaration)}
-
-        host = NodeHost(Node(), plane, wake.set)
-        try:
-            host.start()
-            if mode == "failure":
-                _wait_processor(
-                    plane,
-                    wake,
-                    lambda _front: host.terminal,
-                )
-                assert host.observation.phase == "failed"
-                assert host.observation.error is not None
-                assert "processor failed" in host.observation.error
-            else:
-                assert evaluate_started.wait(2.0)
-                host.cancel("stop processor")
-                release.set()
-                _wait_processor(
-                    plane,
-                    wake,
-                    lambda _front: host.terminal,
-                )
-                assert host.observation.phase == "cancelled"
-        finally:
-            release.set()
-            if not host.terminal:
-                host.cancel("cleanup")
-                plane.freeze()
-            host.shutdown()
-            plane.close()

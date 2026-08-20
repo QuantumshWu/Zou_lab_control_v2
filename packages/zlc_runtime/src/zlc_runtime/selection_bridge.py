@@ -872,7 +872,7 @@ class SelectionBridge:
                     RuntimeError("fit event trails a finished source generation")
                 )
                 return
-            self._publish_final("fit", outputs, publication)
+            self._publish_terminal("fit", outputs, publication)
             return
         with self._lock:
             if self._fit_processor is None:
@@ -905,7 +905,7 @@ class SelectionBridge:
                 processor = self._fit_processor
         assert processor is not None
         try:
-            self._publish_processor(
+            self._commit_processor(
                 processor,
                 outputs,
                 publication,
@@ -953,7 +953,7 @@ class SelectionBridge:
         # so it is answered once, terminally, instead of being refused because
         # the only machinery on offer was the live kind.
         if not self._plane.is_generation_live(self._source_signal):
-            self._publish_final("selection", outputs, publication)
+            self._publish_terminal("selection", outputs, publication)
             return
 
         with self._lock:
@@ -989,7 +989,7 @@ class SelectionBridge:
                 raise
 
         try:
-            self._publish_processor(
+            self._commit_processor(
                 processor,
                 outputs,
                 publication,
@@ -1004,7 +1004,7 @@ class SelectionBridge:
             self._withdraw_processor(processor)
             raise
 
-    def _publish_final(
+    def _publish_terminal(
         self,
         role: str,
         outputs: Mapping[str, LiveDatasetOutput],
@@ -1030,11 +1030,13 @@ class SelectionBridge:
                 source_name=self._source_signal,
                 source_publication=source_publication,
             )
-            self._plane.publish_terminal_processor(
+            self._plane.commit_processor(
                 owner,
                 outputs,
                 source_publication=source_publication,
+                retain=True,
             )
+            self._plane.seal_processor(owner)
         except BaseException:
             with self._lock:
                 if self._selection_processor is owner:
@@ -1103,7 +1105,7 @@ class SelectionBridge:
         if active is not processor or expected is None or trigger != expected:
             return
         try:
-            self._publish_processor(
+            self._commit_processor(
                 processor,
                 result,
                 source_publication,
@@ -1136,7 +1138,7 @@ class SelectionBridge:
     def _accept_processor_cancelled(self, processor: _BridgeProcessor) -> None:
         return None
 
-    def _publish_processor(
+    def _commit_processor(
         self,
         processor: _BridgeProcessor,
         outputs: Mapping[str, LiveDatasetOutput],
@@ -1144,7 +1146,7 @@ class SelectionBridge:
         *,
         trigger: tuple[str, int],
     ) -> None:
-        self._plane.publish_processor(
+        self._plane.commit_processor(
             processor,
             outputs,
             source_publication=publication,

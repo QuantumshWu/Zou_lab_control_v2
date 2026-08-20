@@ -212,20 +212,11 @@ class TaskConsoleHandle(QtCore.QObject):
         """Project one application admission gate onto every existing view."""
 
         self._task_takeover = bool(active)
-        editing = not self._task_takeover
         self._view.set_task_takeover(self._task_takeover)
-        for card in self._cards.values():
-            card.set_editing_enabled(editing)
         for row in self._rows.values():
             row.set_task_takeover(self._task_takeover)
-        for row in self._panel_publisher_rows.values():
-            row.edit_button.setEnabled(editing)
         for editor in self._logic_editors.values():
-            editor.set_mutation_enabled(editing)
-        for editor in self._panel_publisher_editors.values():
-            editor.set_mutation_enabled(editing)
-        for editor in self._panel_editors.values():
-            editor.set_mutation_enabled(editing)
+            editor.set_mutation_enabled(not self._task_takeover)
 
     def choose_signal(self, rows) -> str | None:
         """Ask which signal to show; None when the operator declines."""
@@ -309,7 +300,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 )
             if self._grid_cell_kinds:
                 card.set_cell_kind_choices(self._grid_cell_kinds)
-            card.set_editing_enabled(not self._task_takeover)
+            card.set_editing_enabled(True)
         self._view.set_cards(tuple(self._cards.values()))
 
     def remove_panel(self, panel_id: str) -> None:
@@ -388,7 +379,7 @@ class TaskConsoleHandle(QtCore.QObject):
         """Combine one panel's owner gate with the application Task gate."""
 
         key = str(panel_id)
-        effective = bool(enabled) and not self._task_takeover
+        effective = bool(enabled)
         card = self._cards.get(key)
         if card is not None:
             card.set_editing_enabled(effective)
@@ -409,7 +400,7 @@ class TaskConsoleHandle(QtCore.QObject):
         editor = self._panel_editors.get(key)
         if editor is None:
             editor = PanelEditorView(key, incoming)
-            editor.set_mutation_enabled(not self._task_takeover)
+            editor.set_mutation_enabled(True)
             editor.state_changed.connect(
                 lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
             )
@@ -555,7 +546,7 @@ class TaskConsoleHandle(QtCore.QObject):
                     lambda _=None, pid=key: self.panel_publisher_edit_requested.emit(pid)
                 )
             row.set_publishes(published)
-            row.edit_button.setEnabled(not self._task_takeover)
+            row.edit_button.setEnabled(True)
             incoming[key] = row
         for key, row in tuple(self._panel_publisher_rows.items()):
             if key not in incoming:
@@ -569,7 +560,6 @@ class TaskConsoleHandle(QtCore.QObject):
         editor = self._panel_publisher_editors.get(key)
         if editor is None:
             editor = LogicEditorView(key, projection, show_actions=False)
-            editor.set_mutation_enabled(not self._task_takeover)
             editor.draft_changed.connect(
                 lambda patch, pid=key: self.panel_publisher_draft_changed.emit(pid, patch)
             )
@@ -579,12 +569,18 @@ class TaskConsoleHandle(QtCore.QObject):
         else:
             editor.update_projection(projection)
             self._view.focus_editor_tab(editor)
+        editor.set_mutation_enabled(
+            not bool(dict(projection).get("science_locked"))
+        )
 
     def update_panel_publisher_editor(self, panel_id: str, projection: Any) -> bool:
         editor = self._panel_publisher_editors.get(str(panel_id))
         if editor is None:
             return False
         editor.update_projection(projection)
+        editor.set_mutation_enabled(
+            not bool(dict(projection).get("science_locked"))
+        )
         return True
 
     def focus_panel_publisher_editor(self, panel_id: str) -> bool:
@@ -645,9 +641,6 @@ class TaskConsoleHandle(QtCore.QObject):
         return False if editor is None else self._view.remove_editor_tab(editor)
 
     def _editor_close_requested(self, editor: object) -> None:
-        if self._task_takeover:
-            self._view.focus_editor_tab(editor)
-            return
         for node_id, candidate in tuple(self._logic_editors.items()):
             if candidate is editor:
                 self.close_logic_editor(node_id)

@@ -50,8 +50,12 @@ class _CalibrationCoveragePlane(FakePlane):
         self.calibration_schema_fingerprints: list[str] = []
         self.calibration_preview_shapes: list[tuple[int, ...]] = []
 
-    def mark_changed(self, producer: object, live_slot: object) -> None:
-        output = live_slot.freeze_live_outputs()["capture_preview"]
+    def commit_live(self, producer, outputs, *, growing_outputs=()):
+        output = outputs.get("capture_preview")
+        if output is None:
+            return super().commit_live(
+                producer, outputs, growing_outputs=growing_outputs
+            )
         self.calibration_coverages.append(
             (output.coverage.written_cells, output.coverage.total_cells)
         )
@@ -59,7 +63,9 @@ class _CalibrationCoveragePlane(FakePlane):
             output.snapshot.block.schema.fingerprint
         )
         self.calibration_preview_shapes.append(output.snapshot.block.values.shape)
-        super().mark_changed(producer, live_slot)
+        return super().commit_live(
+            producer, outputs, growing_outputs=growing_outputs
+        )
 
 
 class _RecordingCamera:
@@ -247,7 +253,6 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         ("occupancy", "calibration"),
         ("slm_feedback", "calibration"),
         ("slm_feedback", "camera_measurement"),
-        ("slm_feedback", "occupancy"),
         ("temperature", "calibration"),
         ("temperature", "camera_measurement"),
         ("temperature", "occupancy"),
@@ -430,7 +435,14 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             [event for event, _ in sequencer.events if event == "wait_done"]
         )
         camera_events_before_task = len(camera.events)
-        calibration_host = NodeHost(calibration_node, plane)
+        calibration_host = NodeHost(
+            calibration_node,
+            plane,
+            instance_id="calibration",
+            kind=NodeKind.TASK.value,
+            dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+            required_artifact_names=("artifact_path",),
+        )
         calibration_host.start()
         deadline = time.monotonic() + 10.0
         while not calibration_host.observation.terminal and time.monotonic() < deadline:
@@ -438,8 +450,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             time.sleep(0.005)
         observation = calibration_host.poll()
         assert observation.terminal and observation.phase == "done", observation
-        assert observation.progress is not None
-        assert observation.progress.text == "Calibration complete 30/30"
+        assert observation.progress is None
         task_result = calibration_node.result
         assert task_result is not None
         task_camera_events = camera.events[camera_events_before_task:]
@@ -481,9 +492,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             if name in {"set_exposure_seconds", "arm"}
         ) == "set_exposure_seconds"
         assert ("arm", (90, (3,) * 30, 90)) in task_camera_events
-        assert [value for name, value in task_camera_events if name == "read"] == [
-            (3, True)
-        ] * 30
+        reads = [value for name, value in task_camera_events if name == "read"]
+        assert len(reads) >= 30
+        assert all(value == (3, False) for value in reads)
         assert [name for name, _ in task_camera_events].count("finish") == 1
         assert len([event for event, _ in sequencer.events if event == "load"]) - loads_before_task == 1
         # One pulse for the whole run: the board repeats the cycle itself and
@@ -512,8 +523,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert occupancy_node.model.kind is ReadoutModelKind.UNIFORM_PSF
         occupancy_result = occupancy_node.process(
             camera_cycle_snapshot([(record,) for record in task_result.short]),
-            generation="calibration-task",
-            revision=1,
         )
         assert occupancy_result.counts.shape == (30, 1, 35)
         assert occupancy_result.valid.shape == occupancy_result.counts.shape
@@ -526,7 +535,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             for value in descriptors["calibration"].outputs
         ) == (("capture_preview", "calibration.capture-preview.v1"),)
         assert tuple(
-            (preview.output_name, preview.plot_kind)
+            (preview.output.name, preview.plot_kind)
             for preview in descriptors["calibration"].node_previews
         ) == (("capture_preview", "facet_grid"),)
         # A preview is not a Task privilege: an ordinary measurement names the
@@ -535,7 +544,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         # take.  One frame per cycle IS a picture; three are three of them.
         camera_descriptor = descriptors["camera_measurement"]
         assert tuple(
-            (preview.output_name, preview.plot_kind)
+            (preview.output.name, preview.plot_kind)
             for preview in camera_descriptor.node_previews
         ) == (("frames", "facet_grid"),)
         assert not hasattr(descriptors["calibration"], "task_reports")

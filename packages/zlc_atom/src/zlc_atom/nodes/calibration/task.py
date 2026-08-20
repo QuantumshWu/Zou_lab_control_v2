@@ -52,8 +52,8 @@ from .calibration import (
 from .summary import readout_summary, summary_lines
 from .outputs import (
     CAPTURE_PREVIEW_DECLARATION,
+    capture_preview_output,
     cycle_snapshot,
-    CalibrationCapturePreviewSlot,
     _image_axis_specs,
     _snapshot,
 )
@@ -1036,17 +1036,7 @@ class CalibrationTask:
                 sequencer_snapshot,
                 pulse_facts,
             )
-            preview: CalibrationCapturePreviewSlot | None = None
             if context is not None:
-                preview = CalibrationCapturePreviewSlot(
-                    repeats=self.request.repeats,
-                    frame_shape=actual.frame_shape_yx,
-                    origin_yx=actual.roi_origin_yx,
-                    binning_yx=actual.binning_yx,
-                    generation=context.generation,
-                    run_record=run_record,
-                )
-                context.attach_live_outputs(preview)
                 context.report_progress(
                     "Capturing calibration",
                     current=0,
@@ -1104,8 +1094,19 @@ class CalibrationTask:
                             ),
                         )
                     writer.write(len(cycles) - 1, cycle)
-                if preview is not None:
-                    preview.update(cycle)
+                if context is not None:
+                    output = capture_preview_output(
+                        cycle,
+                        frame_shape=actual.frame_shape_yx,
+                        origin_yx=actual.roi_origin_yx,
+                        binning_yx=actual.binning_yx,
+                        generation=context.generation,
+                        revision=len(cycles),
+                        run_record=run_record,
+                    )
+                    context.commit_live(
+                        {CAPTURE_PREVIEW_DECLARATION.name: output}
+                    )
                     context.report_progress(
                         "Capturing calibration",
                         current=len(cycles),
@@ -1186,21 +1187,23 @@ class CalibrationTask:
             readout_mode=camera.get("readout_mode"),
         )
         if context is not None:
-            preview = CalibrationCapturePreviewSlot(
-                repeats=len(cycles),
-                frame_shape=contract.image_shape,
-                origin_yx=(
-                    (0, 0) if roi is None else (int(roi[1]), int(roi[0]))
-                ),
-                binning_yx=contract.binning_yx,
-                generation=context.generation,
-                run_record=dict(run_record),
-            )
-            context.attach_live_outputs(preview)
             for index, cycle in enumerate(cycles):
                 if context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
-                preview.update(cycle)
+                output = capture_preview_output(
+                    cycle,
+                    frame_shape=contract.image_shape,
+                    origin_yx=(
+                        (0, 0) if roi is None else (int(roi[1]), int(roi[0]))
+                    ),
+                    binning_yx=contract.binning_yx,
+                    generation=context.generation,
+                    revision=index + 1,
+                    run_record=run_record,
+                )
+                context.commit_live(
+                    {CAPTURE_PREVIEW_DECLARATION.name: output}
+                )
                 context.report_progress(
                     "Reading saved frames",
                     current=index + 1,
@@ -1327,6 +1330,10 @@ class CalibrationTask:
                 artifact_report,
             )
             if context is not None:
+                # Analysis remains cancellable.  Once artifact publication
+                # begins, Stop must not leave a successful-looking half report
+                # or relabel durable output as a cancelled run.
+                context.seal_terminal()
                 context.report_progress("Saving calibration")
             calibration.save(artifact_path)
             result = CalibrationRunResult(

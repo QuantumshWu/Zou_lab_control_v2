@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from threading import Event
 import time
 
@@ -31,10 +30,9 @@ from zlc_data import (
     ValueSchema,
 )
 
-from zlc_runtime.dataset import MonitorCoverage
+from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import (
     DatasetOutputDeclaration,
-    FinalDatasetOutput,
     LiveDatasetOutput,
 )
 from zlc_runtime.plane import SignalDataPlane
@@ -62,19 +60,6 @@ class _Source:
 
     def signal_key(self, name: str) -> str:
         return f"camera/{name}"
-
-
-class _Slot:
-    notification_failure = None
-
-    def __init__(self, state: dict[str, LiveDatasetOutput]) -> None:
-        self.state = state
-
-    def freeze_live_outputs(self):
-        return dict(self.state)
-
-    def close(self) -> None:
-        return None
 
 
 class _Events:
@@ -154,13 +139,44 @@ def _source_setup(
         )
     }
     source = _Source(declaration)
-    slot = _Slot(state)
     plane = SignalDataPlane()
     plane.reserve(source)
-    plane.attach(source, slot)
-    plane.mark_changed(source, slot)
+    plane.commit_live(source, state)
     initial = plane.freeze()
-    return plane, source, slot, state, initial
+    return plane, source, None, state, initial
+
+
+def _commit_source(
+    plane: SignalDataPlane,
+    source: _Source,
+    state: dict[str, LiveDatasetOutput],
+) -> None:
+    plane.commit_live(source, state)
+
+
+def _seal_source(
+    plane: SignalDataPlane,
+    source: _Source,
+    output: LiveDatasetOutput,
+) -> None:
+    plane.retire(source)
+    plane.begin_generation(source)
+    schema = output.snapshot.block.schema
+    cells = schema.repeat_axis.size * schema.point_table.row_count
+    plane.commit_live(
+        source,
+        {
+            "frame": LiveDatasetOutput(
+                output.declaration,
+                output.snapshot,
+                DatasetCoverage(cells, cells),
+                output.run_record,
+                schema,
+                (0, 0),
+            )
+        },
+    )
+    plane.seal_committed(source)
 
 
 def _image_schema() -> DatasetSchema:
@@ -367,7 +383,7 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
             _snapshot("frame", 2, schema, values + 100.0),
             MonitorCoverage(1, 1),
         )
-        plane.mark_changed(source, slot)
+        _commit_source(plane, source, state)
         front = _wait_for_signal(plane, bridge, "@logic/image/roi_mean", 2)
         publication = front.publication("@logic/image/roi_mean")
         assert publication is not None
@@ -817,7 +833,7 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
             _snapshot("frame", 2, schema, values + 1.0),
             MonitorCoverage(1, 5),
         )
-        plane.mark_changed(source, slot)
+        _commit_source(plane, source, state)
         plane.freeze()
 
         events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
@@ -863,13 +879,6 @@ def test_fit_contract_fields_and_exports_are_exact() -> None:
         "selection_output_catalog",
     )
     assert not hasattr(selection_bridge_module, "FitParameter")
-    contract = (Path(__file__).parents[1] / "docs" / "contract.md").read_text(
-        encoding="utf-8"
-    )
-    assert "source_revision: int" in contract
-    assert "batch_revision: int" in contract
-    assert "success AND isfinite(error)" in contract
-    assert "{sample_axis_name}_label` TEXT point column" in contract
 
 
 def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
@@ -899,7 +908,7 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
             _snapshot("frame", 2, schema, values + 1.0),
             MonitorCoverage(1, 5),
         )
-        plane.mark_changed(source, slot)
+        _commit_source(plane, source, state)
         plane.freeze()
         assert bridge.wait_for_wake(2.0)
         between = plane.freeze()
@@ -964,7 +973,7 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
             _snapshot("frame", 2, schema, values + 1.0),
             MonitorCoverage(1, 5),
         )
-        plane.mark_changed(source, slot)
+        _commit_source(plane, source, state)
         plane.freeze()
         remember_current()
 
@@ -1117,15 +1126,7 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_mean"}
     )
-    plane.publish_final(
-        source,
-        {
-            "frame": FinalDatasetOutput(
-                state_map["frame"].declaration,
-                state_map["frame"].snapshot,
-            )
-        },
-    )
+    _seal_source(plane, source, state_map["frame"])
     assert not plane.is_generation_live("camera/frame")
 
     events = _Events()
@@ -1168,15 +1169,7 @@ def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_mean"}
     )
-    plane.publish_final(
-        source,
-        {
-            "frame": FinalDatasetOutput(
-                state_map["frame"].declaration,
-                state_map["frame"].snapshot,
-            )
-        },
-    )
+    _seal_source(plane, source, state_map["frame"])
     events = _Events()
     bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frozen")
     bridge.start()

@@ -70,6 +70,7 @@ class PanelEditorView(QtWidgets.QWidget):
         super().__init__(parent)
         self.panel_id = str(panel_id)
         self._mutation_enabled = True
+        self._science_locked = False
         self._projection: dict[str, object] = {}
         self._state: dict[str, Any] = {}
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
@@ -324,6 +325,9 @@ class PanelEditorView(QtWidgets.QWidget):
         if draws_image_surfaces(state):
             values["overlay_signal"] = state["overlay_signal"]
         surface = incoming.get("parameter_surface")
+        self._science_locked = bool(
+            isinstance(surface, Mapping) and surface.get("science_locked")
+        )
         self.panel_form.refresh()
         self.panel_form.reconcile(FormSpec(tuple(fields)), values)
         self.panel_form.refresh()
@@ -400,15 +404,30 @@ class PanelEditorView(QtWidgets.QWidget):
 
         self._mutation_enabled = bool(enabled)
         self.panel_form.setEnabled(self._mutation_enabled)
-        for form in self.parameter_forms.values():
-            form.setEnabled(self._mutation_enabled)
+        if self._mutation_enabled:
+            for key in ("signal", "overlay_signal", "cell_kind"):
+                if key in self.panel_form.spec.keys:
+                    self.panel_form.widget_for(key).setEnabled(
+                        not self._science_locked
+                    )
+            if "signal" in self.panel_form.spec.keys:
+                self.panel_form.widget_for("signal").setEnabled(
+                    bool(self._signal_groups) and not self._science_locked
+                )
+        for section, form in self.parameter_forms.items():
+            form.setEnabled(
+                self._mutation_enabled
+                and not (section == "semantic" and self._science_locked)
+            )
         self.refresh_button.setEnabled(self._mutation_enabled)
         self._update_save_controls()
         self.producer_restart_button.setEnabled(
             self._mutation_enabled and self._producer_editor is not None
         )
         if self._producer_editor is not None:
-            self._producer_editor.set_mutation_enabled(self._mutation_enabled)
+            self._producer_editor.set_mutation_enabled(
+                self._mutation_enabled and not self._science_locked
+            )
 
     def _save_path(self) -> Path | None:
         directory_text = self.save_directory.text().strip()

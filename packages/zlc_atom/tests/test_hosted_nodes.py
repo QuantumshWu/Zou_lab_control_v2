@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,9 +22,14 @@ from zlc_atom.nodes._framework.descriptor import NodeKind
 from zlc_atom.nodes._framework.discovery import discover_logic_nodes
 from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
 from zlc_atom.nodes.camera_measurement.measurement import (
+    CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
+    _finite_cycle_output,
+    _strict_cycle_ordinals,
+    _strict_terminal,
 )
+from zlc_atom.devices.camera import CameraCaptureTerminalRecord, CameraFrameRecord
 from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_runtime.host import NodeHost
@@ -33,14 +38,19 @@ from zlc_runtime.plane import SignalDataPlane
 from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
-class _DetachRecordingPlane(SignalDataPlane):
-    def __init__(self) -> None:
-        super().__init__()
-        self.detached: list[object] = []
-
-    def detach_live(self, node: object) -> None:
-        self.detached.append(node)
-        super().detach_live(node)
+def _camera_host(
+    node: CameraMeasurementNode,
+    plane: SignalDataPlane,
+    wake: Event,
+) -> NodeHost:
+    return NodeHost(
+        node,
+        plane,
+        wake.set,
+        instance_id=node.instance_id,
+        kind="measurement",
+        dataset_output_declarations=(CAMERA_FRAMES_OUTPUT,),
+    )
 
 
 def test_descriptor_role_is_independent_of_camera_measurement_extent() -> None:
@@ -228,7 +238,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
             producer="cm",
         )
         wake = Event()
-        host = NodeHost(node, plane, wake.set)
+        host = _camera_host(node, plane, wake)
         host.start()
 
         # The host arms the camera on its worker; the triggers are ours to supply.
@@ -281,7 +291,6 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         assert actual["exposure_seconds"] == 0.02
         assert tuple(actual["frame_shape_yx"]) == tuple(frames.shape[-2:])
         assert actual["dtype"] == frames.dtype.str
-        json.dumps(dict(record))
     finally:
         if host is not None:
             host.shutdown()
@@ -290,7 +299,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
 
 
 def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
-    plane = _DetachRecordingPlane()
+    plane = SignalDataPlane()
     installation = create_installation("virtual")
     host = None
     try:
@@ -312,7 +321,7 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
             producer="cm-live",
         )
         wake = Event()
-        host = NodeHost(node, plane, wake.set)
+        host = _camera_host(node, plane, wake)
         host.start()
 
         deadline = time.monotonic() + 5.0
@@ -337,7 +346,6 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
         assert live_record["parameters"]["repeat"] == 0
         assert live_record["named_devices"] == {"camera": "camera"}
         assert live_record["device_snapshots"]["camera"]["exposure_seconds"] == 0.02
-        json.dumps(dict(live_record))
 
         host.cancel("test completed")
         deadline = time.monotonic() + 5.0
@@ -347,7 +355,6 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
         assert host.observation.terminal
         assert camera.capture_state() is False
         assert plane.latest_publication(signal_key) is None
-        assert plane.detached == [host]
     finally:
         if host is not None:
             if host.observation.running:
@@ -378,6 +385,9 @@ def test_the_hosted_and_direct_paths_share_one_acquisition() -> None:
     assert "self.prepare(" in execute
     assert "self.monitor(" in execute
     assert "collect(" in execute
+    assert "commit_live" in execute
+    assert "attach_live_outputs" not in execute
+    assert "publish_final" not in execute
     assert "read_frame_records" not in execute
     assert "snapshot_from_array" not in execute
 
@@ -418,12 +428,13 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
             producer="cm-live",
         )
         wake = Event()
-        host = NodeHost(node, plane, wake.set)
+        host = _camera_host(node, plane, wake)
         host.start()
         signal = host.signal_key("frames")
 
-        # One cycle at a time, watching what the plane holds mid-run.
-        seen: list[tuple[tuple[int, ...], int, int]] = []
+        # One cycle event at a time; the Runtime-owned current Dataset keeps
+        # the fixed authored geometry and invalid future cells.
+        seen: list[tuple[tuple[int, ...], tuple[int, ...], int, int]] = []
         deadline = time.monotonic() + 20.0
         fired = 0
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -434,10 +445,15 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
             host.poll()
             value = plane.freeze().value(signal)
             if value is not None and getattr(value, "coverage", None) is not None:
-                frames = np.asarray(value.snapshot.block.values)
+                event = np.asarray(value.snapshot.block.values)
+                current = plane.current_dataset(
+                    signal,
+                    plane.latest_publication(signal),
+                )
                 seen.append(
                     (
-                        tuple(frames.shape[:2]),
+                        tuple(event.shape[:2]),
+                        tuple(current.block.values.shape[:2]),
                         int(value.coverage.written_cells),
                         int(value.coverage.total_cells),
                     )
@@ -445,20 +461,31 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
             time.sleep(0.01)
 
         assert seen, "a finite run published nothing while it ran"
-        # Every live view is the whole run's geometry, filling up.
-        assert {shape for shape, _written, _total in seen} == {(repeats, windows)}
-        assert {total for _shape, _written, total in seen} == {repeats * windows}
-        written = [written for _shape, written, _total in seen]
+        assert {event for event, _current, _written, _total in seen} == {
+            (1, windows)
+        }
+        assert {current for _event, current, _written, _total in seen} == {
+            (repeats, windows)
+        }
+        assert {
+            total for _event, _current, _written, total in seen
+        } == {repeats * windows}
+        written = [written for _event, _current, written, _total in seen]
         assert written == sorted(written)
         assert written[0] < repeats * windows, written
         assert host.observation.phase == "done", host.observation.error
 
-        # ... and the final publication is still there when it ends.
+        # The event schema never changes at terminal; explicit materialization
+        # returns the one sealed full Dataset.
         publication = plane.latest_publication(signal)
         assert publication is not None
         final = publication.value(signal)
         assert final is not None
-        assert np.asarray(final.snapshot.block.values).shape[:2] == (repeats, windows)
+        assert np.asarray(final.snapshot.block.values).shape[:2] == (1, windows)
+        assert plane.current_dataset(signal).block.values.shape[:2] == (
+            repeats,
+            windows,
+        )
     finally:
         if host is not None:
             host.shutdown()
@@ -487,7 +514,7 @@ def test_a_finite_run_stops_within_a_read_slice_not_a_camera_timeout() -> None:
             producer="cm-stop",
         )
         wake = Event()
-        host = NodeHost(node, plane, wake.set)
+        host = _camera_host(node, plane, wake)
         host.start()
         # Wait until the run is inside its first read, waiting for a trigger
         # that will never come.
@@ -514,3 +541,115 @@ def test_a_finite_run_stops_within_a_read_slice_not_a_camera_timeout() -> None:
             host.shutdown()
         installation.close()
         plane.close()
+
+
+def test_repeat_100_builds_only_one_cycle_per_camera_commit() -> None:
+    shape = (96, 128)
+    node = SimpleNamespace(
+        instance_id="copy-proof",
+        generation="copy-proof-generation",
+        repeat=100,
+        frames_per_cycle=1,
+        actual_working_point=None,
+        run_record={},
+    )
+    payload = 0
+    for index in range(100):
+        cycle = (
+            CameraFrameRecord(
+                np.full(shape, index, dtype=np.uint16),
+                index,
+            ),
+        )
+        output = _finite_cycle_output(node, cycle, index)
+        assert output.snapshot.block.values.shape == (1, 1, *shape)
+        assert output.canonical_schema.physical_shape == (100, 1, *shape)
+        assert output.cell_origin == (index, 0)
+        payload += output.snapshot.block.values.nbytes
+    assert payload == 100 * np.empty(shape, dtype=np.uint16).nbytes
+
+
+def test_stop_partial_is_identical_whether_or_not_ui_freezes() -> None:
+    def stopped(*, freeze: bool):
+        plane = SignalDataPlane()
+        installation = create_installation("virtual")
+        host = None
+        try:
+            camera = installation.capability("camera.adapter")
+            sequencer = installation.device("sequencer")
+            program, _metadata = build_calibration_pulse(sequencer.describe())
+            sequencer.load(program)
+            node = CameraMeasurementNode(
+                camera=camera,
+                request=CameraMeasurementRequest(
+                    camera_key="camera",
+                    exposure_seconds=0.02,
+                    roi_xywh=None,
+                    repeat=4,
+                    frames_per_cycle=CALIBRATION_FRAMES_PER_CYCLE,
+                ),
+                signal_plane=plane,
+                producer="cm-stop-proof",
+            )
+            wake = Event()
+            host = _camera_host(node, plane, wake)
+            host.start()
+            deadline = time.monotonic() + 5.0
+            while not camera.capture_state() and time.monotonic() < deadline:
+                host.poll()
+                time.sleep(0.005)
+            sequencer.fire()
+            sequencer.wait_done(1.0)
+            signal = host.signal_key("frames")
+            deadline = time.monotonic() + 5.0
+            while plane.latest_publication(signal) is None and time.monotonic() < deadline:
+                host.poll()
+                time.sleep(0.005)
+            assert plane.latest_publication(signal) is not None
+            if freeze:
+                plane.freeze()
+            host.cancel("stop after one cycle")
+            deadline = time.monotonic() + 5.0
+            while not host.terminal and time.monotonic() < deadline:
+                host.poll()
+                time.sleep(0.005)
+            assert host.observation.phase == "cancelled", host.observation
+            snapshot = plane.current_dataset(signal)
+            return (
+                snapshot.block.schema,
+                np.array(snapshot.block.values, copy=True),
+                np.array(snapshot.expanded_validity(), copy=True),
+            )
+        finally:
+            if host is not None:
+                host.shutdown()
+            installation.close()
+            plane.close()
+
+    without = stopped(freeze=False)
+    with_freeze = stopped(freeze=True)
+    assert without[0] == with_freeze[0]
+    np.testing.assert_array_equal(without[1], with_freeze[1])
+    np.testing.assert_array_equal(without[2], with_freeze[2])
+    assert without[2][:1].all() and not without[2][1:].any()
+
+
+def test_finite_cycle_rejects_a_physical_ordinal_gap() -> None:
+    records = (
+        CameraFrameRecord(np.zeros((2, 2), dtype=np.uint16), 0),
+        CameraFrameRecord(np.zeros((2, 2), dtype=np.uint16), 2),
+    )
+    with pytest.raises(RuntimeError, match="not contiguous"):
+        _strict_cycle_ordinals(
+            records,
+            expected_start=0,
+            frames_per_cycle=2,
+        )
+
+
+def test_finite_capture_rejects_incomplete_terminal_evidence() -> None:
+    with pytest.raises(RuntimeError, match="did not prove"):
+        _strict_terminal(
+            CameraCaptureTerminalRecord(2, True, True, True),
+            expected_frames=3,
+        )

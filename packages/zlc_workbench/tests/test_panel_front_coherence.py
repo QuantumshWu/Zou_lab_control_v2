@@ -139,5 +139,7 @@ class _Snapshot:
 
 
 class _Publication:
+    event_ref = object()
+
     def value(self, _name: str) -> None:
         return None

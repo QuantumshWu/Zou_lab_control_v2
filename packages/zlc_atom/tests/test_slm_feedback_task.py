@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from zlc_plot import Reduction
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.devices.camera import CameraWorkingPoint
@@ -50,28 +51,37 @@ class _Slm:
 
 
 class _Context:
+    instance_id = "slm_feedback"
     generation = "slm-feedback-test"
 
     def __init__(self, cancelled: bool = False) -> None:
         self.cancelled = cancelled
         self.terminal_sealed = False
         self.progress: list[tuple] = []
-        self.live_slot = None
+        self.commits: list[dict[str, object]] = []
 
     def cancel_requested(self) -> bool:
         return self.cancelled
 
-    def seal_terminal(self) -> None:
-        if self.cancelled:
+    def seal_terminal(
+        self,
+        *,
+        accept_stop: bool = False,
+        partial: bool = False,
+    ) -> None:
+        del partial
+        if self.cancelled and not accept_stop:
             raise RuntimeError("SLM feedback was cancelled")
         self.terminal_sealed = True
 
     def report_progress(self, *args, **kwargs) -> None:
         self.progress.append((args, kwargs))
 
-    def attach_live_outputs(self, slot: object) -> None:
-        self.live_slot = slot
-        slot.set_change_listener(lambda: None)
+    def commit_live(self, outputs, *, growing_outputs=()):
+        del growing_outputs
+        committed = dict(outputs)
+        self.commits.append(committed)
+        return committed
 
 
 def _wait_host(host: NodeHost, wake: Event):
@@ -83,6 +93,22 @@ def _wait_host(host: NodeHost, wake: Event):
     observation = host.poll()
     assert observation.terminal
     return observation
+
+
+def _task_host(
+    task: SlmFeedbackTask,
+    plane: SignalDataPlane,
+    wake: Event,
+) -> NodeHost:
+    return NodeHost(
+        task,
+        plane,
+        wake.set,
+        instance_id=task.instance_id,
+        kind="task",
+        dataset_output_declarations=task.dataset_output_declarations,
+        required_artifact_names=("artifact_path",),
+    )
 
 
 def _calibration(
@@ -201,17 +227,24 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         (item.name, item.contract_id) for item in descriptor.artifact_outputs
     ) == (("artifact_path", "zlc.slm.phase.v1"),)
     assert tuple((item.name, item.contract_id) for item in descriptor.outputs) == (
-        ("readout_average", "slm-feedback.readout-average.v1"),
         ("candidate_phase", "slm-feedback.candidate-phase.v1"),
         ("uniformity_history", "slm-feedback.uniformity-history.v1"),
     )
     assert tuple(
-        (item.output_name, item.plot_kind) for item in descriptor.node_previews
+        (item.output.name, item.plot_kind, item.producer)
+        for item in descriptor.node_previews
     ) == (
-        ("readout_average", "image"),
-        ("candidate_phase", "image"),
-        ("uniformity_history", "curve"),
+        ("frames", "image", "camera"),
+        ("candidate_phase", "image", ""),
+        ("uniformity_history", "curve", ""),
     )
+    camera_preview = descriptor.node_previews[0]
+    assert camera_preview.semantic["fate:frame"] == feedback_module.READOUT_FRAME_COORDINATE
+    assert camera_preview.semantic == {
+        "fate:frame": feedback_module.READOUT_FRAME_COORDINATE,
+        "fate:repeat": "reduce",
+        "reduction": Reduction.MEAN,
+    }
     assert tuple(
         item.capability_token for item in descriptor.device_requirements
     ) == (
@@ -280,7 +313,6 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             np.zeros(len(rows)),
             (),
             (),
-            np.zeros(self.calibration.frame_contract.image_shape),
         ),
     )
     plane = SignalDataPlane()
@@ -307,19 +339,12 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
         plane.close()
 
 
-def test_uniformity_history_curve_grows_one_point_per_candidate(
+def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23))
     plane = SignalDataPlane()
     context = _Context()
-    fronts: list[dict[str, object]] = []
-
-    def attach_live_outputs(slot):
-        context.live_slot = slot
-        slot.set_change_listener(lambda: fronts.append(slot.freeze_live_outputs()))
-
-    context.attach_live_outputs = attach_live_outputs
     measurements = iter(
         (
             np.concatenate(([4.0], np.ones(34))),
@@ -347,7 +372,6 @@ def test_uniformity_history_curve_grows_one_point_per_candidate(
             np.zeros(35),
             (),
             (),
-            np.zeros(self.calibration.frame_contract.image_shape),
         ),
     )
     task = _task(
@@ -362,13 +386,17 @@ def test_uniformity_history_curve_grows_one_point_per_candidate(
     try:
         with pytest.raises(RuntimeError, match="did not reach 1.01"):
             task.execute(context)
-        output = context.live_slot.freeze_live_outputs()["uniformity_history"]
+        output = context.commits[-1]["uniformity_history"]
         np.testing.assert_allclose(output.snapshot.block.values[0, :, 0], (4.0, 2.0))
-        assert len(fronts) == 2
+        assert len(context.commits) == 2
         assert (
-            fronts[0]["uniformity_history"].snapshot.block.schema
-            is fronts[1]["uniformity_history"].snapshot.block.schema
+            context.commits[0]["uniformity_history"].snapshot.block.schema
+            is context.commits[1]["uniformity_history"].snapshot.block.schema
         )
+        assert set(context.commits[-1]) == {
+            "candidate_phase",
+            "uniformity_history",
+        }
         column = output.snapshot.block.schema.point_table.columns[0]
         assert column.name == "candidate"
         assert tuple(column.values) == (1.0, 2.0)
@@ -557,7 +585,6 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         return original_arm(*args, **kwargs)
 
     monkeypatch.setattr(camera, "arm", record_arm)
-    monkeypatch.setattr(feedback_module, "_SHOT_CHUNK", 4)
     plane = SignalDataPlane()
     slm = _Slm((5, 7))
     task = _task(
@@ -585,17 +612,43 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             )
         finally:
             installation.close()
-        measured, error, saturated, missing, readout_average = task._measure(
+        measured, error, saturated, missing = task._measure(
             pulse, _Context(), 0, shots=10
         )
         np.testing.assert_allclose(measured, fluorescence)
         np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated
         assert not missing
-        assert readout_average.shape == task.calibration.frame_contract.image_shape
-        assert sequencer.fires == [False, False, False]
-        assert sequencer.scan_sweeps_history == [4, 4, 2]
-        assert armed_buffer_sizes == [12, 12, 6]
+        assert sequencer.fires == [False]
+        assert sequencer.scan_sweeps_history == [10]
+        assert armed_buffer_sizes == [30]
+        signal = "@logic/slm_feedback/camera/frames"
+        raw = plane.current_dataset(signal)
+        assert raw.block.values.shape == (10, 3, 5, 7)
+        np.testing.assert_allclose(
+            raw.block.values[:, 1],
+            np.broadcast_to(fluorescence.reshape(5, 7), (10, 5, 7)),
+        )
+
+        from zlc_plot import PlotKind, PlotSession
+        from zlc_plot._kinds import default_spec
+        from zlc_plot.semantics import composed_spec
+
+        descriptor = {item.api_name: item for item in discover_logic_nodes()}[
+            "slm_feedback"
+        ]
+        preview = descriptor.node_previews[0]
+        spec = default_spec(raw.block.schema, PlotKind.IMAGE)
+        assert spec is not None
+        spec = composed_spec(raw.block.schema, spec, preview.semantic)
+        session = PlotSession(raw, spec)
+        try:
+            np.testing.assert_allclose(
+                np.asarray(session._payload.z.canonical),
+                raw.block.values[:, 1].mean(axis=0),
+            )
+        finally:
+            session.close()
         assert sequencer.loaded[1] is pulse.sequence
         assert next(
             period.duration
@@ -670,7 +723,7 @@ def test_feedback_averages_dark_subtracted_brightness_over_all_shots(
 
         assert task.model.kind is ReadoutModelKind.BOX
         assert task.model.reducer == "mean"
-        measured, error, saturated, missing, readout_average = task._measure(
+        measured, error, saturated, missing = task._measure(
             pulse, _Context(), 0, shots=10
         )
         # Values 1..4 are below the calibration's occupied threshold of 5,
@@ -678,7 +731,6 @@ def test_feedback_averages_dark_subtracted_brightness_over_all_shots(
         np.testing.assert_allclose(measured, fluorescence)
         np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated and not missing
-        assert readout_average.shape == task.calibration.frame_contract.image_shape
     finally:
         plane.close()
         camera.close()
@@ -783,7 +835,6 @@ def test_success_reapplies_and_saves_the_independently_validated_best(
             np.zeros(35),
             (),
             (),
-            np.zeros(self.calibration.frame_contract.image_shape),
         )[1:],
     )
     requested_shots: list[int] = []
@@ -838,10 +889,7 @@ def test_a_failed_validation_does_not_block_the_next_threshold_candidate(
     )
     def measured_result(self, pulse, context, iteration, *, shots=None):
         requested_shots.append(self.shots if shots is None else int(shots))
-        return (
-            *next(measurements),
-            np.zeros(self.calibration.frame_contract.image_shape),
-        )
+        return next(measurements)
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measured_result)
     task = _task(
@@ -893,8 +941,7 @@ def test_validation_refuses_a_point_estimate_with_wide_qcmos_uncertainty(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: next(batches)
-        + (np.zeros(self.calibration.frame_contract.image_shape),),
+        lambda self, pulse, context, iteration, *, shots=None: next(batches),
     )
     task = _task(
         tmp_path,
@@ -944,9 +991,9 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
     )
 
     def fail_first_save(path, phase, metadata):
-        assert metadata["status"] == "applied"
-        save_entered.set()
-        assert release_save.wait(2.0)
+        if metadata["status"] == "applied":
+            save_entered.set()
+            assert release_save.wait(2.0)
         raise OSError("first candidate artifact failed")
 
     monkeypatch.setattr(feedback_module, "save_phase", fail_first_save)
@@ -958,14 +1005,15 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
         plane=plane,
         target=_grid_target(slm.shape_yx),
     )
-    host = NodeHost(task, plane, wake.set)
+    host = _task_host(task, plane, wake)
     try:
         host.start()
         assert save_entered.wait(2.0)
         host.cancel("while first candidate phase is not durable")
         release_save.set()
         observation = _wait_host(host, wake)
-        assert observation.phase == "cancelled"
+        assert observation.phase == "failed"
+        assert "first candidate artifact failed" in (observation.error or "")
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
         assert not tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
     finally:
@@ -976,7 +1024,7 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
         plane.close()
 
 
-def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
+def test_stop_at_terminal_gate_accepts_best_before_transient_previews_retire(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
@@ -985,6 +1033,8 @@ def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
     wake = Event()
     validation_entered = Event()
     release_validation = Event()
+    stopped_save_entered = Event()
+    release_stopped_save = Event()
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
@@ -1008,8 +1058,7 @@ def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
             validation_entered.set()
             assert release_validation.wait(2.0)
             fluorescence[0] = 1.005
-        image = np.full((5, 7), 22.0 if shots is not None else 11.0)
-        return fluorescence, np.zeros(35), (), (), image
+        return fluorescence, np.zeros(35), (), ()
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
@@ -1021,18 +1070,44 @@ def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
         target=_grid_target(slm.shape_yx),
         updates=1,
     )
-    host = NodeHost(task, plane, wake.set)
+    save = feedback_module.save_phase
+
+    def blocking_stopped_save(path, phase, metadata):
+        if metadata["status"] == "stopped":
+            stopped_save_entered.set()
+            assert release_stopped_save.wait(2.0)
+        return save(path, phase, metadata)
+
+    monkeypatch.setattr(feedback_module, "save_phase", blocking_stopped_save)
+    host = _task_host(task, plane, wake)
     try:
         host.start()
         assert validation_entered.wait(2.0)
         # Stop wins immediately before the final apply/save commit, after
         # validation has produced a passing result.  That measured candidate
-        # remains the one on the device and visible in both evidence signals.
+        # is committed to both transient previews before Task terminal retires
+        # them, and remains on the device and in the durable artifact.
         host.cancel("before terminal commit")
         release_validation.set()
+        assert stopped_save_entered.wait(2.0)
+        phase_publication = plane.latest_publication(
+            host.signal_key("candidate_phase")
+        )
+        curve_publication = plane.latest_publication(
+            host.signal_key("uniformity_history")
+        )
+        assert phase_publication is not None and curve_publication is not None
+        phase_value = phase_publication.value(host.signal_key("candidate_phase"))
+        curve_value = curve_publication.value(host.signal_key("uniformity_history"))
+        np.testing.assert_array_equal(phase_value.snapshot.block.values[0, 0], best)
+        np.testing.assert_array_equal(
+            curve_value.snapshot.block.values[0, :, 0], np.asarray([1.0])
+        )
+        assert phase_value.run_record == curve_value.run_record
+        release_stopped_save.set()
         observation = _wait_host(host, wake)
-        assert observation.phase == "cancelled"
-        assert not host.final_result_resolved
+        assert observation.phase == "done"
+        assert host.final_result_resolved
         assert calls == 2
         np.testing.assert_array_equal(slm.last_commanded_phase, best)
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
@@ -1040,38 +1115,13 @@ def test_stop_at_the_terminal_gate_retains_candidate_preview_and_artifact(
         saved, metadata = load_phase(artifacts[0])
         np.testing.assert_array_equal(saved, best)
         assert metadata["candidate"] == 1
-        phase_publication = plane.latest_publication(
-            host.signal_key("candidate_phase")
-        )
-        readout_publication = plane.latest_publication(
-            host.signal_key("readout_average")
-        )
-        curve_publication = plane.latest_publication(
-            host.signal_key("uniformity_history")
-        )
-        assert (
-            phase_publication is not None
-            and readout_publication is not None
-            and curve_publication is not None
-        )
-        phase_value = phase_publication.value(host.signal_key("candidate_phase"))
-        readout_value = readout_publication.value(host.signal_key("readout_average"))
-        curve_value = curve_publication.value(host.signal_key("uniformity_history"))
-        np.testing.assert_array_equal(phase_value.snapshot.block.values[0, 0], best)
-        np.testing.assert_array_equal(
-            readout_value.snapshot.block.values[0, 0], np.full((5, 7), 22.0)
-        )
-        np.testing.assert_array_equal(
-            curve_value.snapshot.block.values[0, :, 0], np.asarray([1.0])
-        )
-        assert (
-            phase_value.run_record
-            == readout_value.run_record
-            == curve_value.run_record
-        )
-        assert phase_value.run_record["artifact_path"] == str(artifacts[0])
+        # Task previews are Monitor projections and retire at terminal; the
+        # durable artifact and commanded SLM remain the accepted truth.
+        assert plane.latest_publication(host.signal_key("candidate_phase")) is None
+        assert plane.latest_publication(host.signal_key("uniformity_history")) is None
     finally:
         release_validation.set()
+        release_stopped_save.set()
         if not host.terminal:
             _wait_host(host, wake)
         host.shutdown()
@@ -1106,8 +1156,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: next(batches)
-        + (np.zeros(self.calibration.frame_contract.image_shape),),
+        lambda self, pulse, context, iteration, *, shots=None: next(batches),
     )
     original_save = feedback_module.save_phase
 
@@ -1127,7 +1176,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         target=_grid_target(slm.shape_yx),
         updates=1,
     )
-    host = NodeHost(task, plane, wake.set)
+    host = _task_host(task, plane, wake)
     try:
         host.start()
         assert save_entered.wait(2.0)
@@ -1142,6 +1191,73 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         np.testing.assert_array_equal(slm.last_commanded_phase, best)
     finally:
         release_save.set()
+        if not host.terminal:
+            _wait_host(host, wake)
+        host.shutdown()
+        plane.close()
+
+
+def test_stop_accepted_then_apply_failure_is_failed_and_restores_incoming(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    slm = _Slm((17, 23), incoming=0.125)
+    incoming = np.array(slm.last_commanded_phase, copy=True)
+    best = np.full(slm.shape_yx, 0.5, dtype=np.float32)
+    plane = SignalDataPlane()
+    wake = Event()
+    validation_entered = Event()
+    release_validation = Event()
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "solve_phase",
+        lambda *args, **kwargs: (best, {"method": "test"}),
+    )
+
+    def measure(self, pulse, context, iteration, *, shots=None):
+        if shots is not None:
+            validation_entered.set()
+            assert release_validation.wait(2.0)
+        return np.ones(35), np.zeros(35), (), ()
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=_grid_target(slm.shape_yx),
+        updates=1,
+    )
+    apply = task._apply_exact
+    calls = 0
+
+    def fail_stop_apply(phase):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("accepted Stop apply failed")
+        return apply(phase)
+
+    monkeypatch.setattr(task, "_apply_exact", fail_stop_apply)
+    host = _task_host(task, plane, wake)
+    try:
+        host.start()
+        assert validation_entered.wait(2.0)
+        host.cancel("accept best then fail apply")
+        release_validation.set()
+        observation = _wait_host(host, wake)
+        assert observation.phase == "failed"
+        assert observation.error == "OSError: accepted Stop apply failed"
+        np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+    finally:
+        release_validation.set()
         if not host.terminal:
             _wait_host(host, wake)
         host.shutdown()
@@ -1176,8 +1292,7 @@ def test_terminal_apply_or_save_failure_restores_incoming_and_fails_host(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: next(batches)
-        + (np.zeros(self.calibration.frame_contract.image_shape),),
+        lambda self, pulse, context, iteration, *, shots=None: next(batches),
     )
     task = _task(
         tmp_path,
@@ -1209,7 +1324,7 @@ def test_terminal_apply_or_save_failure_restores_incoming_and_fails_host(
             return original_save(path, phase, metadata)
 
         monkeypatch.setattr(feedback_module, "save_phase", fail_terminal_save)
-    host = NodeHost(task, plane, wake.set)
+    host = _task_host(task, plane, wake)
     try:
         host.start()
         observation = _wait_host(host, wake)
@@ -1257,8 +1372,7 @@ def test_missing_history_serializes_as_null_before_a_later_success(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: next(batches)
-        + (np.zeros(self.calibration.frame_contract.image_shape),),
+        lambda self, pulse, context, iteration, *, shots=None: next(batches),
     )
     task = _task(
         tmp_path,
@@ -1280,7 +1394,7 @@ def test_missing_history_serializes_as_null_before_a_later_success(
         plane.close()
 
 
-def test_cancel_or_failure_restores_the_incoming_phase(
+def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
@@ -1313,14 +1427,21 @@ def test_cancel_or_failure_restores_the_incoming_phase(
         target=_grid_target(slm.shape_yx),
     )
     try:
-        try:
-            task.execute(_Context(cancelled=True))
-        except RuntimeError as error:
-            assert "cancelled" in str(error)
-        else:
-            raise AssertionError("cancelled feedback unexpectedly succeeded")
+        context = _Context(cancelled=True)
+        result = task.execute(context)
+        assert context.terminal_sealed
+        saved, metadata = load_phase(result["artifact_path"])
+        assert metadata["status"] == "stopped"
+        np.testing.assert_array_equal(saved, incoming)
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+        assert len(context.commits) == 1
+        phase = context.commits[0]["candidate_phase"]
+        history = context.commits[0]["uniformity_history"]
+        np.testing.assert_array_equal(phase.snapshot.block.values[0, 0], incoming)
+        assert not np.any(history.snapshot.expanded_validity())
         assert np.array_equal(slm.commands[-1], incoming)
-        assert not tuple(tmp_path.glob("slm_feedback*.npz"))
+        assert tuple(tmp_path.glob("slm_feedback*.npz")) == (
+            Path(result["artifact_path"]),
+        )
     finally:
         plane.close()

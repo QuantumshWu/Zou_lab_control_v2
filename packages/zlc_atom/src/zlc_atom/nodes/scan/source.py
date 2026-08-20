@@ -66,11 +66,9 @@ def wait_for_board(sequencer: object, context: object) -> None:
 class PublishedSignalSource:
     """The point's value is the next publication of a signal somebody runs.
 
-    A publication materialises when the plane FREEZES.  Waiting for the
-    display to freeze would couple acquisition to whether a panel happens to
-    be open -- a scan on a panel-less bench would simply never advance -- so
-    the scan freezes for itself.  Freezing with nothing staged is cheap by the
-    plane's own design; unchanged slots reuse their immutable fronts.
+    A producer commits publications independently of display.  This source
+    follows that exact stream directly; it never pumps the presentation front
+    and therefore cannot make a scan's cadence depend on an open panel.
 
     A source that restarts mid-scan is not a source with a gap; it is a
     different generation, and the scan says so instead of stitching.
@@ -91,7 +89,10 @@ class PublishedSignalSource:
         """Subscribe before the board is loaded, so nothing played is missed."""
 
         del context, cycles
-        baseline, tap = self.signal_plane.follow_publications(self.signal_name)
+        baseline, tap = self.signal_plane.follow_publications(
+            self.signal_name,
+            replay=False,
+        )
         if baseline.event_ref.generation != self._generation:
             raise RuntimeError("the source signal restarted before the scan began")
         self._tap = tap
@@ -113,7 +114,6 @@ class PublishedSignalSource:
 
         tap = self._require_tap()
         while True:
-            self.signal_plane.freeze()
             try:
                 tap.next(0.0)
             except TimeoutError:
@@ -130,9 +130,8 @@ class PublishedSignalSource:
         while True:
             if context.cancel_requested():
                 raise RuntimeError("the scan was cancelled")
-            self.signal_plane.freeze()
             try:
-                publication = tap.next(0.1).payload
+                publication = tap.next(0.1)
             except TimeoutError:
                 continue
             except StreamEndedEarly:

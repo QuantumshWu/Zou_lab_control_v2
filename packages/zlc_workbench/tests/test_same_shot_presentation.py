@@ -18,7 +18,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 from types import SimpleNamespace
 
-from zlc_runtime import DatasetCoverage, LiveDatasetOutput
+from zlc_runtime import LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.board import LiveBoard
 from zlc_workbench.presentation import PlotPanelPort
@@ -31,12 +31,7 @@ OCCUPANCY = "occupancy/value"
 
 
 def _exact_output(name: str, revision: int) -> LiveDatasetOutput:
-    output = _output(name, revision)
-    return LiveDatasetOutput(
-        output.declaration,
-        output.snapshot,
-        DatasetCoverage(1, 1),
-    )
+    return _output(name, revision)
 
 
 class _RenderHost:
@@ -71,13 +66,7 @@ class _Bench:
             dataset_output_declarations=(self.outputs["frame"].declaration,),
             signal_key=lambda name: f"camera/{name}",
         )
-        self.slot = SimpleNamespace(
-            freeze_live_outputs=lambda: dict(self.outputs),
-            close=lambda: None,
-            notification_failure=None,
-        )
         self.plane.reserve(self.node)
-        self.plane.attach(self.node, self.slot)
         # Deliberately NO set_front_signals here: declaring the coherent set
         # is the scheduler's job on tick.  A bench that declares by hand hides
         # a board that never does -- which is exactly how the same-shot suite
@@ -100,12 +89,12 @@ class _Bench:
     def publish_shot(self) -> None:
         self.revision += 1
         self.outputs["frame"] = _exact_output("frame", self.revision)
-        self.plane.mark_changed(self.node, self.slot)
+        self.plane.commit_live(self.node, self.outputs)
         self.plane.freeze()
 
     def publish_derived(self) -> None:
         root = self.plane.latest_publication(FRAME)
-        self.plane.publish_processor(
+        self.plane.commit_processor(
             self.derived_node,
             {"occupancy": _exact_output("occupancy", self.revision)},
             source_publication=root,
