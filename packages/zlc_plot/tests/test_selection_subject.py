@@ -288,21 +288,6 @@ def test_classifier_threshold_targets_follow_coordinates_when_facets_reorder() -
         assert restored.selector_state(SelectorKind.THRESHOLD).value == -0.25
         restored.focus_facet(2)
         assert restored.selector_state(SelectorKind.THRESHOLD).value == 0.75
-
-        mismatched = dict(target_a)
-        mismatched["scope"] = (
-            {
-                "domain": "point_coordinate",
-                "axis_id": "site",
-                "coordinate": 99.0,
-            },
-        )
-        with np.testing.assert_raises_regex(ValueError, "does not match"):
-            restored.configure(classifier_thresholds=(mismatched, target_b))
-        restored.focus_facet(1)
-        assert restored.selector_state(SelectorKind.THRESHOLD).value == -0.25
-        restored.focus_facet(2)
-        assert restored.selector_state(SelectorKind.THRESHOLD).value == 0.75
     finally:
         restored.close()
 

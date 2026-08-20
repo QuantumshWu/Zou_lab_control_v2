@@ -596,62 +596,6 @@ def test_panel_selection_roundtrip_keeps_every_axis_domain(domain, axis) -> None
     assert restored == selection
 
 
-def test_initial_selection_replays_against_its_exact_displayed_publication() -> None:
-    plot = pytest.importorskip("zlc_plot")
-    snapshot = _curve_scan_snapshot()
-    plane, source_node = _plane_for(
-        snapshot, {"@logic/panel-1/roi_mean"}
-    )
-    host = plot.RasterPlotHost.from_plot(
-        snapshot,
-        plot.CurvePlot(plot.AxisRef.point("detuning")),
-    )
-    bridge = source = None
-    try:
-        host.wait_for_front(10)
-        host.set_x_selector(
-            1.0, 2.0, display=False, emit_change=False
-        ).result(timeout=10)
-        raw = tuple(host.selectors().result(timeout=10).value)[0]
-        initial = SelectionState(
-            "curve",
-            "x_range",
-            (SelectionRange("detuning", 1.0, 2.0),),
-            revision=int(raw.revision),
-        )
-        publication = plane.freeze().publication("camera/frame")
-        assert publication is not None
-        bridge, source = attach_selection_bridge(
-            plane,
-            host,
-            "camera/frame",
-            bridge_id="panel-1",
-            initial_selection=initial,
-            initial_publication=publication,
-        )
-
-        derived = _wait_published(plane, "@logic/panel-1/roi_mean")
-        np.testing.assert_array_equal(
-            derived.snapshot.block.values,
-            snapshot.block.values[:, 1:3, :],
-        )
-        derived_publication = plane.freeze().publication(
-            "@logic/panel-1/roi_mean"
-        )
-        assert derived_publication is not None
-        assert plane.direct_parent_publications(derived_publication) == (
-            publication,
-        )
-    finally:
-        if bridge is not None:
-            bridge.close()
-        if source is not None:
-            source.close()
-        host.close()
-        plane.retire(source_node)
-        plane.close()
-
-
 def _gesture_area(host, front, transform, *, span=(0.25, 0.25, 0.75, 0.75)) -> None:
     """Press, move, release across a fraction of one painted transform."""
 

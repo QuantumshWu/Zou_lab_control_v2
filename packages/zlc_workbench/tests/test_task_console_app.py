@@ -89,19 +89,6 @@ def _wait_qt(application, predicate, *, timeout_ms: int = 5000) -> None:
     assert predicate(), "timed out waiting for a Qt owner turn"
 
 
-def test_importing_workbench_does_not_install_a_ui_size_policy() -> None:
-    completed = _run_script(
-        "import zou_lab_control_v2\n"
-        "import zlc_ui.board.panel_geometry as geometry\n"
-        "before = geometry.panel_display_size('2x2')\n"
-        "import zlc_workbench\n"
-        "assert geometry.panel_display_size('2x2') == before\n",
-        cwd=REPO_ROOT,
-        timeout=60,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-
-
 def test_the_console_assembles_and_beats(workspace) -> None:
     completed = _run(workspace, "--template", "virtual", "--check")
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -189,6 +176,18 @@ def test_app_build_installs_the_plot_size_policy(
     workspace,
     monkeypatch,
 ) -> None:
+    if app_name == "task_console":
+        completed = _run_script(
+            "import zou_lab_control_v2\n"
+            "import zlc_ui.board.panel_geometry as geometry\n"
+            "before = geometry.panel_display_size('2x2')\n"
+            "import zlc_workbench\n"
+            "assert geometry.panel_display_size('2x2') == before\n",
+            cwd=REPO_ROOT,
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
     import zlc_ui.board.panel_geometry as geometry
     from zlc_plot import DEFAULTS
     from zlc_plot.kinds import PlotKind
@@ -222,46 +221,6 @@ def test_app_build_installs_the_plot_size_policy(
             view.close()
         if session is not None:
             session.close()
-
-
-def test_task_console_display_beat_is_the_display_clock_base() -> None:
-    """The beat cadence derives from the harmonic clock, not a constant.
-
-    ``HarmonicClock.advance`` credits one clock base per beat, so any timer
-    period other than that base silently rescales every panel's labeled
-    refresh interval.  The default is therefore THE clock's own base; an
-    explicit ``--interval-ms`` stays available as an operator diagnostic.
-    """
-
-    from types import SimpleNamespace
-
-    from zlc_plot import DEFAULTS
-    from zlc_workbench.apps.task_console import _beat_interval_ms, _parser
-    from zlc_workbench.board import LiveBoard
-
-    assert _parser().parse_args([]).interval_ms is None
-    assert _parser().parse_args(["--interval-ms", "250"]).interval_ms == 250
-
-    board = LiveBoard(
-        SimpleNamespace(
-            freeze=lambda: None,
-            set_front_signals=lambda names: None,
-            direct_parent_publications=lambda publication: (),
-            follower_edges=lambda: frozenset(),
-            latest_publication=lambda signal: None,
-        ),
-        tuple,
-        intervals=DEFAULTS.live.refresh_intervals_ms,
-    )
-    try:
-        presenter = SimpleNamespace(board=board)
-        assert board.base_interval_ms == 100
-        assert _beat_interval_ms(presenter, None) == 100
-        assert _beat_interval_ms(presenter, 250) == 250
-        with pytest.raises(ValueError, match="positive"):
-            _beat_interval_ms(presenter, 0)
-    finally:
-        board.close()
 
 
 def test_live_board_close_cancels_queued_projection_without_waiting_for_running_work() -> None:

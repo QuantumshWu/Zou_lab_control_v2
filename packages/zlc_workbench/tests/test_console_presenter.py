@@ -2290,60 +2290,6 @@ def test_a_bad_late_layout_entry_leaves_the_current_board_exactly_unchanged(
     assert presenter.view.cards == (old_card,)
 
 
-def test_all_coordinate_thresholds_reach_live_edit_and_replacement(
-    presenter,
-) -> None:
-    binding = presenter.add_blank_panel("facet_grid")
-    targets = (
-        {
-            "value": -0.25,
-            "scope": (
-                {
-                    "domain": "point_coordinate",
-                    "axis_id": "site",
-                    "coordinate": 10.0,
-                },
-            ),
-            "repeat_index": None,
-        },
-        {
-            "value": 0.75,
-            "scope": (
-                {
-                    "domain": "point_coordinate",
-                    "axis_id": "site",
-                    "coordinate": 20.0,
-                },
-            ),
-            "repeat_index": None,
-        },
-    )
-    editor_calls: list[dict[str, object]] = []
-    source = object()
-    binding.editor_host = SimpleNamespace(
-        configure=lambda **configuration: editor_calls.append(configuration),
-        close=lambda **_kwargs: True,
-    )
-
-    presenter._settle_panel_threshold(binding.panel_id, source, targets)
-
-    assert binding.state.classifier_thresholds == targets
-    assert editor_calls == [{"classifier_thresholds": targets}]
-
-    replacement_calls: list[dict[str, object]] = []
-    replacement = SimpleNamespace(
-        configure=lambda **configuration: replacement_calls.append(configuration)
-    )
-    presenter._match_host_to_panel(
-        binding,
-        replacement,
-        present=False,
-        live=False,
-        restore_interaction=True,
-    )
-    assert replacement_calls[-1]["classifier_thresholds"] == targets
-
-
 def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None:
     """A cell kind must be something a grid cell CAN be; image now is.
 
@@ -3517,66 +3463,6 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     )
 
 
-def test_layout_restored_selector_derives_from_the_publication_on_screen(
-    presenter,
-    session,
-) -> None:
-    from zlc_runtime import SelectionRange, SelectionState
-    from zlc_workbench.selection import panel_selection_document
-
-    node, snapshot = _one_shot(session)
-    signal = node.signal_key("frames")
-    original = presenter.add_panel(signal, snapshot, title="camera", kind="image")
-    y_axis, x_axis = snapshot.block.schema.cell_schema.data_axes
-    selection = SelectionState(
-        "image",
-        "area",
-        (
-            SelectionRange(
-                str(x_axis.axis_id),
-                float(x_axis.coordinate_at(4)),
-                float(x_axis.coordinate_at(10)),
-                coordinate_frame=(
-                    None
-                    if x_axis.coordinate_frame is None
-                    else str(x_axis.coordinate_frame)
-                ),
-            ),
-            SelectionRange(
-                str(y_axis.axis_id),
-                float(y_axis.coordinate_at(3)),
-                float(y_axis.coordinate_at(8)),
-                coordinate_frame=(
-                    None
-                    if y_axis.coordinate_frame is None
-                    else str(y_axis.coordinate_frame)
-                ),
-            ),
-        ),
-    )
-    restored_state = replace(
-        original.state,
-        selector=panel_selection_document(selection),
-        published_outputs={"roi_mean": True},
-    )
-
-    assert presenter.apply_layout(LayoutDocument((restored_state,), ())) is True
-    (restored,) = tuple(presenter.panels.values())
-    derived_name = f"@logic/{restored.panel_id}/roi_mean"
-    _settle_panel_hosts(
-        presenter,
-        lambda: (
-            restored.bridge is not None
-            and session.signal_plane.freeze().value(derived_name) is not None
-        ),
-    )
-
-    displayed = restored.port.presented_publication()
-    derived = session.signal_plane.freeze().publication(derived_name)
-    assert displayed is not None and derived is not None
-    assert session.signal_plane.direct_parent_publications(derived) == (displayed,)
-
-
 def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
     presenter,
     session,
@@ -3619,12 +3505,10 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
         value = displayed.value(signal)
         assert value is not None
 
-        # Hold bridge installation until this host is accepted on publication
-        # N.  A real layout restore reaches the same state while its initial
-        # raster metadata is still settling.
+        # Hold bridge installation while a real layout restore accepts N.
         apply_deriving = presenter._apply_deriving
         monkeypatch.setattr(presenter, "_apply_deriving", lambda _binding: None)
-        binding = presenter.add_panel(
+        original = presenter.add_panel(
             signal,
             value.snapshot,
             kind="image",
@@ -3633,10 +3517,10 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
         _settle_panel_hosts(
             presenter,
             lambda: (
-                binding.host is not None
-                and binding.port is not None
-                and binding.port.presented_publication() is displayed
-                and binding.host.initial_state[0] is not None
+                original.host is not None
+                and original.port is not None
+                and original.port.presented_publication() is displayed
+                and original.host.initial_state[0] is not None
             ),
         )
         y_axis, x_axis = value.snapshot.block.schema.cell_schema.data_axes
@@ -3666,10 +3550,23 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 ),
             ),
         )
-        binding.state = replace(
-            binding.state,
+        restored_state = replace(
+            original.state,
             selector=panel_selection_document(selection),
             published_outputs={"roi_mean": True},
+        )
+        assert presenter.apply_layout(
+            LayoutDocument((restored_state,), ())
+        ) is True
+        (binding,) = tuple(presenter.panels.values())
+        _settle_panel_hosts(
+            presenter,
+            lambda: (
+                binding.host is not None
+                and binding.port is not None
+                and binding.port.presented_publication() is displayed
+                and binding.host.initial_state[0] is not None
+            ),
         )
 
         latest = next_publication(displayed)

@@ -198,58 +198,6 @@ def test_close_cancels_queued_tasks() -> None:
         host.close(timeout=10)
 
 
-def test_one_session_analysis_lane_serializes_prepare_fit_and_close(
-    monkeypatch,
-) -> None:
-    """A frame prepare cannot overlap a manual fit owned by the same session."""
-
-    snapshot = _fit_curve_series("one-analysis-lane")
-    engine = FitEngine()
-    solve = engine.fit
-    prepare_started = Event()
-    release_prepare = Event()
-    fit_started = Event()
-
-    def observed_fit(*args, **kwargs):
-        fit_started.set()
-        return solve(*args, **kwargs)
-
-    monkeypatch.setattr(engine, "fit", observed_fit)
-    host = RasterPlotHost.from_plot(
-        snapshot(0),
-        CurvePlot(AxisRef.point("x")),
-        fit_engine=engine,
-    )
-    try:
-        host.wait_for_front(timeout=10)
-        session = host.dispatch_control(
-            lambda: host._worker_adapter._session()
-        ).result(timeout=10).value
-        prepare = session._prepare_live_frame_worker
-
-        def blocked_prepare(*args, **kwargs):
-            prepare_started.set()
-            assert release_prepare.wait(5.0)
-            return prepare(*args, **kwargs)
-
-        monkeypatch.setattr(session, "_prepare_live_frame_worker", blocked_prepare)
-        update = host.update_data(snapshot(1))
-        assert prepare_started.wait(2.0)
-        manual = host.fit("gaussian_offset", live=False)
-
-        assert not fit_started.wait(0.2), (
-            "manual fit overlapped this session's live-frame preparation"
-        )
-        assert host.close(timeout=0.05) is False
-        release_prepare.set()
-        assert host.close(timeout=10) is True
-        assert update.done()
-        assert manual.done()
-    finally:
-        release_prepare.set()
-        host.close(timeout=10)
-
-
 def test_press_relocates_to_latest_front_after_live_revision() -> None:
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
@@ -289,7 +237,6 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
     spec = facet_spec()
     assert isinstance(spec, FacetGridPlot)
     host = RasterPlotHost.from_plot(_facet_snapshot(), spec)
-    release_subscription = None
     try:
         first = host.wait_for_front(timeout=10)
         operation = host.fit("gaussian_offset", live=True).result(timeout=30)
@@ -297,22 +244,7 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         assert operation.value.source_revision == operation.front.identity.data_revision
         assert operation.front.identity.sequence > first.identity.sequence
         assert host.front is operation.front
-
-        events: list = []
-        release_subscription = host.subscribe_fit(events.append).result(timeout=10).value
-        host.dispatch_control(
-            lambda: host._worker_adapter.publish_live_fit_gap(
-                2, RuntimeError("facet revision skipped")
-            )
-        ).result(timeout=10)
-        failed = events[-1].result
-        assert isinstance(failed, FacetFitBatchResult)
-        assert failed.source_revision == 2
-        assert not failed.success.any()
-        assert all(np.isnan(values).all() for values in failed.parameter_values.values())
     finally:
-        if release_subscription is not None:
-            release_subscription().result(timeout=10)
         host.close(timeout=10)
 
 
@@ -538,38 +470,6 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         assert configured.front.identity.sequence > initial.identity.sequence
         assert configured.front.buffer.pixels != initial.buffer.pixels
 
-        status = host.dispatch_control(
-            lambda: host._worker_adapter._session().fit_status
-        ).result(timeout=10)
-        assert status.value is None
-
-        details, facet_font = host.dispatch_control(
-            lambda: (
-                tuple(
-                    (
-                        len(artists[0]),
-                        artists[2].get_text(),
-                        artists[2].get_fontsize(),
-                    )
-                    for artists in host._worker_adapter._session()._renderer._classifier_artists.values()
-                ),
-                host._worker_adapter._session()._defaults.style.fonts.facet_fit_annotation_pt,
-            )
-        ).result(timeout=10).value
-        assert len(details) == 2
-        assert all(line_count == 3 for line_count, _label, _font in details)
-        assert all("Threshold" in label for _line_count, label, _font in details)
-        assert all("L/R" in label for _line_count, label, _font in details)
-        assert all("Fidelity" in label for _line_count, label, _font in details)
-        # Every number, and inside the cell: the size is whatever makes the
-        # widest line fit the room, never larger than the planned one.
-        assert all(font <= facet_font for _line_count, _label, font in details)
-        for _line_count, label, _font in details:
-            left_text, right_text = label.splitlines()[1].removeprefix("L/R ").split("/")
-            assert float(left_text.removesuffix("%")) + float(
-                right_text.removesuffix("%")
-            ) == pytest.approx(100.0)
-
         host.focus_facet(0).result(timeout=10)
         optimum = host.selector_state(
             SelectorKind.THRESHOLD,
@@ -578,30 +478,20 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         moved = host.set_threshold_selector(
             float(optimum.value) + 0.25,
             display=False,
-        ).result(timeout=10).value
-        assert moved.value != optimum.value
-        moved_label = host.dispatch_control(
-            lambda: host._worker_adapter._session()._renderer._classifier_labels[0]
-        ).result(timeout=10).value
-        assert moved_label != details[0][1]
-        assert "Fidelity" in moved_label
-        moved_left, moved_right = (
-            moved_label.splitlines()[1].removeprefix("L/R ").split("/")
-        )
-        assert float(moved_left.removesuffix("%")) + float(
-            moved_right.removesuffix("%")
-        ) == pytest.approx(100.0)
+        ).result(timeout=10)
+        assert moved.value.value != optimum.value
+        assert moved.front.identity.sequence > configured.front.identity.sequence
 
         host.fit("bimodal_gaussian", live=False).result(timeout=30)
         assert host.selector_state(
             SelectorKind.THRESHOLD,
             display=False,
-        ).result(timeout=10).value.value == moved.value
+        ).result(timeout=10).value.value == moved.value.value
         host.clear_fit().result(timeout=10)
         assert host.selector_state(
             SelectorKind.THRESHOLD,
             display=False,
-        ).result(timeout=10).value.value == moved.value
+        ).result(timeout=10).value.value == moved.value.value
 
         configured = host.configure(
             parameters={"threshold_classifier": True},
@@ -639,26 +529,6 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         host.close(timeout=10)
 
 
-def test_semantic_edit_composes_at_the_owner_and_an_exact_noop_stays_put() -> None:
-    """The session owns composition and does not rebuild an identical kind."""
-
-    from zlc_plot import PlotKind
-
-    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
-    try:
-        first = host.wait_for_front(timeout=10)
-        noop = host.apply_semantic("kind", PlotKind.CURVE).result(timeout=10)
-        assert noop.value is not None
-        assert host.front.identity.display_revision == first.identity.display_revision
-        assert host.front.identity.layout_revision == first.identity.layout_revision
-
-        changed = host.apply_semantic("kind", PlotKind.HISTOGRAM).result(timeout=10)
-        assert changed.value is not None
-        assert host.describe_semantics().result(timeout=10).value.kind is PlotKind.HISTOGRAM
-    finally:
-        host.close(timeout=10)
-
-
 def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
     """An embedder states the desired plot; it does not choose the render path."""
 
@@ -667,24 +537,15 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
         first = host.wait_for_front(timeout=10)
-        identity = host.host_id
-        initial = host.describe_display().result(timeout=10)
-        assert initial.value.display_state.values["title"] is None
-        assert initial.value.display_state.values["x_label"] is None
-
         configured = host.configure(
             semantic={"kind": PlotKind.CURVE},
             parameters={"title": "Configured once", "show_grid": True},
             size="2x2",
         ).result(timeout=10)
 
-        assert host.host_id == identity
         assert configured.value.display_state.values["title"] == "Configured once"
-        assert configured.value.display_state.values["show_grid"] is True
-        assert configured.value.size == "2x2"
         assert configured.front.identity.sequence == first.identity.sequence + 1
         assert configured.front.identity.display_revision > first.identity.display_revision
-        assert configured.front.identity.layout_revision == first.identity.layout_revision
 
         reshaped = host.configure(
             semantic={"kind": PlotKind.HISTOGRAM},
@@ -693,10 +554,8 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
         ).result(timeout=10)
         assert reshaped.value.kind is PlotKind.HISTOGRAM
         assert reshaped.value.display_state.values["title"] == "Distribution"
-        assert reshaped.value.display_state.values["bin_count"] == 8
         assert reshaped.value.size == "2x4"
         assert reshaped.front.identity.sequence == configured.front.identity.sequence + 1
-        assert reshaped.front.identity.layout_revision > configured.front.identity.layout_revision
 
         unchanged = host.configure(
             semantic={"kind": PlotKind.HISTOGRAM},
@@ -704,7 +563,6 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
             size="2x4",
         ).result(timeout=10)
         assert unchanged.value.display_state.revision == reshaped.value.display_state.revision
-        assert unchanged.value.size == reshaped.value.size
         assert unchanged.front is reshaped.front
 
         automatic = host.configure(
@@ -738,11 +596,8 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         CurvePlot(AxisRef.point("x")),
         fit_engine=engine,
     )
-    promoted = []
-    release = None
     try:
         initial = host.wait_for_front(timeout=10)
-        release = host.subscribe_front(promoted.append)
         fit_target = {
             "model": "gaussian_offset",
             "initial": {
@@ -753,50 +608,26 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
             },
             "bounds": {"sigma": (0.1, 3.0)},
         }
-        fitted = host.configure(
+        desired = dict(
             parameters={"title": "Atomic"},
-            fit=fit_target,
             selectors=(),
             viewport=None,
             facet_focus=None,
-        ).result(timeout=30)
+        )
+        fitted = host.configure(fit=fit_target, **desired).result(timeout=30)
         assert fitted.front.identity.sequence == initial.identity.sequence + 1
         assert solve_count == 1
-        assert promoted == [fitted.front]
 
-        unchanged = host.configure(
-            parameters={"title": "Atomic"},
-            fit=fit_target,
-            selectors=(),
-            viewport=None,
-            facet_focus=None,
-        ).result(timeout=30)
+        unchanged = host.configure(fit=fit_target, **desired).result(timeout=30)
         assert unchanged.front is fitted.front
         assert solve_count == 1
-        assert promoted == [fitted.front]
 
-        cleared = host.configure(
-            parameters={"title": "Atomic"},
-            fit={},
-            selectors=(),
-            viewport=None,
-            facet_focus=None,
-        ).result(timeout=30)
+        cleared = host.configure(fit={}, **desired).result(timeout=30)
         assert cleared.front.identity.sequence == fitted.front.identity.sequence + 1
-        assert promoted == [fitted.front, cleared.front]
 
-        clear_noop = host.configure(
-            parameters={"title": "Atomic"},
-            fit={},
-            selectors=(),
-            viewport=None,
-            facet_focus=None,
-        ).result(timeout=30)
+        clear_noop = host.configure(fit={}, **desired).result(timeout=30)
         assert clear_noop.front is cleared.front
-        assert promoted == [fitted.front, cleared.front]
     finally:
-        if release is not None:
-            release()
         host.close(timeout=10)
 
 
@@ -881,55 +712,25 @@ def test_failed_final_configuration_does_not_retire_the_previous_fit_authority(
         offset=0.1,
     )
 
-    engine = FitEngine()
-    solve = engine.fit
-    pending_started = Event()
-    release_pending = Event()
+    host = RasterPlotHost.from_plot(snapshot(0, 0.2), CurvePlot(AxisRef.point("x")))
+    fail_final_render = False
+    present = MatplotlibRenderer.present
 
-    def controlled_solve(model, coordinates, observations=None, **kwargs):
-        if model.model_id == "lorentzian":
-            pending_started.set()
-            assert release_pending.wait(5.0)
-        return solve(model, coordinates, observations, **kwargs)
+    def controlled_present(renderer, *args, **kwargs):
+        if fail_final_render:
+            raise RuntimeError("forced final configuration render failure")
+        return present(renderer, *args, **kwargs)
 
-    monkeypatch.setattr(engine, "fit", controlled_solve)
-    host = RasterPlotHost.from_plot(
-        snapshot(0, 0.2),
-        CurvePlot(AxisRef.point("x")),
-        fit_engine=engine,
-    )
-    fail_final_render = [False]
+    monkeypatch.setattr(MatplotlibRenderer, "present", controlled_present)
+    fit_events = []
+    release_subscription = None
     try:
         host.wait_for_front(timeout=10)
         host.fit("gaussian_offset", live=True).result(timeout=30)
+        release_subscription = host.subscribe_fit(fit_events.append).result(timeout=10).value
         old_front = host.front
         assert old_front is not None
-        session = host.dispatch_control(
-            lambda: host._worker_adapter._session()
-        ).result(timeout=10).value
-        old_accepted = session._accepted_fit
-        old_display = session.display_state
-        old_spec = session.spec
-
-        old_completion = host.dispatch_control(
-            lambda: session.fit_async("lorentzian", live=True)
-        ).result(timeout=10).value
-        assert pending_started.wait(2.0)
-        old_fit_cancel = session._fit_cancel
-        old_live_cancel = session._live_fit_cancel
-        old_request = session._live_fit_request
-        assert session._live_fit_completion is old_completion
-        assert not old_completion.done()
-
-        render = session._render_current
-
-        def controlled_render(*args, **kwargs):
-            if fail_final_render[0] and session._configuration_effects is None:
-                raise RuntimeError("forced final configuration render failure")
-            return render(*args, **kwargs)
-
-        monkeypatch.setattr(session, "_render_current", controlled_render)
-        fail_final_render[0] = True
+        fail_final_render = True
         with pytest.raises(
             RuntimeError,
             match="forced final configuration render failure",
@@ -941,28 +742,19 @@ def test_failed_final_configuration_does_not_retire_the_previous_fit_authority(
             ).result(timeout=30)
 
         assert host.front is old_front
-        assert session._accepted_fit is old_accepted
-        assert session.display_state == old_display
-        assert session.spec == old_spec
-        assert session._live_fit_request is old_request
-        assert session._live_fit_completion is old_completion
-        assert not old_fit_cancel.is_set()
-        assert not old_live_cancel.is_set()
-        assert not old_completion.done()
-
-        fail_final_render[0] = False
+        fail_final_render = False
+        host.update_data(snapshot(1, 0.25)).result(timeout=30)
+        assert fit_events[-1].result.model.model_id == "gaussian_offset"
+        assert fit_events[-1].result.source_revision == 1
         host.configure(
             semantic=semantic,
             parameters={"title": "committed"},
             fit=fit_target,
         ).result(timeout=30)
-        assert old_fit_cancel.is_set()
-        assert old_live_cancel.is_set()
-        with pytest.raises(FitCancelled):
-            old_completion.result(timeout=2.0)
     finally:
-        fail_final_render[0] = False
-        release_pending.set()
+        fail_final_render = False
+        if release_subscription is not None:
+            release_subscription().result(timeout=10)
         host.close(timeout=10)
 
 

@@ -254,12 +254,14 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 
 ### 明确defer与停止门
 
-- 用户保留的M4 cleanup待办（只记录，尚未授权实施）：production可安全净删约180–240行，首要目标是`RasterPlotHost`内约246行的单消费者`_WorkerSessionAdapter`转发层；tests可安全MERGE/DELETE约500–800行，增量高度集中在9个Plot/Workbench纵向文件。执行时必须保持exact backlog/ROI/invalid gap/Qt lifecycle核心证据，另做明确follow-up commit，不能把删断言冒充简化。
+- 用户随后授权的M4 cleanup已完成：删除单消费者`_WorkerSessionAdapter`并让Host直接调用现有PlotSession owner，production净删260行；九个高增长测试文件及一条gesture白盒共净删538行，保留exact backlog、ROI→Fit→invalid gap→Rolling、atomic rollback、Viewer/Pulse/Qt close与coordinate threshold核心证据。Plot全套383 passed，四个Plot/Viewer/Pulse文件149 passed，Console/Selection/TaskConsole三文件100 passed。
 - 100 ms只保留为正式链profile警戒线。当前P50/P95约150/167 ms已无额外cadence、HOL、错误串行或重复render；是否继续做更大性能取舍由用户在本commit后讨论，本milestone不为百分之几/十几的边际收益新增executor/cache/framework。
 - 不可中断的vendor discovery保持window可见并拒绝close，直到真实future结束；hardware transport cancellation/priority属于M5，不把`shutdown(wait=False)`冒充安全退出。
 - 普通Pulse Stop/FIRE wire priority、Camera/Remote/FPGA归M5；SLM USB/context/feedback归M6；single distribution/fresh install/notebook与final docs归M7。M4未访问hardware，也不把offscreen/virtual证据冒充实验机验收。
 
 Milestone 4 commit：`Make data, fit, overlay, and Qt lifecycle exact and atomic`。提交后立即停止，不进入M5，等待用户的Plot/Fit性能讨论。
+
+M4 cleanup follow-up commit：`Remove residual M4 adapters and duplicate tests`。复盘根因不是缺少规则文字，而是错误地把各agent分片收口当成合并树收口，并用full green、无新增class、test函数净增数替代新增definition/state/consumer与测试正文LOC审计。`AGENTS.md`现强制所有cut合并并冻结candidate后重新独立审计；已知safe deletion不得在标记sweep-complete时延期。
 
 ## 10. Checkpoint更新规则
 

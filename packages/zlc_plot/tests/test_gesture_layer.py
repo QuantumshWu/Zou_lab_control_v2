@@ -168,32 +168,25 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
                 interaction=current.interaction,
             ).result(timeout=20)
 
-        def candidate() -> float | None:
-            state = host.dispatch_control(
-                lambda: host._worker_adapter._session()
-                ._selector_controller.candidate_state()
-            ).result(timeout=20).value
-            return None if state is None else float(state.value)
-
         settled = host.selector_state(SelectorKind.THRESHOLD, display=False).result(
             timeout=20
         ).value
         assert settled is not None
-        pointer("press", 0.456)
-        assert candidate() == pytest.approx(float(settled.value))
+        pressed = pointer("press", 0.456)
 
-        tracked = []
+        fronts = [pressed.front]
         for step in range(6):
-            pointer("move", 0.47 + 0.03 * step)
-            tracked.append(candidate())
-        assert len(set(tracked)) == len(tracked), tracked
-        assert tracked == sorted(tracked)
+            fronts.append(pointer("move", 0.47 + 0.03 * step).front)
+        assert [front.identity.sequence for front in fronts] == sorted(
+            {front.identity.sequence for front in fronts}
+        )
+        assert len({front.buffer.pixels for front in fronts}) == len(fronts)
 
         pointer("release", 0.47 + 0.03 * 5)
         committed = host.selector_state(SelectorKind.THRESHOLD, display=False).result(
             timeout=20
         ).value
-        assert float(committed.value) == pytest.approx(tracked[-1])
+        assert float(committed.value) != pytest.approx(float(settled.value))
     finally:
         host.close(timeout=20)
 

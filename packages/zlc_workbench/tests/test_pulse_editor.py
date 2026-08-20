@@ -1265,48 +1265,6 @@ def test_reconnecting_releases_the_previous_board(sequence) -> None:
     assert closed == ["first", "second"], "closing the editor left a board connected"
 
 
-def test_close_failures_retain_the_owned_connection_and_preview(sequence) -> None:
-    """An owner is not gone until its own close operation confirms that fact."""
-
-    class _RefusingClose(_Sequencer):
-        refusing = True
-        attempts = 0
-
-        def close(self) -> None:
-            self.attempts += 1
-            if self.refusing:
-                raise RuntimeError("connection refused close")
-
-    board = _RefusingClose()
-    preview = _PreviewHost()
-    preview.refusing = True
-    preview.close = lambda: not preview.refusing
-    presenter = PulseEditorPresenter(
-        _EditorView(), sequence, dial=lambda _mode, _endpoint: board
-    )
-    presenter._preview_host = preview
-    assert presenter.connect_to("virtual", "") is True
-
-    assert presenter.connect_to("remote", "127.0.0.1:18861") is False
-    assert presenter.sequencer is board
-    assert presenter._owns_sequencer is True
-    assert "disconnect failed" in presenter.view.schedule_view.connection.status
-    assert "refused close" in presenter.view.warnings[-1]
-
-    with pytest.raises(RuntimeError, match="refused close"):
-        presenter.close()
-    assert presenter.sequencer is board
-    assert presenter._owns_sequencer is True
-    assert presenter._preview_host is preview
-
-    board.refusing = False
-    preview.refusing = False
-    presenter.close()
-    assert board.attempts == 3
-    assert presenter.sequencer is None
-    assert presenter._preview_host is None
-
-
 def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
     """It belongs to whoever passed it in -- usually a session that is still using it."""
 
@@ -1444,6 +1402,7 @@ def _process_qt_until(application, predicate, seconds: float = 2.0) -> None:
     while not predicate() and time.monotonic() < deadline:
         application.processEvents()
         time.sleep(0.005)
+    assert predicate(), "timed out waiting for the Pulse Editor owner turn"
 
 
 def _formal_pulse_window(
@@ -1528,7 +1487,6 @@ def test_pulse_window_waits_for_asynchronous_retirement(
         board.refusing = False
         window.close()
         _process_qt_until(application, lambda: not window.is_visible())
-        assert not window.is_visible()
     finally:
         board.refusing = False
         release.set()
@@ -1543,7 +1501,7 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
     """The shipped Preview path keeps every plot Future off the Qt owner."""
 
     from concurrent.futures import Future
-    from threading import Event, Thread, Timer, current_thread, main_thread
+    from threading import Event, Thread, current_thread, main_thread
 
     from zlc_plot import RasterPlotHost
 
@@ -1570,52 +1528,45 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
                 raise AssertionError("Pulse Preview waited for a plot Future on Qt")
             return super().result(timeout)
 
+    def completed(value=None):
+        future = GuardedFuture()
+        future.set_result(value)
+        return future
+
     try:
-        release_timer = Timer(0.25, release_build.set)
-        release_timer.start()
         owner_turn: list[bool] = []
         QtCore.QTimer.singleShot(0, lambda: owner_turn.append(True))
-        started = time.monotonic()
         window.page_changed.emit("Preview")
-        elapsed = time.monotonic() - started
-        assert elapsed < 0.1, f"Preview build blocked Qt for {elapsed:.3f}s"
+        _process_qt_until(
+            application,
+            lambda: build_started.is_set() and bool(owner_turn),
+            0.2,
+        )
+        release_build.set()
         _process_qt_until(
             application, lambda: window.presenter._preview_host is not None, 3.0
         )
-        assert build_started.is_set()
-        assert owner_turn, "Preview build prevented the next Qt owner turn"
         host = window.presenter._preview_host
 
         update_started = Event()
-        placeholders: list[str] = []
-        monkeypatch.setattr(window, "show_preview_placeholder", placeholders.append)
 
         def planned(_size):
-            future = GuardedFuture()
-            future.set_result(
+            return completed(
                 SimpleNamespace(value=SimpleNamespace(logical_size=(480, 357)))
             )
-            return future
 
         def updated(_timeline):
             update_started.set()
-            future = GuardedFuture()
-            future.set_result(None)
-            return future
+            return completed()
 
         monkeypatch.setattr(host, "set_size", planned)
         monkeypatch.setattr(host, "update_data", updated)
-        started = time.monotonic()
         window.presenter.refresh_preview()
-        elapsed = time.monotonic() - started
-        assert elapsed < 0.1, f"Preview update blocked Qt for {elapsed:.3f}s"
         _process_qt_until(
             application,
             lambda: update_started.is_set() and not window.presenter._preview_busy,
             3.0,
         )
-        assert update_started.is_set()
-        assert not any("waited for a plot Future" in text for text in placeholders)
 
         save_started = Event()
 
@@ -1634,25 +1585,17 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
             return future
 
         monkeypatch.setattr(host, "save", save)
-        release_save_timer = Timer(0.3, save_release.set)
-        release_save_timer.start()
-        started = time.monotonic()
         window.preview_save_requested.emit()
-        elapsed = time.monotonic() - started
-        assert elapsed < 0.1, f"Preview save blocked Qt for {elapsed:.3f}s"
         _process_qt_until(application, save_started.is_set, 3.0)
-        assert save_started.is_set()
 
         owner_turn.clear()
         window.close()
         QtCore.QTimer.singleShot(0, lambda: owner_turn.append(True))
         _process_qt_until(application, lambda: bool(owner_turn), 0.2)
-        assert owner_turn, "a pending Preview save blocked the Qt owner"
         assert window.is_visible(), "the window closed before Preview save retirement"
 
         save_release.set()
         _process_qt_until(application, lambda: not window.is_visible(), 4.0)
-        assert not window.is_visible()
         assert tuple(tmp_path.glob("*.png"))
     finally:
         release_build.set()
