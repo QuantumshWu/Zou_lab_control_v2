@@ -15,6 +15,7 @@ import math
 import numpy as np
 
 from zlc_data import OwnedSnapshot
+from zlc_data.snapshot_projection import axis_catalog
 from zlc_durable import atomic_write_file
 
 from .data_contract import (
@@ -80,7 +81,7 @@ from .fit import (
     FitParameterDisplay,
     FitResult,
 )
-from .kinds import AxisRef, PlotKind
+from .kinds import AxisDomain, AxisRef, PlotKind
 from ._kinds import handler_for
 from .layout import FacetTopology, SurfacePlan, resolve_surface
 from .parameters import ParameterSchema, RenderEffect
@@ -106,6 +107,8 @@ from .selectors import (
     SelectorSnapshot,
     SelectorState,
     SelectorValue,
+    _classifier_threshold_target_from_subject,
+    normalize_classifier_threshold_targets,
 )
 from .specs import (
     CurvePlot,
@@ -149,9 +152,17 @@ _EventT = TypeVar("_EventT")
 _ResultT = TypeVar("_ResultT")
 
 
-_FIT_THREAD_PREFIX = "zlc-fit"
-_LIVE_PREPARE_THREAD_PREFIX = "zlc-live-prepare"
+_ANALYSIS_THREAD_PREFIX = "zlc-analysis"
 _UNSET = object()
+_CONFIGURATION_STATE_NAMES = (
+    "_spec", "_parameter_schema", "_projection", "_image_overlay",
+    "_viewport", "_focused_facet_index", "_facet_focus_index", "_accepted_fit",
+    "_classifier_results", "_classifier_overlays", "_classifier_thresholds",
+    "_history", "_layout_revision", "_size", "_fit_context_generation",
+    "_fit_request_generation", "_fit_batch_revision", "_fit_cancel",
+    "_live_fit_cancel", "_live_fit_request", "_live_fit_future",
+    "_live_fit_completion", "_presentation_epoch",
+)
 
 
 def _validated_device_pixel_ratio(value: float) -> float:
@@ -331,11 +342,20 @@ class SelectionSubject:
 
     ``None`` means the bounds do not cut a named upstream axis at all; a
     histogram's value quantity is the ordinary case.
+
+    The scope is the canonical named panel/facet restriction.  A repeat is
+    structural rather than named, so its resolved source row travels separately
+    as repeat_index.  Coordinate frames travel beside x/y because selector
+    values alone cannot identify their producer coordinate system.
     """
 
     plot_kind: PlotKind
     x: AxisRef | None
     y: AxisRef | None
+    x_coordinate_frame: str | None = None
+    y_coordinate_frame: str | None = None
+    scope: tuple[tuple[AxisRef, object], ...] = ()
+    repeat_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,7 +366,9 @@ class SelectionEvent:
     selector: SelectorState
     display_selector: SelectorState
     data_revision: int
+    data_generation: str | None
     subject: SelectionSubject
+    classifier_thresholds: tuple[Mapping[str, object], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,19 +486,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._classifier_results: tuple[FitResult | None, ...] = ()
         self._classifier_overlays = ()
         self._classifier_thresholds: tuple[float | None, ...] = ()
-        self._fit_executor = ThreadPoolExecutor(
-            max_workers=defaults.runtime.analysis_worker_count,
-            thread_name_prefix=_FIT_THREAD_PREFIX,
-        )
-        self._live_prepare_executor = ThreadPoolExecutor(
-            max_workers=defaults.runtime.analysis_worker_count,
-            thread_name_prefix=_LIVE_PREPARE_THREAD_PREFIX,
+        self._analysis_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=_ANALYSIS_THREAD_PREFIX,
         )
         self._fit_cancel = Event()
         #: Request-scoped cancellation for live pair solves.  Set only on
-        #: re-arm, replace_spec, and close: an in-flight pair always runs to
-        #: completion under data pressure (newer frames replace the queued
-        #: pair, never the running one), so pairing survives solve > period.
+        #: re-arm, replace_spec, and close: accepted FIFO pairs keep running
+        #: under data pressure, so pairing survives solve > period.
         self._live_fit_cancel = Event()
         self._live_prepare_cancel = Event()
         self._live_prepare_future: Future[_PreparedLiveFrame] | None = None
@@ -510,6 +527,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if _keeps_history(self._spec):
             self._history = self._projection.rolling_history
         self._presentation_epoch = 0
+        # One configure unions existing owners' effects before one final paint.
+        self._configuration_effects: RenderEffect | None = None
+        self._configuration_display_events: list[DisplayState] | None = None
+        self._configuration_fit_events: list[FitEvent | None] | None = None
+        self._configuration_fit_commit_actions: list[Callable[[], None]] | None = None
         # Feasibility probes are cached per candidate spec for the current
         # dataset generation; see _semantic_feasibility.
         self._semantic_probe_generation: object = None
@@ -785,6 +807,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             assert self._renderer is not None
             with self._renderer.raster_transaction():
                 return self._renderer.capture_rgba_bytes()
+
+    def _raster_presentation_epoch(self) -> int:
+        with self._lock:
+            self._assert_open()
+            return int(self._presentation_epoch)
 
     def _raster_interaction_snapshot(
         self,
@@ -1081,13 +1108,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             accepted = self._accepted_fit
             if accepted is None:
                 return None
-            result_revision = (
-                accepted.result.source_revision
-                if isinstance(accepted.result, FacetFitBatchResult)
-                else accepted.result.source_revision
-            )
             current = (
-                result_revision == self.data_revision
+                accepted.result.source_revision == self.data_revision
                 and accepted.context_generation == self._fit_context_generation
             )
         return "current" if current else "lagging"
@@ -1215,6 +1237,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         renderer: MatplotlibRenderer,
         effects: RenderEffect,
     ) -> None:
+        deferred = self._configuration_effects
+        if deferred is not None:
+            self._configuration_effects = deferred | effects
+            return
         gesture = self._gesture
         viewport = (
             gesture.candidate
@@ -1451,21 +1477,178 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
-        classifier_thresholds: Sequence[float | None] | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
+        selectors: Sequence[SelectorState] | object = _UNSET,
+        viewport: RectangleRange | None | object = _UNSET,
+        facet_focus: int | None | object = _UNSET,
+        fit: Mapping[str, object] | None | object = _UNSET,
+        fit_live: bool = True,
     ) -> DisplayDescription:
-        """Apply one complete desired plot configuration.
+        """Apply one target once; an identical target does no work."""
+
+        if selectors is not _UNSET:
+            if isinstance(selectors, (str, bytes)):
+                raise TypeError("selectors must be a sequence of SelectorState")
+            selector_target = SelectorSnapshot(tuple(selectors)).committed
+        else:
+            selector_target = None
+        threshold_target = (
+            _UNSET
+            if classifier_thresholds is _UNSET
+            else normalize_classifier_threshold_targets(classifier_thresholds)
+        )
+        if viewport is not _UNSET and viewport is not None and not isinstance(
+            viewport, RectangleRange
+        ):
+            raise TypeError("viewport must be RectangleRange, None, or omitted")
+        if facet_focus is not _UNSET and facet_focus is not None:
+            if isinstance(facet_focus, bool) or not isinstance(facet_focus, int):
+                raise TypeError("facet_focus must be an integer, None, or omitted")
+            if facet_focus < 0:
+                raise ValueError("facet_focus must be non-negative")
+        if fit is not _UNSET and fit is not None and not isinstance(fit, Mapping):
+            raise TypeError("fit must be a mapping, None, or omitted")
+        if type(fit_live) is not bool:
+            raise TypeError("fit_live must be bool")
+
+        with self._render_lock:
+            if self._configuration_effects is not None:
+                raise RuntimeError("plot configuration is already in progress")
+            previous_state = self._configuration_state_snapshot()
+            self._configuration_effects = RenderEffect.NONE
+            self._configuration_display_events = []
+            self._configuration_fit_events = []
+            self._configuration_fit_commit_actions = []
+            try:
+                self._apply_configuration(
+                    semantic=semantic,
+                    parameters=parameters,
+                    size=size,
+                    image_overlay=image_overlay,
+                    classifier_thresholds=threshold_target,
+                )
+                if facet_focus is not _UNSET:
+                    if facet_focus is None:
+                        if self._facet_focus_index is not None:
+                            self.show_facet_overview()
+                    elif facet_focus != self._facet_focus_index:
+                        self.focus_facet(facet_focus)
+                if selector_target is not None:
+                    managed = {
+                        SelectorKind.X_RANGE,
+                        SelectorKind.AREA,
+                        SelectorKind.THRESHOLD,
+                    }
+                    current = {
+                        state.kind: state
+                        for state in self._selector_controller.states()
+                        if state.kind in managed
+                    }
+                    wanted = {
+                        state.kind: state
+                        for state in selector_target
+                        if state.kind in managed
+                    }
+                    for kind in managed:
+                        before = current.get(kind)
+                        after = wanted.get(kind)
+                        if after is None:
+                            if before is not None:
+                                self.remove_selector(kind, emit_change=False)
+                            continue
+                        if (
+                            before is None
+                            or before.value != after.value
+                            or before.facet_index != after.facet_index
+                        ):
+                            self._install_selector_state(
+                                after,
+                                emit_change=False,
+                            )
+                if viewport is not _UNSET:
+                    self._set_viewport_state(viewport, emit_change=False)
+                if fit is not _UNSET:
+                    self._configure_fit_target(
+                        {} if fit is None else fit,
+                        live=fit_live,
+                    )
+                effects = self._configuration_effects
+                display_events = tuple(self._configuration_display_events or ())
+                fit_events = tuple(self._configuration_fit_events or ())
+                self._configuration_effects = None
+                self._configuration_display_events = None
+                self._configuration_fit_events = None
+                if effects != RenderEffect.NONE:
+                    self._render_current(effects, schedule_fit=False)
+                fit_commit_actions = tuple(
+                    self._configuration_fit_commit_actions or ()
+                )
+                self._configuration_fit_commit_actions = None
+                description = self.describe_display()
+            except BaseException:
+                self._restore_configuration_state(previous_state)
+                self._configuration_effects = None
+                self._configuration_display_events = None
+                self._configuration_fit_events = None
+                self._configuration_fit_commit_actions = None
+                raise
+
+        for action in fit_commit_actions:
+            action()
+        if display_events:
+            self._notify_display(display_events[-1])
+        for event in fit_events:
+            self._notify_fit(event)
+        return description
+
+    def _configuration_state_snapshot(self) -> dict[str, object]:
+        assert self._renderer is not None
+        snapshot = {name: getattr(self, name) for name in _CONFIGURATION_STATE_NAMES}
+        snapshot.update({
+            "_display_store": self._display_store,
+            "display_state": self.display_state,
+            "selector_states": self._selector_controller.states(),
+            "fit_warm_starts": dict(self._fit_warm_starts),
+            "renderer_plan": self._renderer.plan,
+        })
+        return snapshot
+
+    def _restore_configuration_state(self, snapshot: Mapping[str, object]) -> None:
+        display_store = snapshot["_display_store"]
+        display_state = snapshot["display_state"]
+        current_store = self._display_store
+        if current_store is display_store and current_store.state is not display_state:
+            current_store._restore_prepared(current_store.state, display_state)
+        selector_controller = _SelectorController()
+        for state in tuple(snapshot["selector_states"]):
+            selector_controller.install(state)
+        for name in _CONFIGURATION_STATE_NAMES:
+            setattr(self, name, snapshot[name])
+        self._display_store = display_store
+        self._selector_controller = selector_controller
+        self._fit_warm_starts = dict(snapshot["fit_warm_starts"])
+        assert self._renderer is not None
+        self._renderer.spec = self._spec
+        self._renderer.relayout(
+            snapshot["renderer_plan"],
+            facet_index=self._focused_facet_index,
+            facet_focus_index=self._facet_focus_index,
+        )
+
+    def _apply_configuration(
+        self,
+        *,
+        semantic: Mapping[str, object] | None = None,
+        parameters: Mapping[str, object] | None = None,
+        size: str | None = None,
+        image_overlay: ImagePointOverlay | None | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
+    ) -> DisplayDescription:
+        """Apply semantic/display/layout state inside ``configure``.
 
         The caller supplies state, not a render strategy.  Semantic choices are
         composed in memory, display values are differenced as one mapping, and
         size/overlay effects join the same renderer update.
-
-        A fit is NOT configuration.  It is an analysis with its own completion,
-        result and failure diagnostic, and ``fit``/``fit_async``/``clear_fit``
-        already model that.  This door used to accept ``fit_model``, start the
-        analysis, and return a completion that described only the configure --
-        so every caller that awaited it believed the fit had landed while it
-        was still in flight, and any caller that did not auto-present the next
-        front simply lost it.
         """
 
         if semantic is not None and not isinstance(semantic, Mapping):
@@ -1640,7 +1823,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # This event belongs to an explicit/ad-hoc fit submitted through
             # fit()/fit_async().  The clock cancellation token belongs to an
             # already admitted live data frame and is deliberately untouched.
-            self._fit_cancel.set()
+            self._commit_fit_actions(self._fit_cancel.set)
             return self._fit_context_generation
 
     def _clear_fit_presentation(self) -> bool:
@@ -1702,7 +1885,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         size: str | object = _UNSET,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
-        classifier_thresholds: Sequence[float | None] | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
     ) -> DisplayState:
         """Commit display, layout and Image overlay with one renderer update."""
 
@@ -1777,7 +1960,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     effects |= RenderEffect.LAYOUT
                 if overlay_changed:
                     effects |= RenderEffect.OVERLAY
-                if classifier_thresholds is not _UNSET:
+                thresholds_changed = (
+                    classifier_thresholds is not _UNSET
+                    and tuple(classifier_thresholds)
+                    != self._classifier_threshold_targets_state()
+                )
+                if thresholds_changed:
                     effects |= RenderEffect.OVERLAY
                 if effects == RenderEffect.NONE:
                     return previous
@@ -1886,9 +2074,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     )
                     if classifier_changed:
                         self._refresh_threshold_classifier()
-                    if classifier_thresholds is not _UNSET:
-                        if isinstance(classifier_thresholds, (str, bytes)):
-                            raise TypeError("classifier_thresholds must be a sequence")
+                    if thresholds_changed:
                         self._set_classifier_thresholds_state(classifier_thresholds)
                     plan = (
                         self._resolve_plan()
@@ -1956,7 +2142,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self.redraw_surface()
                 raise
             if fit_cancel is not None:
-                fit_cancel.set()
+                self._commit_fit_actions(fit_cancel.set)
         if accepted_changes:
             self._notify_display(state)
         return state
@@ -2060,7 +2246,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
-        classifier_thresholds: Sequence[float | None] | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
     ) -> DisplayDescription:
         """Atomically replace semantics and final presentation on one Figure."""
 
@@ -2069,6 +2255,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("spec must be a supported PlotSpec")
         if parameters is not None and not isinstance(parameters, Mapping):
             raise TypeError("parameters must be a mapping or None")
+        threshold_target = (
+            _UNSET
+            if classifier_thresholds is _UNSET
+            else normalize_classifier_threshold_targets(classifier_thresholds)
+        )
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -2148,10 +2339,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 # cell cap); it must stay inside the rollback envelope so a
                 # rejected replacement never leaves half-committed state.
                 self._refresh_threshold_classifier()
-                if classifier_thresholds is not _UNSET:
-                    if isinstance(classifier_thresholds, (str, bytes)):
-                        raise TypeError("classifier_thresholds must be a sequence")
-                    self._set_classifier_thresholds_state(classifier_thresholds)
+                if threshold_target is not _UNSET:
+                    self._set_classifier_thresholds_state(threshold_target)
                 renderer.spec = spec
                 plan = self._resolve_plan()
                 renderer.relayout(
@@ -2189,20 +2378,29 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._update_renderer(renderer, RenderEffect.LAYOUT)
                 raise
             with self._lock:
+                fit_cancel = self._fit_cancel
+                live_fit_cancel = self._live_fit_cancel
+                live_prepare_cancel = self._live_prepare_cancel
                 self._fit_context_generation += 1
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
-                self._fit_cancel.set()
-                self._live_fit_cancel.set()
                 self._live_fit_cancel = Event()
-                self._live_prepare_cancel.set()
                 completion = self._live_fit_completion
                 self._live_fit_completion = None
                 self._live_fit_request = None
                 self._live_fit_future = None
                 description = self.describe_display()
-        if completion is not None and not completion.done():
-            completion.set_exception(FitCancelled("plot specification replaced"))
+
+        def retire_replaced_fit() -> None:
+            fit_cancel.set()
+            live_fit_cancel.set()
+            live_prepare_cancel.set()
+            if completion is not None and not completion.done():
+                completion.set_exception(
+                    FitCancelled("plot specification replaced")
+                )
+
+        self._commit_fit_actions(retire_replaced_fit)
         self._notify_display(description.display_state)
         return description
 
@@ -2633,29 +2831,36 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if image_overlay is _UNSET
                     else image_overlay
                 )
-            # The previous revision's overlay never rides into this frame:
-            # the pair's own fit is accepted below, or the frame is honestly
-            # data-only.  One shot on screen is one shot throughout.
-            self._present_projection_transaction(
-                projection,
-                image_overlay=accepted_overlay,
-                accepted_fit=None,
+            started = self._pair_started(projection)
+            accepted_fit = None
+            resolution = None
+            fit_event = None
+            solved = None
+            if started is not None:
+                solved = self._solve_live_pair(started)
+                accepted_fit, resolution, fit_event = self._accept_pair_fit(
+                    solved,
+                    projection,
+                )
+            try:
+                self._present_projection_transaction(
+                    projection,
+                    image_overlay=accepted_overlay,
+                    accepted_fit=accepted_fit,
+                )
+            except Exception:
+                self._restore_live_fit_completion(resolution)
+                raise
+        if accepted_fit is not None and solved is not None:
+            self._remember_fit_warm_starts(
+                solved.result,
+                request_generation=solved.started.request_generation,
+                selections=accepted_fit.selections,
             )
-            started = self._pair_started(self._projected)
-            live_fit_work = (
-                None
-                if started is None
-                else self._accept_pair_fit(self._solve_live_pair(started))
-            )
-        if live_fit_work is not None:
-            # Futures and observer callbacks resolve only after the render
-            # lock is released; the ownership gate is taken inside these
-            # calls, and render-lock-first ordering would invert it.
-            resolution, fit_event = live_fit_work
-            if resolution is not None:
-                self._resolve_fit_completion(resolution)
-            if fit_event is not None:
-                self._notify_fit(fit_event)
+        if fit_event is not None:
+            self._notify_fit(fit_event)
+        if resolution is not None:
+            self._resolve_fit_completion(resolution)
 
     def update_image_frame(self, frame: ImageFrame) -> ImageFrame:
         """Present image data and its point layer in one render transaction."""
@@ -2756,6 +2961,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return self._subscribe_callback(self._viewport_callbacks, callback)
 
     def _notify_display(self, state: DisplayState) -> None:
+        deferred = self._configuration_display_events
+        if deferred is not None:
+            deferred.append(state)
+            return
         with self._lock:
             callbacks = tuple(self._display_callbacks)
         self._notify_callbacks(callbacks, state)
@@ -3010,7 +3219,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self.redraw_surface()
                 raise
             if context_changed:
-                fit_cancel.set()
+                self._commit_fit_actions(fit_cancel.set)
         if emit_change:
             self._emit_selection(
                 SelectionChange.ADDED if previous is None else SelectionChange.UPDATED,
@@ -3267,20 +3476,25 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 except Exception:
                     self.redraw_surface()
                 raise
-            if affects_fit:
-                fit_cancel.set()
-                if bound_request:
-                    # Un-arming cancels only the live pair solve; an in-flight
-                    # data-frame preparation is fit-agnostic and continues.
-                    live_fit_cancel.set()
+
+        def retire_selector_fit() -> None:
+            if not affects_fit:
+                return
+            fit_cancel.set()
+            if bound_request:
+                # Un-arming cancels only the live pair solve; an in-flight
+                # data-frame preparation is fit-agnostic and continues.
+                live_fit_cancel.set()
+            if cancelled_fit is not None and not cancelled_fit.done():
+                cancelled_fit.set_exception(
+                    FitCancelled(f"fit selector removed: {state.kind.value}")
+                )
+
+        self._commit_fit_actions(retire_selector_fit)
         if withdrawn:
             self._notify_fit(None)
         if emit_change:
             self._emit_selection(SelectionChange.REMOVED, state)
-        if cancelled_fit is not None and not cancelled_fit.done():
-            cancelled_fit.set_exception(
-                FitCancelled(f"fit selector removed: {state.kind.value}")
-            )
         return state
 
     def subscribe_selection(
@@ -3319,33 +3533,43 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return unsubscribe
 
     def _emit_selection(self, change: SelectionChange, state: SelectorState) -> None:
-        with self._lock:
-            subscriptions = tuple(
-                item
-                for item in self._selection_subscriptions
-                if item.selector_kind in (None, state.kind)
+        with self._render_lock:
+            with self._lock:
+                subscriptions = tuple(
+                    item
+                    for item in self._selection_subscriptions
+                    if item.selector_kind in (None, state.kind)
+                )
+            if not subscriptions:
+                return
+            display_state = (
+                self._special_display_selector_state(state)
+                if self._view is None
+                else self._projected._display_selector_state(state)
             )
-        if not subscriptions:
-            return
-        display_state = (
-            self._special_display_selector_state(state)
-            if self._view is None
-            else self._projected._display_selector_state(state)
-        )
-        event = SelectionEvent(
-            change,
-            state,
-            display_state,
-            self.data_revision,
-            self._selection_subject(),
-        )
+            event = SelectionEvent(
+                change,
+                state,
+                display_state,
+                self.data_revision,
+                self.data_generation,
+                self._selection_subject(state),
+                (
+                    self._classifier_threshold_targets_state()
+                    if state.kind is SelectorKind.THRESHOLD
+                    else ()
+                ),
+            )
 
         self._notify_callbacks(
             tuple(item.callback for item in subscriptions),
             event,
         )
 
-    def _selection_subject(self) -> SelectionSubject:
+    def _selection_subject(
+        self,
+        state: SelectorState | None = None,
+    ) -> SelectionSubject:
         """Resolve what the current selectors cut, through the projection.
 
         The projection already owns this rule for slicing and units; asking it
@@ -3357,10 +3581,101 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             return SelectionSubject(semantic.kind, None, None)
         x = self._projected._x_selector_source() if self._has_x_selector_source() else None
         y = self._projected._y_ref_or_value()
+        x_ref = x if isinstance(x, AxisRef) else None
+        y_ref = y if isinstance(y, AxisRef) else None
+        scope, repeat_index = self._selection_scope(state)
         return SelectionSubject(
             semantic.kind,
-            x if isinstance(x, AxisRef) else None,
-            y if isinstance(y, AxisRef) else None,
+            x_ref,
+            y_ref,
+            self._selection_axis_frame(x_ref),
+            self._selection_axis_frame(y_ref),
+            scope,
+            repeat_index,
+        )
+
+    def _selection_axis_frame(self, ref: AxisRef | None) -> str | None:
+        """The producer coordinate frame of one resolved plot axis."""
+
+        if ref is None or not isinstance(self._projection.data, OwnedSnapshot):
+            return None
+        if ref.domain is AxisDomain.POINT_ROW:
+            return None
+        physical_domain = (
+            "repeat"
+            if ref.domain is AxisDomain.REPEAT
+            else "data"
+            if ref.domain is AxisDomain.DATA
+            else "point"
+        )
+        for label, axis_id, axis, domain in axis_catalog(
+            snapshot_schema(self._projection.data)
+        ):
+            if domain != physical_domain:
+                continue
+            if ref.axis_id is not None and ref.axis_id not in {
+                str(label),
+                str(axis_id),
+            }:
+                continue
+            frame = axis.coordinate_frame
+            return None if frame is None else str(frame)
+        return None
+
+    def _selection_scope(
+        self,
+        state: SelectorState | None,
+    ) -> tuple[tuple[tuple[AxisRef, object], ...], int | None]:
+        """Canonical panel/facet narrowing that existed when a gesture fired."""
+
+        if not isinstance(self._projection.data, OwnedSnapshot):
+            return (), None
+        schema = snapshot_schema(self._projection.data)
+        scope: list[tuple[AxisRef, object]] = []
+        repeat_index: int | None = None
+        for ref, value in getattr(self._spec, "scope", ()):
+            if ref.domain is AxisDomain.REPEAT:
+                repeat_index = next(
+                    index
+                    for index in range(schema.repeat_axis.size)
+                    if schema.repeat_axis.coordinate_at(index) == value
+                )
+            else:
+                scope.append((ref, value))
+
+        facet_index = (
+            self._facet_focus_index
+            if state is None
+            else state.facet_index
+        )
+        if isinstance(self._spec, FacetGridPlot) and facet_index is not None:
+            if self._spec.facet.domain is AxisDomain.REPEAT:
+                repeat_index = int(facet_index)
+            else:
+                cell = next(
+                    item
+                    for item in tuple(getattr(self._payload, "cells", ()))
+                    if item.facet_index == facet_index
+                )
+                value = cell.facet_value_canonical
+                if isinstance(value, np.generic):
+                    value = value.item()
+                scope.append((self._spec.facet, value))
+        return tuple(scope), repeat_index
+
+    def _classifier_threshold_target_for_index(
+        self,
+        facet_index: int | None,
+        value: object,
+    ) -> Mapping[str, object]:
+        state = SelectorState(
+            SelectorKind.THRESHOLD,
+            float(value),
+            facet_index=facet_index,
+        )
+        return _classifier_threshold_target_from_subject(
+            self._selection_subject(state),
+            state.value,
         )
 
     def _has_x_selector_source(self) -> bool:
@@ -3596,7 +3911,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 except Exception:
                     self.redraw_surface()
                 raise
-            fit_cancel.set()
+            self._commit_fit_actions(fit_cancel.set)
         if not emit_change:
             return True
         display = selected
@@ -3992,12 +4307,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if logical_completion is not None and not logical_completion.done():
             logical_completion.set_exception(RuntimeError("plot session is closed"))
         caller_name = current_thread().name
-        self._fit_executor.shutdown(
-            wait=not caller_name.startswith(f"{_FIT_THREAD_PREFIX}_"),
-            cancel_futures=True,
-        )
-        self._live_prepare_executor.shutdown(
-            wait=not caller_name.startswith(f"{_LIVE_PREPARE_THREAD_PREFIX}_"),
+        self._analysis_executor.shutdown(
+            wait=not caller_name.startswith(f"{_ANALYSIS_THREAD_PREFIX}_"),
             cancel_futures=True,
         )
 

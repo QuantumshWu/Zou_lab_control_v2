@@ -216,13 +216,6 @@ class PlotPanelPort:
         with self._state_lock:
             return self._host
 
-    @property
-    def has_pending(self) -> bool:
-        """Whether a staged render is still travelling toward this panel."""
-
-        with self._state_lock:
-            return bool(self._pending)
-
     # -------------------------------------------------------------- the tick
 
     @property

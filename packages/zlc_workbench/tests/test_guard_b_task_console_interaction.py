@@ -159,12 +159,69 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         view.panel_state_changed.emit(
             panel.panel_id, {"signal": signal_key}
         )
+        _wait_until(lambda: panel.host is not None, presenter)
         assert panel.signal == signal_key and panel.host is not None
+
+        # Selector Off is the default.  On the formal mounted TaskConsole card
+        # its wheel belongs to the outer board, not the plot viewport.
+        from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+
+        window = view._view
+        window.tabs.setCurrentIndex(0)
+        top = view._window if view._window is not None else window
+        top.resize(620, 280)
+        top.show()
+        app.processEvents()
+        card = view._cards[panel.panel_id]
+        surface = card.surface
+        assert getattr(surface, "host", None) is panel.host
+        assert not surface.interaction_enabled
+        board_scroll = window.scroll.verticalScrollBar()
+        window.board.setMinimumHeight(window.scroll.viewport().height() + 500)
+        app.processEvents()
+        assert board_scroll.maximum() > 0
+        board_scroll.setValue(0)
+        before_viewport = panel.host.describe_display().result().value.viewport
+        centre = surface.rect().center()
+        wheel = QtGui.QWheelEvent(
+            QtCore.QPointF(centre),
+            QtCore.QPointF(surface.mapToGlobal(centre)),
+            QtCore.QPoint(),
+            QtCore.QPoint(0, -120),
+            QtCore.Qt.NoButton,
+            QtCore.Qt.NoModifier,
+            QtCore.Qt.NoScrollPhase,
+            False,
+        )
+        QtWidgets.QApplication.sendEvent(surface, wheel)
+        deadline = time.monotonic() + 2.0
+        while board_scroll.value() == 0 and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        assert board_scroll.value() > 0
+        assert panel.host.describe_display().result().value.viewport == before_viewport
+
         assert presenter.edit_panel(panel.panel_id) is True
         assert panel.editor_host is not None and panel.editor_host is not panel.host
         _wait_until(lambda: panel.editor_selections is not None, presenter)
         panel_editor = view._panel_editors[panel.panel_id]
         assert panel_editor._surface is panel.editor_host.qt_widget()
+        assert not panel_editor._surface.interaction_enabled
+
+        # The real header switch hands all pointer gestures to both the live
+        # card and its already-open frozen Edit surface.
+        QtTest.QTest.mouseClick(
+            window.selectors_switch,
+            QtCore.Qt.LeftButton,
+        )
+        _wait_until(
+            lambda: (
+                presenter._deriving
+                and surface.interaction_enabled
+                and panel_editor._surface.interaction_enabled
+            ),
+            presenter,
+        )
 
         _commit_area(panel.editor_host)
         _wait_until(
@@ -213,9 +270,17 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert replacement is not None and replacement.running
         assert replacement.signal_key("frames") == signal_key
         assert replacement.generation != old_generation
-        assert replacement.node.request.roi_xywh == authored_roi
+        actual = session.camera.working_point()
+        assert actual is not None
+        assert (
+            int(actual.roi_origin_yx[1]),
+            int(actual.roi_origin_yx[0]),
+            int(actual.roi_shape_yx[1]),
+            int(actual.roi_shape_yx[0]),
+        ) == authored_roi
     finally:
         presenter.close()
+        _wait_until(presenter.close, presenter)
         view.set_close_guard(lambda: True)
         view.close()
         app.processEvents()

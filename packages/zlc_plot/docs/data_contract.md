@@ -3,7 +3,7 @@
 `zlc_data` is the sole owner of scientific data.  `zlc_plot` consumes its
 immutable role-axis objects and owns only presentation state: display-unit
 conversion, selectors, fit projections, fixed-size raster surfaces and the
-latest-only live handoff.
+bounded-lag exact-pair live handoff.
 
 ## Role-axis snapshots
 

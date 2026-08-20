@@ -56,6 +56,28 @@ Monitor signals remain latest-event views. Canonical assembly and companion
 projection run on the board-owned presentation worker at panel cadence, not in
 the Qt owner callback.
 
+`PanelState.interval_ms` is the admission cadence for one atomic data+fit pair.
+When a panel is due it admits the then-latest coherent publication as one source
+revision; higher-frequency raw Monitor publications are not relabeled as panel
+revisions or fit gaps. If a due component is waiting for a derived sibling, its
+owed admission is spent by the matching processor/surface completion wake rather
+than another clock tick.
+
+Plot hosts are the native event authority for committed Area, viewport,
+coordinate threshold and facet focus. Their immutable event is queued to the
+Workbench owner turn, which acknowledges it into `PanelState` and mirrors it to
+the other host before later display/fit configuration may read that state. A
+standing host is never overwritten by the briefly stale owner mirror that its
+own gesture is still updating. Fit selection has one order: committed Area (or
+explicit x-range), then viewport, then the full range.
+
+Classifier choices are stored together as coordinate-addressed targets
+(`axis domain/id + canonical coordinate`, or structural repeat row), not a
+facet-index vector or a last-edited annotation. Plot strictly remaps every
+target to the current facets; duplicate or missing coordinates are rejected
+instead of guessed. Live, Edit, replacement hosts, layout restore and Figure
+Viewer all consume that same plural `PanelState.classifier_thresholds` truth.
+
 Image overlay candidates are selected only by the neutral
 `IMAGE_POINT_OVERLAY_CONTRACT`. The geometry and numeric/bool status Dataset
 are adapted by `zlc_plot`; Workbench never imports a concrete Logic Node or
@@ -76,10 +98,28 @@ this.
 - Panel Edit **Save Fig** writes only the frozen image/data currently shown by
   that panel, its plot/overlay state, and the run-time call chain and actual
   device snapshots already captured when the runs executed. It does not include
-  another panel or the whole monitor board.
+  another panel or the whole monitor board. At the click, Workbench freezes the
+  exact state/data and the identity-matched display viewport; viewport belongs
+  to this Figure archive's strict `view` section, not reusable Save Layout.
+  A dedicated composition-owned worker streams the archive first, then performs
+  one saved-host configure/render and image write. The Qt beat and Stop remain
+  live; a second Save for the same panel is rejected rather than queued.
 
 Calibration JSON is a separate Task artifact. Panel Save records its actual
 path where relevant, without embedding the JSON or adding fingerprint/hash.
+
+## Qt and owner shutdown
+
+Figure Viewer reads and fully prepares a candidate off the Qt owner, atomically
+mounts only a successful candidate, and keeps the previous accepted figure on
+failure. Its resize/save/host retirement are likewise asynchronous. TaskConsole
+keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
+Save retire; the window stays visible until every owner is actually stopped.
+Session/device shutdown runs on the one flow-owned serial device worker used by
+discover/init/tune/shutdown, while Panel Save keeps its independent I/O worker.
+Completion callbacks return to the Qt owner and queue the final guarded close;
+timeouts report what is still active but never claim the window or worker is
+closed.
 
 ## Check the environment first
 

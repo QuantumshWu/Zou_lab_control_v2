@@ -502,6 +502,7 @@ class _ProcessorEntry:
     pending_publication: SignalPublication | None = None
     last_publication: SignalPublication | None = None
     cancel_requested: bool = False
+    paused: bool = False
 
 
 class _LatestOnlyProcessorLane:
@@ -537,6 +538,8 @@ class _LatestOnlyProcessorLane:
         node: LatestProcessorControl,
         source_name: str,
         initial_publication: SignalPublication,
+        *,
+        paused: bool = False,
     ) -> None:
         if self._closed:
             raise RuntimeError("continuous worker lane is closed")
@@ -553,13 +556,47 @@ class _LatestOnlyProcessorLane:
         entry = _ProcessorEntry(
             node=node,
             source_name=name,
-            pending_publication=initial_publication,
+            pending_publication=None if paused else initial_publication,
             last_publication=initial_publication,
+            paused=paused,
         )
         with self._lock:
             if key in self._processors:
                 raise RuntimeError("Processor node is already attached")
             self._processors[key] = entry
+            failure = self._start_processor_locked(entry)
+        if failure is not None:
+            entry.node.accept_processor_failure(failure)
+
+    def catch_up_processor(
+        self,
+        node: LatestProcessorControl,
+        publication: SignalPublication,
+    ) -> None:
+        """Start one paused entry at the newest source publication it has seen."""
+
+        node = self._require_node(node)
+        key = _node_instance_id(node)
+        with self._lock:
+            entry = self._processors.get(key)
+            if entry is None or entry.node is not node or entry.cancel_requested:
+                raise RuntimeError("latest-only Processor is no longer attached")
+            source = publication.value(entry.source_name)
+            if source is None:
+                raise ValueError("catch-up publication has no selected Processor source")
+        node.validate_processor_source(source)
+        with self._lock:
+            entry = self._processors.get(key)
+            if entry is None or entry.node is not node or entry.cancel_requested:
+                raise RuntimeError("latest-only Processor is no longer attached")
+            previous = entry.last_publication
+            if (
+                previous is None
+                or publication.event_ref.sequence > previous.event_ref.sequence
+            ):
+                entry.last_publication = publication
+                entry.pending_publication = publication
+            entry.paused = False
             failure = self._start_processor_locked(entry)
         if failure is not None:
             entry.node.accept_processor_failure(failure)
@@ -661,6 +698,7 @@ class _LatestOnlyProcessorLane:
 
         if (
             entry.cancel_requested
+            or entry.paused
             or entry.work_future is not None
             or entry.pending_publication is None
         ):
@@ -726,31 +764,7 @@ class SignalDataPlane:
         self._front_signals: frozenset[str] = frozenset()
         self._membership_changed = False
         self._closed = False
-        self._request_owner_wake: Callable[[], None] | None = None
-        self._owner_wake_token: object | None = None
         self._front = SignalFront({}, {})
-
-    def bind_owner_wake(self, request_owner_wake: Callable[[], None]) -> object:
-        if not callable(request_owner_wake):
-            raise TypeError("request_owner_wake must be callable")
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
-            if self._request_owner_wake is not None:
-                raise RuntimeError("signal data plane owner wake is already bound")
-            token = object()
-            self._request_owner_wake = request_owner_wake
-            self._owner_wake_token = token
-            return token
-
-    def unbind_owner_wake(self, token: object) -> None:
-        """Release only the exact Workbench wake borrow that was admitted."""
-
-        with self._lock:
-            if token is not self._owner_wake_token:
-                raise RuntimeError("signal data plane owner wake token is not current")
-            self._request_owner_wake = None
-            self._owner_wake_token = None
 
     def set_front_signals(self, signal_names) -> None:
         """Set the connected continuous signal set whose front must be coherent."""
@@ -759,16 +773,12 @@ class SignalDataPlane:
             canonical_text(name, "connected signal name")
             for name in signal_names
         )
-        wake = None
         with self._lock:
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
             if names != self._front_signals:
                 self._front_signals = names
                 self._membership_changed = True
-                wake = self._request_owner_wake
-        if wake is not None:
-            wake()
 
     @staticmethod
     def _mint_generation_locked() -> StreamGenerationId:
@@ -1679,6 +1689,7 @@ class SignalDataPlane:
         source_name: str,
         initial_publication: SignalPublication,
         coherent: bool = True,
+        paused: bool = False,
     ) -> None:
         """Attach one reactive latest-only Processor to a live source.
 
@@ -1688,6 +1699,12 @@ class SignalDataPlane:
         never joins the same-shot front component of its source -- holding
         the source's selection for it would deadlock: the source waits for
         the follower that waits for the source's next presentation.
+
+        ``paused=True`` reserves the derived generation against an earlier
+        publication of the same live run without starting numeric work.  Its
+        caller may first commit the exact answer already shown on screen, then
+        call :meth:`catch_up_latest_only_processor` to join the current source
+        and all later publications without changing the derived generation.
         """
 
         source_name = canonical_text(source_name, "processor source name")
@@ -1703,10 +1720,23 @@ class SignalDataPlane:
                 raise RuntimeError("signal data plane is closed")
             self._require_issued_publication_locked(initial_publication)
             source_state = self._state_for_signal_locked(source_name)
-            if (
-                source_state is None
-                or source_state.publication is not initial_publication
+            if source_state is None or source_state.publication is None:
+                raise RuntimeError("Processor source generation is not available")
+            current_publication = source_state.publication
+            same_generation = (
+                initial_publication.event_ref.stream_id.value
+                == source_state.owner_id
+                and initial_publication.event_ref.generation
+                == source_state.generation
+            )
+            if not same_generation or (
+                initial_publication.event_ref.sequence
+                > current_publication.event_ref.sequence
             ):
+                raise RuntimeError(
+                    "Processor source is not in the current live generation"
+                )
+            if not paused and current_publication is not initial_publication:
                 raise RuntimeError(
                     "Processor source is not the exact current publication"
                 )
@@ -1726,6 +1756,7 @@ class SignalDataPlane:
                 node,
                 source_name,
                 initial_publication,
+                paused=paused,
             )
         except BaseException:
             with self._lock:
@@ -1733,6 +1764,36 @@ class SignalDataPlane:
                     self._drop_state_locked(state)
                     self._membership_changed = True
             raise
+
+    def catch_up_latest_only_processor(self, node: object) -> None:
+        """Activate one paused route at its source run's current publication."""
+
+        owner_id = _node_instance_id(node)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
+            state = self._states.get(owner_id)
+            if (
+                state is None
+                or state.retired
+                or state.terminal
+                or state.kind != "processor"
+                or state.node is not node
+                or state.source_owner_id is None
+                or state.source_generation is None
+            ):
+                raise RuntimeError("latest-only Processor is no longer active")
+            source_state = self._states.get(state.source_owner_id)
+            if (
+                source_state is None
+                or source_state.retired
+                or source_state.terminal
+                or source_state.generation != state.source_generation
+                or source_state.publication is None
+            ):
+                raise RuntimeError("latest-only Processor source is no longer live")
+            publication = source_state.publication
+        self._lane.catch_up_processor(node, publication)
 
     def reserve_frozen_processor(
         self,
@@ -2139,8 +2200,6 @@ class SignalDataPlane:
             states = tuple(self._states.values())
             self._states.clear()
             self._front_signals = frozenset()
-            self._request_owner_wake = None
-            self._owner_wake_token = None
             self._front = SignalFront({}, {})
             self._publication_parents.clear()
         self._lane.close()

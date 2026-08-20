@@ -60,7 +60,11 @@ API; there is no Python pulse-module format or second resolver. After one
 calibration run produces one result, the Calibration plugin saves its JSON and
 passes that same result directly to the public `zlc_plot` API for six report
 images. The Atom foundation does not depend on plotting; this plugin-local
-report belongs to the Calibration task itself.
+report belongs to the Calibration task itself. Per-site report thresholds are
+passed as coordinate-addressed site targets, so facet insertion/reordering
+cannot move a threshold by index. Camera sample archives stream through the
+single public `zlc_data.write_figure_archive()` encoder into an atomic file;
+they do not materialize whole-archive bytes or import Workbench PanelState.
 
 Logic Nodes commit `zlc-data` role-axis event chunks, so repeat, site, and
 readout-event meaning is carried by `DatasetSchema` rather than inferred from
@@ -125,7 +129,9 @@ Monitor. When the loop finishes it computes one result, writes one plain JSON,
 and passes the same in-memory result to `zlc_plot` to save site-map, fidelity,
 three classifier grids, and a PSF-kernel grid. Workbench neither renders nor
 opens those report files, and no calibration object/report blob is put on the
-signal plane.
+signal plane. Each classifier grid binds every finite threshold to the
+canonical `calibration.site` coordinate that measured it rather than to the
+current facet index.
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
 It publishes three same-publication Dataset siblings: per-site photoelectron

@@ -521,6 +521,7 @@ def test_hiding_a_port_takes_its_delay_row_with_it() -> None:
 
     _run_qt(
         """
+from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import DelayRowVM, FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
 app = ensure_qt_app(["schedule-hide-delay"])
@@ -556,6 +557,8 @@ assert set(view.channel_panel._rows) == {"d0", "d2"}
 view.set_visible_ports(("d0", "d1", "d2"))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}, "Show All brings it back"
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 """
     )
 

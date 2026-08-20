@@ -21,6 +21,71 @@ from zlc_plot.raster import RasterPlotHost
 
 
 @pytest.mark.gui
+def test_bound_plot_controls_never_wait_for_the_raster_worker() -> None:
+    from concurrent.futures import Future
+    from threading import Thread, get_ident
+    from types import SimpleNamespace
+
+    try:
+        app = ensure_qt5_application([])
+        from PyQt5 import QtCore
+        from zlc_plot.qt_controls import _qt5_bound_controls_class
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": (0.0, 1.0)}),
+        dtype=np.float64,
+        generation="qt-controls-test",
+    )
+    host = RasterPlotHost.from_plot(
+        DatasetSnapshot(schema, np.asarray([[0.0, 1.0]]), 0),
+        CurvePlot(AxisRef.point("x")),
+    )
+
+    owner_thread = get_ident()
+
+    class GuardedFuture(Future):
+        def result(self, *args, **kwargs):
+            assert get_ident() != owner_thread, (
+                "Qt owner resolved a plot operation instead of receiving plain data"
+            )
+            return super().result(*args, **kwargs)
+
+    pending = GuardedFuture()
+    proxy = SimpleNamespace(
+        describe_display=lambda: pending,
+        set_parameter=lambda _name, _value: GuardedFuture(),
+        apply_semantic=lambda _name, _value: GuardedFuture(),
+    )
+    controls = None
+    try:
+        description = host.describe_display().result(timeout=10).value
+        controls = _qt5_bound_controls_class()(proxy)
+        owner_turned: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: owner_turned.append(True))
+        app.processEvents()
+        assert owner_turned
+        assert controls.panel is None
+
+        resolver = Thread(
+            target=lambda: pending.set_result(SimpleNamespace(value=description))
+        )
+        resolver.start()
+        resolver.join()
+        deadline = time.monotonic() + 2.0
+        while controls.panel is None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        assert controls.panel is not None
+    finally:
+        if controls is not None:
+            controls.close()
+        host.close(timeout=10)
+
+
+@pytest.mark.gui
 def test_qt_widget_receives_front_and_commits_area_drag() -> None:
     try:
         app = ensure_qt5_application([])
@@ -87,6 +152,42 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         current = widget.presented_front
         assert current is not None
         assert any(item.kind.value == "area" for item in current.interaction.selectors)
+    finally:
+        if widget is not None:
+            widget.close_adapter()
+        host.close(timeout=10)
+
+
+@pytest.mark.gui
+def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
+    try:
+        ensure_qt5_application([])
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": (0.0, 1.0, 2.0)}),
+        dtype=np.float64,
+        generation="qt-idempotent-present",
+    )
+    snapshot = DatasetSnapshot(schema, np.asarray([[1.0, 2.0, 3.0]]), 0)
+    host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
+    widget = None
+    try:
+        host.wait_for_front(timeout=10)
+        widget = Qt5PlotWidget(host, auto_present=False)
+        current = widget.presented_front
+        assert current is not None
+
+        assert widget.present_front(current) is True
+        assert widget.presented_front is current
+
+        newer = host.set_parameter("title", "newer").result(timeout=10).front
+        assert newer.identity.sequence > current.identity.sequence
+        assert widget.present_front(newer) is True
+        assert widget.present_front(current) is False
+        assert widget.presented_front is newer
     finally:
         if widget is not None:
             widget.close_adapter()

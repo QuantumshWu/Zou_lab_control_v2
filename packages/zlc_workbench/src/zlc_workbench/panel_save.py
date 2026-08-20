@@ -10,19 +10,18 @@ from typing import Any
 import numpy as np
 from zlc_data import snapshot_from_manifest, snapshot_manifest
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
+from zlc_plot.selectors import NumericRange, RectangleRange
 
 from .archive import write_figure_file
 from .panel_state import PanelFrozenData, PanelState
-from .plot_annotations import PanelPlotAnnotations
 
 
 __all__ = [
     "PanelFigureFiles",
     "capture_run_chain",
     "overlay_payload",
-    "panel_plot_annotations_section",
     "restore_panel_plot_input",
-    "restore_panel_plot_annotations",
+    "restore_panel_viewport",
     "save_panel_data",
     "save_panel_figure",
     "save_panel_image",
@@ -134,31 +133,44 @@ def overlay_payload(
     return arrays, section
 
 
-def panel_plot_annotations_section(
-    annotations: PanelPlotAnnotations,
-    *,
-    dataset: str,
-) -> dict[str, object]:
-    """Archive one generic producer-authored plot annotation bundle."""
-
-    if not isinstance(annotations, PanelPlotAnnotations):
-        raise TypeError("annotations must be PanelPlotAnnotations")
-    document = dict(annotations.document())
-    if not document:
-        return {}
-    return {"dataset": str(dataset), **document}
-
-
-def restore_panel_plot_annotations(
+def restore_panel_viewport(
     info: Mapping[str, Any],
     dataset: str,
-) -> PanelPlotAnnotations:
-    """Restore generic annotations without interpreting their producer."""
+) -> RectangleRange | None:
+    """Restore the exact viewport frozen beside one formal Panel Save."""
 
-    section = info.get("sections", {}).get("plot_annotations")
-    if not isinstance(section, Mapping) or section.get("dataset") != str(dataset):
-        return PanelPlotAnnotations()
-    return PanelPlotAnnotations.from_document(section)
+    section = info.get("sections", {}).get("view")
+    if not isinstance(section, Mapping) or set(section) != {"dataset", "viewport"}:
+        raise ValueError("panel view section is missing or malformed")
+    if section["dataset"] != str(dataset):
+        raise ValueError("panel view section names another dataset")
+    viewport = section["viewport"]
+    if viewport is None:
+        return None
+    if not isinstance(viewport, Mapping) or set(viewport) != {"x", "y"}:
+        raise ValueError("panel viewport is malformed")
+
+    def axis_range(name: str) -> NumericRange:
+        value = viewport[name]
+        if not isinstance(value, Mapping) or set(value) != {"low", "high"}:
+            raise ValueError(f"panel viewport {name} range is malformed")
+        return NumericRange(value["low"], value["high"])
+
+    return RectangleRange(axis_range("x"), axis_range("y"))
+
+
+def _viewport_document(viewport: RectangleRange | None) -> dict[str, object]:
+    if viewport is None:
+        return {"dataset": "data", "viewport": None}
+    if not isinstance(viewport, RectangleRange):
+        raise TypeError("panel viewport must be RectangleRange or None")
+    return {
+        "dataset": "data",
+        "viewport": {
+            "x": {"low": viewport.x.low, "high": viewport.x.high},
+            "y": {"low": viewport.y.low, "high": viewport.y.high},
+        },
+    }
 
 
 def _await(operation: object) -> object:
@@ -180,8 +192,12 @@ def save_panel_image(
     *,
     state: PanelState,
     frozen: PanelFrozenData,
+    viewport: RectangleRange | None,
     make_host: Callable[[object, str, str, str], object],
-    configure_host: Callable[[object, PanelState, ImagePointOverlay | None], None],
+    configure_host: Callable[
+        [object, PanelState, ImagePointOverlay | None, RectangleRange | None],
+        None,
+    ],
 ) -> Path:
     """Draw one panel's frozen input and write the picture.
 
@@ -201,6 +217,7 @@ def save_panel_image(
             host,
             state,
             plot_input.overlay if isinstance(plot_input, ImageFrame) else None,
+            viewport,
         )
         save = getattr(host, "save", None)
         if not callable(save):
@@ -218,13 +235,13 @@ def save_panel_data(
     *,
     state: PanelState,
     frozen: PanelFrozenData,
-    annotations: PanelPlotAnnotations | None = None,
+    viewport: RectangleRange | None,
 ) -> Path:
     """Write one panel's numbers, and everything needed to explain them.
 
     The cheap half, and the one that cannot be recomputed: the dataset with
     its axes, the panel it was configured as, the run chain it came out of,
-    the overlay and the annotations.  Drawing needs none of it, so a producer
+    the overlay and the exact saved view.  Drawing needs none of it, so a producer
     can secure the data the moment it exists.
     """
 
@@ -240,15 +257,10 @@ def save_panel_data(
             "state": state.document(),
         },
         "run_chain": [_plain(record) for record in frozen.run_chain],
+        "view": _viewport_document(viewport),
     }
     if overlay_section:
         sections["overlay"] = overlay_section
-    annotation_section = panel_plot_annotations_section(
-        PanelPlotAnnotations() if annotations is None else annotations,
-        dataset="data",
-    )
-    if annotation_section:
-        sections["plot_annotations"] = annotation_section
     return write_figure_file(
         archive_path,
         name=archive_path.with_suffix(".png").name,
@@ -262,9 +274,12 @@ def save_panel_figure(
     *,
     state: PanelState,
     frozen: PanelFrozenData,
+    viewport: RectangleRange | None,
     make_host: Callable[[object, str, str, str], object],
-    configure_host: Callable[[object, PanelState, ImagePointOverlay | None], None],
-    annotations: PanelPlotAnnotations | None = None,
+    configure_host: Callable[
+        [object, PanelState, ImagePointOverlay | None, RectangleRange | None],
+        None,
+    ],
 ) -> PanelFigureFiles:
     """Save the Edit tab's exact frozen input without asking the plane again.
 
@@ -276,13 +291,14 @@ def save_panel_figure(
         base_path,
         state=state,
         frozen=frozen,
-        annotations=annotations,
+        viewport=viewport,
     )
     try:
         image_path = save_panel_image(
             base_path,
             state=state,
             frozen=frozen,
+            viewport=viewport,
             make_host=make_host,
             configure_host=configure_host,
         )

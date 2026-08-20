@@ -897,6 +897,16 @@ class PulseEditorPresenter:
         path: str = "",
         default_endpoint: str = "",
         connection_label: str = "Experiment session",
+        run_preview_work: Callable[
+            [
+                Callable[[], object],
+                Callable[[object], None],
+                Callable[[BaseException], None],
+            ],
+            None,
+        ]
+        | None = None,
+        request_preview_close: Callable[[], None] | None = None,
     ) -> None:
         self.view = view
         if state is not None and not isinstance(state, PulseEditorState):
@@ -913,6 +923,14 @@ class PulseEditorPresenter:
         self._update_preview = update_preview or (
             lambda host, data, *, size: host.update_data(data) and None
         )
+        self._run_preview_work = run_preview_work
+        if self._make_preview is not None and not callable(self._run_preview_work):
+            raise TypeError("a preview host requires a preview worker")
+        self._request_preview_close = request_preview_close
+        self._preview_busy = False
+        self._preview_pending: tuple[PulseSequence, bool, str | None] | None = None
+        self._preview_close_requested = False
+        self._preview_mounted = False
         #: The plotting host behind the preview.  Built once and updated,
         #: and the thing a save actually goes through.
         self._preview_host: Any = None
@@ -1465,7 +1483,8 @@ class PulseEditorPresenter:
         if self._connection_locked:
             raise RuntimeError("the experiment session owns this connection")
         if mode == CONNECTION_OFFLINE:
-            self._release()
+            if not self._release_for_connection_change():
+                return False
             self.connection = (mode, endpoint)
             self._show_connection("edit only")
             self._done("disconnected - this editor is now edit only")
@@ -1477,7 +1496,8 @@ class PulseEditorPresenter:
         if self._dial is None:
             self._warn("this editor was built without a way to connect")
             return False
-        self._release()
+        if not self._release_for_connection_change():
+            return False
         try:
             self.sequencer = self._dial(mode, endpoint)
         except Exception as error:
@@ -1490,13 +1510,26 @@ class PulseEditorPresenter:
         had_sequence = self.sequence is not None
         if not self.adopt_board():
             failure_status = self._connection_status
-            self._release()
+            if not self._release_for_connection_change():
+                self.refresh()
+                return False
             self.connection = (CONNECTION_OFFLINE, endpoint)
             self._show_connection(failure_status)
             self.refresh()
             return False
         if not had_sequence:
             self.start_new_pulse()
+        return True
+
+    def _release_for_connection_change(self) -> bool:
+        """Keep the current connection truthful when it refuses to close."""
+
+        try:
+            self._release()
+        except Exception as error:
+            self._show_connection(f"disconnect failed: {error}")
+            self._warn(f"cannot close the current sequencer connection: {error}")
+            return False
         return True
 
     def adopt_board(self) -> bool:
@@ -1656,7 +1689,7 @@ class PulseEditorPresenter:
                 "the pulse rather than driven blind"
             )
 
-    def _release(self) -> None:
+    def _release(self, *, present: bool = True) -> None:
         """Close a connection this editor opened, and retire what it asserted.
 
         Everything in ``board``/``pins``/``_board_state`` is something the
@@ -1671,16 +1704,13 @@ class PulseEditorPresenter:
         editor did not open that connection and does not get to end it.
         """
 
-        self._retire_drive()
+        self._retire_drive(present=present)
         if not self._owns_sequencer:
             return
         if self.sequencer is not None:
             close = getattr(self.sequencer, "close", None)
             if callable(close):
-                try:
-                    close()
-                except Exception:  # a board that will not hang up is not fatal
-                    pass
+                close()
         self.sequencer = None
         self._owns_sequencer = False
         self.board = None
@@ -1693,12 +1723,15 @@ class PulseEditorPresenter:
         # different models under one revision, and it is right to.
         self.revision += 1
 
-    def _retire_drive(self) -> None:
+    def _retire_drive(self, *, present: bool = True) -> None:
         """Safe and release only a command lease held by this editor."""
 
         if self._drive_lease is None:
             return
-        if not self._safe_drive(release=True) or self._drive_lease is not None:
+        if (
+            not self._safe_drive(release=True, present=present)
+            or self._drive_lease is not None
+        ):
             raise RuntimeError("PulseGUI could not release its sequencer command")
 
     def _show_connection(self, status: str) -> None:
@@ -1992,7 +2025,7 @@ class PulseEditorPresenter:
             return False
         return True
 
-    def _safe_drive(self, *, release: bool) -> bool:
+    def _safe_drive(self, *, release: bool, present: bool = True) -> bool:
         if self.sequencer is None:
             return True
         if not self._acquire_command():
@@ -2004,10 +2037,15 @@ class PulseEditorPresenter:
             if callable(safe):
                 safe()
         except Exception as error:
+            if not present:
+                raise RuntimeError(f"the board did not go safe: {error}") from error
             worked = False
             self._warn(f"the board did not go safe: {error}")
         finally:
-            self._poll_board()
+            if present:
+                self._poll_board()
+            else:
+                self._board_state = self.board_state()
         if worked and not self.running:
             self._finite_drive = False
             if release:
@@ -2941,13 +2979,16 @@ class PulseEditorPresenter:
             return self._pinned_size
         from zlc_plot import recommended_pulse_preset
 
-        # Counted off the drawing itself.  There used to be a second rule here
-        # deciding which rows the preview "will" draw, and it could disagree
-        # with timeline_of -- so a pulse was sized for a different number of
-        # rows than it then drew.
-        drawn = self._preview_rows()
-        periods = 0 if self.sequence is None else len(self.sequence.periods)
-        return recommended_pulse_preset(drawn, periods)
+        if self.sequence is None:
+            return recommended_pulse_preset(0, 0)
+        try:
+            return self._preview_candidate(
+                self.sequence,
+                bool(self.view.preview_include_off_rows),
+                None,
+            )[1]
+        except Exception:
+            return recommended_pulse_preset(0, len(self.sequence.periods))
 
     def _preview_rows(self) -> int:
         """How many rows the preview draws, from the projection that draws them."""
@@ -2955,14 +2996,41 @@ class PulseEditorPresenter:
         if self.sequence is None:
             return 0
         try:
-            data = timeline_of(
+            return self._preview_candidate(
                 self.sequence,
-                include_off=bool(self.view.preview_include_off_rows),
-            )
+                bool(self.view.preview_include_off_rows),
+                self._pinned_size,
+            )[2]
         except Exception:
             return 0
-        return len(getattr(data, "channels", ())) + len(
+
+    @staticmethod
+    def _preview_candidate(
+        sequence: PulseSequence,
+        include_off: bool,
+        pinned_size: str | None,
+    ) -> tuple[object, str, int, int, float]:
+        """Build the one timeline/size/status value every preview path uses."""
+
+        data = timeline_of(sequence, include_off=include_off)
+        rows = len(getattr(data, "channels", ())) + len(
             getattr(data, "analog_traces", ())
+        )
+        if pinned_size:
+            size = pinned_size
+        else:
+            from zlc_plot import recommended_pulse_preset
+
+            size = recommended_pulse_preset(rows, len(sequence.periods))
+        return (
+            data,
+            size,
+            rows,
+            len(sequence.periods),
+            sum(
+                _nanoseconds(period.duration, period.unit)
+                for period in sequence.periods
+            ),
         )
 
     def refresh_preview(self) -> None:
@@ -2986,61 +3054,103 @@ class PulseEditorPresenter:
             return
         if self._preview_host is None and not self._preview_on_screen:
             return
-        view = self.view
-        size = self.preview_size()
-        try:
-            data = timeline_of(
-                self.sequence, include_off=bool(view.preview_include_off_rows)
-            )
-        except Exception as error:
-            view.show_preview_placeholder(f"cannot draw this pulse: {error}")
-            return
-        if self._preview_host is not None:
-            try:
-                grown = self._update_preview(self._preview_host, data, size=size)
-            except Exception as error:
-                view.show_preview_placeholder(f"cannot draw this pulse: {error}")
-                return
-            if grown:
-                # The content changed shape, so the widget showing it has to as
-                # well.  It was sized once at mount and never again.  The host
-                # is handed back rather than a widget: it knows its own new
-                # size, and this side of the wall does not hold widgets.
-                view.show_preview(self._preview_host)
-            self._show_preview_state(size)
-            return
-        try:
-            host = self._make_preview(data, size=size)
-        except Exception as error:
-            view.show_preview_placeholder(f"cannot draw this pulse: {error}")
-            return
-        # A builder answers with the HOST that draws, and nothing else.  It used
-        # to answer with the host, its widget and the size the widget had not
-        # painted yet -- so this layer held a QWidget, sized it, and mounted it,
-        # which is a composition root assembling a UI.  The host knows all
-        # three; the window is the only place that unwraps it.
-        self._preview_host = host
-        # A host that has just been made does not know what the switch says.
-        host.set_interaction_enabled(self._preview_selectors)
-        view.show_preview(host)
-        self._show_preview_state(size)
+        self._preview_pending = (
+            self.sequence,
+            bool(self.view.preview_include_off_rows),
+            self._pinned_size,
+        )
+        if not self._preview_busy and not self._preview_close_requested:
+            self._start_preview_refresh()
 
-    def _show_preview_state(self, size: str) -> None:
+    def _start_preview_refresh(self) -> None:
+        """Submit only the newest pending preview to the window's one worker."""
+
+        request = self._preview_pending
+        if request is None or self._preview_close_requested:
+            return
+        self._preview_pending = None
+        self._preview_busy = True
+        sequence, include_off, pinned_size = request
+        previous = self._preview_host
+        self.view.set_preview_status("drawing preview…")
+
+        def work() -> object:
+            data, size, rows, periods, total_ns = self._preview_candidate(
+                sequence,
+                include_off,
+                pinned_size,
+            )
+            if previous is None:
+                host = self._make_preview(data, size=size)
+                grown = True
+            else:
+                host = previous
+                grown = bool(self._update_preview(host, data, size=size))
+            return (
+                host,
+                size,
+                rows,
+                periods,
+                total_ns,
+                grown,
+            )
+
+        def delivered(result: object) -> None:
+            host, size, rows, periods, total_ns, grown = result
+            if previous is None:
+                self._preview_host = host
+            if not self._preview_close_requested and self._preview_pending is None:
+                host.set_interaction_enabled(self._preview_selectors)
+                if not self._preview_mounted or grown:
+                    self.view.show_preview(host)
+                    self._preview_mounted = True
+                self._show_preview_state(size, rows, periods, total_ns)
+            self._finish_preview_operation()
+
+        def failed(error: BaseException) -> None:
+            message = f"cannot draw this pulse: {error}"
+            if self._preview_host is None:
+                self.view.show_preview_placeholder(message)
+            else:
+                self.view.set_preview_status(message)
+            self._finish_preview_operation()
+
+        try:
+            assert self._run_preview_work is not None
+            self._run_preview_work(work, delivered, failed)
+        except BaseException as error:
+            failed(error)
+
+    def _finish_preview_operation(self) -> None:
+        self._preview_busy = False
+        if self._preview_close_requested:
+            self._preview_pending = None
+            if self._request_preview_close is not None:
+                self._request_preview_close()
+            return
+        if self._preview_pending is not None:
+            self._start_preview_refresh()
+
+    def _show_preview_state(
+        self,
+        size: str,
+        rows: int,
+        periods: int,
+        total_ns: float,
+    ) -> None:
         """What the preview is showing, in the words above it."""
 
         view = self.view
         view.set_preview_size_names(PANEL_SIZE_NAMES)
         view.set_preview_size(size, pinned=bool(self._pinned_size))
-        if self.sequence is None:
-            return
         view.set_preview_status(
-            f"{len(self.sequence.periods)} period(s), "
-            f"{self._preview_rows()} channel(s), "
-            f"{_readable(sum(_nanoseconds(p.duration, p.unit) for p in self.sequence.periods))}"
+            f"{periods} period(s), "
+            f"{rows} channel(s), "
+            f"{_readable(total_ns)}"
             f"  -  {size}"
         )
 
-    def save_preview_image(self) -> str:
+    def save_preview_image(self) -> None:
         """Write the preview exactly as it is drawn.
 
         The plotting host renders its own file, so what lands on disk is the
@@ -3049,7 +3159,7 @@ class PulseEditorPresenter:
 
         if self._preview_host is None:
             self._warn("there is no preview to save")
-            return ""
+            return
         name = (self.sequence.name if self.sequence is not None else "pulse") or "pulse"
         folder = Path(self.path).parent if self.path else Path.cwd()
         # The HOST writes the file.  The widget is a Qt view onto it and has
@@ -3058,20 +3168,38 @@ class PulseEditorPresenter:
         save = getattr(self._preview_host, "save", None)
         if not callable(save):
             self._warn("this preview cannot save itself")
-            return ""
+            return
 
-        def write(temporary: Path) -> None:
-            result = save(temporary)
-            if hasattr(result, "result"):
-                result.result()
+        if self._preview_busy:
+            self.view.set_preview_status(
+                "preview is busy; save again when the drawing is ready"
+            )
+            return
+
+        self._preview_busy = True
+        self.view.set_preview_status("saving preview…")
+
+        def work() -> object:
+            def write(temporary: Path) -> None:
+                result = save(temporary)
+                if hasattr(result, "result"):
+                    result.result(timeout=5.0)
+
+            return unique_path(folder, name, ".png", writer=write)
+
+        def delivered(target: object) -> None:
+            self.view.set_preview_status(f"saved {target}")
+            self._finish_preview_operation()
+
+        def failed(error: BaseException) -> None:
+            self._warn(f"cannot save the preview: {error}")
+            self._finish_preview_operation()
 
         try:
-            target = unique_path(folder, name, ".png", writer=write)
-        except Exception as error:
-            self._warn(f"cannot save the preview: {error}")
-            return ""
-        self.view.set_preview_status(f"saved {target}")
-        return str(target)
+            assert self._run_preview_work is not None
+            self._run_preview_work(work, delivered, failed)
+        except BaseException as error:
+            failed(error)
 
     # -------------------------------------------------------------- private
 
@@ -3271,7 +3399,19 @@ class PulseEditorPresenter:
         if done is not None:
             done(text)
 
-    def close(self) -> None:
+    def prepare_preview_close(self) -> bool:
+        """Stop accepting preview work and report when its delivery is idle."""
+
+        self._preview_close_requested = True
+        self._preview_pending = None
+        return not self._preview_busy
+
+    def cancel_preview_close(self) -> None:
+        """Resume preview requests after owned retirement was refused."""
+
+        self._preview_close_requested = False
+
+    def close(self, *, present: bool = True) -> None:
         """Let go of the board and the preview -- both, whichever fails.
 
         The preview HOST owns a render worker and a matplotlib session, and
@@ -3280,16 +3420,26 @@ class PulseEditorPresenter:
         both close their hosts.
         """
 
+        error: BaseException | None = None
         try:
-            self._retire_drive()
-            self._release()
-        finally:
+            self._release(present=present)
+        except BaseException as caught:
+            error = caught
+        try:
             self._close_preview()
+        except BaseException as caught:
+            if error is None:
+                error = caught
+        if error is not None:
+            raise error
 
     def _close_preview(self) -> None:
-        host, self._preview_host = self._preview_host, None
+        host = self._preview_host
         if host is not None:
-            host.close()
+            if host.close() is False:
+                raise RuntimeError("PulseGUI preview worker did not close")
+            self._preview_host = None
+            self._preview_mounted = False
 
 
 def replace_sequence(sequence: PulseSequence, **changes: Any) -> PulseSequence:

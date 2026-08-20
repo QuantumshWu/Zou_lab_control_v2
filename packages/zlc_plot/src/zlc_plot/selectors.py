@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 import math
+from numbers import Integral, Real
 import threading
+from types import MappingProxyType
 from typing import TypeAlias
 
 from ._validation import finite_real as _finite
 from ._validation import integer
+from .kinds import AxisDomain, AxisRef
 
 
 def _selector_precision(span: float) -> int:
@@ -117,6 +121,142 @@ class SelectorState:
         object.__setattr__(self, "facet_index", facet_index)
         if self.kind is SelectorKind.THRESHOLD:
             object.__setattr__(self, "value", float(self.value))
+
+
+_THRESHOLD_TARGET_FIELDS = {"value", "scope", "repeat_index"}
+_THRESHOLD_SCOPE_FIELDS = {"domain", "axis_id", "coordinate"}
+
+
+def _threshold_coordinate(value: object) -> int | float | str:
+    if isinstance(value, bool):
+        raise TypeError("classifier threshold coordinates cannot be bool")
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("classifier threshold coordinates must be finite")
+        return numeric
+    if isinstance(value, str):
+        return value
+    raise TypeError("classifier threshold coordinates must be numeric or text")
+
+
+def _threshold_coordinate_key(value: object) -> tuple[str, object]:
+    normalized = _threshold_coordinate(value)
+    if isinstance(normalized, int):
+        return "integer", normalized
+    if isinstance(normalized, float):
+        return "real", normalized
+    return "text", normalized
+
+
+def _classifier_threshold_key(target: Mapping[str, object]) -> tuple[object, ...]:
+    scope = tuple(
+        (
+            str(item["domain"]),
+            item["axis_id"],
+            *_threshold_coordinate_key(item["coordinate"]),
+        )
+        for item in target["scope"]
+    )
+    return scope, target["repeat_index"]
+
+
+def normalize_classifier_threshold_targets(
+    targets: object,
+) -> tuple[Mapping[str, object], ...]:
+    """Validate and copy coordinate-addressed authored classifier levels."""
+
+    if isinstance(targets, (str, bytes)) or not isinstance(targets, Sequence):
+        raise TypeError("classifier threshold targets must be a sequence")
+    normalized: list[Mapping[str, object]] = []
+    identities: set[tuple[object, ...]] = set()
+    for target in targets:
+        if not isinstance(target, Mapping):
+            raise TypeError("each classifier threshold target must be an object")
+        if set(target) != _THRESHOLD_TARGET_FIELDS:
+            raise ValueError("classifier threshold target fields differ")
+        value = target["value"]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError("classifier threshold values must be finite numbers")
+        threshold = float(value)
+        if not math.isfinite(threshold):
+            raise ValueError("classifier threshold values must be finite numbers")
+        scope = target["scope"]
+        if isinstance(scope, (str, bytes)) or not isinstance(scope, Sequence):
+            raise TypeError("classifier threshold scope must be a sequence")
+        normalized_scope: list[Mapping[str, object]] = []
+        scoped_axes: set[tuple[str, str | None]] = set()
+        for item in scope:
+            if not isinstance(item, Mapping):
+                raise TypeError("classifier threshold scope entries must be objects")
+            if set(item) != _THRESHOLD_SCOPE_FIELDS:
+                raise ValueError("classifier threshold scope fields differ")
+            domain = AxisDomain(str(item["domain"]))
+            axis_id = item["axis_id"]
+            if axis_id is not None and not isinstance(axis_id, str):
+                raise TypeError("classifier threshold scope axis_id must be text or null")
+            ref = AxisRef(domain, axis_id)
+            if ref.domain is AxisDomain.REPEAT:
+                raise ValueError("repeat scope belongs in repeat_index")
+            axis_key = (ref.domain.value, ref.axis_id)
+            if axis_key in scoped_axes:
+                raise ValueError("classifier threshold scope repeats an axis")
+            scoped_axes.add(axis_key)
+            normalized_scope.append(
+                MappingProxyType({
+                    "domain": ref.domain.value,
+                    "axis_id": ref.axis_id,
+                    "coordinate": _threshold_coordinate(item["coordinate"]),
+                })
+            )
+        normalized_scope.sort(
+            key=lambda item: (
+                str(item["domain"]),
+                "" if item["axis_id"] is None else str(item["axis_id"]),
+                repr(_threshold_coordinate_key(item["coordinate"])),
+            )
+        )
+        repeat_index = target["repeat_index"]
+        repeat_index = integer(
+            repeat_index,
+            "classifier threshold repeat_index",
+            minimum=0,
+            optional=True,
+        )
+        record = MappingProxyType({
+            "value": threshold,
+            "scope": tuple(normalized_scope),
+            "repeat_index": repeat_index,
+        })
+        identity = _classifier_threshold_key(record)
+        if identity in identities:
+            raise ValueError("classifier threshold targets repeat a coordinate")
+        identities.add(identity)
+        normalized.append(record)
+    normalized.sort(key=lambda target: repr(_classifier_threshold_key(target)))
+    return tuple(normalized)
+
+
+def _classifier_threshold_target_from_subject(
+    subject: object,
+    value: object,
+) -> Mapping[str, object]:
+    scope = tuple(subject.scope)
+    record = {
+        "value": value,
+        "scope": tuple(
+            {
+                "domain": ref.domain.value,
+                "axis_id": ref.axis_id,
+                "coordinate": coordinate,
+            }
+            for ref, coordinate in scope
+        ),
+        "repeat_index": subject.repeat_index,
+    }
+    return normalize_classifier_threshold_targets((record,))[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,4 +785,5 @@ __all__ = [
     "SelectorSnapshot",
     "SelectorState",
     "SelectorValue",
+    "normalize_classifier_threshold_targets",
 ]

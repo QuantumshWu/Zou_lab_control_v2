@@ -16,7 +16,6 @@ from .plane import (
 from .presentation import (
     BoardScheduler,
     HarmonicClock,
-    OwnerChannels,
     SurfaceBatchArbiter,
     SurfaceUpdate,
 )
@@ -37,7 +36,6 @@ __all__ = (
     "HarmonicClock",
     "LiveDatasetOutput",
     "MonitorCoverage",
-    "OwnerChannels",
     "SurfaceBatchArbiter",
     "SurfaceUpdate",
     "SignalDataPlane",

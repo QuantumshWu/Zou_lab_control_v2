@@ -12,7 +12,12 @@ import numpy as np
 import pytest
 
 from zlc_data.axis import AxisId, AxisSpec, REPEAT, SITE, SPATIAL_X
-from zlc_data.figure_archive import FIGURE_SCHEMA, figure_bytes, read_archive, read_dataset
+from zlc_data.figure_archive import (
+    FIGURE_SCHEMA,
+    read_archive,
+    read_dataset,
+    write_figure_archive,
+)
 from zlc_data.io import NPZFormatError, load_npz, save_npz
 from zlc_data.schema import (
     DatasetSchema,
@@ -300,8 +305,16 @@ def test_npz_rejects_unknown_validity_kind(tmp_path: Path):
         load_npz(malformed)
 
 
-def _figure_members(payload: bytes) -> dict[str, np.ndarray]:
-    with np.load(BytesIO(payload), allow_pickle=False) as archive:
+def _figure_stream(name: str, *, arrays, sections) -> BytesIO:
+    stream = BytesIO()
+    write_figure_archive(stream, name, arrays=arrays, sections=sections)
+    stream.seek(0)
+    return stream
+
+
+def _figure_members(stream: BytesIO) -> dict[str, np.ndarray]:
+    stream.seek(0)
+    with np.load(stream, allow_pickle=False) as archive:
         return {name: np.asarray(archive[name]) for name in archive.files}
 
 
@@ -313,13 +326,13 @@ def _figure_payload(members: dict[str, np.ndarray]) -> bytes:
 
 def test_figure_archive_round_trip_validates_version_members_and_dataset_shape():
     snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
-    payload = figure_bytes(
+    stream = _figure_stream(
         "strict figure",
         arrays={"data": snapshot, "trace": np.arange(3, dtype="<f4")},
         sections={"panel": {"kind": "image"}},
     )
 
-    info, arrays = read_archive(BytesIO(payload))
+    info, arrays = read_archive(stream)
 
     assert info["schema"] == FIGURE_SCHEMA
     assert info["version"] == 2
@@ -330,13 +343,47 @@ def test_figure_archive_round_trip_validates_version_members_and_dataset_shape()
 
 def test_figure_writer_preplans_snapshot_member_namespace():
     snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
+    stream = BytesIO()
 
     with pytest.raises(ValueError, match="member name collision.*data.validity"):
-        figure_bytes(
+        write_figure_archive(
+            stream,
             "collision",
             arrays={"data": snapshot, "data.validity": np.ones((1,), dtype=bool)},
             sections={},
         )
+    assert stream.getvalue() == b"", "validation failure wrote a partial archive"
+
+
+def test_large_figure_stream_does_not_allocate_archive_sized_python_bytes(
+    tmp_path,
+) -> None:
+    import tracemalloc
+
+    def measured(size_mib: int) -> tuple[int, int]:
+        values = np.random.default_rng(size_mib).integers(
+            0,
+            256,
+            size=size_mib * 1024 * 1024,
+            dtype=np.uint8,
+        )
+        target = tmp_path / f"large-{size_mib}.npz"
+        with target.open("wb") as stream:
+            tracemalloc.start()
+            write_figure_archive(
+                stream,
+                f"large-{size_mib}",
+                arrays={"frame": values},
+                sections={},
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+        return peak, target.stat().st_size
+
+    small_peak, small_archive = measured(16)
+    large_peak, large_archive = measured(64)
+    assert large_archive > small_archive * 3.5
+    assert large_peak < small_peak * 1.25, (small_peak, large_peak)
 
 
 @pytest.mark.parametrize(
@@ -351,7 +398,8 @@ def test_figure_writer_preplans_snapshot_member_namespace():
 )
 def test_figure_writer_rejects_unknown_or_lossy_metadata(bad):
     with pytest.raises(TypeError, match="metadata"):
-        figure_bytes(
+        write_figure_archive(
+            BytesIO(),
             "bad metadata",
             arrays={"trace": np.arange(2)},
             sections={"bad": bad},
@@ -364,7 +412,7 @@ def test_figure_writer_rejects_unknown_or_lossy_metadata(bad):
 )
 def test_figure_reader_rejects_wrong_format_or_version(field, value):
     members = _figure_members(
-        figure_bytes("format", arrays={"trace": np.arange(2)}, sections={})
+        _figure_stream("format", arrays={"trace": np.arange(2)}, sections={})
     )
     info = json.loads(str(members["info"].item()))
     info[field] = value
@@ -376,7 +424,7 @@ def test_figure_reader_rejects_wrong_format_or_version(field, value):
 
 def test_figure_reader_rejects_extra_and_shape_changed_members():
     original = _figure_members(
-        figure_bytes("members", arrays={"trace": np.arange(2)}, sections={})
+        _figure_stream("members", arrays={"trace": np.arange(2)}, sections={})
     )
     members = dict(original)
     members["extra"] = np.arange(1)
@@ -400,8 +448,8 @@ def test_figure_reader_rejects_extra_and_shape_changed_members():
 
 
 def test_figure_reader_rejects_duplicate_zip_members():
-    stream = BytesIO(
-        figure_bytes("duplicates", arrays={"trace": np.arange(2)}, sections={})
+    stream = _figure_stream(
+        "duplicates", arrays={"trace": np.arange(2)}, sections={}
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -415,7 +463,7 @@ def test_figure_reader_rejects_duplicate_zip_members():
 
 def test_figure_reader_rejects_duplicate_keys_and_nonfinite_metadata():
     members = _figure_members(
-        figure_bytes("metadata", arrays={"trace": np.arange(2)}, sections={})
+        _figure_stream("metadata", arrays={"trace": np.arange(2)}, sections={})
     )
     text = str(members["info"].item())
     duplicate = text.replace('"version":2', '"version":2,"version":2', 1)
@@ -433,7 +481,7 @@ def test_figure_reader_rejects_duplicate_keys_and_nonfinite_metadata():
 
 def test_figure_reader_validates_embedded_dataset_before_returning():
     members = _figure_members(
-        figure_bytes("dataset", arrays={"data": _snapshot()}, sections={})
+        _figure_stream("dataset", arrays={"data": _snapshot()}, sections={})
     )
     members["data"] = np.zeros((1,), dtype="<f4")
 
@@ -441,7 +489,7 @@ def test_figure_reader_validates_embedded_dataset_before_returning():
         read_archive(BytesIO(_figure_payload(members)))
 
     members = _figure_members(
-        figure_bytes("dataset", arrays={"data": _snapshot()}, sections={})
+        _figure_stream("dataset", arrays={"data": _snapshot()}, sections={})
     )
     info = json.loads(str(members["info"].item()))
     manifest = info["sections"]["dataset"]["data"]

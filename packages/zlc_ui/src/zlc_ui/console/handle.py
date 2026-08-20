@@ -117,10 +117,15 @@ class TaskConsoleHandle(QtCore.QObject):
     # ------------------------------------------------------------ the window
 
     def close(self) -> None:
-        if hasattr(self._view, "finish_close"):
-            self._view.finish_close()
         if self._window is not None:
             self._window.close()
+        elif hasattr(self._view, "finish_close"):
+            self._view.finish_close()
+
+    def close_later(self) -> None:
+        """Retry the top-level close after the current owner turn finishes."""
+
+        QtCore.QTimer.singleShot(0, self.close)
 
     def set_close_guard(self, guard) -> None:
         """Refuse the close until the host says its workers are down.
@@ -388,7 +393,11 @@ class TaskConsoleHandle(QtCore.QObject):
             editor.set_mutation_enabled(effective)
 
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
-        self._cards[str(panel_id)].set_selectors_enabled(enabled)
+        key = str(panel_id)
+        self._cards[key].set_selectors_enabled(enabled)
+        editor = self._panel_editors.get(key)
+        if editor is not None:
+            editor.set_selectors_enabled(enabled)
 
     # --------------------------------------------------------- panel editors
 
@@ -427,6 +436,7 @@ class TaskConsoleHandle(QtCore.QObject):
         else:
             editor.update_projection(incoming)
             self._view.focus_editor_tab(editor)
+        editor.set_selectors_enabled(self._cards[key].selectors_enabled)
 
     def update_panel_editor(self, panel_id: str, projection: Any) -> bool:
         editor = self._panel_editors.get(str(panel_id))

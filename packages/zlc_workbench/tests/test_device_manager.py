@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -158,6 +160,13 @@ def test_one_catalog_snapshot_drives_choices_unavailable_and_templates(tmp_path)
         catalog,
         "virtual",
     )
+    camera = next(item for item in manager.devices if item.role == "camera")
+    manager.view.values[camera.instance_id]["seed"] += 1
+    manager.view.parameter_committed.emit(camera.instance_id, "seed")
+    assert manager.view.installation_source[0] is None, (
+        "a template name describes the complete canonical configuration, "
+        "not only its device type outline"
+    )
 
 
 def test_adding_a_device_sets_it_up_the_way_its_own_schema_says(manager) -> None:
@@ -190,12 +199,8 @@ def test_two_devices_cannot_share_one_name(manager) -> None:
     assert "already called" in manager.view.status[-1][1]
 
 
-def test_changing_a_device_type_keeps_the_settings_the_new_type_shares(manager) -> None:
-    """A qCMOS and a Basler both have an exposure.
-
-    Being handed a blank exposure box on the way between them is how a bench
-    ends up running at the default.
-    """
+def test_changing_device_type_starts_from_that_types_own_defaults(manager) -> None:
+    """Equal field names do not claim equal hardware meaning or units."""
 
     manager.view.device_add_requested.emit("camera.virtual")
     manager.view.values["camera"]["exposure_seconds"] = 0.005
@@ -205,8 +210,9 @@ def test_changing_a_device_type_keeps_the_settings_the_new_type_shares(manager) 
     manager.view.type_picked.emit("camera", "camera.dcam")
 
     assert manager.devices[0].type_id == "camera.dcam"
-    assert manager.devices[0].parameters["exposure_seconds"] == 0.005
-    assert "device_index" in manager.devices[0].parameters
+    assert dict(manager.devices[0].parameters) == manager.types[
+        "camera.dcam"
+    ].authoring_schema.project_values()
 
 
 def test_a_value_a_device_would_refuse_is_refused_while_it_is_on_screen(manager) -> None:
@@ -229,7 +235,7 @@ def test_a_frame_shape_is_edited_as_one_fact(manager) -> None:
 
     manager.view.parameter_committed.emit("camera", "frame_shape_yx")
 
-    assert manager.devices[0].parameters["frame_shape_yx"] == [64, 96]
+    assert manager.devices[0].parameters["frame_shape_yx"] == (64, 96)
 
 
 def test_what_is_saved_is_what_a_session_opens(manager, tmp_path) -> None:
@@ -341,15 +347,7 @@ def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
 
 
 def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -> None:
-    """The schema says which fields exist; the file says which were chosen.
-
-    A device stores only what was set, so a type that GAINS a setting leaves
-    every apparatus written before it short of one -- and the form, rightly,
-    refuses a partial set of keys.  Opening the file then failed outright with
-    "form values must have exact keys", which is the one situation an apparatus
-    editor exists for: an editor that cannot show a saved apparatus cannot fix
-    it either.  Found by opening the workspace the notebooks ship with.
-    """
+    """Schema defaults become part of both the draft and its visible form."""
 
     path = tmp_path / "apparatus.json"
     path.write_text(
@@ -380,6 +378,17 @@ def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -
         "file is silent about it"
     )
     assert values["seed"] == 7, "and what WAS stored still wins"
+    projected = DeviceInstanceConfig(
+        "camera",
+        "camera",
+        "camera.virtual",
+        presenter.types["camera.virtual"].authoring_schema.project_values(
+            dict(view.read_values("camera"))
+        ),
+    )
+    assert projected.parameters == presenter.devices[0].parameters, (
+        "the form and the draft must project one canonical configuration"
+    )
     del presenter
 
 
@@ -578,3 +587,72 @@ def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) ->
     view.device_open_requested.emit("missing")
     assert opened == ["camera"]
     assert "no loaded device" in view.status[-1][1]
+
+
+def test_scan_families_share_one_total_deadline(tmp_path, monkeypatch) -> None:
+    import zlc_workbench.device_manager as tested_module
+
+    deadline = 0.03
+    monkeypatch.setattr(tested_module, "_FAMILY_SCAN_DEADLINE_SECONDS", deadline)
+    manager = DeviceManagerPresenter(_ManagerView(), tmp_path / "apparatus.json")
+
+    def slow(delay: float):
+        def discover():
+            time.sleep(delay)
+            return ()
+
+        return discover
+
+    manager.types = {
+        f"slow-{index}": SimpleNamespace(
+            type_id=f"slow-{index}",
+            discover=slow(delay),
+        )
+        for index, delay in enumerate((0.06, 0.09, 0.12))
+    }
+    started = time.monotonic()
+    _found, failures = manager._scan_families()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < deadline * 2.2, elapsed
+    assert len(failures) == 3
+    assert manager.close() is False
+    time.sleep(0.13)
+    assert manager.close() is True
+
+
+def test_busy_presenter_refuses_close_then_closes_its_worker_and_rejects_work(
+    tmp_path,
+) -> None:
+    submitted: list[tuple] = []
+    worker_closed: list[bool] = []
+
+    def run(work, deliver, failed) -> None:
+        submitted.append((work, deliver, failed))
+
+    def close_worker() -> bool:
+        worker_closed.append(True)
+        return True
+
+    manager = DeviceManagerPresenter(
+        _ManagerView(),
+        tmp_path / "apparatus.json",
+        run_off_thread=run,
+        close_worker=close_worker,
+    )
+    assert manager.discover() is True
+    assert manager.busy is True and len(submitted) == 1
+    assert manager.close() is False
+    assert worker_closed == []
+
+    work, deliver, failed = submitted.pop()
+    try:
+        result = work()
+    except BaseException as error:
+        failed(error)
+    else:
+        deliver(result)
+    assert manager.busy is False
+    assert manager.close() is True
+    assert worker_closed == [True]
+    assert manager.discover() is False

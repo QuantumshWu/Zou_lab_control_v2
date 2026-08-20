@@ -19,11 +19,11 @@ from zlc_data import OwnedSnapshot
 # under the day it was taken, with a name nothing else has.
 from zlc_data.figure_archive import (
     FIGURE_SCHEMA,
-    figure_bytes,
     read_archive,
     read_dataset,
+    write_figure_archive,
 )
-from zlc_durable import atomic_write_bytes
+from zlc_durable import atomic_write_file
 
 
 __all__ = [
@@ -47,9 +47,10 @@ def write_figure_file(
     if target.suffix.lower() != ".npz":
         target = target.with_suffix(".npz")
     target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(
+    atomic_write_file(
         target,
-        figure_bytes(
+        lambda stream: write_figure_archive(
+            stream,
             target.stem if name is None else str(name),
             arrays=arrays,
             sections=sections,

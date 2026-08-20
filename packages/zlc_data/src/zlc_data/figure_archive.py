@@ -7,10 +7,9 @@ land. Arrays stay NPZ members; explanatory metadata is one strict JSON tree.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from io import BytesIO
 import json
 import math
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 
@@ -21,9 +20,9 @@ from .value import OwnedSnapshot
 
 __all__ = [
     "FIGURE_SCHEMA",
-    "figure_bytes",
     "read_archive",
     "read_dataset",
+    "write_figure_archive",
 ]
 
 
@@ -76,14 +75,17 @@ def _member_descriptor(array: np.ndarray) -> dict[str, Any]:
     return {"dtype": array.dtype.str, "shape": list(array.shape)}
 
 
-def figure_bytes(
+def write_figure_archive(
+    stream: BinaryIO,
     name: str,
     *,
     arrays: Mapping[str, np.ndarray | OwnedSnapshot],
     sections: Mapping[str, Any],
-) -> bytes:
-    """Encode one complete figure after planning its NPZ member namespace."""
+) -> None:
+    """Plan one complete figure, then encode it directly to ``stream``."""
 
+    if not callable(getattr(stream, "write", None)):
+        raise TypeError("figure archive stream must be writable binary IO")
     if not isinstance(name, str) or not name or name.strip() != name:
         raise ValueError("figure name must be canonical non-empty text")
     if not isinstance(arrays, Mapping) or not arrays:
@@ -146,9 +148,7 @@ def figure_bytes(
         sort_keys=True,
     )
 
-    buffer = BytesIO()
-    np.savez_compressed(buffer, **{_INFO_KEY: np.asarray(info), **stored})
-    return buffer.getvalue()
+    np.savez_compressed(stream, **{_INFO_KEY: np.asarray(info), **stored})
 
 
 def _metadata_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

@@ -32,7 +32,6 @@ class FigureViewerHandle(QtCore.QObject):
     #: The figure is a PANEL now: its size and its title are decisions about
     #: this figure, asked on the card where every other one already is.
     figure_size_picked = QtCore.pyqtSignal(str)
-    figure_title_committed = QtCore.pyqtSignal(str)
     figure_edit_requested = QtCore.pyqtSignal()
 
     def __init__(self, window: Any, view: FigureViewerView) -> None:
@@ -44,7 +43,6 @@ class FigureViewerHandle(QtCore.QObject):
         view.save_image_requested.connect(self.save_image_requested)
         view.close_requested.connect(self.close_requested)
         view.figure_card.size_picked.connect(self.figure_size_picked)
-        view.figure_card.title_committed.connect(self.figure_title_committed)
         view.figure_card.edit_requested.connect(self.figure_edit_requested)
         if window is not None and hasattr(window, "closed"):
             window.closed.connect(self.closed)
@@ -52,9 +50,20 @@ class FigureViewerHandle(QtCore.QObject):
     # ------------------------------------------------------------ the window
 
     def close(self) -> None:
-        self._view.finish_close()
         if self._window is not None:
             self._window.close()
+        else:
+            self._view.finish_close()
+
+    def close_later(self) -> None:
+        """Retry the guarded close after the current owner callback returns."""
+
+        QtCore.QTimer.singleShot(0, self.close)
+
+    def set_close_guard(self, guard) -> None:
+        if self._window is None or not hasattr(self._window, "set_close_guard"):
+            raise RuntimeError("figure viewer has no top-level close guard")
+        self._window.set_close_guard(guard)
 
     def finish_close(self) -> None:
         self._view.finish_close()
@@ -96,9 +105,6 @@ class FigureViewerHandle(QtCore.QObject):
         """Run a dialog the DRAWING package owns, centred on this window."""
 
         return opener(host, self._view, title=str(title))
-
-    def set_figure_title(self, text: str) -> None:
-        self._view.set_figure_title(text)
 
     def set_figure_size(self, size: str) -> None:
         self._view.set_figure_size(size)

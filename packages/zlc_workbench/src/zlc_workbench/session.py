@@ -446,10 +446,21 @@ class ExperimentSession:
 
     def close(self) -> None:
         self.device_use.assert_idle()
-        self.installation.close()
+        failures: list[BaseException] = []
+        try:
+            self.installation.close()
+        except BaseException as error:
+            failures.append(error)
         close = getattr(self.signal_plane, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except BaseException as error:
+                failures.append(error)
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("experiment session close failed", failures)
 
     def __enter__(self) -> "ExperimentSession":
         return self

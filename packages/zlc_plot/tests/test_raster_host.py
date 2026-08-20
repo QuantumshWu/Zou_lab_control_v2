@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from threading import Event
-from concurrent.futures import Future
 from pathlib import Path
 import time
 
@@ -15,6 +14,8 @@ from zlc_plot import (
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
+    PlotSession,
+    Reduction,
     SelectorKind,
     parameter_controls,
 )
@@ -26,6 +27,7 @@ from zlc_plot.fit import (
 )
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
+from zlc_plot.selectors import NumericRange, SelectorState
 from zlc_plot.ui import ControlKind
 
 
@@ -56,6 +58,64 @@ def _site_distribution_snapshot() -> DatasetSnapshot:
     return DatasetSnapshot(schema, values, revision=0)
 
 
+def _fit_curve_series(generation: str, *, offset: float = 0.0):
+    x = np.linspace(-4.0, 4.0, 81)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": x}),
+        dtype=np.float64,
+        generation=generation,
+    )
+
+    def snapshot(revision: int, center: float | None = None) -> DatasetSnapshot:
+        selected = revision * 0.05 if center is None else center
+        values = 2.0 * np.exp(-0.5 * ((x - selected) / 0.9) ** 2) + offset
+        return DatasetSnapshot(schema, values.reshape(1, -1), revision=revision)
+
+    return snapshot
+
+
+@pytest.fixture
+def blocked_fit_host(monkeypatch):
+    owned = []
+
+    def build(generation: str, *, offset: float = 0.0, fail_revision=None):
+        snapshots = _fit_curve_series(generation, offset=offset)
+        engine = FitEngine()
+        solve = engine.fit
+        started, release = Event(), Event()
+        solved = []
+
+        def controlled(model, coordinates, observations=None, **kwargs):
+            revision = int(kwargs["data_revision"])
+            solved.append(revision)
+            if revision == 1:
+                started.set()
+                cancelled = kwargs.get("cancelled")
+                deadline = time.monotonic() + 5.0
+                while not release.wait(0.005):
+                    if callable(cancelled) and cancelled():
+                        raise FitCancelled("forced cooperative cancellation")
+                    assert time.monotonic() < deadline
+            if revision == fail_revision:
+                raise RuntimeError(f"forced revision-{revision} failure")
+            return solve(model, coordinates, observations, **kwargs)
+
+        monkeypatch.setattr(engine, "fit", controlled)
+        host = RasterPlotHost.from_plot(
+            snapshots(0),
+            CurvePlot(AxisRef.point("x")),
+            fit_engine=engine,
+        )
+        owned.append((host, release))
+        return snapshots, host, started, release, solved
+
+    yield build
+    for host, release in reversed(owned):
+        release.set()
+        host.close(timeout=10)
+
+
 def test_host_coalesces_same_key_and_front_sequences_advance() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     gate = Event()
@@ -84,6 +144,37 @@ def test_host_coalesces_same_key_and_front_sequences_advance() -> None:
         host.close(timeout=10)
 
 
+def test_initial_front_precedes_a_startup_noop_configuration() -> None:
+    snapshot = _snapshot()
+    factory_started = Event()
+    release_factory = Event()
+
+    def make_session() -> PlotSession:
+        factory_started.set()
+        release_factory.wait(5.0)
+        return PlotSession(
+            snapshot,
+            CurvePlot(AxisRef.point("x")),
+            size="2x2",
+        )
+
+    host = RasterPlotHost(make_session)
+    try:
+        assert factory_started.wait(2.0)
+        configured = host.configure(parameters={}, size="2x2")
+        release_factory.set()
+
+        first = host.wait_for_front(timeout=10)
+        operation = configured.result(timeout=10)
+
+        assert first.identity.sequence == 1
+        assert operation.front.identity == first.identity
+        assert host.front is first
+    finally:
+        release_factory.set()
+        host.close(timeout=10)
+
+
 def test_close_cancels_queued_tasks() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     gate = Event()
@@ -104,6 +195,58 @@ def test_close_cancels_queued_tasks() -> None:
         host.close(timeout=10)
     finally:
         gate.set()
+        host.close(timeout=10)
+
+
+def test_one_session_analysis_lane_serializes_prepare_fit_and_close(
+    monkeypatch,
+) -> None:
+    """A frame prepare cannot overlap a manual fit owned by the same session."""
+
+    snapshot = _fit_curve_series("one-analysis-lane")
+    engine = FitEngine()
+    solve = engine.fit
+    prepare_started = Event()
+    release_prepare = Event()
+    fit_started = Event()
+
+    def observed_fit(*args, **kwargs):
+        fit_started.set()
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "fit", observed_fit)
+    host = RasterPlotHost.from_plot(
+        snapshot(0),
+        CurvePlot(AxisRef.point("x")),
+        fit_engine=engine,
+    )
+    try:
+        host.wait_for_front(timeout=10)
+        session = host.dispatch_control(
+            lambda: host._worker_adapter._session()
+        ).result(timeout=10).value
+        prepare = session._prepare_live_frame_worker
+
+        def blocked_prepare(*args, **kwargs):
+            prepare_started.set()
+            assert release_prepare.wait(5.0)
+            return prepare(*args, **kwargs)
+
+        monkeypatch.setattr(session, "_prepare_live_frame_worker", blocked_prepare)
+        update = host.update_data(snapshot(1))
+        assert prepare_started.wait(2.0)
+        manual = host.fit("gaussian_offset", live=False)
+
+        assert not fit_started.wait(0.2), (
+            "manual fit overlapped this session's live-frame preparation"
+        )
+        assert host.close(timeout=0.05) is False
+        release_prepare.set()
+        assert host.close(timeout=10) is True
+        assert update.done()
+        assert manual.done()
+    finally:
+        release_prepare.set()
         host.close(timeout=10)
 
 
@@ -146,6 +289,7 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
     spec = facet_spec()
     assert isinstance(spec, FacetGridPlot)
     host = RasterPlotHost.from_plot(_facet_snapshot(), spec)
+    release_subscription = None
     try:
         first = host.wait_for_front(timeout=10)
         operation = host.fit("gaussian_offset", live=True).result(timeout=30)
@@ -153,56 +297,38 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         assert operation.value.source_revision == operation.front.identity.data_revision
         assert operation.front.identity.sequence > first.identity.sequence
         assert host.front is operation.front
+
+        events: list = []
+        release_subscription = host.subscribe_fit(events.append).result(timeout=10).value
+        host.dispatch_control(
+            lambda: host._worker_adapter.publish_live_fit_gap(
+                2, RuntimeError("facet revision skipped")
+            )
+        ).result(timeout=10)
+        failed = events[-1].result
+        assert isinstance(failed, FacetFitBatchResult)
+        assert failed.source_revision == 2
+        assert not failed.success.any()
+        assert all(np.isnan(values).all() for values in failed.parameter_values.values())
     finally:
+        if release_subscription is not None:
+            release_subscription().result(timeout=10)
         host.close(timeout=10)
 
 
-def test_live_fit_pairs_every_front_and_coalesces_queued_frames(
-    monkeypatch,
+def test_live_fit_pairs_every_queued_revision_in_order(
+    blocked_fit_host,
 ) -> None:
     """A fit-armed frame is data@N with fit@N, born complete.
 
-    The publish gate: while revision 1's solve runs, no new front appears —
-    a pair never half-shows.  No preemption: newer revisions arriving during
-    the solve replace only the QUEUED frame (revision 2's future cancels,
-    its solve never starts), while the in-flight pair runs to completion and
-    publishes.  The next pair then jumps to the newest revision, so under
-    solve > period the pair rate drops and shots skip, but pairs never
-    split.
+    The publish gate holds while revision 1 solves, but the following burst
+    stays in the exact FIFO.  Every caller receives its own matching data+fit
+    front.  Elapsed lag, not an arbitrary frame count, decides whether the
+    host must resync.
     """
 
-    x = np.linspace(-4.0, 4.0, 81)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
-        dtype=np.float64,
-        generation="raster-live-fit-pairs",
-    )
-
-    def snapshot(revision: int, center: float) -> DatasetSnapshot:
-        values = 2.0 * np.exp(-0.5 * ((x - center) / 0.9) ** 2) + 0.1
-        return DatasetSnapshot(schema, values.reshape(1, -1), revision=revision)
-
-    engine = FitEngine()
-    original_fit = engine.fit
-    solved_revisions: list[int] = []
-    first_started = Event()
-    release_first = Event()
-
-    def controlled_fit(model, coordinates, observations=None, **kwargs):
-        revision = int(kwargs["data_revision"])
-        solved_revisions.append(revision)
-        if revision == 1:
-            first_started.set()
-            if not release_first.wait(5.0):
-                raise AssertionError("revision 1 fit was never released")
-        return original_fit(model, coordinates, observations, **kwargs)
-
-    monkeypatch.setattr(engine, "fit", controlled_fit)
-    host = RasterPlotHost.from_plot(
-        snapshot(0, 0.0),
-        CurvePlot(AxisRef.point("x")),
-        fit_engine=engine,
+    snapshot, host, first_started, release_first, solved_revisions = blocked_fit_host(
+        "raster-live-fit-pairs", offset=0.1
     )
     accepted: list[int] = []
     release_subscription = None
@@ -220,27 +346,156 @@ def test_live_fit_pairs_every_front_and_coalesces_queued_frames(
         assert host.front is not None
         assert host.front.identity.data_revision == 0
 
-        second = host.update_data(snapshot(2, 0.2))
-        third = host.update_data(snapshot(3, 0.3))
-        # Latest-only queueing: revision 2 was replaced before it started.
-        assert second.cancelled()
+        queued = [
+            host.update_data(snapshot(revision, revision * 0.1))
+            for revision in range(2, 13)
+        ]
+        assert all(not future.done() for future in queued)
 
         release_first.set()
-        # No preemption: the in-flight pair completed and published even
-        # though newer data had arrived.
         first.result(timeout=10)
-        third.result(timeout=10)
+        for future in queued:
+            future.result(timeout=10)
         assert host.front is not None
-        assert host.front.identity.data_revision == 3
-        # Every published front carried its own shot's overlay; revision 2
-        # was skipped entirely — never solved, never shown.
-        assert accepted == [1, 3]
-        assert 2 not in solved_revisions
+        assert host.front.identity.data_revision == 12
+        assert accepted == list(range(1, 13))
+        assert solved_revisions[-12:] == list(range(1, 13))
     finally:
         release_first.set()
         if release_subscription is not None:
             release_subscription().result(timeout=10)
         host.close(timeout=10)
+
+
+@pytest.mark.parametrize("limit", ("wait", "bytes"))
+def test_exact_fit_backlog_resyncs_to_latest_and_recovers(
+    monkeypatch,
+    blocked_fit_host,
+    limit: str,
+) -> None:
+    snapshot, host, first_started, release_first, _solved = blocked_fit_host(
+        f"exact-fit-{limit}-budget"
+    )
+    clock = [0.0]
+    monkeypatch.setattr("zlc_plot.raster.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        RasterPlotHost,
+        "MAX_EXACT_WAIT_SECONDS",
+        1.0,
+    )
+    monkeypatch.setattr(
+        RasterPlotHost,
+        "MAX_PENDING_INPUT_BYTES",
+        (
+            64 << 20
+            if limit == "wait"
+            else 2 * int(snapshot(0).block.values.nbytes)
+        ),
+    )
+    release_subscription = None
+    accepted: list[tuple[int, bool]] = []
+    fit_events: list = []
+
+    def observe_fit(event) -> None:
+        fit_events.append(event)
+        accepted.append(
+            (int(event.result.source_revision), bool(event.result.success))
+        )
+
+    try:
+        host.wait_for_front(timeout=10)
+        host.fit("gaussian_offset", live=True).result(timeout=30)
+        release_subscription = host.subscribe_fit(observe_fit).result(timeout=10).value
+
+        first = host.update_data(snapshot(1))
+        assert first_started.wait(2.0)
+        skipped = host.update_data(snapshot(2))
+        superseded = host.update_data(snapshot(3))
+        if limit == "wait":
+            clock[0] = 1.01
+        latest = host.update_data(snapshot(4))
+
+        # Crossing the budget is itself the recovery edge.  It must not wait
+        # for the slow fit to return before reporting its current/queued gaps,
+        # and a cooperative solver must observe cancellation without this test
+        # opening its old gate.
+        with pytest.raises(RuntimeError, match="resynchronized"):
+            first.result(timeout=2.0)
+        assert not release_first.is_set()
+        assert skipped.cancelled()
+        assert superseded.cancelled()
+
+        latest.result(timeout=10)
+        host.update_data(snapshot(5)).result(timeout=10)
+        assert accepted == [
+            (1, False),
+            (2, False),
+            (3, False),
+            (4, True),
+            (5, True),
+        ]
+        assert [event.result.batch_revision for event in fit_events] == sorted(
+            event.result.batch_revision for event in fit_events
+        )
+        assert all(
+            np.isnan(event.result.parameter_values).all()
+            for event in fit_events
+            if not event.result.success
+        )
+        assert host.front is not None
+        assert host.front.identity.data_revision == 5
+    finally:
+        release_first.set()
+        if release_subscription is not None:
+            release_subscription().result(timeout=10)
+
+
+def test_solver_failure_is_loud_for_that_revision_and_the_tail_continues(
+    blocked_fit_host,
+) -> None:
+    """A failed pair leaves the old front, reports its gap, then recovers."""
+
+    snapshot, host, first_started, release_first, solved = blocked_fit_host(
+        "exact-fit-solver-failure", fail_revision=2
+    )
+    release_subscription = None
+    accepted: list[tuple[int, bool]] = []
+    fit_events: list = []
+
+    def observe_fit(event) -> None:
+        fit_events.append(event)
+        accepted.append(
+            (int(event.result.source_revision), bool(event.result.success))
+        )
+
+    try:
+        host.wait_for_front(timeout=10)
+        host.fit("gaussian_offset", live=True).result(timeout=30)
+        release_subscription = host.subscribe_fit(observe_fit).result(timeout=10).value
+
+        first = host.update_data(snapshot(1))
+        assert first_started.wait(2.0)
+        second = host.update_data(snapshot(2))
+        third = host.update_data(snapshot(3))
+        release_first.set()
+
+        first.result(timeout=10)
+        with pytest.raises(RuntimeError, match="forced revision-2 failure"):
+            second.result(timeout=10)
+        third.result(timeout=10)
+        host.update_data(snapshot(4)).result(timeout=10)
+
+        assert host.front is not None
+        assert host.front.identity.data_revision == 4
+        assert accepted == [(1, True), (2, False), (3, True), (4, True)]
+        failed = fit_events[1].result
+        assert np.isnan(failed.parameter_values).all()
+        assert np.isnan(failed.standard_errors).all()
+        assert solved[-4:] == [1, 2, 3, 4]
+    finally:
+        release_first.set()
+        if release_subscription is not None:
+            release_subscription().result(timeout=10)
 
 
 def test_a_regular_bimodal_fit_does_not_create_a_threshold_classifier() -> None:
@@ -350,7 +605,30 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
 
         configured = host.configure(
             parameters={"threshold_classifier": True},
-            classifier_thresholds=(-0.25, 0.75),
+            classifier_thresholds=(
+                {
+                    "value": -0.25,
+                    "scope": (
+                        {
+                            "domain": "point_coordinate",
+                            "axis_id": "site",
+                            "coordinate": 0,
+                        },
+                    ),
+                    "repeat_index": None,
+                },
+                {
+                    "value": 0.75,
+                    "scope": (
+                        {
+                            "domain": "point_coordinate",
+                            "axis_id": "site",
+                            "coordinate": 1,
+                        },
+                    ),
+                    "repeat_index": None,
+                },
+            ),
         ).result(timeout=10)
         assert configured.value.display_state.values["threshold_classifier"] is True
         assert host.selector_state(
@@ -361,66 +639,22 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         host.close(timeout=10)
 
 
-def test_host_fit_callback_exceptions_complete_the_future(monkeypatch) -> None:
-    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
-    try:
-        host.wait_for_front(timeout=10)
-
-        def broken_fit(*_args, **_kwargs):
-            result: Future[object] = Future()
-            result.set_result(object())
-            return result
-
-        monkeypatch.setattr(host._worker_adapter, "fit", broken_fit)
-        completion = host.fit("gaussian_offset", live=False)
-        with pytest.raises(AttributeError):
-            completion.result(timeout=10)
-    finally:
-        host.close(timeout=10)
-
-
-def test_one_semantic_edit_is_composed_where_the_spec_and_schema_live() -> None:
-    """A caller supplies only what the operator changed.
-
-    Composing the candidate needs the current spec and the schema of what is
-    being drawn.  Both belong to the session, so asking an embedder for them is
-    asking it to keep a copy of state it does not own -- and every embedder that
-    did kept a copy that could drift from the session actually rendering.
-    """
-
-    from zlc_plot import PlotKind
-
-    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
-    try:
-        host.wait_for_front(timeout=10)
-
-        described = host.apply_semantic("kind", PlotKind.HISTOGRAM).result(timeout=10)
-
-        assert described.value is not None
-        # It really replaced the spec: the next edit composes against the new
-        # one, not against the curve it started as.
-        again = host.describe_semantics().result(timeout=10).value
-        assert again.kind is PlotKind.HISTOGRAM
-    finally:
-        host.close(timeout=10)
-
-
-def test_a_semantic_edit_that_changes_nothing_does_not_rebuild() -> None:
-    """Re-selecting the kind a plot already is must not restart the render."""
+def test_semantic_edit_composes_at_the_owner_and_an_exact_noop_stays_put() -> None:
+    """The session owns composition and does not rebuild an identical kind."""
 
     from zlc_plot import PlotKind
 
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
         first = host.wait_for_front(timeout=10)
-
-        described = host.apply_semantic("kind", PlotKind.CURVE).result(timeout=10)
-
-        assert described.value is not None
-        # The figure was not thrown away and rebuilt: a replace bumps the
-        # display and layout revisions, and neither moved.
+        noop = host.apply_semantic("kind", PlotKind.CURVE).result(timeout=10)
+        assert noop.value is not None
         assert host.front.identity.display_revision == first.identity.display_revision
         assert host.front.identity.layout_revision == first.identity.layout_revision
+
+        changed = host.apply_semantic("kind", PlotKind.HISTOGRAM).result(timeout=10)
+        assert changed.value is not None
+        assert host.describe_semantics().result(timeout=10).value.kind is PlotKind.HISTOGRAM
     finally:
         host.close(timeout=10)
 
@@ -471,6 +705,7 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
         ).result(timeout=10)
         assert unchanged.value.display_state.revision == reshaped.value.display_state.revision
         assert unchanged.value.size == reshaped.value.size
+        assert unchanged.front is reshaped.front
 
         automatic = host.configure(
             parameters={"title": None},
@@ -478,6 +713,256 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
         assert automatic.value.display_state.values["title"] is None
         assert automatic.front.identity.sequence == unchanged.front.identity.sequence + 1
     finally:
+        host.close(timeout=10)
+
+
+def test_complete_configuration_fits_clears_and_noops_as_one_front(
+    monkeypatch,
+) -> None:
+    """One desired target has one solve/front; replaying it has neither."""
+
+    snapshots = _fit_curve_series("atomic-configuration", offset=0.1)
+    snapshot = snapshots(0, 0.3)
+    engine = FitEngine()
+    solve_count = 0
+    solve = engine.fit
+
+    def counted_solve(*args, **kwargs):
+        nonlocal solve_count
+        solve_count += 1
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "fit", counted_solve)
+    host = RasterPlotHost.from_plot(
+        snapshot,
+        CurvePlot(AxisRef.point("x")),
+        fit_engine=engine,
+    )
+    promoted = []
+    release = None
+    try:
+        initial = host.wait_for_front(timeout=10)
+        release = host.subscribe_front(promoted.append)
+        fit_target = {
+            "model": "gaussian_offset",
+            "initial": {
+                "amplitude": 2.0,
+                "center": 0.3,
+                "sigma": 0.9,
+                "offset": 0.1,
+            },
+            "bounds": {"sigma": (0.1, 3.0)},
+        }
+        fitted = host.configure(
+            parameters={"title": "Atomic"},
+            fit=fit_target,
+            selectors=(),
+            viewport=None,
+            facet_focus=None,
+        ).result(timeout=30)
+        assert fitted.front.identity.sequence == initial.identity.sequence + 1
+        assert solve_count == 1
+        assert promoted == [fitted.front]
+
+        unchanged = host.configure(
+            parameters={"title": "Atomic"},
+            fit=fit_target,
+            selectors=(),
+            viewport=None,
+            facet_focus=None,
+        ).result(timeout=30)
+        assert unchanged.front is fitted.front
+        assert solve_count == 1
+        assert promoted == [fitted.front]
+
+        cleared = host.configure(
+            parameters={"title": "Atomic"},
+            fit={},
+            selectors=(),
+            viewport=None,
+            facet_focus=None,
+        ).result(timeout=30)
+        assert cleared.front.identity.sequence == fitted.front.identity.sequence + 1
+        assert promoted == [fitted.front, cleared.front]
+
+        clear_noop = host.configure(
+            parameters={"title": "Atomic"},
+            fit={},
+            selectors=(),
+            viewport=None,
+            facet_focus=None,
+        ).result(timeout=30)
+        assert clear_noop.front is cleared.front
+        assert promoted == [fitted.front, cleared.front]
+    finally:
+        if release is not None:
+            release()
+        host.close(timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("invalid_target", "error", "match", "solver_failure"),
+    (
+        ({"facet_focus": 0, "fit": {}}, TypeError, "facet", False),
+        (
+            {
+                "selectors": (
+                    SelectorState(SelectorKind.X_RANGE, NumericRange(1.0, 1.0)),
+                ),
+                "fit": {},
+            },
+            ValueError,
+            "non-degenerate",
+            False,
+        ),
+        (
+            {"fit": {"model": "gaussian_offset", "obsolete": True}},
+            TypeError,
+            "unknown fit target fields",
+            False,
+        ),
+        ({"fit": {"model": "gaussian_offset"}}, RuntimeError, "atomic solver", True),
+    ),
+    ids=("facet-focus", "selector", "fit", "solver"),
+)
+def test_complete_configuration_rejects_a_late_target_without_partial_state(
+    invalid_target,
+    error,
+    match,
+    solver_failure,
+    monkeypatch,
+) -> None:
+    engine = FitEngine()
+    if solver_failure:
+        def fail_fit(*_args, **_kwargs):
+            raise RuntimeError("atomic solver failed")
+
+        monkeypatch.setattr(engine, "fit", fail_fit)
+    host = RasterPlotHost.from_plot(
+        _snapshot(), CurvePlot(AxisRef.point("x")), fit_engine=engine
+    )
+    try:
+        initial = host.wait_for_front(timeout=10)
+        before = host.describe_display().result(timeout=10).value
+
+        with pytest.raises(error, match=match):
+            host.configure(
+                parameters={"title": "must not leak"},
+                **invalid_target,
+            ).result(timeout=10)
+
+        after = host.describe_display().result(timeout=10).value
+        assert after.display_state == before.display_state
+        assert host.front is initial
+    finally:
+        host.close(timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("fit_target", "semantic"),
+    (
+        pytest.param(
+            {"model": "gaussian_offset"},
+            {"reduction": Reduction.MAX},
+            id="rearm",
+        ),
+        pytest.param({}, None, id="clear"),
+    ),
+)
+def test_failed_final_configuration_does_not_retire_the_previous_fit_authority(
+    monkeypatch,
+    fit_target,
+    semantic,
+) -> None:
+    """Irreversible fit retirement belongs after the final render commit."""
+
+    snapshot = _fit_curve_series(
+        f"atomic-fit-{fit_target or 'clear'}-rollback",
+        offset=0.1,
+    )
+
+    engine = FitEngine()
+    solve = engine.fit
+    pending_started = Event()
+    release_pending = Event()
+
+    def controlled_solve(model, coordinates, observations=None, **kwargs):
+        if model.model_id == "lorentzian":
+            pending_started.set()
+            assert release_pending.wait(5.0)
+        return solve(model, coordinates, observations, **kwargs)
+
+    monkeypatch.setattr(engine, "fit", controlled_solve)
+    host = RasterPlotHost.from_plot(
+        snapshot(0, 0.2),
+        CurvePlot(AxisRef.point("x")),
+        fit_engine=engine,
+    )
+    fail_final_render = [False]
+    try:
+        host.wait_for_front(timeout=10)
+        host.fit("gaussian_offset", live=True).result(timeout=30)
+        old_front = host.front
+        assert old_front is not None
+        session = host.dispatch_control(
+            lambda: host._worker_adapter._session()
+        ).result(timeout=10).value
+        old_accepted = session._accepted_fit
+        old_display = session.display_state
+        old_spec = session.spec
+
+        old_completion = host.dispatch_control(
+            lambda: session.fit_async("lorentzian", live=True)
+        ).result(timeout=10).value
+        assert pending_started.wait(2.0)
+        old_fit_cancel = session._fit_cancel
+        old_live_cancel = session._live_fit_cancel
+        old_request = session._live_fit_request
+        assert session._live_fit_completion is old_completion
+        assert not old_completion.done()
+
+        render = session._render_current
+
+        def controlled_render(*args, **kwargs):
+            if fail_final_render[0] and session._configuration_effects is None:
+                raise RuntimeError("forced final configuration render failure")
+            return render(*args, **kwargs)
+
+        monkeypatch.setattr(session, "_render_current", controlled_render)
+        fail_final_render[0] = True
+        with pytest.raises(
+            RuntimeError,
+            match="forced final configuration render failure",
+        ):
+            host.configure(
+                semantic=semantic,
+                parameters={"title": "must roll back"},
+                fit=fit_target,
+            ).result(timeout=30)
+
+        assert host.front is old_front
+        assert session._accepted_fit is old_accepted
+        assert session.display_state == old_display
+        assert session.spec == old_spec
+        assert session._live_fit_request is old_request
+        assert session._live_fit_completion is old_completion
+        assert not old_fit_cancel.is_set()
+        assert not old_live_cancel.is_set()
+        assert not old_completion.done()
+
+        fail_final_render[0] = False
+        host.configure(
+            semantic=semantic,
+            parameters={"title": "committed"},
+            fit=fit_target,
+        ).result(timeout=30)
+        assert old_fit_cancel.is_set()
+        assert old_live_cancel.is_set()
+        with pytest.raises(FitCancelled):
+            old_completion.result(timeout=2.0)
+    finally:
+        fail_final_render[0] = False
+        release_pending.set()
         host.close(timeout=10)
 
 

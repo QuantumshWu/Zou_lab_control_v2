@@ -102,7 +102,7 @@ class LiveSessionMixin:
                     image_overlay=image_overlay,
                     image_overlay_authority=self._image_overlay,
                 )
-            future = self._live_prepare_executor.submit(
+            future = self._analysis_executor.submit(
                 self._prepare_live_frame_worker,
                 snapshot,
                 cancellation,
@@ -152,12 +152,11 @@ class LiveSessionMixin:
         """Atomically install and draw one complete data/fit pair.
 
         The frame of a fit-armed panel is data@N together with fit@N: the
-        caller solves the pair on the fit executor (``solve_live_frame``)
+        caller solves the pair on the serial analysis executor (``solve_live_frame``)
         before committing, and this commit paints the data and its overlay
         under one render-lock hold — the captured front is born complete.
-        A pair whose solve was cancelled or failed commits data-only; the
-        next data revision is the only automatic retry.  Un-armed frames
-        commit exactly as before.
+        An armed pair that did not solve does not advance visible data.
+        Un-armed frames commit data-only exactly as before.
         """
 
         if not isinstance(prepared, _PreparedLiveFrame):
@@ -206,32 +205,34 @@ class LiveSessionMixin:
                     if prepared.image_overlay is None
                     else prepared.image_overlay
                 )
-            # The previous revision's overlay never rides into this frame:
-            # the pair's own fit is accepted below, or the frame is honestly
-            # data-only.  One shot on screen is one shot throughout.
-            presentation = self._present_projection_transaction(
-                prepared.projection,
-                image_overlay=accepted_image_overlay,
-                accepted_fit=None,
+            accepted_fit = None
+            resolution = None
+            fit_event = None
+            if solved is not None:
+                accepted_fit, resolution, fit_event = self._accept_pair_fit(
+                    solved,
+                    prepared.projection,
+                )
+            try:
+                presentation = self._present_projection_transaction(
+                    prepared.projection,
+                    image_overlay=accepted_image_overlay,
+                    accepted_fit=accepted_fit,
+                )
+            except Exception:
+                self._restore_live_fit_completion(resolution)
+                raise
+        if accepted_fit is not None and solved is not None:
+            self._remember_fit_warm_starts(
+                solved.result,
+                request_generation=solved.started.request_generation,
+                selections=accepted_fit.selections,
             )
-            live_fit_work = (
-                None if solved is None else self._accept_pair_fit(solved)
-            )
-        resolution = None
-        if live_fit_work is not None:
-            # Observer callbacks fire only after the render lock is released;
-            # the ownership gate is taken inside them, and render-lock-first
-            # ordering would invert it.  The logical fit completion travels
-            # in the finalization token: it resolves in publish_live_frame,
-            # after the caller promoted the committed front, so a waiting
-            # fit future never observes a front older than its result.
-            resolution, fit_event = live_fit_work
-            if fit_event is not None:
-                self._notify_fit(fit_event)
         return _LiveFrameFinalization(
             self._session_identity,
             presentation,
             resolution,
+            fit_event,
         )
 
     def publish_live_frame(self, finalization: _LiveFrameFinalization) -> None:
@@ -241,6 +242,8 @@ class LiveSessionMixin:
             raise TypeError("finalization must be a live-frame finalization token")
         if finalization.session_identity is not self._session_identity:
             raise ValueError("live-frame finalization belongs to another PlotSession")
+        if finalization.fit_event is not None:
+            self._notify_fit(finalization.fit_event)
         if finalization.fit_resolution is not None:
             self._resolve_fit_completion(finalization.fit_resolution)
 
@@ -257,6 +260,4 @@ class LiveSessionMixin:
             # The pair's accept was rolled back with the frame; give the
             # logical completion back to the request so a later pair can
             # still resolve it.
-            with self._lock:
-                if not self._closed and self._live_fit_completion is None:
-                    self._live_fit_completion = resolution.completion
+            self._restore_live_fit_completion(resolution)

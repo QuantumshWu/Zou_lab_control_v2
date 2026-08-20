@@ -1,10 +1,8 @@
-"""The Selectors switch gates selector CREATION, never navigation.
+"""The TaskConsole Selectors switch owns all plot pointer interaction.
 
 These tests mount REAL zlc_plot raster surfaces in the console's PanelCardView
-and drive them through Qt's own pointer routes, because the regression they
-guard was exactly a widget-level one: the card closed the plot's whole input
-transport when Selectors was off, so the double-click that is the only way to
-focus a facet cell -- and pan, and zoom -- were silently dropped.
+and drive them through Qt's own pointer routes.  Off leaves the surrounding
+page in charge; On gives the plot its selector and navigation gestures.
 """
 
 from __future__ import annotations
@@ -118,8 +116,8 @@ def send_wheel(widget, steps):
 """
 
 
-def test_double_click_focuses_a_facet_cell_with_selectors_off() -> None:
-    """The headline regression: Selectors OFF must not drop facet focus."""
+def test_selectors_off_blocks_double_click_facet_focus() -> None:
+    """Off means the plot cannot focus a facet cell."""
 
     _run_qt(
         _PROLOGUE
@@ -139,32 +137,22 @@ host = RasterPlotHost.from_plot(snapshot, spec)
 card = widget = None
 try:
     card, widget = mounted_card(host)
-    assert widget.interaction_enabled, (
-        'mounting must keep the plot input transport open')
-    # Selectors is OFF by default -- exactly the state the console opens in.
+    card.set_selectors_enabled(False)
+    assert not widget.interaction_enabled
     cell = next(
         axes
         for axes in widget.presented_front.interaction.axes
         if axes.role == 'facet_cell' and axes.cell_index == 0
     )
     point = axes_center(widget, cell)
-    # The REAL operator stream: single press/release (gated), then the
-    # double-click Qt synthesizes, then its release.
     QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton, pos=point)
     QtTest.QTest.mouseDClick(widget, QtCore.Qt.LeftButton, pos=point)
-    # The observable at this seam is the plot session itself: the double-click
-    # must ROUTE and focus.  (Whether the focused front is re-presented while
-    # the click gesture is still armed is zlc_plot staging behaviour, the same
-    # with Selectors ON.)
-    wait_until(
-        lambda: (
-            host.front is not None
-            and host.front.interaction.facet_focus_index == 0
-        ),
-        message='double-click with Selectors OFF did not focus the facet cell',
-    )
-    assert committed_selectors(host) == (), (
-        'facet focus must not leave a selector behind')
+    deadline = time.monotonic() + 0.25
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    assert host.front.interaction.facet_focus_index is None
+    assert committed_selectors(host) == ()
 finally:
     if card is not None:
         card.set_surface(None)
@@ -175,8 +163,8 @@ finally:
     )
 
 
-def test_selectors_off_gates_area_drag_while_pan_and_zoom_still_work() -> None:
-    """OFF: an area drag creates NO selector; wheel zoom and pan stay live."""
+def test_selectors_off_blocks_area_pan_and_zoom_until_enabled() -> None:
+    """Off blocks every plot gesture; On enables the same real Qt stream."""
 
     _run_qt(
         _PROLOGUE
@@ -193,6 +181,7 @@ host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')))
 card = widget = None
 try:
     card, widget = mounted_card(host)
+    card.set_selectors_enabled(False)
     main_axes = next(
         (
             axes
@@ -211,7 +200,7 @@ try:
         int((top + (bottom - top) * 2.0 / 3.0) * widget.height()),
     )
 
-    # Selectors OFF (the default): a left drag must create NO selector.
+    # Selectors OFF: no selector, zoom, or pan reaches the plot.
     QtTest.QTest.mousePress(widget, QtCore.Qt.LeftButton, pos=start)
     QtTest.QTest.mouseMove(widget, end, delay=10)
     QtTest.QTest.mouseRelease(widget, QtCore.Qt.LeftButton, pos=end)
@@ -219,27 +208,22 @@ try:
     assert committed_selectors(host) == (), (
         'Selectors OFF must gate selector creation')
 
-    # ... while wheel zoom still works.
     before = viewport(host)
     send_wheel(widget, -120)
-    wait_until(
-        lambda: viewport(host) != before,
-        message='wheel zoom was dropped with Selectors OFF',
-    )
+    app.processEvents()
+    assert viewport(host) == before
 
-    # ... and middle-button pan still works.
     before = viewport(host)
     QtTest.QTest.mousePress(widget, QtCore.Qt.MiddleButton, pos=end)
     QtTest.QTest.mouseMove(widget, start, delay=10)
     QtTest.QTest.mouseRelease(widget, QtCore.Qt.MiddleButton, pos=start)
-    wait_until(
-        lambda: viewport(host) != before,
-        message='middle-button pan was dropped with Selectors OFF',
-    )
+    app.processEvents()
+    assert viewport(host) == before
     assert committed_selectors(host) == ()
 
     # ON: the exact same drag now starts and commits an area selector.
     card.set_selectors_enabled(True)
+    assert widget.interaction_enabled
     QtTest.QTest.mousePress(widget, QtCore.Qt.LeftButton, pos=start)
     QtTest.QTest.mouseMove(widget, end, delay=10)
     QtTest.QTest.mouseRelease(widget, QtCore.Qt.LeftButton, pos=end)

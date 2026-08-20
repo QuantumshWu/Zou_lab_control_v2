@@ -144,8 +144,13 @@ def test_facet_live_fit_pairs_the_whole_batch_with_its_data_frame() -> None:
 
     initial = _facet_snapshot()
     session = PlotSession(initial, _spec())
+    surfaces: list[int] = []
+    release_surface = None
     try:
         session.fit("gaussian_offset", live=True)
+        release_surface = session.subscribe_surface(
+            lambda: surfaces.append(session.data_revision)
+        )
         original_artists = tuple(session._renderer._fit_artists)
         assert original_artists
         prepared = session.prepare_live_frame(
@@ -166,10 +171,13 @@ def test_facet_live_fit_pairs_the_whole_batch_with_its_data_frame() -> None:
         # cell carries exactly its revision-1 overlay artists.
         assert session._renderer._fit_artists
         assert session.fit_status == "current"
+        assert surfaces == [1], "facet data+fit pair rendered more than once"
 
         session.fit("lorentzian", live=True)
         assert session.last_fit.model.model_id == "lorentzian"
     finally:
+        if release_surface is not None:
+            release_surface()
         session.close()
 
 

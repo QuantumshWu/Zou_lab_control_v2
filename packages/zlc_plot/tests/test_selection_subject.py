@@ -13,9 +13,20 @@ resolved subject travels with the event.
 
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import replace
 
-from zlc_plot import CurvePlot, HistogramPlot, ImagePlot, PlotKind, PlotSession
+import numpy as np
+import pytest
+
+from zlc_data import CoordinateFrameId, owned_snapshot_from_arrays
+from zlc_plot import (
+    CurvePlot,
+    FacetGridPlot,
+    HistogramPlot,
+    ImagePlot,
+    PlotKind,
+    PlotSession,
+)
 from zlc_plot.kinds import AxisRef
 from zlc_plot.selectors import NumericRange, SelectorKind
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
@@ -34,12 +45,19 @@ def _curve_snapshot() -> object:
 def _image_snapshot() -> object:
     columns = np.linspace(0.0, 5.0, 6)
     rows = np.linspace(0.0, 3.0, 4)
+    pixel_frame = CoordinateFrameId("camera-pixel")
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
         PointTable.from_columns({"shot": [0.0]}),
         data_axes=(
-            Axis.create("column", values=columns),
-            Axis.create("row", values=rows),
+            replace(
+                Axis.create("column", values=columns),
+                coordinate_frame=pixel_frame,
+            ),
+            replace(
+                Axis.create("row", values=rows),
+                coordinate_frame=pixel_frame,
+            ),
         ),
         dtype=np.float64,
         generation="selection-subject",
@@ -47,7 +65,7 @@ def _image_snapshot() -> object:
     return DatasetSnapshot(schema, np.arange(6 * 4.0).reshape(1, 1, 6, 4), revision=0)
 
 
-def _subjects(session: PlotSession, apply) -> list:
+def _events(session: PlotSession, apply) -> list:
     events: list = []
     release = session.subscribe_selection(events.append)
     try:
@@ -55,7 +73,52 @@ def _subjects(session: PlotSession, apply) -> list:
     finally:
         release()
     assert events, "no selection event was emitted"
-    return [event.subject for event in events]
+    return events
+
+
+def _subjects(session: PlotSession, apply) -> list:
+    return [event.subject for event in _events(session, apply)]
+
+
+def _named_facet_snapshot() -> object:
+    detuning = np.tile(np.arange(5.0), 2)
+    site = np.repeat((10.0, 20.0), 5)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=3),
+        PointTable.from_columns({"detuning": detuning, "site": site}),
+        dtype=np.float64,
+        generation="selection-subject-facet",
+    )
+    return owned_snapshot_from_arrays(
+        schema,
+        np.arange(30.0).reshape(3, 10, 1),
+        revision=7,
+        stream_generation="selection-subject-run",
+    )
+
+
+def _threshold_facet_snapshot(*, inserted_cell: bool = False) -> object:
+    samples = np.linspace(-3.0, 3.0, 80)
+    columns = (
+        np.where(samples < 0.0, samples - 2.0, samples + 2.0),
+        np.where(samples < 0.0, samples - 1.0, samples + 3.0),
+        np.where(samples < 0.0, samples - 3.0, samples + 1.0),
+    )
+    sites = (10.0, 20.0, 5.0)
+    order = (2, 0, 1) if inserted_cell else (0, 1)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=len(samples)),
+        PointTable.from_columns(
+            {"site": tuple(sites[index] for index in order)}
+        ),
+        dtype=np.float64,
+        generation=f"threshold-target-{int(inserted_cell)}",
+    )
+    return DatasetSnapshot(
+        schema,
+        np.column_stack(tuple(columns[index] for index in order)),
+        revision=0,
+    )
 
 
 def test_a_curve_names_the_axis_its_x_bounds_cut() -> None:
@@ -86,6 +149,8 @@ def test_an_image_names_both_axes_its_area_cuts() -> None:
         assert subject.plot_kind is PlotKind.IMAGE
         assert subject.x == AxisRef.data("column")
         assert subject.y == AxisRef.data("row")
+        assert subject.x_coordinate_frame == "camera-pixel"
+        assert subject.y_coordinate_frame == "camera-pixel"
     finally:
         session.close()
 
@@ -141,5 +206,132 @@ def test_every_selector_kind_carries_a_subject() -> None:
             assert subject is not None
             assert subject.plot_kind is PlotKind.CURVE
         assert SelectorKind.THRESHOLD in {state.kind for state in session.selectors}
+    finally:
+        session.close()
+
+@pytest.mark.parametrize("focused", (False, True), ids=("panel-scope", "focused"))
+@pytest.mark.parametrize("named", (False, True), ids=("repeat", "named"))
+def test_panel_and_focused_scope_carry_canonical_event_meaning(
+    focused: bool,
+    named: bool,
+) -> None:
+    snapshot = _named_facet_snapshot() if named else _curve_snapshot()
+    scope_axis = AxisRef.point("site") if named else AxisRef.repeat()
+    scope_value = 20.0 if named else 1.0
+    cell = CurvePlot(x=AxisRef.point("detuning"))
+    spec = (
+        FacetGridPlot(scope_axis, cell)
+        if focused
+        else replace(cell, scope=((scope_axis, scope_value),))
+    )
+    session = PlotSession(snapshot, spec)
+    try:
+        if focused:
+            session.focus_facet(1)
+        event = _events(
+            session,
+            lambda: session.set_x_selector(1.0, 3.0, display=False),
+        )[-1]
+        assert event.subject.scope == (
+            ((AxisRef.point("site"), 20.0),) if named else ()
+        )
+        assert event.subject.repeat_index == (None if named else 1)
+        if named and not focused:
+            assert event.data_revision == 7
+            assert event.data_generation == "selection-subject-run"
+            assert event.selector.value == NumericRange(1.0, 3.0)
+            assert event.display_selector.value == NumericRange(1.0, 3.0)
+    finally:
+        session.close()
+
+
+def test_classifier_threshold_targets_follow_coordinates_when_facets_reorder() -> None:
+    spec = FacetGridPlot(AxisRef.point("site"), HistogramPlot())
+    authored = PlotSession(_threshold_facet_snapshot(), spec)
+    try:
+        authored.configure(parameters={"threshold_classifier": True})
+        authored.focus_facet(0)
+        event_a = _events(
+            authored,
+            lambda: authored.set_threshold_selector(-0.25, display=False),
+        )
+        target_a = event_a[-1].classifier_thresholds[0]
+        authored.focus_facet(1)
+        event_b = _events(
+            authored,
+            lambda: authored.set_threshold_selector(0.75, display=False),
+        )
+        target_b = next(
+            target
+            for target in event_b[-1].classifier_thresholds
+            if target["scope"][0]["coordinate"] == 20.0
+        )
+        assert target_a["scope"] == (
+            {
+                "domain": "point_coordinate",
+                "axis_id": "site",
+                "coordinate": 10.0,
+            },
+        )
+        assert target_b["scope"][0]["coordinate"] == 20.0
+        assert event_b[-1].classifier_thresholds == (target_a, target_b)
+    finally:
+        authored.close()
+
+    restored = PlotSession(_threshold_facet_snapshot(inserted_cell=True), spec)
+    try:
+        restored.configure(
+            parameters={"threshold_classifier": True},
+            classifier_thresholds=(target_a, target_b),
+        )
+        restored.focus_facet(1)
+        assert restored.selector_state(SelectorKind.THRESHOLD).value == -0.25
+        restored.focus_facet(2)
+        assert restored.selector_state(SelectorKind.THRESHOLD).value == 0.75
+
+        mismatched = dict(target_a)
+        mismatched["scope"] = (
+            {
+                "domain": "point_coordinate",
+                "axis_id": "site",
+                "coordinate": 99.0,
+            },
+        )
+        with np.testing.assert_raises_regex(ValueError, "does not match"):
+            restored.configure(classifier_thresholds=(mismatched, target_b))
+        restored.focus_facet(1)
+        assert restored.selector_state(SelectorKind.THRESHOLD).value == -0.25
+        restored.focus_facet(2)
+        assert restored.selector_state(SelectorKind.THRESHOLD).value == 0.75
+    finally:
+        restored.close()
+
+
+def test_repeat_facet_threshold_target_uses_the_source_repeat_row() -> None:
+    samples = np.linspace(-3.0, 3.0, 80)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=2),
+        PointTable.from_columns({"sample": samples}),
+        dtype=np.float64,
+        generation="repeat-threshold-target",
+    )
+    values = np.vstack(
+        (
+            np.where(samples < 0.0, samples - 2.0, samples + 2.0),
+            np.where(samples < 0.0, samples - 1.0, samples + 3.0),
+        )
+    )
+    session = PlotSession(
+        DatasetSnapshot(schema, values, revision=0),
+        FacetGridPlot(AxisRef.repeat(), HistogramPlot()),
+    )
+    try:
+        session.configure(parameters={"threshold_classifier": True})
+        session.focus_facet(1)
+        target = _events(
+            session,
+            lambda: session.set_threshold_selector(0.5, display=False),
+        )[-1].classifier_thresholds[0]
+        assert target == {"value": 0.5, "scope": (), "repeat_index": 1}
     finally:
         session.close()

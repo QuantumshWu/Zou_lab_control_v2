@@ -61,25 +61,28 @@ Node不发布“自己保存的全部历史”，只提交新增commit；Runtime
 
 ### Data与Fit
 
-用户裁决：Data与Fit必须属于同一个source revision，并作为一个完整panel结果原子显示。不得先显示Data、稍后补Fit；不得丢弃中间revision只fit latest。
+用户裁决：Data与Fit必须属于同一个source revision，并作为一个完整panel结果原子显示。不得先显示Data、稍后补Fit。2026-08-20用户进一步裁决连续源的过载恢复：正常负载保持逐revision exact；显示落后超过约1秒时必须报错但不得永久卡住流程，应丢弃尚未fit的中间revision并从当时latest继续。
 
 原因：
 
 - 图上的fit必须和当前data严格对应；
-- Rolling trace消费fit参数时，每个data revision都要有结果，不能产生断层；
-- 若fit速度跟不上，可以明确报错，不能静默skip或显示不对应结果。
+- 正常负载下Rolling trace消费每个data revision；过载resync产生的断点必须伴随明确错误，不能冒充连续结果；
+- 若fit速度跟不上，必须明确报错并恢复到latest，不能静默skip、永久latch或显示不对应结果。
 
 ### 目标实现
 
-- fit armed后，每个source revision形成一个exact fit job；
-- jobs按顺序处理，不做latest replacement；
+- `display_interval`是Panel data+fit admission cadence；fit armed后，在1秒支持预算内每个已admit source revision形成一个exact fit job。区间内更高频且从未进入Panel的raw Monitor publication不是Rolling sample，也不伪造FitResult；
+- jobs正常按顺序处理；只有最老pending超过1秒或pending arrays超过64 MiB时执行一次loud resync，取消未fit中间jobs并保留当时latest；
 - Panel只有在`data@N + fit@N`都完成时才present revision N；
+- Fit样本范围按committed Area ROI（或显式X-range）→viewport→full range；FacetGrid重建selector必须保留focused cell identity，不能让ROI derived正确而fit退回full frame；
 - FitResult成为带source revision/parent identity的正式derived result，Rolling trace消费同一序列；
 - acquisition data由Runtime继续可靠保存，不因为Panel fit慢而丢science data；
-- 若fit backlog超过明确的容量/延迟预算，fit pipeline进入错误状态并报告“无法跟上”，不跳revision、不显示unpaired data；保存的数据可离线重算；
+- 若fit backlog超过明确的容量/延迟预算，fit pipeline报告“无法跟上”并从latest继续；被丢弃revision不产生成功FitResult，而是发布带相同source identity的invalid gap，不显示unpaired data，不阻塞Qt/Stop/clear/close；保存的数据可离线重算；
 - worker计算可在后台线程执行，“原子显示”不等于在Qt线程同步计算；Qt不得卡死。
 
-性能优化必须先profile实际fit/model/render链，删除无关Setting触发的重复solve、重复render、多front handoff和无owner线程池。不能靠丢revision伪造性能。
+性能优化必须先profile实际fit/model/render链，删除无关Setting触发的重复solve、重复render、多front handoff和无owner线程池。1秒resync是明确的连续源过载恢复，不得被滥用为正常负载latest-only策略。
+
+2026-08-20追加验收：正式96×128 Camera、小Area ROI、fit直接运行在Camera主图、同一ROI另发布Image、fit参数进入一个Rolling Panel的完整链路，以100 ms作为profile警戒线。明显的额外cadence、HOL、错误串行或重复绘制必须修；若已无明显错误，不为百分之几或十几的边际收益引入大改或复杂调度。1秒只允许作为异常resync阈值，不能用来掩盖正常问题。
 
 ### Overlay
 
@@ -97,7 +100,7 @@ Node不发布“自己保存的全部历史”，只提交新增commit；Runtime
 裁决：采用A。
 
 - Selector Off：普通滚轮交给外层TaskConsole/board滚动；
-- Selector On：plot接管滚轮及相应交互。
+- Selector On：非Grid surface与已focused Grid cell由plot接管selector/viewport交互；FacetGrid overview只接受双击focus，不接受area、pan、zoom或滚轮。
 
 ## 5. Gate 4 — Logic Node contract与Task冻结范围
 

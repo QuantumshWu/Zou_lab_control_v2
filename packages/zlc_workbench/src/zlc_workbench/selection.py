@@ -32,16 +32,21 @@ Two constraints shaped the implementation and are easy to undo by accident:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from threading import Lock
 from typing import Any
 
 import numpy as np
-from zlc_plot import NumericRange, SelectorKind
-from zlc_plot.selectors import SelectorState
+from zlc_plot import (
+    NumericRange,
+    SelectorKind,
+)
+from zlc_plot.selectors import RectangleRange, SelectorState as PlotSelectorState
 
 from zlc_runtime import (
     FitEventValue,
     SelectionBridge,
     SelectionChange,
+    SignalPublication,
     SelectionRange,
     SelectionState,
 )
@@ -52,8 +57,7 @@ __all__ = [
     "PlotSelectionSource",
     "panel_selection_document",
     "panel_selection_from_document",
-    "panel_threshold_document",
-    "panel_threshold_from_document",
+    "panel_plot_selectors",
     "attach_selection_bridge",
     "subscribe_committed_selection",
 ]
@@ -82,17 +86,6 @@ _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
 _POINT_SELECTOR_KINDS = {"crosshair", "threshold"}
 
 
-def _apply_panel_threshold(host: Any, selector: Any) -> object:
-    """Put the panel's chosen classifier threshold on one plot surface.
-
-    The value is canonical, so it crosses between two hosts holding different
-    data revisions unchanged, and it lands on whichever cell that host has
-    open -- the panel keeps both of its hosts on the same cell.
-    """
-
-    return host.set_threshold_selector(float(selector.value), display=False)
-
-
 def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]:
     """One committed region, as the plain numbers a layout can hold.
 
@@ -116,6 +109,7 @@ def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]
                     if item.coordinate_frame is None
                     else str(item.coordinate_frame)
                 ),
+                "domain": str(item.domain),
             }
             for item in selection.ranges
         ],
@@ -143,6 +137,7 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
                 lower=float(item["lower"]),
                 upper=float(item["upper"]),
                 coordinate_frame=item.get("coordinate_frame"),
+                domain=str(item["domain"]),
             )
             for item in document.get("ranges", ())
         ),
@@ -154,49 +149,40 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
     )
 
 
-def panel_threshold_document(selector: Any) -> dict[str, Any]:
-    """The classifier level an operator chose, as plain numbers."""
+def panel_plot_selectors(
+    selection: SelectionState | None,
+    *,
+    facet_index: int | None,
+) -> tuple[PlotSelectorState, ...]:
+    """Translate one saved panel target into zlc_plot's native selectors."""
 
-    if selector is None:
-        return {}
-    return {
-        "value": float(selector.value),
-        "facet_index": (
-            None if selector.facet_index is None else int(selector.facet_index)
-        ),
-    }
-
-
-def panel_threshold_from_document(document: Mapping[str, Any]) -> Any:
-    """That level, back as the selector state a plot surface accepts."""
-
-    if not document:
-        return None
-    return SelectorState(
-        SelectorKind.THRESHOLD,
-        float(document["value"]),
-        facet_index=document.get("facet_index"),
-    )
-
-
-def _remove_panel_threshold(host: Any) -> object:
-    """Let this surface go back to the threshold its own fit proposes."""
-
-    try:
-        return host.remove_selector(SelectorKind.THRESHOLD, emit_change=False)
-    except KeyError:
-        return None
-
-
-def _same_panel_threshold(left: Any, right: Any) -> bool:
-    """Whether two threshold gestures say the same thing about the same cell."""
-
-    if left is None or right is None:
-        return left is None and right is None
-    return (
-        float(left.value) == float(right.value)
-        and left.facet_index == right.facet_index
-    )
+    states: list[PlotSelectorState] = []
+    if selection is not None:
+        ranges = tuple(selection.ranges)
+        if selection.selector_kind == "area":
+            if len(ranges) != 2:
+                raise ValueError("an area panel selection requires x and y ranges")
+            states.append(PlotSelectorState(
+                SelectorKind.AREA,
+                RectangleRange(
+                    NumericRange(ranges[0].lower, ranges[0].upper),
+                    NumericRange(ranges[1].lower, ranges[1].upper),
+                ),
+                facet_index=facet_index,
+            ))
+        elif selection.selector_kind == "x_range":
+            if len(ranges) != 1:
+                raise ValueError("an x-range panel selection requires one range")
+            states.append(PlotSelectorState(
+                SelectorKind.X_RANGE,
+                NumericRange(ranges[0].lower, ranges[0].upper),
+                facet_index=facet_index,
+            ))
+        else:
+            raise ValueError(
+                f"unsupported panel selector kind {selection.selector_kind!r}"
+            )
+    return tuple(states)
 
 
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
@@ -256,6 +242,8 @@ class PlotSelectionSource:
         self._host = host
         self._states: dict[str, SelectionState] = {}
         self._releases: list[Callable[[], None]] = []
+        self._subscription_lock = Lock()
+        self._closed = False
         self._last_error: Exception | None = None
         self._on_threshold = on_threshold
 
@@ -296,9 +284,9 @@ class PlotSelectionSource:
                     self._on_threshold is not None
                     and _selector_kind_of(event) == "threshold"
                 ):
-                    removed = _change_of(event) is SelectionChange.REMOVED
                     self._deliver(
-                        self._on_threshold, None if removed else event.selector
+                        self._on_threshold,
+                        tuple(event.classifier_thresholds),
                     )
                 return
             if _name_of(event.subject.plot_kind) == "rolling":
@@ -378,6 +366,9 @@ class PlotSelectionSource:
         with a box that derives nothing and says nothing about why.
         """
 
+        with self._subscription_lock:
+            if self._closed:
+                return
         try:
             callback(*payload)
         except Exception as error:
@@ -400,9 +391,14 @@ class PlotSelectionSource:
     # ------------------------------------------------------------- life cycle
 
     def close(self) -> None:
-        for release in reversed(self._releases):
+        with self._subscription_lock:
+            if self._closed:
+                return
+            self._closed = True
+            releases = tuple(reversed(self._releases))
+            self._releases.clear()
+        for release in releases:
             release()
-        self._releases.clear()
         self._states.clear()
 
     # ---------------------------------------------------------------- private
@@ -412,23 +408,74 @@ class PlotSelectionSource:
         subscribe: Callable[[Any], Any],
         listener: Callable[[object], None],
     ) -> Callable[[], None]:
-        """Subscribe through a host that may answer with a future.
+        """Install and retire a plot subscription without waiting on its worker."""
 
-        Resolved here, on the caller's thread at attach time, so that nothing
-        downstream ever has to wait on the plot from inside an event.
-        """
+        with self._subscription_lock:
+            if self._closed:
+                raise RuntimeError("plot selection source is closed")
+        active = True
+        installed: Callable[[], object] | None = None
 
-        release = _resolved(subscribe(listener))
-        released = False
+        def settle_release(release: Callable[[], object]) -> None:
+            try:
+                answer = release()
+            except Exception as error:
+                self._last_error = error
+                return
+            add_done = getattr(answer, "add_done_callback", None)
+            if not callable(add_done):
+                return
+
+            def released(done: object) -> None:
+                try:
+                    done.result()
+                except Exception as error:
+                    self._last_error = error
+
+            add_done(released)
 
         def _once() -> None:
-            nonlocal released
-            if released:
-                return
-            released = True
-            _resolved(release())
+            nonlocal active, installed
+            with self._subscription_lock:
+                if not active:
+                    return
+                active = False
+                release, installed = installed, None
+            if release is not None:
+                settle_release(release)
 
-        self._releases.append(_once)
+        def subscribed(answer: object) -> None:
+            nonlocal installed
+            try:
+                result = answer.result() if hasattr(answer, "result") else answer
+                release = getattr(result, "value", result)
+                if not callable(release):
+                    raise TypeError("plot subscription did not return a release callable")
+            except Exception as error:
+                self._last_error = error
+                return
+            with self._subscription_lock:
+                if active and not self._closed:
+                    installed = release
+                    release = None
+            if release is not None:
+                settle_release(release)
+
+        with self._subscription_lock:
+            self._releases.append(_once)
+        try:
+            answer = subscribe(listener)
+        except BaseException:
+            with self._subscription_lock:
+                if _once in self._releases:
+                    self._releases.remove(_once)
+                active = False
+            raise
+        add_done = getattr(answer, "add_done_callback", None)
+        if callable(add_done):
+            add_done(subscribed)
+        else:
+            subscribed(answer)
         return _once
 
     def _translate(self, event: object) -> SelectionState:
@@ -454,10 +501,20 @@ class PlotSelectionSource:
             # so one named axis translates as a single-range selection.  Only
             # a box naming nothing has nothing to select on.
             named = tuple(
-                (axis, bounds, role)
-                for axis, bounds, role in (
-                    (subject.x, selector.value.x, "x"),
-                    (subject.y, selector.value.y, "y"),
+                (axis, bounds, role, frame)
+                for axis, bounds, role, frame in (
+                    (
+                        subject.x,
+                        selector.value.x,
+                        "x",
+                        subject.x_coordinate_frame,
+                    ),
+                    (
+                        subject.y,
+                        selector.value.y,
+                        "y",
+                        subject.y_coordinate_frame,
+                    ),
                 )
                 if axis is not None
             )
@@ -467,13 +524,21 @@ class PlotSelectionSource:
                     "is nothing to select on"
                 )
             ranges = tuple(
-                _range(axis, bounds, role) for axis, bounds, role in named
+                _range(axis, bounds, role, frame)
+                for axis, bounds, role, frame in named
             )
             if len(ranges) == 1:
                 selector_kind = "x_range"
         else:
-            ranges = (_range(subject.x, selector.value, "x"),)
-        facets, repeat_index = self._facet_scope(selector)
+            ranges = (
+                _range(
+                    subject.x,
+                    selector.value,
+                    "x",
+                    subject.x_coordinate_frame,
+                ),
+            )
+        facets, repeat_index = _subject_scope(subject)
         return SelectionState(
             plot_kind=plot_kind,
             selector_kind=selector_kind,
@@ -483,152 +548,6 @@ class PlotSelectionSource:
             revision=int(selector.revision),
         )
 
-    def _facet_scope(
-        self,
-        selector: object,
-    ) -> tuple[tuple[FacetCondition, ...], int | None]:
-        """Everything this panel is already narrowed to, as the runtime's terms.
-
-        Two narrowings, one statement: the cell a selector was drawn inside,
-        and the coordinates the panel itself is pinned to.  Both say "this
-        axis holds this value", which is what a FacetCondition is, and both
-        must cross -- a box drawn on a panel scoped to one site derives a
-        region of THAT site, and without carrying the scope it derived one
-        cut from every site while the operator was looking at one.
-
-        A selector drawn inside a focused facet cell carries the cell index,
-        and dropping it meant a box in ONE cell derived a region cut from ALL
-        cells.  A repeat facet is structural -- cell k IS repeat row k, the
-        repeat axis has no name anywhere -- so it crosses as ``repeat_index``.
-        A named facet axis needs its cell's coordinate, which is not in the
-        event, so it is read from the owning session's current facet
-        projection: plain state reads on the thread that owns them, never a
-        host dispatch, which from inside this callback would re-enter the
-        worker's own state machine.
-        """
-
-        index = getattr(selector, "facet_index", None)
-        session = self._session_view()
-        if session is None:
-            if index is None:
-                return (), None
-            raise _Unbridgeable(
-                "the focused facet cell's identity is unreachable from this "
-                "plot host, so a cell-scoped selection cannot be carried"
-            )
-        conditions: list[FacetCondition] = []
-        repeat_index: int | None = None
-        for ref, value in getattr(session.spec, "scope", ()):
-            if _name_of(getattr(ref, "domain", None)) == "repeat":
-                # Structural, never by name: the repeat axis is the first
-                # tensor dimension and is anonymous everywhere on the plot
-                # side, so it crosses as a row index like a focused repeat
-                # facet does.
-                repeat_index = self._repeat_row(session, value)
-                continue
-            axis_name = getattr(ref, "axis_id", None)
-            if not isinstance(axis_name, str) or not axis_name:
-                raise _Unbridgeable(
-                    "this panel is scoped to an axis with no upstream name, "
-                    "so a selection drawn on it cannot be carried"
-                )
-            conditions.append(FacetCondition(axis_name, float(value)))
-        if index is None:
-            return tuple(conditions), repeat_index
-        facet = getattr(session.spec, "facet", None)
-        if facet is None:
-            # A focused index without a facet spec: nothing narrower than the
-            # whole surface exists, so there is no restriction to add.
-            return tuple(conditions), repeat_index
-        domain = _name_of(getattr(facet, "domain", None))
-        if domain == "repeat":
-            return tuple(conditions), int(index)
-        axis_name = getattr(facet, "axis_id", None)
-        if not isinstance(axis_name, str) or not axis_name:
-            raise _Unbridgeable(
-                f"a {domain} facet has no named upstream axis, so the focused "
-                "cell cannot be carried"
-            )
-        conditions.append(FacetCondition(axis_name, self._facet_value(session, index)))
-        return tuple(conditions), repeat_index
-
-    @staticmethod
-    def _repeat_row(session: Any, value: float) -> int:
-        """Which repeat ROW a pinned repeat coordinate names."""
-
-        block = getattr(getattr(session, "_projection", None), "_data", None)
-        schema = getattr(getattr(block, "block", None), "schema", None)
-        if schema is None:
-            raise _Unbridgeable(
-                "this panel is pinned to one repeat, but the repeat axis is "
-                "unreachable from this plot host, so it cannot be carried"
-            )
-        axis = schema.repeat_axis
-        if axis.coordinates is None:
-            row = int(value) - int(axis.index_origin)
-        else:
-            row = next(
-                (
-                    position
-                    for position, coordinate in enumerate(axis.coordinates)
-                    if float(coordinate) == float(value)
-                ),
-                -1,
-            )
-        if not 0 <= row < axis.size:
-            raise _Unbridgeable(
-                f"this panel is pinned to repeat {value!r}, which the source "
-                "no longer has"
-            )
-        return row
-
-    def _session_view(self) -> Any | None:
-        """The owning session, reachable only where its state may be read.
-
-        A raster host's selection callbacks run on its worker thread -- the
-        one thread allowed to touch the session directly, which its adapter
-        enforces.  An unattached session dispatches callbacks inline, so the
-        host IS the session there.
-        """
-
-        host = self._host
-        adapter = getattr(host, "_worker_adapter", None)
-        if adapter is not None:
-            try:
-                return adapter._session()
-            except RuntimeError:
-                return None
-        return host if hasattr(host, "spec") else None
-
-    @staticmethod
-    def _facet_value(session: Any, index: int) -> int | float | str:
-        """The canonical facet coordinate of one cell of the current grid."""
-
-        payload = getattr(
-            getattr(session, "_projection", None), "_payload", None
-        )
-        cells = getattr(payload, "cells", None)
-        if cells is None:
-            raise _Unbridgeable(
-                "the focused facet cell has no facet projection to identify it"
-            )
-        cell = next(
-            (item for item in cells if item.facet_index == index),
-            None,
-        )
-        if cell is None:
-            raise _Unbridgeable(
-                f"facet cell {index} is not present in the current projection"
-            )
-        value = cell.facet_value_canonical
-        if isinstance(value, np.generic):
-            value = value.item()
-        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-            raise _Unbridgeable(
-                f"facet cell {index} has a non-scalar facet coordinate"
-            )
-        return value
-
 
 def attach_selection_bridge(
     plane: object,
@@ -637,6 +556,9 @@ def attach_selection_bridge(
     *,
     bridge_id: str,
     source_publication_for: Callable[[int], object | None] | None = None,
+    request_owner_wake: Callable[[], object] | None = None,
+    initial_selection: SelectionState | None = None,
+    initial_publication: SignalPublication | None = None,
     on_committed: Callable[[SelectionState], object] | None = None,
     on_removed: Callable[[SelectionState], object] | None = None,
     on_viewport: Callable[[SelectionState, object | None], object] | None = None,
@@ -660,8 +582,17 @@ def attach_selection_bridge(
         source,
         bridge_id=bridge_id,
         source_publication_for=source_publication_for,
+        request_owner_wake=request_owner_wake,
     )
-    bridge.start()
+    try:
+        bridge.start(
+            initial_selection=initial_selection,
+            initial_publication=initial_publication,
+        )
+    except BaseException:
+        bridge.close()
+        source.close()
+        raise
     if on_committed is not None or on_removed is not None:
         if on_committed is not None and not callable(on_committed):
             bridge.close()
@@ -731,7 +662,12 @@ def subscribe_committed_selection(
 # --------------------------------------------------------------- translation
 
 
-def _range(axis: object, bounds: object, role: str) -> SelectionRange:
+def _range(
+    axis: object,
+    bounds: object,
+    role: str,
+    coordinate_frame: str | None = None,
+) -> SelectionRange:
     if axis is None:
         raise _Unbridgeable(
             f"this plot's {role} bounds cut no named upstream axis, so there is "
@@ -743,12 +679,36 @@ def _range(axis: object, bounds: object, role: str) -> SelectionRange:
             axis="",
             lower=float(bounds.low),
             upper=float(bounds.high),
+            coordinate_frame=coordinate_frame,
             domain=domain,
         )
     name = getattr(axis, "axis_id", None)
     if not isinstance(name, str) or not name:
         raise _Unbridgeable(f"the {role} axis of this plot has no upstream name")
-    return SelectionRange(axis=name, lower=float(bounds.low), upper=float(bounds.high))
+    return SelectionRange(
+        axis=name,
+        lower=float(bounds.low),
+        upper=float(bounds.high),
+        coordinate_frame=coordinate_frame,
+    )
+
+
+def _subject_scope(
+    subject: object,
+) -> tuple[tuple[FacetCondition, ...], int | None]:
+    """Canonical panel/facet scope frozen into one plot event."""
+
+    conditions: list[FacetCondition] = []
+    for ref, value in subject.scope:
+        domain = _name_of(ref.domain)
+        axis_name = ref.axis_id
+        if not isinstance(axis_name, str) or not axis_name:
+            raise _Unbridgeable(
+                f"a {domain} scoped axis has no upstream name, so the "
+                "selection cannot be carried"
+            )
+        conditions.append(FacetCondition(axis_name, value))
+    return tuple(conditions), subject.repeat_index
 
 
 def _viewport_state(event: object) -> tuple[SelectionState | None, object | None]:
@@ -762,12 +722,22 @@ def _viewport_state(event: object) -> tuple[SelectionState | None, object | None
     y = getattr(subject, "y", None)
     if x is None:
         return None, display
+    facets, repeat_index = _subject_scope(subject)
     if y is None:
         return (
             SelectionState(
                 plot_kind=plot_kind,
                 selector_kind="x_range",
-                ranges=(_range(x, canonical.x, "x"),),
+                ranges=(
+                    _range(
+                        x,
+                        canonical.x,
+                        "x",
+                        subject.x_coordinate_frame,
+                    ),
+                ),
+                facets=facets,
+                repeat_index=repeat_index,
             ),
             display,
         )
@@ -776,9 +746,21 @@ def _viewport_state(event: object) -> tuple[SelectionState | None, object | None
             plot_kind=plot_kind,
             selector_kind="area",
             ranges=(
-                _range(x, canonical.x, "x"),
-                _range(y, canonical.y, "y"),
+                _range(
+                    x,
+                    canonical.x,
+                    "x",
+                    subject.x_coordinate_frame,
+                ),
+                _range(
+                    y,
+                    canonical.y,
+                    "y",
+                    subject.y_coordinate_frame,
+                ),
             ),
+            facets=facets,
+            repeat_index=repeat_index,
         ),
         display,
     )
@@ -865,14 +847,6 @@ def _batch_fit_value(batch: object) -> FitEventValue:
 
 
 # ------------------------------------------------------------------ plumbing
-
-
-def _resolved(value: object) -> Any:
-    """The value behind a host answer, whether or not it came as a future."""
-
-    if hasattr(value, "result"):
-        value = value.result()
-    return getattr(value, "value", value)
 
 
 def _name_of(value: object) -> str:

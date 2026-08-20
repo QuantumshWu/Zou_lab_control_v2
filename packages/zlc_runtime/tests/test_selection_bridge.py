@@ -252,17 +252,16 @@ def _curve_schema(with_facet: bool = False) -> DatasetSchema:
     )
 
 
-def _wait_for_signal(plane, bridge, signal_name: str, revision: int):
+def _wait_for_signal(plane, signal_name: str, revision: int):
     deadline = time.monotonic() + 2.0
     while True:
         front = plane.freeze()
         value = front.value(signal_name)
         if value is not None and value.snapshot.ref.revision.value == revision:
             return front
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
+        if time.monotonic() >= deadline:
             raise TimeoutError(f"{signal_name} did not reach revision {revision}")
-        bridge.wait_for_wake(remaining)
+        time.sleep(0.001)
 
 
 def _close(bridge: SelectionBridge, plane: SignalDataPlane, source: _Source) -> None:
@@ -416,7 +415,7 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
             MonitorCoverage(1, 1),
         )
         _commit_source(plane, source, state)
-        front = _wait_for_signal(plane, bridge, "@logic/image/roi_mean", 2)
+        front = _wait_for_signal(plane, "@logic/image/roi_mean", 2)
         publication = front.publication("@logic/image/roi_mean")
         assert publication is not None
         assert publication.direct_parent_refs[0].sequence == 2
@@ -485,7 +484,7 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
                 deadline = time.monotonic() + 1.0
                 while not entered.is_set() and time.monotonic() < deadline:
                     plane.freeze()
-                    bridge.wait_for_wake(0.01)
+                    time.sleep(0.001)
         except BaseException as error:
             callback_errors.append(error)
 
@@ -576,7 +575,7 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
             cell_origin=(1, 0),
         )
         _commit_source(plane, source, state)
-        front = _wait_for_signal(plane, bridge, signal, 2)
+        front = _wait_for_signal(plane, signal, 2)
         derived = front.value(signal)
         assert derived is not None, bridge.last_error
         np.testing.assert_allclose(
@@ -586,6 +585,115 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
         np.testing.assert_array_equal(
             derived.snapshot.expanded_validity()[..., 0],
             np.asarray([[True], [True], [False]]),
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest() -> None:
+    """A restored panel answers for its screen before following newer data."""
+
+    event_schema = _image_schema()
+    canonical_schema = replace(
+        event_schema,
+        repeat_axis=replace(
+            event_schema.repeat_axis,
+            size=3,
+            coordinates=(0, 1, 2),
+        ),
+    )
+    first = np.full(event_schema.physical_shape, 1.0)
+    plane, source, state, initial = _finite_source_setup(
+        canonical_schema,
+        event_schema,
+        first,
+        origin=(0, 0),
+    )
+    displayed = initial.publication("camera/frame")
+    assert displayed is not None
+
+    second = np.full(event_schema.physical_shape, 2.0)
+    state["frame"] = LiveDatasetOutput(
+        state["frame"].declaration,
+        _snapshot("frame", 2, event_schema, second),
+        DatasetCoverage(2, 3),
+        canonical_schema=canonical_schema,
+        cell_origin=(1, 0),
+    )
+    _commit_source(plane, source, state)
+    latest = plane.latest_publication("camera/frame")
+    assert latest is not None and latest is not displayed
+
+    events = _Events()
+    signal = "@logic/restored-prefix/roi_mean"
+    plane.set_front_signals({"camera/frame", signal})
+    bridge = SelectionBridge(
+        plane,
+        "camera/frame",
+        events,
+        events,
+        bridge_id="restored-prefix",
+    )
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("x", -1.0, 2.0),
+            SelectionRange("y", 10.0, 30.0),
+        ),
+        revision=1,
+    )
+    try:
+        bridge.start(
+            initial_selection=selection,
+            initial_publication=displayed,
+        )
+        initial_derived = plane.latest_publication(signal)
+        assert initial_derived is not None
+        assert plane.direct_parent_publications(initial_derived) == (displayed,)
+        generation = initial_derived.event_ref.generation
+        initial_value = initial_derived.value(signal)
+        assert initial_value is not None
+        np.testing.assert_allclose(
+            initial_value.snapshot.block.values[:, 0, 0],
+            np.asarray([1.0, 0.0, 0.0]),
+        )
+        np.testing.assert_array_equal(
+            initial_value.snapshot.expanded_validity()[:, 0, 0],
+            np.asarray([True, False, False]),
+        )
+
+        caught_up = _wait_for_signal(plane, signal, 2)
+        caught_up_publication = caught_up.publication(signal)
+        assert caught_up_publication is not None
+        assert caught_up_publication.event_ref.generation == generation
+        assert plane.direct_parent_publications(caught_up_publication) == (latest,)
+        caught_up_value = caught_up.value(signal)
+        assert caught_up_value is not None
+        np.testing.assert_allclose(
+            caught_up_value.snapshot.block.values[:, 0, 0],
+            np.asarray([1.0, 2.0, 0.0]),
+        )
+
+        third = np.full(event_schema.physical_shape, 3.0)
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 3, event_schema, third),
+            DatasetCoverage(3, 3),
+            canonical_schema=canonical_schema,
+            cell_origin=(2, 0),
+        )
+        _commit_source(plane, source, state)
+        final = _wait_for_signal(plane, signal, 3)
+        final_publication = final.publication(signal)
+        assert final_publication is not None
+        assert final_publication.event_ref.generation == generation
+        assert final_publication.direct_parent_refs[0].sequence == 3
+        final_value = final.value(signal)
+        assert final_value is not None
+        np.testing.assert_allclose(
+            final_value.snapshot.block.values[:, 0, 0],
+            np.asarray([1.0, 2.0, 3.0]),
         )
     finally:
         _close(bridge, plane, source)
@@ -631,7 +739,6 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         revision=1,
     )
     events.emit_selection(SelectionChange.COMMITTED, selection)
-    assert bridge.wait_for_wake(2.0)
     plane.freeze()
 
     entered = Event()
@@ -673,7 +780,7 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         deadline = time.monotonic() + 2.0
         while not observed and time.monotonic() < deadline:
             plane.freeze()
-            bridge.wait_for_wake(0.02)
+            time.sleep(0.001)
         assert observed
         snapshot = observed[0]
         np.testing.assert_array_equal(
@@ -1190,9 +1297,7 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         events.emit_fit(first_event)
         first = plane.freeze().value("@logic/revision/center")
         assert first is not None
-        assert bridge.wait_for_wake(2.0)
         plane.freeze()
-        bridge.wait_for_wake(0.0)
         first_names = tuple(
             item.name
             for item in plane.describe_signals()
@@ -1206,7 +1311,6 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
         )
         _commit_source(plane, source, state)
         plane.freeze()
-        assert bridge.wait_for_wake(2.0)
         between = plane.freeze()
         assert between.value("@logic/revision/center") is first
         assert tuple(
@@ -1215,7 +1319,7 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
             if item.owner_id.startswith("revision:fit:")
         ) == first_names
         events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
-        front = _wait_for_signal(plane, bridge, "@logic/revision/center", 2)
+        front = _wait_for_signal(plane, "@logic/revision/center", 2)
         second = front.value("@logic/revision/center")
         assert second is not None
         assert second.snapshot.ref.revision.value > first.snapshot.ref.revision.value
@@ -1366,7 +1470,6 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
                 revision=2,
             ),
         )
-        assert bridge.selection is None
         assert plane.latest_publication("@logic/curve/roi_mean") is None
     finally:
         _close(bridge, plane, source)
@@ -1679,7 +1782,7 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
             cell_origin=(0, 4),
         )
         _commit_source(plane, source, state)
-        front = _wait_for_signal(plane, bridge, signal, 2)
+        front = _wait_for_signal(plane, signal, 2)
         derived = front.value(signal)
         assert derived is not None, bridge.last_error
         assert float(derived.snapshot.block.values[0, 0, 0]) == 10.0

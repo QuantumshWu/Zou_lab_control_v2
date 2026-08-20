@@ -5,21 +5,22 @@
 ## 1. Persistent Checkpoint
 
 更新时间：2026-08-20
-启动HEAD：`92089f5fc037f8a87e8efe834ccf83139aaf4383`
+启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
-用户执行边界：用户已授权Milestone 4；M1–M3 post-milestone residual sweep及全部发现项已完成，先由`Fix post-milestone residuals`单独落盘，随后才开始Milestone 4。
+用户执行边界：Milestone 1–4及各自post-milestone residual sweep均已完成；Milestone 4由单一commit `Make data, fit, overlay, and Qt lifecycle exact and atomic`落盘后立即停止。下一步只与用户讨论已记录的Plot/Fit profile，不进入M5。
 
 ### 当前状态
 
 - 审计：完成；逐文件证据在`AUDIT/`。
 - 用户裁决：完成；记录在`AUDIT/USER-DECISIONS-2026-08-17.md`与根Goal。
-- Production代码：Milestone 1、2、3及其residual closure均已完成；Milestone 4尚未开始。
+- Production代码：Milestone 1–4及其residual closure均已完成。
 - Hardware：未访问；本Goal不授权program/flash或实验机device操作。
 - Milestone 0：`COMPLETE` — commit `e854ddf`（`Establish approved architecture and implementation checkpoint`）；唯一Architecture、Plan、Handoff、Goal与Audit证据已纳入版本控制，未改production。
 - Milestone 1：`COMPLETE / SWEEP COMPLETE` — test-owned Pulse engine、dead Qt wake、compat aliases、false-green API/notebook/dependency tests与重复contract docs已删除。
 - Milestone 2：`COMPLETE / SWEEP COMPLETE` — nested immutable truth、strict embedded manifest grammar、archive-first Panel Save与唯一Figure入口已闭合。
 - Milestone 3：`COMPLETE / SWEEP COMPLETE` — replay lineage、selection lock域、canonical presentation/overlay alignment、Refresh/layout lifecycle及测试残余已闭合。
-- Milestone 4–7：`PENDING`；本次不得开始。
+- Milestone 4：`COMPLETE / SWEEP COMPLETE` — exact pair/resync、原子PanelState、canonical selector/threshold、streaming archive以及Qt worker/close均已闭合；全树1498 tests通过。
+- Milestone 5–7：`PENDING`；本次不得开始。
 
 ### Milestone 3完成边界
 
@@ -27,7 +28,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-先提交`Fix post-milestone residuals`并确认worktree clean；随后将Milestone 4标为`IN PROGRESS`。用户新报告的Selector Off与FacetGrid overview交互属于Milestone 4第一批行为修复。
+Milestone 4的代码、验证和residual sweep均已完成。提交后立即停止，等待用户继续讨论正式链P50/P95约150/167 ms的Plot/Fit性能；100 ms是profile警戒线，不是硬验收门。不得开始M5。
 
 ## 2. Milestone状态
 
@@ -37,7 +38,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 | 1 | Dead framework、parallel pipeline、test-only surface、duplicate launcher/docs/tests删除 | COMPLETE / SWEEP COMPLETE | 原commit + residual fix；见§8 |
 | 2 | Data/Durable/Installation truth | COMPLETE / SWEEP COMPLETE | 原commit + residual fix；见§8 |
 | 3 | Canonical Runtime live与Logic Node contract | COMPLETE / SWEEP COMPLETE | 两个M3 commits + residual fix；见§8 |
-| 4 | Exact Data/Fit/Overlay与Qt lifecycle | PENDING | 已记录Selector边界：Off禁用plot全部pointer gesture；FacetGrid overview即使On也只允许focus，不允许area |
+| 4 | Exact Data/Fit/Overlay与Qt lifecycle | COMPLETE / SWEEP COMPLETE | `Make data, fit, overlay, and Qt lifecycle exact and atomic`；见§9 |
 | 5 | Pulse/Camera/Remote/FPGA | PENDING | — |
 | 6 | USB-only SLM与robust Feedback | PENDING | — |
 | 7 | One distribution、evidence lanes、final docs | PENDING | — |
@@ -182,7 +183,7 @@ Milestone 2 commit：`Make dataset, archive, path, and installation truth strict
 
 Milestone 3 commits：`Unify Runtime live data and task previews`；验收follow-up `Fix canonical full signal presentation`。
 
-本Checkpoint随follow-up commit落盘；commit后立即停止，不进入Milestone 4，等待用户明确确认。
+该follow-up当时随commit落盘并按门停止；之后仅在用户明确确认后才开始Milestone 4。
 
 ## 8. M1–M3 post-milestone residual closure
 
@@ -217,9 +218,49 @@ Milestone 3 commits：`Unify Runtime live data and task previews`；验收follow
 - M4：Plot-owned原子PanelState operation、首mount多front、exact data+fit queue、selector Off/FacetGrid overview、Viewer唯一PanelState parser、Qt/executor bounded close与whole-archive bytes materialization的性能/owner收口。
 - M7：单distribution package-data（含scan JSON templates）、fresh notebook lane、`save_npz(path)` persistence/public-API policy、Calibration/figure format version migration与最终安装文档。
 
-Fix commit：`Fix post-milestone residuals`。该commit之后才允许把Milestone 4改为`IN PROGRESS`。
+Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确认才开始Milestone 4；目前M4也已完成。
 
-## 9. Checkpoint更新规则
+## 9. Milestone 4 completion与residual closure
+
+### Exact pair、selector与presentation
+
+- `display_interval`是Panel data+fit admission cadence。被admit的revision在支持预算内严格FIFO；Data与matching Fit只以一个front原子present。最老pending超过1秒或retained immutable arrays超过64 MiB时，active与queued revisions立即发布同source identity的invalid gap并loud报告一次，协作式取消当前fit，只保留then-latest继续；迟到的非协作式fit不能提交stale pair，Qt/Stop/close不永久latch。
+- PlotSession只保留一个serial analysis executor。prepare、manual fit与live fit不再由第二executor或package-global stripe/facet pool并行；fit request、warm state、accepted fit与render仍由PlotSession唯一拥有。
+- PanelState作为一个原子Plot target应用：no-op为0 solve/0 render/0 front；title/interval不触发Plot；display/semantic/fit各最多一个完整front；最终render失败会完整rollback，旧fit cancellation/Future settlement只在commit后发生。Startup initial front先于adaptive task，same-front Qt handoff幂等，不再依赖ghost front。
+- Fit范围唯一优先级为committed Area ROI（或X-range）→viewport→full range。Plot-native selector在Workbench ack前保持authority；FacetGrid selector保留focused-cell identity。真实Area后立即点击Fit的old-red证明26×26 ROI、676 samples，不会被空PanelState重放成full frame。
+- SelectionEvent携带generation/revision、canonical/display bounds、scope/facet/repeat meaning；Workbench不再读取Plot private projection。Restored selector先在Panel已接受publication N上产生derived truth，再于同generation追到Plane latest N+1并继续N+2；processor completion直接唤醒现有Board owner turn，不等待下一periodic beat。
+- Per-facet classifier threshold以axis id+canonical coordinate为唯一plural truth；删除最后一个index/scalar truth与`PanelPlotAnnotations` archive。Selector Off禁全部plot pointer gesture并把wheel交给board；FacetGrid overview在On时也只允许double-click focus，focused cell才接受area/pan/zoom。
+
+### Archive、Qt与owned lifecycle
+
+- Figure archive唯一writer改为`write_figure_archive(BinaryIO)` streaming encoder；Workbench与Calibration把same-directory atomic temp stream直接交给它，不再构造archive-sized bytes。Formal Panel Save冻结同一PanelState/frozen snapshot/exact viewport，后台archive-first再render；失败不会留下缺science data的图片。
+- FigureViewer的open/dataset/configure/resize/save/close全部completion-driven：candidate先成功mount再retire old，失败恢复last accepted figure；saved fit、coordinate thresholds与exact Figure viewport通过同一次atomic configure恢复。
+- TaskConsole/LiveBoard、Device Manager/Experiment flow、Pulse SAFE/Preview与Panel Save各由明确existing owner关闭。Qt slots不执行I/O、fit、device tune或等待Future；window在owned worker/claim/host真实退出前保持可见并诚实拒绝close。ExperimentSession即使installation close失败也会关闭Plane。
+- Generic image overlay仍由`zlc_plot` contract/geometry/adapter拥有；Workbench没有concrete Logic Node import，Data/Fit/overlay都从同一accepted canonical snapshot与same-shot lineage投影。
+
+### Profile与验证
+
+- 正式offscreen TaskConsole链：repeat=0 Camera 96×128、主图26×26 Area radial fit、并行ROI image、fit amplitude Rolling，真实100 ms timer。去掉两个额外cadence wait后，24个稳态revision总延迟P50/P95为149.97/166.83 ms；source→coherent prepare 46.99/62.91，fit 23.61/30.51，paired render/publish 54.31/58.25，fit publication→Rolling prepare 0.33/1.29，Rolling render→accept 18.88/21.11 ms。剩余是authored beat、必要fit与两个实际raster/Qt surface，不为边际收益增加新调度框架。
+- First mount的1/4/8 panels从5/20/40 fronts降为2/8/16（initial+真实DPR）；title为0 front，display为1，fit arm为1 solve+1 front，fit-armed Edit为2。invalid target与final-render failure均保持旧state/front。
+- 全仓current checkout八包一次完整运行：`1498 passed, 6 warnings in 427.82s`；warnings仅vendor SWIG deprecation。Runtime+Plot单组484 passed，UI+Workbench单组488 passed，Atom全套310 passed。
+- 81个changed Python文件AST解析通过；八包import均解析到本checkout；59个active Markdown relative links全部存在；旧API/alias/test-only wake与pending probes搜索为0；无新增production file/class，删除3个历史文件；`git diff --check`无error，仅line-ending warnings。未访问hardware、real camera/SLM/FPGA或real-screen。
+
+### Gate 17 consumer/test/docs sweep
+
+- Candidate相对启动HEAD `af54e24`：98 files，`+7965/-3349`，净增4616行；其中production 46 files `+4070/-2199`（净增1871）、tests 38 files `+3657/-1035`（净增2622）、active docs 14 files `+238/-115`（净增123）。
+- Production增量主要是Plot exact-pair/atomic transaction/coordinate selector（zlc_plot净增1046）与Workbench completion-driven Console/Viewer/Save/device/Pulse ownership（zlc_workbench净增736）；Runtime净增74用于publication catch-up与owed presentation，UI与Data净增0，Atom净增15。没有新增file/class或plugin-specific Workbench framework。
+- Test分类：KEEP真实Camera Area→main fit→invalid gap→Rolling断线、active backlog即时resync、atomic rollback/no-op、restored N→latest catch-up、formal Qt Save/Viewer/close与Selector interaction；MERGE wait/bytes resync为参数化gate并共享blocked-fit fixture、合并重复semantic/rollback/Qt window setup；DELETE capacity-one/latest-drop旧政策、private helper/Port/container窥视、OwnerChannels/SelectionBridge self-tests、旧event-snapshot直喂Plot、package-local launcher保活与陈旧绝对随机阈值。全树test函数只从1246增至1270（净增24）；测试LOC增长来自真实跨层Qt/lifecycle/lineage纵向，而非数千个新测试。
+- Consumer/owner sweep删除package-global fit pool、second prepare/fit executor、`apply_panel_fit`/`compose_panel_spec`、`PanelPlotAnnotations`、OwnerChannels wrapper、SelectionBridge test-only Event/introspection、arbiter/port pending probes及同步Figure/Pulse preview路径；active旧名均为0。
+
+### 明确defer与停止门
+
+- 100 ms只保留为正式链profile警戒线。当前P50/P95约150/167 ms已无额外cadence、HOL、错误串行或重复render；是否继续做更大性能取舍由用户在本commit后讨论，本milestone不为百分之几/十几的边际收益新增executor/cache/framework。
+- 不可中断的vendor discovery保持window可见并拒绝close，直到真实future结束；hardware transport cancellation/priority属于M5，不把`shutdown(wait=False)`冒充安全退出。
+- 普通Pulse Stop/FIRE wire priority、Camera/Remote/FPGA归M5；SLM USB/context/feedback归M6；single distribution/fresh install/notebook与final docs归M7。M4未访问hardware，也不把offscreen/virtual证据冒充实验机验收。
+
+Milestone 4 commit：`Make data, fit, overlay, and Qt lifecycle exact and atomic`。提交后立即停止，不进入M5，等待用户的Plot/Fit性能讨论。
+
+## 10. Checkpoint更新规则
 
 每个milestone开始/完成、长测试前或新用户裁决后立即更新：
 

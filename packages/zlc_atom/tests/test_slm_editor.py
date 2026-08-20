@@ -547,7 +547,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         blocker = object()
         lease = session.device_use.acquire_command(
             blocker, "feedback task",
-            (DeviceClaim("slm", "slm", device, "exclusive"),),
+            (DeviceClaim("slm", "slm", device),),
         )
         try:
             assert control.send() is True
@@ -1409,7 +1409,7 @@ def test_send_command_keeps_qt_responsive_holds_lease_and_close_retries(
         with np.testing.assert_raises(DeviceUseBusy):
             session.device_use.acquire_command(
                 object(), "other command",
-                (DeviceClaim("slm", "slm", device, "exclusive"),),
+                (DeviceClaim("slm", "slm", device),),
             )
 
         _pump(app, lambda: len(heartbeat) >= 3)

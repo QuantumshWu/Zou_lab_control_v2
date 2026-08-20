@@ -823,6 +823,22 @@ class FluentParameterForm(QtWidgets.QWidget):
 
     changed = QtCore.pyqtSignal(str)
 
+    @staticmethod
+    def _dependency_map(spec: FormSpec) -> dict[str, list[str]]:
+        declared = set(spec.keys)
+        dependents: dict[str, list[str]] = {}
+        for field in spec.fields:
+            if field.enabled_when is None:
+                continue
+            controller = field.enabled_when[0]
+            if controller not in declared:
+                raise KeyError(
+                    f"field {field.key!r} is enabled by {controller!r}, "
+                    "which this form does not declare"
+                )
+            dependents.setdefault(controller, []).append(field.key)
+        return dependents
+
     def __init__(
         self,
         spec: FormSpec,
@@ -849,7 +865,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._handlers: dict[str, FormWidgetHandler] = {}
         self._rows: dict[str, QtWidgets.QWidget] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
-        self._dependents: dict[str, list[str]] = {}
+        self._dependents = self._dependency_map(spec)
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -879,22 +895,11 @@ class FluentParameterForm(QtWidgets.QWidget):
         # once they have.  Indexed BY the field that decides, so editing
         # anything else costs nothing: a form of thirty rows would otherwise
         # re-read every dependency on every keystroke.
-        for field in spec.fields:
-            if field.enabled_when is None:
-                continue
-            controller = field.enabled_when[0]
-            if controller not in self._widgets:
-                raise KeyError(
-                    f"field {field.key!r} is enabled by {controller!r}, "
-                    "which this form does not declare"
-                )
-            self._dependents.setdefault(controller, []).append(field.key)
-        if self._dependents:
-            # Through the form's own change signal rather than each widget's:
-            # a switch toggles, a combo changes index and a text box finishes
-            # editing, and normalising those three into one is what this
-            # signal is for.
-            self.changed.connect(self._controller_changed)
+        # Through the form's own change signal rather than each widget's: a
+        # switch, combo and text edit all reach one dependency path.  Connect
+        # once even when the initial schema has no dependencies; reconcile may
+        # introduce them later.
+        self.changed.connect(self._controller_changed)
         if values is not None:
             self.populate(values)
         for controller in self._dependents:
@@ -908,7 +913,10 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._fields[controller], self._widgets[controller]
             )
             self._widgets[dependent].setEnabled(
-                any(current == value for value in enabling)
+                any(
+                    type(current) is type(value) and current == value
+                    for value in enabling
+                )
                 and not field.unavailable
             )
 
@@ -946,7 +954,13 @@ class FluentParameterForm(QtWidgets.QWidget):
             if field.kind == "choice" and field.choices:
                 self._handlers[key].write(field, widget, field.choices[0].value)
             elif field.kind in {"int", "float", "number"}:
-                value = field.minimum if field.minimum is not None else 0
+                value = (
+                    field.minimum
+                    if field.minimum is not None
+                    else field.maximum
+                    if field.maximum is not None and field.maximum < 0
+                    else 0
+                )
                 self._handlers[key].write(field, widget, value)
         self.changed.emit(key)
 
@@ -1102,6 +1116,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             )
             for field in spec.fields
         }
+        new_dependents = self._dependency_map(spec)
 
         old_fields = self._fields
         replacements: dict[
@@ -1229,8 +1244,11 @@ class FluentParameterForm(QtWidgets.QWidget):
             self._spec = spec
             self._fields = {field.key: field for field in spec.fields}
             self._handlers = new_handlers
+            self._dependents = new_dependents
         finally:
             self.setUpdatesEnabled(True)
+        for controller in self._dependents:
+            self._controller_changed(controller)
 
     def refresh(self) -> None:
         """Refresh every handler, preserving legal selections and edit silence."""

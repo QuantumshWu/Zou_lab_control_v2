@@ -122,6 +122,8 @@ def build(
     device_use: object | None = None,
     allow_dial: bool = True,
     connection_label: str | None = None,
+    run_off_thread=None,
+    request_close=None,
 ) -> object:
     """Wire one editor window, with or without a pulse in it."""
 
@@ -146,7 +148,11 @@ def build(
         # The preview page lays content out at its natural size rather than
         # stretching it, so nothing may be mounted before a front exists: a
         # raster host has no size until it has painted one.
-        host.wait_for_front(5.0)
+        try:
+            host.wait_for_front(5.0)
+        except BaseException:
+            host.close()
+            raise
         return host
 
     def update_preview(host, timeline, *, size: str = "2x2"):
@@ -178,6 +184,8 @@ def build(
         connection_label=(
             "Experiment session" if connection_label is None else str(connection_label)
         ),
+        run_preview_work=run_off_thread,
+        request_preview_close=request_close,
     )
 
 
@@ -214,6 +222,61 @@ def resolve(workspace=None, pulse=None):
     return space, state, path
 
 
+def _guard_window_close(
+    window: object,
+    *,
+    run_off_thread,
+    close_worker,
+    request_close,
+    refresh_timer: object | None = None,
+) -> None:
+    """Retire PulseGUI resources off Qt before allowing its window to vanish."""
+    closing = False
+    retired = False
+
+    def failed(error: BaseException) -> None:
+        nonlocal closing
+        closing = False
+        window.presenter.cancel_preview_close()
+        message = f"PulseGUI could not close: {error}"
+        window.set_summary(message)
+        window.show_warning(message)
+        if refresh_timer is not None:
+            refresh_timer.start()
+
+    def completed(_result: object) -> None:
+        nonlocal closing, retired
+        closing = False
+        retired = True
+        # ``attach_qt_worker`` decrements its pending count after this callback.
+        # Let that finish before the guard closes the worker and commits close.
+        request_close()
+
+    def guard() -> bool:
+        nonlocal closing
+        if retired:
+            return close_worker()
+        if closing:
+            return False
+        if refresh_timer is not None:
+            refresh_timer.stop()
+        window.set_summary("Stopping...")
+        if not window.presenter.prepare_preview_close():
+            return False
+        closing = True
+        try:
+            run_off_thread(
+                lambda: window.presenter.close(present=False),
+                completed,
+                failed,
+            )
+        except BaseException as error:
+            failed(error)
+        return False
+
+    window.set_close_guard(guard)
+
+
 def create_window(
     *,
     workspace=None,
@@ -229,6 +292,7 @@ def create_window(
     """
 
     from zlc_ui import open_pulse_editor
+    from ..board import attach_qt_owner_turn, attach_qt_worker
 
     space, state, path = resolve(workspace, pulse)
     # One call, one handle.  This layer never names a widget class: what comes
@@ -236,15 +300,27 @@ def create_window(
     window = open_pulse_editor(
         title="PulseGUI@Zou lab", window_ratio=window_ratio
     )
-    window.presenter = build(
+    run_off_thread, close_worker = attach_qt_worker("zlc-pulse-preview")
+    request_close = attach_qt_owner_turn(window.close)
+    try:
+        window.presenter = build(
+            window,
+            state,
+            path=path,
+            pulses_directory=str(space.pulses) if space is not None else "",
+            run_off_thread=run_off_thread,
+            request_close=request_close,
+        )
+    except BaseException:
+        close_worker()
+        window.close()
+        raise
+    _guard_window_close(
         window,
-        state,
-        path=path,
-        pulses_directory=str(space.pulses) if space is not None else "",
+        run_off_thread=run_off_thread,
+        close_worker=close_worker,
+        request_close=request_close,
     )
-    # The window owns the presenter for as long as it is open; closing it is
-    # what releases the plot worker and any board it dialled.
-    window.closed.connect(window.presenter.close)
     if connect:
         mode, _, endpoint = str(connect).partition(":")
         window.presenter.connect_to(mode, endpoint)
@@ -268,6 +344,7 @@ def create_bound_window(
     """
 
     from zlc_ui import open_pulse_editor
+    from ..board import attach_qt_owner_turn, attach_qt_worker
 
     from ..pulse_state import PulseEditorState
     from ..session import Workspace
@@ -276,6 +353,8 @@ def create_bound_window(
     window = open_pulse_editor(
         title="PulseGUI@Zou lab", window_ratio=window_ratio
     )
+    run_off_thread, close_worker = attach_qt_worker("zlc-pulse-preview")
+    request_close = attach_qt_owner_turn(window.close)
     try:
         window.presenter = build(
             window,
@@ -286,8 +365,11 @@ def create_bound_window(
             device_use=device_use,
             allow_dial=False,
             connection_label="Experiment session",
+            run_off_thread=run_off_thread,
+            request_close=request_close,
         )
     except BaseException:
+        close_worker()
         window.close()
         raise
     from ..board import attach_qt
@@ -295,16 +377,13 @@ def create_bound_window(
     refresh_timer = attach_qt(window.presenter.refresh_run_state, interval_ms=100)
     window._device_control_refresh_timer = refresh_timer
 
-    def close_bound_control() -> bool:
-        try:
-            window.presenter.close()
-        except BaseException as error:
-            window.show_warning(str(error))
-            return False
-        refresh_timer.stop()
-        return True
-
-    window.set_close_guard(close_bound_control)
+    _guard_window_close(
+        window,
+        run_off_thread=run_off_thread,
+        close_worker=close_worker,
+        request_close=request_close,
+        refresh_timer=refresh_timer,
+    )
     return window
 
 
@@ -325,12 +404,22 @@ def main(argv: list[str] | None = None) -> int:
         # The same composition, through the same entry: a smoke test, not
         # acceptance.  It used to build the body class directly, which is the
         # one shape this layer must not know.
+        def run_immediately(work, delivered, failed) -> None:
+            try:
+                result = work()
+            except BaseException as error:
+                failed(error)
+            else:
+                delivered(result)
+
         view = open_pulse_editor(window_ratio=0.4)
         presenter = build(
             view,
             state,
             path=path,
             pulses_directory=str(space.pulses) if space is not None else "",
+            run_off_thread=run_immediately,
+            request_close=lambda: None,
         )
         try:
             if arguments.connect:

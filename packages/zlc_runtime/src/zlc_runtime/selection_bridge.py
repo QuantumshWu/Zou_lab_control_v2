@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 import math
 from numbers import Real
-from threading import Event, RLock
+from threading import RLock
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
@@ -552,6 +552,7 @@ class SelectionBridge:
         *,
         bridge_id: str,
         source_publication_for: Callable[[int], object | None] | None = None,
+        request_owner_wake: Callable[[], object] | None = None,
     ) -> None:
         if not isinstance(plane, SignalDataPlane):
             raise TypeError("plane must be SignalDataPlane")
@@ -563,6 +564,8 @@ class SelectionBridge:
             source_publication_for
         ):
             raise TypeError("source_publication_for must be callable or None")
+        if request_owner_wake is not None and not callable(request_owner_wake):
+            raise TypeError("request_owner_wake must be callable or None")
         source_signal = canonical_text(source_signal, "SelectionBridge source_signal")
         bridge_id = canonical_text(bridge_id, "SelectionBridge bridge_id")
         if "/" in bridge_id or bridge_id.startswith("@"):
@@ -576,12 +579,13 @@ class SelectionBridge:
         #: accepted inside that revision's own commit), so provenance comes
         #: from the presentation side, never from a plane retention window.
         self._source_publication_for = source_publication_for
+        self._request_owner_wake = request_owner_wake
         self.bridge_id = bridge_id
         self._lock = RLock()
-        self._wake_event = Event()
         self._started = False
         self._closed = False
         self._selection: SelectionState | None = None
+        self._selection_publication: SignalPublication | None = None
         self._selection_epoch = 0
         self._selection_processor: _BridgeProcessor | None = None
         self._fit_processor: _BridgeProcessor | None = None
@@ -596,43 +600,9 @@ class SelectionBridge:
         self._output_enabled: dict[str, bool] = {}
 
     @property
-    def started(self) -> bool:
-        with self._lock:
-            return self._started and not self._closed
-
-    @property
-    def selection(self) -> SelectionState | None:
-        with self._lock:
-            return self._selection
-
-    @property
     def last_error(self) -> Exception | None:
         with self._lock:
             return self._last_error
-
-    def wait_for_wake(self, timeout: float | None = None) -> bool:
-        """Wait for one completed processor callback, then clear the wake."""
-
-        notified = self._wake_event.wait(timeout)
-        if notified:
-            self._wake_event.clear()
-        return notified
-
-    def signal_keys(self) -> tuple[str, ...]:
-        with self._lock:
-            processors = tuple(
-                item
-                for item in (self._selection_processor, self._fit_processor)
-                if item is not None
-            )
-            return tuple(
-                declaration_name
-                for processor in processors
-                for declaration_name in (
-                    self._signal_key(item.name)
-                    for item in processor.dataset_output_declarations
-                )
-            )
 
     def configure_outputs(self, enabled: Mapping[str, bool]) -> None:
         """Replace output switches and immediately replay held answers."""
@@ -646,6 +616,7 @@ class SelectionBridge:
             previous = self._output_enabled
             self._output_enabled = normalized
             selection = self._selection
+            selection_publication = self._selection_publication
             fit_event = self._fit_event
             fit_publication = self._fit_publication
             selection_names = {
@@ -668,6 +639,7 @@ class SelectionBridge:
             old_fit = self._fit_processor if fit_changed else None
             if selection_changed:
                 self._selection = None
+                self._selection_publication = None
                 self._selection_epoch += 1
                 self._selection_processor = None
             if fit_changed:
@@ -679,11 +651,31 @@ class SelectionBridge:
         if not started:
             return
         if selection_changed and selection is not None:
-            self._commit_selection(selection)
+            self._commit_selection(
+                selection,
+                source_publication=selection_publication,
+            )
         if fit_changed and fit_event is not None and fit_publication is not None:
             self._publish_fit_event(fit_event, fit_publication, accept_revision=False)
 
-    def start(self) -> None:
+    def start(
+        self,
+        *,
+        initial_selection: SelectionState | None = None,
+        initial_publication: SignalPublication | None = None,
+    ) -> None:
+        if initial_selection is not None and not isinstance(
+            initial_selection, SelectionState
+        ):
+            raise TypeError("initial_selection must be SelectionState or None")
+        if initial_publication is not None and not isinstance(
+            initial_publication, SignalPublication
+        ):
+            raise TypeError("initial_publication must be SignalPublication or None")
+        if (initial_selection is None) != (initial_publication is None):
+            raise ValueError(
+                "initial selection and its exact publication must be supplied together"
+            )
         with self._lock:
             if self._closed:
                 raise RuntimeError("SelectionBridge is closed")
@@ -706,6 +698,12 @@ class SelectionBridge:
             raise
         with self._lock:
             self._subscriptions.extend(subscriptions)
+        if initial_selection is not None:
+            assert initial_publication is not None
+            self._commit_selection(
+                initial_selection,
+                source_publication=initial_publication,
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -721,6 +719,7 @@ class SelectionBridge:
             self._selection_processor = None
             self._fit_processor = None
             self._selection = None
+            self._selection_publication = None
             self._selection_epoch += 1
             self._fit_event = None
             self._fit_publication = None
@@ -746,6 +745,7 @@ class SelectionBridge:
         if change is SelectionChange.REMOVED:
             with self._lock:
                 self._selection = None
+                self._selection_publication = None
                 self._selection_epoch += 1
                 processor = self._selection_processor
                 self._selection_processor = None
@@ -962,7 +962,17 @@ class SelectionBridge:
                 return
             raise
 
-    def _commit_selection(self, state: SelectionState) -> None:
+    def _commit_selection(
+        self,
+        state: SelectionState,
+        *,
+        source_publication: SignalPublication | None = None,
+    ) -> None:
+        if source_publication is not None and not isinstance(
+            source_publication, SignalPublication
+        ):
+            raise TypeError("source_publication must be SignalPublication or None")
+        exact_source = source_publication is not None
         with self._lock:
             if self._closed or not self._started:
                 return
@@ -972,10 +982,11 @@ class SelectionBridge:
             output_names = self._selection_output_names(state)
             self._selection_epoch += 1
             selection_epoch = self._selection_epoch
-        publication = None
+        publication = source_publication
         outputs = None
         if output_names:
-            publication = self._current_source_publication()
+            if publication is None:
+                publication = self._current_source_publication()
             if publication is None:
                 raise RuntimeError(
                     "committed selection arrived before source publication"
@@ -1003,6 +1014,7 @@ class SelectionBridge:
             old_processor = self._selection_processor
             self._selection_processor = None
             self._selection = state
+            self._selection_publication = publication
 
         if old_processor is not None:
             self._withdraw_processor(old_processor)
@@ -1019,20 +1031,21 @@ class SelectionBridge:
             self._publish_terminal("selection", outputs, publication)
             return
 
-        latest = self._current_source_publication()
-        if latest is None:
-            raise RuntimeError("committed selection arrived before source publication")
-        if latest is not publication:
-            publication = latest
-            source = publication.value(self._source_signal)
-            if source is None:
-                raise RuntimeError(
-                    "current source publication has no selected signal"
+        if not exact_source:
+            latest = self._current_source_publication()
+            if latest is None:
+                raise RuntimeError("committed selection arrived before source publication")
+            if latest is not publication:
+                publication = latest
+                source = publication.value(self._source_signal)
+                if source is None:
+                    raise RuntimeError(
+                        "current source publication has no selected signal"
+                    )
+                outputs = self._materialize_selection_outputs(
+                    self._source_snapshot(publication),
+                    state,
                 )
-            outputs = self._materialize_selection_outputs(
-                self._source_snapshot(publication),
-                state,
-            )
         with self._lock:
             if (
                 self._closed
@@ -1040,11 +1053,13 @@ class SelectionBridge:
                 or self._selection is not state
             ):
                 return
+            self._selection_publication = publication
             processor = self._new_processor("selection", output_names)
         self._plane.attach_latest_only_processor(
             processor,
             source_name=self._source_signal,
             initial_publication=publication,
+            paused=True,
         )
         with self._lock:
             install = (
@@ -1066,6 +1081,13 @@ class SelectionBridge:
                 publication,
                 trigger=("selection", state.revision),
             )
+            # The first answer belongs to the exact publication already on
+            # screen.  Only after that answer exists may this same derived
+            # generation join the source's current latest publication; doing
+            # it in the opposite order either rejects a lagged restored panel
+            # or lets its first ROI silently describe a newer shot.
+            self._plane.catch_up_latest_only_processor(processor)
+            self._processor_wake()
         except RuntimeError as error:
             if "obsolete parent" in str(error):
                 return
@@ -1229,6 +1251,10 @@ class SelectionBridge:
                 source_publication,
                 trigger=trigger,
             )
+            if processor._role == "selection":
+                with self._lock:
+                    if self._selection_processor is processor:
+                        self._selection_publication = source_publication
         except RuntimeError as error:
             if "obsolete parent" in str(error) or "generation is no longer active" in str(error):
                 return
@@ -1272,10 +1298,7 @@ class SelectionBridge:
         )
 
     def _withdraw_processor(self, processor: _BridgeProcessor) -> None:
-        try:
-            self._plane.cancel_latest_only_processor(processor)
-        finally:
-            self._plane.withdraw_processor(processor)
+        self._plane.cancel_latest_only_processor(processor)
 
     def _new_processor(
         self,
@@ -1298,7 +1321,10 @@ class SelectionBridge:
             self._last_error = error
 
     def _processor_wake(self) -> None:
-        self._wake_event.set()
+        with self._lock:
+            callback = None if self._closed else self._request_owner_wake
+        if callback is not None:
+            callback()
 
     def _signal_key(self, name: str) -> str:
         return f"@logic/{self.bridge_id}/{name}"

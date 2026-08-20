@@ -111,15 +111,10 @@ class _PreparedLiveFrame:
 
 @dataclass(frozen=True, slots=True)
 class _SolvedLiveFit:
-    """One pair-solved live fit travelling from the fit executor to its commit.
-
-    ``result`` is None when the solve was cancelled, hit a caller-authored
-    deadline, or failed; the paired data frame then commits without an
-    overlay and the next data revision is the only automatic retry.
-    """
+    """One successful exact fit travelling with its matching data revision."""
 
     started: _StartedFitRequest
-    result: "FitResult | FacetFitBatchResult | None"
+    result: "FitResult | FacetFitBatchResult"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +125,7 @@ class _LiveFrameFinalization:
     #: front is promoted (``publish_live_frame``) so a waiting fit future
     #: never observes a front older than its result.
     fit_resolution: "_FitResolution | None" = None
+    fit_event: "FitEvent | None" = None
 
 
 @dataclass(frozen=True, slots=True)

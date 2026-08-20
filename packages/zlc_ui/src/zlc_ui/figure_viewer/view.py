@@ -55,8 +55,8 @@ class FigureViewerView(QtWidgets.QWidget):
                 ("Raw", ()),
             ),
             path_label="File",
-            path_caption="Open a saved figure (image or .npz)",
-            file_filter="Saved figures (*.png *.jpg *.jpeg *.npz);;All files (*)",
+            path_caption="Open a saved figure archive (.npz)",
+            file_filter="Saved figure archives (*.npz)",
             initial_status="Open a current saved Figure (.npz).",
             parent=self,
         )
@@ -148,9 +148,6 @@ class FigureViewerView(QtWidgets.QWidget):
         """The card's picker.  Kept as a name so a test can still find it."""
 
         return self.figure_card.signal_combo
-
-    def set_figure_title(self, text: str) -> None:
-        self.figure_card.set_title(str(text))
 
     def set_figure_size(self, size: str) -> None:
         self.figure_card.set_panel_size(str(size))

@@ -22,8 +22,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
+from threading import Lock
 
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
@@ -73,18 +74,24 @@ class DeviceManagerPresenter:
         initial_config: InstallationConfig | None = None,
         initialize_session: Callable[[InstallationConfig], object] | None = None,
         on_initialized: Callable[[object], None] | None = None,
+        prepare_shutdown: Callable[[object], bool] | None = None,
         shutdown_session: Callable[[object], None] | None = None,
+        on_shutdown: Callable[[object], None] | None = None,
         on_device_open: Callable[[str], None] | None = None,
         run_off_thread: Callable[..., None] | None = None,
+        close_worker: Callable[[], bool] | None = None,
     ) -> None:
         if initial_config is not None and not isinstance(initial_config, InstallationConfig):
             raise TypeError("initial_config must be InstallationConfig or None")
         for value, name in (
             (initialize_session, "initialize_session"),
             (on_initialized, "on_initialized"),
+            (prepare_shutdown, "prepare_shutdown"),
             (shutdown_session, "shutdown_session"),
+            (on_shutdown, "on_shutdown"),
             (on_device_open, "on_device_open"),
             (run_off_thread, "run_off_thread"),
+            (close_worker, "close_worker"),
         ):
             if value is not None and not callable(value):
                 raise TypeError(f"{name} must be callable or None")
@@ -97,6 +104,7 @@ class DeviceManagerPresenter:
         #: below were never painted, and the window was a frozen rectangle for
         #: however long the hardware took.
         self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
+        self._close_worker = (lambda: True) if close_worker is None else close_worker
         self.view = view
         self.path = Path(path)
         # The real catalog, not a copy of it: a window that listed its own
@@ -117,10 +125,15 @@ class DeviceManagerPresenter:
         self.saved = True
         self.busy = False
         self._closed = False
+        self._scan_lock = Lock()
+        self._scan_pool: ThreadPoolExecutor | None = None
+        self._scan_pending: set[object] = set()
         self._initial_config = initial_config
         self._initialize_session = initialize_session
         self._on_initialized = on_initialized
+        self._prepare_shutdown = prepare_shutdown
         self._shutdown_session = shutdown_session
+        self._on_shutdown = on_shutdown
         self._on_device_open = on_device_open
         self._active_session: object | None = None
         self._active_config: InstallationConfig | None = None
@@ -206,10 +219,11 @@ class DeviceManagerPresenter:
             return False
         try:
             config = load_installation_config(self.path)
+            devices = [self._canonical_device(item) for item in config.devices]
         except Exception as error:
             self._report(f"cannot read {self.path.name}: {error}", severity="error")
             return False
-        self.devices = list(config.devices)
+        self.devices = devices
         self._baseline_devices = tuple(self.devices)
         self.saved = True
         self._show()
@@ -283,7 +297,10 @@ class DeviceManagerPresenter:
     def discover(self) -> bool:
         """Scan each hardware family without connecting or configuring it."""
 
-        if self.busy:
+        if self._closed:
+            self._report("device manager is closed", severity="error")
+            return False
+        if self.busy or self._scan_active():
             return False
         self.busy = True
         self._show()
@@ -334,24 +351,47 @@ class DeviceManagerPresenter:
         pool = ThreadPoolExecutor(
             max_workers=len(descriptors), thread_name_prefix="zlc-scan"
         )
-        try:
-            pending = {
-                pool.submit(descriptor.discover): descriptor
-                for descriptor in descriptors
-            }
-            for future, descriptor in pending.items():
-                try:
-                    found.extend(future.result(timeout=_FAMILY_SCAN_DEADLINE_SECONDS))
-                except FutureTimeout:
-                    failures.append(
-                        f"{descriptor.type_id}: no answer within "
-                        f"{_FAMILY_SCAN_DEADLINE_SECONDS:g}s"
-                    )
-                except Exception as error:
-                    failures.append(f"{descriptor.type_id}: {error}")
-        finally:
-            pool.shutdown(wait=False)
+        pending = {
+            pool.submit(descriptor.discover): descriptor
+            for descriptor in descriptors
+        }
+        with self._scan_lock:
+            if self._scan_pending:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError("a previous hardware scan is still running")
+            self._scan_pool = pool
+            self._scan_pending = set(pending)
+        for future in pending:
+            future.add_done_callback(self._scan_finished)
+        done, unfinished = wait(
+            tuple(pending),
+            timeout=_FAMILY_SCAN_DEADLINE_SECONDS,
+        )
+        for future, descriptor in pending.items():
+            if future in unfinished:
+                failures.append(
+                    f"{descriptor.type_id}: no answer within "
+                    f"{_FAMILY_SCAN_DEADLINE_SECONDS:g}s"
+                )
+                continue
+            try:
+                found.extend(future.result())
+            except Exception as error:
+                failures.append(f"{descriptor.type_id}: {error}")
         return found, failures
+
+    def _scan_finished(self, future: object) -> None:
+        pool = None
+        with self._scan_lock:
+            self._scan_pending.discard(future)
+            if not self._scan_pending:
+                pool, self._scan_pool = self._scan_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False)
+
+    def _scan_active(self) -> bool:
+        with self._scan_lock:
+            return bool(self._scan_pending)
 
 
     def add_discovered(self, instance_id: str) -> str:
@@ -405,12 +445,11 @@ class DeviceManagerPresenter:
         )
 
     def set_type(self, instance_id: str, type_id: str) -> bool:
-        """Change what a device IS, keeping every setting its new type shares.
+        """Change what a device is, starting from that type's own defaults.
 
-        A qCMOS and a Basler both have an exposure; changing between them and
-        being handed a blank exposure box is how a bench ends up running at the
-        default.  What the new type does not have is dropped, because it has
-        nowhere to go.
+        Equal field names do not establish equal hardware meaning, unit or
+        safe range.  Carrying values by spelling silently transfers one
+        device's command into another device's schema.
         """
 
         descriptor = self.types.get(str(type_id))
@@ -419,17 +458,12 @@ class DeviceManagerPresenter:
         current = self._device(instance_id)
         if current is None or current.type_id == descriptor.type_id:
             return False
-        kept = {
-            name: value
-            for name, value in current.parameters.items()
-            if name in descriptor.authoring_schema.field_names
-        }
         return self._replace(
             instance_id,
             lambda item: replace(
                 item,
                 type_id=descriptor.type_id,
-                parameters=descriptor.authoring_schema.project_values(kept),
+                parameters=descriptor.authoring_schema.project_values(),
             ),
         )
 
@@ -493,7 +527,7 @@ class DeviceManagerPresenter:
         if self._closed:
             self._report("device manager is closed", severity="error")
             return False
-        if self.busy:
+        if self.busy or self._scan_active():
             return False
         if self._initialize_session is None:
             self._report(
@@ -582,22 +616,47 @@ class DeviceManagerPresenter:
             return True
         if self.busy:
             return False
+        if self._prepare_shutdown is not None:
+            try:
+                prepared = self._prepare_shutdown(session)
+            except Exception as error:
+                self._report(f"devices did not prepare to shut down: {error}", severity="error")
+                return False
+            if not prepared:
+                return False
         self.busy = True
         self._show()
         self._report("shutting down devices")
-        try:
+
+        completed = False
+
+        def work() -> object:
             self._retire_session(session)
-        except Exception as error:
+            return session
+
+        def failed(error: BaseException) -> None:
             self.busy = False
             self._show()
             self._report(f"devices did not shut down: {error}", severity="error")
-            return False
-        self._active_session = None
-        self._active_config = None
-        self.busy = False
-        self._show()
-        self._report("devices shut down")
-        return True
+
+        def finished(retired: object) -> None:
+            nonlocal completed
+            if self._active_session is not retired:
+                raise RuntimeError("another session replaced the one being shut down")
+            self._active_session = None
+            self._active_config = None
+            self.busy = False
+            if self._on_shutdown is not None:
+                self._on_shutdown(retired)
+            self._show()
+            self._report("devices shut down")
+            completed = True
+
+        try:
+            self._run_off_thread(work, finished, failed)
+        except BaseException as error:
+            failed(error)
+        return completed
 
     def _retire_session(self, session: object) -> None:
         if self._shutdown_session is not None:
@@ -677,6 +736,17 @@ class DeviceManagerPresenter:
             None,
         )
 
+    def _canonical_device(self, item: DeviceInstanceConfig) -> DeviceInstanceConfig:
+        """Materialize one known type's defaults into the editable truth."""
+
+        descriptor = self.types.get(item.type_id)
+        if descriptor is None:
+            return item
+        return replace(
+            item,
+            parameters=descriptor.authoring_schema.project_values(item.parameters),
+        )
+
     def _free_name(self, domain: str) -> str:
         taken = {item.role for item in self.devices}
         if domain not in taken:
@@ -740,20 +810,13 @@ class DeviceManagerPresenter:
             if descriptor is None:
                 continue
             spec = project_schema(descriptor.authoring_schema)
-            # The schema says which fields exist; the file says which were
-            # chosen.  A device stores only what was set, so a type that GAINS
-            # a field leaves every apparatus written before it short of one --
-            # and the form, rightly, refuses a partial set of keys.  Opening
-            # the file then failed outright: an editor that cannot show a
-            # saved apparatus is an editor that cannot fix it either.
-            stored = dict(item.parameters)
             self.view.set_form_spec(
                 item.instance_id,
                 spec,
                 tuple(
                     (
                         field.key,
-                        display_value(stored.get(field.key, field.default)),
+                        display_value(item.parameters[field.key]),
                     )
                     for field in spec.fields
                 ),
@@ -810,15 +873,13 @@ class DeviceManagerPresenter:
         self,
         devices: Sequence[DeviceInstanceConfig],
     ) -> str | None:
-        shape = tuple((item.instance_id, item.type_id) for item in devices)
+        current = InstallationConfig(tuple(devices))
         for name in installation_template_names():
             try:
                 config = installation_config_from_template(self.catalog, name)
             except KeyError:
                 continue
-            if shape == tuple(
-                (item.instance_id, item.type_id) for item in config.devices
-            ):
+            if current == config:
                 return name
         return None
 
@@ -845,7 +906,21 @@ class DeviceManagerPresenter:
 
         if self._closed:
             return True
+        if self.busy:
+            self._report("device operation is still running", severity="warning")
+            return False
+        if self._scan_active():
+            self._report("vendor hardware scan is still running", severity="warning")
+            return False
         if not self.shutdown_active():
+            return False
+        try:
+            worker_closed = self._close_worker()
+        except Exception as error:
+            self._report(f"device worker did not close: {error}", severity="error")
+            return False
+        if not worker_closed:
+            self._report("device worker is still running", severity="warning")
             return False
         self._closed = True
         return True

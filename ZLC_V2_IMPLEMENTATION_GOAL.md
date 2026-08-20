@@ -1,6 +1,6 @@
 # ZLC v2 Architecture Convergence — Implementation Goal
 
-状态：ACTIVE；用户已授权执行。Milestone 1–3与residual closure完成，Milestone 4在独立fix commit之后开始；准确状态看`IMPLEMENTATION_PLAN.md`。
+状态：ACTIVE；Milestone 1–4及residual closure完成。当前按用户要求停止在M4 commit，下一步讨论已记录的Plot/Fit profile；Milestone 5–7尚未开始。准确状态看`IMPLEMENTATION_PLAN.md`。
 
 ## 1. 唯一目标
 
@@ -65,10 +65,11 @@
 
 ### 3.3 Data/Fit/Overlay
 
-- fit armed时每个Data revision都必须fit，不丢revision、不只fit latest；
+- `display_interval`定义Panel pair admission；fit armed时在1秒显示延迟预算内按顺序fit每个已admit Data revision。区间内更高频的raw Monitor publication由Panel明确latest-sample，不冒充已经显示/fit的revision；
 - Panel只原子显示`data@N + fit@N`；不得出现data无fit或fit与data不对应；
-- FitResult保留source parent/revision，Rolling trace逐revision连续；
-- fit跟不上时明确报错，不静默drop；raw data仍完整保存并可离线重算；
+- Fit数据范围严格按committed Area ROI（或显式X-range）→viewport→full range；FacetGrid重放selector必须携带focused cell identity，不得静默降级；
+- FitResult保留source parent/revision，正常负载下Rolling trace逐revision连续；
+- 最老pending等待超过1秒或队列超过64 MiB时明确报一次resync错误，丢弃尚未fit的中间revision并从latest继续；断点不得冒充成功fit，Panel/Qt/Stop/close不得被永久锁住，raw data仍完整保存并可离线重算；
 - worker可后台计算，但Qt呈现必须atomic且不阻塞owner thread；
 - Overlay与Data/Fit共享同一scope/axis/fate projection；无法唯一对齐即拒绝；
 - Selector Off时plot完全不接管area、zoom/pan、滚轮或双击focus，普通滚轮滚外层board；Selector On时FacetGrid overview只允许focus cell，不允许开始area selector。
@@ -245,13 +246,14 @@ Profiling：
 
 实现用户批准的exact paired pipeline：
 
-- fit armed后每source revision进入有序exact queue；
+- fit armed后，每个由authored `display_interval` admit的source revision在1秒支持预算内进入有序exact queue；
 - 每revision有一个FitResult，带source parent/revision；
-- Panel只present matching data+fit；Rolling trace无revision gap；
-- 不做latest drop；backlog超出经profiling确定的支持预算时loud error，raw data不丢；
+- Panel只present matching data+fit；正常负载下Rolling trace无revision gap；
+- 最老pending等待超过1秒或队列超过64 MiB时loud报告一次resync，丢弃未fit中间revision并只保留latest继续；不得永久latch，raw data不丢；
 - Fit计算后台执行，Qt不阻塞；
 - 一次PanelState transaction幂等，no-op=0 solve/0 render；title/layout不re-fit；
 - 删除重复configure/clear/replay和多front handoff；
+- 正式96×128 Camera、小Area ROI、主图fit、并行ROI image和一个fit-parameter Rolling链路以100 ms为profile警戒线；删除明显额外cadence/HOL/错误串行/重复render，但不为百分之几或十几的边际收益增加不相称的调度复杂度；
 - Overlay作为typed companion，Data/Fit/Overlay共同解析scope/axis/fate；ROI/binning使用同一坐标truth；
 - Selector Off时plot完全不接管area、zoom/pan、滚轮或双击focus，普通滚轮滚board；
 - Selector On时FacetGrid overview只允许双击进入cell，不允许开始area selector；area只在focused cell或非grid surface工作；
@@ -380,7 +382,7 @@ Docs：
 1. 当前tree不存在审计确认的dead parallel frameworks/pipelines/launchers/docs；
 2. 每个核心事实只有一个owner：dataset accumulation、live/final seal、PanelState decode、owner wake、figure codec、pulse execution、SLM context；
 3. Node只提交新数据，但Panel随时可从Runtime访问完整截至当前数据；
-4. Data/Fit每revision exact paired，Rolling fit无gap；Overlay投影与Data一致；
+4. Data/Fit在1秒预算内逐revision exact paired；超预算loud resync到latest且不断Qt/原始数据，Rolling断点不冒充成功fit；Overlay投影与Data一致；
 5. 新Logic Node由框架强制live/preview/terminal contract；
 6. Pulse Stop UI不阻塞，disconnect自动SAFE，second client takeover正确；
 7. FPGA source具有clock/SAFE/DONE/error/board/build闭合contract和自动RTL evidence；

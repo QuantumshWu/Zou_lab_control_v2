@@ -100,10 +100,11 @@ def test_an_interrupted_save_does_not_destroy_the_previous_archive(tmp_path, mon
 
     import zlc_workbench.archive as archive_module
 
-    def explode(*_args, **_kwargs):
+    def explode(stream, *_args, **_kwargs):
+        stream.write(b"partial")
         raise OSError("disk full")
 
-    monkeypatch.setattr(archive_module, "figure_bytes", explode)
+    monkeypatch.setattr(archive_module, "write_figure_archive", explode)
     with pytest.raises(OSError):
         write_figure_file(
             good,

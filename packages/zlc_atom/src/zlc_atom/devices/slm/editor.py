@@ -941,7 +941,7 @@ class SlmEditorControl(QtCore.QObject):
 
         lease = self.session.device_use.acquire_command(
             self, f"{self.device_key} SLM Editor",
-            (DeviceClaim(self.device_key, self.device_key, self.device, "exclusive"),),
+            (DeviceClaim(self.device_key, self.device_key, self.device),),
         )
         try:
             applied = self.device.apply_phase(expected)

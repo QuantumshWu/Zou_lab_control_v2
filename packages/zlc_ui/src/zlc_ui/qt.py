@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 import sys
 import threading
 from collections.abc import Sequence
 
-from PyQt5 import QtCore, QtGui, QtWidgets, sip
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .fluent.style import FONT, FONT_SIZE
 
@@ -16,7 +15,6 @@ from .fluent.style import FONT, FONT_SIZE
 _QT_ARGV: list[str] | None = None
 _QT_APP: QtWidgets.QApplication | None = None
 _QT_LOOP_ENABLED = False
-_QT_TEARDOWN_INSTALLED = False
 _KERNEL_WAKE_TIMER: QtCore.QTimer | None = None
 _KERNEL_WAKE_INTERVAL_MS = 50
 _WINDOWS_FLUENT_FONT_FILES = (
@@ -31,41 +29,6 @@ _WINDOWS_FLUENT_FONT_FILES = (
 
 def _fluent_font_size() -> int:
     return max(8, int(round(FONT_SIZE)))
-
-
-def _destroy_windows_before_python_lets_go() -> None:
-    """Take the widget tree down while Python can still be asked to.
-
-    Nothing owns the shutdown of a Qt tree by default.  CPython drops the
-    Python wrappers in its own order at exit and Qt destroys the C++ objects
-    in its own, and where a still-live object reaches for one already gone the
-    process dies with an access violation and no Python frame -- after every
-    line of the program has already run.  It is a race, so it shows up as a
-    window that "sometimes" crashes on close and a test that "sometimes"
-    fails: exactly the two things nobody can act on.
-
-    Whoever creates the QApplication is the only one who can close this
-    window, so it is done here, once, at the single entry: every top-level
-    widget is destroyed deterministically first, then the deferred deletions
-    are drained, and only then is the interpreter allowed to finish.
-    """
-
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        return
-    for widget in list(app.topLevelWidgets()):
-        if not sip.isdeleted(widget):
-            sip.delete(widget)
-    app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
-    app.processEvents()
-
-
-def _install_teardown() -> None:
-    global _QT_TEARDOWN_INSTALLED
-    if _QT_TEARDOWN_INSTALLED:
-        return
-    atexit.register(_destroy_windows_before_python_lets_go)
-    _QT_TEARDOWN_INSTALLED = True
 
 
 def _install_ipykernel_wake_timer(shell) -> None:
@@ -204,7 +167,6 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
         _ensure_fluent_scale()
         _QT_APP = app
         _enable_ipython_qt_loop()
-        _install_teardown()
         return app
 
     if threading.current_thread() is not threading.main_thread():
@@ -221,7 +183,6 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
     _QT_APP.setFont(QtGui.QFont(FONT, _fluent_font_size()))
     _ensure_fluent_scale()
     _enable_ipython_qt_loop()
-    _install_teardown()
     return _QT_APP
 
 

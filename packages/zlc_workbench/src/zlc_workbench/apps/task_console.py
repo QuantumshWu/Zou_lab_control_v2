@@ -127,14 +127,17 @@ def build_panel_host(plot_input, state):
     )
 
 
-def build_console(session, *, window_ratio=None):
+def build_console(session, *, window_ratio=None, request_close=None):
     """One console presenter over one session, with the view it drives."""
 
+    from ..panel_sizes import install as install_panel_sizes
+
+    install_panel_sizes()
     import zlc_plot as plot
 
     from zlc_ui import open_task_console
 
-    from ..board import attach_qt_owner_turn
+    from ..board import attach_qt_owner_turn, attach_qt_worker
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
 
@@ -164,13 +167,21 @@ def build_console(session, *, window_ratio=None):
             snapshot.block.schema, kind, cell_kind
         )
 
-    presenter = ConsolePresenter(
-        session,
-        view,
-        make_host=build_panel_host,
-        spec_for=_spec_for,
-        open_saved=lambda start: _open_saved_figure(view, start),
-    )
+    run_save, close_save_worker = attach_qt_worker("zlc-panel-save")
+    try:
+        presenter = ConsolePresenter(
+            session,
+            view,
+            make_host=build_panel_host,
+            spec_for=_spec_for,
+            open_saved=lambda start: _open_saved_figure(view, start),
+            request_close=view.close_later if request_close is None else request_close,
+            run_off_thread=run_save,
+            close_worker=close_save_worker,
+        )
+    except BaseException:
+        close_save_worker()
+        raise
     # Completion-driven presentation: a finished render's wake hops to the GUI
     # thread and commits immediately, instead of waiting for the next beat.
     presenter.board.wake.set_notify(
@@ -209,6 +220,10 @@ class ExperimentGuiFlow:
         self.timer = None
         self._closing_console = False
         self._closing_all = False
+        self._device_worker_run = None
+        self._device_worker_close = None
+        self._device_tune_active: str | None = None
+        self._device_shutdown_pending = False
 
     def open(self) -> "ExperimentGuiFlow":
         from zlc_atom.install import (
@@ -217,6 +232,7 @@ class ExperimentGuiFlow:
         )
 
         from .device_manager import create_window as create_device_window
+        from ..board import attach_qt_worker
 
         if self.devices is not None:
             return self
@@ -227,16 +243,31 @@ class ExperimentGuiFlow:
             else installation_config_from_template(catalog, str(self.template))
         )
         self.catalog = catalog
-        self.devices = create_device_window(
-            workspace=self.space.root,
-            window_ratio=self.window_ratio,
-            catalog=catalog,
-            initial_config=initial_config,
-            initialize_session=self._initialize_session,
-            on_initialized=self._open_work_windows,
-            shutdown_session=self._shutdown_session,
-            on_device_open=self.open_device_control,
-        )
+        # One flow-owned serial device worker: Manager discover/init/shutdown
+        # and generic tune share its existing busy policy and one close truth.
+        run, close = attach_qt_worker("zlc-devices")
+        self._device_worker_run = run
+        self._device_worker_close = close
+        try:
+            self.devices = create_device_window(
+                workspace=self.space.root,
+                window_ratio=self.window_ratio,
+                catalog=catalog,
+                initial_config=initial_config,
+                initialize_session=self._initialize_session,
+                on_initialized=self._open_work_windows,
+                prepare_shutdown=self._prepare_session_shutdown,
+                shutdown_session=self._shutdown_session,
+                on_shutdown=self._session_shutdown_complete,
+                on_device_open=self.open_device_control,
+                run_off_thread=run,
+                close_worker=close,
+            )
+        except BaseException:
+            close()
+            self._device_worker_run = None
+            self._device_worker_close = None
+            raise
         self.devices.set_close_guard(self._device_manager_close_guard)
         return self
 
@@ -257,6 +288,7 @@ class ExperimentGuiFlow:
             console, presenter = build_console(
                 session,
                 window_ratio=self.window_ratio,
+                request_close=self._console_owner_ready,
             )
             timer = attach_qt(
                 presenter.beat,
@@ -340,12 +372,17 @@ class ExperimentGuiFlow:
             ),
         )
 
-        def refresh(message: str = "", severity: str = "idle") -> None:
-            current = tuple(declare()) if fields else ()
+        def refresh(
+            current: tuple[object, ...],
+            message: str = "",
+            severity: str = "idle",
+        ) -> None:
+            nonlocal fields
+            fields = tuple(current)
             control.set_form(
-                project_schema(AuthoringSchema(current)),
+                project_schema(AuthoringSchema(fields)),
                 tuple(
-                    (field.name, display_value(field.default)) for field in current
+                    (field.name, display_value(field.default)) for field in fields
                 ),
             )
             control.show_status(
@@ -354,6 +391,13 @@ class ExperimentGuiFlow:
             )
 
         def commit(field_name: str) -> None:
+            active = self._device_tune_active
+            if active is not None:
+                control.show_status(
+                    f"{active} tune is still running; this edit was not queued",
+                    "warning",
+                )
+                return
             try:
                 wanted = dict(control.read_values())
                 lease = session.device_use.acquire_command(
@@ -363,29 +407,88 @@ class ExperimentGuiFlow:
                 )
             except DeviceUseBusy as error:
                 try:
-                    refresh(str(error), "warning")
+                    refresh(fields, str(error), "warning")
                 except Exception as refresh_error:
                     control.show_status(str(refresh_error), "error")
                 return
             except Exception as error:
                 control.show_status(str(error), "error")
                 return
-            try:
-                tune(str(field_name), float(wanted[str(field_name)]))
-            except Exception as error:
-                message, severity = str(error), "error"
-            else:
-                message, severity = f"{field_name} applied", "task"
-            finally:
+            run = self._device_worker_run
+            if run is None:
                 lease.release()
+                control.show_status("device tune worker is closed", "error")
+                return
+            name = str(field_name)
             try:
-                refresh(message, severity)
-            except Exception as error:
-                control.show_status(str(error), "error")
+                value = wanted[name]
+            except KeyError:
+                lease.release()
+                control.show_status(f"unknown runtime field {name!r}", "error")
+                return
+            self._device_tune_active = key
+            control.show_status(f"applying {name}", "task")
+
+            def work() -> tuple[object, ...]:
+                tune(name, value)
+                return tuple(declare())
+
+            def finish(current: tuple[object, ...] | None, error: BaseException | None) -> None:
+                try:
+                    lease.release()
+                finally:
+                    self._device_tune_active = None
+                try:
+                    refresh(
+                        fields if current is None else current,
+                        str(error) if error is not None else f"{name} applied",
+                        "error" if error is not None else "task",
+                    )
+                except Exception as refresh_error:
+                    control.show_status(str(refresh_error), "error")
+
+            try:
+                run(
+                    work,
+                    lambda current: finish(tuple(current), None),
+                    lambda error: finish(None, error),
+                )
+            except BaseException as error:
+                finish(None, error)
 
         control.field_committed.connect(commit)
         control.show_status("ready" if fields else "No runtime controls", "idle")
+        control.set_close_guard(
+            lambda: self._generic_control_close_guard(key, control)
+        )
         return control
+
+    def _generic_control_close_guard(self, key: str, control: object) -> bool:
+        if self._device_tune_active != str(key):
+            return True
+        control.show_status("device tune is still running", "warning")
+        return False
+
+    def _device_tune_idle(self) -> bool:
+        active = self._device_tune_active
+        if active is None:
+            return True
+        control = self.device_controls.get(active)
+        if control is not None:
+            control.show_status("device tune is still running", "warning")
+        return False
+
+    def _close_device_worker(self) -> bool:
+        if not self._device_tune_idle():
+            return False
+        close = self._device_worker_close
+        if close is None:
+            return True
+        if not close():
+            return False
+        self._device_worker_run = None
+        self._device_worker_close = None
+        return True
 
     def _retire_device_controls(self) -> None:
         for key, control in tuple(self.device_controls.items()):
@@ -395,32 +498,46 @@ class ExperimentGuiFlow:
                     raise RuntimeError(f"{key} control refused to close")
                 self.device_controls.pop(key, None)
 
-    def _retire_console(self, *, close_window: bool) -> None:
-        timer = self.timer
-        if timer is not None:
-            timer.stop()
-        presenter = self.console_presenter
-        if presenter is not None:
-            try:
-                presenter.close()
-            except BaseException:
-                if timer is not None:
-                    timer.start()
-                raise
-        self.timer = None
-        self.console_presenter = None
-        console, self.console = self.console, None
-        if close_window and console is not None:
-            console.set_close_guard(lambda: True)
-            console.close()
+    def _console_owner_ready(self) -> None:
+        if self._device_shutdown_pending and self.devices is not None:
+            self.devices.presenter.shutdown_active()
+            return
+        if self.console is not None:
+            self.console.close_later()
 
-    def _shutdown_session(self, session: object) -> None:
+    def _prepare_session_shutdown(self, session: object) -> bool:
         if self.session is not None and session is not self.session:
             raise RuntimeError("DeviceManager tried to retire another experiment session")
+        if not self._device_tune_idle():
+            return False
+        self._device_shutdown_pending = True
+        presenter = self.console_presenter
+        if presenter is not None and not presenter.close():
+            return False
         self._retire_device_controls()
-        self._retire_console(close_window=not self._closing_console)
+        if self.timer is not None:
+            self.timer.stop()
+        return True
+
+    def _shutdown_session(self, session: object) -> None:
         session.close()
+
+    def _session_shutdown_complete(self, session: object) -> None:
+        if self.session is not session:
+            raise RuntimeError("another experiment session replaced the retired one")
         self.session = None
+        self.console_presenter = None
+        self.timer = None
+        self._device_shutdown_pending = False
+        console = self.console
+        if self._closing_all:
+            if console is not None:
+                console.close_later()
+        else:
+            self.console = None
+            if console is not None:
+                console.set_close_guard(lambda: True)
+                console.close()
         if self.devices is not None and not self._closing_all:
             self.devices.restore()
 
@@ -430,11 +547,19 @@ class ExperimentGuiFlow:
         self._closing_console = True
         self._closing_all = True
         try:
+            if not self._device_tune_idle():
+                return False
+            if self.console_presenter is not None and not self.console_presenter.close():
+                return False
             if self.devices is not None:
                 if not self.devices.presenter.shutdown_active():
                     return False
-                self.devices.presenter.close()
+                if not self.devices.presenter.close():
+                    return False
+                if not self._close_device_worker():
+                    return False
                 self.devices.close()
+            self.console = None
             return True
         except BaseException:
             return False
@@ -446,25 +571,35 @@ class ExperimentGuiFlow:
 
         self._closing_all = True
         try:
-            return self.devices is None or self.devices.presenter.close()
+            if not self._device_tune_idle():
+                return False
+            if self.devices is not None and not self.devices.presenter.close():
+                return False
+            return self._close_device_worker()
         except BaseException:
             return False
 
-    def close(self) -> None:
-        """Retire device controls, Console, session, then DeviceManager."""
+    def close(self) -> bool:
+        """Advance composition shutdown without waiting on the Qt owner."""
 
         self._closing_all = True
+        if not self._device_tune_idle():
+            return False
         if self.console is not None:
-            console = self.console
-            console.close()
-            if self.console is not None:
-                raise RuntimeError("TaskConsole refused to close its active experiment")
+            self.console.close()
+            return self.console is None
         elif self.devices is not None:
             if not self.devices.presenter.shutdown_active():
-                raise RuntimeError("DeviceManager refused to retire its active session")
-            self.devices.presenter.close()
+                return False
+            if not self.devices.presenter.close():
+                return False
+            if not self._close_device_worker():
+                return False
             self.devices.close()
+        elif not self._close_device_worker():
+            return False
         self.devices = None
+        return True
 
 
 def create_experiment_flow(
@@ -498,7 +633,7 @@ def create_window(
     creates one session; its cards open controls on demand.
     """
 
-    from ..board import attach_qt
+    from ..board import attach_qt, attach_qt_worker
 
     if interval_ms is not None and int(interval_ms) <= 0:
         raise ValueError("interval_ms must be positive")
@@ -514,21 +649,11 @@ def create_window(
     timer = attach_qt(
         presenter.beat, interval_ms=_beat_interval_ms(presenter, interval_ms)
     )
-
-    def _release():
-        """Release owners in order, never closing devices under a live node."""
-
-        timer.stop()
-        try:
-            presenter.close()
-        except BaseException:
-            # A timed-out node still needs the normal beat to poll its worker.
-            # The close guard keeps the window, so keep that window responsive.
-            timer.start()
-            raise
-        session.close()
-
-    released: list[bool] = []
+    run_session_close, close_session_worker = attach_qt_worker(
+        "zlc-console-session-close"
+    )
+    session_closing = False
+    session_closed = False
 
     def _guard() -> bool:
         """Let go BEFORE the window goes, and keep it if letting go failed.
@@ -542,14 +667,34 @@ def create_window(
         the window up so the operator can try again.
         """
 
-        if released:
-            return True
-        try:
-            _release()
-        except BaseException:
+        nonlocal session_closing, session_closed
+        if not presenter.close():
             return False
-        released.append(True)
-        return True
+        timer.stop()
+        if session_closed:
+            return close_session_worker()
+        if session_closing:
+            return False
+        # A failed device close remains visible and retryable from the same X.
+        session_closing = True
+
+        def closed(_result: object) -> None:
+            nonlocal session_closing, session_closed
+            session_closing = False
+            session_closed = True
+            window.close_later()
+
+        def failed(error: BaseException) -> None:
+            nonlocal session_closing
+            session_closing = False
+            window.show_status(f"session did not close: {error}", "error")
+
+        try:
+            run_session_close(session.close, closed, failed)
+        except BaseException as error:
+            failed(error)
+            return False
+        return False
 
     window.presenter = presenter
     window.session = session

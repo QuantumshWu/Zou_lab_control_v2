@@ -7,24 +7,38 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from zlc_plot import PlotKind, describe_semantics
+from zlc_plot import (
+    PlotKind,
+    describe_semantics,
+    normalize_classifier_threshold_targets,
+)
 from zlc_plot.semantics import composed_spec
 
 
 __all__ = [
     "PanelFrozenData",
     "PanelState",
-    "apply_panel_fit",
-    "compose_panel_spec",
     "draws_image_surfaces",
     "project_panel_state",
 ]
 
 
-def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Own one shallow plain mapping without inventing a second state model."""
+def _state_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("panel state mapping keys must be text")
+        return MappingProxyType(
+            {key: _state_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_state_value(item) for item in value)
+    return value
 
-    return MappingProxyType(dict(values))
+
+def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Deep-own one panel-state mapping without a parallel mutable tree."""
+
+    return _state_value(values)
 
 
 def _document_value(value: Any) -> Any:
@@ -140,52 +154,6 @@ def project_panel_state(
     return candidate, semantic, parameters
 
 
-def compose_panel_spec(schema: object, spec: object, state: "PanelState") -> object:
-    """Compose saved semantics before a host performs its first render."""
-
-    return project_panel_state(schema, spec, state)[0]
-
-
-def apply_panel_fit(
-    host: object,
-    state: "PanelState | None",
-    *,
-    live: bool,
-    models: object = None,
-) -> object:
-    """Arm or clear this panel's authored fit on one host; return the operation.
-
-    THE decision of what a panel's ``fit`` record means, in one place.  What
-    each caller does with the returned operation legitimately differs -- the
-    console presents it when it lands, a save awaits it before writing the
-    file -- but "which model, or none" must not be re-derived per caller.
-
-    ``models`` is what this host offers, when the caller has already been
-    told: a record naming a model this data cannot be fitted with means
-    there is no fit to arm.  Callers used to check that themselves before
-    calling, in two places, one of which then armed the fit WITHOUT the rest
-    of the record.
-
-    Returns ``None`` only when there is no host operation to perform.
-    """
-
-    fit = {} if state is None else dict(state.fit)
-    model = fit.pop("model", None)
-    if model is not None and models is not None:
-        offered = {str(getattr(item, "model_id", item)) for item in tuple(models)}
-        if str(model) not in offered:
-            model = None
-    # ``live`` is the caller's fact about its host, not an archived value.
-    fit.pop("live", None)
-    if not model:
-        clear = getattr(host, "clear_fit", None)
-        return clear() if callable(clear) else None
-    run = getattr(host, "fit", None)
-    if not callable(run):
-        return None
-    return run(str(model), live=live, **fit)
-
-
 def draws_image_surfaces(kind: str, cell_kind: str) -> bool:
     """Whether the surfaces this declaration paints are images.
 
@@ -224,7 +192,7 @@ class PanelState:
     #: of them is being read.  Written down so a board comes back as it was
     #: left; empty means "nothing chosen", not "restore nothing".
     selector: Mapping[str, Any] = field(default_factory=dict)
-    classifier_threshold: Mapping[str, Any] = field(default_factory=dict)
+    classifier_thresholds: tuple[Mapping[str, Any], ...] = ()
     focused_cell: int | None = None
 
     def __post_init__(self) -> None:
@@ -272,7 +240,11 @@ class PanelState:
         )
         object.__setattr__(self, "selector", _plain_state(self.selector))
         object.__setattr__(
-            self, "classifier_threshold", _plain_state(self.classifier_threshold)
+            self,
+            "classifier_thresholds",
+            _state_value(
+                normalize_classifier_threshold_targets(self.classifier_thresholds)
+            ),
         )
         focused_cell = self.focused_cell
         if focused_cell is not None:
@@ -305,9 +277,84 @@ class PanelState:
             "overlay_signal": self.overlay_signal,
             "published_outputs": dict(self.published_outputs),
             "selector": _document_value(self.selector),
-            "classifier_threshold": _document_value(self.classifier_threshold),
+            "classifier_thresholds": _document_value(self.classifier_thresholds),
             "focused_cell": self.focused_cell,
         }
+
+    @classmethod
+    def from_document(cls, document: object) -> "PanelState":
+        """Decode the one strict PanelState grammar used by every reader."""
+
+        if not isinstance(document, Mapping):
+            raise TypeError("panel state must be an object")
+        expected = {
+            "signal",
+            "title",
+            "kind",
+            "cell_kind",
+            "size",
+            "interval_ms",
+            "semantic",
+            "display",
+            "fit",
+            "overlay_signal",
+            "published_outputs",
+            "selector",
+            "classifier_thresholds",
+            "focused_cell",
+        }
+        if set(document) != expected:
+            raise ValueError(
+                "panel state fields differ; "
+                f"missing={sorted(expected - set(document))}, "
+                f"extra={sorted(set(document) - expected)}"
+            )
+
+        def text(name: str) -> str:
+            value = document[name]
+            if not isinstance(value, str):
+                raise TypeError(f"panel state {name} must be text")
+            return value
+
+        def mapping(name: str) -> dict[str, Any]:
+            value = document[name]
+            if not isinstance(value, Mapping):
+                raise TypeError(f"panel state {name} must be an object")
+            return dict(value)
+
+        interval = document["interval_ms"]
+        if isinstance(interval, bool) or not isinstance(interval, int):
+            raise TypeError("panel state interval_ms must be an integer")
+        focused = document["focused_cell"]
+        if focused is not None and (
+            isinstance(focused, bool) or not isinstance(focused, int)
+        ):
+            raise TypeError("panel state focused_cell must be an integer or null")
+        published = mapping("published_outputs")
+        if any(
+            not isinstance(name, str) or not isinstance(enabled, bool)
+            for name, enabled in published.items()
+        ):
+            raise TypeError("panel state published_outputs must map text to bool")
+        thresholds = document["classifier_thresholds"]
+        if not isinstance(thresholds, (tuple, list)):
+            raise TypeError("panel state classifier_thresholds must be a sequence")
+        return cls(
+            signal=text("signal"),
+            title=text("title"),
+            kind=text("kind"),
+            cell_kind=text("cell_kind"),
+            size=text("size"),
+            interval_ms=interval,
+            semantic=mapping("semantic"),
+            display=mapping("display"),
+            fit=mapping("fit"),
+            overlay_signal=text("overlay_signal"),
+            published_outputs=published,
+            selector=mapping("selector"),
+            classifier_thresholds=tuple(thresholds),
+            focused_cell=focused,
+        )
 
 
 @dataclass(frozen=True, slots=True)

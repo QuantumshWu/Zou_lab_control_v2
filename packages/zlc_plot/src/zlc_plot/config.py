@@ -51,22 +51,6 @@ class LiveDefaults:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeDefaults:
-    """Analysis worker and shutdown bounds."""
-
-    analysis_worker_count: int
-    shutdown_timeout_ms: int
-
-    def __post_init__(self) -> None:
-        for field in ("analysis_worker_count", "shutdown_timeout_ms"):
-            object.__setattr__(
-                self,
-                field,
-                integer(getattr(self, field), field, minimum=1),
-            )
-
-
-@dataclass(frozen=True, slots=True)
 class InteractionDefaults:
     """Backend-independent pointer cadence and hit/zoom policy."""
 
@@ -149,7 +133,6 @@ class PlotLibraryDefaults:
     style: PlotStyleConfig
     layout: PlotLayoutConfig
     live: LiveDefaults
-    runtime: RuntimeDefaults
     interaction: InteractionDefaults
     projection: ProjectionDefaults
 
@@ -158,7 +141,6 @@ class PlotLibraryDefaults:
             (self.style, PlotStyleConfig, "style"),
             (self.layout, PlotLayoutConfig, "layout"),
             (self.live, LiveDefaults, "live"),
-            (self.runtime, RuntimeDefaults, "runtime"),
             (self.interaction, InteractionDefaults, "interaction"),
             (self.projection, ProjectionDefaults, "projection"),
         )
@@ -171,7 +153,6 @@ DEFAULTS = PlotLibraryDefaults(
     style=build_plot_style(),
     layout=_DEFAULT_LAYOUT,
     live=LiveDefaults((100, 200, 400, 800), 100),
-    runtime=RuntimeDefaults(analysis_worker_count=1, shutdown_timeout_ms=5_000),
     interaction=InteractionDefaults(
         pointer_update_interval_ms=30,
         double_click_interval_ms=500,
@@ -190,5 +171,4 @@ __all__ = [
     "InteractionDefaults",
     "PlotLibraryDefaults",
     "ProjectionDefaults",
-    "RuntimeDefaults",
 ]

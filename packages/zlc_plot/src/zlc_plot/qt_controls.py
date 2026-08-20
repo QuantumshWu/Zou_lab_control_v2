@@ -497,7 +497,7 @@ def _qt5_bound_controls_class() -> type[Any]:
     if _BOUND_CLASS is not None:
         return _BOUND_CLASS
     modules = _load_qt5_modules()
-    QtWidgets = modules.QtWidgets
+    QtCore, QtWidgets = modules.QtCore, modules.QtWidgets
     panel_class = _qt5_parameter_panel_class()
 
     class _Qt5PlotControls(QtWidgets.QWidget):
@@ -515,35 +515,75 @@ def _qt5_bound_controls_class() -> type[Any]:
         and shows what came back, including the refusal.
         """
 
-        def __init__(self, host: object, parent: object = None, *, timeout: float = 10.0) -> None:
+        operationFinished = QtCore.pyqtSignal(object)
+
+        def __init__(self, host: object, parent: object = None) -> None:
             super().__init__(parent)
             for name in ("describe_display", "set_parameter", "apply_semantic"):
                 if not callable(getattr(host, name, None)):
                     raise TypeError(f"plot controls need a host offering {name}()")
             self._host = host
-            self._timeout = float(timeout)
+            self._request_serial = 0
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
-            self.panel = panel_class(self._described(host.describe_display()), self)
-            layout.addWidget(self.panel)
-            self.panel.parameterEdited.connect(self._parameter_edited)
-            self.panel.semanticEdited.connect(self._semantic_edited)
-
-        def _described(self, pending: object) -> object:
-            return pending.result(timeout=self._timeout).value
+            self._layout = layout
+            self.panel = None
+            self._placeholder = QtWidgets.QLabel("Loading plot controls…", self)
+            layout.addWidget(self._placeholder)
+            self.operationFinished.connect(
+                self._operation_finished,
+                type=QtCore.Qt.QueuedConnection,
+            )
+            self._submit(host.describe_display())
 
         def _submit(self, pending: object) -> None:
-            """Show what the host accepted, or why it refused.
+            """Resolve a worker operation later on the Qt owner thread.
 
             A refusal that only reaches a log leaves the editor showing a value
             the plot never took, which is the "nothing happened" feel.
             """
 
-            try:
-                self.panel.set_description(self._described(pending))
+            add_done = getattr(pending, "add_done_callback", None)
+            if not callable(add_done):
+                raise TypeError("plot control operations must return Future-like values")
+            self._request_serial += 1
+            serial = self._request_serial
+
+            def completed(future: object) -> None:
+                try:
+                    description = future.result().value
+                    outcome = (serial, description, None)
+                except Exception as error:  # noqa: BLE001 - delivered to Qt
+                    outcome = (serial, None, error)
+                try:
+                    self.operationFinished.emit(outcome)
+                except RuntimeError:
+                    # The dialog closed before its worker operation finished.
+                    return
+
+            add_done(completed)
+
+        @QtCore.pyqtSlot(object)
+        def _operation_finished(self, resolved: object) -> None:
+            serial, description, error = resolved
+            if serial != self._request_serial:
+                return
+            if error is not None:
+                if self.panel is None:
+                    self._placeholder.setText(str(error))
+                else:
+                    self.panel.set_error(str(error))
+                return
+            if self.panel is None:
+                self.panel = panel_class(description, self)
+                self.panel.parameterEdited.connect(self._parameter_edited)
+                self.panel.semanticEdited.connect(self._semantic_edited)
+                self._layout.replaceWidget(self._placeholder, self.panel)
+                self._placeholder.hide()
+                self._placeholder.deleteLater()
+            else:
+                self.panel.set_description(description)
                 self.panel.set_error(None)
-            except Exception as error:  # noqa: BLE001 - reported, not raised
-                self.panel.set_error(str(error))
 
         def _parameter_edited(self, name: str, value: object) -> None:
             self._submit(self._host.set_parameter(name, value))

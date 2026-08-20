@@ -46,6 +46,29 @@ def test_every_virtual_device_opens(session) -> None:
     assert session.failures == {}
 
 
+def test_session_closes_its_signal_plane_when_a_device_close_fails(tmp_path) -> None:
+    class RefusingInstallation:
+        def close(self) -> None:
+            raise RuntimeError("device close failed")
+
+    class Plane:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    plane = Plane()
+    session = ExperimentSession(
+        installation=RefusingInstallation(),
+        signal_plane=plane,
+        workspace=Workspace(tmp_path),
+    )
+
+    with pytest.raises(RuntimeError, match="device close failed"):
+        session.close()
+    assert plane.closed is True
+
+
 def test_only_the_default_workspace_seeds_the_packaged_imaging_template(
     tmp_path, monkeypatch
 ) -> None:

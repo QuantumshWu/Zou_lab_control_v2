@@ -100,14 +100,12 @@ QtTest.QTest.mouseClick(
 )
 assert {'signal': 'temperature'} in picked
 assert surface.parentWidget() is not None
-# The switch gates SELECTOR CREATION only.  The plot's input transport stays
-# open regardless: double-click focus, pan and zoom are navigation, and the
-# old wiring dropped every pointer event until Selectors was flipped on.
+# A bare card is interactive until TaskConsole projects its global switch.
 assert surface.interaction is True
 card.set_selectors_enabled(True)
 assert surface.interaction is True
 card.set_selectors_enabled(False)
-assert surface.interaction is True
+assert surface.interaction is False
 body = QtWidgets.QWidget()
 body.setMinimumSize(420, 1200)
 card.setParent(body)
@@ -265,6 +263,9 @@ assert ('edit',) in events
 assert ('remove',) in events
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 assert ('state', {'interval_ms': 800}) in events
+app.removeEventFilter(show_spy)
+popup.close(); card.close(); card.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 """
     )
 

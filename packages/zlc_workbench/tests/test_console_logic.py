@@ -94,6 +94,11 @@ def presenter(session):
         yield presenter
     finally:
         presenter.close()
+        deadline = time.monotonic() + 10.0
+        while not presenter.close() and time.monotonic() < deadline:
+            presenter.beat()
+            time.sleep(0.005)
+        assert presenter.close(), "Console test owner did not retire"
 
 
 def test_the_node_types_offered_are_the_ones_that_exist(presenter) -> None:
@@ -200,7 +205,7 @@ def test_stop_reaches_a_running_node(presenter, session) -> None:
 
 
 def test_close_keeps_a_row_when_its_worker_has_not_released(presenter) -> None:
-    """A close timeout must not hide a node that still owns its host."""
+    """Close initiates once, then the ordinary beat reaps each real owner."""
 
     node_id = presenter.add_logic("camera_measurement")
     shutdown: list[bool] = []
@@ -209,28 +214,47 @@ def test_close_keeps_a_row_when_its_worker_has_not_released(presenter) -> None:
         cancel=lambda _reason: None,
         poll=lambda: None,
         shutdown=lambda: shutdown.append(True),
+        observation=SimpleNamespace(
+            error=None,
+            running=True,
+            phase="stopping",
+            terminal=False,
+            warnings=(),
+        ),
+        published_signals=lambda: (),
+        dataset_output_declarations=(),
     )
     presenter.logic[node_id].host = host
 
-    with pytest.raises(TimeoutError, match=node_id):
-        presenter.close(node_stop_seconds=0.0)
+    started = time.monotonic()
+    assert presenter.close() is False
+    assert time.monotonic() - started < 0.05
 
     assert presenter.logic[node_id].host is host
     assert shutdown == []
+    presenter.CLOSE_REPORT_SECONDS = 0.0
+    presenter.beat()
+    assert node_id in presenter.logic
+    assert any(
+        "close is still waiting" in text
+        for severity, text in presenter.view.status
+        if severity == "error"
+    )
 
     host.running = False
+    host.observation.running = False
     def fail_shutdown() -> None:
         raise RuntimeError("host has not reaped its worker")
 
     host.shutdown = fail_shutdown
-    with pytest.raises(RuntimeError, match="could not release"):
-        presenter.close(node_stop_seconds=0.0)
+    presenter.beat()
     assert node_id in presenter.logic
 
     host.shutdown = lambda: shutdown.append(True)
-    presenter.close(node_stop_seconds=0.0)
+    presenter.beat()
     assert node_id not in presenter.logic
     assert shutdown == [True]
+    assert presenter.close() is True
 
 
 def test_removing_a_node_takes_its_row_and_shuts_it_down(presenter) -> None:

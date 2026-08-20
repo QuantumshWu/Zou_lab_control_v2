@@ -243,6 +243,9 @@ def test_the_card_consumes_the_plot_owners_size_policy() -> None:
     from zlc_plot.kinds import PlotKind
     from zlc_plot.layout import resolve_surface
     from zlc_ui.board import panel_display_size
+    from zlc_workbench.panel_sizes import install
+
+    install()
 
     for name in DEFAULTS.layout.size_names:
         plan = resolve_surface(

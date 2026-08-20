@@ -17,9 +17,9 @@ from zlc_data import (
     AxisId,
     AxisSpec,
 )
-from zlc_data.figure_archive import figure_bytes, read_archive, read_dataset
+from zlc_data.figure_archive import read_archive, read_dataset, write_figure_archive
 from zlc_durable import (
-    atomic_write_bytes,
+    atomic_write_file,
     durable_makedirs,
     unique_path,
     write_readable_json,
@@ -317,9 +317,10 @@ class SampleWriter:
             revision=int(index) + 1,
         )
         image_path, archive_path = self._paths(index)
-        atomic_write_bytes(
+        atomic_write_file(
             archive_path,
-            figure_bytes(
+            lambda stream: write_figure_archive(
+                stream,
                 image_path.name,
                 arrays={"data": snapshot},
                 sections={"run_chain": [dict(self._run_record)]},
@@ -731,9 +732,23 @@ def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path
                 & site_valid[np.newaxis, :]
             )[:, np.newaxis, :],
         )
+        site_ref = AxisRef.data("calibration.site")
         thresholds = tuple(
-            float(value) if valid else None
-            for value, valid in zip(model.thresholds, site_valid, strict=True)
+            {
+                "value": float(value),
+                "scope": (
+                    {
+                        "domain": site_ref.domain.value,
+                        "axis_id": site_ref.axis_id,
+                        "coordinate": site_axis.coordinate_at(index),
+                    },
+                ),
+                "repeat_index": None,
+            }
+            for index, (value, valid) in enumerate(
+                zip(model.thresholds, site_valid, strict=True)
+            )
+            if valid
         )
         title = f"{model.kind.value.replace('_', ' ')} readout"
         with facet_grid(

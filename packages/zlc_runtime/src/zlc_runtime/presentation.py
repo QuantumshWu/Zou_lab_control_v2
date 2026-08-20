@@ -6,8 +6,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 from numbers import Integral
-from threading import Lock
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .plane import SignalDataPlane, SignalFront, SignalPublication, SignalValue
 from .streams import EventRef
@@ -38,142 +37,6 @@ class WakeSink(Protocol):
     def request_owner_wake(self) -> None: ...
 
 
-class OwnerTurn(NamedTuple):
-    """One coalesced owner turn taken from the three wake channels."""
-
-    lifecycle: bool
-    data: bool
-    surface: bool
-
-
-class OwnerChannels:
-    """Coalesce lifecycle, data, and surface notifications for one owner."""
-
-    __slots__ = (
-        "_closed",
-        "_data_binding",
-        "_data_plane",
-        "_data_token",
-        "_lifecycle_pending",
-        "_lock",
-        "_sink",
-        "_surface_pending",
-        "_data_pending",
-    )
-
-    def __init__(self, sink: WakeSink) -> None:
-        if not callable(getattr(sink, "request_owner_wake", None)):
-            raise TypeError("wake sink must provide request_owner_wake()")
-        self._sink = sink
-        self._lock = Lock()
-        self._lifecycle_pending = False
-        self._data_pending = False
-        self._surface_pending = False
-        self._closed = False
-        self._data_plane: object | None = None
-        self._data_token: object | None = None
-        self._data_binding = False
-
-    @property
-    def closed(self) -> bool:
-        with self._lock:
-            return self._closed
-
-    def _notify(self, channel: str) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            setattr(self, f"_{channel}_pending", True)
-        self._sink.request_owner_wake()
-
-    def notify_lifecycle(self) -> None:
-        self._notify("lifecycle")
-
-    def notify_surface(self) -> None:
-        self._notify("surface")
-
-    def notify_data(self) -> None:
-        """Receive the callback borrowed by an attached signal data plane."""
-
-        with self._lock:
-            if self._closed or self._data_token is None:
-                return
-            self._data_pending = True
-        self._sink.request_owner_wake()
-
-    def activate_data(self, plane: SignalDataPlane) -> None:
-        """Borrow the plane's owner-wake callback until deactivation or close."""
-
-        bind = getattr(plane, "bind_owner_wake", None)
-        unbind = getattr(plane, "unbind_owner_wake", None)
-        if not callable(bind) or not callable(unbind):
-            raise TypeError("data plane must provide bind_owner_wake/unbind_owner_wake")
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("owner channels are closed")
-            if self._data_token is not None or self._data_binding:
-                raise RuntimeError("data owner wake is already active")
-            self._data_binding = True
-        try:
-            token = bind(self.notify_data)
-        except BaseException:
-            with self._lock:
-                self._data_binding = False
-            raise
-        should_unbind = False
-        with self._lock:
-            self._data_binding = False
-            if self._closed:
-                should_unbind = True
-            else:
-                self._data_plane = plane
-                self._data_token = token
-        if should_unbind:
-            unbind(token)
-            raise RuntimeError("owner channels closed during data activation")
-
-    def deactivate_data(self) -> None:
-        with self._lock:
-            if self._data_binding:
-                raise RuntimeError("data owner wake activation is still in progress")
-            plane = self._data_plane
-            token = self._data_token
-            self._data_plane = None
-            self._data_token = None
-            self._data_pending = False
-        if plane is not None and token is not None:
-            plane.unbind_owner_wake(token)
-
-    def take(self) -> OwnerTurn:
-        with self._lock:
-            if self._closed:
-                return OwnerTurn(False, False, False)
-            turn = OwnerTurn(
-                self._lifecycle_pending,
-                self._data_pending,
-                self._surface_pending,
-            )
-            self._lifecycle_pending = False
-            self._data_pending = False
-            self._surface_pending = False
-            return turn
-
-    def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._lifecycle_pending = False
-            self._data_pending = False
-            self._surface_pending = False
-            plane = self._data_plane
-            token = self._data_token
-            self._data_plane = None
-            self._data_token = None
-        if plane is not None and token is not None:
-            plane.unbind_owner_wake(token)
-
-
 class HarmonicClock:
     """Pure arithmetic clock for one harmonic set of panel intervals."""
 
@@ -193,10 +56,6 @@ class HarmonicClock:
     @property
     def base_ms(self) -> int:
         return self._base_ms
-
-    @property
-    def elapsed_ms(self) -> int:
-        return self._elapsed_ms
 
     @property
     def intervals(self) -> tuple[int, ...]:
@@ -324,22 +183,14 @@ class SurfaceBatchArbiter:
     regresses.
     """
 
-    __slots__ = ("_channels", "_closed", "_cohorts")
+    __slots__ = ("_closed", "_cohorts", "_wake")
 
-    def __init__(self, channels: OwnerChannels) -> None:
-        if not callable(getattr(channels, "notify_surface", None)):
-            raise TypeError("surface arbiter requires owner channels")
-        self._channels = channels
+    def __init__(self, wake: WakeSink) -> None:
+        if not callable(getattr(wake, "request_owner_wake", None)):
+            raise TypeError("surface arbiter requires an owner wake")
+        self._wake = wake
         self._cohorts: list[_ShotCohort] = []
         self._closed = False
-
-    @property
-    def channels(self) -> OwnerChannels:
-        return self._channels
-
-    @property
-    def pending_cohorts(self) -> int:
-        return len(self._cohorts)
 
     @staticmethod
     def _panel_id(port: SurfacePort) -> str:
@@ -404,11 +255,14 @@ class SurfaceBatchArbiter:
         *,
         shot_roots: frozenset | None = None,
         window_panels: frozenset[str] = frozenset(),
+        formation_complete: bool = False,
     ) -> bool:
         if self._closed:
             return False
         if not isinstance(front, SignalFront):
             raise TypeError("surface group requires SignalFront")
+        if type(formation_complete) is not bool:
+            raise TypeError("formation_complete must be bool")
         members = tuple(ports)
         if not members:
             raise ValueError("surface group must contain at least one port")
@@ -482,6 +336,8 @@ class SurfaceBatchArbiter:
         # removal or replacement), but that original port still owns the
         # pending entry and any staged generation host that must be retired.
         cohort.updates.extend(submitted)
+        if formation_complete and not cohort.window_panels:
+            cohort.sealed = True
         if not cohort.sealed and cohort.window_panels and cohort.window_panels <= {
             update.panel_id for _port, update in cohort.updates
         }:
@@ -490,7 +346,7 @@ class SurfaceBatchArbiter:
             cohort.sealed = True
         for _port, update in submitted:
             update.future.add_done_callback(
-                lambda _future: self._channels.notify_surface()
+                lambda _future: self._wake.request_owner_wake()
             )
         return True
 
@@ -741,6 +597,7 @@ class BoardScheduler:
             not callable(getattr(plane, "freeze", None))
             or not callable(getattr(plane, "set_front_signals", None))
             or not callable(getattr(plane, "follower_edges", None))
+            or not callable(getattr(plane, "latest_publication", None))
         ):
             raise TypeError("board scheduler requires a signal data plane")
         if not isinstance(clock, HarmonicClock):
@@ -753,17 +610,9 @@ class BoardScheduler:
         self._clock = clock
         self._arbiter = arbiter
         self._ports = ports
-        self._owed: dict[object, bool] = {}
+        self._owed: set[str] = set()
         self._closed = False
         self._last_front = SignalFront({}, {})
-
-    @property
-    def owed_groups(self) -> frozenset[object]:
-        return frozenset(self._owed)
-
-    @property
-    def last_front(self) -> SignalFront:
-        return self._last_front
 
     @staticmethod
     def _presented_front_refs(port: SurfacePort) -> tuple[EventRef, ...]:
@@ -789,6 +638,21 @@ class BoardScheduler:
 
     def _resolve_port(self, panel_id: str) -> SurfacePort | None:
         return self._port_map().get(panel_id)
+
+    @staticmethod
+    def _displayed_signals(ports: Sequence[SurfacePort]) -> set[str]:
+        return {
+            name
+            for port in ports
+            for name in SurfaceBatchArbiter._front_signals(port)
+        }
+
+    def _follower_outputs(self, displayed: set[str]) -> set[str]:
+        return {
+            output
+            for source, output in self._plane.follower_edges()
+            if source in displayed and output in displayed
+        }
 
     def _shot_roots(
         self,
@@ -819,11 +683,7 @@ class BoardScheduler:
         # ahead of the panel derived from it.  The plane no-ops on an
         # unchanged set, so this scheduler is the sole declaration authority.
         ports = tuple(self._ports())
-        displayed = {
-            name
-            for port in ports
-            for name in SurfaceBatchArbiter._front_signals(port)
-        }
+        displayed = self._displayed_signals(ports)
         self._plane.set_front_signals(displayed)
         front = self._plane.freeze()
         if not isinstance(front, SignalFront):
@@ -837,13 +697,51 @@ class BoardScheduler:
         # for exactly those follower panels: the window closes the moment
         # every one has joined, or after the fallback boundaries when one
         # never stages.  Without a displayed follower nothing ever waits.
-        edges = self._plane.follower_edges()
-        follower_outputs = {
-            output
-            for source, output in edges
-            if source in displayed and output in displayed
+        follower_outputs = self._follower_outputs(displayed)
+        due = {
+            SurfaceBatchArbiter._panel_id(port): self._clock.group_due(
+                elapsed, (getattr(port, "display_interval_ms"),)
+            )
+            for port in ports
         }
+        # A coherent component can intentionally remain on its accepted shot
+        # while a processor finishes the new shot's derived siblings.  The
+        # raw latest source is then ahead of the frozen front.  Record the due
+        # decision for every displayed view of that old shot so the processor's
+        # completion wake can stage the whole new component without a second beat.
+        held_panels: set[str] = set()
+        held_roots: set[frozenset] = set()
+        for port in ports:
+            panel_id = SurfaceBatchArbiter._panel_id(port)
+            held = False
+            for name in SurfaceBatchArbiter._front_signals(port):
+                latest = self._plane.latest_publication(name)
+                current = front.publication(name)
+                if latest is not None and (
+                    current is None or latest.event_ref != current.event_ref
+                ):
+                    held = True
+                    break
+            if not held:
+                continue
+            held_panels.add(panel_id)
+            roots = self._port_shot_roots(port, front)
+            if roots is not None:
+                held_roots.add(roots)
+        if held_roots:
+            for port in ports:
+                roots = self._port_shot_roots(port, front)
+                if roots is not None and roots in held_roots:
+                    held_panels.add(SurfaceBatchArbiter._panel_id(port))
         window_panels = frozenset(
+            SurfaceBatchArbiter._panel_id(port)
+            for port in ports
+            if due[SurfaceBatchArbiter._panel_id(port)] and any(
+                name in follower_outputs
+                for name in SurfaceBatchArbiter._front_signals(port)
+            )
+        )
+        follower_panels = frozenset(
             SurfaceBatchArbiter._panel_id(port)
             for port in ports
             if any(
@@ -864,12 +762,23 @@ class BoardScheduler:
                 front_refs is not None
                 and self._presented_front_refs(port) == front_refs
             ):
-                self._owed.pop(panel_id, None)
+                waiting_for_data = (
+                    panel_id in self._owed
+                    and (panel_id in follower_panels or panel_id in held_panels)
+                ) or panel_id in window_panels or (
+                    panel_id in held_panels
+                    and due[panel_id]
+                )
+                if waiting_for_data:
+                    # This follower is due for the source shot being staged,
+                    # or this coherent component is waiting for a derived
+                    # sibling.  Remember the cadence decision so the matching
+                    # completion wake can spend it without another display tick.
+                    self._owed.add(panel_id)
+                else:
+                    self._owed.discard(panel_id)
                 continue
-            due = self._clock.group_due(
-                elapsed, (getattr(port, "display_interval_ms"),)
-            )
-            if not due and panel_id not in self._owed:
+            if not due[panel_id] and panel_id not in self._owed:
                 continue
             if self._arbiter.enqueue_group(
                 (port,),
@@ -883,16 +792,113 @@ class BoardScheduler:
                     window_panels if publication is not None else frozenset()
                 ),
             ):
-                self._owed.pop(panel_id, None)
+                self._owed.discard(panel_id)
             else:
-                self._owed[panel_id] = True
+                self._owed.add(panel_id)
         active_panels = {
             SurfaceBatchArbiter._panel_id(port) for port in ports
         }
         for panel_id in tuple(self._owed):
             if panel_id not in active_panels:
-                self._owed.pop(panel_id, None)
+                self._owed.discard(panel_id)
         self._arbiter.tick_boundary()
+        return front
+
+    def stage_owed(self) -> SignalFront:
+        """Stage already-due surfaces on the completion wake that makes them ready.
+
+        This covers both halves of the same contract: a coherent component
+        held while its derived sibling is produced, and a presentation-paced
+        follower produced while its source surface renders.  Only debt already
+        created by ``on_tick`` is eligible; this wake neither advances the
+        clock nor lets a not-due panel bypass its authored interval.
+        """
+
+        if self._closed or not self._owed:
+            return self._last_front
+        ports = tuple(self._ports())
+        displayed = self._displayed_signals(ports)
+        self._plane.set_front_signals(displayed)
+        front = self._plane.freeze()
+        if not isinstance(front, SignalFront):
+            raise TypeError("signal data plane freeze() must return SignalFront")
+        self._last_front = front
+        active_panels = {
+            SurfaceBatchArbiter._panel_id(port) for port in ports
+        }
+        for panel_id in tuple(self._owed):
+            if panel_id not in active_panels:
+                self._owed.discard(panel_id)
+
+        ready: dict[frozenset, list[SurfacePort]] = {}
+        unresolved: list[SurfacePort] = []
+        for port in ports:
+            panel_id = SurfaceBatchArbiter._panel_id(port)
+            if panel_id not in self._owed:
+                continue
+            front_refs = SurfaceBatchArbiter._front_refs(port, front)
+            if (
+                front_refs is None
+                or self._presented_front_refs(port) == front_refs
+            ):
+                continue
+            publication = front.publication(
+                SurfaceBatchArbiter._signal_name(port)
+            )
+            if publication is None:
+                continue
+            roots = self._port_shot_roots(port, front)
+            if roots is None:
+                unresolved.append(port)
+            else:
+                ready.setdefault(roots, []).append(port)
+
+        edges = self._plane.follower_edges()
+        follower_outputs = {output for _source, output in edges}
+        for roots, members in ready.items():
+            member_panels = {
+                SurfaceBatchArbiter._panel_id(member) for member in members
+            }
+            source_signals = {
+                name
+                for member in members
+                for name in SurfaceBatchArbiter._front_signals(member)
+            }
+            window_panels = frozenset(
+                SurfaceBatchArbiter._panel_id(candidate)
+                for candidate in ports
+                if SurfaceBatchArbiter._panel_id(candidate) in self._owed
+                and (
+                    any(
+                        name in follower_outputs
+                        for name in SurfaceBatchArbiter._front_signals(candidate)
+                    )
+                    and (
+                        SurfaceBatchArbiter._panel_id(candidate) in member_panels
+                        or any(
+                            source in source_signals
+                            and output
+                            in SurfaceBatchArbiter._front_signals(candidate)
+                            for source, output in edges
+                        )
+                    )
+                )
+            )
+            if self._arbiter.enqueue_group(
+                tuple(members),
+                front,
+                shot_roots=roots,
+                window_panels=window_panels,
+                # With no asynchronous follower, every ready same-root member
+                # is submitted in this one call, so this formation is complete
+                # without inventing a clock boundary on a completion wake.
+                formation_complete=not window_panels,
+            ):
+                for member in members:
+                    self._owed.discard(SurfaceBatchArbiter._panel_id(member))
+        for port in unresolved:
+            if self._arbiter.enqueue_group((port,), front):
+                self._owed.discard(SurfaceBatchArbiter._panel_id(port))
         return front
 
     def _port_shot_roots(
@@ -911,19 +917,6 @@ class BoardScheduler:
             roots.update(current)
         return frozenset(roots)
 
-    def on_owner_turn(self, poll_lifecycle: Callable[[], None]) -> None:
-        if not callable(poll_lifecycle):
-            raise TypeError("poll_lifecycle must be callable")
-        if self._closed:
-            return
-        turn = self._arbiter.channels.take()
-        if turn.surface:
-            self._arbiter.drain(self._resolve_port)
-        if turn.lifecycle:
-            poll_lifecycle()
-        if turn.lifecycle or turn.data:
-            self._plane.freeze()
-
     def close(self) -> None:
         if self._closed:
             return
@@ -935,8 +928,6 @@ class BoardScheduler:
 __all__ = [
     "BoardScheduler",
     "HarmonicClock",
-    "OwnerChannels",
-    "OwnerTurn",
     "SurfaceBatchArbiter",
     "SurfacePort",
     "SurfaceUpdate",

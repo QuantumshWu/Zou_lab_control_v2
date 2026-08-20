@@ -65,6 +65,10 @@ _EXPORTS = {
     "RasterPlotHost": ("zlc_plot.raster", "RasterPlotHost"),
     "NumericRange": ("zlc_plot.selectors", "NumericRange"),
     "SelectorKind": ("zlc_plot.selectors", "SelectorKind"),
+    "normalize_classifier_threshold_targets": (
+        "zlc_plot.selectors",
+        "normalize_classifier_threshold_targets",
+    ),
     "FitEvent": ("zlc_plot.session", "FitEvent"),
     "PlotSession": ("zlc_plot.session", "PlotSession"),
     "PulseTimelineSelectionData": ("zlc_plot.session", "PulseTimelineSelectionData"),
@@ -172,6 +176,7 @@ __all__ = [
     "SelectionChange",
     "SelectorData",
     "SelectorKind",
+    "normalize_classifier_threshold_targets",
     "Unit",
     "UnitRegistry",
     "__version__",

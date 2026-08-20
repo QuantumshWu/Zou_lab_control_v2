@@ -47,6 +47,10 @@ class DeviceControlHandle(QtCore.QObject):
         target = self._window if self._window is not None else self._view
         target.close()
 
+    def set_close_guard(self, guard) -> None:
+        if self._window is not None:
+            self._window.set_close_guard(guard)
+
     def is_visible(self) -> bool:
         target = self._window if self._window is not None else self._view
         return bool(target.isVisible())

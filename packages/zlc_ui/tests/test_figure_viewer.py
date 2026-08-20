@@ -29,6 +29,7 @@ from zlc_ui.figure_viewer import FigureViewerView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(["figure-test"])
 view = FigureViewerView(); view.set_info((("Summary", (("Name", "fake"),)),))
+assert view.info_pane.path_edit._filter == "Saved figure archives (*.npz)"
 first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
 view.set_figure_surface(first); view.set_figure_surface(first); view.set_figure_surface(second)
 assert view._figure_surface is second and first.parentWidget() is None

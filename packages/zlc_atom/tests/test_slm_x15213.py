@@ -236,21 +236,17 @@ def test_x15213_factory_binds_without_private_test_configuration(
     )
 
 
-def test_x15213_factory_rejects_private_presenter_configuration() -> None:
-    installation = create_installation(
-        (
-            {
-                "key": "slm",
-                "type_id": "slm.hamamatsu_x15213",
-                "config": {**_config(), "_presenter": object()},
-            },
+def test_x15213_private_presenter_is_not_plain_configuration() -> None:
+    with pytest.raises(TypeError, match="configuration is plain data"):
+        create_installation(
+            (
+                {
+                    "key": "slm",
+                    "type_id": "slm.hamamatsu_x15213",
+                    "config": {**_config(), "_presenter": object()},
+                },
+            )
         )
-    )
-    try:
-        assert "slm" in installation.failures
-        assert "unknown X15213 configuration fields" in str(installation.failures["slm"])
-    finally:
-        installation.close()
 
 
 def test_scan_reports_dvi_candidates_without_claiming_edid_identity(monkeypatch) -> None:

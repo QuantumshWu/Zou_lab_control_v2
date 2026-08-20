@@ -43,13 +43,20 @@ _measure: Callable[[str], tuple[int, int]] | None = None
 def use_panel_display_sizes(measure: Callable[[str], tuple[int, int]]) -> None:
     """Tell this package how big each named panel's picture is.
 
-    Called once by whoever composes a window, from the drawing package's own
-    plan.  One source, injected across a seam neither side may cross.
+    Called by whoever composes a window, from the drawing package's own plan.
+    Repeating the same callable is idempotent; a different callable is a second
+    truth source and is rejected.
     """
 
     global _measure
     if not callable(measure):
         raise TypeError("panel display sizes must come from a callable")
+    if _measure is measure:
+        return
+    if _measure is not None:
+        raise RuntimeError(
+            "panel display sizes are already installed by a different owner"
+        )
     _measure = measure
 
 

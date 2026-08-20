@@ -15,6 +15,13 @@ materialization is presentation-paced, cached, and performed off the UI owner;
 `freeze()` only reads committed state and never calls plugin science or a
 plugin materializer.
 
+Presentation cadence is an admission decision, not a polling delay. On a due
+tick, `BoardScheduler` records a panel as owed when its coherent component is
+still waiting for new data or a derived sibling. The exact processor or surface
+completion wake stages that already-owed component as soon as it becomes
+complete without advancing the display clock or admitting a not-due panel.
+Completion wakes are coalesced into one owner turn.
+
 `seal_committed()` closes that same run truth as complete or explicitly
 partial, with unwritten cells remaining invalid. Save, late one-shot processing,
 and full-data scope/reduction read the sealed/current `OwnedSnapshot`; terminal
@@ -22,6 +29,13 @@ does not publish a second replacement dataset. Scientific processors declare
 exact delivery and consume every ordered event chunk once. Display derivations
 declare latest delivery, coalesce while busy, and run concurrently with other
 processors while remaining serial within one processor.
+
+Publication roots preserve lineage through exact replay and derived/follower
+routes. Accepted-fit outputs are presentation-paced followers of the exact
+source publication: they keep its roots without joining a coherent component
+that would wait on itself. A missing or trailing fit therefore remains a loud
+gap for that source revision; Runtime never attaches the latest unrelated fit,
+and terminal fit output is rejected if it trails the finished source generation.
 
 `NodeHost` enforces the descriptor-selected worker/processor role, live commit,
 Task progress, required artifact, Stop, and terminal contracts. A Task may

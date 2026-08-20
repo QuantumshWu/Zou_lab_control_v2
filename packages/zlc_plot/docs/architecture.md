@@ -229,8 +229,8 @@ owner thread 调用 `present_front()`。`RasterIdentity` 的 generation/revision
 
 `RasterPlotHost` 的 worker adapter 为每个公开操作提供一个显式委托方法；提交模式
 （CONTROL/PUBLISH/PRESENTATION）与 coalesce key 作为 dispatch 参数传入。查询和
-prepare/finalize 不发布 front，普通热更新 latest-only 合并，selector/fit 保序，一次
-live commit 则按 capture → promote → finalize 原子发布。宿主提交完整表单时只调用一次
+prepare/finalize 不发布 front；同 key pointer/display motion 可合并，data/fit 走有界
+exact FIFO；一次 live commit 按 capture → promote → finalize 原子发布。宿主提交完整表单时只调用一次
 `configure()`；semantic/display/size/Image overlay 的差异与 `RenderEffect` 合并都在
 session 内完成，同步部分最多发布一张 front，宿主不循环调用单字段 setter。facade 保留显式公共签名，
 没有动态属性转发或另一份 GUI dispatch switch。
@@ -270,7 +270,7 @@ robust losses and covariance, without a full meshgrid or dense Jacobian. Custom
 Image models remain on the general expansion/solver path unless they provide
 their own specialization.
 
-Live data 使用一条 capacity-one clock lane：owner 冻结 base data revision、display/view authority 和 causal Image overlay authority，analysis worker 在 isolated projection context 中构建 incoming immutable payload；owner 通过 CAS install 提交 data front。若 live fit 已 armed，每个数据帧是一个**对**（pair）：data@N 与 fit@N 同生同present。宿主管线为 prepare（投影，prepare executor）→ solve（fit executor，`solve_live_frame`）→ commit（render worker 短任务：画数据 + 画 overlay + capture，`commit_live_frame(prepared, solved)`）；capture 之前对必须完整（publish gate），因此发布出去的 front 天然完整、旧 overlay 永不骑到新数据上。直接调用 `session.update_data()` 在调用线程内联完成同一个对。**没有求解预算、没有异步补投**：求解慢只会降低对速率——更新的数据只替换**排队中的**下一个对（既有 latest-only mailbox 语义），在途的对总是跑完并发布，这保证了 solve > 采集周期时依然有活性（不会互相饿死）。live 对求解的取消只发生在 re-arm、`replace_spec` 与 close（私有 `_live_fit_cancel` token）；selector/viewport 变化只推进 fit context generation，从不击杀已受理的数据帧求解。完成结果仍须匹配当前 data revision 与 request generation 才能提交 overlay 和 `FitEvent`（arming 的立即求解走异步 accept，靠这道门保持 same-shot）。selector、viewport、unit 和 resize 不自动启动求解；显式绑定 selector 被删除时，其 request generation 立即退休、overlay 清除。
+Live data 的 host lane 在支持的显示延迟内保持 exact FIFO：owner 冻结 base data revision、display/view authority 和 causal Image overlay authority；同一个 Session-owned serial analysis executor 依次完成 prepare 与 solve，二者不并行；render worker 再以短 commit 同时画 data@N、fit@N、capture 并 promote。最老 pending 等待超过 1 秒或 retained immutable arrays 超过 64 MiB 时，host loud resync 到当时 latest，中间 revision 不产生成功 FitEvent，Runtime raw data 不丢。live 对求解的取消只发生在 re-arm、`replace_spec` 与 close；selector/viewport 变化只推进 fit context generation，从不击杀已受理的数据帧求解。
 
 Manual fit and data-frame fit completions use the same host presentation transaction:
 accept and render, capture/promote the complete raster front, then publish the
@@ -282,4 +282,4 @@ yet contain.
 
 ## Style and runtime configuration
 
-`PlotLibraryDefaults` combines immutable `PlotStyleConfig`, `PlotLayoutConfig`, `LiveDefaults`, `RuntimeDefaults` and `InteractionDefaults`. rcParams, palette, artist tokens, font tiers, split ratios, preset geometry, refresh choices, pointer cadence, selector hit radius and wheel zoom factor each have one typed owner. Renderers and sessions consume those tokens instead of embedding backend-specific literals. Fixed geometry, immutable snapshots, monotonic revisions and latest-only capacity one are package invariants, not misleading switch-like fields.
+`PlotLibraryDefaults` combines immutable `PlotStyleConfig`, `PlotLayoutConfig`, `LiveDefaults` and `InteractionDefaults`. rcParams, palette, artist tokens, font tiers, split ratios, preset geometry, refresh choices, pointer cadence, selector hit radius and wheel zoom factor each have one typed owner. Each PlotSession owns exactly one serial analysis executor; its concurrency is an invariant, not a configurable second policy.

@@ -713,11 +713,11 @@ def _qt5_plot_widget_class() -> type[Any]:
             if self._closed:
                 return False
             current = self._front
-            if (
-                current is not None
-                and front.identity.sequence <= current.identity.sequence
-            ):
-                return False
+            if current is not None:
+                if front.identity == current.identity:
+                    return True
+                if front.identity.sequence <= current.identity.sequence:
+                    return False
             gesture_front = self._gesture_front
             gesture_axes = self._gesture_axes
             if (

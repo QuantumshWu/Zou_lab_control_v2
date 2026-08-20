@@ -59,26 +59,47 @@ def build(
     initial_config: object | None = None,
     initialize_session=None,
     on_initialized=None,
+    prepare_shutdown=None,
     shutdown_session=None,
+    on_shutdown=None,
     on_device_open=None,
+    run_off_thread=None,
+    close_worker=None,
 ) -> object:
     """One presenter over one apparatus file, with the view it drives."""
 
     from ..board import attach_qt_worker
     from ..device_manager import DeviceManagerPresenter
 
-    return DeviceManagerPresenter(
-        view,
-        path,
-        catalog=catalog,
-        confirm_overwrite=lambda _path: True,
-        initial_config=initial_config,
-        initialize_session=initialize_session,
-        on_initialized=on_initialized,
-        shutdown_session=shutdown_session,
-        on_device_open=on_device_open,
-        run_off_thread=attach_qt_worker("zlc-devices"),
-    )
+    external_owner = run_off_thread is not None or close_worker is not None
+    if external_owner and (
+        not callable(run_off_thread) or not callable(close_worker)
+    ):
+        raise TypeError("external device worker requires callable run and close")
+    if not external_owner:
+        run_off_thread, close_worker = attach_qt_worker("zlc-devices")
+    try:
+        return DeviceManagerPresenter(
+            view,
+            path,
+            catalog=catalog,
+            confirm_overwrite=lambda _path: True,
+            initial_config=initial_config,
+            initialize_session=initialize_session,
+            on_initialized=on_initialized,
+            prepare_shutdown=prepare_shutdown,
+            shutdown_session=shutdown_session,
+            on_shutdown=on_shutdown,
+            on_device_open=on_device_open,
+            run_off_thread=run_off_thread,
+            # An injected worker belongs to the enclosing composition; this
+            # window retires its own state but never closes that shared owner.
+            close_worker=(lambda: True) if external_owner else close_worker,
+        )
+    except BaseException:
+        if not external_owner:
+            close_worker()
+        raise
 
 
 def create_window(
@@ -89,8 +110,12 @@ def create_window(
     initial_config: object | None = None,
     initialize_session=None,
     on_initialized=None,
+    prepare_shutdown=None,
     shutdown_session=None,
+    on_shutdown=None,
     on_device_open=None,
+    run_off_thread=None,
+    close_worker=None,
 ):
     """Open the apparatus editor and return its window."""
 
@@ -107,8 +132,12 @@ def create_window(
             initial_config=initial_config,
             initialize_session=initialize_session,
             on_initialized=on_initialized,
+            prepare_shutdown=prepare_shutdown,
             shutdown_session=shutdown_session,
+            on_shutdown=on_shutdown,
             on_device_open=on_device_open,
+            run_off_thread=run_off_thread,
+            close_worker=close_worker,
         )
     except BaseException:
         window.close()
@@ -135,12 +164,17 @@ def main(argv: list[str] | None = None) -> int:
         from zlc_ui import open_device_manager
 
         # The same composition, through the same entry: a smoke test.
-        presenter = build(open_device_manager(window_ratio=0.4), path)
-        print(
-            f"device manager ready: {len(presenter.devices)} device(s), "
-            f"{len(presenter.types)} type(s) offerable"
-        )
-        return 0
+        window = open_device_manager(window_ratio=0.4)
+        presenter = build(window, path)
+        try:
+            print(
+                f"device manager ready: {len(presenter.devices)} device(s), "
+                f"{len(presenter.types)} type(s) offerable"
+            )
+            return 0
+        finally:
+            presenter.close()
+            window.close()
 
     create_window(workspace=arguments.workspace)
     return int(application.exec_())

@@ -20,6 +20,8 @@ from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+import time
+from types import SimpleNamespace
 
 import pytest
 from zlc_durable import readable_json_bytes
@@ -534,10 +536,26 @@ def _ordinary_sequence():
     return ordinary_imaging_sequence()
 
 
+def _run_preview_immediately(work, delivered, failed) -> None:
+    """Drive the production async preview state machine without Qt."""
+
+    try:
+        result = work()
+    except BaseException as error:
+        failed(error)
+    else:
+        delivered(result)
+
+
 @pytest.fixture
 def presenter(sequence):
     view = _EditorView()
-    presenter = PulseEditorPresenter(view, sequence, make_preview=lambda data, **_options: _PreviewHost(data))
+    presenter = PulseEditorPresenter(
+        view,
+        sequence,
+        make_preview=lambda data, **_options: _PreviewHost(data),
+        run_preview_work=_run_preview_immediately,
+    )
     # Turned to Preview, because that is now what asks for a drawing: a window
     # opens on Edit and does not build a render worker for a page behind it.
     presenter.show_page("Preview")
@@ -782,22 +800,6 @@ def test_a_timeline_can_be_drawn_for_a_pulse_with_nothing_high(sequence) -> None
     )
     data = timeline_of(quiet)
     assert data.channels and not data.blocks
-
-
-def test_the_projection_holds_no_pulse_objects() -> None:
-    """The rule that keeps zlc_ui from learning what a PulseSequence is."""
-
-    vm = None
-    import zlc_workbench.pulse_editor as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    assert "ScheduleVM(" in source
-    del vm
-
-    import inspect
-
-    signature = inspect.signature(project_schedule)
-    assert "sequence" in signature.parameters
 
 
 def _board_description():
@@ -1263,6 +1265,48 @@ def test_reconnecting_releases_the_previous_board(sequence) -> None:
     assert closed == ["first", "second"], "closing the editor left a board connected"
 
 
+def test_close_failures_retain_the_owned_connection_and_preview(sequence) -> None:
+    """An owner is not gone until its own close operation confirms that fact."""
+
+    class _RefusingClose(_Sequencer):
+        refusing = True
+        attempts = 0
+
+        def close(self) -> None:
+            self.attempts += 1
+            if self.refusing:
+                raise RuntimeError("connection refused close")
+
+    board = _RefusingClose()
+    preview = _PreviewHost()
+    preview.refusing = True
+    preview.close = lambda: not preview.refusing
+    presenter = PulseEditorPresenter(
+        _EditorView(), sequence, dial=lambda _mode, _endpoint: board
+    )
+    presenter._preview_host = preview
+    assert presenter.connect_to("virtual", "") is True
+
+    assert presenter.connect_to("remote", "127.0.0.1:18861") is False
+    assert presenter.sequencer is board
+    assert presenter._owns_sequencer is True
+    assert "disconnect failed" in presenter.view.schedule_view.connection.status
+    assert "refused close" in presenter.view.warnings[-1]
+
+    with pytest.raises(RuntimeError, match="refused close"):
+        presenter.close()
+    assert presenter.sequencer is board
+    assert presenter._owns_sequencer is True
+    assert presenter._preview_host is preview
+
+    board.refusing = False
+    preview.refusing = False
+    presenter.close()
+    assert board.attempts == 3
+    assert presenter.sequencer is None
+    assert presenter._preview_host is None
+
+
 def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
     """It belongs to whoever passed it in -- usually a session that is still using it."""
 
@@ -1393,6 +1437,231 @@ def test_seeded_calibration_template_is_not_the_editor_current_document(
     assert space.root == default.root
     assert state is None
     assert path == ""
+
+
+def _process_qt_until(application, predicate, seconds: float = 2.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not predicate() and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.005)
+
+
+def _formal_pulse_window(
+    tmp_path, monkeypatch, *, sequence, board=None, bound: bool = False, path: str = ""
+):
+    pytest.importorskip("PyQt5")
+    from PyQt5 import QtCore
+    from zlc_ui.qt import ensure_qt_app
+    from zlc_workbench.apps import pulse_editor as application_module
+
+    application = ensure_qt_app(["formal-pulse-window"])
+    if bound:
+        from zlc_workbench.device_use import DeviceUseCoordinator
+
+        window = application_module.create_bound_window(
+            workspace=tmp_path, sequence=sequence, sequencer=board,
+            device_use=DeviceUseCoordinator(), path=path, window_ratio=0.4,
+        )
+    else:
+        monkeypatch.setattr(
+            application_module,
+            "resolve",
+            lambda *_args, **_kwargs: (
+                SimpleNamespace(pulses=tmp_path), PulseEditorState(sequence=sequence), path,
+            ),
+        )
+        if board is not None:
+            monkeypatch.setattr(application_module, "dial", lambda *_args: board)
+        window = application_module.create_window(
+            workspace=tmp_path, connect=None if board is None else "virtual", window_ratio=0.4,
+        )
+    return application, QtCore, window
+
+
+@pytest.mark.parametrize("bound", (False, True), ids=("standalone", "bound"))
+def test_pulse_window_waits_for_asynchronous_retirement(
+    tmp_path, monkeypatch, bound: bool
+) -> None:
+    """A refused SAFE stays visible, and its slow call never parks Qt."""
+
+    from threading import Event
+
+    release = Event()
+    sequence = _ordinary_sequence()
+
+    class _RefusingSafe(_Sequencer):
+        refusing = True
+
+        def safe(self) -> None:
+            if self.refusing:
+                release.wait(2.0)
+                raise RuntimeError("board refused safe")
+            super().safe()
+
+    board = _RefusingSafe(description=_board_description())
+    application, QtCore, window = _formal_pulse_window(
+        tmp_path, monkeypatch, sequence=sequence, board=board, bound=bound
+    )
+    summaries: list[str] = []
+    warnings: list[str] = []
+    monkeypatch.setattr(window, "set_summary", summaries.append)
+    monkeypatch.setattr(window, "show_warning", warnings.append)
+    window.fire_requested.emit()
+    assert board.snapshot()["firing"] is True
+
+    try:
+        owner_turn: list[bool] = []
+        window.close()
+        QtCore.QTimer.singleShot(0, lambda: owner_turn.append(True))
+        _process_qt_until(application, lambda: bool(owner_turn), 0.2)
+
+        assert owner_turn, "close-triggered SAFE blocked the Qt owner thread"
+        assert window.is_visible()
+        assert summaries == ["Stopping..."]
+
+        release.set()
+        _process_qt_until(application, lambda: bool(warnings))
+        assert window.is_visible(), "a failed retirement let the window disappear"
+        assert "board refused safe" in warnings[-1]
+        assert "board refused safe" in summaries[-1]
+
+        board.refusing = False
+        window.close()
+        _process_qt_until(application, lambda: not window.is_visible())
+        assert not window.is_visible()
+    finally:
+        board.refusing = False
+        release.set()
+        if window.is_visible():
+            window.close()
+            _process_qt_until(application, lambda: not window.is_visible())
+
+
+def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
+    tmp_path, monkeypatch
+) -> None:
+    """The shipped Preview path keeps every plot Future off the Qt owner."""
+
+    from concurrent.futures import Future
+    from threading import Event, Thread, Timer, current_thread, main_thread
+
+    from zlc_plot import RasterPlotHost
+
+    sequence = _ordinary_sequence()
+    build_started = Event()
+    release_build = Event()
+    real_wait = RasterPlotHost.wait_for_front
+
+    def slow_first_front(self, *args, **kwargs):
+        build_started.set()
+        assert release_build.wait(2.0)
+        return real_wait(self, *args, **kwargs)
+
+    monkeypatch.setattr(RasterPlotHost, "wait_for_front", slow_first_front)
+    application, QtCore, window = _formal_pulse_window(
+        tmp_path, monkeypatch, sequence=sequence, path=str(tmp_path / "ordinary.json")
+    )
+    save_release = Event()
+    save_threads: list[Thread] = []
+
+    class GuardedFuture(Future):
+        def result(self, timeout=None):
+            if current_thread() is main_thread():
+                raise AssertionError("Pulse Preview waited for a plot Future on Qt")
+            return super().result(timeout)
+
+    try:
+        release_timer = Timer(0.25, release_build.set)
+        release_timer.start()
+        owner_turn: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: owner_turn.append(True))
+        started = time.monotonic()
+        window.page_changed.emit("Preview")
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.1, f"Preview build blocked Qt for {elapsed:.3f}s"
+        _process_qt_until(
+            application, lambda: window.presenter._preview_host is not None, 3.0
+        )
+        assert build_started.is_set()
+        assert owner_turn, "Preview build prevented the next Qt owner turn"
+        host = window.presenter._preview_host
+
+        update_started = Event()
+        placeholders: list[str] = []
+        monkeypatch.setattr(window, "show_preview_placeholder", placeholders.append)
+
+        def planned(_size):
+            future = GuardedFuture()
+            future.set_result(
+                SimpleNamespace(value=SimpleNamespace(logical_size=(480, 357)))
+            )
+            return future
+
+        def updated(_timeline):
+            update_started.set()
+            future = GuardedFuture()
+            future.set_result(None)
+            return future
+
+        monkeypatch.setattr(host, "set_size", planned)
+        monkeypatch.setattr(host, "update_data", updated)
+        started = time.monotonic()
+        window.presenter.refresh_preview()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.1, f"Preview update blocked Qt for {elapsed:.3f}s"
+        _process_qt_until(
+            application,
+            lambda: update_started.is_set() and not window.presenter._preview_busy,
+            3.0,
+        )
+        assert update_started.is_set()
+        assert not any("waited for a plot Future" in text for text in placeholders)
+
+        save_started = Event()
+
+        def save(path):
+            future = GuardedFuture()
+            save_started.set()
+
+            def complete() -> None:
+                assert save_release.wait(2.0)
+                Path(path).write_bytes(b"png")
+                future.set_result(None)
+
+            thread = Thread(target=complete, name="pulse-preview-save-test")
+            save_threads.append(thread)
+            thread.start()
+            return future
+
+        monkeypatch.setattr(host, "save", save)
+        release_save_timer = Timer(0.3, save_release.set)
+        release_save_timer.start()
+        started = time.monotonic()
+        window.preview_save_requested.emit()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.1, f"Preview save blocked Qt for {elapsed:.3f}s"
+        _process_qt_until(application, save_started.is_set, 3.0)
+        assert save_started.is_set()
+
+        owner_turn.clear()
+        window.close()
+        QtCore.QTimer.singleShot(0, lambda: owner_turn.append(True))
+        _process_qt_until(application, lambda: bool(owner_turn), 0.2)
+        assert owner_turn, "a pending Preview save blocked the Qt owner"
+        assert window.is_visible(), "the window closed before Preview save retirement"
+
+        save_release.set()
+        _process_qt_until(application, lambda: not window.is_visible(), 4.0)
+        assert not window.is_visible()
+        assert tuple(tmp_path.glob("*.png"))
+    finally:
+        release_build.set()
+        save_release.set()
+        for thread in save_threads:
+            thread.join(2.0)
+        if window.is_visible():
+            window.close()
+            _process_qt_until(application, lambda: not window.is_visible(), 4.0)
 
 
 def test_named_pulse_loader_resolves_the_json_product_document(tmp_path) -> None:
@@ -1699,22 +1968,6 @@ def test_show_all_channels_draws_the_ones_that_are_always_off(presenter, sequenc
     assert str(lean) not in view.status or "channel" in view.status
 
 
-def test_saving_the_preview_writes_the_picture_that_is_shown(presenter, tmp_path) -> None:
-    class _Savable(_PreviewHost):
-        """A host that really writes, declaring everything a host declares."""
-
-        def save(self, path):
-            self.saved = path
-            path.write_bytes(b"png")
-
-    presenter.path = str(tmp_path / "imaging_test.json")
-    presenter._preview_host = _Savable()
-    written = presenter.save_preview_image()
-
-    assert written and Path(written).exists()
-    assert Path(written).parent == tmp_path
-
-
 def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
     """A step trace is N values over N+1 boundaries.
 
@@ -1727,7 +1980,12 @@ def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
 
     dac = next(port for port in sequence.target.ports if port.kind == "dac")
     view = _EditorView()
-    presenter = PulseEditorPresenter(view, sequence, make_preview=lambda data, **_o: _PreviewHost(data))
+    presenter = PulseEditorPresenter(
+        view,
+        sequence,
+        make_preview=lambda data, **_o: _PreviewHost(data),
+        run_preview_work=_run_preview_immediately,
+    )
     presenter.show_page("Preview")
     try:
         period_id = sequence.periods[1].period_id
@@ -2511,7 +2769,11 @@ def test_showing_every_row_grows_the_preview_widget_too(sequence) -> None:
         return host.logical_size
 
     presenter = PulseEditorPresenter(
-        view, sequence, make_preview=_make, update_preview=_update
+        view,
+        sequence,
+        make_preview=_make,
+        update_preview=_update,
+        run_preview_work=_run_preview_immediately,
     )
     presenter.show_page("Preview")
     try:

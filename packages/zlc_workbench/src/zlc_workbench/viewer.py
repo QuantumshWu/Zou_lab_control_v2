@@ -22,7 +22,7 @@ grep for.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +30,10 @@ from zlc_plot import DEFAULTS
 
 from .archive import read_archive, read_dataset
 from .panel_save import (
-    restore_panel_plot_annotations,
     restore_panel_plot_input,
+    restore_panel_viewport,
 )
-from .panel_state import PanelState, apply_panel_fit
-from .plot_annotations import (
-    PanelPlotAnnotations,
-)
+from .panel_state import PanelState
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -123,18 +120,7 @@ def _panel_state(
     document = panel.get("state")
     if not isinstance(document, Mapping):
         return None
-    return PanelState(
-        signal=str(document.get("signal", "")),
-        kind=str(document.get("kind", "")),
-        cell_kind=str(document.get("cell_kind", "")),
-        size=str(document.get("size", "")),
-        interval_ms=int(document.get("interval_ms", 500)),
-        title=str(document.get("title", "")),
-        semantic=dict(document.get("semantic", {})),
-        display=dict(document.get("display", {})),
-        fit=dict(document.get("fit", {})),
-        overlay_signal=str(document.get("overlay_signal", "")),
-    )
+    return PanelState.from_document(document)
 
 
 def _plot_rows(
@@ -262,15 +248,26 @@ class FigureViewerPresenter:
         view: object,
         *,
         make_host: Callable[[Any, str, PanelState | None], Any],
+        run_off_thread: Callable[
+            [
+                Callable[[], object],
+                Callable[[object], None],
+                Callable[[BaseException], None],
+            ],
+            None,
+        ],
+        close_worker: Callable[[], bool],
+        request_close: Callable[[], None],
         edit_figure: Callable[[Any, str], object] | None = None,
     ) -> None:
         self.view = view
         self._make_host = make_host
+        self._run_off_thread = run_off_thread
+        self._close_worker = close_worker
+        self._request_close = request_close
         #: Opening the plot's own controls is Qt work this asks for rather
         #: than does, the same way the console asks for it.
         self._edit_figure = edit_figure
-        #: What the operator called the figure, if they renamed it.
-        self.figure_title = ""
         self.path: Path | None = None
         self.description: ArchiveDescription | None = None
         #: The archive as read, kept so switching datasets does not re-read the
@@ -279,8 +276,12 @@ class FigureViewerPresenter:
         self._arrays: Mapping[str, Any] = {}
         self.dataset = ""
         self.panel_state: PanelState | None = None
-        self.plot_annotations = PanelPlotAnnotations()
         self._host: Any = None
+        self._retired_host: Any = None
+        self._retirement_pending = False
+        self._busy = False
+        self._close_requested = False
+        self._closed = False
         self.view.set_panel_sizes(
             DEFAULTS.layout.size_names, DEFAULTS.layout.default_preset
         )
@@ -292,63 +293,39 @@ class FigureViewerPresenter:
         self.view.save_image_requested.connect(self.save_image)
         # The figure is a panel, so the decisions a panel carries are answered.
         self.view.figure_size_picked.connect(self.resize_figure)
-        # NOT echoed back to the card: it already shows what was typed, and
-        # writing it back made the card re-raise the commit -- a loop that
-        # ended the process with no traceback, which is what a Qt signal cycle
-        # looks like from outside.
-        self.view.figure_title_committed.connect(self.rename_figure)
         self.view.figure_edit_requested.connect(self.edit_figure)
-        self.view.close_requested.connect(self.close)
 
-    def open(self, path: str) -> ArchiveDescription | None:
-        """Read one archive and show it, or say plainly why it cannot be read.
+    def open(self, path: str) -> None:
+        """Submit one complete archive candidate without blocking the Qt owner.
 
-        A file that cannot be opened is the normal case here -- an operator
-        types a path, picks the wrong file, opens something from another tool --
-        so it is answered, not raised.
+        The accepted archive, path, dataset and host change together only after
+        reading, rebuilding and configuring the candidate all succeed.  A bad
+        path therefore cannot tear down the last figure that opened correctly.
         """
 
-        try:
-            info, arrays = read_archive(path)
+        requested = Path(path)
+
+        def prepare() -> object:
+            resolved = requested.resolve()
+            info, arrays = read_archive(resolved)
             description = describe_archive(info, arrays)
-        except Exception as error:
-            self.view.set_status(f"cannot read {Path(path).name}: {error}", error=True)
-            return None
-
-        # Resolved, not stored as spelled.  Where an archive IS is an absolute
-        # fact; how a caller happened to write it is not.  Derived saves must
-        # keep landing beside this file even if the process cwd later changes.
-        self.path = Path(path).resolve()
-        self.description = description
-        # Kept so switching datasets does not re-read the file; an archive is
-        # immutable once written, so there is nothing to re-read.
-        self._info, self._arrays = info, arrays
-        self.view.set_title(description.name or self.path.stem)
-        self.view.set_path(str(self.path))
-        self.view.set_info(description.tabs)
-        self.view.set_datasets(
-            description.datasets,
-            description.dataset_keys[0] if description.datasets else "",
-        )
-        self._show_dataset(info, arrays, description)
-        return description
-
-    def _show_dataset(
-        self,
-        info: Mapping[str, Any],
-        arrays: Mapping[str, Any],
-        description: ArchiveDescription,
-    ) -> None:
-        if not description.datasets:
-            self._mount(None)
-            self.view.set_status(
-                "opened; its arrays were saved without axes, so it cannot be replotted"
+            candidate = self._prepare_dataset(
+                info,
+                arrays,
+                description,
+                description.dataset_keys[0] if description.datasets else "",
             )
-            return
-        self.show_dataset(description.dataset_keys[0])
+            return resolved, info, arrays, description, candidate
 
-    def show_dataset(self, name: str) -> bool:
-        """Draw one of the archive's datasets.
+        self._submit(
+            f"opening {requested.name}…",
+            prepare,
+            self._accept_archive,
+            f"cannot open {requested.name}",
+        )
+
+    def show_dataset(self, name: str) -> None:
+        """Submit another dataset from the already accepted immutable archive.
 
         Panel Save Fig writes one dataset; notebook-created figure archives may
         still contain several.  The viewer therefore keeps the dataset choice
@@ -356,44 +333,197 @@ class FigureViewerPresenter:
         """
 
         if not self._info or not name:
-            return False
-        # The plot is titled with what the dataset IS, not the archive's key
-        # for it: "panel-2" tells an operator nothing about what they opened.
-        label = dict(self.description.datasets).get(str(name), str(name)) if self.description else str(name)
+            return
+        info, arrays, description = self._info, self._arrays, self.description
+        if description is None:
+            return
+
+        def prepare() -> object:
+            return self._prepare_dataset(info, arrays, description, str(name))
+
+        self._submit(
+            f"opening {name}…",
+            prepare,
+            self._accept_dataset,
+            f"cannot draw {name}",
+        )
+
+    def _prepare_dataset(
+        self,
+        info: Mapping[str, Any],
+        arrays: Mapping[str, Any],
+        description: ArchiveDescription,
+        name: str,
+    ) -> tuple[str, PanelState | None, object | None, Any]:
+        if not name:
+            return "", None, None, None
+        label = dict(description.datasets).get(str(name), str(name))
         host: Any = None
         try:
-            snapshot = read_dataset(self._info, self._arrays, str(name))
-            plot_input = restore_panel_plot_input(
-                self._info,
-                self._arrays,
-                str(name),
-                snapshot,
+            snapshot = read_dataset(info, arrays, str(name))
+            plot_input = restore_panel_plot_input(info, arrays, str(name), snapshot)
+            panel_state = _panel_state(info.get("sections", {}), str(name))
+            viewport = (
+                None
+                if panel_state is None
+                else restore_panel_viewport(info, str(name))
             )
-            panel_state = _panel_state(self._info.get("sections", {}), str(name))
-            annotations = restore_panel_plot_annotations(self._info, str(name))
-            host = self._make_host(
-                plot_input,
-                label,
-                panel_state,
-            )
-            fit_error = self._configure_host(host, panel_state, annotations)
-        except Exception as error:
+            host = self._make_host(plot_input, label, panel_state)
+            self._configure_host(host, panel_state, viewport)
+            return str(name), panel_state, viewport, host
+        except BaseException:
             if host is not None:
-                close = getattr(host, "close", None)
-                if callable(close):
-                    close()
-            self._mount(None)
-            self.view.set_status(f"cannot draw {name}: {error}", error=True)
-            return False
-        self._mount(host)
+                self._close_host(host)
+            raise
+
+    def _accept_archive(self, result: object) -> bool:
+        resolved, info, arrays, description, candidate = result
+        previous = self._host
+        try:
+            self._show_candidate(candidate, description)
+            self.view.set_title(description.name or resolved.stem)
+            self.view.set_path(str(resolved))
+            self.view.set_info(description.tabs)
+            self.view.set_datasets(
+                description.datasets,
+                description.dataset_keys[0] if description.datasets else "",
+            )
+        except BaseException:
+            self._restore_previous_surface(previous)
+            self._discard_candidate(candidate)
+            raise
+
+        name, panel_state, _viewport, host = candidate
+        self.path = resolved
+        self.description = description
+        self._info, self._arrays = info, arrays
+        self._host = host
         self.dataset = str(name)
         self.panel_state = panel_state
-        self.plot_annotations = annotations
-        total = len(self.description.datasets) if self.description else 1
+        return self._retire_previous(previous)
+
+    def _accept_dataset(self, candidate: object) -> bool:
+        description = self.description
+        if description is None:
+            raise RuntimeError("viewer has no accepted archive description")
+        previous = self._host
+        try:
+            self._show_candidate(candidate, description)
+        except BaseException:
+            self._restore_previous_surface(previous)
+            self._discard_candidate(candidate)
+            raise
+
+        name, panel_state, _viewport, host = candidate
+        self._host = host
+        self.dataset = str(name)
+        self.panel_state = panel_state
+        return self._retire_previous(previous)
+
+    def _show_candidate(
+        self,
+        candidate: object,
+        description: ArchiveDescription,
+    ) -> None:
+        name, panel_state, _viewport, host = candidate
+        self.view.show_figure(host)
+        if panel_state is not None:
+            self.view.set_figure_size(panel_state.size)
+        if host is None:
+            self.view.set_status(
+                "opened; its arrays were saved without axes, so it cannot be replotted"
+            )
+            return
+        total = len(description.datasets)
         position = "" if total <= 1 else f"  ({total} datasets in this file)"
-        suffix = "" if fit_error is None else f"; saved fit was not restored: {fit_error}"
-        self.view.set_status(f"showing {name}{position}{suffix}")
-        return True
+        self.view.set_status(f"showing {name}{position}")
+
+    def _restore_previous_surface(self, previous: object | None) -> None:
+        try:
+            self.view.show_figure(previous)
+            description = self.description
+            if description is not None:
+                self.view.set_title(
+                    description.name
+                    or ("" if self.path is None else self.path.stem)
+                )
+                self.view.set_path("" if self.path is None else str(self.path))
+                self.view.set_info(description.tabs)
+                self.view.set_datasets(description.datasets, self.dataset)
+            if self.panel_state is not None:
+                self.view.set_figure_size(self.panel_state.size)
+        except BaseException:
+            # Preserve the original candidate refusal.  The previous presenter
+            # state is still authoritative and a later owner turn can repaint it.
+            return
+
+    def _discard_candidate(self, candidate: object) -> None:
+        host = candidate[3]
+        if host is not None and host is not self._host:
+            self._start_retirement(host, "cannot retire rejected figure")
+
+    def _retire_previous(self, previous: object | None) -> bool:
+        if previous is None or previous is self._host:
+            return True
+        self._start_retirement(
+            previous,
+            "cannot retire previous figure",
+            finished=self._finish_operation,
+        )
+        return False
+
+    def _submit(
+        self,
+        busy_status: str,
+        work: Callable[[], object],
+        accepted: Callable[[object], object],
+        failure_prefix: str,
+        *,
+        on_failure: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        if self._closed:
+            return
+        if self._busy:
+            self.view.set_status("viewer is busy; wait for the current operation", error=True)
+            return
+        if self._retired_host is not None:
+            self.view.set_status(
+                "viewer is still retiring the previous figure", error=True
+            )
+            return
+        self._busy = True
+        self.view.set_status(busy_status)
+
+        def report_failure(error: BaseException) -> None:
+            if on_failure is None:
+                self.view.set_status(f"{failure_prefix}: {error}", error=True)
+            else:
+                on_failure(error)
+
+        def delivered(result: object) -> None:
+            complete = True
+            try:
+                complete = accepted(result) is not False
+            except BaseException as error:  # Qt/mount refusal is still visible
+                report_failure(error)
+            finally:
+                if complete:
+                    self._finish_operation()
+
+        def failed(error: BaseException) -> None:
+            report_failure(error)
+            self._finish_operation()
+
+        try:
+            self._run_off_thread(work, delivered, failed)
+        except BaseException as error:
+            report_failure(error)
+            self._finish_operation()
+
+    def _finish_operation(self) -> None:
+        self._busy = False
+        if self._close_requested:
+            self._request_close()
 
     @staticmethod
     def _await(operation: object) -> object:
@@ -404,52 +534,25 @@ class FigureViewerPresenter:
         cls,
         host: object,
         state: PanelState | None,
-        annotations: PanelPlotAnnotations | None = None,
-    ) -> Exception | None:
+        viewport: object | None,
+    ) -> None:
         """Apply the saved panel decisions through the plot host's public API."""
 
-        selected_annotations = (
-            PanelPlotAnnotations() if annotations is None else annotations
-        )
         # The host was built from this same record and already holds the
         # appearance it accepts; re-sending the whole saved bag is how names
         # authored under another kind reached a vocabulary that never
         # declared them.  Only what this call adds travels.
-        display: dict[str, object] = {}
-        thresholds: tuple[float | None, ...] | None = None
-        if not selected_annotations.empty:
-            display["threshold_classifier"] = True
-            thresholds = selected_annotations.classifier_thresholds
-        configuration: dict[str, object] = {"parameters": display}
+        configuration: dict[str, object] = {
+            "viewport": viewport,
+        }
         if state is not None:
             configuration["size"] = state.size
-        if thresholds is not None:
-            configuration["classifier_thresholds"] = thresholds
+            configuration["classifier_thresholds"] = state.classifier_thresholds
+            configuration["fit"] = dict(state.fit)
+            configuration["fit_live"] = False
         cls._await(host.configure(**configuration))
 
-        if state is None:
-            return None
-
-        # One authority decides what this panel's fit record means; a viewer
-        # host is static, so it AWAITS the analysis rather than presenting it.
-        operation = apply_panel_fit(host, state, live=False)
-        if operation is not None:
-            try:
-                cls._await(operation)
-            except Exception as error:
-                # The dataset and authored plot state remain useful when a fit
-                # model is no longer available or this archived fit was never
-                # executable.  Report that one omission without discarding the
-                # otherwise exact figure.
-                return error
-        return None
-
-    def rename_figure(self, text: str) -> None:
-        """Remember what the operator called this figure."""
-
-        self.figure_title = str(text)
-
-    def resize_figure(self, size: str) -> bool:
+    def resize_figure(self, size: str) -> None:
         """The card and the picture inside it have to agree.
 
         A card resized around a figure that stayed 2x2 is a big card with a
@@ -457,15 +560,36 @@ class FigureViewerPresenter:
         """
 
         if self._host is None:
-            return False
-        try:
-            result = self._host.configure(size=str(size))
-            if hasattr(result, "result"):
-                result.result()
-        except Exception as error:
+            return
+        host = self._host
+        previous_size = (
+            DEFAULTS.layout.default_preset
+            if self.panel_state is None
+            else self.panel_state.size
+        )
+
+        def resize() -> object:
+            self._await(host.configure(size=str(size)))
+            return str(size)
+
+        def accepted(selected: object) -> None:
+            resolved = str(selected)
+            if self._host is host and self.panel_state is not None:
+                self.panel_state = replace(self.panel_state, size=resolved)
+            self.view.set_figure_size(resolved)
+            self.view.set_status(f"resized to {resolved}")
+
+        def rejected(error: BaseException) -> None:
+            self.view.set_figure_size(previous_size)
             self.view.set_status(f"cannot resize: {error}", error=True)
-            return False
-        return True
+
+        self._submit(
+            f"resizing to {size}…",
+            resize,
+            accepted,
+            "cannot resize",
+            on_failure=rejected,
+        )
 
     def edit_figure(self) -> object | None:
         """Open the plot's own controls, which belong to the plotting package."""
@@ -474,44 +598,134 @@ class FigureViewerPresenter:
             return None
         return self._edit_figure(self._host, self.dataset or "figure")
 
-    def save_image(self) -> str:
+    def save_image(self) -> None:
         """Write the figure as it is drawn, beside the archive it came from."""
 
         from zlc_durable import unique_path
 
         if self._host is None or self.path is None:
             self.view.set_status("there is no figure to save", error=True)
-            return ""
+            return
         save = getattr(self._host, "save", None)
         if not callable(save):
             self.view.set_status("this figure cannot save itself", error=True)
-            return ""
+            return
+        host, path, dataset = self._host, self.path, self.dataset
 
-        def write(temporary: Path) -> None:
-            result = save(temporary)
-            if hasattr(result, "result"):
-                result.result()
+        def write_image() -> object:
+            def write(temporary: Path) -> None:
+                self._await(host.save(temporary))
 
-        try:
-            target = unique_path(
-                self.path.parent,
-                f"{self.path.stem}-{self.dataset or 'figure'}",
+            return unique_path(
+                path.parent,
+                f"{path.stem}-{dataset or 'figure'}",
                 ".png",
                 writer=write,
             )
-        except Exception as error:
-            self.view.set_status(f"cannot save: {error}", error=True)
-            return ""
-        self.view.set_status(f"saved {target.name}")
-        return str(target)
 
-    def _mount(self, host: Any) -> None:
-        previous, self._host = self._host, host
-        if host is None:
-            self.panel_state = None
-        self.view.show_figure(host)
-        if previous is not None:
-            previous.close()
+        self._submit(
+            "saving image…",
+            write_image,
+            lambda target: self.view.set_status(f"saved {target.name}"),
+            "cannot save",
+        )
 
-    def close(self) -> None:
-        self._mount(None)
+    @classmethod
+    def _close_host(cls, host: object) -> None:
+        close = getattr(host, "close", None)
+        if not callable(close):
+            return
+        stopped = cls._await(close())
+        if stopped is False:
+            raise RuntimeError("plot host did not stop")
+
+    def _start_retirement(
+        self,
+        host: object,
+        failure_prefix: str,
+        *,
+        finished: Callable[[], None] | None = None,
+    ) -> None:
+        if self._retired_host is None:
+            self._retired_host = host
+        elif self._retired_host is not host:
+            raise RuntimeError("viewer already owns another retiring figure")
+        if self._retirement_pending:
+            return
+        self._retirement_pending = True
+
+        def retired(_result: object) -> None:
+            self._retirement_pending = False
+            if self._retired_host is host:
+                self._retired_host = None
+            if finished is not None:
+                finished()
+            elif self._close_requested:
+                self._request_close()
+
+        def failed(error: BaseException) -> None:
+            self._retirement_pending = False
+            self._busy = False
+            self._close_requested = False
+            self.view.set_status(f"{failure_prefix}: {error}", error=True)
+
+        try:
+            self._run_off_thread(
+                lambda: self._close_host(host),
+                retired,
+                failed,
+            )
+        except BaseException as error:
+            failed(error)
+
+    def close(self) -> bool:
+        """Close guard: keep the window until its host and worker are retired."""
+
+        self._close_requested = True
+        if self._closed:
+            return True
+        if self._busy:
+            self.view.set_status("closing after the current operation…")
+            return False
+        if self._retired_host is not None:
+            self.view.set_status("closing previous figure…")
+            if self._retirement_pending:
+                return False
+            self._busy = True
+            self._start_retirement(
+                self._retired_host,
+                "cannot close previous figure",
+                finished=self._finish_operation,
+            )
+            return False
+        if self._host is not None:
+            host = self._host
+            self._busy = True
+            self.view.set_status("closing figure…")
+
+            def retired(_result: object) -> None:
+                if self._host is host:
+                    self._host = None
+                    self.panel_state = None
+                    self.view.show_figure(None)
+                self._finish_operation()
+
+            def failed(error: BaseException) -> None:
+                self._busy = False
+                self._close_requested = False
+                self.view.set_status(f"cannot close figure: {error}", error=True)
+
+            try:
+                self._run_off_thread(
+                    lambda: self._close_host(host),
+                    retired,
+                    failed,
+                )
+            except BaseException as error:
+                failed(error)
+            return False
+        if not self._close_worker():
+            self._request_close()
+            return False
+        self._closed = True
+        return True

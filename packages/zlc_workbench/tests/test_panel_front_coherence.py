@@ -61,7 +61,7 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
     the set the plane actually receives, not a helper that computes it.
     """
 
-    from zlc_runtime.presentation import BoardScheduler, OwnerChannels
+    from zlc_runtime.presentation import BoardScheduler
     from zlc_runtime.plane import SignalFront
 
     class _Sink:
@@ -84,6 +84,9 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
         def follower_edges(self):
             return frozenset()
 
+        def latest_publication(self, _signal):
+            return None
+
     host = _Host()
     port = PlotPanelPort(
         "panel-1",
@@ -97,7 +100,7 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
     scheduler = BoardScheduler(
         plane,
         HarmonicClock((100, 200, 400, 800)),
-        SurfaceBatchArbiter(OwnerChannels(_Sink())),
+        SurfaceBatchArbiter(_Sink()),
         lambda: (port,),
     )
 

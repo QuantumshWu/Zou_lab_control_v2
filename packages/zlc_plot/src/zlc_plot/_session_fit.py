@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
 import math
 from threading import Event
@@ -37,7 +37,12 @@ from .fit import (
     _bimodal_classifier_metrics,
 )
 from .parameters import RenderEffect
-from .selectors import SelectorKind, SelectorState
+from .selectors import (
+    SelectorKind,
+    SelectorState,
+    _classifier_threshold_key,
+    normalize_classifier_threshold_targets,
+)
 from .specs import FacetGridPlot, HistogramPlot
 
 if TYPE_CHECKING:
@@ -55,7 +60,6 @@ _CLASSIFIER_REQUEST_GENERATION = -1
 # per-cell problems, and a measured 4-thread pool was ~20% SLOWER than the
 # serial loop (25.9 ms pooled vs 14.2 ms serial for 8x4000-point solves).
 # Raise this only with a measurement showing the pool winning.
-_FACET_FIT_WORKERS = 1
 
 # Warm-seed memory hardening: a degenerate accepted solve must never seed
 # later revisions (one poisoned seed used to replicate itself into every
@@ -111,6 +115,28 @@ class _DeferredStartedFitRequest(_StartedFitRequest):
 
 class FitSessionMixin:
 
+    def resynchronize_live_fit(self) -> None:
+        """Cancel only the active pair while keeping its live request armed."""
+
+        with self._lock:
+            prepare_cancel = self._live_prepare_cancel
+            fit_cancel = self._live_fit_cancel
+            # Later admitted pairs inherit a fresh request-scoped token.  The
+            # active pair retains the old one and observes it as cancelled.
+            self._live_fit_cancel = Event()
+        prepare_cancel.set()
+        fit_cancel.set()
+
+    def _commit_fit_actions(self, *actions: Callable[[], None]) -> None:
+        """Run irreversible fit retirement only after configuration commits."""
+
+        pending = self._configuration_fit_commit_actions
+        if pending is None:
+            for action in actions:
+                action()
+            return
+        pending.extend(actions)
+
     def _stamp_fit_batch_revision(
         self,
         result: FitResult | FacetFitBatchResult,
@@ -123,6 +149,117 @@ class FitSessionMixin:
         if isinstance(result, FacetFitBatchResult):
             return replace(result, batch_revision=batch_revision)
         return result.with_batch_revision(batch_revision)
+
+    @staticmethod
+    def _facet_batch_geometry(
+        projection: FitProjection,
+        cells: Sequence[Any],
+    ) -> dict[str, object]:
+        """Describe one facet axis identically for successes and gaps."""
+
+        values = tuple(cell.facet_value_canonical for cell in cells)
+        numeric = all(
+            isinstance(value, (int, float, np.number))
+            and not isinstance(value, (bool, np.bool_))
+            for value in values
+        )
+        coordinate = projection._coordinate(projection._spec.facet)
+        return {
+            "facet": projection._spec.facet,
+            "facet_values": values,
+            "sample_axis_name": coordinate.label,
+            "sample_coordinates": (
+                np.asarray(values, dtype=np.float64)
+                if numeric
+                else np.arange(len(cells), dtype=np.float64)
+            ),
+            "sample_unit": (
+                ""
+                if not numeric or coordinate.canonical_unit.symbol == "1"
+                else coordinate.canonical_unit.symbol
+            ),
+            "sample_labels": (
+                None if numeric else tuple(cell.label for cell in cells)
+            ),
+        }
+
+    def _failed_live_fit_event(
+        self,
+        request: _LiveFitRequest,
+        projection: FitProjection,
+        source_revision: int,
+        error: BaseException,
+    ) -> FitEvent:
+        """One explicit invalid parameter sample for an unpresented revision."""
+
+        model = request.model
+        message = str(error) or type(error).__name__
+        units = projection._fit_parameter_units(model)
+        if request.all_facets and isinstance(projection._spec, FacetGridPlot):
+            cells = tuple(getattr(projection.payload, "cells", ()))
+            if not cells:
+                raise RuntimeError("failed facet fit has no cells to identify")
+            failed = FacetFitBatchResult(
+                model=model,
+                results=(None,) * len(cells),
+                failure_messages=(message,) * len(cells),
+                source_revision=int(source_revision),
+                overlays=tuple(
+                    FitOverlay(
+                        success=False,
+                        diagnostic=message,
+                        facet_index=index,
+                    )
+                    for index in range(len(cells))
+                ),
+                parameter_units=units,
+                **self._facet_batch_geometry(projection, cells),
+            )
+            result = self._stamp_fit_batch_revision(failed)
+            return FitEvent(result, None, (), "", result.overlays)
+
+        count = len(model.parameters)
+        invalid = np.full(count, np.nan, dtype=np.float64)
+        failed = FitResult(
+            model=model,
+            parameter_values=invalid,
+            standard_errors=invalid,
+            covariance=np.full((count, count), np.nan, dtype=np.float64),
+            fitted_values=np.asarray([], dtype=np.float64),
+            residuals=np.asarray([], dtype=np.float64),
+            selected_indices=np.asarray([], dtype=np.int64),
+            source_revision=int(source_revision),
+            success=False,
+            message=message,
+            reduced_chi_square=0.0,
+            covariance_valid=False,
+            parameter_units=units,
+        )
+        return FitEvent(self._stamp_fit_batch_revision(failed), None, (), "")
+
+    def publish_live_fit_gap(
+        self,
+        source_revision: int,
+        error: BaseException,
+        *,
+        projection: FitProjection | None = None,
+    ) -> bool:
+        """Publish a gap without replacing the last accepted data/fit front."""
+
+        revision = int(source_revision)
+        if revision < 0:
+            raise ValueError("fit gap source_revision must be non-negative")
+        with self._lock:
+            if self._closed or self._live_fit_request is None:
+                return False
+            request = self._live_fit_request
+            selected = self._projected if projection is None else projection
+        if not isinstance(selected, FitProjection):
+            raise TypeError("fit gap projection must be FitProjection or None")
+        self._notify_fit(
+            self._failed_live_fit_event(request, selected, revision, error)
+        )
+        return True
 
     def _forget_fit_warm_starts(self, request_generation: int | None) -> None:
         """Drop seeds after any non-normal solve completion."""
@@ -324,12 +461,10 @@ class FitSessionMixin:
         except BaseException:
             self._forget_fit_warm_starts(started.request_generation)
             raise
-        result_revision = (
-            result.source_revision
-            if isinstance(result, FacetFitBatchResult)
-            else result.source_revision
-        )
-        if not started.cancellation.is_set() and self.data_revision == result_revision:
+        if (
+            not started.cancellation.is_set()
+            and self.data_revision == result.source_revision
+        ):
             event = self._accept_fit(
                 result,
                 started,
@@ -374,6 +509,92 @@ class FitSessionMixin:
             logical_completion=logical_completion,
         )
         return logical_completion
+
+    def _configure_fit_target(
+        self,
+        target: Mapping[str, object],
+        *,
+        live: bool,
+    ) -> FitResult | FacetFitBatchResult | None:
+        """Make one authored fit target current without replaying it."""
+
+        if not isinstance(target, Mapping):
+            raise TypeError("fit target must be a mapping")
+        if type(live) is not bool:
+            raise TypeError("fit live must be bool")
+        values = dict(target)
+        model = values.pop("model", None)
+        values.pop("live", None)
+
+        def clear_current() -> None:
+            with self._lock:
+                changed = self._live_fit_request is not None or self._accepted_fit is not None
+            if changed:
+                self.clear_fit()
+
+        if model is None or str(model).strip() == "":
+            clear_current()
+            return None
+
+        if not isinstance(model, FitModelSpec):
+            try:
+                self._fit_engine.registry.get(str(model))
+            except ValueError:
+                clear_current()
+                return None
+
+        selector_kind = values.pop("selector_kind", None)
+        initial = values.pop("initial", None)
+        bounds = values.pop("bounds", None)
+        options = values.pop("options", None)
+        fit_all_facets = values.pop("fit_all_facets", False)
+        if values:
+            raise TypeError(
+                f"unknown fit target fields: {', '.join(sorted(map(str, values)))}"
+            )
+        if selector_kind is not None and not isinstance(
+            selector_kind, SelectorKind
+        ):
+            selector_kind = SelectorKind(str(selector_kind))
+        prepared = self._prepare_fit_request(
+            model,
+            selector_kind=selector_kind,
+            initial=initial,
+            bounds=bounds,
+            options=options,
+        )
+        prepared = replace(
+            prepared,
+            all_facets=bool(fit_all_facets) or (
+                live and isinstance(self._spec, FacetGridPlot)
+            ),
+        )
+        with self._lock:
+            if live and self._live_fit_request == prepared:
+                return None
+        started = self._begin_fit_request(
+            prepared.model,
+            selector_kind=None,
+            initial=None,
+            bounds=None,
+            options=None,
+            live=live,
+            all_facets=prepared.all_facets,
+            logical_completion=None,
+            prepared_request=prepared,
+        )
+        if started is None:
+            raise RuntimeError("configured fit request has no selection")
+        try:
+            result = self._solve_started_fit(started)
+        except BaseException:
+            self._forget_fit_warm_starts(started.request_generation)
+            raise
+        presentation = self._accept_fit(result, started)
+        if presentation is None:
+            raise FitCancelled("fit target was superseded before acceptance")
+        self._notify_fit(presentation.event)
+        return result
 
     def _fit_facet_batch(
         self,
@@ -460,26 +681,11 @@ class FitSessionMixin:
                 )
             return result, None, selection, overlay
 
-        worker_count = min(_FACET_FIT_WORKERS, len(cells))
-        if worker_count > 1:
-            with ThreadPoolExecutor(
-                max_workers=worker_count,
-                thread_name_prefix="zlc-facet-fit",
-            ) as pool:
-                outcomes = list(pool.map(solve_cell, range(len(cells))))
-        else:
-            outcomes = [solve_cell(index) for index in range(len(cells))]
+        outcomes = [solve_cell(index) for index in range(len(cells))]
         results = [outcome[0] for outcome in outcomes]
         failure_messages = [outcome[1] for outcome in outcomes]
         selections = [outcome[2] for outcome in outcomes]
         overlays = [outcome[3] for outcome in outcomes]
-        facet_coordinate = projection._coordinate(projection._spec.facet)
-        facet_values = tuple(cell.facet_value_canonical for cell in cells)
-        numeric_facet = all(
-            isinstance(value, (int, float, np.number))
-            and not isinstance(value, (bool, np.bool_))
-            for value in facet_values
-        )
         parameter_units = next(
             (
                 result.parameter_units
@@ -489,28 +695,13 @@ class FitSessionMixin:
             projection._fit_parameter_units(model),
         )
         batch = FacetFitBatchResult(
-            facet=projection._spec.facet,
-            facet_values=facet_values,
             model=model,
             results=tuple(results),
             failure_messages=tuple(failure_messages),
             source_revision=projection.data_revision,
             overlays=tuple(overlays),
             parameter_units=parameter_units,
-            sample_axis_name=facet_coordinate.label,
-            sample_coordinates=(
-                np.asarray(facet_values, dtype=np.float64)
-                if numeric_facet
-                else np.arange(len(facet_values), dtype=np.float64)
-            ),
-            sample_unit=(
-                ""
-                if not numeric_facet or facet_coordinate.canonical_unit.symbol == "1"
-                else facet_coordinate.canonical_unit.symbol
-            ),
-            sample_labels=(
-                None if numeric_facet else tuple(cell.label for cell in cells)
-            ),
+            **self._facet_batch_geometry(projection, cells),
         )
         return batch, tuple(selections)
 
@@ -525,6 +716,7 @@ class FitSessionMixin:
         live: bool,
         all_facets: bool = False,
         logical_completion: Future[FitResult | FacetFitBatchResult] | None,
+        prepared_request: _LiveFitRequest | None = None,
     ) -> _StartedFitRequest | None:
         """Atomically replace fit request authority and freeze one solver input."""
 
@@ -534,19 +726,22 @@ class FitSessionMixin:
             raise TypeError("all_facets must be bool")
         if all_facets and not isinstance(self._spec, FacetGridPlot):
             raise TypeError("fit_all_facets requires FacetGridPlot")
-        request = self._prepare_fit_request(
-            model,
-            selector_kind=selector_kind,
-            initial=initial,
-            bounds=bounds,
-            options=options,
-        )
-        request = replace(
-            request,
-            all_facets=all_facets or (
-                live and isinstance(self._spec, FacetGridPlot)
-            ),
-        )
+        if prepared_request is None:
+            request = self._prepare_fit_request(
+                model,
+                selector_kind=selector_kind,
+                initial=initial,
+                bounds=bounds,
+                options=options,
+            )
+            request = replace(
+                request,
+                all_facets=all_facets or (
+                    live and isinstance(self._spec, FacetGridPlot)
+                ),
+            )
+        else:
+            request = prepared_request
         selection: FitSelection | None = None
         with self._render_lock:
             with self._lock:
@@ -588,10 +783,13 @@ class FitSessionMixin:
                     if selection is not None or request.all_facets
                     else None
                 )
+        def retire_previous_request() -> None:
             previous_fit_cancel.set()
             previous_live_fit_cancel.set()
-        if superseded is not None and not superseded.done():
-            superseded.set_exception(FitCancelled("fit request superseded"))
+            if superseded is not None and not superseded.done():
+                superseded.set_exception(FitCancelled("fit request superseded"))
+
+        self._commit_fit_actions(retire_previous_request)
         return started
 
     def _pair_started(
@@ -603,9 +801,8 @@ class FitSessionMixin:
         The selection freeze runs inside the solver task (from the captured
         immutable projection), so neither the caller nor the render worker
         pays for it.  The cancellation token is the request-scoped live token:
-        a running pair solve completes even when newer data arrives — the
-        newer frame replaces the QUEUED pair, never the running one — and is
-        cancelled only by re-arm, replace_spec, or close.
+        every accepted frame keeps its FIFO position while earlier pairs solve,
+        and turns over only for backlog resync, re-arm, replace_spec, or close.
         """
 
         with self._lock:
@@ -623,68 +820,64 @@ class FitSessionMixin:
     def _solve_live_pair(
         self,
         started: _DeferredStartedFitRequest,
+        cancelled: Callable[[], bool] | None = None,
     ) -> _SolvedLiveFit:
-        """Solve one pair fit to completion; never raises into the pipeline."""
+        """Solve one exact pair or fail it without advancing visible data."""
 
         try:
-            result = self._solve_started_fit(started)
-        except (FitCancelled, FitDeadlineExceeded):
-            return _SolvedLiveFit(started, None)
+            result = self._solve_started_fit(started, cancelled=cancelled)
+            if started.cancellation.is_set() or (
+                cancelled is not None and bool(cancelled())
+            ):
+                raise FitCancelled("live fit pair was resynchronized")
         except Exception as error:
-            self._forget_fit_warm_starts(started.request_generation)
+            if not isinstance(error, (FitCancelled, FitDeadlineExceeded)):
+                self._forget_fit_warm_starts(started.request_generation)
             failed = self._retire_failed_live_presentation(started, error)
             if failed is not None:
                 self._resolve_fit_completion(failed)
-            return _SolvedLiveFit(started, None)
+            raise
         return _SolvedLiveFit(started, result)
 
     def solve_live_frame(
         self,
         prepared: object,
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> Future[_SolvedLiveFit] | None:
-        """Start the fit half of one data/fit pair on the fit executor.
+        """Start the fit half of one data/fit pair on the analysis executor.
 
-        Returns None when no live fit is armed (the frame commits data-only)
-        or the session is closing.  The returned future always resolves to a
-        ``_SolvedLiveFit`` — cancellations and solver failures travel as
-        ``result=None`` so the paired data frame still presents.
+        Returns None only when no live fit is armed.  An armed solve either
+        resolves with its matching result or raises loudly; it never converts
+        failure into a data-only presentation.
         """
 
         if not isinstance(prepared, _PreparedLiveFrame):
             raise TypeError("prepared must be a prepared live frame")
         if prepared.session_identity is not self._session_identity:
             raise ValueError("prepared live frame belongs to another PlotSession")
+        if cancelled is not None and not callable(cancelled):
+            raise TypeError("cancelled must be callable or None")
         started = self._pair_started(prepared.projection)
         if started is None:
             return None
         try:
-            return self._fit_executor.submit(self._solve_live_pair, started)
-        except RuntimeError:
-            # The executor is shutting down; the frame commits data-only.
-            return None
+            return self._analysis_executor.submit(
+                self._solve_live_pair,
+                started,
+                cancelled,
+            )
+        except RuntimeError as error:
+            raise FitCancelled("analysis executor is not available") from error
 
     def _accept_pair_fit(
         self,
         solved: _SolvedLiveFit,
-    ) -> tuple[_FitResolution | None, FitEvent | None] | None:
-        """Accept a pair-solved fit inside its data commit (render lock held).
-
-        Returns completion/notification work the caller must run after
-        releasing the render lock (futures and observer callbacks must never
-        resolve under it), or None when nothing was accepted.
-        """
+        projection: FitProjection,
+    ) -> tuple[_AcceptedFit, _FitResolution | None, FitEvent]:
+        """Build matching fit state before the pair's one render transaction."""
 
         result = solved.result
-        if result is None:
-            return None
-        try:
-            presentation = self._accept_fit(result, solved.started)
-        except Exception:
-            # The overlay paint failed and rolled itself back; the data front
-            # stands and the next data revision retries.
-            return None
-        if presentation is None:
-            return None
         resolution: _FitResolution | None = None
         with self._lock:
             request_current = (
@@ -693,12 +886,32 @@ class FitSessionMixin:
                 and solved.started.request_generation
                 == self._fit_request_generation
             )
-            completion = self._live_fit_completion if request_current else None
+            if not request_current:
+                raise FitCancelled("fit request changed before pair acceptance")
+            accepted, _selections = self._resolved_accepted_fit(
+                result,
+                solved.started,
+                projection,
+            )
+            event = self._fit_event(accepted)
+            completion = self._live_fit_completion
             if completion is not None:
                 self._live_fit_completion = None
         if completion is not None:
             resolution = _FitResolution(completion, result=result)
-        return resolution, presentation.event
+        return accepted, resolution, event
+
+    def _restore_live_fit_completion(
+        self,
+        resolution: _FitResolution | None,
+    ) -> None:
+        """Return an unpromoted pair's logical completion to its live request."""
+
+        if resolution is None or resolution.completion.done():
+            return
+        with self._lock:
+            if not self._closed and self._live_fit_completion is None:
+                self._live_fit_completion = resolution.completion
 
     def _prepare_fit_request(
         self,
@@ -815,7 +1028,7 @@ class FitSessionMixin:
         """Run one started fit on the analysis executor and route completion."""
 
         try:
-            future = self._fit_executor.submit(self._solve_started_fit, started)
+            future = self._analysis_executor.submit(self._solve_started_fit, started)
         except Exception as error:
             self._forget_fit_warm_starts(started.request_generation)
             if not live and logical_completion is not None:
@@ -1104,27 +1317,51 @@ class FitSessionMixin:
 
     def _set_classifier_thresholds_state(
         self,
-        thresholds: Sequence[float | None],
+        thresholds: object,
     ) -> None:
         if not self._threshold_classifier_enabled():
             raise RuntimeError("threshold classifier is not enabled")
-        selected = tuple(thresholds)
-        if len(selected) != len(self._classifier_results):
-            raise ValueError("classifier thresholds must match the distributions")
-        normalized: list[float | None] = []
-        for value in selected:
-            if value is None:
-                normalized.append(None)
-                continue
-            numeric = float(value)
-            if not np.isfinite(numeric):
-                raise ValueError("classifier thresholds must be finite or None")
-            normalized.append(numeric)
+        selected = normalize_classifier_threshold_targets(thresholds)
+        expected: dict[tuple[object, ...], int] = {}
+        facet_grid = isinstance(self._spec, FacetGridPlot)
+        for index in range(len(self._classifier_results)):
+            target = self._classifier_threshold_target_for_index(
+                index if facet_grid else None,
+                0.0,
+            )
+            identity = _classifier_threshold_key(target)
+            if identity in expected:
+                raise ValueError(
+                    "classifier distributions are not uniquely coordinate-addressed"
+                )
+            expected[identity] = index
+        normalized: list[float | None] = [None] * len(self._classifier_results)
+        for target in selected:
+            identity = _classifier_threshold_key(target)
+            index = expected.get(identity)
+            if index is None:
+                raise ValueError(
+                    "classifier threshold target does not match a current distribution"
+                )
+            normalized[index] = float(target["value"])
         self._classifier_thresholds = tuple(normalized)
         try:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
         except KeyError:
             pass
+
+    def _classifier_threshold_targets_state(self) -> tuple[Mapping[str, object], ...]:
+        facet_grid = isinstance(self._spec, FacetGridPlot)
+        return normalize_classifier_threshold_targets(
+            tuple(
+                self._classifier_threshold_target_for_index(
+                    index if facet_grid else None,
+                    value,
+                )
+                for index, value in enumerate(self._classifier_thresholds)
+                if value is not None
+            )
+        )
 
     def _schedule_fit_completion(
         self,
@@ -1312,27 +1549,59 @@ class FitSessionMixin:
                 )
         return resolution, presentation
 
+    def _resolved_accepted_fit(
+        self,
+        result: FitResult | FacetFitBatchResult,
+        started: _StartedFitRequest,
+        projection: FitProjection,
+    ) -> tuple[_AcceptedFit, tuple[FitSelection | None, ...]]:
+        """Resolve one fit against exactly the projection it was solved from."""
+
+        batch = result if isinstance(result, FacetFitBatchResult) else None
+        selection = None if batch is not None else self._started_selection(started)
+        if result.source_revision != projection.data_revision:
+            raise RuntimeError("fit result does not match its data projection")
+        if selection is not None and selection.data_revision != projection.data_revision:
+            raise RuntimeError("fit selection does not match its data projection")
+        if batch is None:
+            if selection is None:
+                raise RuntimeError("single fit acceptance has no selection")
+            overlay = projection._make_fit_overlay(result, selection)
+            overlays = (overlay,)
+            selections = (selection,)
+        else:
+            overlay = None
+            overlays = batch.overlays
+            selections = self._facet_fit_selections(
+                projection,
+                batch.model,
+                selector_kind=started.request.selector_kind,
+            )
+        return (
+            _AcceptedFit(
+                result=result,
+                selection=selection,
+                overlay=overlay,
+                overlays=overlays,
+                selections=selections,
+                context_generation=started.context_generation,
+            ),
+            selections,
+        )
+
     def _accept_fit(
         self,
         result: FitResult | FacetFitBatchResult,
         started: _StartedFitRequest,
     ) -> _FitPresentation | None:
         batch = result if isinstance(result, FacetFitBatchResult) else None
-        selection = None if batch is not None else self._started_selection(started)
-        result_revision = (
-            batch.source_revision
-            if batch is not None
-            else result.source_revision
-        )
         with self._render_lock:
             with self._lock:
                 if (
                     self._closed
-                    or result_revision != self.data_revision
+                    or result.source_revision != self.data_revision
                     or started.request_generation != self._fit_request_generation
                 ):
-                    return None
-                if selection is not None and selection.data_revision != self.data_revision:
                     return None
                 if (
                     batch is None
@@ -1347,28 +1616,12 @@ class FitSessionMixin:
                     # Keep the last complete fit front instead of replacing it
                     # with a failure topology while the pointer is still down.
                     return None
-                if batch is None:
-                    assert selection is not None
-                    overlay = self._projected._make_fit_overlay(result, selection)
-                    overlays = (overlay,)
-                    selections = (selection,)
-                else:
-                    overlay = None
-                    overlays = batch.overlays
-                    selections = self._facet_fit_selections(
-                        started.projection,
-                        batch.model,
-                        selector_kind=started.request.selector_kind,
-                    )
-                previous = self._accepted_fit
-                accepted = _AcceptedFit(
-                    result=result,
-                    selection=selection,
-                    overlay=overlay,
-                    overlays=overlays,
-                    selections=selections,
-                    context_generation=started.context_generation,
+                accepted, selections = self._resolved_accepted_fit(
+                    result,
+                    started,
+                    self._projected,
                 )
+                previous = self._accepted_fit
                 self._accepted_fit = accepted
             try:
                 self._render_current(
@@ -1477,6 +1730,10 @@ class FitSessionMixin:
         return self._subscribe_callback(self._fit_callbacks, callback)
 
     def _notify_fit(self, event: FitEvent | None) -> None:
+        deferred = getattr(self, "_configuration_fit_events", None)
+        if deferred is not None:
+            deferred.append(event)
+            return
         with self._lock:
             callbacks = tuple(self._fit_callbacks)
         self._notify_callbacks(callbacks, event)
@@ -1529,11 +1786,17 @@ class FitSessionMixin:
                 except Exception:
                     self.redraw_surface()
                 raise
+
+        def retire_cleared_request() -> None:
             fit_cancel.set()
             live_fit_cancel.set()
+            if logical_completion is not None and not logical_completion.done():
+                logical_completion.set_exception(
+                    FitCancelled("fit request cleared")
+                )
+
+        self._commit_fit_actions(retire_cleared_request)
         if withdrawn:
             # Nothing is painted any longer, so nothing is published either:
             # whoever derived signals from this fit hears it go.
             self._notify_fit(None)
-        if logical_completion is not None and not logical_completion.done():
-            logical_completion.set_exception(FitCancelled("fit request cleared"))

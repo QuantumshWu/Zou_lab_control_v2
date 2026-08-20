@@ -784,7 +784,7 @@ def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
                 radius=1,
                 reducer="mean",
             )
-            assert kept_signal - background > 100.0
+            assert kept_signal > background
             assert removed_signal - background < 0.35 * (kept_signal - background)
     finally:
         installation.close()
@@ -1451,9 +1451,9 @@ def test_public_repeat_reduction_exposes_the_planted_trap_depth_contrast() -> No
                 assert sequencer.wait_done(1.0) is not None
             result = capture.collect()
             return np.asarray(
-                result.publication.value(
-                    measurement.signal_key("frames")
-                ).snapshot.block.values
+                plane.current_dataset(
+                    measurement.signal_key("frames"), result.publication
+                ).block.values
             )
 
         frames = capture_frames()

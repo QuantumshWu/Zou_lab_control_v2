@@ -71,14 +71,12 @@ def _escaped(text: str) -> str:
 
 
 def _set_interaction(surface: object | None, enabled: bool) -> None:
-    """Keep a plot surface's input transport alive, when it has one.
+    """Project the TaskConsole selector gate onto a plot surface, when present.
 
     Duck-typed on purpose: a plot widget owns an interaction gate, and a label
-    standing in for one in a demo does not.  The card always enables the
-    transport at mount -- navigation (double-click focus, pan, zoom, scroll)
-    must survive the Selectors switch, so the switch gates only the
-    selector-STARTING pointer gestures in the card's own event filter and
-    never closes this transport.
+    standing in for one in a demo does not.  Suspending the transport cancels
+    any active plot gesture; the card separately sends an Off-state wheel to
+    the surrounding page instead of letting the plot consume it.
     """
 
     gate = getattr(surface, "set_interaction_enabled", None)
@@ -233,14 +231,13 @@ class PanelCardView(FluentGroupBox):
         self.size_combo.hide()
         self.size_combo.currentIndexChanged[int].connect(self._size_changed)
         self.setCursor(QtCore.Qt.OpenHandCursor)
-        self._selectors_on = False
-        #: Buttons whose press this card swallowed while Selectors is off, so
-        #: the matching move/release stream is swallowed with it and the plot
-        #: never sees half a gesture.
-        self._gated_buttons: set[int] = set()
+        # A bare reusable card has no TaskConsole switch, so its plot remains
+        # interactive.  TaskConsoleHandle projects the global switch onto every
+        # card before a mounted panel can be used.
+        self._selectors_on = True
         self._surface_error_connected = False
         self.set_status("", error=False)
-        self.set_selectors_enabled(False)
+        self.set_selectors_enabled(True)
         # An empty card still has a size: the frame it is.  Settle it now, so
         # a board can pack this card before anything is mounted in it.
         self._apply_card_size(str(self._state_projection["size"]))
@@ -515,14 +512,11 @@ class PanelCardView(FluentGroupBox):
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("surface must be QWidget or None")
         if widget is not None and widget is self._surface:
+            _set_interaction(widget, self._selectors_on)
             widget.show()
             return
         if widget is not None:
-            # The transport stays OPEN regardless of the Selectors switch:
-            # navigation (double-click focus, pan, zoom) is never the
-            # switch's to drop.  Selector-starting gestures are gated in
-            # this card's event filter instead.
-            _set_interaction(widget, True)
+            _set_interaction(widget, self._selectors_on)
         if self._surface is not None:
             self._surface.removeEventFilter(self)
             if self._surface_error_connected:
@@ -538,7 +532,6 @@ class PanelCardView(FluentGroupBox):
             self._surface_layout.removeWidget(self._surface)
             self._surface.hide()
             self._surface.setParent(None)
-        self._gated_buttons.clear()
         self._surface = widget
         if widget is None:
             self._placeholder.show()
@@ -612,40 +605,23 @@ class PanelCardView(FluentGroupBox):
             and event.type() == QtCore.QEvent.Wheel
             and not bool(getattr(self._surface, "interaction_enabled", False))
         ):
-            # A surface with an OPEN plot transport owns its wheel (zoom).
-            # Anything else -- a demo label, a surface whose transport a host
-            # closed -- would drop the wheel dead, so it goes to the board
-            # scroll instead.  Qt does not propagate the ignored wheel up
-            # through this parent chain by itself.
+            # Off means the plot owns no pointer gesture.  Qt does not
+            # propagate an ignored wheel through this child chain, so deliver
+            # it explicitly to the outer TaskConsole page.
             ancestor = self.parentWidget()
             while ancestor is not None:
                 if isinstance(ancestor, QtWidgets.QAbstractScrollArea):
                     QtWidgets.QApplication.sendEvent(ancestor.viewport(), event)
                     return True
                 ancestor = ancestor.parentWidget()
+            return True
         if watched is self._surface and not self._selectors_on:
-            # The Selectors switch gates SELECTOR CREATION only, never
-            # navigation.  A left press starts (or drags) a selector and a
-            # right press installs a crosshair, so those presses -- and the
-            # rest of their own gesture stream -- are swallowed here.
-            # Everything else stays routed: double-click (facet focus),
-            # middle-button pan/zoom-reset, wheel zoom, hover, Escape.
-            kind = event.type()
-            if kind == QtCore.QEvent.MouseButtonPress and event.button() in (
-                QtCore.Qt.LeftButton,
-                QtCore.Qt.RightButton,
-            ):
-                self._gated_buttons.add(int(event.button()))
-                return True
-            if kind == QtCore.QEvent.MouseMove and any(
-                int(event.buttons()) & button for button in self._gated_buttons
-            ):
-                return True
-            if (
-                kind == QtCore.QEvent.MouseButtonRelease
-                and int(event.button()) in self._gated_buttons
-            ):
-                self._gated_buttons.discard(int(event.button()))
+            if event.type() in {
+                QtCore.QEvent.MouseButtonPress,
+                QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick,
+                QtCore.QEvent.MouseMove,
+            }:
                 return True
         return super().eventFilter(watched, event)
 
@@ -705,17 +681,14 @@ class PanelCardView(FluentGroupBox):
         self.status_dot.setVisible(bool(value))
 
     def set_selectors_enabled(self, enabled: bool) -> None:
-        """Allow or suspend STARTING selectors on this panel's plot.
-
-        Only that.  This used to close the plot widget's whole interaction
-        transport, which silently dropped every pointer event -- including
-        the double-click that is the only way to focus a facet cell, and
-        pan/zoom -- until the operator flipped Selectors on.  Navigation is
-        not the switch's to gate: the card's event filter swallows only the
-        selector-starting presses while this flag is off.
-        """
+        """Give the plot all pointer gestures when On and none when Off."""
 
         self._selectors_on = bool(enabled)
+        _set_interaction(self._surface, self._selectors_on)
+
+    @property
+    def selectors_enabled(self) -> bool:
+        return self._selectors_on
 
     def set_editing_enabled(self, enabled: bool) -> None:
         """Gate persisted panel edits without disabling plot interaction."""

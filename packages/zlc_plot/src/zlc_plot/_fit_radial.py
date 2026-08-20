@@ -15,11 +15,8 @@ access.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
-import os
-import threading
 import time
 from typing import Callable, Mapping, Sequence
 
@@ -73,29 +70,6 @@ _REGULAR_IMAGE_MAX_LINE_SEARCH_STEPS = 50
 _REGULAR_IMAGE_MAX_NEWTON_STEPS = 8
 _REGULAR_IMAGE_FTOL = 1e-10
 _REGULAR_IMAGE_GTOL = 1e-8
-_REGULAR_IMAGE_STRIPE_WORKERS = 4
-
-
-_STRIPE_POOL: ThreadPoolExecutor | None = None
-_STRIPE_POOL_LOCK = threading.Lock()
-
-
-def _stripe_pool() -> ThreadPoolExecutor:
-    """Shared small pool for stripe sweeps (numpy releases the GIL)."""
-
-    global _STRIPE_POOL
-    if _STRIPE_POOL is None:
-        with _STRIPE_POOL_LOCK:
-            if _STRIPE_POOL is None:
-                _STRIPE_POOL = ThreadPoolExecutor(
-                    max_workers=min(
-                        _REGULAR_IMAGE_STRIPE_WORKERS, os.cpu_count() or 1
-                    ),
-                    thread_name_prefix="zlc-fit-stripe",
-                )
-    return _STRIPE_POOL
-
-
 @dataclass(frozen=True, slots=True)
 class _SeparableKernel:
     """Separable structure of one regular-image Gaussian model.
@@ -704,10 +678,10 @@ def _regular_image_striped_objective(
         return cost, square_sum, gradient, information
 
     bounds_list = context.stripe_bounds()
-    if len(bounds_list) > 1:
-        stripe_results = list(_stripe_pool().map(stripe_task, bounds_list))
-    else:
-        stripe_results = [stripe_task(bounds_list[0])]
+    # PlotSession already owns the analysis worker.  A second persistent pool
+    # inside one fit oversubscribed 4/8-panel runs and outlived every session;
+    # NumPy still performs each stripe's vectorized kernels in native code.
+    stripe_results = [stripe_task(bounds) for bounds in bounds_list]
 
     costs: list[float] = []
     square_sums: list[float] = []

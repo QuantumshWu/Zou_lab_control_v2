@@ -29,7 +29,6 @@ from typing import Any
 from zlc_runtime import (
     BoardScheduler,
     HarmonicClock,
-    OwnerChannels,
     SurfaceBatchArbiter,
 )
 
@@ -87,12 +86,6 @@ class OwnerWake:
             pending, self._pending = self._pending, False
             return pending
 
-    @property
-    def pending(self) -> bool:
-        with self._lock:
-            return self._pending
-
-
 class LiveBoard:
     """A set of panels kept up to date from one signal plane."""
 
@@ -105,6 +98,9 @@ class LiveBoard:
         notify: Callable[[], None] | None = None,
     ) -> None:
         self._closed = False
+        self._closing = False
+        self._projection_lock = Lock()
+        self._projection_futures: set[object] = set()
         # Canonical run assembly and companion projection happen before a
         # RasterPlotHost can accept its PlotInput.  They are display work, so
         # one board-owned worker performs them at the board cadence instead of
@@ -114,8 +110,7 @@ class LiveBoard:
             thread_name_prefix="zlc-presentation",
         )
         self.wake = OwnerWake(notify)
-        self._channels = OwnerChannels(self.wake)
-        self._arbiter = SurfaceBatchArbiter(self._channels)
+        self._arbiter = SurfaceBatchArbiter(self.wake)
         self._ports = ports
         self._clock = HarmonicClock(tuple(intervals))
         self._scheduler = BoardScheduler(
@@ -150,11 +145,23 @@ class LiveBoard:
     def submit_projection(self, project: Callable[[], object]):
         """Submit one coalesced panel input projection off the owner thread."""
 
-        if self._closed:
-            raise RuntimeError("live board is closed")
         if not callable(project):
             raise TypeError("panel projection must be callable")
-        return self._projection_executor.submit(project)
+        with self._projection_lock:
+            if self._closing:
+                raise RuntimeError("live board is closing")
+            future = self._projection_executor.submit(project)
+            self._projection_futures.add(future)
+
+        def finished(completed: object) -> None:
+            with self._projection_lock:
+                self._projection_futures.discard(completed)
+                closing = self._closing
+            if closing:
+                self.wake.request_owner_wake()
+
+        future.add_done_callback(finished)
+        return future
 
     def commit(self) -> None:
         """Put ready boards on screen.  The GUI thread, and only it.
@@ -164,6 +171,7 @@ class LiveBoard:
         """
 
         self.wake.take()
+        self._scheduler.stage_owed()
         self._arbiter.drain(self._resolve)
 
     def _resolve(self, panel_id: str) -> Any | None:
@@ -172,13 +180,36 @@ class LiveBoard:
                 return port
         return None
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._scheduler.close()
-        self._arbiter.close()
+    @property
+    def pending_projection_count(self) -> int:
+        with self._projection_lock:
+            return len(self._projection_futures)
+
+    def close(self) -> bool:
+        """Start shutdown and report True only after every projection is done."""
+
+        with self._projection_lock:
+            if self._closed:
+                return True
+            first = not self._closing
+            self._closing = True
+            pending = tuple(self._projection_futures)
+        if first:
+            self._scheduler.close()
+            self._arbiter.close()
+        for future in pending:
+            future.cancel()
+        if first:
+            self._projection_executor.shutdown(wait=False, cancel_futures=True)
+        with self._projection_lock:
+            if self._projection_futures:
+                return False
+        # Every tracked Future callback has returned to the executor loop; this
+        # final join is therefore an idle-thread retirement, not a work wait.
         self._projection_executor.shutdown(wait=True, cancel_futures=True)
+        with self._projection_lock:
+            self._closed = True
+        return True
 
 
 def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
@@ -225,6 +256,9 @@ def attach_qt_worker(name: str = "zlc-worker"):
 
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=str(name))
     inbox: SimpleQueue = SimpleQueue()
+    state_lock = Lock()
+    pending = 0
+    closed = False
 
     def drain() -> None:
         while True:
@@ -237,18 +271,50 @@ def attach_qt_worker(name: str = "zlc-worker"):
     trigger = attach_qt_owner_turn(drain)
 
     def run(work, deliver, failed) -> None:
+        nonlocal pending
+        with state_lock:
+            if closed:
+                raise RuntimeError("Qt worker is closed")
+            pending += 1
+
         def task() -> None:
             try:
                 result = work()
             except BaseException as error:  # noqa: BLE001 -- delivered, not lost
-                inbox.put(lambda: failed(error))
+                callback = lambda error=error: failed(error)
             else:
-                inbox.put(lambda: deliver(result))
+                callback = lambda result=result: deliver(result)
+
+            def finish() -> None:
+                nonlocal pending
+                try:
+                    callback()
+                finally:
+                    with state_lock:
+                        pending -= 1
+
+            inbox.put(finish)
             trigger()
 
-        pool.submit(task)
+        try:
+            pool.submit(task)
+        except BaseException:
+            with state_lock:
+                pending -= 1
+            raise
 
-    return run
+    def close() -> bool:
+        nonlocal closed
+        with state_lock:
+            if closed:
+                return True
+            if pending:
+                return False
+            closed = True
+        pool.shutdown(wait=True, cancel_futures=True)
+        return True
+
+    return run, close
 
 
 def attach_qt_owner_turn(turn: Callable[[], None]) -> Callable[[], None]:

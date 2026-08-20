@@ -37,6 +37,22 @@ non-standard UI dependency beyond PyQt5 is the reference
    intents in its in-window log and to stdout; the gallery is a compact control
    survey.
 
+## Plot interaction and close contract
+
+The TaskConsole Selectors switch is a global plot-pointer gate. Off means the
+plot consumes no area, zoom, pan, hover or double-click focus gesture, and the
+ordinary wheel remains with the outer board. On a FacetGrid overview, only a
+left-button double click may focus one cell; an Area selector can start only on
+that focused cell (or on a non-grid plot).
+
+Views emit close intent; a composition-installed close guard decides when the
+top-level window may actually disappear. Handles provide queued close retry so
+completion callbacks never re-enter the current close event. The Qt owner does
+not wait for device, node, archive or plot workers, and a refused close leaves
+the window visible. There is no raw `atexit` widget-deletion path standing in
+for application shutdown: Workbench must retire its real owners before the
+guard accepts the close.
+
 ## Development
 
 ```powershell

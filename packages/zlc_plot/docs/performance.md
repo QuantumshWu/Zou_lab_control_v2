@@ -1,10 +1,39 @@
 # Plot performance
 
+## Current M4 guardrails (2026-08-20)
+
+- One `PlotSession` owns one serial analysis executor. Frame preparation,
+  manual fit and live fit submit to that same lane; there is no package-global
+  fit/stripe pool and no second prepare executor.
+- A complete PanelState target is one idempotent transaction. A no-op performs
+  zero solve, zero render and zero front promotion; a changed target merges its
+  effects into one final render. Startup always promotes the initial front
+  first, and a startup no-op reuses it instead of creating a ghost front.
+- Fit-armed data is exact FIFO while the oldest queued input has waited at most
+  1 second and retained immutable arrays remain at most 64 MiB. Crossing either
+  budget reports one resync, supersedes unfit middle revisions and continues
+  from the then-latest input; it never permanently latches the panel or Qt.
+- Selector Off means the plot consumes no pointer gesture. Its wheel belongs to
+  the outer page. Selector On permits only double-click focus in a FacetGrid
+  overview; area/pan/zoom begin only on a focused cell or non-grid surface.
+- The formal 96x128 Camera -> 26x26 Area fit + parallel ROI image -> Rolling
+  chain uses 100 ms as a profiling warning, not a hard acceptance deadline.
+  After removing two extra cadence waits, its steady end-to-end P50/P95 is
+  150/167 ms; the fit itself is 24/31 ms and fit-publication -> Rolling prepare
+  is 0.3/1.3 ms. An isolated 1/4/8-panel batch measured
+  40.3/174.3/360.6 ms. The multi-panel totals are contention diagnostics, not
+  per-panel cadence promises. Changes smaller than normal run-to-run noise are
+  not grounds for another executor, cache or pool.
+
+The older tables below remain dated numeric references for projection and
+render costs. Their former queue/lifecycle policies have been removed; the
+guardrails above are the current product contract.
+
 ## Overhaul reference measurements (2026-08-10)
 
 Everything below this section predates the 2026-08-10 performance overhaul
-and is retained as a dated record; treat these numbers as the current
-reference.  Measured on the reference machine (Windows 11, Python 3.13.12,
+and is retained only as a dated numeric record, not as lifecycle or queue
+policy. Measured on the reference machine (Windows 11, Python 3.13.12,
 numpy 2.4.2, matplotlib 3.10.8), 2048^2 uint16 camera contract, warm p50,
 via direct session/host probes:
 
@@ -27,7 +56,7 @@ chrome background cache with bit-identical composition, the prepared-front
 LRU plus per-revision mip pyramid, reshape-mean decimation, coalesced
 compounding wheel ticks, BLAS-backed separable fit objectives with
 Gauss-Newton/multigrid refinement and lazy result arrays, the same-frame
-budgeted live fit, and the separable windowed MOT synthesis.
+exact paired live fit, and the separable windowed MOT synthesis.
 
 A same-day follow-up pass tightened the remaining hot paths (same machine,
 same harnesses):
@@ -65,8 +94,8 @@ One drag step (preview + overlay render + capture) went from 17.7 ms to
 full-figure Agg redraw at larger panels.  With the step that cheap, the
 color preview's own 100 ms throttle lane became the drag lag it once
 guarded against — the recolor now rides the same 30 ms pointer cadence as
-pan (`raster_preview_interval_ms` is gone), with latest-only coalescing as
-the real flow control.  Measured through the live pointer path under
+pan (`raster_preview_interval_ms` is gone), with same-key pointer-motion
+coalescing as flow control.  Measured through the live pointer path under
 concurrent 10 Hz 2048² updates: 7–8 ms per recolor for either handle.
 
 The projection layer's dense fast paths were completed in the same pass.
@@ -85,26 +114,6 @@ of identical codes); histograms were already one vectorized
 `np.histogram`, and facet cells and scan-point curves are small by
 construction.
 
-## Source-size audit (2026-08-03)
-
-The current `src/zlc_plot` tree contains 25,825 non-blank Python lines (28,627
-physical lines including blanks).  This
-is above the aspirational 15k target because the package still carries four
-independent responsibilities that are part of its public contract: (1) the
-typed `(R, P, *data_dim)` projection and unit-aware DataView, (2) the complete
-Matplotlib artist renderer and fixed-preset/DPR layout, (3) the Qt5 raster host
-and controls, and (4) the notebook DOM adapter plus bounded live/fit transport.
-The fit engine and regular-image solver are shared by every plot kind, while
-the `_kinds` registry owns only the closed semantic dispatch; deleting those
-modules would reintroduce duplicated kind branches rather than reduce the
-system.
-
-The retained size is therefore deliberate and itemized here instead of being
-hidden by generated code or compatibility shims.  The next safe reduction
-boundary is a responsibility-level extraction into separately installable
-packages; collapsing those public boundaries inside this package would make
-the GUI/notebook parity and the single raster authority less explicit.
-
 ## Scope
 
 The measured workload used the same direct composition as a GUI camera view:
@@ -119,9 +128,8 @@ immutable zlc_data.OwnedSnapshot
 The primary camera contract is `(R=1, P=1, camera_y, camera_x)`.  Both spatial
 axes are declared dense `data_dim` axes and the `ImagePlot` refers to them with
 `AxisRef.data(...)`.  Every public live camera frame keeps the fixed
-`(1, 1, *frame)` geometry, while acquisition history remains private.  The
-capacity-one ingress replaces only a pending revision, so acquisition can keep
-publishing without building a presentation queue.
+`(1, 1, *frame)` geometry, while acquisition history remains private. The host
+admits revisions through the bounded exact FIFO described above.
 
 The comparison also covered flattened `P=H*W` plus `GridTopology`, but that is
 not the recommended camera representation.
@@ -181,7 +189,7 @@ The first plot in a fresh Python process can additionally pay font discovery
 and Matplotlib initialization; that one-time cost is excluded from the warm
 medians.
 
-## Current virtual-camera, Distribution and live-fit profile (2026-08-09)
+## Dated virtual-camera and classifier measurements (2026-08-09)
 
 This pass used the current checkout on Windows 11 / Python 3.13.12 with the
 public `PlotSession` and `RasterPlotHost` APIs. Ten fresh
@@ -189,8 +197,9 @@ processes constructed one `96 x 128` Image session at `2x2`; the cold session
 median/p95 was 190.83 / 194.77 ms. A 30-frame, 30 Hz `128 x 128` camera run at
 the 100 ms display cadence measured projection 0.77 / 1.06 ms, artist render
 15.21 / 17.24 ms, complete render pipeline 16.35 / 18.42 ms, and observed
-front interval 101.11 / 111.26 ms median/p95. It promoted 11 latest fronts,
-reached revision 30, and reported no error or timeout.
+front interval 101.11 / 111.26 ms median/p95. It observed 11 fronts,
+reached revision 30, and reported no error or timeout. These render-stage
+numbers predate the current exact queue and are not queue-policy acceptance.
 
 The fit/classifier cases used ten warm complete session transactions. The Image
 case was an anisotropic Gaussian over a regular `96 x 128` field. Distribution
@@ -210,17 +219,6 @@ Histogram fitting consumed the painted histogram centers/counts through the
 existing `FitSelection`; it did not submit the 300 raw samples to a second fit
 path. Calibration uses only the independent threshold classifier, not the
 generic 35-cell fit row.
-
-A controlled 250 ms solver quantified the former live-fit path. Before the correction
-(`f4095be`), data waited for fit: only revisions 1/4/7/9/13/15 appeared and
-front intervals were 295.62 / 314.89 ms median/p95; all six stale-in-between
-fits were accepted. After the correction, 14 of 15 latest data revisions
-appeared at 97.60 / 146.38 ms and only final fit revision 15 was accepted.
-The TaskConsole path calls `RasterPlotHost.update_data()` directly; its same
-96 x 128 workload took 17.79 / 19.45 ms per data front and maintained
-100.11 / 101.98 ms intervals while only fit revision 15 survived. Thus slow
-analysis no longer changes data cadence. This dated result does not define the
-current exact-pair product contract.
 
 ## Dense-image data and display paths
 
@@ -258,29 +256,24 @@ Matplotlib 3.10.8 on a 16-logical-CPU machine.  Each row is a fresh process
 using a direct `2048 x 2048 uint16` session/host probe.
 Values are milliseconds.
 
-| Preset / cadence | DPR / front raster | Prepared image | Promoted / published | Projection p50 / p95 | Artist render p50 / p95 | Complete pipeline p50 / p95 | Peak RSS delta |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `2x2`, 100 ms | 1 / 480x357 | 256x256 | 11 / 30 | 0.446 / 0.729 | 22.163 / 23.023 | 23.047 / 24.046 | 98.17 MiB |
-| `8x8`, 400 ms | 1 / 1488x1113 | 1024x1024 | 4 / 30 | 0.681 / 0.750 | 117.746 / 121.831 | 122.980 / 126.850 | 225.52 MiB |
+| Preset / cadence | DPR / front raster | Prepared image | Projection p50 / p95 | Artist render p50 / p95 | Complete pipeline p50 / p95 | Peak RSS delta |
+|---|---:|---:|---:|---:|---:|---:|
+| `2x2`, 100 ms | 1 / 480x357 | 256x256 | 0.446 / 0.729 | 22.163 / 23.023 | 23.047 / 24.046 | 98.17 MiB |
+| `8x8`, 400 ms | 1 / 1488x1113 | 1024x1024 | 0.681 / 0.750 | 117.746 / 121.831 | 122.980 / 126.850 | 225.52 MiB |
 
-Both runs reached the latest revision, painted the first and final fronts,
-reported no update failure and closed without a timeout.  The `2x2` run
-sustained 9.91 Hz at the 100 ms render budget.  The `8x8` run remained below
-its 400 ms budget while rendering roughly sixteen times as many prepared scalar
-samples.  The producer ran at 30 Hz; capacity-one ingress intentionally
-coalesced 19 and 26 intermediate revisions respectively instead of building a
-queue.
+Both runs painted the first and final observed fronts, reported no update
+failure and closed without a timeout. The `2x2` render stages sustained the
+100 ms budget; the `8x8` stages remained below 400 ms while rendering roughly
+sixteen times as many prepared scalar samples. Promotion counts from that old
+cadence harness are intentionally omitted because they do not describe the
+current exact queue.
 
 The final presentation-transaction pass was also rerun at DPR 2 with a `2x2`
-surface. A 1024² source at 100 ms promoted 20 of 24 published revisions; its
-projection, artist render and complete pipeline measured 0.474 / 0.718,
-22.232 / 24.141 and 25.389 / 27.255 ms p50/p95. A 2048² source at 400 ms
-promoted 4 of 12 revisions and measured 0.583 / 0.880, 43.609 / 46.421 and
-47.078 / 49.312 ms respectively. Both cases painted their initial front,
-reached the final revision, reported no failure or timeout and closed both
-workers. Their peak RSS deltas were 51.9 MiB and 112.5 MiB. Intermediate
-revisions were coalesced by the capacity-one mailbox; no stale frame was later
-replayed.
+surface. A 1024² source measured projection, artist render and complete
+pipeline at 0.474 / 0.718, 22.232 / 24.141 and 25.389 / 27.255 ms p50/p95. A
+2048² source measured 0.583 / 0.880, 43.609 / 46.421 and 47.078 / 49.312 ms.
+Both cases painted an initial and final observed front, reported no render
+failure and closed cleanly. Their peak RSS deltas were 51.9 MiB and 112.5 MiB.
 
 A separate `2x2` color-limit pointer profile retained the 256x256 raster.
 Selector geometry and its numeric labels continue to follow pointer cadence,
@@ -362,16 +355,17 @@ including overlay presentation, measured 204 / 151 ms cold/warm at 1024² and
 332 / 325 ms at 2048² on the reference machine. Both returned the exact
 all-pixel sample count, full fitted/residual/index arrays, finite parameter
 uncertainties and a current overlay. An armed live fit makes every data
-frame a pair: the solve runs to completion on the fit executor while the
-render worker stays free (hosted pipeline prepare → solve → commit), and
-the overlay is accepted into the same presented front as its data — the
-frame is born complete, with no budget and no asynchronous catch-up. A
-solve slower than the producer period lowers the pair rate (newer frames
-replace only the queued next pair; the in-flight pair always completes), so
-shots skip but pairs never split. Reference 2048² numbers: paint 15–25 ms,
-projection 10–25 ms, warm radial solve ~33 ms — a fit-armed canonical board
-holds ~10 Hz whole-pair flips. Custom Image models remain on the general
-coordinate-expansion solver path unless they provide a specialization.
+frame a pair. One Session-owned serial analysis executor performs prepare and
+solve in order while the render worker remains free; commit then accepts the
+overlay into the same front as its data. Within the 1 second / 64 MiB support
+budget every admitted revision remains FIFO exact. Beyond it the host reports
+one resync and continues from the then-latest input rather than growing without
+bound or permanently stopping. The regular-image objective evaluates bounded
+stripes serially inside that analysis task; there is no global stripe pool to
+oversubscribe 4/8-panel runs or outlive sessions. Reference 2048² stage costs
+remain paint 15–25 ms, projection 10–25 ms and warm radial solve about 33 ms.
+Custom Image models stay on the general coordinate-expansion solver path unless
+they provide a specialization.
 
 ## GridTopology comparison
 
@@ -380,10 +374,9 @@ The 1024² flattened comparison used `(R=1, P=1,048,576)` with explicit
 representation correctly remains on the general grouping path.  Reusing the
 same immutable schema object makes ingress validation constant-time:
 `publish()` measured 0.169 / 0.194 ms p50/p95.  Snapshot freezing still took
-46.52 / 66.43 ms and projection took 2.657 / 2.665 s.  The run remained bounded
-(16 published, two promoted, 14 coalesced) and reached revision 16, but this is
-further evidence that camera pixels belong in dense data axes rather than
-flattened point rows.
+46.52 / 66.43 ms and projection took 2.657 / 2.665 s. This remains evidence
+that camera pixels belong in dense data axes rather than flattened point rows;
+the old cadence harness's promotion counts are not a current queue contract.
 
 ## Grouped reduction is vectorised (2026-08-11)
 

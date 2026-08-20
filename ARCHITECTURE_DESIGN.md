@@ -121,17 +121,19 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
-- Fit armed后每个source revision都有一个ordered exact fit job；不丢revision、不只fit latest。
+- `display_interval`是Panel data+fit pair的admission cadence；每次Panel due时选择当时latest coherent publication作为一个source revision。在支持的显示延迟预算内，每个已admit source revision都有一个ordered exact fit job；更高频的raw Monitor publications不被伪装成Panel revision。
 - Panel只原子呈现`data@N + fit@N`。
-- FitResult携带source parent/revision，Rolling trace逐revision连续。
+- Fit selection唯一优先级是committed Area ROI（或显式X-range）→viewport→full range；FacetGrid selector必须保留所属focused cell identity，任何PanelState重放不得把ROI降级成viewport/full。
+- FitResult携带source parent/revision；正常负载下Rolling trace逐revision连续。
 - Fit计算在后台worker；Qt owner thread不等待Future或执行fit。
-- Backlog超过经profiling确定的支持预算时loud error，不跳revision；raw data仍可离线重算。
+- 最老待处理revision等待超过1秒，或队列持有的immutable array超过64 MiB时，必须loud报告一次resync，丢弃尚未fit的中间revision，只保留当时latest继续；不得永久锁住Panel、Qt、Stop或close。该断点不是成功fit，raw Runtime data仍完整并可离线重算。
 
 ### 5.2 Performance与state
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
+- 正式96×128 Camera、小Area ROI、主图atomic fit、并行ROI image与一个fit-parameter Rolling Panel链路以100 ms作为profile警戒线；明显的额外cadence、HOL、错误串行和重复render必须删除。若剩余是必要fit/raster/Qt成本，只有能带来实质收益且不增加不相称复杂度的优化才实施。
 - 性能以真实TaskConsole、1/4/8 panels、fit+overlay、Setting/Edit和Qt owner latency为profile对象。
 
 ### 5.3 Overlay与selector

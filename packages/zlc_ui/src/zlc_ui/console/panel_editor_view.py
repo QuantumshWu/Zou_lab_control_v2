@@ -52,6 +52,7 @@ from ._panel_projection import (
     signal_form_runtime,
 )
 from .logic_editor_view import LogicEditorView
+from .panel_card_view import _set_interaction
 
 
 _IMAGE_FORMATS = ("png", "pdf", "svg")
@@ -80,6 +81,7 @@ class PanelEditorView(QtWidgets.QWidget):
         }
         self._producer_editor: LogicEditorView | None = None
         self._surface: QtWidgets.QWidget | None = None
+        self._selectors_on = True
         self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._save_directory_initialized = False
         self._save_name_initialized = False
@@ -91,8 +93,8 @@ class PanelEditorView(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        scroll = FluentScrollArea()
-        scroll.setWidgetResizable(True)
+        self.scroll = FluentScrollArea()
+        self.scroll.setWidgetResizable(True)
         body = QtWidgets.QWidget()
         body.setStyleSheet("background: transparent;")
         body_layout = QtWidgets.QVBoxLayout(body)
@@ -259,8 +261,8 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_button.clicked.connect(self._save_figure)
         body_layout.addStretch(1)
 
-        scroll.setWidget(body)
-        outer.addWidget(scroll)
+        self.scroll.setWidget(body)
+        outer.addWidget(self.scroll)
         self.update_projection(projection)
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
@@ -384,9 +386,11 @@ class PanelEditorView(QtWidgets.QWidget):
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("surface must be QWidget or None")
         if widget is self._surface:
+            _set_interaction(widget, self._selectors_on)
             return
         previous = self._surface
         if previous is not None:
+            previous.removeEventFilter(self)
             self.surface_layout.removeWidget(previous)
             previous.hide()
             previous.setParent(None)
@@ -396,8 +400,28 @@ class PanelEditorView(QtWidgets.QWidget):
             return
         self.surface_placeholder.hide()
         widget.setParent(self.surface_holder)
+        widget.installEventFilter(self)
+        _set_interaction(widget, self._selectors_on)
         self.surface_layout.addWidget(widget)
         widget.show()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if watched is self._surface and not self._selectors_on:
+            if event.type() == QtCore.QEvent.Wheel:
+                QtWidgets.QApplication.sendEvent(self.scroll.viewport(), event)
+                return True
+            if event.type() in {
+                QtCore.QEvent.MouseButtonPress,
+                QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick,
+                QtCore.QEvent.MouseMove,
+            }:
+                return True
+        return super().eventFilter(watched, event)
+
+    def set_selectors_enabled(self, enabled: bool) -> None:
+        self._selectors_on = bool(enabled)
+        _set_interaction(self._surface, self._selectors_on)
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         """Gate saved-state changes while leaving the frozen plot inspectable."""

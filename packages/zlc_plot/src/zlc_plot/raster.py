@@ -11,11 +11,12 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, InvalidStateError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
-from threading import Condition, Lock, Thread, current_thread
+from threading import Condition, Event, Lock, Thread, current_thread
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from uuid import uuid4
 
@@ -306,22 +307,56 @@ class _DispatchMode(str, Enum):
 
 
 class _FrameSuperseded(RuntimeError):
-    """A data frame's commit found the session context had moved past it.
-
-    Flow control, not failure: the producer's next revision (or the
-    scheduler's next tick) renders against the new context and heals the
-    panel.  The pair pipeline reports it as a cancelled future so consumers
-    treat it exactly like a coalesced frame.
-    """
+    """A prepared frame no longer matches the explicitly changed session context."""
 
 
 @dataclass(slots=True)
 class _QueuedDataFrame:
-    """The latest-only next pair waiting for the in-flight pair to finish."""
+    """One input waiting inside the bounded-lag exact presentation FIFO."""
 
     data: object
     revision: int | None
     completion: Future["RasterOperation[None]"]
+    size_bytes: int
+    queued_at: float
+    cancel: Event = field(default_factory=Event)
+    stage: str = "queued"
+
+
+def _plot_input_array_bytes(data: object) -> int:
+    """Logical immutable array bytes retained by one queued plot input."""
+
+    seen: set[int] = set()
+    total = 0
+
+    def add_array(value: object) -> None:
+        nonlocal total
+        if not isinstance(value, np.ndarray) or id(value) in seen:
+            return
+        seen.add(id(value))
+        total += int(value.nbytes)
+
+    def add_snapshot(value: object) -> None:
+        block = getattr(value, "block", None)
+        if block is None:
+            return
+        add_array(getattr(block, "values", None))
+        add_array(getattr(getattr(block, "validity", None), "mask", None))
+
+    snapshot = getattr(data, "snapshot", data)
+    add_snapshot(snapshot)
+    overlay = getattr(data, "overlay", None)
+    if overlay is not None:
+        add_array(getattr(overlay, "coordinates", None))
+        add_snapshot(getattr(overlay, "status", None))
+    return total
+
+
+def _plot_input_revision(data: object) -> int | None:
+    snapshot = getattr(data, "snapshot", data)
+    revision = getattr(getattr(snapshot, "ref", None), "revision", None)
+    value = getattr(revision, "value", revision)
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _pointer_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object | None:
@@ -522,12 +557,38 @@ class _WorkerSessionAdapter:
             cancelled=cancelled,
         )
 
-    def solve_live_frame(self, prepared: object) -> Future[object] | None:
+    def solve_live_frame(
+        self,
+        prepared: object,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Future[object] | None:
         # Deliberately no worker-thread assertion: solving happens on the fit
         # executor, and submitting is lock-protected session state access —
         # the pair pipeline calls this from whichever thread completed the
         # preparation.
-        return self._host._require_session().solve_live_frame(prepared)
+        return self._host._require_session().solve_live_frame(
+            prepared,
+            cancelled=cancelled,
+        )
+
+    def resynchronize_live_fit(self) -> None:
+        # Event rotation is lock-protected PlotSession control state, like
+        # solve submission above; it performs no rendering or owner-affine IO.
+        self._host._require_session().resynchronize_live_fit()
+
+    def publish_live_fit_gap(
+        self,
+        source_revision: int,
+        error: BaseException,
+        *,
+        projection: object | None = None,
+    ) -> bool:
+        return self._session().publish_live_fit_gap(
+            source_revision,
+            error,
+            projection=projection,
+        )
 
     def commit_live_frame(
         self,
@@ -564,16 +625,21 @@ class _WorkerSessionAdapter:
         return self._session()._raster_color_limits_snapshot()
 
 class RasterPlotHost:
-    """Serialize one ``PlotSession`` and publish immutable latest-only fronts.
+    """Serialize one ``PlotSession`` and publish immutable latest fronts.
 
     The callable factory is invoked on the owned worker, and closing the host
     always closes that session.  A live Figure is never exposed to callers.
     :meth:`from_plot` is the standard immutable-data/spec construction path;
     the raw factory remains available for deliberate ``PlotSession`` subclasses.
-    Public mutation methods never run plot work on the caller.  Pending data and
-    high-frequency controls coalesce only with the same semantic key; selector,
+    Public mutation methods never run plot work on the caller.  Data/fit pairs
+    retain FIFO order inside the supported display lag; a reported resync
+    skips stale middle revisions once that lag is exceeded.  Only
+    high-frequency controls with the same semantic key coalesce.  Selector,
     fit, unit, size and other distinct commands retain their ordering.
     """
+
+    MAX_EXACT_WAIT_SECONDS = 1.0
+    MAX_PENDING_INPUT_BYTES = 64 << 20
 
     def __init__(
         self,
@@ -595,13 +661,19 @@ class RasterPlotHost:
         self._worker_adapter = _WorkerSessionAdapter(self)
         self._condition = Condition(Lock())
         self._pending: deque[_WorkerTask] = deque()
-        #: The pair pipeline: at most one data frame travels
-        #: prepare -> solve -> commit at a time, and at most one newer frame
-        #: waits its turn.  A newer producer revision replaces the QUEUED
-        #: frame only — the in-flight pair always runs to completion, which is
-        #: what keeps fit-armed panels pairing when solve > producer period.
-        self._frame_inflight = False
-        self._frame_queued: _QueuedDataFrame | None = None
+        #: One frame travels prepare -> solve -> commit while successors wait
+        #: in exact order.  A short burst remains lossless.  Once the oldest
+        #: queued input has actually waited more than the supported display
+        #: lag (or retained inputs cross the memory budget), queued middle
+        #: revisions fail loudly and the then-latest input becomes the new
+        #: exact starting point.  The host never permanently latches.
+        self._frame_active: _QueuedDataFrame | None = None
+        self._frame_queue: deque[_QueuedDataFrame] = deque()
+        self._frame_gaps: deque[
+            tuple[tuple[_QueuedDataFrame, ...], RuntimeError]
+        ] = deque()
+        self._frame_gap_dispatching = False
+        self._frame_pending_bytes = 0
         #: Wheel ticks accumulated across coalesced scroll tasks.  The one
         #: surviving scroll task drains the whole sum, so a fast wheel burst
         #: renders once with the combined magnitude instead of queueing one
@@ -1005,10 +1077,16 @@ class RasterPlotHost:
         promoted = False
         self._active_mode = mode
         try:
+            session = self._require_session()
+            presentation_epoch = session._raster_presentation_epoch()
             value = callback()
             publishes = mode.publishes or (
                 mode is _DispatchMode.ADAPTIVE
-                and bool(getattr(value, "publish_front", False))
+                and (
+                    bool(getattr(value, "publish_front", False))
+                    or session._raster_presentation_epoch()
+                    != presentation_epoch
+                )
             )
             front = self._capture_front() if publishes else self.front
             if front is None:
@@ -1126,10 +1204,12 @@ class RasterPlotHost:
         """Present one data frame as a complete pair through the pipeline.
 
         The frame travels prepare (projection, off-worker) -> solve (armed
-        live fit, fit executor) -> commit (paint data + overlay + capture,
+        live fit, analysis executor) -> commit (paint data + overlay + capture,
         one short worker item).  The returned future resolves when the
-        committed front is promoted; a frame replaced by a newer one while
-        queued resolves cancelled, exactly like the old coalesced task.
+        committed front is promoted.  Armed frames wait in exact FIFO order
+        inside the supported lag.  A resync reports the skipped gap and keeps
+        the then-latest pair; a failed solve reports only its own revision so
+        a later matching pair can recover the panel.
         """
 
         return self._enqueue_data_frame(data, revision)
@@ -1162,63 +1242,209 @@ class RasterPlotHost:
         data: object,
         revision: int | None,
     ) -> Future[RasterOperation[None]]:
+        if revision is None:
+            revision = _plot_input_revision(data)
         completion: Future[RasterOperation[None]] = Future()
-        superseded: Future[RasterOperation[None]] | None = None
-        start = False
+        size_bytes = _plot_input_array_bytes(data)
+        frame = _QueuedDataFrame(
+            data,
+            revision,
+            completion,
+            size_bytes,
+            monotonic(),
+        )
+        refused: BaseException | None = None
+        start: _QueuedDataFrame | None = None
+        cancel_active_request = False
+        gap_batches: tuple[
+            tuple[tuple[_QueuedDataFrame, ...], RuntimeError], ...
+        ] = ()
         with self._condition:
             if self._closing:
-                completion.set_exception(self._unusable())
-                return completion
-            if self._frame_inflight:
-                queued = self._frame_queued
-                superseded = None if queued is None else queued.completion
-                self._frame_queued = _QueuedDataFrame(data, revision, completion)
+                refused = self._unusable()
+            elif self._frame_active is not None:
+                oldest_wait = (
+                    0.0
+                    if not self._frame_queue
+                    else max(0.0, frame.queued_at - self._frame_queue[0].queued_at)
+                )
+                exceeds_wait = (
+                    bool(self._frame_queue)
+                    and oldest_wait > self.MAX_EXACT_WAIT_SECONDS
+                )
+                exceeds_bytes = (
+                    bool(self._frame_queue)
+                    and self._frame_pending_bytes + size_bytes
+                    > self.MAX_PENDING_INPUT_BYTES
+                )
+                if exceeds_wait or exceeds_bytes:
+                    active = self._frame_active
+                    dropped_active: tuple[_QueuedDataFrame, ...] = ()
+                    if active.stage not in {"commit", "resynchronized"}:
+                        active.stage = "resynchronized"
+                        active.cancel.set()
+                        cancel_active_request = True
+                        dropped_active = (active,)
+                    dropped = dropped_active + tuple(self._frame_queue)
+                    self._frame_queue.clear()
+                    self._frame_pending_bytes = 0
+                    resync_error = self._fit_backlog_resync_error(
+                        dropped, revision, oldest_wait, size_bytes
+                    )
+                    self._frame_gaps.append((dropped, resync_error))
+                    if not self._frame_gap_dispatching:
+                        self._frame_gap_dispatching = True
+                        gap_batches = tuple(self._frame_gaps)
+                        self._frame_gaps.clear()
+                self._frame_queue.append(frame)
+                self._frame_pending_bytes += size_bytes
             else:
-                self._frame_inflight = True
-                start = True
-        # Future.cancel() invokes done callbacks synchronously; never under
-        # the queue lock.
-        if superseded is not None:
-            superseded.cancel()
-        if start:
-            self._begin_data_frame(data, revision, completion)
+                self._frame_active = frame
+                start = frame
+        if refused is not None:
+            completion.set_exception(refused)
+            return completion
+        if cancel_active_request:
+            self._worker_adapter.resynchronize_live_fit()
+        if gap_batches:
+            self._dispatch_resynchronized_gaps(gap_batches)
+        if start is not None:
+            self._begin_data_frame(start)
         return completion
+
+    def _fit_backlog_resync_error(
+        self,
+        dropped: tuple[_QueuedDataFrame, ...],
+        latest_revision: int | None,
+        wait_seconds: float,
+        incoming_bytes: int,
+    ) -> RuntimeError:
+        return RuntimeError(
+            "exact fit backlog resynchronized to latest: "
+            f"dropped={len(dropped)}, "
+            f"oldest_revision={dropped[0].revision}, "
+            f"latest_revision={latest_revision}, "
+            f"wait_seconds={wait_seconds:.3f}, "
+            f"pending_bytes={sum(item.size_bytes for item in dropped)}, "
+            f"incoming_bytes={incoming_bytes}, "
+            f"limits=({self.MAX_EXACT_WAIT_SECONDS:.3f}s, "
+            f"{self.MAX_PENDING_INPUT_BYTES} bytes)"
+        )
+
+    def _dispatch_resynchronized_gaps(
+        self,
+        batches: tuple[
+            tuple[tuple[_QueuedDataFrame, ...], RuntimeError], ...
+        ],
+    ) -> None:
+        def publish() -> None:
+            for dropped, error in batches:
+                for frame in dropped:
+                    if frame.revision is not None:
+                        self._worker_adapter.publish_live_fit_gap(
+                            frame.revision,
+                            error,
+                        )
+
+        dispatched = self._submit(publish, mode=_DispatchMode.CONTROL)
+
+        def published(done: Future[RasterOperation[None]]) -> None:
+            try:
+                done.result()
+            except BaseException as gap_error:
+                for _dropped, error in batches:
+                    error.add_note(f"fit gap publication failed: {gap_error}")
+            for dropped, error in batches:
+                loud, *superseded = dropped
+                if not loud.completion.done():
+                    try:
+                        loud.completion.set_exception(error)
+                    except InvalidStateError:
+                        pass
+                for skipped in superseded:
+                    skipped.completion.cancel()
+            next_batches: tuple[
+                tuple[tuple[_QueuedDataFrame, ...], RuntimeError], ...
+            ] = ()
+            with self._condition:
+                self._frame_gap_dispatching = False
+                if self._frame_gaps and not self._closing:
+                    self._frame_gap_dispatching = True
+                    next_batches = tuple(self._frame_gaps)
+                    self._frame_gaps.clear()
+            if next_batches:
+                self._dispatch_resynchronized_gaps(next_batches)
+                return
+            self._advance_data_frame()
+
+        dispatched.add_done_callback(published)
+
+    def _dispatch_failed_frame_gap(
+        self,
+        prepared: object,
+        frame: _QueuedDataFrame,
+        error: BaseException,
+    ) -> None:
+        projection = getattr(prepared, "projection", None)
+        revision = getattr(projection, "data_revision", None)
+
+        def publish() -> None:
+            if revision is not None:
+                self._worker_adapter.publish_live_fit_gap(
+                    int(revision),
+                    error,
+                    projection=projection,
+                )
+
+        dispatched = self._submit(publish, mode=_DispatchMode.CONTROL)
+
+        def published(done: Future[RasterOperation[None]]) -> None:
+            try:
+                done.result()
+            except BaseException as gap_error:
+                error.add_note(f"fit gap publication failed: {gap_error}")
+            self._finish_data_frame(frame, error=error)
+
+        dispatched.add_done_callback(published)
 
     def _begin_data_frame(
         self,
-        data: object,
-        revision: int | None,
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
     ) -> None:
+        with self._condition:
+            if frame.stage != "resynchronized":
+                frame.stage = "prepare"
+
         def stage_prepare() -> Future[object]:
             return self._require_session().prepare_live_frame(
-                data,
-                revision=revision,
+                frame.data,
+                revision=frame.revision,
+                cancelled=frame.cancel.is_set,
             )
 
         dispatched = self._submit(stage_prepare, mode=_DispatchMode.CONTROL)
         dispatched.add_done_callback(
-            lambda done: self._on_frame_prepare_submitted(done, completion)
+            lambda done: self._on_frame_prepare_submitted(done, frame)
         )
 
     def _on_frame_prepare_submitted(
         self,
         dispatched: Future[RasterOperation[Future[object]]],
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
     ) -> None:
         try:
             prepare_future = dispatched.result().value
         except BaseException as error:
-            self._finish_data_frame(completion, error=error)
+            self._finish_data_frame(frame, error=error)
             return
         prepare_future.add_done_callback(
-            lambda done: self._on_frame_prepared(done, completion)
+            lambda done: self._on_frame_prepared(done, frame)
         )
 
     def _on_frame_prepared(
         self,
         prepare_future: Future[object],
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
     ) -> None:
         from .fit import FitCancelled
 
@@ -1227,46 +1453,64 @@ class RasterPlotHost:
         except (FitCancelled, CancelledError):
             # The preparation was cancelled by a context change (replace_spec,
             # clear_fit, close); the producer's next revision heals the panel.
-            self._finish_data_frame(completion, cancelled=True)
+            self._finish_data_frame(frame, cancelled=True)
             return
         except BaseException as error:
-            self._finish_data_frame(completion, error=error)
+            self._finish_data_frame(frame, error=error)
+            return
+        if frame.cancel.is_set():
+            self._finish_data_frame(frame, cancelled=True)
             return
         try:
-            solve_future = self._worker_adapter.solve_live_frame(prepared)
+            solve_future = self._worker_adapter.solve_live_frame(
+                prepared,
+                cancelled=frame.cancel.is_set,
+            )
         except BaseException as error:
-            self._finish_data_frame(completion, error=error)
+            self._dispatch_failed_frame_gap(prepared, frame, error)
             return
         if solve_future is None:
-            self._dispatch_frame_commit(prepared, None, completion)
+            self._dispatch_frame_commit(prepared, None, frame)
             return
+        with self._condition:
+            if frame.stage != "resynchronized":
+                frame.stage = "solve"
         solve_future.add_done_callback(
-            lambda done: self._on_frame_solved(done, prepared, completion)
+            lambda done: self._on_frame_solved(done, prepared, frame)
         )
 
     def _on_frame_solved(
         self,
         solve_future: Future[object],
         prepared: object,
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
     ) -> None:
+        from .fit import FitCancelled
+
         try:
-            solved: object | None = solve_future.result()
-        except BaseException:
-            # Solve futures resolve failures internally; reaching here means
-            # the executor was torn down mid-flight.  Commit data-only.
-            solved = None
-        self._dispatch_frame_commit(prepared, solved, completion)
+            solved = solve_future.result()
+        except (CancelledError, FitCancelled):
+            self._finish_data_frame(frame, cancelled=True)
+            return
+        except BaseException as error:
+            self._dispatch_failed_frame_gap(prepared, frame, error)
+            return
+        if frame.cancel.is_set():
+            self._finish_data_frame(frame, cancelled=True)
+            return
+        self._dispatch_frame_commit(prepared, solved, frame)
 
     def _dispatch_frame_commit(
         self,
         prepared: object,
         solved: object | None,
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
     ) -> None:
         accepted: list[object] = []
 
         def stage_commit() -> None:
+            if frame.cancel.is_set():
+                raise _FrameSuperseded("live frame was resynchronized before commit")
             finalization = self._worker_adapter.commit_live_frame(
                 prepared,
                 solved,
@@ -1275,6 +1519,9 @@ class RasterPlotHost:
                 raise _FrameSuperseded(
                     "live frame superseded before presentation"
                 )
+            if frame.cancel.is_set():
+                self._worker_adapter.abort_live_frame(finalization)
+                raise _FrameSuperseded("live frame was resynchronized during commit")
             accepted.append(finalization)
 
         def published() -> None:
@@ -1294,64 +1541,120 @@ class RasterPlotHost:
             after_publish=published,
             on_abort=abort,
         )
+        with self._condition:
+            if frame.stage != "resynchronized":
+                frame.stage = "commit"
         dispatched.add_done_callback(
-            lambda done: self._on_frame_committed(done, completion)
+            lambda done: self._on_frame_committed(done, frame)
         )
 
     def _on_frame_committed(
         self,
         dispatched: Future[RasterOperation[None]],
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
     ) -> None:
         try:
             operation = dispatched.result()
         except (_FrameSuperseded, CancelledError):
-            self._finish_data_frame(completion, cancelled=True)
+            self._finish_data_frame(frame, cancelled=True)
             return
         except BaseException as error:
-            self._finish_data_frame(completion, error=error)
+            self._finish_data_frame(frame, error=error)
             return
-        self._finish_data_frame(completion, operation=operation)
+        self._finish_data_frame(frame, operation=operation)
 
     def _finish_data_frame(
         self,
-        completion: Future[RasterOperation[None]],
+        frame: _QueuedDataFrame,
         *,
         operation: RasterOperation[None] | None = None,
         error: BaseException | None = None,
         cancelled: bool = False,
     ) -> None:
+        completion = frame.completion
         with self._condition:
             closing = self._closing
-        try:
-            if cancelled or (error is not None and closing):
-                completion.cancel()
-            elif error is not None:
-                if not completion.done():
-                    completion.set_exception(error)
-            elif not completion.done():
-                completion.set_result(operation)
-        except InvalidStateError:
-            pass
-        self._advance_data_frame()
+            resynchronized = frame.stage == "resynchronized"
+        # A resynchronized frame is settled by the gap publisher, after its
+        # invalid FitEvent has been emitted while the panel port still holds
+        # the exact source publication.  The cooperative solver may observe
+        # cancellation first; letting that callback cancel the Future would
+        # race away the one loud resync error.
+        if not resynchronized:
+            try:
+                if cancelled or (error is not None and closing):
+                    completion.cancel()
+                elif error is not None:
+                    if not completion.done():
+                        completion.set_exception(error)
+                elif not completion.done():
+                    completion.set_result(operation)
+            except InvalidStateError:
+                pass
+        # A solver failure is loud on exactly its revision, but it cannot
+        # permanently freeze the panel.  The last matching pair stays visible
+        # while the queued successor gets its own solve and may recover it.
+        with self._condition:
+            current = self._frame_active is frame
+            if current:
+                self._frame_active = None
+        if current:
+            self._advance_data_frame()
 
     def _advance_data_frame(self) -> None:
-        cancel: Future[RasterOperation[None]] | None = None
+        cancelled: tuple[_QueuedDataFrame, ...] = ()
+        gap_batches: tuple[
+            tuple[tuple[_QueuedDataFrame, ...], RuntimeError], ...
+        ] = ()
         start: _QueuedDataFrame | None = None
         with self._condition:
-            queued = self._frame_queued
-            self._frame_queued = None
-            if queued is None:
-                self._frame_inflight = False
+            if self._frame_active is not None:
+                return
+            if self._frame_gap_dispatching:
+                return
+            if self._frame_gaps:
+                self._frame_gap_dispatching = True
+                gap_batches = tuple(self._frame_gaps)
+                self._frame_gaps.clear()
+            elif not self._frame_queue:
+                return
             elif self._closing:
-                self._frame_inflight = False
-                cancel = queued.completion
+                cancelled = tuple(self._frame_queue)
+                self._frame_queue.clear()
+                self._frame_pending_bytes = 0
             else:
-                start = queued
-        if cancel is not None:
-            cancel.cancel()
+                oldest_wait = max(
+                    0.0,
+                    monotonic() - self._frame_queue[0].queued_at,
+                )
+                if (
+                    len(self._frame_queue) > 1
+                    and oldest_wait > self.MAX_EXACT_WAIT_SECONDS
+                ):
+                    latest = self._frame_queue.pop()
+                    dropped = tuple(self._frame_queue)
+                    self._frame_queue.clear()
+                    self._frame_queue.append(latest)
+                    self._frame_pending_bytes = latest.size_bytes
+                    error = self._fit_backlog_resync_error(
+                        dropped,
+                        latest.revision,
+                        oldest_wait,
+                        latest.size_bytes,
+                    )
+                    gap_batches = ((dropped, error),)
+                    self._frame_gap_dispatching = True
+                else:
+                    start = self._frame_queue.popleft()
+                    self._frame_pending_bytes -= start.size_bytes
+                    self._frame_active = start
+        for queued in cancelled:
+            queued.completion.cancel()
+        if gap_batches:
+            self._dispatch_resynchronized_gaps(gap_batches)
+            return
         if start is not None:
-            self._begin_data_frame(start.data, start.revision, start.completion)
+            self._begin_data_frame(start)
 
     def set_parameter(
         self,
@@ -1385,13 +1688,14 @@ class RasterPlotHost:
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: "ImagePointOverlay | None | object" = _UNSET,
-        classifier_thresholds: Sequence[float | None] | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
+        selectors: Sequence[SelectorState] | object = _UNSET,
+        viewport: RectangleRange | None | object = _UNSET,
+        facet_focus: int | None | object = _UNSET,
+        fit: Mapping[str, object] | None | object = _UNSET,
+        fit_live: bool = True,
     ) -> Future[RasterOperation["DisplayDescription"]]:
-        """Submit the complete desired state as one coalesced worker job.
-
-        A fit is not part of it: ``fit``/``clear_fit`` own that, and their
-        futures resolve with the promoted front.
-        """
+        """Submit one complete desired plot target as one raster operation."""
 
         configuration = {
             "semantic": None if semantic is None else dict(semantic),
@@ -1402,12 +1706,35 @@ class RasterPlotHost:
             configuration["image_overlay"] = image_overlay
         if classifier_thresholds is not _UNSET:
             configuration["classifier_thresholds"] = tuple(classifier_thresholds)
-        return self._dispatch_session(
+        if selectors is not _UNSET:
+            configuration["selectors"] = tuple(selectors)
+        if viewport is not _UNSET:
+            configuration["viewport"] = viewport
+        if facet_focus is not _UNSET:
+            configuration["facet_focus"] = facet_focus
+        if fit is not _UNSET:
+            configuration["fit"] = None if fit is None else dict(fit)
+        configuration["fit_live"] = fit_live
+        pending = self._dispatch_session(
             self._worker_adapter.configure,
-            _mode=_DispatchMode.PUBLISH,
+            _mode=_DispatchMode.ADAPTIVE,
             coalesce_key="configuration",
             **configuration,
         )
+
+        def remember(completed: Future[RasterOperation[object]]) -> None:
+            if completed.cancelled():
+                return
+            try:
+                description = completed.result().value
+                models = tuple(description.fit_models)
+            except BaseException:
+                return
+            with self._condition:
+                self._initial_metadata = (description, models)
+
+        pending.add_done_callback(remember)
+        return pending
 
     def describe_display(self) -> Future[RasterOperation["DisplayDescription"]]:
         """Return the worker session's immutable control-plane description."""
@@ -2147,6 +2474,11 @@ class RasterPlotHost:
     def _take_next_task(self) -> _WorkerTask:
         """The next task to run: a pointer first, then arrival order.
 
+        Before the first front exists, its one explicit startup task goes
+        first.  Otherwise a queued no-op ADAPTIVE configuration captures an
+        unpromoted ghost front merely because ``self.front`` is still None,
+        and the startup task immediately captures the same surface again.
+
         A pointer move and a camera frame are not the same kind of work.  One
         is a person's hand, which is only worth serving while the hand is
         still there; the other is a measurement, which is worth serving
@@ -2160,6 +2492,11 @@ class RasterPlotHost:
         coalesce, so a data frame waits for at most one of them.
         """
 
+        if self._front is None:
+            for index, candidate in enumerate(self._pending):
+                if candidate.coalesce_key == "initial-front":
+                    del self._pending[index]
+                    return candidate
         for index, candidate in enumerate(self._pending):
             if candidate.mode is _DispatchMode.ADAPTIVE:
                 del self._pending[index]
@@ -2323,8 +2660,9 @@ class RasterPlotHost:
     #: How long close waits for the worker by default.
     #:
     #: Bounded, because the caller is usually the GUI thread and the worker's
-    #: exit path shuts down a fit pool with wait=True -- so an unbounded join
-    #: could park the whole window behind a fit that had not finished.  Long
+    #: exit path shuts down the analysis executor with wait=True -- so an
+    #: unbounded join could park the whole window behind a fit that had not
+    #: finished.  Long
     #: enough that a normal exit is never cut short; finite so a wedged worker
     #: is a reported failure rather than a frozen application.
     CLOSE_SECONDS = 30.0
@@ -2338,20 +2676,31 @@ class RasterPlotHost:
             if self._closing:
                 thread = self._thread
                 pending: tuple[_WorkerTask, ...] = ()
-                queued_frame: _QueuedDataFrame | None = None
+                queued_frames: tuple[_QueuedDataFrame, ...] = ()
             else:
                 self._closing = True
                 pending = tuple(self._pending)
                 self._pending.clear()
-                queued_frame = self._frame_queued
-                self._frame_queued = None
+                active = self._frame_active
+                if active is not None:
+                    active.cancel.set()
+                queued_frames = (() if active is None else (active,)) + tuple(
+                    self._frame_queue
+                ) + tuple(
+                    frame
+                    for dropped, _error in self._frame_gaps
+                    for frame in dropped
+                )
+                self._frame_queue.clear()
+                self._frame_gaps.clear()
+                self._frame_pending_bytes = 0
                 self._front_callbacks.clear()
                 self._condition.notify_all()
                 thread = self._thread
         # See _submit(): cancellation callbacks may re-enter this host.
         for task in pending:
             task.completion.cancel()
-        if queued_frame is not None:
+        for queued_frame in queued_frames:
             queued_frame.completion.cancel()
         if thread is not None and thread is not current_thread():
             thread.join(timeout)

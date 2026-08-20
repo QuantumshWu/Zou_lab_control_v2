@@ -85,6 +85,17 @@ body = card._settings_body
 viewport = card._settings_scroll.viewport()
 """
 
+_SURFACE_EPILOGUE = """
+popup = card._settings_popup
+card.retire_settings_popup()
+if popup is not None:
+    popup.close()
+card.close()
+card.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
+"""
+
 
 def test_the_switch_track_never_paints_under_its_neighbour() -> None:
     _run_qt(
@@ -107,6 +118,7 @@ squeezed.setFixedWidth(40)
 app.processEvents()
 assert squeezed._content_width() <= squeezed.width()
 """
+        + _SURFACE_EPILOGUE
     )
 
 
@@ -129,6 +141,7 @@ for index, rect in enumerate(rects):
     for other in rects[index + 1:]:
         assert not rect.intersects(other), (rect, other)
 """
+        + _SURFACE_EPILOGUE
     )
 
 
@@ -149,5 +162,60 @@ assert body.width() <= viewport.width(), (body.width(), viewport.width())
 margins = body.layout().contentsMargins()
 required = form.minimum_content_width() + margins.left() + margins.right()
 assert viewport.width() >= required, (viewport.width(), required)
+"""
+        + _SURFACE_EPILOGUE
+    )
+
+
+def test_reconcile_replaces_the_enabled_when_dependency_graph() -> None:
+    _run_qt(
+        """
+import zou_lab_control_v2
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.form.qt_form import FluentParameterForm
+app = ensure_qt_app(['form-dependency-reconcile'])
+old = FormSpec((
+    FormFieldProps('a', 'bool', 'A', default=True),
+    FormFieldProps(
+        'value', 'bool', 'Value', default=True,
+        enabled_when=('a', (True,)),
+    ),
+))
+form = FluentParameterForm(old, {'a': True, 'value': True})
+assert form.widget_for('value').isEnabled()
+new = FormSpec((
+    FormFieldProps('c', 'bool', 'C', default=False),
+    FormFieldProps(
+        'value', 'bool', 'Value', default=True,
+        enabled_when=('c', (True,)),
+    ),
+))
+form.reconcile(new, {'c': False, 'value': True})
+assert not form.widget_for('value').isEnabled()
+controller = form.widget_for('c')
+controller.setChecked(True)
+form.changed.emit('c')
+assert form.widget_for('value').isEnabled()
+typed = FormSpec((
+    FormFieldProps('flag', 'bool', 'Flag', default=True),
+    FormFieldProps(
+        'typed', 'bool', 'Typed', default=True,
+        enabled_when=('flag', (1,)),
+    ),
+))
+form.reconcile(typed, {'flag': True, 'typed': True})
+assert not form.widget_for('typed').isEnabled(), 'bool True is not integer 1'
+negative = FormSpec((
+    FormFieldProps(
+        'offset', 'float', 'Offset', default=None,
+        maximum=-2.0, automatic=True,
+    ),
+))
+form = FluentParameterForm(negative, {'offset': None})
+form.auto_switch_for('offset').setChecked(False)
+assert form.read_value('offset') == -2.0, (
+    'leaving Auto must choose a value inside a negative-only domain'
+)
 """
     )

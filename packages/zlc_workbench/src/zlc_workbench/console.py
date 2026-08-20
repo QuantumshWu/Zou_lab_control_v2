@@ -14,11 +14,9 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from threading import Lock
 import time
 from typing import Any
 
@@ -73,21 +71,16 @@ from .panel_catalog import (
 from .panel_state import (
     PanelFrozenData,
     PanelState,
-    apply_panel_fit,
     draws_image_surfaces,
 )
 from .presentation import PlotPanelPort
 from .selection import (
     panel_selection_document,
     panel_selection_from_document,
-    panel_threshold_document,
-    panel_threshold_from_document,
+    panel_plot_selectors,
     _apply_panel_selection,
-    _apply_panel_threshold,
     _apply_panel_viewport,
     _remove_panel_selection,
-    _remove_panel_threshold,
-    _same_panel_threshold,
     attach_selection_bridge,
     subscribe_committed_selection,
 )
@@ -97,6 +90,13 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
 
 _UNCHANGED = object()
+
+
+def _run_inline(work, deliver, failed) -> None:
+    try:
+        deliver(work())
+    except BaseException as error:
+        failed(error)
 
 
 def _error_text(error: BaseException) -> str:
@@ -259,6 +259,8 @@ class _LayoutCandidate:
 class ConsolePresenter:
     """Wires a console view to a running session."""
 
+    CLOSE_REPORT_SECONDS = 10.0
+
     def __init__(
         self,
         session: object,
@@ -267,7 +269,16 @@ class ConsolePresenter:
         make_host: Callable[[object, PanelState], Any],
         spec_for: Callable[[object, str, str], Any] | None = None,
         open_saved: Callable[[str], object] | None = None,
+        request_close: Callable[[], None] | None = None,
+        run_off_thread: Callable[..., None] | None = None,
+        close_worker: Callable[[], bool] | None = None,
     ) -> None:
+        if request_close is not None and not callable(request_close):
+            raise TypeError("request_close must be callable or None")
+        if run_off_thread is not None and not callable(run_off_thread):
+            raise TypeError("run_off_thread must be callable or None")
+        if close_worker is not None and not callable(close_worker):
+            raise TypeError("close_worker must be callable or None")
         self.session = session
         self.view = view
         self._make_host = make_host
@@ -277,6 +288,9 @@ class ConsolePresenter:
         # Reading a saved run is a different window over a different subject,
         # so the console asks for it rather than growing one.
         self._open_saved = open_saved
+        self._request_close = request_close
+        self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
+        self._close_worker = (lambda: True) if close_worker is None else close_worker
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         # Task identity is a command-admission projection only.  Its lifecycle,
@@ -307,6 +321,12 @@ class ConsolePresenter:
         self._paused = False
         self._deriving = False
         self._shown_console_summary: str | None = None
+        self._closing = False
+        self._closed = False
+        self._close_started_at: float | None = None
+        self._close_wait_reported = False
+        self._close_retry_sent = False
+        self._saving_panels: set[str] = set()
         #: How often a new panel redraws.  The board's default, kept so a panel
         #: and the card that reports it cannot state different numbers.
         live_policy = DEFAULTS.live
@@ -842,6 +862,41 @@ class ConsolePresenter:
     # inside one batch accept pass) and every non-batch render a host produces
     # -- configure, an armed fit, a mirrored selector -- still reaches pixels.
 
+    def _panel_host_configuration(
+        self,
+        panel_state: PanelState,
+        surface: Mapping[str, object],
+        *,
+        overlay: object,
+        viewport: object,
+        live: bool,
+        restore_interaction: bool,
+    ) -> dict[str, object]:
+        configuration: dict[str, object] = {
+            "semantic": self._declared_only(
+                panel_state.semantic, surface.get("semantic", ())
+            ),
+            "parameters": self._declared_only(
+                panel_state.display, surface.get("display", ())
+            ),
+            "size": panel_state.size,
+            "fit": dict(panel_state.fit),
+            "fit_live": live,
+        }
+        if restore_interaction:
+            configuration.update(
+                facet_focus=panel_state.focused_cell,
+                classifier_thresholds=panel_state.classifier_thresholds,
+                selectors=panel_plot_selectors(
+                    panel_selection_from_document(panel_state.selector),
+                    facet_index=panel_state.focused_cell,
+                ),
+                viewport=viewport,
+            )
+        if overlay is not _UNCHANGED:
+            configuration["image_overlay"] = overlay
+        return configuration
+
     def _match_host_to_panel(
         self,
         binding: PanelBinding,
@@ -849,24 +904,16 @@ class ConsolePresenter:
         *,
         state: PanelState | None = None,
         overlay: object = _UNCHANGED,
-        models: object = None,
+        viewport: object = _UNCHANGED,
         present: bool = False,
         live: bool = True,
-        operations: list[object] | None = None,
+        restore_interaction: bool = False,
     ) -> object:
         """Make one of this panel's hosts show what the panel says.
 
         A panel owns two hosts: the live card, and the Edit tab's copy of the
-        same configuration over frozen data.  The design is one PanelState
-        reaching both (ARCHITECTURE_DESIGN 10.3), and what legitimately
-        differs between them is the DATA -- never the appearance, the fit, or
-        where the operator has looked.
-
-        This was written four times over -- the state change, the two first
-        projections, and the save path -- each with a different subset, which
-        is how the Edit tab ended up holding gestures the card did not and the
-        card holding an analysis the Edit tab did not.  It is written once
-        here, and every site that builds or updates a host calls it.
+        same configuration over frozen data.  One PanelState reaches both;
+        only their data differs, never appearance, fit or viewport.
 
         ``present`` is for a host whose widget STAGES its fronts: the card
         needs each resulting operation presented, while the Edit surface
@@ -876,98 +923,45 @@ class ConsolePresenter:
         Such a host is not following anything, and everything it was told must
         have LANDED before the file is written -- the analysis is part of the
         picture, not a later arrival somebody else will present.
+
+        ``restore_interaction`` belongs only to a new/replacement/static host.
+        A standing live host is the event authority for its committed Area,
+        viewport, threshold and focus until the queued owner acknowledgement
+        updates PanelState; replaying that briefly stale mirror during a Fit or
+        display edit would erase the interaction that triggered the edit.
         """
 
         panel_state = binding.state if state is None else state
         surface = binding.parameter_surface
-        configuration: dict[str, object] = {
-            "semantic": self._declared_only(
-                panel_state.semantic, surface.get("semantic", ())
-            ),
-            "parameters": self._declared_only(
-                panel_state.display, surface.get("display", ())
-            ),
-            "size": panel_state.size,
-        }
-        if overlay is not _UNCHANGED:
-            configuration["image_overlay"] = overlay
-        pending = host.configure(**configuration)
-        if operations is not None:
-            operations.append(pending)
-
-        def _also(operation: object) -> None:
-            if operation is None:
-                return
-            if operations is not None:
-                operations.append(operation)
-            if present:
-                self._present_when_done(binding, operation)
-            elif not live and hasattr(operation, "result"):
-                operation.result()
-
-        if not live and hasattr(pending, "result"):
-            pending.result()
-        # A fit is an analysis, not a display parameter: it has its own
-        # completion, and the front it produces reaches a staged widget only
-        # because that operation is presented.
-        # Filtered like the semantic and display bags beside it: a model this
-        # host does not offer is not a fit to arm.  The vocabulary comes from
-        # the same surface they use, so one refresh answers for all three --
-        # only one of seven callers used to pass it, and the rest re-armed the
-        # outgoing kind's model and painted its refusal into every cell.
-        _also(
-            apply_panel_fit(
-                host,
-                panel_state,
-                live=live,
-                models=models if models is not None else surface.get("fit_models"),
-            )
-        )
-        selection = panel_selection_from_document(panel_state.selector)
-        if selection is not None:
-            _also(_apply_panel_selection(host, selection))
-        if binding.interaction_viewport is not None:
-            measured_on, viewport = binding.interaction_viewport
+        selected_viewport = None if viewport is _UNCHANGED else viewport
+        if (
+            restore_interaction
+            and viewport is _UNCHANGED
+            and binding.interaction_viewport is not None
+        ):
+            measured_on, remembered = binding.interaction_viewport
             if measured_on == self._panel_view_identity(binding):
-                _also(_apply_panel_viewport(host, viewport))
+                selected_viewport = remembered
             else:
                 # The data underneath moved: a range measured on the previous
                 # one would paste its limits onto axes that no longer have
                 # them, which is how a restarted producer came back framed by
                 # the picture before it.
                 binding.interaction_viewport = None
-        threshold = panel_threshold_from_document(panel_state.classifier_threshold)
-        if threshold is not None:
-            _also(_apply_panel_threshold(host, threshold))
-        _also(self._apply_panel_focus(host, panel_state.focused_cell))
+        configuration = self._panel_host_configuration(
+            panel_state,
+            surface,
+            overlay=overlay,
+            viewport=selected_viewport,
+            live=live,
+            restore_interaction=restore_interaction,
+        )
+        pending = host.configure(**configuration)
+        if present:
+            self._present_when_done(binding, pending)
+        elif not live and hasattr(pending, "result"):
+            pending.result()
         return pending
-
-    @staticmethod
-    def _apply_panel_focus(host: object, focus: object) -> object:
-        """Put one host on the panel's focused cell, or back on the overview.
-
-        A cell is named by its INDEX between the two hosts -- they draw the
-        same grid over different data, so cell 3 means the same thing to both
-        -- and that is now how the plot layer is asked for it too.  Asked
-        with a pixel-geometry handle taken from the host's CURRENT front, a
-        host already focused on one cell could never be moved to another: a
-        focused front publishes geometry for no other cell, the lookup below
-        found nothing, and the request was dropped without a word.
-        """
-
-        if focus is None:
-            # "No cell is open" is a fact, not an instruction: a host already
-            # showing its overview -- or a plot with no cells at all -- has
-            # nothing to close, and asking anyway is what refused a save with
-            # "facet overview is available only for FacetGridPlot".
-            if ConsolePresenter._host_focus(host) is None:
-                return None
-            overview = getattr(host, "show_facet_overview", None)
-            return overview() if callable(overview) else None
-        focus_facet = getattr(host, "focus_facet", None)
-        if not callable(focus_facet):
-            return None
-        return focus_facet(int(focus))
 
     @staticmethod
     def _host_focus(host: object) -> object:
@@ -1020,7 +1014,7 @@ class ConsolePresenter:
         for host in hosts:
             if host is None or host is source:
                 continue
-            operation = self._apply_panel_focus(host, focus)
+            operation = host.configure(facet_focus=focus)
             if host is binding.host and operation is not None:
                 self._present_when_done(binding, operation)
 
@@ -1036,22 +1030,6 @@ class ConsolePresenter:
 
         binding.state = replace(binding.state, **changes)
         self._publish_panel_state(binding)
-
-    def _offer_state_to_editor(self, binding: PanelBinding) -> None:
-        """Hand the Edit host what the live host resolved.
-
-        A configure comes back DESCRIBED: automatic values resolved, names
-        normalised, and that description is written back into the panel's
-        record.  Only the live host's completion was read that way, so the
-        Edit surface kept whatever it had been told before -- the same
-        record's two readers holding two answers again.
-        """
-
-        editor = binding.editor_host
-        if editor is not None:
-            binding.editor_configuration = self._match_host_to_panel(
-                binding, editor
-            )
 
     def _present_panel_front(self, binding: PanelBinding, front: object) -> bool:
         """Put one completed immutable front on the panel's staged widget.
@@ -1100,7 +1078,18 @@ class ConsolePresenter:
     ) -> None:
         """Present the exact front painted by one completed host operation."""
 
-        if self._present_panel_front(binding, getattr(operation, "front", None)):
+        front = getattr(operation, "front", None)
+        if self._present_panel_front(binding, front):
+            binding.initial_presented = True
+            return
+        # Mounting the widget may immediately negotiate a different screen
+        # DPR.  That newer host front is handed to the staged widget by the Qt
+        # adapter; presenting the older operation then correctly returns
+        # False.  Confirm the latest front once so the beat does not retry the
+        # already-visible initial surface forever.
+        latest = getattr(binding.host, "front", None)
+        if latest is not None and latest is not front:
+            self._present_panel_front(binding, latest)
             binding.initial_presented = True
 
     def _present_mounted_front(self, binding: PanelBinding) -> None:
@@ -1142,7 +1131,7 @@ class ConsolePresenter:
                 # Cancelled or failed operations have no front; their errors
                 # surface through the paths that already own them.
                 return
-            self._panel_interactions.put(
+            self._enqueue_panel_interaction(
                 lambda: self._present_panel_operation(binding, result)
             )
 
@@ -1168,94 +1157,16 @@ class ConsolePresenter:
             selections=None,
             display_publication=publication,
         )
-        operations: list[object] = []
         try:
-            self._match_host_to_panel(
+            operation = self._match_host_to_panel(
                 staged,
                 host,
-                models=(),
-                operations=operations,
+                restore_interaction=True,
             )
-            operation = self._join_host_operations(operations)
         except BaseException:
             self._retire_plot_host(host)
             raise
         return host, operation
-
-    @staticmethod
-    def _join_host_operations(operations: Sequence[object]) -> Future:
-        """Resolve with the newest front only after every staged operation."""
-
-        futures = tuple(
-            operation
-            for operation in operations
-            if callable(getattr(operation, "add_done_callback", None))
-        )
-        if not futures:
-            raise RuntimeError("staged host configuration produced no operation")
-        combined = Future()
-        lock = Lock()
-        remaining = len(futures)
-        results: list[object | None] = [None] * remaining
-
-        def completed(index: int, future: object) -> None:
-            nonlocal remaining
-            try:
-                result = future.result()
-            except BaseException as error:
-                failed = False
-                with lock:
-                    if not combined.done():
-                        combined.set_exception(error)
-                        failed = True
-                if failed:
-                    for sibling in futures:
-                        if sibling is not future:
-                            try:
-                                sibling.cancel()
-                            except BaseException:
-                                pass
-                return
-            with lock:
-                if combined.done():
-                    return
-                results[index] = result
-                remaining -= 1
-                if remaining:
-                    return
-                candidates = tuple(
-                    value
-                    for value in results
-                    if getattr(value, "front", None) is not None
-                )
-                if not candidates:
-                    combined.set_exception(
-                        RuntimeError("staged host configuration produced no front")
-                    )
-                    return
-                combined.set_result(
-                    max(
-                        candidates,
-                        key=lambda value: value.front.identity.sequence,
-                    )
-                )
-
-        for index, future in enumerate(futures):
-            future.add_done_callback(
-                lambda resolved, position=index: completed(position, resolved)
-            )
-
-        def cancel_children(resolved: Future) -> None:
-            if not resolved.cancelled():
-                return
-            for future in futures:
-                try:
-                    future.cancel()
-                except BaseException:
-                    pass
-
-        combined.add_done_callback(cancel_children)
-        return combined
 
     def _accept_panel_host(
         self,
@@ -1613,6 +1524,16 @@ class ConsolePresenter:
                 changes.get("overlay_signal", current.overlay_signal)
             ),
         }
+        if signal != current.signal:
+            # A selector/focus/viewport names axes of the exact signal it was
+            # drawn on.  A different signal must earn its own interaction
+            # state; replaying the old axis ids onto it is not a restore.
+            merged.update(
+                selector={},
+                classifier_thresholds=(),
+                focused_cell=None,
+            )
+            binding.interaction_viewport = None
         for name in ("semantic", "display", "fit"):
             values = dict(getattr(current, name))
             if name in changes:
@@ -1623,6 +1544,16 @@ class ConsolePresenter:
         except Exception as error:
             self._report(f"{panel_id}: {_error_text(error)}", severity="error")
             return False
+        plot_changed = any(
+            getattr(candidate, name) != getattr(current, name)
+            for name in (
+                "size",
+                "semantic",
+                "display",
+                "fit",
+                "overlay_signal",
+            )
+        )
         if (
             candidate.overlay_signal
             and candidate.overlay_signal != current.overlay_signal
@@ -1767,35 +1698,36 @@ class ConsolePresenter:
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 return True
-            live_overlay: object = _UNCHANGED
-            editor_overlay: object = _UNCHANGED
-            if (
-                draws_image_surfaces(candidate.kind, candidate.cell_kind)
-                and candidate.overlay_signal != current.overlay_signal
-            ):
-                live_overlay = None
-                editor_overlay = None
-                frozen = binding.frozen_data
-                if frozen is not None:
-                    binding.frozen_data = replace(
-                        frozen,
-                        plot_input=frozen.snapshot,
-                        overlay={},
-                    )
-            binding.configuration = self._match_host_to_panel(
-                binding,
-                binding.host,
-                state=candidate,
-                overlay=live_overlay,
-                present=True,
-            )
-            if binding.editor_host is not None:
-                binding.editor_configuration = self._match_host_to_panel(
+            if plot_changed:
+                live_overlay: object = _UNCHANGED
+                editor_overlay: object = _UNCHANGED
+                if (
+                    draws_image_surfaces(candidate.kind, candidate.cell_kind)
+                    and candidate.overlay_signal != current.overlay_signal
+                ):
+                    live_overlay = None
+                    editor_overlay = None
+                    frozen = binding.frozen_data
+                    if frozen is not None:
+                        binding.frozen_data = replace(
+                            frozen,
+                            plot_input=frozen.snapshot,
+                            overlay={},
+                        )
+                binding.configuration = self._match_host_to_panel(
                     binding,
-                    binding.editor_host,
+                    binding.host,
                     state=candidate,
-                    overlay=editor_overlay,
+                    overlay=live_overlay,
+                    present=True,
                 )
+                if binding.editor_host is not None:
+                    binding.editor_configuration = self._match_host_to_panel(
+                        binding,
+                        binding.editor_host,
+                        state=candidate,
+                        overlay=editor_overlay,
+                    )
             binding.state = candidate
 
         self._publish_panel_state(binding)
@@ -2056,7 +1988,6 @@ class ConsolePresenter:
                             surface,
                         )
                         binding.parameter_surface = surface
-                        self._offer_state_to_editor(binding)
                         self._publish_panel_state(binding)
             editor_pending = binding.editor_configuration
             if editor_pending is not None and editor_pending.done():
@@ -2118,25 +2049,10 @@ class ConsolePresenter:
                             # keeps the assignments of every vocabulary it has
                             # crossed, on purpose, and asking the description
                             # about one it never declared is a KeyError.
-                            described_state = self._state_with_described_parameters(
-                                binding.state, surface
+                            binding.state = self._state_with_described_parameters(
+                                binding.state,
+                                surface,
                             )
-                            binding.state = replace(
-                                described_state,
-                                # The first host description supplies defaults
-                                # for display controls the operator never
-                                # authored.  Those defaults belong to the
-                                # surface, not the saved PanelState.  Semantic
-                                # fields are different: the staged host has
-                                # already resolved them, so its accepted value
-                                # replaces an incompatible value left by the
-                                # previous cell vocabulary.
-                                display=binding.state.display,
-                            )
-                            binding.configuration = self._match_host_to_panel(
-                                binding, host, models=models, present=True
-                            )
-                            self._offer_state_to_editor(binding)
                             self._publish_panel_state(binding)
                         self._apply_deriving(binding)
 
@@ -2352,7 +2268,11 @@ class ConsolePresenter:
         # offer are not needed to say what the panel already says, and its
         # completion is reported through the same path as every other editor
         # configure.
-        binding.editor_configuration = self._match_host_to_panel(binding, host)
+        binding.editor_configuration = self._match_host_to_panel(
+            binding,
+            host,
+            restore_interaction=True,
+        )
         return host
 
     def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:
@@ -2393,8 +2313,8 @@ class ConsolePresenter:
             host,
             lambda selection: _routed(selection),
             on_removed=lambda _removed: _routed(None),
-            on_threshold=lambda selector: self._enqueue_panel_threshold(
-                panel_id, host, selector
+            on_threshold=lambda thresholds: self._enqueue_panel_threshold(
+                panel_id, host, thresholds
             ),
             on_viewport=lambda selection, viewport: _routed(
                 selection, viewport=viewport
@@ -2494,61 +2414,107 @@ class ConsolePresenter:
         self.board.tick()
         return True
 
-    def save_panel_figure(self, panel_id: str, selected: str) -> object | None:
-        """Save only the exact frozen data currently shown in Panel Edit."""
+    def save_panel_figure(self, panel_id: str, selected: str) -> bool:
+        """Submit one exact frozen Panel Save without blocking the owner."""
 
-        binding = self.panels.get(str(panel_id))
+        key = str(panel_id)
+        binding = self.panels.get(key)
         if binding is None:
-            return None
+            return False
+        if self._closing:
+            self._report("Console is closing; Panel Save was not started", severity="warning")
+            return False
+        if key in self._saving_panels:
+            self._report(f"{binding.state.title} is already saving", severity="warning")
+            return False
         frozen = binding.frozen_data
         if frozen is None:
             self._report(
                 f"{panel_id} has no frozen data to save",
                 severity="warning",
             )
-            return None
+            return False
         selected = str(selected).strip()
         if not selected:
-            return None
-        try:
-            def make_saved_host(
-                _initial: object,
-                _signal: str,
-                _kind: str,
-                _cell_kind: str,
-            ) -> object:
-                return self._make_host(frozen.snapshot, binding.state)
+            return False
 
-            written = _save_panel_figure(
+        # Everything below is frozen on the owner turn.  The worker never
+        # reads the live binding again, so Refresh/Edit cannot change a save
+        # that is already archive-first in flight.
+        state = binding.state
+        viewport = None
+        if binding.interaction_viewport is not None:
+            measured_on, remembered = binding.interaction_viewport
+            if measured_on == self._panel_view_identity(binding):
+                viewport = remembered
+        plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
+        overlay = plot_input.overlay if isinstance(plot_input, ImageFrame) else None
+        configuration = self._panel_host_configuration(
+            state,
+            binding.parameter_surface,
+            overlay=overlay,
+            viewport=viewport,
+            live=False,
+            restore_interaction=True,
+        )
+        make_host = self._make_host
+
+        def make_saved_host(
+            _initial: object,
+            _signal: str,
+            _kind: str,
+            _cell_kind: str,
+        ) -> object:
+            return make_host(frozen.snapshot, state)
+
+        def configure_saved_host(
+            host: object,
+            _state: PanelState,
+            _overlay: object,
+            _viewport: object,
+        ) -> None:
+            pending = host.configure(**configuration)
+            if hasattr(pending, "result"):
+                pending.result()
+
+        def work() -> object:
+            return _save_panel_figure(
                 selected,
-                state=binding.state,
+                state=state,
                 frozen=frozen,
+                viewport=viewport,
                 make_host=make_saved_host,
-                # The file must be the picture on screen.  Saving through the
-                # panel's ONE projection is what puts the operator's selector,
-                # viewport and focused cell into it; a narrower copy here is
-                # how a saved figure came out showing something else.
-                configure_host=lambda host, state, overlay: (
-                    self._match_host_to_panel(
-                        binding,
-                        host,
-                        state=state,
-                        overlay=overlay,
-                        live=False,
-                    )
-                ),
+                configure_host=configure_saved_host,
             )
-        except Exception as error:
+
+        title = state.title
+
+        def finished(written: object) -> None:
+            self._saving_panels.discard(key)
             self._report(
-                f"cannot save {binding.state.title}: {_error_text(error)}",
+                f"panel saved to {written.image.name} and {written.archive.name}",
+                severity="task",
+            )
+            if self._closing and self._request_close is not None:
+                self._request_close()
+
+        def failed(error: BaseException) -> None:
+            self._saving_panels.discard(key)
+            self._report(
+                f"cannot save {title}: {_error_text(error)}",
                 severity="error",
             )
-            return None
-        self._report(
-            f"panel saved to {written.image.name} and {written.archive.name}",
-            severity="task",
-        )
-        return written
+            if self._closing and self._request_close is not None:
+                self._request_close()
+
+        self._saving_panels.add(key)
+        self._report(f"saving {title}", severity="task")
+        try:
+            self._run_off_thread(work, finished, failed)
+        except BaseException as error:
+            failed(error)
+            return False
+        return True
 
     def restart_panel_producer(self, panel_id: str) -> bool:
         binding = self.panels.get(str(panel_id))
@@ -2776,20 +2742,18 @@ class ConsolePresenter:
         self._refresh_console_projection()
 
     def set_deriving(self, deriving: bool) -> None:
-        """Whether the operator may START selectors on plot surfaces.
+        """Whether plot surfaces own pointer input.
 
-        Selector CREATION only.  The view keeps every panel's pointer routing
-        alive either way -- double-click facet focus, pan, zoom and hover are
-        navigation, not derivation, and gating them behind this switch made
-        "double-click does nothing" the console's default state.
+        Off rejects area, zoom, pan, hover and facet focus; the ordinary wheel
+        remains with the board.  On gives the focused/non-grid surface its
+        selector gestures while a FacetGrid overview remains focus-only.
         """
 
         self._deriving = bool(deriving)
         self.view.set_selectors(self._deriving)
         for panel_id, binding in self.panels.items():
             self._apply_deriving(binding)
-            # And the card, whose switch gates only selector-starting
-            # gestures on the mounted plot surface.
+            # The card applies the same global pointer gate to its plot.
             self.view.set_panel_selectors_enabled(
                 panel_id,
                 self._deriving and not self._task_science_locked(binding),
@@ -2810,6 +2774,11 @@ class ConsolePresenter:
 
         self._drain_panel_interactions()
         self._poll_retired_plot_hosts()
+        if self._closing:
+            self.board.commit()
+            self.poll_logic()
+            self._advance_close()
+            return
         self._settle_panel_hosts()
         if not self._paused:
             self.board.tick()
@@ -2827,8 +2796,21 @@ class ConsolePresenter:
         during Pause for the same reason the beat's commit does.
         """
 
+        # Plot callbacks carry semantic owner work as well as completed
+        # surfaces.  Settle that work first: an Area release must become the
+        # canonical PanelState before a Fit click can read/configure it, and a
+        # viewport or threshold must not wait for the periodic display beat.
+        self._drain_panel_interactions()
         self.board.commit()
         self._report_panel_errors()
+        if self._closing:
+            self._poll_retired_plot_hosts()
+            self.poll_logic()
+            self._advance_close()
+
+    def _enqueue_panel_interaction(self, interaction: Callable[[], None]) -> None:
+        self._panel_interactions.put(interaction)
+        self.board.wake.request_owner_wake()
 
     def _drain_panel_interactions(self) -> None:
         while True:
@@ -3150,6 +3132,20 @@ class ConsolePresenter:
             return
         if error is not None:
             raise error
+        initial_selection = panel_selection_from_document(binding.state.selector)
+        initial_publication = None
+        if initial_selection is not None:
+            initial_publication = (
+                None
+                if binding.port is None
+                else binding.port.presented_publication()
+            )
+            if initial_publication is None:
+                initial_publication = binding.display_publication
+            if initial_publication is None:
+                # The host may render before its first board acceptance.  Wait
+                # for that exact publication rather than restoring from latest.
+                return
         binding.bridge, binding.selections = attach_selection_bridge(
             self.session.signal_plane,
             binding.host,
@@ -3163,6 +3159,9 @@ class ConsolePresenter:
                 if binding.port is None
                 else binding.port.publication_for_revision(revision)
             ),
+            request_owner_wake=self.board.wake.request_owner_wake,
+            initial_selection=initial_selection,
+            initial_publication=initial_publication,
             on_committed=lambda selection: self._enqueue_panel_selection(
                 binding.panel_id, selection
             ),
@@ -3172,8 +3171,8 @@ class ConsolePresenter:
             on_viewport=lambda selection, viewport: self._enqueue_panel_selection(
                 binding.panel_id, selection, viewport=viewport
             ),
-            on_threshold=lambda selector, host=binding.host: (
-                self._enqueue_panel_threshold(binding.panel_id, host, selector)
+            on_threshold=lambda thresholds, host=binding.host: (
+                self._enqueue_panel_threshold(binding.panel_id, host, thresholds)
             ),
         )
         binding.bridge.configure_outputs(binding.state.published_outputs)
@@ -3182,17 +3181,17 @@ class ConsolePresenter:
         self,
         panel_id: str,
         host: object,
-        selector: object | None,
+        thresholds: object,
     ) -> None:
-        self._panel_interactions.put(
-            lambda: self._settle_panel_threshold(panel_id, host, selector)
+        self._enqueue_panel_interaction(
+            lambda: self._settle_panel_threshold(panel_id, host, thresholds)
         )
 
     def _settle_panel_threshold(
         self,
         panel_id: str,
         source: object,
-        selector: object | None,
+        thresholds: object,
     ) -> None:
         """A threshold set on either surface is the panel's answer.
 
@@ -3212,20 +3211,16 @@ class ConsolePresenter:
             "changing classifier selection",
         ):
             return
-        remembered = panel_threshold_from_document(binding.state.classifier_threshold)
-        if _same_panel_threshold(remembered, selector):
+        target = tuple(thresholds)
+        if binding.state.classifier_thresholds == target:
             return
         self._remember_panel_view(
-            binding, classifier_threshold=panel_threshold_document(selector)
+            binding, classifier_thresholds=target
         )
         for host in (binding.host, binding.editor_host):
             if host is None or host is source:
                 continue
-            operation = (
-                _remove_panel_threshold(host)
-                if selector is None
-                else _apply_panel_threshold(host, selector)
-            )
+            operation = host.configure(classifier_thresholds=target)
             if host is binding.host and operation is not None:
                 self._present_when_done(binding, operation)
 
@@ -3236,7 +3231,7 @@ class ConsolePresenter:
         *,
         viewport: object = _UNCHANGED,
     ) -> None:
-        self._panel_interactions.put(
+        self._enqueue_panel_interaction(
             lambda: self._route_panel_selection(
                 panel_id, selection, viewport=viewport
             )
@@ -3251,7 +3246,7 @@ class ConsolePresenter:
         *,
         viewport: object = _UNCHANGED,
     ) -> None:
-        self._panel_interactions.put(
+        self._enqueue_panel_interaction(
             lambda: self._route_panel_editor_selection(
                 panel_id,
                 host,
@@ -4301,8 +4296,9 @@ class ConsolePresenter:
                         f"{binding.node_id}: {_error_text(error)}",
                         severity="error",
                     )
-                self._capture_artifact_results(binding)
-                self._ensure_node_previews(binding)
+                if not self._closing:
+                    self._capture_artifact_results(binding)
+                    self._ensure_node_previews(binding)
                 if not binding.host.running and binding.lease is not None:
                     binding.lease.release()
                     binding.lease = None
@@ -4780,47 +4776,66 @@ class ConsolePresenter:
         self._shown_console_summary = summary
         self.view.set_summary(summary)
 
-    def close(self, *, node_stop_seconds: float = 10.0) -> None:
-        # Nodes first: one still running publishes into a plane the panels are
-        # being taken off, and a worker left alive keeps the process up with no
-        # window to show for it.  Here, unlike Remove, waiting is right -- the
-        # window is going away and there is nothing left to keep responsive --
-        # but it is still bounded, so a wedged node cannot hold the process.
-        deadline = time.monotonic() + float(node_stop_seconds)
+    def _begin_close(self) -> None:
+        self._closing = True
+        self._close_started_at = time.monotonic()
+        self._report("closing console; waiting for active work", severity="task")
         for binding in tuple(self.logic.values()):
             binding.removing = True
             self._discard_pending(binding)
             if binding.host is not None and binding.host.running:
                 binding.host.cancel("the console is closing")
-        while self.logic and time.monotonic() < deadline:
-            self.poll_logic()
-            if any(
-                item.host is not None and item.host.running
-                for item in self.logic.values()
-            ):
-                time.sleep(0.01)
-        running = tuple(
-            binding.node_id
-            for binding in self.logic.values()
-            if binding.host is not None and binding.host.running
-        )
-        if running:
-            names = ", ".join(running)
-            raise TimeoutError(f"logic nodes did not stop before close: {names}")
-        for binding in tuple(self.logic.values()):
-            if not self._retire_logic(binding):
-                raise RuntimeError(
-                    f"logic node {binding.node_id!r} could not release its host"
-                )
         for panel_id in list(self.panels):
             self._remove_panel_now(panel_id)
         self.board.close()
-        deadline = time.monotonic() + float(node_stop_seconds)
-        remaining: list[object] = []
-        for host in self._retired_plot_hosts:
-            timeout = max(0.0, deadline - time.monotonic())
-            if not host.close(timeout=timeout):
-                remaining.append(host)
-        self._retired_plot_hosts[:] = remaining
-        if remaining:
-            raise TimeoutError("plot workers did not stop before console close")
+
+    def _advance_close(self) -> bool:
+        board_closed = self.board.close()
+        owners_ready = (
+            not self.logic
+            and not self._retired_plot_hosts
+            and board_closed
+            and not self._saving_panels
+        )
+        worker_closed = self._close_worker() if owners_ready else False
+        ready = owners_ready and worker_closed
+        if ready:
+            self._closed = True
+            if self._request_close is not None and not self._close_retry_sent:
+                self._close_retry_sent = True
+                self._request_close()
+            return True
+        started = self._close_started_at
+        if (
+            started is not None
+            and not self._close_wait_reported
+            and time.monotonic() - started >= self.CLOSE_REPORT_SECONDS
+        ):
+            waiting = [binding.node_id for binding in self.logic.values()]
+            if self.board.pending_projection_count:
+                waiting.append(
+                    f"{self.board.pending_projection_count} panel projection(s)"
+                )
+            if self._retired_plot_hosts:
+                waiting.append(f"{len(self._retired_plot_hosts)} plot worker(s)")
+            if self._saving_panels:
+                waiting.append(f"{len(self._saving_panels)} panel save(s)")
+            elif owners_ready and not worker_closed:
+                waiting.append("panel-save worker")
+            self._report(
+                "console close is still waiting for " + ", ".join(waiting),
+                severity="error",
+            )
+            self._close_wait_reported = True
+        return False
+
+    def close(self) -> bool:
+        """Close guard: initiate shutdown once and never wait on the Qt owner."""
+
+        if self._closed:
+            return True
+        first = not self._closing
+        if first:
+            self._begin_close()
+        ready = self._advance_close()
+        return False if first else ready

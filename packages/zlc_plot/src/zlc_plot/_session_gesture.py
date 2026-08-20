@@ -149,16 +149,10 @@ class GestureSessionMixin:
                     return
                 if button == 1 and is_double:
                     self.focus_facet(cell_index)
-                    return
-                # A press names the cell it landed on, and the gesture then
-                # runs on that cell exactly as it would on a standalone plot.
-                # Which cell is active already has ONE spelling; the pointer
-                # simply gets to write it, instead of every check below being
-                # taught to carry a cell index of its own.  This is not
-                # OPENING the cell: the grid shares one viewport and one fit
-                # context, so neither is disturbed.
-                self._focused_facet_index = cell_index
-                active_axes = event_axes
+                # The overview is a chooser, not an interactive cell.  Only a
+                # left double-click enters one cell; every other gesture waits
+                # until that focused surface exists.
+                return
             elif button == 1 and is_double and event_axes is active_axes:
                 self.show_facet_overview()
                 return
@@ -391,15 +385,7 @@ class GestureSessionMixin:
             isinstance(self._spec, FacetGridPlot)
             and self._facet_focus_index is None
         ):
-            # Same rule as a press: the wheel names the cell it turned over.
-            # The cells share one viewport, so the zoom is the grid's -- what
-            # the cell decides is only whether this wheel event is on the
-            # picture at all.
-            cell_index = self._renderer.facet_index_for_axes(axes)
-            if cell_index is None:
-                return
-            self._focused_facet_index = cell_index
-            active_axes = axes
+            return
         if axes is not active_axes:
             return
         # Zoom against the axes' CURRENT limits, not the painted snapshot the

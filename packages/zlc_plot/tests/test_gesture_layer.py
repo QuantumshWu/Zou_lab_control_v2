@@ -398,17 +398,10 @@ def _inside(transform, fraction_x: float, fraction_y: float) -> tuple[float, flo
 
 
 @pytest.mark.parametrize("cell", (0, 1, 2))
-def test_an_overview_grid_answers_the_pointer_on_the_cell_it_landed_on(
+def test_an_overview_grid_only_focuses_then_the_focused_cell_accepts_an_area(
     cell: int,
 ) -> None:
-    """A grid is a plot, not a picture of plots.
-
-    Every cell of an unfocused grid takes the wheel and the drag, and the
-    press NAMES the cell: the selector it starts belongs to that cell, and
-    the frontend can see it, so it can be grabbed again.  An overview used to
-    refuse both and publish no selectors at all, which is why a camera panel
-    defaulting to a grid had no interaction whatsoever.
-    """
+    """Overview only enters a cell; selector gestures belong to that cell."""
 
     from zlc_plot import FacetGridPlot
 
@@ -424,19 +417,44 @@ def test_an_overview_grid_answers_the_pointer_on_the_cell_it_landed_on(
         session.rgba()
         transform = _cell_transform(session, cell)
         before = session.viewport
+        before_pointer_cell = session._focused_facet_index
         session._raster_pointer_event(
             "scroll", *_inside(transform, 0.5, 0.5), step=-1.0,
             axes_snapshot=transform,
         )
-        assert session.viewport != before, "the wheel did nothing over a cell"
-        assert session._focused_facet_index == cell
+        assert session.viewport == before
+        assert session._focused_facet_index == before_pointer_cell
 
         transform = _cell_transform(session, cell)
         session._raster_pointer_event(
             "press", *_inside(transform, 0.3, 0.3), button=1,
             axes_snapshot=transform,
         )
-        assert session._focused_facet_index == cell
+        session._raster_pointer_event(
+            "move", *_inside(transform, 0.7, 0.7), button=1,
+            axes_snapshot=transform,
+        )
+        session._raster_pointer_event(
+            "release", *_inside(transform, 0.7, 0.7), button=1,
+            axes_snapshot=transform,
+        )
+        assert tuple(session.selectors) == ()
+        assert session._focused_facet_index == before_pointer_cell
+
+        # The one allowed overview gesture enters the cell.
+        transform = _cell_transform(session, cell)
+        session._raster_pointer_event(
+            "press", *_inside(transform, 0.5, 0.5), button=1, double=True,
+            axes_snapshot=transform,
+        )
+        assert session._facet_focus_index == cell
+
+        # Once focused, the same area gesture has one unambiguous cell owner.
+        transform = _cell_transform(session, cell)
+        session._raster_pointer_event(
+            "press", *_inside(transform, 0.3, 0.3), button=1,
+            axes_snapshot=transform,
+        )
         session._raster_pointer_event(
             "move", *_inside(transform, 0.7, 0.7), button=1,
             axes_snapshot=transform,
@@ -448,7 +466,5 @@ def test_an_overview_grid_answers_the_pointer_on_the_cell_it_landed_on(
         committed = tuple(session.selectors)
         assert [state.facet_index for state in committed] == [cell]
         assert committed[0].kind is SelectorKind.AREA
-        painted = session._raster_interaction_snapshot()
-        assert [state.facet_index for state in painted] == [cell]
     finally:
         session.close()

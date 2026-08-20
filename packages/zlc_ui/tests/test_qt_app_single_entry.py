@@ -116,7 +116,6 @@ def test_importing_package_does_not_create_qapplication() -> None:
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
-
 def test_ensure_qt_app_sets_reference_font_and_owner_thread() -> None:
     code = """
 from PyQt5 import QtCore, QtWidgets
@@ -250,69 +249,6 @@ assert window.layout().contentsMargins().top() == frameless_content_top_margin(w
 assert window.loaded.geometry().top() >= window.titleBar.geometry().bottom() + 1, (
     window.loaded.geometry().top(), window.titleBar.geometry().getRect()
 )
-"""
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_the_entry_that_creates_the_app_also_takes_the_windows_down() -> None:
-    """Shutdown is owned, not left to whichever side finishes first.
-
-    Nothing arranged the order in which a Qt tree dies: CPython drops the
-    Python wrappers at exit in its order and Qt destroys the C++ objects in
-    its own, and the crossing point is an access violation with no Python
-    frame -- after the program has already finished.  Being a race it showed
-    up as "sometimes", which is the form of failure nobody can act on: one
-    view test failed roughly one run in four with every assertion passed.
-    """
-
-    code = """
-from PyQt5 import QtWidgets, sip
-from zlc_ui.qt import _destroy_windows_before_python_lets_go, ensure_qt_app
-app = ensure_qt_app(['teardown'])
-
-top = QtWidgets.QWidget(); top.show()
-child = QtWidgets.QLabel('inside', top)
-app.processEvents()
-_destroy_windows_before_python_lets_go()
-assert sip.isdeleted(top), 'a top-level widget must be gone before Python lets go'
-assert sip.isdeleted(child), 'and its children with it'
-# Idempotent: exiting twice (atexit after an explicit call) must not fault.
-_destroy_windows_before_python_lets_go()
-"""
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_ensure_qt_app_registers_the_teardown_once() -> None:
-    """The hook is installed by the entry, and installing it is idempotent."""
-
-    code = """
-from zlc_ui import qt
-assert not qt._QT_TEARDOWN_INSTALLED, 'importing must not register anything'
-qt.ensure_qt_app(['teardown-once'])
-assert qt._QT_TEARDOWN_INSTALLED, 'the single entry owns the shutdown'
-qt.ensure_qt_app(['teardown-again'])
 """
     environment = dict(__import__("os").environ)
     environment["PYTHONPATH"] = str(SRC)

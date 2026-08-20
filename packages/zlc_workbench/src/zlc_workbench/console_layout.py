@@ -338,59 +338,8 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
 def _panel_from_tree(value: object, index: int) -> PanelState:
     where = f"panel entry {index + 1}"
     entry = _mapping(value, where)
-    _exact_fields(
-        entry,
-        {
-            "signal",
-            "title",
-            "kind",
-            "cell_kind",
-            "size",
-            "interval_ms",
-            "semantic",
-            "display",
-            "fit",
-            "overlay_signal",
-            "published_outputs",
-            "selector",
-            "classifier_threshold",
-            "focused_cell",
-        },
-        where,
-    )
     try:
-        return PanelState(
-            signal=_string(entry["signal"], f"{where} signal"),
-            title=_string(entry["title"], f"{where} title"),
-            kind=_string(entry["kind"], f"{where} kind"),
-            cell_kind=_string(entry["cell_kind"], f"{where} cell_kind"),
-            size=_string(entry["size"], f"{where} size"),
-            interval_ms=_integer(entry["interval_ms"], f"{where} interval_ms"),
-            semantic=dict(_mapping(entry["semantic"], f"{where} semantic")),
-            display=dict(_mapping(entry["display"], f"{where} display")),
-            fit=dict(_mapping(entry["fit"], f"{where} fit")),
-            overlay_signal=_string(
-                entry["overlay_signal"], f"{where} overlay_signal"
-            ),
-            published_outputs={
-                str(name): _boolean(enabled, f"{where} published output {name}")
-                for name, enabled in _mapping(
-                    entry["published_outputs"],
-                    f"{where} published_outputs",
-                ).items()
-            },
-            selector=dict(_mapping(entry["selector"], f"{where} selector")),
-            classifier_threshold=dict(
-                _mapping(
-                    entry["classifier_threshold"], f"{where} classifier_threshold"
-                )
-            ),
-            focused_cell=(
-                None
-                if entry["focused_cell"] is None
-                else _integer(entry["focused_cell"], f"{where} focused_cell")
-            ),
-        )
+        return PanelState.from_document(entry)
     except Exception as error:
         raise LayoutError(f"{where}: {error}") from error
 

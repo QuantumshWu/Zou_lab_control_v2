@@ -34,7 +34,6 @@ from zlc_runtime.streams import EventRef
 from zlc_runtime.presentation import (
     BoardScheduler,
     HarmonicClock,
-    OwnerChannels,
     SurfaceBatchArbiter,
 )
 from zlc_workbench.presentation import PlotPanelPort
@@ -214,7 +213,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
                 self.pending.set()
 
         wake = _Wake()
-        channels = OwnerChannels(wake)
+        channels = wake
         arbiter = SurfaceBatchArbiter(channels)
         clock = HarmonicClock((100, 200, 400, 800))
         scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
@@ -385,12 +384,11 @@ def test_closing_a_port_cancels_queued_projection(live_bench) -> None:
     )
 
     update = port.prepare(value, publication, front)
-    assert update is not None and port.has_pending
+    assert update is not None
     port.close()
 
     assert queued.cancelled()
     assert update.future.cancelled()
-    assert not port.has_pending
 
 
 def test_close_does_not_wait_for_initial_host_staging(live_bench) -> None:
@@ -478,7 +476,6 @@ def test_close_does_not_wait_for_running_projection(live_bench) -> None:
         _without_deadlock(port.close)
 
         assert update.future.cancelled()
-        assert not port.has_pending
     finally:
         release.set()
         projector.shutdown(wait=True, cancel_futures=True)
@@ -784,7 +781,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
             submit_projection=_submit_now,
             replace_host=_initial_then(host),
         )
-        channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+        channels = SimpleNamespace(request_owner_wake=lambda: None)
         arbiter = SurfaceBatchArbiter(channels)
 
         def moment(step: int) -> SignalFront:
@@ -809,13 +806,15 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
         blocker.result(timeout=10)
 
         deadline = time.monotonic() + 10.0
-        while arbiter.pending_cohorts and time.monotonic() < deadline:
+        while (
+            port.presented_publication() is not newest.publication(signal)
+            and time.monotonic() < deadline
+        ):
             arbiter.drain(
                 lambda panel_id: port if panel_id == port.panel_id else None
             )
             time.sleep(0.01)
 
-        assert arbiter.pending_cohorts == 0
         assert port.last_error is None, (
             f"a coalesced frame became an error: {port.last_error!r}"
         )
@@ -1061,7 +1060,7 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
     for port in ports:
         _mount(port, value, publication, front)
 
-    channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+    channels = SimpleNamespace(request_owner_wake=lambda: None)
     arbiter = SurfaceBatchArbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
     assert tuple(port.host for port in ports) == old
@@ -1137,7 +1136,7 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
     )
     for port in ports:
         _mount(port, value, publication, front)
-    channels = OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+    channels = SimpleNamespace(request_owner_wake=lambda: None)
     arbiter = SurfaceBatchArbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
     completions[0].set_result("ready")
@@ -1238,7 +1237,6 @@ def test_releasing_port_cancels_pending_replacement_without_swapping_host(
     assert port.host is old
     assert port.presented_publication() is publication
     assert not old.closed
-    assert not port.has_pending
 
 
 def test_board_close_releases_pending_generation_replacement(
@@ -1276,7 +1274,7 @@ def test_board_close_releases_pending_generation_replacement(
     )
     _mount(port, value, publication, front)
     arbiter = SurfaceBatchArbiter(
-        OwnerChannels(SimpleNamespace(request_owner_wake=lambda: None))
+        SimpleNamespace(request_owner_wake=lambda: None)
     )
     assert arbiter.enqueue_group((port,), restarted_front)
 
@@ -1287,7 +1285,6 @@ def test_board_close_releases_pending_generation_replacement(
     assert port.host is old
     assert port.presented_publication() is publication
     assert not old.closed
-    assert not port.has_pending
 
 
 def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(

@@ -207,9 +207,14 @@ def test_live_fit_overlay_lands_in_the_same_committed_front() -> None:
         _dense_facet_snapshot(),
         CurvePlot(AxisRef.point("x")),
     )
+    surfaces: list[int] = []
+    release_surface = None
     try:
         first = session.fit("gaussian_offset", live=True)
         assert first.success
+        release_surface = session.subscribe_surface(
+            lambda: surfaces.append(session.data_revision)
+        )
         accepted = _present_and_wait(
             session,
             _dense_facet_snapshot(revision=1, scale=1.001),
@@ -217,7 +222,10 @@ def test_live_fit_overlay_lands_in_the_same_committed_front() -> None:
         )
         assert isinstance(accepted, FitResult)
         assert session.fit_status == "current"
+        assert surfaces == [1], "one exact data+fit pair rendered more than once"
     finally:
+        if release_surface is not None:
+            release_surface()
         session.close()
 
 
@@ -237,12 +245,8 @@ class _DeadlineOnceFitEngine(_RecordingFitEngine):
         return super().fit(model, coordinates, observations, **kwargs)
 
 
-def test_deadline_exceeded_pair_commits_data_only_and_next_revision_retries() -> None:
-    """A pair whose solve hits a deadline never half-shows a stale overlay.
-
-    The frame commits honestly data-only, and the next data revision is the
-    only automatic retry — where the pair lands complete again.
-    """
+def test_deadline_exceeded_pair_is_loud_and_keeps_the_previous_pair() -> None:
+    """A deadline cannot turn an armed revision into an unpaired data front."""
 
     engine = _DeadlineOnceFitEngine()
     session = PlotSession(
@@ -259,15 +263,14 @@ def test_deadline_exceeded_pair_commits_data_only_and_next_revision_retries() ->
         ).result(timeout=10.0)
         solve = session.solve_live_frame(prepared)
         assert solve is not None
-        solved = solve.result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared, solved)
-        assert finalization is not None
-        # Data-only: the revision-0 overlay did not ride into revision 1.
-        assert session.last_fit is None
+        with pytest.raises(FitDeadlineExceeded, match="forced live-fit deadline"):
+            solve.result(timeout=10.0)
+        assert session.data_revision == 0
+        assert session.last_fit is first
         _present_and_wait(
             session,
-            _dense_facet_snapshot(revision=2, scale=1.002),
-            2,
+            _dense_facet_snapshot(revision=1, scale=1.002),
+            1,
         )
     finally:
         session.close()
@@ -535,16 +538,15 @@ def test_fit_warm_cache_is_cleared_after_solver_exception() -> None:
         ).result(timeout=10.0)
         solve = session.solve_live_frame(prepared)
         assert solve is not None
-        solved = solve.result(timeout=10.0)
-        finalization = session.commit_live_frame(prepared, solved)
-        assert finalization is not None
-        # The failed pair committed data-only and dropped the poisoned seeds.
+        with pytest.raises(RuntimeError, match="forced warm-start failure"):
+            solve.result(timeout=10.0)
         assert not engine.fail_next
-        assert session.last_fit is None
+        assert session.data_revision == 0
+        assert session.last_fit is first
         _present_and_wait(
             session,
-            _dense_facet_snapshot(revision=2, scale=1.002),
-            2,
+            _dense_facet_snapshot(revision=1, scale=1.002),
+            1,
         )
         assert engine.warm_starts[-1] is None
     finally:

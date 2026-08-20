@@ -112,7 +112,15 @@ def test_a_sealed_window_is_reached_only_through_its_handle(opener: str) -> None
         assert window.is_visible()
 
         window.close()
-        application.processEvents()
+        # A hardware-owning window retires off the Qt thread and only commits
+        # close on the completion turn; wait for that formal handshake rather
+        # than treating one arbitrary event-loop turn as the lifecycle API.
+        import time
+
+        deadline = time.monotonic() + 2.0
+        while window.is_visible() and time.monotonic() < deadline:
+            application.processEvents()
+            time.sleep(0.005)
         assert not window.is_visible(), "the window could not be closed"
     finally:
         application.processEvents()
@@ -151,3 +159,31 @@ def test_the_console_window_can_refuse_its_own_close() -> None:
         assert not console.is_visible(), "and the second answer must let it go"
     finally:
         application.processEvents()
+
+
+def test_qt_worker_refuses_to_claim_closed_while_vendor_work_is_hung() -> None:
+    from threading import Event
+    import time
+
+    from zlc_ui.qt import ensure_qt_app
+    from zlc_workbench.board import attach_qt_worker
+
+    application = ensure_qt_app(["device-worker-close"])
+    release = Event()
+    delivered: list[str] = []
+    run, close = attach_qt_worker("device-worker-test")
+    run(
+        lambda: release.wait(5.0) or "timed-out",
+        lambda value: delivered.append(str(value)),
+        lambda error: delivered.append(str(error)),
+    )
+    assert close() is False
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while not delivered and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.005)
+    assert delivered == ["True"]
+    assert close() is True
+    with pytest.raises(RuntimeError, match="closed"):
+        run(lambda: None, lambda _value: None, lambda _error: None)
