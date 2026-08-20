@@ -52,16 +52,19 @@ semantics: Logic shape, live Panel, Edit/Refresh/Save, selector, fit and overlay
 all use the accepted canonical full Dataset for that publication. Event chunks
 remain internal to acquisition and exact processors. Scope/reduction/fate only
 change how the canonical Dataset is drawn; they never switch the data source.
-Monitor signals remain latest-event views. Canonical assembly and companion
+Ordinary Monitor signals remain latest-event views. Indexed-derived signals
+expose the same Runtime-owned ordinary Dataset to every Plot; generic
+primary-index fate/window chooses latest or history and every skipped/failed
+source index remains invalid rather than disappearing. Canonical assembly and companion
 projection run on the board-owned presentation worker at panel cadence, not in
 the Qt owner callback.
 
-`PanelState.interval_ms` is the admission cadence for one atomic data+fit pair.
-When a panel is due it admits the then-latest coherent publication as one source
-revision; higher-frequency raw Monitor publications are not relabeled as panel
-revisions or fit gaps. If a due component is waiting for a derived sibling, its
-owed admission is spent by the matching processor/surface completion wake rather
-than another clock tick.
+`PanelState.interval_ms` is the Surface deadline for one atomic data+fit front.
+When a same-shot group is still rendering, Workbench does not enqueue another
+full frame; it keeps admission debt and stages Plane latest on completion. The
+Runtime indexed Dataset, not Workbench, preserves every source primary index and
+its validity. Processor/surface completion wakes spend already-due work without
+waiting for another interval.
 
 Plot hosts are the native event authority for committed Area, viewport,
 coordinate threshold and facet focus. Their immutable event is queued to the

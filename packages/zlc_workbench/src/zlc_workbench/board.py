@@ -97,6 +97,9 @@ class LiveBoard:
         intervals: Sequence[int],
         notify: Callable[[], None] | None = None,
     ) -> None:
+        subscribe = getattr(plane, "subscribe_publications", None)
+        if not callable(subscribe):
+            raise TypeError("live board requires publication subscription")
         self._closed = False
         self._closing = False
         self._projection_lock = Lock()
@@ -118,6 +121,9 @@ class LiveBoard:
             self._clock,
             self._arbiter,
             ports,
+        )
+        self._unsubscribe_publications = subscribe(
+            self.wake.request_owner_wake,
         )
 
     @property
@@ -163,16 +169,24 @@ class LiveBoard:
         future.add_done_callback(finished)
         return future
 
-    def commit(self) -> None:
+    def commit(self, *, admit_new: bool = True) -> None:
         """Put ready boards on screen.  The GUI thread, and only it.
 
         The wake is claimed first, so a surface finishing while the drain runs
         notifies again instead of being lost inside the turn it missed.
+        Pause and close pass ``admit_new=False``: renders already travelling
+        may still finish, while a source publication that arrived after Pause
+        cannot advance the frozen board.
         """
 
         self.wake.take()
-        self._scheduler.stage_owed()
+        self._scheduler.stage_owed(admit_new=admit_new)
         self._arbiter.drain(self._resolve)
+        # Accepting a travelling group releases its ports.  Spend any
+        # capacity-one surface debt against Plane latest in this same owner
+        # turn, instead of waiting for another 100 ms beat.
+        if admit_new:
+            self._scheduler.stage_owed()
 
     def _resolve(self, panel_id: str) -> Any | None:
         for port in self._ports():
@@ -195,6 +209,7 @@ class LiveBoard:
             self._closing = True
             pending = tuple(self._projection_futures)
         if first:
+            self._unsubscribe_publications()
             self._scheduler.close()
             self._arbiter.close()
         for future in pending:

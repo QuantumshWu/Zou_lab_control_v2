@@ -685,6 +685,7 @@ class NodeHost:
                 snapshot,
                 None,
                 run_record=publication.run_record,
+                primary_index=source.primary_index,
             )
             self._processor_path = "frozen"
             self._start_frozen_processor(publication, self._terminal_source)

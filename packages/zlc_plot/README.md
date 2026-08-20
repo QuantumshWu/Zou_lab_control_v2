@@ -140,7 +140,7 @@ session.set_size("2x4")
 
 `session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
-Live fit 的唯一自动触发源是宿主按Panel `display_interval`提交的新data revision，且每个已提交帧是一个**对**：`update_data()`（以及宿主管线的 prepare → solve → commit）把 fit@N 求解到底并与 data@N 在同一张 front 上发布——帧生而完整，旧 overlay 永不出现在新数据上。Runtime Monitor可在两个Panel admission之间产生更高频raw publications；Panel在下一次due时明确选择latest coherent publication，它们不冒充已显示revision或FitResult。正常负载下，已接收revision按FIFO逐个完成；当最老pending等待超过1秒，或pending immutable arrays超过64 MiB时，host明确报告一次resync，丢弃尚未fit的中间revision，只保留当时latest继续。被丢弃的已admit revision发布invalid FitEvent，Rolling trace留下明确断点；Panel、Qt、Stop、clear fit与close不会被永久latch。selector、viewport、unit 和 resize只更新交互/显示层；需要立即按新选择重算时显式调用`fit()`。
+Live fit 的唯一自动触发源是宿主的通用indexed-derived signal。每个Measurement primary index都在同一个普通Dataset中有value或invalid cell；`display_interval`只控制Surface deadline。同一same-shot group仍有重绘在途时不排第二张完整frame，只保留Plane latest，之后一次prepare → solve → commit把fit@N与data@N发布在同一front。任何window/history按source index连续，未计算或失败位置为invalid/NaN。普通非indexed Monitor仍是latest event。selector、viewport、unit和resize只更新交互/显示层；需要立即按新选择重算时显式调用`fit()`。
 
 Rolling 的静态快照也保留 R 轴的逐 shot 历史种子，因此 static 与 live 共用同一
 projection 语义；Runtime以严格递增revision提交新快照。Notebook拖拽候选由

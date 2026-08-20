@@ -9,18 +9,20 @@ their generation/revision identity and, for finite data, places them into one
 canonical run dataset using the declared schema and `(repeat, point)` origin.
 Exact scientific processors consume the immutable event; every display
 consumer sees the same publication's canonical full geometry through
-`current_dataset()`, with unwritten cells invalid. Monitor outputs have no
-finite canonical extent and retain only their latest event. Display
+`current_dataset()`, with unwritten cells invalid. Ordinary Monitor outputs have
+no finite canonical extent and retain only their latest event. Indexed-derived
+Monitors additionally expose a byte-bounded ordinary Dataset over a neutral
+`primary-index`; missing computations are invalid cells and bounded window
+materialization is independent of run length. Display
 materialization is presentation-paced, cached, and performed off the UI owner;
 `freeze()` only reads committed state and never calls plugin science or a
 plugin materializer.
 
-Presentation cadence is an admission decision, not a polling delay. On a due
-tick, `BoardScheduler` records a panel as owed when its coherent component is
-still waiting for new data or a derived sibling. The exact processor or surface
-completion wake stages that already-owed component as soon as it becomes
-complete without advancing the display clock or admitting a not-due panel.
-Completion wakes are coalesced into one owner turn.
+Presentation cadence is a Surface deadline, not a Dataset-index filter. A busy
+same-shot group does not enqueue another full frame; `BoardScheduler` records
+admission debt and stages Plane latest on the processor/surface completion wake.
+Runtime accounts every intervening primary index as valid or invalid. Completion
+wakes are coalesced into one owner turn and do not advance the display clock.
 
 `seal_committed()` closes that same run truth as complete or explicitly
 partial, with unwritten cells remaining invalid. Save, late one-shot processing,

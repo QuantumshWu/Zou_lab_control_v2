@@ -15,7 +15,7 @@ import math
 import numpy as np
 
 from zlc_data import OwnedSnapshot
-from zlc_data.snapshot_projection import axis_catalog
+from zlc_data.snapshot_projection import axis_catalog, indexed_schemas_compatible
 from zlc_durable import atomic_write_file
 
 from .data_contract import (
@@ -1473,6 +1473,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def configure(
         self,
         *,
+        data: PlotInput | object = _UNSET,
         semantic: Mapping[str, object] | None = None,
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
@@ -1510,6 +1511,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("fit must be a mapping, None, or omitted")
         if type(fit_live) is not bool:
             raise TypeError("fit_live must be bool")
+        selected_data = data
+        selected_overlay = _UNSET
+        if data is not _UNSET:
+            selected_data, image_frame = self._split_image_frame(data, self._spec)
+            selected_overlay = _UNSET if image_frame is None else image_frame.overlay
+            FitProjection._validate_input(selected_data, self._spec)
 
         with self._render_lock:
             if self._configuration_effects is not None:
@@ -1527,6 +1534,49 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     image_overlay=image_overlay,
                     classifier_thresholds=threshold_target,
                 )
+                if selected_data is not _UNSET:
+                    assert isinstance(selected_data, (OwnedSnapshot, PulseTimelineData))
+                    current_data = self._projection.data
+                    if isinstance(selected_data, OwnedSnapshot):
+                        if not isinstance(current_data, OwnedSnapshot):
+                            raise TypeError("indexed data cannot replace a timeline")
+                        current_schema = snapshot_schema(current_data)
+                        selected_schema = snapshot_schema(selected_data)
+                        if not indexed_schemas_compatible(
+                            current_schema, selected_schema
+                        ):
+                            raise ValueError(
+                                "configuration data requires one indexed Dataset layout"
+                            )
+                        current_revision = snapshot_revision(current_data)
+                        selected_revision = snapshot_revision(selected_data)
+                        if selected_revision < current_revision:
+                            raise ValueError("configuration data revision moved backwards")
+                        if (
+                            selected_revision == current_revision
+                            and selected_data.ref == current_data.ref
+                        ):
+                            selected_data = _UNSET
+                    else:
+                        raise TypeError(
+                            "same-publication configuration data requires an indexed Dataset"
+                        )
+                if selected_data is not _UNSET:
+                    projection = self._projection._fork_frozen(
+                        data=selected_data,
+                        revision=snapshot_revision(selected_data),
+                        context=self._projection_context(),
+                    )
+                    projection._build_view_and_payload()
+                    self._present_projection_transaction(
+                        projection,
+                        image_overlay=(
+                            self._image_overlay
+                            if selected_overlay is _UNSET
+                            else selected_overlay
+                        ),
+                        accepted_fit=self._accepted_fit,
+                    )
                 if facet_focus is not _UNSET:
                     if facet_focus is None:
                         if self._facet_focus_index is not None:
@@ -2789,8 +2839,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         raise ValueError(
                             "OwnedSnapshot revision must equal the supplied revision"
                         )
-                    if not schema_equal(
-                        snapshot_schema(self._projection.data), snapshot_schema(data)
+                    previous_schema = snapshot_schema(self._projection.data)
+                    next_schema = snapshot_schema(data)
+                    if not (
+                        schema_equal(previous_schema, next_schema)
+                        or indexed_schemas_compatible(previous_schema, next_schema)
                     ):
                         raise ValueError("data schema must remain exactly constant")
                     previous_revision = snapshot_revision(self._projection.data)
@@ -3634,6 +3687,30 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         scope: list[tuple[AxisRef, object]] = []
         repeat_index: int | None = None
         for ref, value in getattr(self._spec, "scope", ()):
+            if value == "latest":
+                physical_domain = (
+                    "repeat"
+                    if ref.domain is AxisDomain.REPEAT
+                    else "point"
+                    if ref.domain in {
+                        AxisDomain.POINT_ROW,
+                        AxisDomain.POINT_COORDINATE,
+                        AxisDomain.POINT_DIMENSION,
+                    }
+                    else "data"
+                )
+                matches = tuple(
+                    axis
+                    for _label, axis_id, axis, domain in axis_catalog(schema)
+                    if domain == physical_domain
+                    and (
+                        ref.axis_id is None
+                        or ref.axis_id in {str(axis_id), axis.name}
+                    )
+                )
+                if len(matches) != 1:
+                    raise ValueError("latest scope axis is not uniquely present")
+                value = matches[0].coordinate_at(matches[0].size - 1)
             if ref.domain is AxisDomain.REPEAT:
                 repeat_index = next(
                     index

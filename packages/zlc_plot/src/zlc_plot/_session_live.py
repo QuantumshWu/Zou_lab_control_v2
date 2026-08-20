@@ -8,6 +8,7 @@ from threading import Event
 from typing import TYPE_CHECKING, Callable
 
 from zlc_data import OwnedSnapshot
+from zlc_data.snapshot_projection import indexed_schemas_compatible
 
 from .data_contract import schema_equal, snapshot_revision, snapshot_schema
 
@@ -73,8 +74,11 @@ class LiveSessionMixin:
                 self._assert_open()
                 if isinstance(data, OwnedSnapshot):
                     assert isinstance(self._projection.data, OwnedSnapshot)
-                    if not schema_equal(
-                        snapshot_schema(self._projection.data), snapshot_schema(data)
+                    previous_schema = snapshot_schema(self._projection.data)
+                    next_schema = snapshot_schema(data)
+                    if not (
+                        schema_equal(previous_schema, next_schema)
+                        or indexed_schemas_compatible(previous_schema, next_schema)
                     ):
                         raise ValueError("data schema must remain exactly constant")
                 if selected_revision <= self.data_revision:

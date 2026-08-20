@@ -174,6 +174,13 @@ class PlotPanelPort:
         with self._state_lock:
             return self._presented_input
 
+    @property
+    def surface_busy(self) -> bool:
+        """Whether one heavy surface is already travelling for this panel."""
+
+        with self._state_lock:
+            return bool(self._pending)
+
     @staticmethod
     def _revision_value(revision: object) -> int | None:
         """Canonical integer revision for cross-boundary identity.

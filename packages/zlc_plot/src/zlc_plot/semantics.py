@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
 from zlc_data import AxisId, DatasetSchema, point_ordinal_axis
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -432,11 +433,11 @@ def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
         return "facet"
     scope = _scope_terms(spec)
     if ref in scope:
-        return float(scope[ref])
+        return scope[ref]
     return _default_fate(spec)
 
 
-def _scope_terms(spec: PlotSpec) -> dict[AxisRef, float]:
+def _scope_terms(spec: PlotSpec) -> dict[AxisRef, float | str]:
     return dict(getattr(spec, "scope", ()))
 
 
@@ -482,9 +483,17 @@ def _scope_coordinates(
         )
     else:
         values = tuple(float(value) for value in axis.coordinates)
-    if len(values) < 2 or len(values) > SCOPE_CHOICE_LIMIT:
-        return None
-    return tuple((value, f"{value:g}") for value in dict.fromkeys(values))
+    choices = (
+        ()
+        if len(values) < 2 or len(values) > SCOPE_CHOICE_LIMIT
+        else tuple((value, f"{value:g}") for value in dict.fromkeys(values))
+    )
+    if (
+        ref.domain is AxisDomain.POINT_COORDINATE
+        and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
+    ):
+        return (("latest", "Latest"), *choices)
+    return choices or None
 
 
 def _kind_label(kind: PlotKind) -> str:
@@ -580,7 +589,7 @@ def composed_spec(
         if value is None:
             scope.pop(axis, None)
         else:
-            scope[axis] = float(value)
+            scope[axis] = "latest" if value == "latest" else float(value)
     # A fate row says what becomes of ONE axis; the roles are what the plot
     # kinds are written in.  Translating here means the collision rules, the
     # facet routing and the labels all stay in one place and the table is a
@@ -595,6 +604,9 @@ def composed_spec(
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             scope[axis] = float(value)
             role_now = previous if previous in ROLE_FATES else None
+        elif value == "latest":
+            scope[axis] = "latest"
+            role_now = previous if previous in ROLE_FATES else None
         elif value in (FATE_REDUCE, FATE_POOL):
             role_now = previous if previous in ROLE_FATES else None
         elif value in ROLE_FATES:
@@ -607,6 +619,8 @@ def composed_spec(
             if displaced is not None and displaced != axis:
                 if previous in ROLE_FATES:
                     rest[str(previous)] = displaced
+                elif previous == "latest":
+                    scope[displaced] = "latest"
                 elif isinstance(previous, (int, float)):
                     scope[displaced] = float(previous)
         else:

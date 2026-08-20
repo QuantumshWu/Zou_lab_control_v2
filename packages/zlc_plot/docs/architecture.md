@@ -227,10 +227,10 @@ Preview 或 Edit surface 可以把 wheel 留给外层 scroll area，而不停止
 owner thread 调用 `present_front()`。`RasterIdentity` 的 generation/revision 用于
 核对来源；Image front 还携带 overlay revision。它们不冒充跨 signal 的 same-shot key。
 
-`RasterPlotHost` 的 worker adapter 为每个公开操作提供一个显式委托方法；提交模式
-（CONTROL/PUBLISH/PRESENTATION）与 coalesce key 作为 dispatch 参数传入。查询和
-prepare/finalize 不发布 front；同 key pointer/display motion 可合并，data/fit 走有界
-exact FIFO；一次 live commit 按 capture → promote → finalize 原子发布。宿主提交完整表单时只调用一次
+`RasterPlotHost`直接在owned worker中调用`PlotSession`；没有单消费者转发adapter。提交模式
+（CONTROL/PUBLISH/PRESENTATION）与coalesce key作为dispatch参数传入。查询和
+prepare/finalize不发布front；同key pointer/display motion可合并，same-shot Surface
+保持capacity-one active并由Board保留Plane latest。一次live commit按capture → promote → finalize原子发布。宿主提交完整表单时只调用一次
 `configure()`；semantic/display/size/Image overlay 的差异与 `RenderEffect` 合并都在
 session 内完成，同步部分最多发布一张 front，宿主不循环调用单字段 setter。facade 保留显式公共签名，
 没有动态属性转发或另一份 GUI dispatch switch。
@@ -270,7 +270,7 @@ robust losses and covariance, without a full meshgrid or dense Jacobian. Custom
 Image models remain on the general expansion/solver path unless they provide
 their own specialization.
 
-Live data 的 host lane 在支持的显示延迟内保持 exact FIFO：owner 冻结 base data revision、display/view authority 和 causal Image overlay authority；同一个 Session-owned serial analysis executor 依次完成 prepare 与 solve，二者不并行；render worker 再以短 commit 同时画 data@N、fit@N、capture 并 promote。最老 pending 等待超过 1 秒或 retained immutable arrays 超过 64 MiB 时，host loud resync 到当时 latest，中间 revision 不产生成功 FitEvent，Runtime raw data 不丢。live 对求解的取消只发生在 re-arm、`replace_spec` 与 close；selector/viewport 变化只推进 fit context generation，从不击杀已受理的数据帧求解。
+Live data 的source primary index由Runtime indexed-derived Dataset连续保存；每个index是value或invalid，Plot不建立自己的gap/history lane。Surface host只保持一个active complete pair；busy时Board不排第二张完整frame，只保留Plane latest并在completion wake后stage。同一个Session-owned serial analysis executor依次prepare/solve，render worker再以短commit同时画data@N、fit@N、capture并promote。普通Monitor仍latest；axis fate/window只投影同一Dataset。live对求解的取消只发生在timeout/resync、re-arm、`replace_spec`与close。
 
 Manual fit and data-frame fit completions use the same host presentation transaction:
 accept and render, capture/promote the complete raster front, then publish the

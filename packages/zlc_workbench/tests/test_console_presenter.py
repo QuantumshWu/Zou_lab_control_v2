@@ -1296,16 +1296,85 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
 
     rolling_session = rolling.host._session
     validity = np.asarray(rolling_session._payload.series[0].valid)
-    gap_index = int(np.flatnonzero(~validity)[-1])
-    assert 0 < gap_index < validity.size - 1
+    revisions = rolling_session._payload.source_revisions
+    assert revisions == tuple(range(revisions[0], revisions[-1] + 1))
+    gap_index = revisions.index(failed_source.event_ref.sequence)
+    recovered_index = revisions.index(recovered_source.event_ref.sequence)
+    assert not validity[gap_index]
+    assert validity[recovered_index]
+    previous_valid = int(np.flatnonzero(validity[:gap_index])[-1])
+    assert not np.any(validity[previous_valid + 1 : recovered_index])
+    frozen = rolling.frozen_data
+    assert frozen is not None
+    primary = next(
+        column
+        for column in frozen.snapshot.block.schema.point_table.columns
+        if str(column.coordinate_id) == "zlc_data.primary-index"
+    )
+    assert tuple(dict.fromkeys(primary.values))
+    saved_truth = session.signal_plane.current_dataset(
+        fit_signal,
+        frozen.publication,
+        primary_window=100,
+    )
+    assert frozen.snapshot.ref == saved_truth.ref
     np.testing.assert_array_equal(
-        validity[gap_index - 1 : gap_index + 2],
-        (True, False, True),
+        frozen.snapshot.expanded_validity(),
+        saved_truth.expanded_validity(),
     )
     line = rolling_session._renderer._artists["rolling:history"][0]
     plotted = np.asarray(line.get_ydata(), dtype=float)
-    assert np.isfinite(plotted[[gap_index - 1, gap_index + 1]]).all()
-    assert np.isnan(plotted[gap_index]), "failed fit neighbours were joined"
+    assert np.isfinite(plotted[[previous_valid, recovered_index]]).all()
+    assert np.isnan(plotted[previous_valid + 1 : recovered_index]).all()
+
+    # A generic window/fate edit rematerializes the SAME source publication;
+    # it neither waits for another measurement nor invents a local trace.
+    shown_before_edit = rolling.port.presented_publication()
+    assert presenter.update_panel_state(
+        rolling.panel_id,
+        {"display": {"window": 2}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            rolling.configuration is None
+            and rolling.host._session._payload.source_revisions == revisions[-2:]
+        ),
+    )
+    assert rolling.port.presented_publication() is shown_before_edit
+    assert presenter.update_panel_state(
+        rolling.panel_id,
+        {"display": {"window": 100}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            rolling.configuration is None
+            and rolling.host._session._payload.source_revisions == revisions
+        ),
+    )
+    assert presenter.update_panel_state(
+        rolling.panel_id,
+        {"semantic": {"fate:source index": "latest"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            rolling.configuration is None
+            and rolling.host._session._payload.source_revisions == revisions[-1:]
+        ),
+    )
+    assert presenter.update_panel_state(
+        rolling.panel_id,
+        {"semantic": {"fate:source index": "reduce"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            rolling.configuration is None
+            and rolling.host._session._payload.source_revisions == revisions
+        ),
+    )
 
 
 def test_committed_selection_outputs_enter_the_real_occupancy_input(

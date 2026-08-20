@@ -110,6 +110,10 @@ class _Port:
     def presented_front_refs(self):
         return self.presented_refs
 
+    @property
+    def surface_busy(self):
+        return bool(self.pending)
+
     def prepare(self, value, publication, front):
         # The front is the coherent freeze this update is drawn from; a port
         # that reads a companion signal reads it from HERE, never from the
@@ -491,6 +495,53 @@ class _Plane:
 
     def follower_edges(self):
         return self.edges
+
+
+def test_due_panel_stages_on_the_next_publication_wake_without_advancing_clock() -> None:
+    old = _front("camera/frame", sequence=1)
+    new = _front("camera/frame", sequence=2)
+    old_publication = old.publication("camera/frame")
+    assert old_publication is not None
+    plane = _Plane(old)
+    port = _Port("camera", "camera/frame")
+    port.presented = old_publication
+    port.presented_refs = (old_publication.event_ref,)
+    arbiter = SurfaceBatchArbiter(_Sink())
+    scheduler = BoardScheduler(
+        plane,
+        HarmonicClock((100, 200)),
+        arbiter,
+        lambda: (port,),
+    )
+
+    # The deadline arrives before the source publication.  It remains a
+    # lightweight admission debt; there is no stale frame to render.
+    scheduler.on_tick()
+    assert not port.updates
+
+    # Publication may arrive while Pause is active.  Existing travelling
+    # cohorts may finish, but a not-yet-admitted source must remain frozen.
+    plane.front = new
+    scheduler.stage_owed(admit_new=False)
+    assert not port.updates
+
+    # The ordinary owner wake spends the authored deadline immediately and
+    # does not consume a second HarmonicClock tick.
+    scheduler.stage_owed()
+    assert len(port.updates) == 1
+
+    # A later due revision remains only Plane latest while this heavy surface
+    # travels; it cannot become a second full-frame/Fit queue entry.
+    newest = _front("camera/frame", sequence=3)
+    plane.front = newest
+    scheduler.on_tick()
+    assert len(port.updates) == 1
+
+    port.futures[0].set_result("revision-2")
+    arbiter.drain(lambda _panel_id: port)
+    scheduler.stage_owed()
+    assert len(port.updates) == 2
+    assert port.updates[-1].publication is newest.publication("camera/frame")
 
 
 def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:

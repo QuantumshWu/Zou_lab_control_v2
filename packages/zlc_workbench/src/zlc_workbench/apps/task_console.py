@@ -40,35 +40,20 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="build everything and exit without opening a window (a startup smoke test)",
     )
-    parser.add_argument(
-        "--interval-ms",
-        type=int,
-        default=None,
-        help=(
-            "TaskConsole event-loop beat in milliseconds "
-            "(default: the display clock base, 100)"
-        ),
-    )
     return parser
 
 
-def _beat_interval_ms(presenter, interval_ms) -> int:
-    """The Qt beat cadence: the display clock's base unless overridden.
+def _beat_interval_ms(presenter) -> int:
+    """Return the one wall cadence owned by the display clock.
 
     ``HarmonicClock.advance`` credits one clock base per beat, so the wall-time
     truth of every panel's labeled refresh interval requires the timer to fire
-    at exactly that base.  Driving it from an independent constant silently
-    rescaled every label -- a beat of 200 ms made a "400 ms" panel refresh at
-    800 ms.  An explicit override remains an operator diagnostic and is
-    validated rather than guessed at.
+    at exactly that base.  An independent override silently rescales every
+    panel's admission cadence, so it is rejected rather than retained as a
+    second clock truth.
     """
 
-    if interval_ms is None:
-        return int(presenter.board.base_interval_ms)
-    value = int(interval_ms)
-    if value <= 0:
-        raise ValueError("interval_ms must be positive")
-    return value
+    return int(presenter.board.base_interval_ms)
 
 
 def open_experiment(workspace=None, template=None):
@@ -198,7 +183,6 @@ class ExperimentGuiFlow:
         *,
         workspace=None,
         template=None,
-        interval_ms=None,
         window_ratio=None,
     ) -> None:
         from ..session import Workspace
@@ -206,11 +190,6 @@ class ExperimentGuiFlow:
         self.space = Workspace(workspace) if workspace is not None else Workspace.discover()
         self.template = template
         self.catalog = None
-        # None means "the display clock base", resolved once a presenter with
-        # a board exists; an explicit value must at least be a real cadence.
-        self.interval_ms = None if interval_ms is None else int(interval_ms)
-        if self.interval_ms is not None and self.interval_ms <= 0:
-            raise ValueError("interval_ms must be positive")
         self.window_ratio = window_ratio
         self.devices = None
         self.session = None
@@ -292,7 +271,7 @@ class ExperimentGuiFlow:
             )
             timer = attach_qt(
                 presenter.beat,
-                interval_ms=_beat_interval_ms(presenter, self.interval_ms),
+                interval_ms=_beat_interval_ms(presenter),
             )
             console.presenter = presenter
             console.session = session
@@ -606,7 +585,6 @@ def create_experiment_flow(
     *,
     workspace=None,
     template=None,
-    interval_ms=None,
     window_ratio=None,
 ) -> ExperimentGuiFlow:
     """Open Device Manager; Init creates one shared on-demand GUI session."""
@@ -614,7 +592,6 @@ def create_experiment_flow(
     return ExperimentGuiFlow(
         workspace=workspace,
         template=template,
-        interval_ms=interval_ms,
         window_ratio=window_ratio,
     ).open()
 
@@ -623,7 +600,6 @@ def create_window(
     *,
     workspace=None,
     template=None,
-    interval_ms=None,
     window_ratio=None,
 ):
     """Open only TaskConsole for notebook and acceptance-capture callers.
@@ -635,8 +611,6 @@ def create_window(
 
     from ..board import attach_qt, attach_qt_worker
 
-    if interval_ms is not None and int(interval_ms) <= 0:
-        raise ValueError("interval_ms must be positive")
     _space, session = open_experiment(workspace, template)
     # The window is opened by build_console, through zlc_ui's one entry: this
     # layer composes and wires, and no longer knows what a window is made of.
@@ -645,9 +619,9 @@ def create_window(
         window_ratio=window_ratio,
     )
     # The presenter's beat, not the board's: the board is one step of it, and
-    # the cadence is the display clock's own base unless explicitly overridden.
+    # the cadence is the display clock's one wall-time base.
     timer = attach_qt(
-        presenter.beat, interval_ms=_beat_interval_ms(presenter, interval_ms)
+        presenter.beat, interval_ms=_beat_interval_ms(presenter)
     )
     run_session_close, close_session_worker = attach_qt_worker(
         "zlc-console-session-close"
@@ -764,7 +738,6 @@ def main(argv: list[str] | None = None) -> int:
         flow = create_experiment_flow(
             workspace=arguments.workspace,
             template=arguments.template,
-            interval_ms=arguments.interval_ms,
         )
     except (FileNotFoundError, KeyError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

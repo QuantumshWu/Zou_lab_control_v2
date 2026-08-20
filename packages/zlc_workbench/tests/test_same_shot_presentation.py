@@ -205,6 +205,15 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
         _wait_staged(2, frame_host, occupancy_host)
         assert len(frame_host.futures) == len(occupancy_host.futures) == 2
         first_shot = _shot_of(frame_port)
+
+        # A still-newer same-shot group arrives while revision 2 is rendering.
+        # It remains Plane latest: neither panel may build a second heavy
+        # surface, and the group cannot split.
+        bench.publish_shot()
+        bench.publish_derived()
+        board.tick()
+        assert len(frame_host.futures) == len(occupancy_host.futures) == 2
+
         frame_host.complete()
         board.commit()
         assert presents == []
@@ -214,6 +223,15 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
         assert len(presents) == 2
         _assert_same_shot(frame_port, occupancy_port)
         assert _shot_of(frame_port) != first_shot
+
+        # Accepting revision 2 releases the capacity-one group and stages only
+        # the then-latest revision 3 in the same owner turn.
+        _wait_staged(3, frame_host, occupancy_host)
+        frame_host.complete()
+        occupancy_host.complete()
+        board.commit()
+        assert len(presents) == 4
+        _assert_same_shot(frame_port, occupancy_port)
     finally:
         board.close()
         bench.close()
@@ -259,13 +277,54 @@ def test_pause_leaves_every_group_member_on_the_same_shot() -> None:
         bench.close()
 
 
-def test_a_lagging_member_defers_its_partner_by_at_most_one_refresh() -> None:
-    """Latest-only coalescing bounds staleness to one refresh.
+def test_pause_does_not_spend_a_due_surface_on_a_new_publication() -> None:
+    bench = _Bench()
+    board, frame_host, occupancy_host, frame_port, occupancy_port, presents = (
+        _bench_board(bench)
+    )
+    try:
+        board.tick()
+        _wait_staged(1, frame_host, occupancy_host)
+        frame_host.complete()
+        occupancy_host.complete()
+        board.commit()
+        first_shot = _shot_of(frame_port)
+        presents.clear()
 
-    When the group's next shot is staged while the previous occupancy render
-    is still queued, the host coalesces the old render away; the arbiter then
-    abandons the whole superseded batch and the NEWER batch presents both
-    members together -- the partner waited one refresh, never diverged.
+        # The next deadline finds no new source and records a surface debt.
+        board.tick()
+        assert len(frame_host.futures) == len(occupancy_host.futures) == 1
+
+        # A publication wake during Pause may finish travelling work, but it
+        # must not advance the surface to this new same-shot group.
+        bench.publish_shot()
+        bench.publish_derived()
+        assert board.wake.take(), "the atomic publication did not wake its board owner"
+        board.commit(admit_new=False)
+        assert len(frame_host.futures) == len(occupancy_host.futures) == 1
+        assert presents == []
+        assert _shot_of(frame_port) == _shot_of(occupancy_port) == first_shot
+
+        # Resuming spends the existing authored deadline without another tick.
+        board.commit()
+        _wait_staged(2, frame_host, occupancy_host)
+        frame_host.complete()
+        occupancy_host.complete()
+        board.commit()
+        assert len(presents) == 2
+        _assert_same_shot(frame_port, occupancy_port)
+        assert _shot_of(frame_port) != first_shot
+    finally:
+        board.close()
+        bench.close()
+
+
+def test_a_lagging_member_defers_its_partner_by_at_most_one_refresh() -> None:
+    """Capacity-one presentation bounds staleness without a heavy FIFO.
+
+    A group's next shot remains Plane latest while its previous occupancy
+    render travels.  Once that batch leaves, the newest group stages together
+    -- the partner waited one refresh, never diverged.
     """
 
     bench = _Bench()
@@ -275,17 +334,20 @@ def test_a_lagging_member_defers_its_partner_by_at_most_one_refresh() -> None:
     try:
         board.tick()
         _wait_staged(1, frame_host, occupancy_host)
-        # Shot 2 arrives before shot 1's occupancy render finished; the host
-        # coalesces the queued render away, cancelling its future.
+        # Shot 2 arrives before shot 1's occupancy render finished.
         bench.publish_shot()
         bench.publish_derived()
         frame_host.complete()  # shot 1's frame DID render
         assert occupancy_host.futures[0].cancel()
         board.tick()
+        assert len(frame_host.futures) == len(occupancy_host.futures) == 1
+
+        # Draining the abandoned first cohort frees both ports; the same owner
+        # turn stages only the then-latest group.
+        board.commit()
         _wait_staged(2, frame_host, occupancy_host)
         assert len(frame_host.futures) == len(occupancy_host.futures) == 2
 
-        board.commit()
         # The superseded batch was abandoned whole: shot 1 never half-showed.
         assert presents == []
         _assert_same_shot(frame_port, occupancy_port)

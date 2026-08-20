@@ -158,9 +158,9 @@ def test_session_fit_selection_and_painted_payload_keep_ordered_source_revisions
     try:
         rolling.update_data(_snapshot(revision=1, repeats=2))
         # Revision 0 seeds one sample per repeat; revision 1 appends one.
-        assert rolling._payload.source_revisions == (0, 0, 1)
+        assert rolling._payload.source_revisions == (0, 1, 2)
         selected = rolling.fit_selection("gaussian_offset")
-        assert selected.source_revisions == (0, 0, 1)
+        assert selected.source_revisions == (0, 1, 2)
     finally:
         rolling.close()
 
@@ -171,14 +171,14 @@ def test_session_rolling_history_seeds_per_repeat_then_grows_one_sample_per_revi
         # A static snapshot is a complete shot record: the repeat axis seeds
         # the history so the initial render already shows every shot.
         payload = rolling._payload
-        assert payload.source_revisions == (0, 0, 0)
+        assert payload.source_revisions == (0, 1, 2)
         assert len(payload.series) == 1
         assert payload.series[0].x.canonical.size == 3
 
         # Later revisions keep the live contract: one sample per revision.
         rolling.update_data(_snapshot(revision=1, repeats=3))
         payload = rolling._payload
-        assert payload.source_revisions == (0, 0, 0, 1)
+        assert payload.source_revisions == (0, 1, 2, 3)
         assert payload.series[0].x.canonical.size == 4
     finally:
         rolling.close()

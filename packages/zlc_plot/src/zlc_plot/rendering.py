@@ -1143,10 +1143,27 @@ class MatplotlibRenderer:
         # carry ``axes=None`` in Matplotlib, hence ownership and stacking
         # position are supplied here.  Outside-the-box text (tick labels,
         # titles) stays in the background and is painted exactly once.
+        from matplotlib.axes import Axes
+        from matplotlib.axis import Axis
+
+        dynamic_axis_ids = {
+            id(artist)
+            for _key, artist in collected
+            if isinstance(artist, Axis)
+        }
+        dynamic_full_axes_ids = {
+            id(artist)
+            for _key, artist in collected
+            if isinstance(artist, Axes)
+        }
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
                 continue
+            if id(axes) in dynamic_full_axes_ids:
+                continue
             for axis in (axes.xaxis, axes.yaxis):
+                if id(axis) in dynamic_axis_ids:
+                    continue
                 axis_z = float(axis.get_zorder())
                 # The same ticks a full Axis.draw would paint: positions
                 # refreshed and clipped to the current view interval.  The
@@ -1208,31 +1225,33 @@ class MatplotlibRenderer:
                 ),
                 None,
             )
-        with style_context(self.style):
-            if not reusable:
-                visibility = [
-                    (artist, artist.get_visible()) for _key, artist in dynamics
-                ]
-                try:
-                    for artist, _visible in visibility:
-                        artist.set_visible(False)
-                    self._native_draw(canvas)
-                finally:
-                    for artist, visible in visibility:
-                        artist.set_visible(visible)
-                self._background_region = capture(self._figure.bbox)
-                self._background_signature = signature
-                self._chrome_dirty_axes.clear()
-            restore(self._background_region)
-            renderer = get_renderer()
-            for index, (_key, artist) in enumerate(ordered):
-                if index == split:
-                    self._gesture_region = capture(self._figure.bbox)
-                    self._gesture_overlay = tuple(ordered[split:])
-                    self._gesture_selector_ids = selector_ids
-                if artist.get_visible():
-                    if not self._blit_exact_rgba_image(artist, canvas):
-                        artist.draw(renderer)
+        # Every owner call enters the renderer's style once around mutation
+        # and compose.  Re-entering here copied the full rcParams mapping for
+        # every frame without changing a property on any existing artist.
+        if not reusable:
+            visibility = [
+                (artist, artist.get_visible()) for _key, artist in dynamics
+            ]
+            try:
+                for artist, _visible in visibility:
+                    artist.set_visible(False)
+                self._native_draw(canvas)
+            finally:
+                for artist, visible in visibility:
+                    artist.set_visible(visible)
+            self._background_region = capture(self._figure.bbox)
+            self._background_signature = signature
+            self._chrome_dirty_axes.clear()
+        restore(self._background_region)
+        renderer = get_renderer()
+        for index, (_key, artist) in enumerate(ordered):
+            if index == split:
+                self._gesture_region = capture(self._figure.bbox)
+                self._gesture_overlay = tuple(ordered[split:])
+                self._gesture_selector_ids = selector_ids
+            if artist.get_visible():
+                if not self._blit_exact_rgba_image(artist, canvas):
+                    artist.draw(renderer)
         if split is None:
             self._forget_gesture_region()
         self._raster_generation += 1
@@ -2353,6 +2372,7 @@ class MatplotlibRenderer:
                 policy.distribution_tick_count,
                 label_pt=self.style.fonts.tick_pt,
             )
+            self._artists[f"{key}:dynamic_axes"] = (axes.xaxis, axes.yaxis)
             if tick_profile == "image":
                 axes.tick_params(
                     axis="y", left=True, right=False, labelleft=False, labelright=False
@@ -2396,8 +2416,10 @@ class MatplotlibRenderer:
         ):
             ceiling = wanted
             self._artists[ceiling_key] = ceiling
-        self._set_xlim(axes, 0.0, ceiling)
-        self._set_ylim(axes, *y_limits)
+        if tuple(map(float, axes.get_xlim())) != (0.0, ceiling):
+            axes.set_xlim(0.0, ceiling)
+        if tuple(map(float, axes.get_ylim())) != tuple(map(float, y_limits)):
+            axes.set_ylim(*y_limits)
 
     def _update_image(
         self,
@@ -2621,6 +2643,7 @@ class MatplotlibRenderer:
                 self._artists[mappable_key] = mappable
                 colorbar = self._figure.colorbar(mappable, cax=colorbar_axes[0])
                 self._artists[colorbar_key] = colorbar
+                self._artists[f"{key}:colorbar_dynamic_axis"] = colorbar.ax
             colorbar_state = (
                 cmap_name,
                 (vmin, vmax),
@@ -2645,7 +2668,6 @@ class MatplotlibRenderer:
                     )
                 )
                 self._artists[state_key] = colorbar_state
-                self._mark_axes_chrome_dirty(colorbar_axes[0])
         self._apply_colorbar_visibility(state)
         # A tick configuration has ONE owner per axes: it writes the axis'
         # ``_zlc_tick_signature`` and installs its locator only when that
@@ -2789,6 +2811,7 @@ class MatplotlibRenderer:
     #: a later focus rebuilds them on the new axes instead of ghosting.
     _FACET_FOCUS_CHROME_SUFFIXES = (
         "distribution",
+        "distribution:dynamic_axes",
         "distribution_cache",
         "distribution:count_ceiling",
         "distribution_data_limits",
@@ -2796,6 +2819,7 @@ class MatplotlibRenderer:
         "colorbar",
         "colorbar_mappable",
         "colorbar_state",
+        "colorbar_dynamic_axis",
     )
 
     def _sync_facet_focus_chrome(self, index: int | None) -> None:

@@ -8,14 +8,16 @@ however, a newer source and its active descendants replace the previous
 component together. A slow Processor therefore cannot expose source revision N
 beside its own derived revision N-1.
 
-A monitor tap overwrites when its consumer cannot keep up rather than
-back-pressuring acquisition.  It retains only the current value; it does not
-record or expose a loss count.  There is no global shot counter to compare
-against -- signals from different runs advance independently.
+A producer Monitor retains only its current event.  A derived Monitor also
+inherits its source generation's primary index; Runtime can therefore
+materialize a bounded ordinary Dataset in which every source index is present
+and an uncomputed index is invalid.  Signals from different runs still advance
+independently; there is no cross-run global counter.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 import math
@@ -27,14 +29,19 @@ from weakref import WeakKeyDictionary
 
 import numpy as np
 from zlc_data import (
+    PRIMARY_INDEX,
     BlockId,
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    GridTopology,
     OwnedSnapshot,
+    PointColumn,
+    PointTable,
     StreamGenerationId,
     owned_snapshot_from_arrays,
 )
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
@@ -155,6 +162,7 @@ class SignalValue:
     run_record: Mapping[str, object] = field(default_factory=dict)
     canonical_schema: DatasetSchema | None = None
     cell_origin: tuple[int, int] | None = None
+    primary_index: int | None = None
 
     def __post_init__(self) -> None:
         name = canonical_text(self.name, "signal name")
@@ -178,6 +186,11 @@ class SignalValue:
             object.__setattr__(self, "cell_origin", origin)
         if not isinstance(self.run_record, Mapping):
             raise TypeError("signal value run_record must be a mapping")
+        primary_index = self.primary_index
+        if primary_index is not None and (
+            type(primary_index) is not int or primary_index < 0
+        ):
+            raise TypeError("signal primary_index must be a non-negative integer or None")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
 
@@ -444,6 +457,111 @@ def _restamp_snapshot(
     return OwnedSnapshot(block.ref(generation), block)
 
 
+_INDEXED_HISTORY_BYTES = 64 << 20
+_INDEXED_HISTORY_COUNT = 100_000
+
+
+def _indexed_capacity(snapshot: OwnedSnapshot) -> int:
+    values = snapshot.block.values
+    bytes_per_index = max(1, int(values.nbytes) + int(values.size))
+    return max(
+        1,
+        min(_INDEXED_HISTORY_COUNT, _INDEXED_HISTORY_BYTES // bytes_per_index),
+    )
+
+
+def _indexed_schema(
+    event_schema: DatasetSchema,
+    indices: tuple[int, ...],
+) -> DatasetSchema:
+    point_count = event_schema.point_table.row_count
+    if any(
+        column.coordinate_id == PRIMARY_INDEX_AXIS_ID
+        for column in event_schema.point_table.columns
+    ):
+        raise ValueError("processor event schema uses the reserved primary-index axis")
+    primary = PointColumn(
+        PRIMARY_INDEX_AXIS_ID,
+        "source index",
+        PRIMARY_INDEX,
+        PointColumn.NUMERIC,
+        tuple(index for index in indices for _row in range(point_count)),
+    )
+    columns = [primary]
+    for column in event_schema.point_table.columns:
+        columns.append(
+            PointColumn(
+                column.coordinate_id,
+                column.name,
+                column.role,
+                column.value_kind,
+                tuple(column.values) * len(indices),
+                column.unit,
+                column.coordinate_frame,
+                None
+                if column.coordinate_labels is None
+                else tuple(column.coordinate_labels) * len(indices),
+            )
+        )
+    topology = event_schema.grid_topology
+    if topology is not None:
+        topology = GridTopology(
+            (PRIMARY_INDEX_AXIS_ID, *topology.dimension_ids),
+            (indices, *topology.coordinate_domains),
+            tuple(
+                (index_position, *cell)
+                for index_position in range(len(indices))
+                for cell in topology.row_to_cell
+            ),
+        )
+    return DatasetSchema(
+        event_schema.repeat_axis,
+        PointTable(point_count * len(indices), tuple(columns)),
+        topology,
+        event_schema.cell_schema,
+    )
+
+
+def _materialize_indexed_dataset(
+    signal_name: str,
+    generation: StreamGenerationId,
+    revision: int,
+    event_schema: DatasetSchema,
+    events: tuple[tuple[int, OwnedSnapshot], ...],
+    first_index: int,
+    latest_index: int,
+    capacity: int,
+    window: int | None,
+) -> OwnedSnapshot:
+    retained = capacity if window is None else min(capacity, window)
+    start = max(first_index, latest_index - retained + 1)
+    indices = tuple(range(start, latest_index + 1))
+    schema = _indexed_schema(event_schema, indices)
+    values = np.zeros(schema.physical_shape, dtype=event_schema.cell_schema.dtype)
+    validity = np.zeros(schema.physical_shape, dtype=np.bool_)
+    point_count = event_schema.point_table.row_count
+    trailing = (slice(None),) * len(event_schema.cell_schema.data_axes)
+    for primary_index, snapshot in events:
+        if not start <= primary_index <= latest_index:
+            continue
+        point_start = (primary_index - start) * point_count
+        target = (
+            slice(None),
+            slice(point_start, point_start + point_count),
+            *trailing,
+        )
+        values[target] = snapshot.block.values
+        validity[target] = snapshot.expanded_validity()
+    return owned_snapshot_from_arrays(
+        schema,
+        values,
+        revision,
+        validity=validity,
+        block_id=BlockId(f"{signal_name}.indexed"),
+        stream_generation=generation,
+    )
+
+
 @dataclass(slots=True)
 class _GenerationState:
     """The sole mutable state for one process-local signal generation."""
@@ -489,6 +607,18 @@ class _GenerationState:
     ] = field(default_factory=dict)
     occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
     materialized: dict[str, tuple[int, OwnedSnapshot]] = field(default_factory=dict)
+    indexed_event_schemas: dict[str, DatasetSchema] = field(default_factory=dict)
+    indexed_events: dict[str, deque[int]] = field(default_factory=dict)
+    indexed_event_values: dict[
+        str,
+        dict[int, tuple[int, OwnedSnapshot]],
+    ] = field(default_factory=dict)
+    indexed_first_indices: dict[str, int] = field(default_factory=dict)
+    indexed_capacities: dict[str, int] = field(default_factory=dict)
+    indexed_materialized: dict[
+        str,
+        tuple[int, int | None, OwnedSnapshot],
+    ] = field(default_factory=dict)
     committed_run_record: Mapping[str, object] | None = None
     sealing: bool = False
 
@@ -765,6 +895,31 @@ class SignalDataPlane:
         self._membership_changed = False
         self._closed = False
         self._front = SignalFront({}, {})
+        self._publication_callbacks: set[Callable[[], object]] = set()
+
+    def subscribe_publications(
+        self,
+        callback: Callable[[], object],
+    ) -> Callable[[], None]:
+        """Wake an owner once after each atomic live publication."""
+
+        if not callable(callback):
+            raise TypeError("publication callback must be callable")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
+            self._publication_callbacks.add(callback)
+        subscribed = True
+
+        def unsubscribe() -> None:
+            nonlocal subscribed
+            if not subscribed:
+                return
+            subscribed = False
+            with self._lock:
+                self._publication_callbacks.discard(callback)
+
+        return unsubscribe
 
     def set_front_signals(self, signal_names) -> None:
         """Set the connected continuous signal set whose front must be coherent."""
@@ -1147,8 +1302,11 @@ class SignalDataPlane:
                 raise RuntimeError("live commit requires the reserved generation")
             if state.publication is not None and state.exact_outputs is None:
                 raise RuntimeError("one generation cannot mix publication paths")
+            route_source = None
             if source_publication is not None:
-                self._require_route_parent_locked(state, source_publication)
+                route_source = self._require_route_parent_locked(
+                    state, source_publication
+                )
                 source_sequence = source_publication.event_ref.sequence
                 if source_sequence < state.last_parent_sequence or (
                     source_sequence == state.last_parent_sequence
@@ -1198,6 +1356,22 @@ class SignalDataPlane:
             origins: dict[str, tuple[int, int]] = {}
             values: dict[str, SignalValue] = {}
             sequence = state.next_sequence
+            primary_index = (
+                sequence
+                if route_source is None
+                else route_source.primary_index
+                if route_source.primary_index is not None
+                else source_publication.event_ref.sequence
+            )
+            indexed_updates: dict[
+                str,
+                tuple[
+                    DatasetSchema,
+                    OwnedSnapshot,
+                    int,
+                    int,
+                ],
+            ] = {}
 
             for qualified in state.output_names:
                 bare = state.bare_names[qualified]
@@ -1211,6 +1385,36 @@ class SignalDataPlane:
                     generation=state.generation,
                     revision=sequence,
                 )
+                if (
+                    source_publication is not None
+                    and isinstance(output.coverage, MonitorCoverage)
+                ):
+                    event_schema = event.block.schema
+                    previous_event_schema = state.indexed_event_schemas.get(qualified)
+                    if (
+                        previous_event_schema is not None
+                        and previous_event_schema != event_schema
+                    ):
+                        raise ValueError(
+                            "indexed Processor event schema changed inside one generation"
+                        )
+                    indices = state.indexed_events.get(qualified)
+                    if indices and primary_index < indices[-1]:
+                        raise RuntimeError(
+                            "indexed Processor source primary index moved backwards"
+                        )
+                    first_index = state.indexed_first_indices.get(
+                        qualified, primary_index
+                    )
+                    capacity = state.indexed_capacities.get(
+                        qualified, _indexed_capacity(event)
+                    )
+                    indexed_updates[qualified] = (
+                        event_schema,
+                        event,
+                        first_index,
+                        capacity,
+                    )
                 if qualified in exact_qualified:
                     schema = output.canonical_schema
                     origin = output.cell_origin
@@ -1273,6 +1477,7 @@ class SignalDataPlane:
                     run_record=run_record,
                     canonical_schema=output.canonical_schema,
                     cell_origin=output.cell_origin,
+                    primary_index=primary_index,
                 )
 
             parents = () if source_publication is None else (source_publication,)
@@ -1297,6 +1502,26 @@ class SignalDataPlane:
             state.canonical_schemas = MappingProxyType(canonical_schemas)
             state.occupied_cells = occupied_cells
             state.committed_run_record = run_record
+            for qualified, (
+                event_schema,
+                event,
+                first_index,
+                capacity,
+            ) in indexed_updates.items():
+                state.indexed_event_schemas[qualified] = event_schema
+                indices = state.indexed_events.setdefault(qualified, deque())
+                event_values = state.indexed_event_values.setdefault(qualified, {})
+                if indices and indices[-1] == primary_index:
+                    event_values[primary_index] = (sequence, event)
+                else:
+                    indices.append(primary_index)
+                    event_values[primary_index] = (sequence, event)
+                start = max(first_index, primary_index - capacity + 1)
+                while indices and indices[0] < start:
+                    event_values.pop(indices.popleft(), None)
+                state.indexed_first_indices[qualified] = first_index
+                state.indexed_capacities[qualified] = capacity
+                state.indexed_materialized.pop(qualified, None)
             if source_publication is not None:
                 state.last_parent_sequence = source_publication.event_ref.sequence
                 state.last_parent_trigger = trigger
@@ -1315,16 +1540,32 @@ class SignalDataPlane:
                     publication,
                     sequence=publication.event_ref.sequence,
                 )
-            return publication.signals
+            result = publication.signals
+            callbacks = tuple(self._publication_callbacks)
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                # A presentation wake cannot roll back already-committed data.
+                continue
+        return result
 
     def current_dataset(
         self,
         signal_name: str,
         publication: SignalPublication | None = None,
+        *,
+        primary_window: int | None = None,
     ) -> OwnedSnapshot:
-        """Materialize one exact committed run prefix, never from UI freeze."""
+        """Materialize one exact finite prefix or bounded indexed view."""
 
+        if primary_window is not None and (
+            type(primary_window) is not int or primary_window <= 0
+        ):
+            raise TypeError("primary_window must be a positive integer or None")
         name = canonical_text(signal_name, "signal name")
+        indexed_input = None
+        finite_input = None
         with self._lock:
             state = self._state_for_signal_locked(name)
             if state is None or state.retired:
@@ -1343,33 +1584,89 @@ class SignalDataPlane:
             value = selected.value(name)
             if value is None:
                 raise ValueError("publication does not contain the selected signal")
-            if state.exact_outputs is None or name not in state.exact_outputs:
-                return value.snapshot
             sequence = selected.event_ref.sequence
-            if not any(
-                commit_sequence == sequence
-                for commit_sequence, _value, _origin, _parents in state.commit_chunks[
-                    name
-                ]
-            ):
-                raise ValueError("publication is not a canonical commit of this run")
-            cached = state.materialized.get(name)
-            if cached is not None and cached[0] == sequence:
-                return cached[1]
-            materialization = self._materialization_input_locked(
-                state,
-                name,
-                sequence,
-            )
-        snapshot = self._materialize_dataset(name, sequence, *materialization)
+            if name in state.indexed_event_schemas:
+                if value.primary_index is None:
+                    raise RuntimeError("indexed signal lost its source primary index")
+                cached = state.indexed_materialized.get(name)
+                if (
+                    cached is not None
+                    and cached[0] == sequence
+                    and cached[1] == primary_window
+                ):
+                    return cached[2]
+                capacity = state.indexed_capacities[name]
+                retained = (
+                    capacity
+                    if primary_window is None
+                    else min(capacity, primary_window)
+                )
+                first_index = state.indexed_first_indices[name]
+                start = max(
+                    first_index,
+                    value.primary_index - retained + 1,
+                )
+                event_values = state.indexed_event_values[name]
+                selected_events: list[tuple[int, OwnedSnapshot]] = []
+                for primary_index in range(start, value.primary_index + 1):
+                    if primary_index == value.primary_index:
+                        selected_events.append((primary_index, value.snapshot))
+                        continue
+                    held = event_values.get(primary_index)
+                    if held is not None and held[0] <= sequence:
+                        selected_events.append((primary_index, held[1]))
+                events = tuple(selected_events)
+                indexed_input = (
+                    name,
+                    state.generation,
+                    sequence,
+                    state.indexed_event_schemas[name],
+                    events,
+                    first_index,
+                    value.primary_index,
+                    capacity,
+                    primary_window,
+                )
+            elif state.exact_outputs is None or name not in state.exact_outputs:
+                return value.snapshot
+            else:
+                if not any(
+                    commit_sequence == sequence
+                    for commit_sequence, _value, _origin, _parents in state.commit_chunks[
+                        name
+                    ]
+                ):
+                    raise ValueError("publication is not a canonical commit of this run")
+                cached = state.materialized.get(name)
+                if cached is not None and cached[0] == sequence:
+                    return cached[1]
+                finite_input = self._materialization_input_locked(
+                    state,
+                    name,
+                    sequence,
+                )
+        snapshot = (
+            _materialize_indexed_dataset(*indexed_input)
+            if indexed_input is not None
+            else self._materialize_dataset(name, sequence, *finite_input)
+        )
         with self._lock:
             if self._states.get(state.owner_id) is state and not state.retired:
-                cached = state.materialized.get(name)
-                # Keep one immutable prefix per signal, never a list of all
-                # prefixes.  A later materialization must not be displaced by
-                # an older request that happened to finish afterwards.
-                if cached is None or cached[0] <= sequence:
-                    state.materialized[name] = (sequence, snapshot)
+                if indexed_input is not None:
+                    cached = state.indexed_materialized.get(name)
+                    if cached is None or cached[0] <= sequence:
+                        state.indexed_materialized[name] = (
+                            sequence,
+                            primary_window,
+                            snapshot,
+                        )
+                else:
+                    cached = state.materialized.get(name)
+                    # Keep one immutable prefix per signal, never a list of all
+                    # prefixes.  A later materialization must not be displaced by
+                    # an older request that happened to finish afterwards.
+                    if cached is None or cached[0] <= sequence:
+                        state.materialized[name] = (sequence, snapshot)
         return snapshot
 
     def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
@@ -2202,6 +2499,7 @@ class SignalDataPlane:
             self._front_signals = frozenset()
             self._front = SignalFront({}, {})
             self._publication_parents.clear()
+            self._publication_callbacks.clear()
         self._lane.close()
         errors = list(self._cleanup_retired_states(states))
         if errors:

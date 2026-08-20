@@ -133,6 +133,18 @@ def accumulate_history(
     R shots to the history exactly once, when it seeds it.
     """
 
+    if view.has_primary_index:
+        samples = view.rolling_history_samples(
+            group=group,
+            aggregation=aggregation,
+        )
+        pools = view.pooled_values_by_repeat()
+        return _within_value_budget(
+            [
+                RollingHistoryPoint(sample, sample.revision, values)
+                for sample, values in zip(samples, pools, strict=True)
+            ][-RETAINED_HISTORY_LIMIT:]
+        )
     history = list(projection._context.rolling_history)
     if not history:
         # The first revision seeds the full shot history from the repeat
@@ -706,7 +718,7 @@ class FitProjection:
             x_ref=AxisRef.point_rows(),
             group_by=(() if self._spec.group is None else (self._spec.group,)),
             series=tuple(series),
-            source_revisions=tuple(point.sample.revision for point in visible),
+            source_revisions=tuple(point.shot_index for point in visible),
         )
 
     def _histogram_bins(

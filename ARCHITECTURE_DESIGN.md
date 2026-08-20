@@ -85,7 +85,7 @@ Node new chunk
 - Camera使用chunked append，避免每次复制全部历史；Scan按固定point geometry增长。
 - 未写位置invalid；coverage只描述实际写入extent。
 - Finite exact signal的event view只用于commit与exact Processor；所有UI/display consumer必须使用同一publication对应的canonical current view，从第一次publication起报告完整authored physical shape，未来位置invalid。
-- Monitor signal没有finite canonical extent，UI显示latest complete event。
+- 普通Monitor signal没有finite canonical extent，UI显示latest complete event。带通用`primary-index`的indexed-derived Monitor同时由Runtime保留bounded ordinary Dataset：每个Measurement source index都有value或invalid cell；所有Plot读取同一Dataset并只用axis fate/window选择latest或history，不建立Plot-kind、Fit或Workbench专用history lane。
 - `scope/reduction/fate`只决定怎样投影canonical view，绝不决定选择event还是canonical；同一publication不能因Panel semantic不同代表两份不同数据truth。
 - Incremental placement沿repeat与point rows；多维scan/grid通过point table与grid topology表达。一个cell payload原子完整发布，不新增cell-internal tile/slice streaming contract。
 - Canonical display materialization只在实际display consumer到期时合并/cache，并在Qt owner thread之外执行；不得让producer每commit强制复制full prefix，也不得因Panel存在与否改变采集结果。
@@ -121,12 +121,12 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
-- `display_interval`是Panel data+fit pair的admission cadence；每次Panel due时选择当时latest coherent publication作为一个source revision。在支持的显示延迟预算内，每个已admit source revision都有一个ordered exact fit job；更高频的raw Monitor publications不被伪装成Panel revision。
+- `display_interval`只控制Surface刷新deadline，不决定Measurement primary index是否存在。Runtime indexed-derived Dataset对每个source index写value或invalid；昂贵Surface计算同一same-shot group只允许一个active，并在忙时只保留Plane latest完整输入，中间indices仍以invalid存在而不排完整frame。
 - Panel只原子呈现`data@N + fit@N`。
 - Fit selection唯一优先级是committed Area ROI（或显式X-range）→viewport→full range；FacetGrid selector必须保留所属focused cell identity，任何PanelState重放不得把ROI降级成viewport/full。
-- FitResult携带source parent/revision；正常负载下Rolling trace逐revision连续。
+- FitResult携带source parent/revision；任何history/window投影按Measurement primary index连续，未计算、失败或timeout的位置invalid/NaN，window长度按source indices而非成功结果计数。
 - Fit计算在后台worker；Qt owner thread不等待Future或执行fit。
-- 最老待处理revision等待超过1秒，或队列持有的immutable array超过64 MiB时，必须loud报告一次resync，丢弃尚未fit的中间revision，只保留当时latest继续；不得永久锁住Panel、Qt、Stop或close。该断点不是成功fit，raw Runtime data仍完整并可离线重算。
+- Active Fit超过1秒必须loud标记该source index invalid并从Plane latest继续；不得积累完整frame FIFO，也不得永久锁住Panel、Qt、Stop或close。普通cadence/backpressure跳过计算的indices同样invalid但不是solver failure；raw Runtime data始终完整。
 
 ### 5.2 Performance与state
 

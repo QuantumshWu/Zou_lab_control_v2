@@ -9,21 +9,27 @@
   zero solve, zero render and zero front promotion; a changed target merges its
   effects into one final render. Startup always promotes the initial front
   first, and a startup no-op reuses it instead of creating a ghost front.
-- Fit-armed data is exact FIFO while the oldest queued input has waited at most
-  1 second and retained immutable arrays remain at most 64 MiB. Crossing either
-  budget reports one resync, supersedes unfit middle revisions and continues
-  from the then-latest input; it never permanently latches the panel or Qt.
+- Indexed-derived data preserves every Measurement primary index as value or
+  invalid. A busy same-shot Surface group never queues another full frame; it
+  keeps Plane latest and stages it on completion. Active timeout remains loud,
+  but cadence/backpressure gaps are ordinary invalid Dataset cells.
 - Selector Off means the plot consumes no pointer gesture. Its wheel belongs to
   the outer page. Selector On permits only double-click focus in a FacetGrid
   overview; area/pan/zoom begin only on a focused cell or non-grid surface.
 - The formal 96x128 Camera -> 26x26 Area fit + parallel ROI image -> Rolling
   chain uses 100 ms as a profiling warning, not a hard acceptance deadline.
-  After removing two extra cadence waits, its steady end-to-end P50/P95 is
-  150/167 ms; the fit itself is 24/31 ms and fit-publication -> Rolling prepare
-  is 0.3/1.3 ms. An isolated 1/4/8-panel batch measured
-  40.3/174.3/360.6 ms. The multi-panel totals are contention diagnostics, not
-  per-panel cadence promises. Changes smaller than normal run-to-run noise are
-  not grounds for another executor, cache or pool.
+  A same-harness A/B with an independent 66 ms virtual source measured the
+  pre-follow-up `69d5514` tree against the indexed/capacity-one candidate:
+  source-publication -> main P50/P95 fell from 338/435 to 131/163 ms and
+  source-publication -> Rolling from 339/435 to 191/224 ms. Main full-frame
+  retention fell from three to one and both Raster/Port queues from three to
+  one, with every source primary index retained as valid or invalid. The
+  Rolling tail remains a measured optimisation candidate; these numbers do
+  not claim the previously estimated 80--105 ms target has been reached.
+- Tight-color + Area-fit renderer A/B under cProfile fell from 80.5/89.4 to
+  63.6/69.0 ms while DPR1/2, selectors, fit overlays and colorbar ticks remained
+  pixel-identical to the old native draw. Changes smaller than normal run-to-run
+  noise remain no grounds for another executor, cache or pool.
 
 The older tables below remain dated numeric references for projection and
 render costs. Their former queue/lifecycle policies have been removed; the
@@ -127,9 +133,10 @@ immutable zlc_data.OwnedSnapshot
 
 The primary camera contract is `(R=1, P=1, camera_y, camera_x)`.  Both spatial
 axes are declared dense `data_dim` axes and the `ImagePlot` refers to them with
-`AxisRef.data(...)`.  Every public live camera frame keeps the fixed
-`(1, 1, *frame)` geometry, while acquisition history remains private. The host
-admits revisions through the bounded exact FIFO described above.
+`AxisRef.data(...)`. Every public live camera frame keeps the fixed
+`(1, 1, *frame)` event geometry. Generic indexed-derived signals separately
+materialize a bounded ordinary Dataset over their source primary index; the
+Surface host never retains a FIFO of full camera frames.
 
 The comparison also covered flattened `P=H*W` plus `GridTopology`, but that is
 not the recommended camera representation.

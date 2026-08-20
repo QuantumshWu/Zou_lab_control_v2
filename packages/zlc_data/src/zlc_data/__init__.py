@@ -4,6 +4,7 @@ __version__ = "0.1.0"
 
 from .axis import (
     COMPONENT,
+    PRIMARY_INDEX,
     READOUT_EVENT,
     REPEAT,
     SCAN_POINT,
@@ -113,6 +114,7 @@ __all__ = [
     "OwnedSnapshot",
     "PointColumn",
     "PointTable",
+    "PRIMARY_INDEX",
     "READOUT_EVENT",
     "REPEAT",
     "SCAN_POINT",

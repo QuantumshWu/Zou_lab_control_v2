@@ -89,6 +89,12 @@ def _wait_qt(application, predicate, *, timeout_ms: int = 5000) -> None:
     assert predicate(), "timed out waiting for a Qt owner turn"
 
 
+def test_task_console_has_no_second_display_clock_override(workspace) -> None:
+    completed = _run(workspace, "--template", "virtual", "--interval-ms", "10")
+    assert completed.returncode == 2
+    assert "unrecognized arguments: --interval-ms 10" in completed.stderr
+
+
 def test_the_console_assembles_and_beats(workspace) -> None:
     completed = _run(workspace, "--template", "virtual", "--check")
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -240,6 +246,7 @@ def test_live_board_close_cancels_queued_projection_without_waiting_for_running_
             direct_parent_publications=lambda publication: (),
             follower_edges=lambda: frozenset(),
             latest_publication=lambda signal: None,
+            subscribe_publications=lambda callback: lambda: None,
         ),
         tuple,
         intervals=DEFAULTS.live.refresh_intervals_ms,
@@ -274,7 +281,6 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
     window = create_window(
         workspace=workspace,
         template="virtual",
-        interval_ms=10,
         window_ratio=0.25,
     )
     presenter = window.presenter
@@ -342,7 +348,11 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
         assert time.monotonic() - begun < 0.05
         assert cancelled == [True]
         assert window.is_visible()
-        _wait_qt(application, lambda: len(turns) >= 5, timeout_ms=2000)
+        _wait_qt(
+            application,
+            lambda: len(turns) >= 5 and bool(polls),
+            timeout_ms=2000,
+        )
         assert polls, "the lifecycle/status beat stopped during close"
 
         node_release.set()
@@ -449,7 +459,6 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     window = create_window(
         workspace=workspace,
         template="virtual",
-        interval_ms=10,
         window_ratio=0.25,
     )
     presenter = window.presenter
@@ -519,7 +528,11 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
         assert writer_started.wait(2.0)
         window.close()
         assert window.is_visible(), "pending Panel Save was reported closed"
-        _wait_qt(application, lambda: len(turns) >= 5, timeout_ms=1000)
+        _wait_qt(
+            application,
+            lambda: len(turns) >= 5 and bool(beats),
+            timeout_ms=1000,
+        )
         assert beats, "the Console lifecycle beat stopped during Panel Save"
 
         writer_release.set()

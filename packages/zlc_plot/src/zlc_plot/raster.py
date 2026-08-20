@@ -1436,6 +1436,7 @@ class RasterPlotHost:
     def configure(
         self,
         *,
+        data: "PlotInput | object" = _UNSET,
         semantic: Mapping[str, object] | None = None,
         parameters: Mapping[str, object] | None = None,
         size: str | None = None,
@@ -1454,6 +1455,8 @@ class RasterPlotHost:
             "parameters": None if parameters is None else dict(parameters),
             "size": size,
         }
+        if data is not _UNSET:
+            configuration["data"] = data
         if image_overlay is not _UNSET:
             configuration["image_overlay"] = image_overlay
         if classifier_thresholds is not _UNSET:

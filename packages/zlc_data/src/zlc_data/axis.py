@@ -70,6 +70,7 @@ class CoordinateFrameId:
 
 
 REPEAT = AxisRoleId("repeat")
+PRIMARY_INDEX = AxisRoleId("primary-index")
 SCAN_POINT = AxisRoleId("scan-point")
 READOUT_EVENT = AxisRoleId("readout-event")
 SPATIAL_X = AxisRoleId("spatial-x")

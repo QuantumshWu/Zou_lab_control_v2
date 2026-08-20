@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from zlc_data import (
+    PRIMARY_INDEX,
     REPEAT,
     SCAN_POINT,
     SPATIAL_X,
@@ -144,6 +145,224 @@ def _large_latest(
         snapshot,
         MonitorCoverage(1, 1),
     )
+
+
+def test_derived_monitor_materializes_every_source_primary_index() -> None:
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("value", "test.value")
+
+    class Source:
+        instance_id = "indexed-source"
+        dataset_output_declarations = (source_declaration,)
+
+        @staticmethod
+        def signal_key(name: str) -> str:
+            return f"indexed-source/{name}"
+
+    class Derived:
+        instance_id = "indexed-derived"
+        dataset_output_declarations = (derived_declaration,)
+
+        @staticmethod
+        def signal_key(name: str) -> str:
+            return f"indexed-derived/{name}"
+
+        @staticmethod
+        def validate_processor_source(_source) -> None:
+            return None
+
+        @staticmethod
+        def evaluate_processor(_source, _publication):
+            raise AssertionError("paused processor must not evaluate")
+
+        @staticmethod
+        def accept_processor_result(_source, _publication, _result) -> None:
+            return None
+
+        @staticmethod
+        def accept_processor_failure(error: Exception) -> None:
+            raise error
+
+        @staticmethod
+        def accept_processor_cancelled() -> None:
+            return None
+
+        @staticmethod
+        def request_processor_owner_wake() -> None:
+            return None
+
+    source = Source()
+    derived = Derived()
+    plane = SignalDataPlane()
+    wakes: list[int] = []
+    unsubscribe = plane.subscribe_publications(lambda: wakes.append(1))
+    try:
+        plane.reserve(source)
+        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        first = plane.latest_publication("indexed-source/frame")
+        assert first is not None
+        plane.attach_latest_only_processor(
+            derived,
+            source_name="indexed-source/frame",
+            initial_publication=first,
+            paused=True,
+        )
+        plane.commit_processor(
+            derived,
+            {"value": _latest(derived_declaration, 11.0)},
+            source_publication=first,
+        )
+
+        for revision in (2, 3, 4):
+            plane.commit_live(
+                source,
+                {"frame": _latest(source_declaration, float(revision))},
+            )
+        fourth = plane.latest_publication("indexed-source/frame")
+        assert fourth is not None
+        plane.commit_processor(
+            derived,
+            {"value": _latest(derived_declaration, 44.0)},
+            source_publication=fourth,
+        )
+
+        publication = plane.latest_publication("indexed-derived/value")
+        assert publication is not None
+        snapshot = plane.current_dataset("indexed-derived/value", publication)
+        source_index = snapshot.block.schema.point_table.column(
+            AxisId("zlc_data.primary-index")
+        )
+        assert source_index.role == PRIMARY_INDEX
+        assert source_index.values == (1, 2, 3, 4)
+        np.testing.assert_allclose(
+            snapshot.block.values.reshape(-1),
+            (11.0, 0.0, 0.0, 44.0),
+        )
+        np.testing.assert_array_equal(
+            snapshot.expanded_validity().reshape(-1),
+            (True, False, False, True),
+        )
+        bounded = plane.current_dataset(
+            "indexed-derived/value",
+            publication,
+            primary_window=2,
+        )
+        assert bounded.block.schema.point_table.column(
+            AxisId("zlc_data.primary-index")
+        ).values == (3, 4)
+        np.testing.assert_array_equal(
+            bounded.expanded_validity().reshape(-1),
+            (False, True),
+        )
+        old_publication = publication
+        plane.commit_processor(
+            derived,
+            {"value": _latest(derived_declaration, 55.0)},
+            source_publication=fourth,
+            trigger=("refit", 1),
+        )
+        new_publication = plane.latest_publication("indexed-derived/value")
+        assert new_publication is not None
+        old_tail = plane.current_dataset(
+            "indexed-derived/value", old_publication, primary_window=1
+        )
+        new_tail = plane.current_dataset(
+            "indexed-derived/value", new_publication, primary_window=1
+        )
+        np.testing.assert_allclose(old_tail.block.values.reshape(-1), (44.0,))
+        np.testing.assert_allclose(new_tail.block.values.reshape(-1), (55.0,))
+        assert bool(old_tail.expanded_validity().reshape(-1)[0])
+        assert bool(new_tail.expanded_validity().reshape(-1)[0])
+        assert len(wakes) == 7  # four source and three atomic derived publications
+    finally:
+        unsubscribe()
+        plane.close()
+
+
+def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
+    monkeypatch,
+) -> None:
+    from collections import deque as standard_deque
+    import zlc_runtime.plane as plane_module
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("value", "test.value")
+    source = _node("bounded-source", source_declaration)
+
+    class Derived:
+        instance_id = "bounded-derived"
+        dataset_output_declarations = (derived_declaration,)
+
+        @staticmethod
+        def signal_key(name: str) -> str:
+            return f"bounded-derived/{name}"
+
+        validate_processor_source = staticmethod(lambda _source: None)
+        evaluate_processor = staticmethod(
+            lambda _source, _publication: (_ for _ in ()).throw(AssertionError())
+        )
+        accept_processor_result = staticmethod(lambda *_args: None)
+        accept_processor_failure = staticmethod(lambda error: (_ for _ in ()).throw(error))
+        accept_processor_cancelled = staticmethod(lambda: None)
+        request_processor_owner_wake = staticmethod(lambda: None)
+
+    class NoScanDeque(standard_deque):
+        def __iter__(self):
+            raise AssertionError("indexed commit scanned retained history")
+
+        def __reversed__(self):
+            raise AssertionError("indexed commit scanned retained history")
+
+    monkeypatch.setattr(plane_module, "deque", NoScanDeque)
+    derived = Derived()
+    plane = SignalDataPlane()
+    materialized_event_counts: list[int] = []
+    original_materialize = plane_module._materialize_indexed_dataset
+
+    def counted_materialize(*args, **kwargs):
+        materialized_event_counts.append(len(args[4]))
+        return original_materialize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        plane_module,
+        "_materialize_indexed_dataset",
+        counted_materialize,
+    )
+    try:
+        plane.reserve(source)
+        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        publication = plane.latest_publication("bounded-source/frame")
+        assert publication is not None
+        plane.attach_latest_only_processor(
+            derived,
+            source_name="bounded-source/frame",
+            initial_publication=publication,
+            paused=True,
+        )
+        for revision in range(1, 10_001):
+            if revision > 1:
+                plane.commit_live(
+                    source,
+                    {"frame": _latest(source_declaration, float(revision))},
+                )
+                publication = plane.latest_publication("bounded-source/frame")
+                assert publication is not None
+            plane.commit_processor(
+                derived,
+                {"value": _latest(derived_declaration, float(revision))},
+                source_publication=publication,
+            )
+        snapshot = plane.current_dataset(
+            "bounded-derived/value",
+            primary_window=100,
+        )
+        primary = snapshot.block.schema.point_table.column(
+            AxisId("zlc_data.primary-index")
+        )
+        assert primary.values == tuple(range(9_901, 10_001))
+        assert materialized_event_counts == [100]
+    finally:
+        plane.close()
 
 
 def _finite_grid_point(
@@ -760,7 +979,6 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         assert first_derived is not None
         phase = first_derived.value("causal-first/phase")
         assert phase is not None
-        phase_array = weakref.ref(phase.snapshot.block.values)
 
         plane.commit_live(
             source,
@@ -793,8 +1011,6 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         latest_derived = plane.latest_publication("causal-first/history")
         assert latest_derived is not None
         del phase, first_derived
-        gc.collect()
-        assert phase_array() is None
 
         downstream_tap = plane.reserve_follow_processor(
             downstream,
@@ -803,6 +1019,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         )
         replayed = downstream_tap.next(timeout=0.0)
         assert replayed.event_ref.sequence == 1
+        assert replayed.value("causal-first/phase") is None
         assert replayed.direct_parent_refs == (first_root.event_ref,)
         assert plane.publication_roots(replayed) == frozenset(
             {first_root.event_ref}

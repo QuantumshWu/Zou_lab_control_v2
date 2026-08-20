@@ -15,10 +15,13 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
+import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 
 from zlc_plot import AxisRef, ImagePlot, PlotLabels, PlotSession
+from zlc_plot.rendering import MatplotlibRenderer
+from zlc_plot.selectors import NumericRange
 
 
 def _image_contract(size: int):
@@ -106,5 +109,115 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         assert renderer._background_signature == before
         image = renderer._artists["image"]
         assert tuple(map(float, image.get_clim())) == (20.0, 150.0)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("device_pixel_ratio", (1.0, 2.0))
+def test_tight_chrome_reuses_one_exact_background_without_residue(
+    monkeypatch,
+    device_pixel_ratio: float,
+) -> None:
+    size = 128
+    schema = _image_contract(size)
+    spec = ImagePlot(
+        AxisRef.data("camera_x"),
+        AxisRef.data("camera_y"),
+        labels=PlotLabels("tight", "x", "y", value="Counts"),
+    )
+    session = PlotSession(
+        _snapshot(schema, size, 40000.0, 1, seed=12),
+        spec,
+        device_pixel_ratio=device_pixel_ratio,
+    )
+    try:
+        session.update_data(_snapshot(schema, size, 35000.0, 2, seed=13))
+        renderer = session._renderer
+        background = renderer._background_region
+        native_draw = MatplotlibRenderer._native_draw
+        reference = PlotSession(
+            _snapshot(schema, size, 35.0, 3, seed=14),
+            spec,
+            device_pixel_ratio=device_pixel_ratio,
+        )
+        try:
+            reference._renderer.draw()
+            small_full = np.array(
+                reference._renderer.figure.canvas.buffer_rgba(),
+                copy=True,
+            )
+        finally:
+            reference.close()
+        native_draws = 0
+
+        def counted_draw(canvas) -> None:
+            nonlocal native_draws
+            native_draws += 1
+            native_draw(canvas)
+
+        monkeypatch.setattr(
+            MatplotlibRenderer,
+            "_native_draw",
+            staticmethod(counted_draw),
+        )
+        session.update_data(_snapshot(schema, size, 35.0, 3, seed=14))
+        small = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+        _cmap, limits, _label = renderer._artists["image:colorbar_state"]
+        assert tuple(renderer._artists["image:colorbar_mappable"].get_clim()) == limits
+        assert tuple(renderer._artists["image:colorbar"].get_ticks()) == limits
+        np.testing.assert_array_equal(small, small_full)
+        session.update_data(_snapshot(schema, size, 39000.0, 4, seed=15))
+
+        assert native_draws == 0
+        assert renderer._background_region is background
+        composed = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+        renderer.draw()
+        full = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+        np.testing.assert_array_equal(composed, full)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("device_pixel_ratio", (1.0, 2.0))
+def test_tight_fit_and_area_selector_remain_full_draw_exact(
+    device_pixel_ratio: float,
+) -> None:
+    size = 128
+    schema = _image_contract(size)
+    coordinate = np.arange(size, dtype=float)
+    xx, yy = np.meshgrid(coordinate, coordinate, indexing="ij")
+
+    def fitted_snapshot(revision: int, shift: float) -> DatasetSnapshot:
+        values = 100.0 + 4000.0 * np.exp(
+            -(
+                (xx - (64.0 + shift)) ** 2
+                + (yy - (64.0 - shift)) ** 2
+            )
+            / (2.0 * 7.0**2)
+        )
+        return DatasetSnapshot(
+            schema,
+            values.astype(np.uint16)[np.newaxis, np.newaxis, :, :],
+            revision=revision,
+        )
+
+    session = PlotSession(
+        fitted_snapshot(1, 0.0),
+        ImagePlot(AxisRef.data("camera_x"), AxisRef.data("camera_y")),
+        device_pixel_ratio=device_pixel_ratio,
+    )
+    try:
+        session.set_area_selector(
+            NumericRange(50.5, 76.5),
+            NumericRange(50.5, 76.5),
+            display=False,
+        )
+        session.fit("radial_gaussian_center", live=True)
+        renderer = session._renderer
+        background = renderer._background_region
+
+        session.update_data(fitted_snapshot(2, 0.4))
+        assert renderer._background_region is background
+        assert _composed_matches_full_draw(session) == 0
     finally:
         session.close()

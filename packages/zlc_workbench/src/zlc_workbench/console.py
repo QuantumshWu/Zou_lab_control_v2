@@ -683,15 +683,45 @@ class ConsolePresenter:
         signal: str,
         value: object,
         publication: object,
+        *,
+        primary_window: int | None = None,
     ) -> object:
         """Resolve the one dataset entity every display consumer sees."""
 
         snapshot = getattr(value, "snapshot", None)
         if snapshot is None:
             raise TypeError("a panel signal value must carry an OwnedSnapshot")
-        if getattr(value, "canonical_schema", None) is None:
-            return snapshot
-        return self.session.signal_plane.current_dataset(signal, publication)
+        if primary_window is None:
+            return self.session.signal_plane.current_dataset(signal, publication)
+        return self.session.signal_plane.current_dataset(
+            signal, publication, primary_window=primary_window
+        )
+
+    @staticmethod
+    def _panel_primary_window(
+        binding: PanelBinding,
+        state: PanelState | None = None,
+    ) -> int | None:
+        """Bound indexed materialization by the panel's generic axis target."""
+
+        selected = binding.state if state is None else state
+        surface = binding.parameter_surface
+        semantic = {
+            str(entry["key"]): entry.get("value")
+            for entry in tuple(surface.get("semantic", ()))
+        }
+        semantic.update(selected.semantic)
+        if any(value == "latest" for value in semantic.values()):
+            return 1
+        display = {
+            str(entry["key"]): entry.get("value")
+            for entry in tuple(surface.get("display", ()))
+        }
+        display.update(selected.display)
+        window = display.get("window")
+        if type(window) is int and window > 0:
+            return window
+        return None
 
     def _project_panel_input(
         self,
@@ -715,12 +745,14 @@ class ConsolePresenter:
         # Exact producers publish event chunks for scientific Processors, but
         # every display consumer sees the canonical run geometry.  Whether an
         # axis is scoped, reduced, faceted, or grouped changes only the plot
-        # projection; it never chooses a different data entity.  Monitor
-        # values have no canonical schema and remain latest-event displays.
+        # projection; it never chooses a different data entity.  Producer
+        # Monitors remain latest-event displays; derived Monitors resolve the
+        # same Runtime-owned indexed Dataset at the panel's generic target.
         snapshot = self._presentation_snapshot(
             selected.signal,
             value,
             publication,
+            primary_window=self._panel_primary_window(binding, selected),
         )
         if not selected.overlay_signal or front is None:
             return snapshot
@@ -775,6 +807,7 @@ class ConsolePresenter:
             overlay_signal,
             status,
             overlay_publication,
+            primary_window=1,
         )
         geometry = overlay_publication.run_record.get(
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
@@ -903,6 +936,7 @@ class ConsolePresenter:
         host: object,
         *,
         state: PanelState | None = None,
+        data: object = _UNCHANGED,
         overlay: object = _UNCHANGED,
         viewport: object = _UNCHANGED,
         present: bool = False,
@@ -956,6 +990,8 @@ class ConsolePresenter:
             live=live,
             restore_interaction=restore_interaction,
         )
+        if data is not _UNCHANGED:
+            configuration["data"] = data
         pending = host.configure(**configuration)
         if present:
             self._present_when_done(binding, pending)
@@ -1699,6 +1735,36 @@ class ConsolePresenter:
                 self._refresh_console_projection()
                 return True
             if plot_changed:
+                live_data: object = _UNCHANGED
+                editor_data: object = _UNCHANGED
+                if self._panel_primary_window(
+                    binding, candidate
+                ) != self._panel_primary_window(binding, current):
+                    publication = binding.display_publication
+                    value = self._publication_value(
+                        publication, candidate.signal
+                    )
+                    if publication is not None and value is not None:
+                        live_data = self._project_panel_input(
+                            binding,
+                            value,
+                            publication,
+                            None,
+                            state=candidate,
+                        )
+                    frozen = binding.frozen_data
+                    if frozen is not None:
+                        frozen_value = self._publication_value(
+                            frozen.publication, candidate.signal
+                        )
+                        if frozen_value is not None:
+                            editor_data = self._project_panel_input(
+                                binding,
+                                frozen_value,
+                                frozen.publication,
+                                frozen.front,
+                                state=candidate,
+                            )
                 live_overlay: object = _UNCHANGED
                 editor_overlay: object = _UNCHANGED
                 if (
@@ -1718,6 +1784,7 @@ class ConsolePresenter:
                     binding,
                     binding.host,
                     state=candidate,
+                    data=live_data,
                     overlay=live_overlay,
                     present=True,
                 )
@@ -1726,6 +1793,7 @@ class ConsolePresenter:
                         binding,
                         binding.editor_host,
                         state=candidate,
+                        data=editor_data,
                         overlay=editor_overlay,
                     )
             binding.state = candidate
@@ -2775,14 +2843,14 @@ class ConsolePresenter:
         self._drain_panel_interactions()
         self._poll_retired_plot_hosts()
         if self._closing:
-            self.board.commit()
+            self.board.commit(admit_new=False)
             self.poll_logic()
             self._advance_close()
             return
         self._settle_panel_hosts()
         if not self._paused:
             self.board.tick()
-        self.board.commit()
+        self.board.commit(admit_new=not self._paused)
         self._report_panel_errors()
         self.poll_logic()
         self._refresh_signal_choices()
@@ -2801,7 +2869,7 @@ class ConsolePresenter:
         # canonical PanelState before a Fit click can read/configure it, and a
         # viewport or threshold must not wait for the periodic display beat.
         self._drain_panel_interactions()
-        self.board.commit()
+        self.board.commit(admit_new=not self._paused and not self._closing)
         self._report_panel_errors()
         if self._closing:
             self._poll_retired_plot_hosts()

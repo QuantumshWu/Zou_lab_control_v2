@@ -124,6 +124,9 @@ class SurfacePort(Protocol):
     @property
     def display_interval_ms(self) -> int: ...
 
+    @property
+    def surface_busy(self) -> bool: ...
+
     def presented_front_refs(self) -> tuple[EventRef, ...]: ...
 
     def prepare(
@@ -582,6 +585,7 @@ class BoardScheduler:
         "_closed",
         "_last_front",
         "_owed",
+        "_admission_owed",
         "_plane",
         "_ports",
     )
@@ -611,6 +615,11 @@ class BoardScheduler:
         self._arbiter = arbiter
         self._ports = ports
         self._owed: set[str] = set()
+        # A due panel whose source has not advanced owes only a SURFACE
+        # admission, not a render.  The publication and its indexed Dataset
+        # already exist in Runtime.  Keeping this separate lets a travelling
+        # cohort finish during Pause without advancing the frozen board.
+        self._admission_owed: set[str] = set()
         self._closed = False
         self._last_front = SignalFront({}, {})
 
@@ -638,6 +647,41 @@ class BoardScheduler:
 
     def _resolve_port(self, panel_id: str) -> SurfacePort | None:
         return self._port_map().get(panel_id)
+
+    def _blocked_surface_panels(
+        self,
+        ports: Sequence[SurfacePort],
+        front: SignalFront,
+        eligible: set[str],
+    ) -> tuple[set[str], dict[str, frozenset | None]]:
+        candidates: dict[str, frozenset | None] = {}
+        busy_roots: set[frozenset] = set()
+        busy_unresolved: set[str] = set()
+        for port in ports:
+            panel_id = SurfaceBatchArbiter._panel_id(port)
+            if panel_id not in eligible:
+                continue
+            refs = SurfaceBatchArbiter._front_refs(port, front)
+            if refs is None or self._presented_front_refs(port) == refs:
+                continue
+            roots = self._port_shot_roots(port, front)
+            candidates[panel_id] = roots
+            busy = getattr(port, "surface_busy", None)
+            if type(busy) is not bool:
+                raise TypeError("surface port must provide boolean surface_busy")
+            if not busy:
+                continue
+            if roots is None:
+                busy_unresolved.add(panel_id)
+            else:
+                busy_roots.add(roots)
+        blocked = {
+            panel_id
+            for panel_id, roots in candidates.items()
+            if panel_id in busy_unresolved
+            or (roots is not None and roots in busy_roots)
+        }
+        return blocked, candidates
 
     @staticmethod
     def _displayed_signals(ports: Sequence[SurfacePort]) -> set[str]:
@@ -749,6 +793,20 @@ class BoardScheduler:
                 for name in SurfaceBatchArbiter._front_signals(port)
             )
         )
+        surface_candidates = {
+            SurfaceBatchArbiter._panel_id(port)
+            for port in ports
+            if (
+                due[SurfaceBatchArbiter._panel_id(port)]
+                or SurfaceBatchArbiter._panel_id(port) in self._owed
+                or SurfaceBatchArbiter._panel_id(port) in self._admission_owed
+            )
+        }
+        blocked_surfaces, candidate_roots = self._blocked_surface_panels(
+            ports,
+            front,
+            surface_candidates,
+        )
         # Panels stage individually; the arbiter couples exactly what
         # causality couples by assembling equal shot-root batches into one
         # cohort.  Several views of one signal share roots and flip
@@ -775,36 +833,55 @@ class BoardScheduler:
                     # sibling.  Remember the cadence decision so the matching
                     # completion wake can spend it without another display tick.
                     self._owed.add(panel_id)
+                    self._admission_owed.discard(panel_id)
+                elif due[panel_id]:
+                    # The authored surface deadline was reached before a new
+                    # source publication.  Its wake may spend this display
+                    # debt immediately instead of waiting for another beat.
+                    self._owed.discard(panel_id)
+                    self._admission_owed.add(panel_id)
                 else:
                     self._owed.discard(panel_id)
                 continue
-            if not due[panel_id] and panel_id not in self._owed:
+            if (
+                not due[panel_id]
+                and panel_id not in self._owed
+                and panel_id not in self._admission_owed
+            ):
+                continue
+            roots = candidate_roots.get(panel_id)
+            if panel_id in blocked_surfaces:
+                # No heavy surface FIFO: one travelling member holds its whole
+                # same-shot group.  Runtime retains every indexed revision;
+                # the display debt points only to whatever front is latest
+                # after the current group accepts.
+                self._owed.discard(panel_id)
+                self._admission_owed.add(panel_id)
                 continue
             if self._arbiter.enqueue_group(
                 (port,),
                 front,
-                shot_roots=(
-                    None
-                    if front_refs is None
-                    else self._port_shot_roots(port, front)
-                ),
+                shot_roots=roots,
                 window_panels=(
                     window_panels if publication is not None else frozenset()
                 ),
             ):
                 self._owed.discard(panel_id)
+                self._admission_owed.discard(panel_id)
             else:
-                self._owed.add(panel_id)
+                if panel_id not in self._owed:
+                    self._admission_owed.add(panel_id)
         active_panels = {
             SurfaceBatchArbiter._panel_id(port) for port in ports
         }
-        for panel_id in tuple(self._owed):
+        for panel_id in tuple(self._owed | self._admission_owed):
             if panel_id not in active_panels:
                 self._owed.discard(panel_id)
+                self._admission_owed.discard(panel_id)
         self._arbiter.tick_boundary()
         return front
 
-    def stage_owed(self) -> SignalFront:
+    def stage_owed(self, *, admit_new: bool = True) -> SignalFront:
         """Stage already-due surfaces on the completion wake that makes them ready.
 
         This covers both halves of the same contract: a coherent component
@@ -814,7 +891,8 @@ class BoardScheduler:
         clock nor lets a not-due panel bypass its authored interval.
         """
 
-        if self._closed or not self._owed:
+        eligible = self._owed | (self._admission_owed if admit_new else set())
+        if self._closed or not eligible:
             return self._last_front
         ports = tuple(self._ports())
         displayed = self._displayed_signals(ports)
@@ -826,15 +904,21 @@ class BoardScheduler:
         active_panels = {
             SurfaceBatchArbiter._panel_id(port) for port in ports
         }
-        for panel_id in tuple(self._owed):
+        for panel_id in tuple(self._owed | self._admission_owed):
             if panel_id not in active_panels:
                 self._owed.discard(panel_id)
+                self._admission_owed.discard(panel_id)
 
+        blocked_surfaces, candidate_roots = self._blocked_surface_panels(
+            ports,
+            front,
+            eligible,
+        )
         ready: dict[frozenset, list[SurfacePort]] = {}
         unresolved: list[SurfacePort] = []
         for port in ports:
             panel_id = SurfaceBatchArbiter._panel_id(port)
-            if panel_id not in self._owed:
+            if panel_id not in eligible:
                 continue
             front_refs = SurfaceBatchArbiter._front_refs(port, front)
             if (
@@ -847,7 +931,11 @@ class BoardScheduler:
             )
             if publication is None:
                 continue
-            roots = self._port_shot_roots(port, front)
+            roots = candidate_roots.get(panel_id)
+            if panel_id in blocked_surfaces:
+                self._owed.discard(panel_id)
+                self._admission_owed.add(panel_id)
+                continue
             if roots is None:
                 unresolved.append(port)
             else:
@@ -895,10 +983,14 @@ class BoardScheduler:
                 formation_complete=not window_panels,
             ):
                 for member in members:
-                    self._owed.discard(SurfaceBatchArbiter._panel_id(member))
+                    panel_id = SurfaceBatchArbiter._panel_id(member)
+                    self._owed.discard(panel_id)
+                    self._admission_owed.discard(panel_id)
         for port in unresolved:
             if self._arbiter.enqueue_group((port,), front):
-                self._owed.discard(SurfaceBatchArbiter._panel_id(port))
+                panel_id = SurfaceBatchArbiter._panel_id(port)
+                self._owed.discard(panel_id)
+                self._admission_owed.discard(panel_id)
         return front
 
     def _port_shot_roots(
@@ -922,6 +1014,7 @@ class BoardScheduler:
             return
         self._closed = True
         self._owed.clear()
+        self._admission_owed.clear()
         self._arbiter.close()
 
 

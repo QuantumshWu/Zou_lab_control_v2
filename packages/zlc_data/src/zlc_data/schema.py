@@ -13,6 +13,7 @@ from .axis import (
     _POINT_ORDINAL_AXIS_ID,
     HISTOGRAM_BIN,
     READOUT_EVENT,
+    PRIMARY_INDEX,
     SCAN_POINT,
     SITE,
     SPATIAL_X,
@@ -49,6 +50,7 @@ def _ordered_subset(candidate: tuple[AxisId, ...], available: tuple[AxisId, ...]
 
 _POINT_ROLES = frozenset(
     {
+        PRIMARY_INDEX,
         SCAN_POINT,
         READOUT_EVENT,
         SPATIAL_X,

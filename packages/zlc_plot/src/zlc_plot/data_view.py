@@ -19,6 +19,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from zlc_data import OwnedSnapshot
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -459,6 +460,17 @@ class DataView:
     @property
     def samples(self) -> SampleProjection:
         return self._samples
+
+    @property
+    def has_primary_index(self) -> bool:
+        return any(
+            column.coordinate_id == PRIMARY_INDEX_AXIS_ID
+            for column in self._schema.point_table.columns
+        )
+
+    @staticmethod
+    def _primary_index_ref() -> AxisRef:
+        return AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
 
     def coordinate(self, ref: AxisRef) -> CoordinateArray:
         return self._resolve(ref).coordinate
@@ -940,12 +952,22 @@ class DataView:
         repeat.  A snapshot without repeats degenerates to the single pool.
         """
 
-        repeats = schema_repeat_count(self._schema)
-        if repeats <= 1:
-            return (self.pooled_values(),)
         positions = self._all_positions()
         flat_valid = self._samples.valid_mask.reshape(-1)
         flat_values = self._samples.value.canonical.reshape(-1)
+        if self.has_primary_index:
+            primary = self._domain(self._primary_index_ref(), positions)
+            return tuple(
+                flat_values[
+                    positions[
+                        flat_valid[positions] & (primary.codes == index)
+                    ]
+                ]
+                for index in range(len(primary.values))
+            )
+        repeats = schema_repeat_count(self._schema)
+        if repeats <= 1:
+            return (self.pooled_values(),)
         block = flat_values.size // repeats
         repeat_of_position = positions // block
         usable = flat_valid[positions]
@@ -1038,6 +1060,11 @@ class DataView:
         the single whole-revision sample.
         """
 
+        if self.has_primary_index:
+            return self._history_samples_by_primary_index(
+                group=group,
+                aggregation=aggregation,
+            )
         repeats = schema_repeat_count(self._schema)
         if repeats <= 1:
             return (self.rolling_sample(group=group, aggregation=aggregation),)
@@ -1072,6 +1099,51 @@ class DataView:
             samples.append(
                 RollingSample(
                     revision=self._samples.revision,
+                    generation=self._samples.generation,
+                    values=values,
+                    valid=valid,
+                    group_keys=keys,
+                )
+            )
+        return tuple(samples)
+
+    def _history_samples_by_primary_index(
+        self,
+        *,
+        group: AxisRef | None,
+        aggregation: Reduction,
+    ) -> tuple[RollingSample, ...]:
+        """Reduce every authored primary-index cell without arrival history."""
+
+        self.validate_rolling(group)
+        aggregation = _validate_aggregation(aggregation)
+        positions = self._all_positions()
+        flat_values = self._samples.value.canonical.reshape(-1)
+        flat_valid = self._samples.valid_mask.reshape(-1)
+        primary = self._domain(self._primary_index_ref(), positions)
+        if group is None:
+            codes = np.zeros(positions.size, dtype=np.int64)
+            domain_size = 1
+            keys: tuple[tuple[AxisValue, ...], ...] = ((),)
+        else:
+            grouped = self._domain(group, positions)
+            codes = grouped.codes
+            domain_size = len(grouped.values)
+            keys = tuple((value,) for value in grouped.values)
+        usable = flat_valid[positions] & (codes >= 0)
+        samples: list[RollingSample] = []
+        for index, source in enumerate(primary.values):
+            values, counts = _aggregate_by_codes(
+                flat_values[positions],
+                usable & (primary.codes == index),
+                codes,
+                domain_size,
+                aggregation,
+            )
+            valid = (counts > 0) & np.isfinite(values)
+            samples.append(
+                RollingSample(
+                    revision=int(source.canonical),
                     generation=self._samples.generation,
                     values=values,
                     valid=valid,

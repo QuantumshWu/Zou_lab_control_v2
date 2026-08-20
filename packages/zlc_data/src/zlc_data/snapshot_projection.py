@@ -8,6 +8,7 @@ from dataclasses import replace
 import numpy as np
 
 from .axis import (
+    PRIMARY_INDEX,
     SCAN_POINT,
     AxisId,
     AxisSpec,
@@ -36,7 +37,9 @@ from .value import (
 )
 
 __all__ = [
+    "PRIMARY_INDEX_AXIS_ID",
     "axis_catalog",
+    "indexed_schemas_compatible",
     "materialize_derived_dataset",
     "restrict_snapshot",
     "restricted_schema",
@@ -44,6 +47,119 @@ __all__ = [
     "selection_indices",
     "value_selection",
 ]
+
+
+#: The coordinate carried by every cell of a Runtime indexed-derived event.
+#: It is a point coordinate because an event may retain its own repeat and
+#: point geometry; putting the outer stream index on either of those physical
+#: dimensions would erase producer-authored meaning.
+PRIMARY_INDEX_AXIS_ID = AxisId("zlc_data.primary-index")
+
+
+def _indexed_layout(schema: DatasetSchema) -> tuple[object, ...] | None:
+    """Return the invariant event layout below a growing primary-index axis."""
+
+    columns = tuple(schema.point_table.columns)
+    primary = next(
+        (column for column in columns if column.coordinate_id == PRIMARY_INDEX_AXIS_ID),
+        None,
+    )
+    if primary is None:
+        return None
+    if primary.role != PRIMARY_INDEX:
+        return None
+    coordinates = tuple(primary.values)
+    if any(type(value) is not int or value < 0 for value in coordinates):
+        return None
+    unique: list[int] = []
+    counts: list[int] = []
+    for coordinate in coordinates:
+        if not unique or coordinate != unique[-1]:
+            if unique and coordinate <= unique[-1]:
+                return None
+            unique.append(coordinate)
+            counts.append(1)
+        else:
+            counts[-1] += 1
+    if not counts or len(set(counts)) != 1:
+        return None
+    inner_count = counts[0]
+
+    column_layout: list[object] = []
+    for column in columns:
+        if column.coordinate_id == PRIMARY_INDEX_AXIS_ID:
+            continue
+        values = tuple(column.values[:inner_count])
+        labels = (
+            None
+            if column.coordinate_labels is None
+            else tuple(column.coordinate_labels[:inner_count])
+        )
+        if any(
+            tuple(column.values[offset : offset + inner_count]) != values
+            for offset in range(inner_count, len(coordinates), inner_count)
+        ):
+            return None
+        if column.coordinate_labels is not None and any(
+            tuple(column.coordinate_labels[offset : offset + inner_count]) != labels
+            for offset in range(inner_count, len(coordinates), inner_count)
+        ):
+            return None
+        column_layout.append(
+            (
+                column.coordinate_id,
+                column.name,
+                column.role,
+                column.value_kind,
+                values,
+                column.unit,
+                column.coordinate_frame,
+                labels,
+            )
+        )
+
+    topology = schema.grid_topology
+    topology_layout: object = None
+    if topology is not None:
+        if (
+            not topology.dimension_ids
+            or topology.dimension_ids[0] != PRIMARY_INDEX_AXIS_ID
+            or tuple(topology.coordinate_domains[0]) != tuple(unique)
+        ):
+            return None
+        base = tuple(cell[1:] for cell in topology.row_to_cell[:inner_count])
+        for group, offset in enumerate(
+            range(0, len(topology.row_to_cell), inner_count)
+        ):
+            block = topology.row_to_cell[offset : offset + inner_count]
+            if any(cell[0] != group for cell in block):
+                return None
+            if tuple(cell[1:] for cell in block) != base:
+                return None
+        topology_layout = (
+            topology.dimension_ids[1:],
+            topology.coordinate_domains[1:],
+            base,
+        )
+    return (
+        schema.repeat_axis,
+        schema.cell_schema,
+        inner_count,
+        tuple(column_layout),
+        topology_layout,
+    )
+
+
+def indexed_schemas_compatible(
+    left: DatasetSchema,
+    right: DatasetSchema,
+) -> bool:
+    """Whether only an indexed Dataset's retained coordinate window changed."""
+
+    if not isinstance(left, DatasetSchema) or not isinstance(right, DatasetSchema):
+        raise TypeError("indexed schema compatibility requires DatasetSchema values")
+    left_layout = _indexed_layout(left)
+    return left_layout is not None and left_layout == _indexed_layout(right)
 
 
 def _derived_reference(
@@ -366,7 +482,11 @@ def value_selection(
                 f"selection axis {label!r} is not uniquely present in the source schema"
             )
         axis = matches[0][2]
-        coordinate = canonical_coordinate_scalar(value, f"axis {axis.axis_id} coordinate")
+        coordinate = (
+            axis.coordinate_at(axis.size - 1)
+            if value == "latest"
+            else canonical_coordinate_scalar(value, f"axis {axis.axis_id} coordinate")
+        )
         if axis.coordinates is None:
             if not isinstance(coordinate, int):
                 raise TypeError(

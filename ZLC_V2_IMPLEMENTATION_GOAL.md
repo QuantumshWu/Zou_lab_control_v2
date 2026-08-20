@@ -65,11 +65,11 @@
 
 ### 3.3 Data/Fit/Overlay
 
-- `display_interval`定义Panel pair admission；fit armed时在1秒显示延迟预算内按顺序fit每个已admit Data revision。区间内更高频的raw Monitor publication由Panel明确latest-sample，不冒充已经显示/fit的revision；
+- `display_interval`只定义Surface deadline；Measurement primary index全部进入通用indexed-derived Dataset，未计算/失败位置invalid。Surface同一same-shot group保持一个active并只保留latest完整输入，不排完整frame FIFO；
 - Panel只原子显示`data@N + fit@N`；不得出现data无fit或fit与data不对应；
 - Fit数据范围严格按committed Area ROI（或显式X-range）→viewport→full range；FacetGrid重放selector必须携带focused cell identity，不得静默降级；
-- FitResult保留source parent/revision，正常负载下Rolling trace逐revision连续；
-- 最老pending等待超过1秒或队列超过64 MiB时明确报一次resync错误，丢弃尚未fit的中间revision并从latest继续；断点不得冒充成功fit，Panel/Qt/Stop/close不得被永久锁住，raw data仍完整保存并可离线重算；
+- FitResult保留source parent/revision；任何window/history按source primary index连续，invalid位置为NaN且计入window；
+- Active Fit超过1秒明确报错、写invalid并从latest继续；中间完整frame不排队，Panel/Qt/Stop/close不得被永久锁住，raw data仍完整保存并可离线重算；
 - worker可后台计算，但Qt呈现必须atomic且不阻塞owner thread；
 - Overlay与Data/Fit共享同一scope/axis/fate projection；无法唯一对齐即拒绝；
 - Selector Off时plot完全不接管area、zoom/pan、滚轮或双击focus，普通滚轮滚外层board；Selector On时FacetGrid overview只允许focus cell，不允许开始area selector。
@@ -246,10 +246,10 @@ Profiling：
 
 实现用户批准的exact paired pipeline：
 
-- fit armed后，每个由authored `display_interval` admit的source revision在1秒支持预算内进入有序exact queue；
+- 每个Measurement source index在普通indexed-derived Dataset中有value或invalid；昂贵Fit只保持一个active与Plane latest完整输入；
 - 每revision有一个FitResult，带source parent/revision；
 - Panel只present matching data+fit；正常负载下Rolling trace无revision gap；
-- 最老pending等待超过1秒或队列超过64 MiB时loud报告一次resync，丢弃未fit中间revision并只保留latest继续；不得永久latch，raw data不丢；
+- Active Fit超过1秒loud写invalid并从latest继续；不建立完整frame FIFO，不永久latch，raw data不丢；
 - Fit计算后台执行，Qt不阻塞；
 - 一次PanelState transaction幂等，no-op=0 solve/0 render；title/layout不re-fit；
 - 删除重复configure/clear/replay和多front handoff；

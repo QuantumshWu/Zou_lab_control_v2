@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from ..kinds import PlotKind
+from ..kinds import AxisRef
 from .base import KindHandler
 from .curve import HANDLER as CURVE_HANDLER
 from .facet_grid import HANDLER as FACET_GRID_HANDLER, cell_within_one_cell
@@ -23,6 +25,35 @@ HANDLERS: tuple[KindHandler, ...] = (
     PULSE_TIMELINE_HANDLER,
 )
 _BY_SPEC = {handler.spec_type: handler for handler in HANDLERS}
+
+
+def _with_primary_index_default(schema: Any, candidate: Any) -> Any:
+    """Default ordinary plots to the latest cell of an indexed Dataset."""
+
+    if candidate is None or not hasattr(schema, "point_table"):
+        return candidate
+    if not any(
+        column.coordinate_id == PRIMARY_INDEX_AXIS_ID
+        for column in schema.point_table.columns
+    ):
+        return candidate
+    from ..config import DEFAULTS
+    from ..specs import parameter_schema_for
+
+    if "window" in parameter_schema_for(candidate, style=DEFAULTS.style):
+        return candidate
+    primary = AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
+    semantic = getattr(candidate, "cell", candidate)
+    used = {
+        getattr(semantic, "x", None),
+        getattr(semantic, "y", None),
+        getattr(semantic, "group", None),
+        getattr(candidate, "facet", None),
+    }
+    scopes = tuple(getattr(candidate, "scope", ()))
+    if primary in used or any(ref == primary for ref, _value in scopes):
+        return candidate
+    return replace(candidate, scope=(*scopes, (primary, "latest")))
 
 
 def handler_for(spec: Any) -> KindHandler:
@@ -46,7 +77,7 @@ def default_spec(schema: Any, kind: Any) -> Any:
         handler = next(item for item in HANDLERS if item.kind is kind)
     except StopIteration as error:
         raise ValueError(f"unregistered plot kind: {kind!r}") from error
-    candidate = handler.default_spec(schema)
+    candidate = _with_primary_index_default(schema, handler.default_spec(schema))
     if candidate is not None:
         if handler_for(candidate).kind is not kind:
             raise TypeError(
@@ -105,7 +136,9 @@ def fitting_spec(schema: Any, kind: Any = None, *, cell: Any = None) -> Any:
         inner = cell_within_one_cell(schema, grid.facet, inner)
         return None if inner is None else replace(grid, cell=inner)
     for handler in _INFERENCE_ORDER:
-        candidate = handler.default_spec(schema)
+        candidate = _with_primary_index_default(
+            schema, handler.default_spec(schema)
+        )
         if candidate is not None:
             return candidate
     return None

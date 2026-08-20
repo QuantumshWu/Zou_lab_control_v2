@@ -154,7 +154,7 @@ class PlotLabels:
 #: that.  It is a fate an axis can be given, exactly like being x or being
 #: grouped by, which is why it lives on the specification and not among the
 #: display parameters: it changes WHAT is plotted, not how it looks.
-ScopeTerm: TypeAlias = tuple[AxisRef, float]
+ScopeTerm: TypeAlias = tuple[AxisRef, float | str]
 
 
 def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
@@ -168,12 +168,17 @@ def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
         axis, coordinate = term
         if not isinstance(axis, AxisRef):
             raise TypeError("scope term axis must be AxisRef")
-        if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
-            raise TypeError("scope term value must be a real coordinate")
+        if coordinate != "latest" and (
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, (int, float))
+        ):
+            raise TypeError("scope term value must be a real coordinate or 'latest'")
         if axis in seen:
             raise ValueError(f"axis {axis!r} is scoped twice")
         seen.add(axis)
-        terms.append((axis, float(coordinate)))
+        terms.append(
+            (axis, "latest" if coordinate == "latest" else float(coordinate))
+        )
     return tuple(terms)
 
 

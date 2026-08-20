@@ -28,7 +28,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 4的代码、验证和residual sweep均已完成。提交后立即停止，等待用户继续讨论正式链P50/P95约150/167 ms的Plot/Fit性能；100 ms是profile警戒线，不是硬验收门。不得开始M5。
+Milestone 4、cleanup与performance follow-up均已完成；下一步进入M5。100 ms仍是profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -224,7 +224,7 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 
 ### Exact pair、selector与presentation
 
-- `display_interval`是Panel data+fit admission cadence。被admit的revision在支持预算内严格FIFO；Data与matching Fit只以一个front原子present。最老pending超过1秒或retained immutable arrays超过64 MiB时，active与queued revisions立即发布同source identity的invalid gap并loud报告一次，协作式取消当前fit，只保留then-latest继续；迟到的非协作式fit不能提交stale pair，Qt/Stop/close不永久latch。
+- `display_interval`只控制Surface deadline；Runtime普通indexed-derived Dataset保存每个source primary index及validity。Surface同一same-shot group只保持一个active完整front，忙时只保留Plane latest和admission debt，中间indices invalid且不排完整frame。
 - PlotSession只保留一个serial analysis executor。prepare、manual fit与live fit不再由第二executor或package-global stripe/facet pool并行；fit request、warm state、accepted fit与render仍由PlotSession唯一拥有。
 - PanelState作为一个原子Plot target应用：no-op为0 solve/0 render/0 front；title/interval不触发Plot；display/semantic/fit各最多一个完整front；最终render失败会完整rollback，旧fit cancellation/Future settlement只在commit后发生。Startup initial front先于adaptive task，same-front Qt handoff幂等，不再依赖ghost front。
 - Fit范围唯一优先级为committed Area ROI（或X-range）→viewport→full range。Plot-native selector在Workbench ack前保持authority；FacetGrid selector保留focused-cell identity。真实Area后立即点击Fit的old-red证明26×26 ROI、676 samples，不会被空PanelState重放成full frame。
@@ -255,13 +255,23 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 ### 明确defer与停止门
 
 - 用户随后授权的M4 cleanup已完成：删除单消费者`_WorkerSessionAdapter`并让Host直接调用现有PlotSession owner，production净删260行；九个高增长测试文件及一条gesture白盒共净删538行，保留exact backlog、ROI→Fit→invalid gap→Rolling、atomic rollback、Viewer/Pulse/Qt close与coordinate threshold核心证据。Plot全套383 passed，四个Plot/Viewer/Pulse文件149 passed，Console/Selection/TaskConsole三文件100 passed。
-- 100 ms只保留为正式链profile警戒线。当前P50/P95约150/167 ms已无额外cadence、HOL、错误串行或重复render；是否继续做更大性能取舍由用户在本commit后讨论，本milestone不为百分之几/十几的边际收益新增executor/cache/framework。
+- 100 ms只保留为正式链profile警戒线；原150/167数字来自不同source harness，不能作为A/B基线。当前同harness结果与未达到的目标均记录在下方Performance follow-up。
 - 不可中断的vendor discovery保持window可见并拒绝close，直到真实future结束；hardware transport cancellation/priority属于M5，不把`shutdown(wait=False)`冒充安全退出。
 - 普通Pulse Stop/FIRE wire priority、Camera/Remote/FPGA归M5；SLM USB/context/feedback归M6；single distribution/fresh install/notebook与final docs归M7。M4未访问hardware，也不把offscreen/virtual证据冒充实验机验收。
 
 Milestone 4 commit：`Make data, fit, overlay, and Qt lifecycle exact and atomic`。提交后立即停止，不进入M5，等待用户的Plot/Fit性能讨论。
 
 M4 cleanup follow-up commit：`Remove residual M4 adapters and duplicate tests`。复盘根因不是缺少规则文字，而是错误地把各agent分片收口当成合并树收口，并用full green、无新增class、test函数净增数替代新增definition/state/consumer与测试正文LOC审计。`AGENTS.md`现强制所有cut合并并冻结candidate后重新独立审计；已知safe deletion不得在标记sweep-complete时延期。
+
+### Performance follow-up
+
+- Runtime新增中立`primary-index` indexed-derived Dataset：每个Measurement source index有value或invalid，普通Monitor仍latest；64 MiB/100k retention按display请求lazy materialize，10,000 publications的window=100为0.393 ms/900 bytes。所有Plot读取同一OwnedSnapshot；普通Plot默认latest，声明window的history projection读取同一axis；同publication扩大window或改fate立即原子rematerialize，Save冻结同一Dataset。
+- Surface admission改为capacity-one same-shot group：任一member仍有重绘在途就不排第二张完整frame，只留Plane latest与admission debt；atomic publication wake在deadline已到时立即stage，Pause/closing不admit新Surface。TaskConsole删除第二个`--interval-ms`时钟真相。
+- Tight colorbar保留原actual vmin/vmax norm、ticks与逐像素表现，但把其Axes纳入现有dynamic composition，避免整张Figure native redraw；renderer同条件cProfile P50/P95 80.5/89.4→63.6/69.0 ms，DPR1/2、Area/Fit与golden逐像素一致。
+- 同一formal harness（独立66 ms virtual source、100 ms Board、96×128 Camera、26×26 Area fit、并行ROI、Rolling）对比`69d5514`：publication→main 338/435→131/163 ms，publication→Rolling 339/435→191/224 ms；full frames与Host/Port pending最大值3→1，primary index连续、无error。未达到80–105 ms估计，Rolling tail继续作为未来profile对象，不能冒充已完成收益。
+- Candidate相对`69d5514`为36 files `+1563/-214`（净增1349）：production 20 files净增821、tests 7 files净增506、docs 9 files净增22；无新增production file/class/lane。完整current-checkout全树`1497 passed, 6 warnings in 412.35s`，warnings仍仅vendor SWIG deprecation；Data+Runtime+Plot 557、UI+Workbench 483均独立全绿。10k NoScanDeque gate证明commit摊还O(1)、window=W最多O(W) lookup；renderer逐像素parity属于KEEP，clock override/完整frame FIFO旧政策测试已删除或改写。
+
+Performance commit：`Make derived history continuous and presentation capacity-one`。完成后进入M5，不把indexed Dataset、gap或window放进任何Plot-kind/Logic plugin/Workbench专用lane。
 
 ## 10. Checkpoint更新规则
 
