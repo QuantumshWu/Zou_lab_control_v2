@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 import threading
+import time
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
@@ -23,9 +25,9 @@ from zlc_ui.fluent import (
 from zlc_atom.data import snapshot_from_array
 from .device import SlmAdapter, canonical_phase
 from .solver import (
-    imported_target, load_phase, load_target, preset_checkerboard,
-    preset_flat_top, preset_gaussian, preset_grid, preset_text, save_phase,
-    save_target, solve_phase, validate_target,
+    imported_target, load_science_context, load_target, preset_checkerboard,
+    preset_flat_top, preset_gaussian, preset_grid, preset_text,
+    save_science_context, save_target, solve_phase, validate_target,
 )
 
 
@@ -77,6 +79,17 @@ def _number_spin(parent: QtWidgets.QWidget, value: float, minimum: float,
     return spin
 
 
+def _read_imported_target(path: object) -> np.ndarray:
+    source = Path(path)
+    if source.suffix.lower() == ".npy":
+        values = np.load(source, allow_pickle=False)
+    else:
+        from PIL import Image
+        with Image.open(source) as image:
+            values = np.asarray(image.convert("F"), dtype=np.float32)
+    return imported_target(values)
+
+
 class SlmEditorControl(QtCore.QObject):
     """Plugin-local handle, brush controller, and latest-only solve owner."""
 
@@ -92,10 +105,15 @@ class SlmEditorControl(QtCore.QObject):
             raise TypeError("SLM Editor requires a canonical SlmAdapter")
         self.shape = tuple(self.device.shape_yx)
         self._target = preset_grid(self.shape, (5, 7))
-        self._phase = canonical_phase(self.device.last_commanded_phase, self.shape)
+        self._phase = canonical_phase(np.zeros(self.shape), self.shape)
         self._pattern_phase = self._phase
-        self._pattern_metadata: dict[str, object] = {"source": "device"}
-        self._phase_metadata: dict[str, object] = {"source": "device"}
+        self._pattern_metadata: dict[str, object] = {"source": "deterministic-seed"}
+        self._phase_metadata: dict[str, object] = {"source": "authoring-draft"}
+        self._system_correction: dict[str, object] | None = None
+        self._context_command_receipt = dict(self.device.last_command_receipt)
+        self._draft_command_revision = int(self.device.command_revision)
+        self._draft_mapping_revision = int(self.device.mapping_revision)
+        self._device_diverged = False
         self._objective_kind = "spots"
         height, width = self.shape
         self._pupil_center_xy = (0.5 * (width - 1), 0.5 * (height - 1))
@@ -116,6 +134,7 @@ class SlmEditorControl(QtCore.QObject):
         ] | None = None
         self._running = self._painting = self._closed = self._cleaned = False
         self._command_active = False
+        self._close_deadline: float | None = None
         self._window = None
         self._stop = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="slm-solve")
@@ -135,8 +154,13 @@ class SlmEditorControl(QtCore.QObject):
         self._body = self._build_body()
         self._solve_ready.connect(self._finish_solve)
         self._command_ready.connect(
-            self._finish_send, QtCore.Qt.QueuedConnection
+            self._finish_command, QtCore.Qt.QueuedConnection
         )
+        self._device_poll = QtCore.QTimer(self)
+        self._device_poll.setInterval(100)
+        self._device_poll.timeout.connect(self._sync_device_state)
+        self._device_poll.start()
+        self._sync_device_state()
         self._queue_solve()
 
     def _build_body(self) -> QtWidgets.QWidget:
@@ -278,13 +302,16 @@ class SlmEditorControl(QtCore.QObject):
             ("Load target", "load_target"),
             ("Import target", "import"),
             ("Save target", "save_target"),
-            ("Load science phase", "load_phase"),
-            ("Save science phase", "save_phase"),
+            ("Load science context", "load_context"),
+            ("Save science context", "save_context"),
         ):
             button = FluentButton(label, files)
             button.clicked.connect(partial(self._choose, action))
             buttons.addWidget(button)
         buttons.addStretch(1)
+        self._adopt = FluentButton("Adopt device command", files)
+        self._adopt.clicked.connect(self._adopt_device_command)
+        buttons.addWidget(self._adopt)
         self._send = FluentButton("Send to SLM", files)
         self._send.clicked.connect(self.send)
         self._sync_send_enabled()
@@ -292,6 +319,8 @@ class SlmEditorControl(QtCore.QObject):
         root.addWidget(files)
         self._status = QtWidgets.QLabel("Solving latest target…", page)
         root.addWidget(self._status)
+        self._device_status = QtWidgets.QLabel("Device command: checking…", page)
+        root.addWidget(self._device_status)
         return page
 
     def _plot_size_picked(self, _index: int) -> None:
@@ -543,11 +572,12 @@ class SlmEditorControl(QtCore.QObject):
         self._correction_status.setText(" · ".join(details))
 
     def _set_correction_enabled(self, enabled: bool) -> None:
-        try:
-            self.device.set_correction_enabled(bool(enabled))
-        except Exception as error:
-            self._status.setText(str(error))
-        self._sync_correction_controls()
+        if not self._queue_work(
+            "Vendor correction updated",
+            partial(self.device.set_correction_enabled, bool(enabled)),
+            claim_device=True,
+        ):
+            self._sync_correction_controls()
 
     def _build_layer_tabs(self, parent: QtWidgets.QWidget) -> FluentTabWidget:
         tabs = FluentTabWidget(parent)
@@ -767,6 +797,10 @@ class SlmEditorControl(QtCore.QObject):
         self._wavefront_phase = canonical_phase(
             np.zeros(self.shape, dtype=np.float32), self.shape
         )
+        self._system_correction = None
+        self._context_command_receipt = dict(self.device.last_command_receipt)
+        self._draft_command_revision = int(self.device.command_revision)
+        self._draft_mapping_revision = int(self.device.mapping_revision)
         self._zernike_status.setText("Off")
         self._show_phase()
         self._show_wavefront()
@@ -774,6 +808,7 @@ class SlmEditorControl(QtCore.QObject):
         self._status.setText(
             "Science phase loaded; wavefront reset; hardware unchanged"
         )
+        self._sync_device_state()
 
     @property
     def solver_idle(self) -> bool:
@@ -786,6 +821,61 @@ class SlmEditorControl(QtCore.QObject):
     @property
     def command_active(self) -> bool:
         return self._command_active
+
+    def _sync_device_state(self) -> None:
+        if self._closed:
+            return
+        command_revision = int(self.device.command_revision)
+        mapping_revision = int(self.device.mapping_revision)
+        phase = self.device.last_commanded_phase
+        receipt = dict(self.device.last_command_receipt)
+        self._device_diverged = (
+            command_revision != self._draft_command_revision or mapping_revision != self._draft_mapping_revision
+        )
+        prefix = f"Device {receipt['transport']} · {receipt['outcome']} · command r{command_revision} · mapping r{mapping_revision}"
+        if self._device_diverged:
+            text = f"{prefix} · changed externally; Adopt or Load before Send"
+        elif phase is None:
+            text = f"{prefix} · command is unknown; draft is unsent"
+        elif np.array_equal(phase, self._phase):
+            text = f"{prefix} · draft matches device"
+        else:
+            text = f"{prefix} · authoring draft differs from device"
+        if self._phase_metadata.get("source") == "science-context":
+            text += f" · context provenance {self._context_command_receipt['identity']}"
+        self._device_status.setText(text)
+        self._adopt.setEnabled(not self._command_active and phase is not None)
+        self._sync_send_enabled()
+
+    def _adopt_device_command(self) -> None:
+        try:
+            lease = self.session.acquire_device_command(
+                self, f"{self.device_key} SLM Editor adopt",
+                self.device_key, self.device,
+            )
+        except Exception as error:
+            self._status.setText(str(error))
+            return
+        try:
+            phase = self.device.last_commanded_phase
+            receipt = dict(self.device.last_command_receipt)
+            revisions = (
+                int(self.device.command_revision), int(self.device.mapping_revision)
+            )
+        finally:
+            lease.release()
+        if phase is None:
+            self._status.setText("Device command outcome is unknown; nothing can be adopted")
+            return
+        self.set_phase(phase, {"source": "explicit-device-adopt"})
+        self._context_command_receipt = receipt
+        self._draft_command_revision, self._draft_mapping_revision = revisions
+        self._sync_device_state()
+        self._status.setText(
+            "Device changed after Adopt snapshot; retry"
+            if self._device_diverged
+            else "Device command adopted as an exact authoring draft"
+        )
 
     def _queue_solve(self) -> None:
         optimizer_state = (
@@ -846,6 +936,8 @@ class SlmEditorControl(QtCore.QObject):
                 self._status.setText(f"Solved with {metadata['method']}; hardware unchanged")
         self._sync_send_enabled()
         self._start_pending()
+        if self._closed and self._window is not None:
+            QtCore.QTimer.singleShot(0, self._window.close)
 
     def _show_phase(self) -> None:
         self._phase_revision += 1
@@ -893,75 +985,241 @@ class SlmEditorControl(QtCore.QObject):
         self.set_target(target, objective_kind=objective_kind)
         return True
 
-    def import_target(self, path: object) -> None:
-        source = Path(path)
-        if source.suffix.lower() == ".npy":
-            values = np.load(source, allow_pickle=False)
-        else:
-            from PIL import Image
-            with Image.open(source) as image:
-                values = np.asarray(image.convert("F"), dtype=np.float32)
-        self.set_target(imported_target(values))
+    def _save_target_operation(self, path: object):
+        return partial(
+            save_target, path, np.array(self._target, copy=True),
+            objective_kind=self._objective_kind,
+        )
 
-    def save_target(self, path: object) -> Path:
-        return save_target(path, self._target)
+    def _set_context(self, context: dict[str, object]) -> None:
+        pupil, operator = context["pupil"], context["operator_metadata"]
+        carrier = operator.get("carrier_waves_xy", [0.0, 0.0])
+        coefficients = operator.get("zernike_noll_waves_rms", {})
+        arrays = (
+            context["phase"], context["pattern_phase"],
+            context["operator_wavefront"], context["pupil_amplitude"],
+            context["pupil_support"],
+        )
+        if any(np.asarray(array).shape != self.shape for array in arrays):
+            raise ValueError(f"Science Context shape must be {self.shape!r}")
+        if (
+            type(operator.get("enabled", False)) is not bool
+            or not isinstance(carrier, list) or len(carrier) != 2
+            or any(type(value) not in (int, float) or not np.isfinite(value)
+                   or abs(value) > 1000.0 for value in carrier)
+            or not isinstance(coefficients, dict)
+            or set(coefficients) - {key for key, *_ in _ZERNIKE}
+            or any(type(value) not in (int, float) or not np.isfinite(value)
+                   or abs(value) > 1000.0 for value in coefficients.values())
+        ):
+            raise ValueError("Science Context operator metadata is invalid")
+        center, diameter = pupil["center_xy"], pupil["diameter_xy"]
+        if not (
+            0.0 <= center[0] <= self.shape[1] - 1
+            and 0.0 <= center[1] <= self.shape[0] - 1
+            and diameter[0] <= 2.0 * self.shape[1]
+            and diameter[1] <= 2.0 * self.shape[0]
+        ):
+            raise ValueError("Science Context pupil lies outside Editor limits")
+        receipt = context["command_receipt"]
+        if (
+            type(receipt["command_revision"]) is not int
+            or type(receipt["mapping_revision"]) is not int
+            or receipt["outcome"] not in {"known-old", "known-new", "unknown"}
+        ):
+            raise ValueError("Science Context command receipt is invalid")
+        lease = self.session.acquire_device_command(
+            self, f"{self.device_key} SLM Editor load",
+            self.device_key, self.device,
+        )
+        try:
+            revisions = (
+                int(self.device.command_revision), int(self.device.mapping_revision)
+            )
+        finally:
+            lease.release()
+        widgets = (
+            self._pupil_enabled, self._pupil_center_x, self._pupil_center_y,
+            self._pupil_diameter_x, self._pupil_diameter_y,
+            self._zernike_enabled, self._carrier_x, self._carrier_y,
+            *self._zernike.values(),
+        )
+        blocked = tuple(widget.blockSignals(True) for widget in widgets)
+        try:
+            self._pupil_enabled.setChecked(bool(pupil["enabled"]))
+            self._pupil_center_x.setValue(float(pupil["center_xy"][0]))
+            self._pupil_center_y.setValue(float(pupil["center_xy"][1]))
+            self._pupil_diameter_x.setValue(float(pupil["diameter_xy"][0]))
+            self._pupil_diameter_y.setValue(float(pupil["diameter_xy"][1]))
+            self._zernike_enabled.setChecked(bool(operator.get("enabled", False)))
+            self._carrier_x.setValue(float(carrier[0]))
+            self._carrier_y.setValue(float(carrier[1]))
+            for key, spin in self._zernike.items():
+                spin.setValue(float(coefficients.get(key, 0.0)))
+        finally:
+            for widget, previous in zip(widgets, blocked):
+                widget.blockSignals(previous)
+        self._request_revision += 1
+        self._pending, self._spot_optimizer_state = None, None
+        self._phase = context["phase"]
+        self._pattern_phase = context["pattern_phase"]
+        self._wavefront_phase = context["operator_wavefront"]
+        self._pupil_amplitude = context["pupil_amplitude"]
+        self._pupil_support = context["pupil_support"]
+        self._pupil_center_xy = tuple(float(value) for value in pupil["center_xy"])
+        self._pupil_diameter_xy = tuple(float(value) for value in pupil["diameter_xy"])
+        self._pupil_applied_description = self._pupil_description(bool(pupil["enabled"]))
+        self._pupil_status.setText(self._pupil_applied_description)
+        self._zernike_status.setText("On · frozen context" if operator.get("enabled") else "Off")
+        self._objective_kind = str(context["objective_kind"])
+        self._pattern_metadata = dict(context["pattern_metadata"])
+        self._phase_metadata = {"source": "science-context"}
+        self._system_correction = None if context["system_correction"] is None else dict(context["system_correction"])
+        self._context_command_receipt = dict(context["command_receipt"])
+        self._draft_command_revision, self._draft_mapping_revision = revisions
+        self._phase_request_revision = self._request_revision
+        self._show_phase(); self._show_wavefront(); self._sync_device_state()
+        self._status.setText("Frozen Science Context loaded; hardware unchanged")
 
-    def save_phase(self, path: object) -> Path:
-        return save_phase(path, self._phase, self._phase_metadata)
+    def _save_context_operation(self, path: object):
+        if self._phase_request_revision != self._request_revision:
+            raise RuntimeError("wait for the latest target solve before saving context")
+        return partial(
+            save_science_context, path, np.array(self._phase, copy=True),
+            pattern_phase=np.array(self._pattern_phase, copy=True),
+            operator_wavefront=np.array(self._wavefront_phase, copy=True),
+            pupil_amplitude=np.array(self._pupil_amplitude, copy=True),
+            pupil_support=np.array(self._pupil_support, copy=True),
+            objective_kind=self._objective_kind,
+            pupil={"enabled": self._pupil_enabled.isChecked(),
+                   "center_xy": list(self._pupil_center_xy),
+                   "diameter_xy": list(self._pupil_diameter_xy)},
+            system_correction=deepcopy(self._system_correction),
+            command_receipt=deepcopy(self._context_command_receipt),
+            pattern_metadata=deepcopy(self._pattern_metadata),
+            operator_metadata={
+                "enabled": self._zernike_enabled.isChecked(),
+                "carrier_waves_xy": [self._carrier_x.value(), self._carrier_y.value()],
+                "zernike_noll_waves_rms": {
+                    key: spin.value() for key, spin in self._zernike.items()
+                },
+            },
+        )
 
     def send(self) -> bool:
         """Queue the clicked canonical phase; return whether it was accepted."""
 
-        if self._closed:
-            self._status.setText("SLM Editor is closing")
-            return False
-        if self._command_active:
-            self._status.setText("SLM command already in progress")
-            return False
         if self._phase_request_revision != self._request_revision:
             self._status.setText("Wait for the latest target solve before Send")
             self._sync_send_enabled()
             return False
+        self._sync_device_state()
+        if self._device_diverged:
+            self._status.setText(
+                "Device command changed externally; Adopt or Load before Send"
+            )
+            return False
         expected = canonical_phase(self._phase, self.shape)
+        return self._queue_work(
+            "Phase sent to SLM", partial(self._apply_phase, expected),
+            claim_device=True,
+        )
+
+    def _queue_work(
+        self, label: str, operation: object, *, claim_device: bool = False,
+        completion: object = None,
+    ) -> bool:
+        if self._closed or self._command_active:
+            self._status.setText(
+                "SLM Editor is closing" if self._closed
+                else "SLM command already in progress"
+            )
+            return False
+        command_revision = self._draft_command_revision
+        mapping_revision = self._draft_mapping_revision
         self._command_active = True
         self._sync_send_enabled()
-        self._status.setText("Sending phase to SLM…")
+        self._status.setText("Working…")
         try:
-            future = self._command_executor.submit(self._send_phase, expected)
+            future = self._command_executor.submit(
+                self._run_device_command, label, operation,
+                command_revision, mapping_revision,
+            ) if claim_device else self._command_executor.submit(
+                operation,
+            )
         except Exception as error:
             self._command_active = False
             self._sync_send_enabled()
             self._status.setText(str(error))
             return False
-        future.add_done_callback(lambda done: self._command_ready.emit(done))
+        future.add_done_callback(
+            lambda done: self._command_ready.emit(
+                (label, claim_device, completion, done)
+            )
+        )
         return True
 
-    def _send_phase(self, expected: np.ndarray) -> None:
-        from zlc_workbench.device_use import DeviceClaim
-
-        lease = self.session.device_use.acquire_command(
-            self, f"{self.device_key} SLM Editor",
-            (DeviceClaim(self.device_key, self.device_key, self.device),),
+    def _run_device_command(
+        self, label: str, operation: object,
+        command_revision: int, mapping_revision: int,
+    ) -> object:
+        lease = self.session.acquire_device_command(
+            self, f"{self.device_key} SLM Editor {label}",
+            self.device_key, self.device,
         )
         try:
-            applied = self.device.apply_phase(expected)
-            if not np.array_equal(applied, expected) or not np.array_equal(
-                self.device.last_commanded_phase, expected
+            if (
+                self.device.command_revision != command_revision
+                or self.device.mapping_revision != mapping_revision
             ):
-                raise RuntimeError("SLM did not confirm the commanded canonical phase")
+                raise RuntimeError(
+                    "Device command changed before ownership was acquired; reconcile first"
+                )
+            result = operation()
+            return (
+                result, int(self.device.command_revision),
+                int(self.device.mapping_revision), dict(self.device.last_command_receipt),
+            )
         finally:
             lease.release()
 
+    def _apply_phase(self, expected: np.ndarray) -> None:
+        applied = self.device.apply_phase(expected)
+        receipt = dict(self.device.last_command_receipt)
+        if not np.array_equal(applied, expected) or not np.array_equal(
+            self.device.last_commanded_phase, expected
+        ) or (
+            receipt.get("outcome") != "known-new"
+            or receipt.get("identity") != self.device.identity
+            or receipt.get("command_revision") != self.device.command_revision
+            or receipt.get("mapping_revision") != self.device.mapping_revision
+        ):
+            raise RuntimeError("SLM did not confirm a known-new command receipt")
+
     @QtCore.pyqtSlot(object)
-    def _finish_send(self, future: object) -> None:
+    def _finish_command(self, payload: object) -> None:
+        label, claimed, completion, future = payload
         self._command_active = False
-        self._sync_send_enabled()
         try:
-            future.result()
+            result = future.result()
+            if claimed:
+                _value, command_revision, mapping_revision, receipt = result
+            elif completion is not None:
+                completion(result)
         except Exception as error:
             self._status.setText(str(error))
         else:
-            self._status.setText("Phase sent to SLM")
+            if claimed:
+                self._draft_mapping_revision = mapping_revision
+                if label.startswith("Phase"):
+                    self._draft_command_revision = command_revision
+                    self._context_command_receipt = receipt
+            if completion is None:
+                self._status.setText(label)
+        self._sync_correction_controls()
+        self._sync_device_state()
+        if self._closed and self._window is not None:
+            QtCore.QTimer.singleShot(0, self._window.close)
 
     def _sync_send_enabled(self) -> None:
         send = getattr(self, "_send", None)
@@ -969,25 +1227,59 @@ class SlmEditorControl(QtCore.QObject):
             send.setEnabled(
                 not self._closed
                 and not self._command_active
+                and not self._device_diverged
                 and self._phase_request_revision == self._request_revision
             )
 
     def _choose(self, action: str) -> None:
         actions = {
-            "load_target": (False, "target.json", "SLM target (*.json)", lambda path: self.set_target(load_target(path))),
-            "save_target": (True, "target.json", "SLM target (*.json)", lambda path: save_target(path, self._target)),
-            "load_phase": (False, "final.npz", "SLM final phase (*.npz)", lambda path: self.set_phase(*load_phase(path))),
-            "save_phase": (True, "final.npz", "SLM final phase (*.npz)", lambda path: self.save_phase(path)),
-            "import": (False, "", "Array or image (*.npy *.png *.tif *.tiff *.bmp)", self.import_target),
-            "correction": (False, "correction_Pattern.bmp", "8-bit correction BMP (*.bmp)", lambda path: (self.device.load_correction(path), self._sync_correction_controls())),
+            "load_target": (False, "target.json", "SLM target (*.json)"),
+            "save_target": (True, "target.json", "SLM target (*.json)"),
+            "load_context": (False, "science-context.npz", "SLM Science Context (*.npz)"),
+            "save_context": (True, "science-context.npz", "SLM Science Context (*.npz)"),
+            "import": (False, "", "Array or image (*.npy *.png *.tif *.tiff *.bmp)"),
+            "correction": (False, "correction_Pattern.bmp", "8-bit correction BMP (*.bmp)"),
         }
-        saving, name, filters, callback = actions[action]
+        saving, name, filters = actions[action]
         start = str(Path(self.session.workspace.data) / name)
         picker = fluent_save_path if saving else fluent_open_path
         path = picker(self._body, action.replace("_", " ").title(), start, filters)
         if path:
             try:
-                callback(path)
+                if action == "load_target":
+                    operation, completion, label = (
+                        partial(load_target, path),
+                        lambda result: self.set_target(
+                            result[0], objective_kind=result[1]
+                        ), "Target loaded",
+                    )
+                elif action == "load_context":
+                    operation, completion, label = (
+                        partial(load_science_context, path), self._set_context,
+                        "Science Context loaded",
+                    )
+                elif action == "import":
+                    operation, completion, label = (
+                        partial(_read_imported_target, path),
+                        lambda target: self.set_target(target), "Target imported",
+                    )
+                elif action == "save_target":
+                    operation, completion, label = (
+                        self._save_target_operation(path), None, "Target saved",
+                    )
+                elif action == "save_context":
+                    operation, completion, label = (
+                        self._save_context_operation(path), None,
+                        "Science Context saved",
+                    )
+                else:
+                    self._queue_work(
+                        "Vendor correction loaded",
+                        partial(self.device.load_correction, path),
+                        claim_device=True,
+                    )
+                    return
+                self._queue_work(label, operation, completion=completion)
             except Exception as error:
                 self._status.setText(str(error))
 
@@ -996,6 +1288,8 @@ class SlmEditorControl(QtCore.QObject):
             return True
         if not self._closed:
             self._closed, self._pending = True, None
+            self._close_deadline = time.monotonic() + 2.0
+            self._device_poll.stop()
             self._spot_optimizer_state = None
             self._stop.set()
             self._body.setEnabled(False)
@@ -1009,8 +1303,12 @@ class SlmEditorControl(QtCore.QObject):
             for host in (self._target_host, self._phase_host, self._wavefront_host)
         )
         if self._running or self._command_active or not all(hosts_stopped):
-            if self._window is not None:
-                QtCore.QTimer.singleShot(20, self._window.close)
+            if time.monotonic() >= self._close_deadline:
+                self._status.setText(
+                    "SLM Editor close timed out; waiting for active work to finish"
+                )
+            elif self._window is not None:
+                QtCore.QTimer.singleShot(50, self._window.close)
             return False
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._command_executor.shutdown(wait=True, cancel_futures=False)

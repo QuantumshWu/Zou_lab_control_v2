@@ -10,52 +10,50 @@ Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
 SLM Editor Pattern -> base phase + optional Zernike -> science phase -> explicit Send
-SLM Feedback(calibration + target + pulse) -> grouped qCMOS fluorescence -> accepted phase NPZ
+SLM Feedback(calibration + target + Science Context + pulse) -> grouped qCMOS fluorescence -> accepted/inconclusive Science Context
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
 
 TaskConsole and every device Control share the same `Experiment` session,
 named devices, virtual world, and sequencer; Pulse and SLM Editors open on
 demand from their loaded device cards and do not create a second session or IPC
-service. SLM feedback uses the raw occupied-shot site BOX brightness at the 35
-calibrated qCMOS sites for direct intensity-ratio correction; empty shots do
-not enter the mean and no per-site dark/bright normalization is applied. It
-neither treats a single atom's PSF brightness as trap intensity nor fits a
-hidden wavefront, and it does not claim to observe unmeasured dense-target pixels.
-Its 1% finite-shot gate is not claimed complete until the current raw-BOX,
-fresh-loading implementation passes exact qCMOS multi-seed validation.
-Insufficient authored budgets fail without retaining a phase; no hidden
-virtual truth or relaxed threshold is used to manufacture acceptance. Earlier
-shot-count estimates based on depth-dependent loading are obsolete.
+service. SLM feedback consumes every finite readout shot from the canonical
+Camera Measurement dataset and subtracts the calibrated per-site dark mean.
+That all-shot fluorescence includes loading probability and occupied brightness;
+it is not trap depth. The controller shrinks uncertain log residuals, clips
+steps, rolls back non-improving candidates, and retains a confidence-ranked
+best. Coarse measurements use 100 shots by default; one held-out validation
+then grows in 100-shot batches up to its authored maximum or 60-second budget.
+It returns an estimate and simultaneous confidence interval as `accepted` or
+`inconclusive`, never promotes a noisy point estimate into a 1% claim, and does
+not infer unmeasured dense-target pixels or a hidden wavefront.
 
 The real SLM device type is `slm.hamamatsu_x15213`. **Scan hardware** uses the
-same descriptor route as every other device: it can find an official USB SDK
-controller and head serial, or offer attached `1280 x 1024 @ approximately 60
-Hz` displays as DVI candidates. A DVI candidate is not an identity proof; the
-operator confirms which display is physically connected. The Editor has only
-**Pattern** and **Wavefront** pages. Pattern keeps the independent target and
-pre-correction science-phase plots at the established `2x2 = 490 x 357`
-logical size; a shared **Size** selector also controls the independent
-Wavefront preview, and scrollable canvases keep larger presets from overlapping
-or being clipped. The main page exposes only Input pupil, Zernike, and vendor
-correction. The default pupil is a centered Gaussian with a `1/e^2` intensity
-diameter equal to 70% of the SLM height; Off uses uniform full-raster solver
-illumination. Pattern offers exact Grid, geometrically staggered Checkerboard,
-Gaussian, Flat Top, and English/Chinese Text with minimum spacing and an atom
-budget. Steering X/Y and Noll Z4-Z11 share the one Zernike switch. Loading or
-saving target/science phase does not write the SLM; only **Send to SLM** applies
-the science phase.
+same descriptor route as every other device and reports a candidate only when
+the official USB SDK opens a controller and reads the head serial. Discovery
+does not send a phase. A newly connected real adapter reports its command state
+as unknown; only a completed USB write, display-slot selection, byte readback,
+and authored optical-settle wait establishes known command truth. The Editor
+has only **Pattern** and **Wavefront** pages. Pattern keeps the independent
+target and pre-correction science-phase plots at the established
+`2x2 = 490 x 357` logical size; a shared **Size** selector also controls the
+independent Wavefront preview, and scrollable canvases keep larger presets from
+overlapping or being clipped. A strict Target stores intensity plus objective;
+a strict Science Context stores Pattern, numeric pupil, operator wavefront,
+typed system-correction reference and command receipt. Loading or saving either
+artifact does not write the SLM; only **Send to SLM** establishes a known command.
 
 The vendor correction BMP stays on the experiment computer, can be loaded and
 A/B enabled in the Editor, and is composed by the adapter only on the next
-explicit Send. A serial-specific profile under `devices/slm/profiles/` supplies
-the full calibrated phase curve. Wavelength builds the nonlinear LUT from that
-curve, so the displayed 2-pi gray is computed rather than manually authored
-(LSH0804382 at 852 nm gives 225). Correction is added modulo 256 before this
-LUT, stays at native `1272 x 1024`, and a wavelength-labelled map is converted
-without resizing. DVI uses the left 1272 columns and leaves the right eight
-zero. Development-machine readback tests are not optical proof; the experiment
-machine can directly Scan/configure/Send for final bring-up.
+explicit Send. Each mutation advances the device mapping revision; a command
+receipt freezes the USB identity, profile, wavelength, orientation, correction
+and mapping revision used by that command. The serial profile records the model,
+head serial, phase-curve wavelength and source, and settle source. The current
+LSH0804382 curve and settle provenance are explicitly unverified, so the
+experiment-machine SDK-header, calibration, orientation, readback and optical
+settle runbook remains required before hardware acceptance. A correction map
+labelled for another wavelength is rejected rather than passed through an
+unverified two-dimensional unwrap.
 
 Virtual loading follows the same shot logic the experiment expects: every
 cooling rise while the trap output is high independently redraws each active

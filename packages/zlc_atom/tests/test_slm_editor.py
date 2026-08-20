@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,9 +21,8 @@ from zlc_ui import ensure_qt_app
 from zlc_workbench.device_use import (
     DeviceClaim,
     DeviceUseBusy,
-    DeviceUseCoordinator,
 )
-from zlc_workbench.session import Workspace
+from zlc_workbench.session import ExperimentSession, Workspace
 
 
 def test_slm_control_factory_is_plugin_owned_and_lazy() -> None:
@@ -44,6 +44,8 @@ assert "PyQt5" not in sys.modules
 assert "zlc_plot" not in sys.modules
 assert "zlc_ui" not in sys.modules
 assert "zlc_workbench" not in sys.modules
+import zlc_atom.devices.slm.editor
+assert "zlc_workbench" not in sys.modules
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -56,10 +58,10 @@ assert "zlc_workbench" not in sys.modules
 
 def _session(tmp_path: Path):
     installation = create_installation((DeviceSpec("slm", "slm.virtual"),))
-    return SimpleNamespace(
+    return ExperimentSession(
         installation=installation,
+        signal_plane=SimpleNamespace(close=lambda: None),
         workspace=Workspace(tmp_path).prepare(),
-        device_use=DeviceUseCoordinator(),
     )
 
 
@@ -190,13 +192,16 @@ def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
         _pump(app, lambda: control.solver_idle)
         assert calls[-1][1]["workspace"] is accepted_workspace
 
-        phase_path = tmp_path / "phase.npz"
-        control.save_phase(phase_path)
+        phase_path = tmp_path / "science-context.npz"
+        control._save_context_operation(phase_path)()
         with np.load(phase_path, allow_pickle=False) as archive:
-            assert set(archive.files) == {"phase", "metadata"}
-        _phase, metadata = editor.load_phase(phase_path)
-        assert "spot_optimizer_state" not in repr(metadata)
-        assert "workspace" not in repr(metadata)
+            assert set(archive.files) == {
+                "phase", "pattern_phase", "operator_wavefront",
+                "pupil_amplitude", "pupil_support", "metadata",
+            }
+        context = editor.load_science_context(phase_path)
+        assert "spot_optimizer_state" not in repr(context)
+        assert "workspace" not in repr(context)
 
         control._apply_pupil()
         _pump(app, lambda: control.solver_idle)
@@ -535,13 +540,19 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
     control = editor.SlmEditorControl(session, "slm")
     try:
         _pump(app, lambda: control.solver_idle)
+        control.set_target(control._target, objective_kind="image")
+        _pump(app, lambda: control.solver_idle)
         control.set_phase(phase, {})
         target_path = tmp_path / "target.json"
-        phase_path = tmp_path / "phase.npz"
-        control.save_target(target_path)
-        control.save_phase(phase_path)
+        phase_path = tmp_path / "science-context.npz"
+        control._save_target_operation(target_path)()
+        control._save_context_operation(phase_path)()
         assert target_path.is_file() and phase_path.is_file()
-        assert editor.load_phase(phase_path)[1] == {}
+        context = editor.load_science_context(phase_path)
+        np.testing.assert_array_equal(context["phase"], phase)
+        loaded_target, objective_kind = editor.load_target(target_path)
+        np.testing.assert_array_equal(loaded_target, control._target)
+        assert objective_kind == "image"
         np.testing.assert_array_equal(device.last_commanded_phase, incoming)
 
         blocker = object()
@@ -557,10 +568,56 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         finally:
             lease.release()
 
-        assert control.send() is True
+        QtTest.QTest.mouseClick(control._send, QtCore.Qt.LeftButton)
+        assert control.command_active
         _pump(app, lambda: not control.command_active)
         np.testing.assert_array_equal(device.last_commanded_phase, phase)
         session.device_use.assert_idle()
+
+        external = canonical_phase(np.full(device.shape_yx, 2.5), device.shape_yx)
+        external_owner = object()
+        external_lease = session.device_use.acquire_command(
+            external_owner, "feedback task",
+            (DeviceClaim("slm", "slm", device),),
+        )
+        try:
+            device.apply_phase(external)
+        finally:
+            external_lease.release()
+        _pump(app, lambda: "changed externally" in control._device_status.text())
+        assert not control._send.isEnabled()
+        assert control.send() is False
+        np.testing.assert_array_equal(device.last_commanded_phase, external)
+        control._set_context(editor.load_science_context(phase_path))
+        assert not control._device_diverged
+        assert control._send.isEnabled()
+        external_after_load = canonical_phase(
+            np.full(device.shape_yx, 2.75), device.shape_yx
+        )
+        external_lease = session.device_use.acquire_command(
+            external_owner, "feedback task",
+            (DeviceClaim("slm", "slm", device),),
+        )
+        try:
+            device.apply_phase(external_after_load)
+        finally:
+            external_lease.release()
+        _pump(app, lambda: control._device_diverged)
+        assert control.send() is False
+        adopt_blocker = session.acquire_device_command(
+            object(), "feedback task", "slm", device,
+        )
+        try:
+            before_adopt = np.array(control._phase, copy=True)
+            QtTest.QTest.mouseClick(control._adopt, QtCore.Qt.LeftButton)
+            assert "feedback task" in control.status_text
+            np.testing.assert_array_equal(control._phase, before_adopt)
+        finally:
+            adopt_blocker.release()
+        QtTest.QTest.mouseClick(control._adopt, QtCore.Qt.LeftButton)
+        np.testing.assert_array_equal(control._phase, external_after_load)
+        assert "adopted" in control.status_text.lower()
+        control.set_phase(phase, {})
 
         original_apply = device.apply_phase
         monkeypatch.setattr(
@@ -584,6 +641,18 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         assert control.status_text == "adapter write failed"
         session.device_use.assert_idle()
         monkeypatch.setattr(device, "apply_phase", original_apply)
+
+        receipt_property = type(device).last_command_receipt
+        monkeypatch.setattr(
+            type(device), "last_command_receipt",
+            property(lambda slm: {
+                **receipt_property.fget(slm), "outcome": "unknown",
+            }),
+        )
+        assert control.send() is True
+        _pump(app, lambda: not control.command_active)
+        assert "known-new command receipt" in control.status_text
+        monkeypatch.setattr(type(device), "last_command_receipt", receipt_property)
 
         commanded = device.last_commanded_phase
         control._finish_close()
@@ -651,24 +720,27 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
         np.testing.assert_allclose(control._phase, expected, rtol=0.0, atol=5e-6)
         assert control._phase_request_revision == control._request_revision
 
-        final_path = tmp_path / "final.npz"
-        control.save_phase(final_path)
-        loaded_final, final_metadata = editor.load_phase(final_path)
-        np.testing.assert_array_equal(loaded_final, expected)
-        assert final_metadata["source"] == "composite"
-        assert final_metadata["hardware_correction"] == "excluded"
-        assert final_metadata["pattern"] == {"source": "authored pattern"}
-        assert "cgh_crop_xywh" not in final_metadata
-        assert "steering_enabled" not in final_metadata
+        final_path = tmp_path / "science-context.npz"
+        control._save_context_operation(final_path)()
+        context = editor.load_science_context(final_path)
+        np.testing.assert_array_equal(context["phase"], expected)
+        np.testing.assert_array_equal(context["pattern_phase"], pattern)
+        np.testing.assert_allclose(
+            context["operator_wavefront"], control._wavefront_phase,
+            rtol=0.0, atol=5e-6,
+        )
+        assert context["pattern_metadata"] == {"source": "authored pattern"}
+        assert context["operator_metadata"]["carrier_waves_xy"] == [1.25, -0.5]
+        assert context["system_correction"] is None
 
-        control.set_phase(loaded_final, {"loaded": "final"})
-        np.testing.assert_array_equal(control._pattern_phase, loaded_final)
-        np.testing.assert_array_equal(control._phase, loaded_final)
-        assert control._carrier_x.value() == 0.0
-        assert control._carrier_y.value() == 0.0
-        assert all(spin.value() == 0.0 for spin in control._zernike.values())
-        assert not control._zernike_enabled.isChecked()
-        assert control._phase_metadata == {"loaded": "final"}
+        control.set_phase(np.zeros(control.shape), {})
+        control._set_context(editor.load_science_context(final_path))
+        np.testing.assert_array_equal(control._pattern_phase, pattern)
+        np.testing.assert_array_equal(control._phase, expected)
+        assert control._carrier_x.value() == 1.25
+        assert control._carrier_y.value() == -0.5
+        assert control._zernike["defocus"].value() == 0.125
+        assert control._zernike_enabled.isChecked()
 
         control.set_phase(np.zeros(control.shape), {})
         control._zernike_enabled.setChecked(True)
@@ -1025,6 +1097,195 @@ def test_preset_popup_materializes_each_authored_target_only_on_apply(
         session.installation.close()
 
 
+def test_editor_presents_unknown_device_truth_without_inventing_a_command(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    device = session.installation.device("slm")
+    device_type = type(device)
+    phase_property = device_type.last_commanded_phase
+    receipt_property = device_type.last_command_receipt
+    receipt = dict(device.last_command_receipt)
+    receipt.update(outcome="unknown", stage="uncommanded", readback="not-run")
+    unknown = {"active": True}
+    monkeypatch.setattr(
+        device_type, "last_commanded_phase",
+        property(lambda slm: None if unknown["active"] else phase_property.fget(slm)),
+    )
+    monkeypatch.setattr(
+        device_type, "last_command_receipt",
+        property(lambda slm: dict(receipt) if unknown["active"]
+                 else receipt_property.fget(slm)),
+    )
+    original_apply = device.apply_phase
+
+    def establish_first_command(radians):
+        applied = original_apply(radians)
+        unknown["active"] = False
+        return applied
+
+    monkeypatch.setattr(device, "apply_phase", establish_first_command)
+    monkeypatch.setattr(
+        editor, "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.zeros(target.shape), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        _pump(app, lambda: control.solver_idle)
+        assert "command is unknown" in control._device_status.text()
+        assert "draft is unsent" in control._device_status.text()
+        assert not control._adopt.isEnabled()
+        context_path = tmp_path / "unknown-context.npz"
+        control._save_context_operation(context_path)()
+        assert editor.load_science_context(context_path)["command_receipt"][
+            "outcome"
+        ] == "unknown"
+        monkeypatch.setattr(editor, "fluent_open_path", lambda *_args: str(context_path))
+        control._body.show(); app.processEvents()
+        load_button = next(
+            button for button in control._body.findChildren(QtWidgets.QAbstractButton)
+            if button.text() == "Load science context"
+        )
+        QtTest.QTest.mouseClick(load_button, QtCore.Qt.LeftButton)
+        _pump(app, lambda: not control.command_active)
+        assert not control._device_diverged
+        assert control._send.isEnabled()
+        assert "command is unknown" in control._device_status.text()
+        assert "draft is unsent" in control._device_status.text()
+        foreign = editor.load_science_context(context_path)
+        foreign["command_receipt"] = {
+            **foreign["command_receipt"], "identity": "another-slm",
+            "outcome": "known-new",
+        }
+        monkeypatch.setattr(editor, "load_science_context", lambda _path: foreign)
+        control._set_context(editor.load_science_context(context_path))
+        assert not control._device_diverged
+        assert "another-slm" in control._device_status.text()
+        assert control._send.isEnabled()
+        QtTest.QTest.mouseClick(control._send, QtCore.Qt.LeftButton)
+        _pump(app, lambda: not control.command_active)
+        assert control.status_text == "Phase sent to SLM"
+    finally:
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
+def test_science_context_file_button_freezes_inputs_without_blocking_qt(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        editor, "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.full(target.shape, 0.4), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    started, release = threading.Event(), threading.Event()
+    captured: dict[str, object] = {}
+    owner_thread = threading.get_ident()
+
+    def slow_save(path, phase, **kwargs):
+        captured.update(
+            path=Path(path), phase=np.array(phase, copy=True),
+            receipt=deepcopy(kwargs["command_receipt"]),
+            thread=threading.get_ident(),
+        )
+        started.set()
+        release.wait(2.0)
+        return Path(path)
+
+    monkeypatch.setattr(editor, "save_science_context", slow_save)
+    destination = tmp_path / "frozen-context.npz"
+    monkeypatch.setattr(editor, "fluent_save_path", lambda *_args: str(destination))
+    heartbeat: list[float] = []
+    timer = QtCore.QTimer()
+    timer.setInterval(5)
+    timer.timeout.connect(lambda: heartbeat.append(time.monotonic()))
+    try:
+        _pump(app, lambda: control.solver_idle)
+        frozen_phase = np.array(control._phase, copy=True)
+        control._body.show(); app.processEvents(); timer.start()
+        button = next(
+            item for item in control._body.findChildren(QtWidgets.QAbstractButton)
+            if item.text() == "Save science context"
+        )
+        began = time.monotonic()
+        QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
+        assert time.monotonic() - began < 0.04
+        assert started.wait(1.0)
+        control.set_phase(np.full(control.shape, 2.0), {})
+        _pump(app, lambda: len(heartbeat) >= 3)
+        assert control.command_active
+        release.set()
+        _pump(app, lambda: not control.command_active)
+        np.testing.assert_array_equal(captured["phase"], frozen_phase)
+        assert captured["thread"] != owner_thread
+        assert control.status_text == "Science Context saved"
+    finally:
+        timer.stop(); release.set(); control._body.hide()
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
+def test_context_prevalidation_never_partially_mutates_editor(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        editor, "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.zeros(target.shape), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        _pump(app, lambda: control.solver_idle)
+        path = control._save_context_operation(tmp_path / "valid-context.npz")()
+        valid = editor.load_science_context(path)
+        before = (
+            control._request_revision, np.array(control._phase, copy=True),
+            control._pupil_center_xy, control._carrier_x.value(),
+        )
+        malformed = []
+        wrong_shape = deepcopy(valid)
+        wrong_shape["phase"] = wrong_shape["phase"][:-1]
+        malformed.append(wrong_shape)
+        bad_operator = deepcopy(valid)
+        bad_operator["operator_metadata"]["carrier_waves_xy"] = [np.nan, 0.0]
+        malformed.append(bad_operator)
+        bad_receipt = deepcopy(valid)
+        bad_receipt["command_receipt"]["command_revision"] = True
+        malformed.append(bad_receipt)
+        for context in malformed:
+            with pytest.raises(ValueError):
+                control._set_context(context)
+            assert control._request_revision == before[0]
+            np.testing.assert_array_equal(control._phase, before[1])
+            assert control._pupil_center_xy == before[2]
+            assert control._carrier_x.value() == before[3]
+    finally:
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
 def test_input_pupil_is_draft_until_apply_and_reaches_the_solver_as_amplitude(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -1216,13 +1477,28 @@ def test_editor_exposes_x15213_correction_load_and_enable_without_sending(
         assert not control._correction_enabled.isChecked()
         assert "off" in control._correction_status.text().lower()
 
+        blocker = object()
+        lease = session.device_use.acquire_command(
+            blocker, "feedback task",
+            (DeviceClaim("slm", "slm", device),),
+        )
+        try:
+            QtTest.QTest.mouseClick(control._correction_load, QtCore.Qt.LeftButton)
+            _pump(app, lambda: not control.command_active)
+            assert "feedback task" in control.status_text
+            assert state == {"path": "", "enabled": False}
+        finally:
+            lease.release()
+
         QtTest.QTest.mouseClick(control._correction_load, QtCore.Qt.LeftButton)
+        _pump(app, lambda: not control.command_active)
         assert state == {"path": str(correction), "enabled": True}
         assert control._correction_enabled.isChecked()
         assert correction.name in control._correction_status.text()
         np.testing.assert_array_equal(device.last_commanded_phase, incoming)
 
         control._correction_enabled.setChecked(False)
+        _pump(app, lambda: not control.command_active)
         assert state["enabled"] is False
         assert "off" in control._correction_status.text().lower()
         assert correction.name in control._correction_status.text()
@@ -1314,23 +1590,28 @@ def test_editor_close_guard_never_waits_for_a_running_solver(
 
     monkeypatch.setattr(editor, "solve_phase", slow_solve)
     control = editor.SlmEditorControl(session, "slm")
-    timer = threading.Timer(0.2, release.set)
+    close_attempts: list[float] = []
+    control._window = SimpleNamespace(
+        close=lambda: (
+            close_attempts.append(time.monotonic()), control._finish_close()
+        )[-1]
+    )
     try:
         assert started.wait(2.0)
-        timer.start()
         began = time.monotonic()
         assert control._finish_close() is False
         assert time.monotonic() - began < 0.05
         assert not control._body.isEnabled()
-        _pump(app, lambda: control.solver_idle)
-        deadline = time.monotonic() + 2.0
-        while not control._finish_close() and time.monotonic() < deadline:
-            app.processEvents()
-            time.sleep(0.002)
-        assert control._cleaned
+        control._close_deadline = time.monotonic() - 1.0
+        _pump(app, lambda: "close timed out" in control.status_text)
+        attempts_at_timeout = len(close_attempts)
+        QtTest.QTest.qWait(100); app.processEvents()
+        assert len(close_attempts) == attempts_at_timeout
+        release.set()
+        _pump(app, lambda: control._cleaned)
+        assert len(close_attempts) > attempts_at_timeout
     finally:
         release.set()
-        timer.cancel()
         _dispose(control, app)
         session.device_use.assert_idle()
         session.installation.close()

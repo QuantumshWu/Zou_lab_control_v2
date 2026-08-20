@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
+import json
 import math
+from pathlib import Path
 import threading
 from typing import Any, Callable
 
@@ -44,6 +46,24 @@ BOLTZMANN_J_PER_K = 1.380649e-23
 DEFAULT_ATOM_TEMPERATURE_K = 2.0e-5
 DEFAULT_TRAP_DEPTH_K = 1.0e-3
 DEFAULT_TRAP_WAIST_M = 1.0e-6
+_WORLD_PROFILE_FORMAT = "zlc.simulation.world_profile"
+_SIMULATION_FLOAT_FIELDS = (
+    "offset_counts",
+    "conversion_e_per_count",
+    "read_noise_e",
+    "background_rate",
+    "atom_rate",
+    "atom_sigma_px",
+    "loading_probability",
+    "probe_saturation",
+    "probe_detuning_linewidths",
+    "trap_light_shift_linewidths",
+    "fluorescence_lifetime_seconds",
+    "atom_temperature_k",
+    "trap_depth_k",
+    "trap_waist_m",
+    "dark_current_e_per_s",
+)
 
 
 def _maxwell_boltzmann_below(speed: float, most_probable_speed: float) -> float:
@@ -127,9 +147,24 @@ class SimulationGeometry:
 class SimulationWorldConfig:
     """Resolved apparatus contribution used to construct one shared world."""
 
-    geometry: SimulationGeometry
+    geometry: SimulationGeometry = field(default_factory=SimulationGeometry)
     seed: int = 0
     mot_field_optimum_dac: tuple[int, int, int] = DEFAULT_MOT_FIELD_OPTIMUM_DAC
+    offset_counts: float = 200.0
+    conversion_e_per_count: float = 0.107
+    read_noise_e: float = 0.43
+    background_rate: float = 300.0
+    atom_rate: float = 145_000.0
+    atom_sigma_px: float = 0.7
+    loading_probability: float = 0.5
+    probe_saturation: float = 0.1
+    probe_detuning_linewidths: float = -1.9
+    trap_light_shift_linewidths: float = 1.15
+    fluorescence_lifetime_seconds: float = 0.05
+    atom_temperature_k: float = DEFAULT_ATOM_TEMPERATURE_K
+    trap_depth_k: float = DEFAULT_TRAP_DEPTH_K
+    trap_waist_m: float = DEFAULT_TRAP_WAIST_M
+    dark_current_e_per_s: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.geometry, SimulationGeometry):
@@ -141,6 +176,108 @@ class SimulationWorldConfig:
                 "mot_field_optimum_dac must be three DAC codes within the bus range"
             )
         object.__setattr__(self, "mot_field_optimum_dac", optimum)
+        for name in _SIMULATION_FLOAT_FIELDS:
+            try:
+                value = float(getattr(self, name))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{name} must be numeric") from error
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            object.__setattr__(self, name, value)
+        for name in (
+            "conversion_e_per_count",
+            "atom_sigma_px",
+            "probe_saturation",
+            "fluorescence_lifetime_seconds",
+            "atom_temperature_k",
+            "trap_depth_k",
+            "trap_waist_m",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(f"{name} must be positive")
+        for name in (
+            "offset_counts",
+            "read_noise_e",
+            "background_rate",
+            "atom_rate",
+            "dark_current_e_per_s",
+        ):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
+        if not 0.0 <= self.loading_probability <= 1.0:
+            raise ValueError("loading_probability must be between zero and one")
+
+    @classmethod
+    def from_profile(
+        cls,
+        path: str | Path,
+        *,
+        geometry: SimulationGeometry,
+        seed: int,
+    ) -> SimulationWorldConfig:
+        """Resolve one strict workspace profile before constructing the world."""
+
+        resolved = Path(path).expanduser().resolve()
+
+        def strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate simulation profile field {key!r}")
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> object:
+            raise ValueError(f"non-finite simulation profile value {value!r}")
+
+        try:
+            payload = json.loads(
+                resolved.read_text(encoding="utf-8"),
+                object_pairs_hook=strict_object,
+                parse_constant=reject_constant,
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+            raise ValueError(f"simulation world profile {resolved} is not strict JSON") from error
+        if not isinstance(payload, dict):
+            raise ValueError("simulation world profile must be a JSON object")
+        allowed = {
+            "format",
+            "version",
+            "mot_field_optimum_dac",
+            *_SIMULATION_FLOAT_FIELDS,
+        }
+        if set(payload) - allowed:
+            raise ValueError("simulation world profile has unknown fields")
+        if (
+            payload.get("format") != _WORLD_PROFILE_FORMAT
+            or type(payload.get("version")) is not int
+            or payload["version"] != 1
+        ):
+            raise ValueError("simulation world profile has an unsupported format")
+        changes: dict[str, object] = {}
+        for name in _SIMULATION_FLOAT_FIELDS:
+            if name not in payload:
+                continue
+            value = payload[name]
+            if type(value) not in (int, float):
+                raise TypeError(f"simulation world profile {name} must be numeric")
+            changes[name] = value
+        if "mot_field_optimum_dac" in payload:
+            optimum = payload["mot_field_optimum_dac"]
+            if (
+                not isinstance(optimum, list)
+                or len(optimum) != 3
+                or any(type(value) is not int for value in optimum)
+            ):
+                raise TypeError(
+                    "simulation world profile mot_field_optimum_dac must be three integers"
+                )
+            changes["mot_field_optimum_dac"] = tuple(optimum)
+        return cls(
+            geometry=geometry,
+            seed=seed,
+            **changes,
+        )
 
 
 class SimulationWorld:
@@ -148,18 +285,14 @@ class SimulationWorld:
 
     def __init__(
         self,
-        geometry: SimulationGeometry | None = None,
-        *,
-        seed: int = 0,
-        mot_field_optimum_dac: tuple[int, int, int] = DEFAULT_MOT_FIELD_OPTIMUM_DAC,
+        config: SimulationWorldConfig | None = None,
     ) -> None:
-        self.geometry = SimulationGeometry() if geometry is None else geometry
-        seed = int(seed)
-        optimum = tuple(int(value) for value in mot_field_optimum_dac)
-        if len(optimum) != 3 or any(abs(value) > 511 for value in optimum):
-            raise ValueError(
-                "mot_field_optimum_dac must be three DAC codes within the bus range"
-            )
+        resolved = SimulationWorldConfig() if config is None else config
+        if not isinstance(resolved, SimulationWorldConfig):
+            raise TypeError("config must be SimulationWorldConfig or None")
+        self._config = resolved
+        seed = resolved.seed
+        optimum = resolved.mot_field_optimum_dac
         self._mot_field_optimum = dict(
             zip(("da_bias_x", "da_bias_y", "da_bias_z"), optimum)
         )
@@ -173,25 +306,6 @@ class SimulationWorld:
         self._lock = threading.RLock()
         self._cameras: list[tuple[Any, Callable[..., np.ndarray] | None]] = []
         self._fire_count = 0
-        self.offset_counts = 200.0
-        self.conversion_e_per_count = 0.107
-        self.read_noise_e = 0.43
-        self.background_rate = 300.0
-        # Detected electrons per second for one nominal-depth atom at the
-        # beginning of a probe.  The finite bright-state lifetime below keeps
-        # long probes physical instead of letting this initial rate grow
-        # without bound.
-        self.atom_rate = 145_000.0
-        self.atom_sigma_px = 0.7
-        self.loading_probability = 0.5
-        self.probe_saturation = 0.1
-        self.probe_detuning_linewidths = -1.9
-        self.trap_light_shift_linewidths = 1.15
-        self.fluorescence_lifetime_seconds = 0.05
-        self.atom_temperature_k = DEFAULT_ATOM_TEMPERATURE_K
-        self.trap_depth_k = DEFAULT_TRAP_DEPTH_K
-        self.trap_waist_m = DEFAULT_TRAP_WAIST_M
-        self.dark_current_e_per_s = 0.0
         site_count = len(self.geometry.site_centers_xy)
         self._slm_shape_yx = DEFAULT_SIMULATION_SLM_SHAPE_YX
         self._slm_site_indices_yx, nominal_phase = _nominal_slm_command(
@@ -283,11 +397,78 @@ class SimulationWorld:
         #: Read-only pixel coordinate vectors per MOT frame shape.  A frame
         #: shape is a configuration fact, so this holds one or two entries.
         self._mot_axis_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
-
         # Establish the physical intensity scale once from the nominal command.
         # Later commands are compared against that fixed bench scale, rather
         # than renormalized per phase (which would erase diffraction loss).
         self._ensure_slm_propagation()
+
+    @property
+    def config(self) -> SimulationWorldConfig:
+        return self._config
+
+    @property
+    def geometry(self) -> SimulationGeometry:
+        return self._config.geometry
+
+    @property
+    def offset_counts(self) -> float:
+        return self._config.offset_counts
+
+    @property
+    def conversion_e_per_count(self) -> float:
+        return self._config.conversion_e_per_count
+
+    @property
+    def read_noise_e(self) -> float:
+        return self._config.read_noise_e
+
+    @property
+    def background_rate(self) -> float:
+        return self._config.background_rate
+
+    @property
+    def atom_rate(self) -> float:
+        return self._config.atom_rate
+
+    @property
+    def atom_sigma_px(self) -> float:
+        return self._config.atom_sigma_px
+
+    @property
+    def loading_probability(self) -> float:
+        return self._config.loading_probability
+
+    @property
+    def probe_saturation(self) -> float:
+        return self._config.probe_saturation
+
+    @property
+    def probe_detuning_linewidths(self) -> float:
+        return self._config.probe_detuning_linewidths
+
+    @property
+    def trap_light_shift_linewidths(self) -> float:
+        return self._config.trap_light_shift_linewidths
+
+    @property
+    def fluorescence_lifetime_seconds(self) -> float:
+        return self._config.fluorescence_lifetime_seconds
+
+    @property
+    def atom_temperature_k(self) -> float:
+        return self._config.atom_temperature_k
+
+    @property
+    def trap_depth_k(self) -> float:
+        return self._config.trap_depth_k
+
+    @property
+    def trap_waist_m(self) -> float:
+        return self._config.trap_waist_m
+
+    @property
+    def dark_current_e_per_s(self) -> float:
+        return self._config.dark_current_e_per_s
 
     def _slm_plant(self, seed: int) -> tuple[np.ndarray, np.ndarray]:
         """Materialize fixed illumination and one apparatus wavefront ripple."""
@@ -576,8 +757,6 @@ class SimulationWorld:
 
     def _loading_probabilities(self, intensities: np.ndarray) -> np.ndarray:
         base = float(self.loading_probability)
-        if not 0.0 <= base <= 1.0:
-            raise ValueError("loading_probability must be between zero and one")
         scale = self._loading_intensity_scale
         if scale is None or not np.isfinite(scale) or scale <= 0.0:
             raise RuntimeError("nominal SLM command produced no site intensity")
@@ -598,14 +777,8 @@ class SimulationWorld:
             raise RuntimeError("nominal SLM command produced no site intensity")
         relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
         saturation = float(self.probe_saturation)
-        if not np.isfinite(saturation) or saturation <= 0.0:
-            raise ValueError("probe_saturation must be positive and finite")
         probe_detuning = float(self.probe_detuning_linewidths)
-        if not np.isfinite(probe_detuning):
-            raise ValueError("probe_detuning_linewidths must be finite")
         light_shift = float(self.trap_light_shift_linewidths)
-        if not np.isfinite(light_shift):
-            raise ValueError("trap_light_shift_linewidths must be finite")
         # The probe is fixed at the apparatus working point selected for the
         # ideal uniform nominal array.  It never follows a candidate phase or
         # the current array mean, so absolute depth remains observable.
@@ -763,10 +936,6 @@ class SimulationWorld:
                     raise ValueError("occupancy size differs from simulation site map")
             base_area = self.atom_sigma_px**2
             fluorescence_lifetime = float(self.fluorescence_lifetime_seconds)
-            if not np.isfinite(fluorescence_lifetime) or fluorescence_lifetime <= 0.0:
-                raise ValueError(
-                    "fluorescence_lifetime_seconds must be positive and finite"
-                )
             fluorescence_seconds = -fluorescence_lifetime * math.expm1(
                 -probe / fluorescence_lifetime
             )

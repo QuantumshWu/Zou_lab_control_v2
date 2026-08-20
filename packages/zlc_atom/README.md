@@ -27,31 +27,51 @@ uniform full-raster solver illumination. Wavefront puts full-raster Steering
 X/Y and Noll Z4-Z11 under the same Zernike switch. Pattern authoring offers
 exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
 and English/Chinese Text with both minimum site spacing and atom budget.
-Target JSON and science-phase NPZ load/save never write hardware. Loading a
-science phase resets the Zernike layer for an exact roundtrip. Only **Send to
-SLM** takes a short exclusive claim and applies the science phase; closing the
-Editor preserves the currently commanded phase.
+A strict Target JSON stores intensity plus objective. A strict Science Context
+NPZ stores Pattern/base phase, numeric pupil, operator wavefront, typed reusable
+system-correction reference and command receipt. Loading either artifact never
+writes hardware; it establishes an authoring draft and the current external-
+change baseline. Only **Send to SLM** takes an exclusive claim and applies the
+composed science phase. If a Task changes the command or correction mapping,
+the Editor shows the divergence and refuses the old draft until explicit Adopt
+or Context reload; closing preserves the currently commanded phase.
 
-The X15213 leaf supports the series' `1272 x 1024` active LCOS raster through
-either official USB frame memory or a `1280 x 1024 @ approximately 60 Hz` DVI
-display. Generic **Scan hardware** reports a USB candidate only when the local
-official `hpkSLMdaLV.dll` and `hpkSLMda.dll` can open a controller and read its
-head serial. It reports attached displays with the required raster/timing as
-DVI candidates, but display enumeration cannot prove which one is the SLM, so
-the operator must confirm it. Scan does not send a phase. USB performs byte
-readback; DVI requires an exact unscaled full-raster presenter and places the
-active image in the left 1272 columns, leaving the right eight columns zero.
+The X15213 leaf supports the series' `1272 x 1024` active LCOS raster only
+through the official USB frame-memory SDK. Generic **Scan hardware** reports a
+candidate only when local `hpkSLMdaLV.dll` and `hpkSLMda.dll` can open a
+controller and read its head serial; scanning does not send a phase. A new real
+adapter starts with unknown command truth. A command becomes known only after
+write, display-slot selection, exact active-frame readback, and the profile's
+settle wait all complete.
 
-Each supported head has a small profile under `devices/slm/profiles/` with its
-serial, readout wavelength, and full 256-point phase calibration curve.
-Authored wavelength builds the nonlinear phase-code-to-drive LUT from that
-curve; it is not record-only and `two_pi_gray` is a computed readout (for
-LSH0804382 at 852 nm it is 225), not an editable constant. A local native
-`L 1272 x 1024` correction BMP is added to the phase code modulo 256 before the
-LUT. A filename containing its source wavelength is unwrapped and converted to
-the authored wavelength without resizing or interpolation. These paths are
-ready for experiment-machine bring-up, while development-machine mock/readback
-tests prove frame bytes rather than controller state or optical acceptance.
+Each supported head has a strict profile under `devices/slm/profiles/` with
+model, serial, working and phase-curve wavelengths, curve provenance, and
+settle provenance. Authored wavelength builds the nonlinear
+phase-code-to-drive LUT from that curve; `two_pi_gray` remains computed rather
+than authored. A native `L 1272 x 1024` correction BMP is added modulo 256
+before the LUT. Loading or toggling correction advances a mapping revision, and
+each command receipt freezes the USB/profile/wavelength/orientation/correction
+facts it used. A map labelled for another wavelength is rejected because the
+repository has no measured two-dimensional unwrap authority. The bundled
+LSH0804382 provenance is explicitly incomplete; development mocks prove the
+software byte path, not the vendor ABI, controller, or optical acceptance.
+
+USB experiment-machine acceptance remains an unexecuted runbook:
+
+1. Record the full head model/serial, controller and SDK/DLL versions, then
+   bind every ctypes function from that installed official header.
+2. Confirm the selected profile's curve source, measurement wavelength and
+   uncertainty instead of treating the bundled values as a calibration claim.
+3. Verify vendor-correction encoding, serial, wavelength, sign and native pixel
+   orientation; exercise correction Off/On under the same device claim.
+4. Send asymmetric corner/gray patterns and confirm X/Y orientation plus exact
+   active-frame USB readback at the controller.
+5. Measure optical response for representative increasing and decreasing gray
+   transitions, then replace the pending settle value with the accepted worst
+   case and its source.
+6. Record the resulting command receipt and separately validate any declared
+   pupil-phase-map or target-response-map system correction; controller bytes
+   and optical correction remain different evidence.
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
 Qt dependency. Calibration consumes a project-owned
@@ -160,15 +180,19 @@ model's dark mean but does not threshold shots through Occupancy; loading and
 occupied-atom brightness both remain part of the measured all-shot
 fluorescence observable.
 
-The controller updates `w_i *= (GM(F) / F_i) ** 0.25`; it performs no Zernike,
-modal, hidden-aberration, or continuous-wavefront fit and makes no claim about
-pixels between measured sites. The Task's own typed previews are the latest
-candidate phase and the complete uniformity-history curve. Success reapplies
-and saves the independently validated phase. Stop accepts the best valid
-measured phase available, republishes that phase beside the current history,
-applies it, and returns its durable artifact; a genuine failure restores the
-incoming phase. The default 100 coarse and 100 validation shots are acquisition
-defaults, not proof that a finite run must reach 1%.
+The controller updates only the frozen Context's Pattern: simultaneous
+uncertainty shrinks unresolved log residuals, each step is clipped, and a
+non-improving candidate rolls back to the confidence-best Pattern while the
+gain falls. It performs no Zernike, modal, hidden-aberration, or continuous-
+wavefront fit and makes no claim about pixels between measured sites. The
+Task's typed previews are the latest candidate phase and the complete
+uniformity-history curve. One confidence-best candidate receives a held-out
+validation in 100-shot batches, bounded by 1000 shots and 60 seconds by
+default; the terminal Science Context reports `accepted` or `inconclusive`
+with estimate and simultaneous interval. Stop accepts the confidence-best
+valid candidate, reapplies it, republishes it beside current history, and
+returns its durable Context; a genuine failure restores the known incoming
+command. The default 100 coarse shots are not a finite-shot proof of 1%.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,

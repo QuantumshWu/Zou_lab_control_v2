@@ -337,6 +337,15 @@ class ExperimentSession:
 
         return self.installation.failures
 
+    def acquire_device_command(
+        self, owner: object, label: str, key: str, device: object,
+    ):
+        """Acquire this session's command claim without leaking claim types."""
+
+        return self.device_use.acquire_command(
+            owner, label, (DeviceClaim(key, key, device),)
+        )
+
     # ------------------------------------------------------------------ pulse
 
     def load_pulse(self, name: str) -> Mapping[str, Any]:
@@ -381,16 +390,8 @@ class ExperimentSession:
     # ------------------------------------------------------------------- shot
 
     def _acquire_pulse_device(self):
-        return self.device_use.acquire_command(
-            object(),
-            "ExperimentSession pulse",
-            (
-                DeviceClaim(
-                    "sequencer",
-                    "sequencer",
-                    self.sequencer,
-                ),
-            ),
+        return self.acquire_device_command(
+            object(), "ExperimentSession pulse", "sequencer", self.sequencer,
         )
 
     def fire(self, shots: int = 1, timeout: float = 5.0) -> None:

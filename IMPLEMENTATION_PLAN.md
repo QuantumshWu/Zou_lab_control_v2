@@ -7,13 +7,13 @@
 更新时间：2026-08-20
 启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
-用户执行边界：Milestone 1–5及各自post-milestone residual sweep均已完成；M4 cleanup与performance follow-up分别独立提交，M5以`Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`单独提交。M5于2026-08-20 14:31 PDT完成验证，早于用户给出的15:30门，因此下一步进入M6；不得访问真实SLM或其它hardware。
+用户执行边界：Milestone 1–6及各自post-milestone residual sweep均已完成；M4 cleanup、performance、M5与M6均为独立commit。M5于2026-08-20 14:31 PDT完成验证，满足用户15:30门并进入M6；M6以`Converge USB SLM context, feedback, and simulation truth`单独提交。用户本轮四项要求至此完成，不自动进入M7；不得访问真实SLM或其它hardware。
 
 ### 当前状态
 
 - 审计：完成；逐文件证据在`AUDIT/`。
 - 用户裁决：完成；记录在`AUDIT/USER-DECISIONS-2026-08-17.md`与根Goal。
-- Production代码：Milestone 1–5及其residual closure均已完成。
+- Production代码：Milestone 1–6及其residual closure均已完成。
 - Hardware：未访问；本Goal不授权program/flash或实验机device操作。
 - Milestone 0：`COMPLETE` — commit `e854ddf`（`Establish approved architecture and implementation checkpoint`）；唯一Architecture、Plan、Handoff、Goal与Audit证据已纳入版本控制，未改production。
 - Milestone 1：`COMPLETE / SWEEP COMPLETE` — test-owned Pulse engine、dead Qt wake、compat aliases、false-green API/notebook/dependency tests与重复contract docs已删除。
@@ -21,7 +21,8 @@ Branch：`master`
 - Milestone 3：`COMPLETE / SWEEP COMPLETE` — replay lineage、selection lock域、canonical presentation/overlay alignment、Refresh/layout lifecycle及测试残余已闭合。
 - Milestone 4：`COMPLETE / SWEEP COMPLETE` — exact pair/resync、原子PanelState、canonical selector/threshold、streaming archive以及Qt worker/close均已闭合；全树1498 tests通过。
 - Milestone 5：`COMPLETE / SWEEP COMPLETE` — Pulse执行词汇、camera cadence、Remote takeover、Stop/SAFE、RTL/build与strict transport均闭合。
-- Milestone 6–7：`PENDING`；下一步按M6 USB-only SLM、Science Context与robust Feedback边界实施。
+- Milestone 6：`COMPLETE / SWEEP COMPLETE` — USB-only SLM、command truth、Science Context、robust Feedback与immutable Simulation已闭合。
+- Milestone 7：`PENDING`；single distribution、wheel/fresh install、evidence lanes和final docs等待用户后续指令。
 
 ### Milestone 3完成边界
 
@@ -29,7 +30,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 5已完成；下一步进入M6。不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
+Milestone 6已完成；本轮停止，不自动进入M7。不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -41,7 +42,7 @@ Milestone 5已完成；下一步进入M6。不得运行真实SLM、camera或FPGA
 | 3 | Canonical Runtime live与Logic Node contract | COMPLETE / SWEEP COMPLETE | 两个M3 commits + residual fix；见§8 |
 | 4 | Exact Data/Fit/Overlay与Qt lifecycle | COMPLETE / SWEEP COMPLETE | `Make data, fit, overlay, and Qt lifecycle exact and atomic`；见§9 |
 | 5 | Pulse/Camera/Remote/FPGA | COMPLETE / SWEEP COMPLETE | `Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`；见§10 |
-| 6 | USB-only SLM与robust Feedback | PENDING | — |
+| 6 | USB-only SLM与robust Feedback | COMPLETE / SWEEP COMPLETE | `Converge USB SLM context, feedback, and simulation truth`；见§11 |
 | 7 | One distribution、evidence lanes、final docs | PENDING | — |
 
 ## 3. Audit finding映射
@@ -287,7 +288,21 @@ Performance commit：`Make derived history continuous and presentation capacity-
 
 Milestone 5 commit：`Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`。下一步M6，不把SLM物理truth塞进Workbench或simulation旁路。
 
-## 11. Checkpoint更新规则
+## 11. Milestone 6完成证据
+
+- 正式X15213 transport只剩USB；DVI production/discovery/UI/tests/docs为0。真实adapter初始command为unknown；只有write、display slot、exact frame-memory readback和profile settle全部完成才是known-new。失败能区分known-old/unknown；command与mapping revision、profile/model/serial/wavelength/orientation/correction/settle和outcome进入immutable receipt。Strict profile记录phase-curve与settle provenance，同波长correction才接受。
+- Target strict v2保存`intensity + objective`；bare phase artifact与objective-less v1保活路径删除。Science Context保存Pattern/base、numeric pupil amplitude/support、operator wavefront、typed system correction（kind/reference/wavelength/pupil/coordinate/valid-region/method）和command receipt；所有arrays immutable且strict roundtrip。
+- Editor在unknown硬件上只建立deterministic authoring draft，不虚构device zero；Load Context是显式takeover但仍显示unknown/unsent，Send后才known。外部Task或mapping revision变化使draft可见diverge并拒绝旧Send，Adopt/Load snapshot在session claim内；correction load/enable复用同一DeviceUse seam。Target/Context import/load/save在existing worker执行，Qt只冻结input/交付结果；context在任何widget mutation前核shape/operator/pupil/receipt，close有2秒deadline且completion-driven retry。Atom不再反向import Workbench claim类型。
+- Sparse WGS-Kim、iteration-12 fixed far phase、selected DFT与caller-owned optimizer state保留；initial/hot均`iterations=None`走canonical numerical gate。Dense Gaussian有finite signal/noise region与vortex-free initial phase，Flat Top用quality-preservingFOM stagnation stop；1024×1272实测Gaussian 26.37s/300轮/3.10% RMS，Flat Top 13.97s/210轮/0.488% RMS。不得宣称dense CPU明显改善，不引GPU。
+- Feedback只接受spots Target+known Science Context，只更新Pattern并保留pupil/wavefront/system correction。每个candidate复用canonical Camera Measurement sealed Dataset和相同readout projection；所有requested shots必须对每site finite，否则candidate invalid。Controller以simultaneous uncertainty shrink residual、step clip、confidence trust rollback和gain reduction更新；persistent invalid同phase重试两次后停止。100-shot coarse后只锁一个confidence-best做独立100-shot batch validation，默认最多1000 shots/60s，terminal明确`accepted`或`inconclusive`并保存CI。Stop应用confidence-best并写formal Context；没有valid best时保留known incoming，异常只在incoming known时restore。
+- SimulationWorld保持单一class/state owner；一个frozen`SimulationWorldConfig`拥有全部physics inputs，public projections read-only。唯一构造入口接config；optional strict workspace `world_profile`在任何device factory前解析，duplicate/NaN/unknown/type拒绝；tests用config replace而非运行时mutation。
+- Frozen-tree residual：functional candidate 21 files `+3396/-1958`（净+1438）；production净+1084、tests净+329、active product docs净+22、profile净+3。加入三份Checkpoint状态文档后最终24 files净+1453。无新增production file/class，test functions净删8。正增长KEEP为strict Context codec+dense metrics、Feedback estimator/controller、Editor async ownership、immutable Simulation；DELETE/MERGE已闭合DVI、bare phase codec、fixed12/8、point-only/repeated validation、ScanLiveSlot/private average、O(K²) history、公开mutable physics、错误outcome tests及重复Context tests。
+- 验证均打印current-checkout路径：M6合并纵向`122 passed`；Atom整包`300 passed`；Gate回修定向`104 passed`；最终全树`1504 passed, 4 skipped, 6 warnings in 424.33s`，warnings仍仅vendor SWIG deprecation，4 skips仍是无Icarus的M5 RTL runner。AST/strict JSON/old-name/import-boundary/diff-check均green。
+- 明确未验收：本地无官方Hamamatsu header/DLL，不绑定猜测ctypes ABI；真实USB controller、profile曲线来源、correction编码/方向、active slot与optical settle必须按Atom README实验机runbook记录。Root wheel可能遗漏profile package-data，归M7 single-distribution/fresh-install gate，不称已安装可用。
+
+Milestone 6 commit：`Converge USB SLM context, feedback, and simulation truth`。本轮按用户要求停止；M7等待后续指令。
+
+## 12. Checkpoint更新规则
 
 每个milestone开始/完成、长测试前或新用户裁决后立即更新：
 

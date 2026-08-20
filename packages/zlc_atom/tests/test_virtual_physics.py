@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError, replace
 import json
 from pathlib import Path
 import time
@@ -14,6 +15,7 @@ import zlc_atom.devices.simulation.world as simulation_world
 import zlc_atom.devices.slm.solver as slm_solver
 from zlc_atom.devices.simulation import (
     SimulationWorld,
+    SimulationWorldConfig,
     VirtualCamera,
     VirtualCameraConfig,
     VirtualPulseStreamer,
@@ -21,14 +23,14 @@ from zlc_atom.devices.simulation import (
 from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.devices.slm.solver import (
     imported_target,
-    load_phase,
+    load_science_context,
     load_target,
     preset_checkerboard,
     preset_flat_top,
     preset_gaussian,
     preset_grid,
     preset_text,
-    save_phase,
+    save_science_context,
     save_target,
     solve_phase,
     validate_target,
@@ -56,6 +58,10 @@ from tests.pulse_fixture import (
 #: The repository this test belongs to.  Anchored to the file rather than to
 #: the working directory, so a suite run from anywhere still finds pulses/.
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _world(**config_changes: object) -> SimulationWorld:
+    return SimulationWorld(replace(SimulationWorldConfig(), **config_changes))
 
 
 def _world_pulse(
@@ -146,7 +152,7 @@ def _timeline_pulse(
 
 
 def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() -> None:
-    world = SimulationWorld(seed=4)
+    world = _world(seed=4)
     assert world.atom_sigma_px == pytest.approx(0.7)
     assert world.background_rate == pytest.approx(300.0)
     assert world.atom_rate == pytest.approx(145_000.0)
@@ -198,22 +204,73 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
         ("trap_light_shift_linewidths", np.inf),
         ("fluorescence_lifetime_seconds", 0.0),
     ):
-        invalid_world = SimulationWorld(seed=4)
-        setattr(invalid_world, field, invalid)
         with pytest.raises(ValueError, match=field):
-            invalid_world.render_frame(
-                0,
-                exposure_seconds=exposure,
-                probe_seconds=0.005,
-                occupancy=empty,
-            )
+            replace(SimulationWorldConfig(), seed=4, **{field: invalid})
+
+    configured = _world(seed=4, loading_probability=0.75, atom_rate=10_000.0)
+    assert configured.config.loading_probability == 0.75
+    assert configured.atom_rate == 10_000.0
+    with pytest.raises(AttributeError):
+        configured.loading_probability = 1.0
+    with pytest.raises(FrozenInstanceError):
+        configured.config.atom_rate = 1.0
+
+
+def test_workspace_world_profile_is_resolved_before_virtual_device_init(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "simulation-world.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "format": "zlc.simulation.world_profile",
+                "version": 1,
+                "offset_counts": 123.0,
+                "conversion_e_per_count": 0.2,
+                "loading_probability": 0.75,
+                "atom_rate": 10_000.0,
+                "mot_field_optimum_dac": [11, -12, 13],
+            }
+        ),
+        encoding="utf-8",
+    )
+    installation = create_installation(
+        (
+            {
+                "key": "camera",
+                "type_id": "camera.virtual",
+                "config": {"world_profile": str(profile)},
+            },
+        )
+    )
+    try:
+        world = installation.world
+        assert world.loading_probability == 0.75
+        assert world.atom_rate == 10_000.0
+        assert world.config.mot_field_optimum_dac == (11, -12, 13)
+        assert installation.device("camera").photoelectron_conversion == (123.0, 0.2)
+    finally:
+        installation.close()
+
+    duplicate = tmp_path / "duplicate-world.json"
+    duplicate.write_text(
+        '{"format":"zlc.simulation.world_profile","version":1,'
+        '"atom_rate":1,"atom_rate":2}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="strict JSON"):
+        SimulationWorldConfig.from_profile(
+            duplicate,
+            geometry=SimulationWorldConfig().geometry,
+            seed=0,
+        )
 
 
 def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
     """Rendering must not rebuild the same 35 fixed optical spots per frame."""
 
-    world = SimulationWorld(seed=41)
-    reference = SimulationWorld(seed=41)
+    world = _world(seed=41)
+    reference = _world(seed=41)
     site_count = len(world.geometry.site_centers_xy)
     occupancies = (
         np.ones(site_count, dtype=bool),
@@ -263,7 +320,7 @@ def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
     from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
 
     opt_x, opt_y, opt_z = DEFAULT_MOT_FIELD_OPTIMUM_DAC
-    world = SimulationWorld(seed=7)
+    world = _world(seed=7)
     _fire_world(
         world,
         _world_pulse(cooling=True, trap=True, da_x=opt_x, da_y=opt_y, da_z=opt_z),
@@ -299,7 +356,7 @@ def test_mot_follows_the_net_field_and_is_best_at_the_planted_optimum() -> None:
     assert (opt_x, opt_y, opt_z) == (0, 0, 0)
 
     def frames(seed: int, *, da_x: int, da_y: int, da_z: int) -> np.ndarray:
-        world = SimulationWorld(seed=seed)
+        world = _world(seed=seed)
         _fire_world(
             world,
             _world_pulse(cooling=True, trap=True, da_x=da_x, da_y=da_y, da_z=da_z),
@@ -347,7 +404,7 @@ def test_mot_camera_sees_the_dac_from_its_own_fire() -> None:
     """The first camera edge sees the bus value already played in that fire."""
 
     def capture(da_y: int) -> np.ndarray:
-        world = SimulationWorld(seed=19)
+        world = _world(seed=19)
         shape = (200, 320)
         camera = VirtualCamera(
             VirtualCameraConfig(
@@ -412,7 +469,7 @@ def test_mot_camera_sees_the_dac_from_its_own_fire() -> None:
 
 
 def test_virtual_sites_have_small_detector_nuisance_and_psf_diversity() -> None:
-    world = SimulationWorld(seed=4)
+    world = _world(seed=4)
     efficiency = np.array(world._detector_efficiency, copy=True)
     sigma_xy = np.array(world._site_psf_sigma_xy, copy=True)
     angles = np.array(world._site_psf_angle_radians, copy=True)
@@ -426,7 +483,7 @@ def test_virtual_sites_have_small_detector_nuisance_and_psf_diversity() -> None:
     assert float(np.ptp(angles)) > 0.05
     assert float(np.ptp(skew)) > 0.05
     np.testing.assert_allclose(
-        SimulationWorld(seed=4)._detector_efficiency,
+        _world(seed=4)._detector_efficiency,
         efficiency,
     )
 
@@ -435,7 +492,7 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
     ratios: list[float] = []
     correctable_fractions: list[float] = []
     for seed in (0, 1, 4, 11, 23, 37, 91):
-        world = SimulationWorld(seed=seed)
+        world = _world(seed=seed)
         # Hidden plant truth is intentionally private.  Only this acceptance
         # oracle may inspect it; a solver or Task can reach the plant only via
         # the SLM command and qCMOS publications.
@@ -578,7 +635,7 @@ def test_nominal_and_extra_traps_share_raw_local_peak_depths() -> None:
             np.zeros(np.count_nonzero(~matched)),
         )
 
-    world = SimulationWorld(seed=23)
+    world = _world(seed=23)
     assert_nominal_peak_matches(world)
     assert np.all(np.asarray(world._slm_nominal_peak_indices_yx) >= 0)
     assert len(world._extra_slm_site_indices_yx) == 0
@@ -639,7 +696,7 @@ def test_nominal_and_extra_traps_share_raw_local_peak_depths() -> None:
 def test_slm_topology_rejects_blind_sidelobes_across_hidden_plants() -> None:
     """Only dominant off-grid peaks become new traps across hidden benches."""
 
-    reference = SimulationWorld(seed=0)
+    reference = _world(seed=0)
     nominal = np.asarray(reference._slm_site_indices_yx)
     shape_yx = reference.slm_shape_yx
     base = np.array(preset_grid(shape_yx, (5, 7)), copy=True)
@@ -684,7 +741,7 @@ def test_slm_topology_rejects_blind_sidelobes_across_hidden_plants() -> None:
     )
 
     for seed in range(256):
-        world = SimulationWorld(seed=seed)
+        world = _world(seed=seed)
         assert np.all(np.asarray(world._slm_nominal_peak_indices_yx) >= 0)
         assert len(world._extra_slm_site_indices_yx) == 0
         for phase, active, expected_extra in zip(
@@ -714,7 +771,10 @@ def test_slm_topology_rejects_blind_sidelobes_across_hidden_plants() -> None:
 
 
 def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
-    installation = create_installation("virtual")
+    installation = create_installation(
+        "virtual",
+        world=_world(loading_probability=1.0, atom_rate=10_000.0),
+    )
     world = installation.world
     camera = installation.device("camera")
     try:
@@ -726,8 +786,6 @@ def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
         target[tuple(nominal_sites[kept].T)] = 1.0
         sparse_phase, _metadata = solve_phase(target, seed=0)
 
-        world.loading_probability = 1.0
-        world.atom_rate = 10_000.0
         _fire_world(world, _world_pulse(cooling=True, trap=True))
         assert np.all(world._occupancy)
 
@@ -796,7 +854,7 @@ def test_removed_nominal_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
 def test_occupied_qcmos_box_brightness_tracks_fixed_site_trap_depth() -> None:
     """BOX means follow the shared Stark-shifted response to local depth."""
 
-    world = SimulationWorld(seed=23)
+    world = _world(seed=23)
     target = np.array(preset_grid(world.slm_shape_yx, (5, 7)), copy=True)
     sites = np.argwhere(target > 0.0)
     for index, site in enumerate(sites):
@@ -832,14 +890,15 @@ def test_occupied_qcmos_box_brightness_tracks_fixed_site_trap_depth() -> None:
 def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
     """Each public phase command must change the next physical atom image."""
 
-    installation = create_installation("virtual")
+    installation = create_installation(
+        "virtual",
+        world=_world(loading_probability=1.0, atom_rate=10_000.0),
+    )
     world = installation.world
     camera = installation.device("camera")
     sequencer = installation.device("sequencer")
     slm = installation.device("slm")
     try:
-        world.loading_probability = 1.0
-        world.atom_rate = 10_000.0
         base_target = np.array(preset_grid(slm.shape_yx, (5, 7)), copy=True)
         nominal_indices = np.argwhere(base_target > 0.0)
         old_index = nominal_indices[len(nominal_indices) // 2]
@@ -919,7 +978,7 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
 
 
 def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> None:
-    world = SimulationWorld(seed=11)
+    world = _world(seed=11)
     target = np.zeros(world.slm_shape_yx, dtype=np.float32)
     nominal_sites = np.asarray(world._slm_site_indices_yx)
     selected = np.asarray((0, 17, 34))
@@ -951,9 +1010,9 @@ def test_virtual_shots_randomly_reload_instead_of_alternating_two_patterns() -> 
 
 
 def test_atom_qcmos_and_mot_draws_are_independent() -> None:
-    reference = SimulationWorld(seed=31)
-    after_qcmos = SimulationWorld(seed=31)
-    after_mot = SimulationWorld(seed=31)
+    reference = _world(seed=31)
+    after_qcmos = _world(seed=31)
+    after_mot = _world(seed=31)
     np.testing.assert_array_equal(
         reference._detector_efficiency, after_qcmos._detector_efficiency
     )
@@ -992,8 +1051,8 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     np.testing.assert_array_equal(reference._occupancy, after_qcmos._occupancy)
     np.testing.assert_array_equal(reference._occupancy, after_mot._occupancy)
 
-    qcmos_reference = SimulationWorld(seed=37)
-    qcmos_after_mot = SimulationWorld(seed=37)
+    qcmos_reference = _world(seed=37)
+    qcmos_after_mot = _world(seed=37)
     loaded = np.ones(35, dtype=bool)
     qcmos_after_mot.render_mot_frame(
         0,
@@ -1014,8 +1073,8 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
         ),
     )
 
-    mot_reference = SimulationWorld(seed=43)
-    mot_after_qcmos = SimulationWorld(seed=43)
+    mot_reference = _world(seed=43)
+    mot_after_qcmos = _world(seed=43)
     mot_after_qcmos.render_frame(
         0,
         exposure_seconds=0.005,
@@ -1165,7 +1224,7 @@ def test_fire_extends_release_to_the_delayed_physical_horizon(
 
 
 def test_release_does_not_deplete_the_mot_population() -> None:
-    world = SimulationWorld(seed=17)
+    world = _world(seed=17)
     world._mot_population = 1.0
     world._occupancy[:] = True
     world._lose_atoms(16e-6)
@@ -1173,7 +1232,7 @@ def test_release_does_not_deplete_the_mot_population() -> None:
 
 
 def test_safe_has_no_persistent_test_only_occupancy_mode() -> None:
-    world = SimulationWorld(seed=2)
+    world = _world(seed=2)
     assert not hasattr(world, "set_occupancy")
     target = np.zeros(world.slm_shape_yx, dtype=np.float32)
     for index in ((32, 24), (64, 72), (96, 104)):
@@ -1198,10 +1257,9 @@ def test_safe_has_no_persistent_test_only_occupancy_mode() -> None:
 
 
 def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
-    world = SimulationWorld(seed=3)
+    world = _world(seed=3, loading_probability=1.0)
     _fire_world(world, _world_pulse(trap=True))
     assert not np.any(world._occupancy), "a pulse without cooling cannot load atoms"
-    world.loading_probability = 1.0
     _fire_world(world, _world_pulse(cooling=True, trap=True))
     assert np.all(world._occupancy)
     _fire_world(world, _world_pulse(duration=1.0))
@@ -1209,7 +1267,7 @@ def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
 
 
 def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
-    world = SimulationWorld(seed=1)
+    world = _world(seed=1)
     streamer = VirtualPulseStreamer(
         world=world,
         camera_trigger_channel=CAMERA_CHANNEL,
@@ -1336,7 +1394,7 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
 
 
 def test_camera_cycle_source_preflights_compiled_windows_and_cadence() -> None:
-    world = SimulationWorld(seed=5)
+    world = _world(seed=5)
     camera = VirtualCamera(frame_source=world.render_frame)
     streamer = VirtualPulseStreamer(world=world)
     streamer.open()
@@ -1417,7 +1475,7 @@ def test_virtual_camera_busy_edges_leave_physical_ordinal_gaps() -> None:
         config["params"],
         float(config["clock_hz"]),
     )
-    world = SimulationWorld(seed=7)
+    world = _world(seed=7)
     camera = VirtualCamera(frame_source=world.render_frame)
     world.register_camera(camera)
     camera.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=1.0)
@@ -1669,6 +1727,8 @@ def test_slm_presets_are_one_continuous_target_truth() -> None:
     assert gaussian[center_y, center_x + 10] == pytest.approx(
         0.9 * np.exp(-2.0), rel=1e-6
     )
+    assert gaussian[0, 0] == 0.0
+    assert np.any(gaussian == 0.0)
     assert flat_top[center_y, center_x] == pytest.approx(0.6)
     assert flat_top[0, 0] == 0.0
     assert np.any((flat_top > 0.0) & (flat_top < 0.6))
@@ -2070,9 +2130,14 @@ def test_slm_solver_uses_authored_pupil_in_every_full_resolution_path() -> None:
         assert metadata["method"] == method
         assert metadata["transform"] == transform
         _normalized, ratio, efficiency = _support_quality(phase, target, pupil)
-        assert metadata["support_intensity_ratio"] == pytest.approx(
-            ratio, rel=2e-5
-        )
+        if objective_kind == "spots":
+            assert metadata["support_intensity_ratio"] == pytest.approx(
+                ratio, rel=2e-5
+            )
+        else:
+            assert "support_intensity_ratio" not in metadata
+            assert metadata["signal_relative_rms"] >= 0.0
+            assert metadata["background_power_fraction"] >= 0.0
         assert metadata["diffraction_efficiency"] == pytest.approx(
             efficiency, rel=2e-5
         )
@@ -2555,11 +2620,26 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
         dense, objective_kind="image", seed=9
     )
     assert dense_metadata["method"] == "mraf"
-    assert dense_metadata["iterations"] == 300
+    assert dense_metadata["early_stopped"] is True
+    assert dense_metadata["stop_reason"] == "fom-stagnation"
+    assert dense_metadata["iterations"] < dense_metadata["max_iterations"]
+    assert dense_metadata["signal_pixels"] > 0
+    assert dense_metadata["noise_pixels"] > 0
+    assert dense_metadata["figure_of_merit"] >= 0.0
+    assert dense_metadata["signal_relative_rms"] >= 0.0
+    assert 0.0 <= dense_metadata["background_power_fraction"] <= 1.0
+    assert dense_metadata["signal_roughness"] >= 0.0
     intensity = _ideal_slm_intensity(dense_phase)
     interior = dense >= 0.999
     values = intensity[interior]
     assert float(np.percentile(values, 95) / np.percentile(values, 5)) <= 1.01
+
+    _exact_dense, exact_dense_metadata = solve_phase(
+        dense, objective_kind="image", iterations=37, seed=9
+    )
+    assert exact_dense_metadata["iterations_run"] == 37
+    assert exact_dense_metadata["early_stopped"] is False
+    assert exact_dense_metadata["stop_reason"] == "iteration-limit"
 
     warmed, warm_metadata = solve_phase(
         sparse,
@@ -2588,31 +2668,20 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
         solve_phase(np.zeros((16, 16), dtype=np.float32))
 
 
-def test_slm_target_json_and_phase_npz_are_strict_plain_artifacts(tmp_path: Path) -> None:
+def test_slm_target_json_is_a_strict_objective_bearing_artifact(tmp_path: Path) -> None:
     target = preset_flat_top((24, 32), (7, 11), edge=2)
-    target_path = save_target(tmp_path / "target.json", target)
-    np.testing.assert_array_equal(load_target(target_path), target)
-
-    phase, metadata = solve_phase(
-        preset_grid((24, 32), (2, 3), spacing_yx=(7, 8)),
-        iterations=30,
-        seed=4,
+    target_path = save_target(
+        tmp_path / "target.json", target, objective_kind="image"
     )
-    metadata = {**metadata, "note": "plain", "shape": [24, 32]}
-    phase_path = save_phase(tmp_path / "phase.npz", phase, metadata)
-    loaded_phase, loaded_metadata = load_phase(phase_path)
-    np.testing.assert_array_equal(loaded_phase, phase)
-    assert loaded_metadata == metadata
-    with np.load(phase_path, allow_pickle=False) as archive:
-        assert set(archive.files) == {"phase", "metadata"}
-        assert archive["phase"].dtype == np.dtype("<f4")
-        assert archive["metadata"].shape == ()
-        assert archive["metadata"].dtype.kind == "U"
+    loaded_target, loaded_objective = load_target(target_path)
+    np.testing.assert_array_equal(loaded_target, target)
+    assert loaded_objective == "image"
 
     malformed_target = tmp_path / "bad-target.json"
     malformed_target.write_text(
         '{"format":"zlc.slm.target","format":"zlc.slm.target",'
-        '"version":1,"shape":[1,1],"intensity":[[1.0]]}',
+        '"version":2,"shape":[1,1],"intensity":[[1.0]],'
+        '"objective_kind":"spots"}',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="duplicate"):
@@ -2622,17 +2691,20 @@ def test_slm_target_json_and_phase_npz_are_strict_plain_artifacts(tmp_path: Path
         (
             "bad-version.json",
             '{"format":"zlc.slm.target","version":true,'
-            '"shape":[2,2],"intensity":[[1,0],[0,1]]}',
+            '"shape":[2,2],"intensity":[[1,0],[0,1]],'
+            '"objective_kind":"spots"}',
         ),
         (
             "bad-shape.json",
-            '{"format":"zlc.slm.target","version":1,'
-            '"shape":[2.0,2],"intensity":[[1,0],[0,1]]}',
+            '{"format":"zlc.slm.target","version":2,'
+            '"shape":[2.0,2],"intensity":[[1,0],[0,1]],'
+            '"objective_kind":"spots"}',
         ),
         (
             "bad-value.json",
-            '{"format":"zlc.slm.target","version":1,'
-            '"shape":[2,2],"intensity":[["1",0],[0,1]]}',
+            '{"format":"zlc.slm.target","version":2,'
+            '"shape":[2,2],"intensity":[["1",0],[0,1]],'
+            '"objective_kind":"spots"}',
         ),
     ):
         malformed = tmp_path / name
@@ -2640,23 +2712,134 @@ def test_slm_target_json_and_phase_npz_are_strict_plain_artifacts(tmp_path: Path
         with pytest.raises(ValueError):
             load_target(malformed)
 
-    malformed_phase = tmp_path / "bad-phase.npz"
-    with malformed_phase.open("wb") as stream:
-        np.savez(
-            stream,
-            phase=phase,
-            metadata=np.asarray("{}"),
-            unexpected=np.asarray(1),
-        )
-    with pytest.raises(ValueError, match="members"):
-        load_phase(malformed_phase)
+def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
+    tmp_path: Path,
+) -> None:
+    shape = (8, 10)
+    yy, xx = np.ogrid[: shape[0], : shape[1]]
+    pattern = canonical_phase(np.broadcast_to(0.1 + xx / 5.0, shape), shape)
+    wavefront = canonical_phase(np.broadcast_to(-0.2 + yy / 7.0, shape), shape)
+    phase = canonical_phase(
+        pattern.astype(np.float64) + wavefront.astype(np.float64), shape
+    )
+    amplitude = np.exp(-((xx - 4.5) ** 2 + (yy - 3.5) ** 2) / 12.0).astype(
+        np.float32
+    )
+    support = np.broadcast_to(amplitude > 0.25, shape).copy()
+    receipt = {
+        "transport": "usb",
+        "identity": "hamamatsu-x15213:usb:LSH0804382",
+        "profile": "LSH0804382",
+        "model": "X15213",
+        "serial": "LSH0804382",
+        "wavelength_nm": 852.0,
+        "flip_x": False,
+        "flip_y": True,
+        "correction_path": "CAL_LSH0804382_852nm.bmp",
+        "correction_enabled": True,
+        "mapping_revision": 3,
+        "settle_seconds": 0.05,
+        "phase_curve_source": "workspace/profile.json",
+        "outcome": "known-new",
+        "command_revision": 7,
+        "stage": "settled",
+        "readback": "exact-frame-memory",
+    }
+    correction = {
+        "kind": "pupil_phase_map",
+        "reference": "workspace/corrections/my_correction.npz",
+        "wavelength_nm": 852.0,
+        "pupil": {
+            "enabled": True,
+            "center_xy": [4.5, 3.5],
+            "diameter_xy": [7.0, 6.0],
+        },
+        "coordinate_system": "slm-pixel-xy",
+        "valid_region": "frozen pupil support",
+        "measurement_method": "dense-grid interferometry",
+    }
+    path = save_science_context(
+        tmp_path / "context.npz",
+        phase,
+        pattern_phase=pattern,
+        operator_wavefront=wavefront,
+        pupil_amplitude=amplitude,
+        pupil_support=support,
+        objective_kind="spots",
+        pupil={
+            "enabled": True,
+            "center_xy": [4.5, 3.5],
+            "diameter_xy": [7.0, 6.0],
+        },
+        system_correction=correction,
+        command_receipt=receipt,
+        pattern_metadata={"method": "wgs-kim", "iterations": 80},
+        operator_metadata={"carrier_waves_xy": [1.0, -0.5]},
+    )
+    context = load_science_context(path)
+    for key, expected in (
+        ("phase", phase),
+        ("pattern_phase", pattern),
+        ("operator_wavefront", wavefront),
+        ("pupil_amplitude", amplitude),
+        ("pupil_support", support),
+    ):
+        np.testing.assert_array_equal(context[key], expected)
+        assert not context[key].flags.writeable
+    assert context["objective_kind"] == "spots"
+    assert context["system_correction"] == correction
+    assert context["command_receipt"] == receipt
+    assert context["pupil"]["center_xy"] == [4.5, 3.5]
 
-    wrong_dtype = tmp_path / "wrong-dtype.npz"
-    with wrong_dtype.open("wb") as stream:
-        np.savez(
-            stream,
-            phase=np.asarray(phase, dtype=np.float64),
-            metadata=np.asarray("{}"),
+    save_science_context(
+        tmp_path / "response-context.npz",
+        phase,
+        pattern_phase=pattern,
+        operator_wavefront=wavefront,
+        pupil_amplitude=amplitude,
+        pupil_support=support,
+        objective_kind="spots",
+        pupil={
+            "enabled": True,
+            "center_xy": [4.5, 3.5],
+            "diameter_xy": [7.0, 6.0],
+        },
+        system_correction={
+            **correction,
+            "kind": "target_response_map",
+            "reference": "workspace/corrections/site_response.npz",
+            "measurement_method": "all-shot fluorescence",
+        },
+        command_receipt={
+            **receipt,
+            "transport": "virtual",
+            "identity": "virtual-simulation:slm",
+            "profile": "virtual",
+            "wavelength_nm": None,
+        },
+        pattern_metadata={},
+        operator_metadata={},
+    )
+    with pytest.raises(ValueError, match="pupil_phase_map or target_response_map"):
+        save_science_context(
+            tmp_path / "ambiguous.npz",
+            phase,
+            pattern_phase=pattern,
+            operator_wavefront=wavefront,
+            pupil_amplitude=amplitude,
+            pupil_support=support,
+            objective_kind="spots",
+            pupil={
+                "enabled": True,
+                "center_xy": [4.5, 3.5],
+                "diameter_xy": [7.0, 6.0],
+            },
+            system_correction={
+                **correction,
+                "kind": "both",
+                "reference": "ambiguous.npz",
+            },
+            command_receipt=receipt,
+            pattern_metadata={},
+            operator_metadata={},
         )
-    with pytest.raises(ValueError, match="float32"):
-        load_phase(wrong_dtype)

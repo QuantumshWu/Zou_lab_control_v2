@@ -13,6 +13,7 @@ from zlc_atom.devices.camera import (
 from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.simulation import (
     SimulationWorld,
+    SimulationWorldConfig,
     VirtualCamera,
     VirtualCameraConfig,
     VirtualPulseStreamer,
@@ -107,7 +108,7 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
     frames "short".
     """
 
-    world = SimulationWorld(seed=3)
+    world = SimulationWorld(SimulationWorldConfig(seed=3))
     camera = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=world.geometry.image_shape_yx),
         frame_source=lambda ordinal, exposure: world.render_frame(

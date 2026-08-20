@@ -17,7 +17,31 @@ from zlc_durable import atomic_write_file, write_readable_json
 from .device import canonical_phase
 
 _TARGET_FORMAT = "zlc.slm.target"
-_TARGET_KEYS = frozenset({"format", "version", "shape", "intensity"})
+_TARGET_KEYS = frozenset(
+    {"format", "version", "shape", "intensity", "objective_kind"}
+)
+_SCIENCE_CONTEXT_FORMAT = "zlc.slm.science_context"
+_CONTEXT_ARRAY_KEYS = (
+    "phase", "pattern_phase", "operator_wavefront", "pupil_amplitude",
+    "pupil_support",
+)
+_SCIENCE_CONTEXT_MEMBERS = frozenset((*_CONTEXT_ARRAY_KEYS, "metadata"))
+_SCIENCE_CONTEXT_KEYS = frozenset(
+    {
+        "format",
+        "version",
+        "objective_kind",
+        "pupil",
+        "system_correction",
+        "command_receipt",
+        "pattern_metadata",
+        "operator_metadata",
+    }
+)
+_OBJECTIVE_KINDS = frozenset({"auto", "spots", "image"})
+_SYSTEM_CORRECTION_KINDS = frozenset(
+    {"pupil_phase_map", "target_response_map"}
+)
 
 def _pair(value: object, name: str) -> tuple[int, int]:
     try:
@@ -66,6 +90,12 @@ def validate_target(values: object) -> np.ndarray:
     if np.any(target < 0.0):
         raise ValueError("target intensity must be non-negative")
     return _readonly(target)
+
+
+def _objective_kind(value: object) -> str:
+    if type(value) is not str or value not in _OBJECTIVE_KINDS:
+        raise ValueError("objective_kind must be 'auto', 'spots', or 'image'")
+    return value
 
 def _grid_indices(
     shape_yx: object,
@@ -149,8 +179,10 @@ def preset_gaussian(
         ((yy - shape[0] // 2) / radius[0]) ** 2
         + ((xx - shape[1] // 2) / radius[1]) ** 2
     )
+    profile = np.exp(exponent)
+    profile[exponent < -8.0] = 0.0
     return validate_target(
-        _scalar(intensity, "intensity", nonnegative=True) * np.exp(exponent)
+        _scalar(intensity, "intensity", nonnegative=True) * profile
     )
 
 def preset_flat_top(
@@ -405,6 +437,54 @@ def _support_intensity_ratio(
 ) -> float:
     relative = np.square(magnitude, dtype=np.float32) / desired
     return float(np.max(relative) / max(float(np.min(relative)), epsilon))
+
+
+def _image_metrics(
+    far_field: np.ndarray,
+    desired: np.ndarray,
+    support: np.ndarray,
+    epsilon: float,
+) -> tuple[float, float, float, float]:
+    power = np.square(np.abs(far_field), dtype=np.float32)
+    expected = desired[support]
+    relative = power[support] / np.maximum(expected, epsilon)
+    relative /= max(
+        float(np.sum(relative * expected) / np.sum(expected)), epsilon
+    )
+    relative_rms = float(
+        np.sqrt(
+            np.sum(expected * np.square(relative - 1.0)) / np.sum(expected)
+        )
+    )
+    relative_image = np.zeros(desired.shape, dtype=np.float32)
+    relative_image[support] = relative
+    differences = []
+    vertical = support[1:] & support[:-1]
+    horizontal = support[:, 1:] & support[:, :-1]
+    if np.any(vertical):
+        differences.append((relative_image[1:] - relative_image[:-1])[vertical])
+    if np.any(horizontal):
+        differences.append((relative_image[:, 1:] - relative_image[:, :-1])[horizontal])
+    roughness = float(
+        np.sqrt(
+            np.mean(
+                np.square(
+                    np.concatenate(differences)
+                    if differences
+                    else np.zeros(1, dtype=np.float32)
+                )
+            )
+        )
+    )
+    background = float(
+        np.sum(power[~support]) / max(float(np.sum(power)), epsilon)
+    )
+    return (
+        relative_rms,
+        roughness,
+        background,
+        relative_rms + 0.05 * roughness + 0.10 * background,
+    )
 
 def _canonical_unshifted_phase(field: np.ndarray) -> np.ndarray:
     phase = np.angle(field).astype(np.float32, copy=False)
@@ -745,10 +825,18 @@ def solve_phase(
     else:
         if saved_state is not None:
             state_status = "objective-changed"
+        if bool(np.all(support_unshifted)):
+            raise ValueError(
+                "image objective requires zero-valued pixels defining a noise region"
+            )
         if initial_phase is None:
-            phase = np.random.default_rng(seed_value).uniform(
-                0.0, 2.0 * np.pi, desired.shape
-            ).astype(np.float32)
+            yy, xx = np.ogrid[
+                -1.0:1.0:desired.shape[0] * 1j,
+                -1.0:1.0:desired.shape[1] * 1j,
+            ]
+            phase = np.asarray(
+                np.pi * (0.75 * xx * xx + yy * yy), dtype=np.float32
+            )
         else:
             phase = np.array(canonical_phase(initial_phase, desired.shape), copy=True)
         field = fft.ifftshift(
@@ -761,10 +849,34 @@ def solve_phase(
         amplitude /= np.linalg.norm(amplitude[support_unshifted])
         amplitude_spots = amplitude[support_unshifted]
         weights = np.array(amplitude_spots, copy=True)
+        best_fom = float("inf")
+        previous_fom = float("inf")
+        best_field: np.ndarray | None = None
+        stagnant_iterations = 0
         for _iteration in range(count):
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM phase solve stopped")
             far = fft.fft2(field, norm="ortho")
+            if iterations is None:
+                _relative_rms, _roughness, _background, fom = _image_metrics(
+                    far, desired_unshifted, support_unshifted, epsilon
+                )
+                if best_field is None or fom < best_fom:
+                    best_fom = fom
+                    best_field = np.array(field, copy=True)
+                if np.isfinite(previous_fom) and previous_fom - fom < 1e-4:
+                    stagnant_iterations += 1
+                else:
+                    stagnant_iterations = 0
+                previous_fom = fom
+                if (
+                    iterations_run >= 24
+                    and _relative_rms <= 0.005
+                    and stagnant_iterations >= 12
+                ):
+                    field = best_field
+                    early_stopped = True
+                    break
             selected = far[support_unshifted]
             magnitude = np.abs(selected).astype(np.float32, copy=False)
             measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
@@ -821,8 +933,12 @@ def solve_phase(
             np.float32, copy=False
         )
         total_power = float(np.sum(np.square(np.abs(final), dtype=np.float32)))
-    support_ratio = _support_intensity_ratio(
-        final_magnitude, desired_unshifted[support_unshifted], epsilon
+    support_ratio = (
+        _support_intensity_ratio(
+            final_magnitude, desired_unshifted[support_unshifted], epsilon
+        )
+        if method == "wgs-kim"
+        else None
     )
     measured = np.square(final_magnitude, dtype=np.float32)
     measured /= max(float(np.sum(measured)), epsilon)
@@ -862,7 +978,7 @@ def solve_phase(
         spot_optimizer_state.clear()
         spot_optimizer_state.update(new_state)
 
-    return result, {
+    metadata = {
         "method": method,
         "objective_kind": resolved_kind,
         "pupil_source": pupil_source,
@@ -873,12 +989,34 @@ def solve_phase(
         "iterations_run": iterations_run,
         "max_iterations": count,
         "early_stopped": early_stopped,
-        "stop_reason": "support-ratio" if early_stopped else "iteration-limit",
-        "support_intensity_ratio": support_ratio,
+        "stop_reason": (
+            "support-ratio"
+            if early_stopped and method == "wgs-kim"
+            else "fom-stagnation"
+            if early_stopped
+            else "iteration-limit"
+        ),
         "seed": seed_value,
         "rms_intensity_error": error,
         "diffraction_efficiency": efficiency,
     }
+    if support_ratio is not None:
+        metadata["support_intensity_ratio"] = support_ratio
+    else:
+        relative_rms, roughness, background, fom = _image_metrics(
+            final, desired_unshifted, support_unshifted, epsilon
+        )
+        metadata.update(
+            {
+                "signal_pixels": int(np.count_nonzero(support_unshifted)),
+                "noise_pixels": int(np.count_nonzero(~support_unshifted)),
+                "signal_relative_rms": relative_rms,
+                "signal_roughness": roughness,
+                "background_power_fraction": background,
+                "figure_of_merit": fom,
+            }
+        )
+    return result, metadata
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -891,28 +1029,40 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _constant(value: str) -> None:
     raise ValueError(f"JSON contains {value}")
 
-def save_target(path: str | Path, target: object) -> Path:
+def save_target(
+    path: str | Path,
+    target: object,
+    *,
+    objective_kind: str,
+) -> Path:
     intensity = validate_target(target)
     return write_readable_json(
         path,
         {
             "format": _TARGET_FORMAT,
-            "version": 1,
+            "version": 2,
             "shape": list(intensity.shape),
             "intensity": intensity.tolist(),
+            "objective_kind": _objective_kind(objective_kind),
         },
     )
 
-def load_target(path: str | Path) -> np.ndarray:
+def load_target(path: str | Path) -> tuple[np.ndarray, str]:
     payload = json.loads(
         Path(path).read_text(encoding="utf-8"),
         object_pairs_hook=_strict_object,
         parse_constant=_constant,
     )
     if not isinstance(payload, dict) or set(payload) != _TARGET_KEYS:
-        raise ValueError("target JSON has the wrong fields")
-    if payload["format"] != _TARGET_FORMAT or type(payload["version"]) is not int or payload["version"] != 1:
-        raise ValueError("unsupported target JSON format")
+        raise ValueError(
+            "target JSON fields differ from strict v2 intensity/objective format"
+        )
+    if (
+        payload["format"] != _TARGET_FORMAT
+        or type(payload["version"]) is not int
+        or payload["version"] != 2
+    ):
+        raise ValueError("unsupported target JSON format; expected strict v2")
     shape = payload["shape"]
     if (
         not isinstance(shape, list)
@@ -931,47 +1081,262 @@ def load_target(path: str | Path) -> np.ndarray:
     target = validate_target(intensity)
     if list(target.shape) != shape:
         raise ValueError("target JSON shape differs from intensity")
-    return target
+    return target, _objective_kind(payload["objective_kind"])
 
 def _metadata_json(metadata: Mapping[str, object]) -> str:
     if not isinstance(metadata, Mapping) or any(not isinstance(key, str) for key in metadata):
         raise TypeError("phase metadata must be a string-keyed mapping")
     return json.dumps(dict(metadata), ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
-def save_phase(
+
+def _json_object(value: object, name: str) -> dict[str, object]:
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) for key in value
+    ):
+        raise TypeError(f"{name} must be a string-keyed mapping")
+    encoded = _metadata_json(value)
+    result = json.loads(
+        encoded, object_pairs_hook=_strict_object, parse_constant=_constant
+    )
+    if not isinstance(result, dict):
+        raise TypeError(f"{name} must be a JSON object")
+    return result
+
+
+def _system_correction(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    result = _json_object(value, "system correction reference")
+    if set(result) != {
+        "kind",
+        "reference",
+        "wavelength_nm",
+        "pupil",
+        "coordinate_system",
+        "valid_region",
+        "measurement_method",
+    }:
+        raise ValueError("system correction reference has the wrong fields")
+    if result["kind"] not in _SYSTEM_CORRECTION_KINDS:
+        raise ValueError(
+            "system correction kind must be pupil_phase_map or target_response_map"
+        )
+    reference = result["reference"]
+    if type(reference) is not str or not reference.strip():
+        raise ValueError("system correction reference must be non-empty text")
+    wavelength = result["wavelength_nm"]
+    if (
+        type(wavelength) not in (int, float)
+        or not np.isfinite(wavelength)
+        or wavelength <= 0
+    ):
+        raise ValueError("system correction wavelength_nm must be finite and positive")
+    for key in ("coordinate_system", "valid_region", "measurement_method"):
+        if type(result[key]) is not str or not result[key].strip():
+            raise ValueError(f"system correction {key} must be non-empty text")
+    return {
+        "kind": result["kind"],
+        "reference": reference,
+        "wavelength_nm": float(wavelength),
+        "pupil": _pupil_metadata(result["pupil"]),
+        "coordinate_system": result["coordinate_system"],
+        "valid_region": result["valid_region"],
+        "measurement_method": result["measurement_method"],
+    }
+
+
+def _command_receipt(value: object) -> dict[str, object]:
+    result = _json_object(value, "SLM command receipt")
+    required = {
+        "transport", "identity", "profile", "wavelength_nm", "flip_x",
+        "flip_y", "correction_path", "correction_enabled",
+        "mapping_revision", "outcome", "command_revision",
+    }
+    missing = required - set(result)
+    if missing:
+        raise ValueError(f"SLM command receipt is missing {sorted(missing)!r}")
+    wavelength_policy = {"usb": True, "virtual": False}
+    try:
+        requires_wavelength = wavelength_policy[result["transport"]]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "SLM command receipt transport must be usb or virtual"
+        ) from error
+    if result["outcome"] not in {"known-old", "known-new", "unknown"}:
+        raise ValueError("SLM command receipt has an invalid outcome")
+    for key in ("identity", "profile", "correction_path"):
+        if type(result[key]) is not str:
+            raise TypeError(f"SLM command receipt {key} must be text")
+    for key in ("flip_x", "flip_y", "correction_enabled"):
+        if type(result[key]) is not bool:
+            raise TypeError(f"SLM command receipt {key} must be bool")
+    for key in ("mapping_revision", "command_revision"):
+        if type(result[key]) is not int or result[key] < 0:
+            raise ValueError(f"SLM command receipt {key} must be a non-negative int")
+    wavelength = result["wavelength_nm"]
+    if requires_wavelength and wavelength is None:
+        raise ValueError(
+            "USB SLM command receipt wavelength_nm must be finite and positive"
+        )
+    if wavelength is not None and (
+        type(wavelength) not in (int, float)
+        or not np.isfinite(wavelength)
+        or wavelength <= 0
+    ):
+        raise ValueError("SLM command receipt wavelength_nm is invalid")
+    return result
+
+
+def _pupil_metadata(value: object) -> dict[str, object]:
+    result = _json_object(value, "pupil metadata")
+    if set(result) != {"enabled", "center_xy", "diameter_xy"}:
+        raise ValueError("pupil metadata has the wrong fields")
+    if type(result["enabled"]) is not bool:
+        raise TypeError("pupil enabled must be bool")
+    for key, positive in (("center_xy", False), ("diameter_xy", True)):
+        pair = result[key]
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(type(item) not in (int, float) for item in pair)
+            or any(not np.isfinite(item) or (positive and item <= 0) for item in pair)
+        ):
+            raise ValueError(f"pupil {key} must be a finite numeric pair")
+    return result
+
+
+def _pupil_array(values: object, shape: tuple[int, int]) -> np.ndarray:
+    array = np.asarray(values)
+    if array.shape != shape or array.dtype.kind not in "iuf":
+        raise ValueError("pupil amplitude must be a numeric matrix matching phase")
+    amplitude = np.asarray(array, dtype="<f4")
+    if not np.all(np.isfinite(amplitude)) or np.any(amplitude < 0.0):
+        raise ValueError("pupil amplitude must be finite and non-negative")
+    return _readonly(amplitude)
+
+
+def _pupil_mask(values: object, shape: tuple[int, int]) -> np.ndarray:
+    support = np.asarray(values)
+    if support.shape != shape or support.dtype != np.dtype(bool):
+        raise ValueError("pupil support must be a bool matrix matching phase")
+    return np.frombuffer(
+        np.ascontiguousarray(support).tobytes(), dtype=np.bool_
+    ).reshape(shape)
+
+
+def save_science_context(
     path: str | Path,
     phase: object,
-    metadata: Mapping[str, object],
+    *,
+    pattern_phase: object,
+    operator_wavefront: object,
+    pupil_amplitude: object,
+    pupil_support: object,
+    objective_kind: str,
+    pupil: Mapping[str, object],
+    system_correction: Mapping[str, object] | None,
+    command_receipt: Mapping[str, object],
+    pattern_metadata: Mapping[str, object],
+    operator_metadata: Mapping[str, object],
 ) -> Path:
     values = np.asarray(phase)
     if values.ndim != 2:
-        raise ValueError("phase must be a two-dimensional array")
-    radians = canonical_phase(values, tuple(values.shape))
+        raise ValueError("science phase must be a two-dimensional array")
+    shape = tuple(values.shape)
+    science = canonical_phase(values, shape)
+    pattern = canonical_phase(pattern_phase, shape)
+    wavefront = canonical_phase(operator_wavefront, shape)
+    composed = canonical_phase(
+        pattern.astype(np.float64) + wavefront.astype(np.float64), shape
+    )
+    circular_error = np.abs(
+        np.angle(np.exp(1j * (science.astype(np.float64) - composed)))
+    )
+    if float(np.max(circular_error)) > 2e-5:
+        raise ValueError("science phase does not equal Pattern plus operator wavefront")
+    amplitude = _pupil_array(pupil_amplitude, shape)
+    support = _pupil_mask(pupil_support, shape)
+    metadata = {
+        "format": _SCIENCE_CONTEXT_FORMAT,
+        "version": 1,
+        "objective_kind": _objective_kind(objective_kind),
+        "pupil": _pupil_metadata(pupil),
+        "system_correction": _system_correction(system_correction),
+        "command_receipt": _command_receipt(command_receipt),
+        "pattern_metadata": _json_object(pattern_metadata, "Pattern metadata"),
+        "operator_metadata": _json_object(operator_metadata, "operator metadata"),
+    }
     encoded = _metadata_json(metadata)
     return atomic_write_file(
         path,
-        lambda stream: np.savez(stream, phase=radians, metadata=np.asarray(encoded)),
+        lambda stream: np.savez(
+            stream,
+            phase=science,
+            pattern_phase=pattern,
+            operator_wavefront=wavefront,
+            pupil_amplitude=amplitude,
+            pupil_support=support,
+            metadata=np.asarray(encoded),
+        ),
     )
 
-def load_phase(path: str | Path) -> tuple[np.ndarray, dict[str, object]]:
+
+def load_science_context(path: str | Path) -> dict[str, object]:
     with np.load(path, allow_pickle=False) as archive:
-        if set(archive.files) != {"phase", "metadata"}:
-            raise ValueError("phase NPZ members must be exactly phase and metadata")
-        raw_phase = np.asarray(archive["phase"])
+        if set(archive.files) != _SCIENCE_CONTEXT_MEMBERS:
+            raise ValueError("science context NPZ has the wrong members")
+        arrays = {key: np.asarray(archive[key]) for key in _CONTEXT_ARRAY_KEYS}
         encoded = np.asarray(archive["metadata"])
-        if raw_phase.dtype != np.dtype("<f4") or raw_phase.ndim != 2:
-            raise ValueError("phase NPZ phase must be a little-endian float32 matrix")
         if encoded.shape != () or encoded.dtype.kind != "U":
-            raise ValueError("phase NPZ metadata must be scalar Unicode JSON")
-        if not np.all(np.isfinite(raw_phase)) or np.any(raw_phase < 0.0) or np.any(raw_phase >= 2.0 * np.pi):
-            raise ValueError("phase NPZ phase must contain canonical radians")
-        phase = canonical_phase(raw_phase, tuple(raw_phase.shape))
+            raise ValueError("science context metadata must be scalar Unicode JSON")
         metadata = json.loads(
             str(encoded.item()),
             object_pairs_hook=_strict_object,
             parse_constant=_constant,
         )
-    if not isinstance(metadata, dict):
-        raise ValueError("phase NPZ metadata JSON must be an object")
-    _metadata_json(metadata)
-    return phase, metadata
+    if not isinstance(metadata, dict) or set(metadata) != _SCIENCE_CONTEXT_KEYS:
+        raise ValueError("science context metadata has the wrong fields")
+    if (
+        metadata["format"] != _SCIENCE_CONTEXT_FORMAT
+        or type(metadata["version"]) is not int
+        or metadata["version"] != 1
+    ):
+        raise ValueError("unsupported science context format")
+    phase = arrays["phase"]
+    if phase.dtype != np.dtype("<f4") or phase.ndim != 2:
+        raise ValueError("science context phase must be a float32 matrix")
+    shape = tuple(phase.shape)
+    for key in ("phase", "pattern_phase", "operator_wavefront"):
+        raw = arrays[key]
+        if raw.dtype != np.dtype("<f4") or raw.shape != shape:
+            raise ValueError(f"science context {key} must be a matching float32 matrix")
+        arrays[key] = canonical_phase(raw, shape)
+        if not np.array_equal(raw, arrays[key]):
+            raise ValueError(f"science context {key} must contain canonical radians")
+    if arrays["pupil_amplitude"].dtype != np.dtype("<f4"):
+        raise ValueError("science context pupil amplitude must be float32")
+    arrays["pupil_amplitude"] = _pupil_array(arrays["pupil_amplitude"], shape)
+    arrays["pupil_support"] = _pupil_mask(arrays["pupil_support"], shape)
+    composed = canonical_phase(
+        arrays["pattern_phase"].astype(np.float64)
+        + arrays["operator_wavefront"].astype(np.float64),
+        shape,
+    )
+    circular_error = np.abs(
+        np.angle(np.exp(1j * (arrays["phase"].astype(np.float64) - composed)))
+    )
+    if float(np.max(circular_error)) > 2e-5:
+        raise ValueError("science context phase does not match its frozen layers")
+    normalized = {
+        "objective_kind": _objective_kind(metadata["objective_kind"]),
+        "pupil": _pupil_metadata(metadata["pupil"]),
+        "system_correction": _system_correction(metadata["system_correction"]),
+        "command_receipt": _command_receipt(metadata["command_receipt"]),
+        "pattern_metadata": _json_object(
+            metadata["pattern_metadata"], "Pattern metadata"
+        ),
+        "operator_metadata": _json_object(
+            metadata["operator_metadata"], "operator metadata"
+        ),
+    }
+    return {**arrays, **normalized}

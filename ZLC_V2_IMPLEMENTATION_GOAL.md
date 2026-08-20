@@ -1,6 +1,6 @@
 # ZLC v2 Architecture Convergence — Implementation Goal
 
-状态：ACTIVE；Milestone 1–5及residual closure完成。M5于2026-08-20 14:31 PDT完成验证，早于用户给出的15:30门，下一步进入M6；Milestone 6–7尚未完成。准确状态看`IMPLEMENTATION_PLAN.md`。
+状态：ACTIVE；Milestone 1–6及residual closure完成。M5于2026-08-20 14:31 PDT完成验证并按用户15:30门进入M6；M6已作为独立commit完成。Milestone 7尚未开始，等待用户后续指令。准确状态看`IMPLEMENTATION_PLAN.md`。
 
 ## 1. 唯一目标
 

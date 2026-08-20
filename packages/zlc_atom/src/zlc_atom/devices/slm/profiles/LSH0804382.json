@@ -1,10 +1,13 @@
 {
   "format": "zlc.slm.hamamatsu_x15213.device_profile",
-  "version": 1,
-  "model": "X15213",
+  "version": 2,
+  "model": "X15213 (exact type suffix not recorded)",
   "serial": "LSH0804382",
   "default_wavelength_nm": 852,
-  "readout_wavelength_nm": 785,
+  "phase_curve_wavelength_nm": 785,
+  "phase_curve_source": "Repository calibration values; measurement provenance not recorded",
+  "settle_seconds": 0.05,
+  "settle_source": "Repository default; optical settle acceptance pending",
   "phase_pi_by_gray": [
     0, 0.009, 0.018, 0.028, 0.037, 0.047, 0.056, 0.066, 0.075, 0.084, 0.094, 0.104, 0.113, 0.123, 0.132, 0.142,
     0.151, 0.161, 0.171, 0.181, 0.19, 0.199, 0.21, 0.219, 0.228, 0.238, 0.248, 0.258, 0.267, 0.277, 0.287, 0.296,

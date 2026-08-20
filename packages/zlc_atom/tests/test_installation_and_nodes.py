@@ -132,6 +132,9 @@ def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
         assert installation.capability("slm.phase", key="slm") is slm
         assert slm.identity == "virtual-slm"
         assert slm.shape_yx == (128, 128)
+        assert slm.command_revision == 0
+        assert slm.mapping_revision == 0
+        assert slm.last_command_receipt["outcome"] == "known-new"
 
         before_revision = installation.world._slm_phase_revision
         authored = np.linspace(
@@ -147,6 +150,26 @@ def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
         assert float(np.max(commanded)) < 2.0 * np.pi
         assert installation.world._slm_phase_revision == before_revision + 1
         np.testing.assert_array_equal(slm.last_commanded_phase, commanded)
+        assert slm.command_revision == 1
+        assert slm.last_command_receipt == {
+            "transport": "virtual",
+            "identity": "virtual-slm",
+            "profile": "simulation",
+            "model": "SimulationWorld",
+            "serial": "virtual-slm",
+            "wavelength_nm": None,
+            "flip_x": False,
+            "flip_y": False,
+            "correction_path": "",
+            "correction_enabled": False,
+            "mapping_revision": 0,
+            "settle_seconds": 0.0,
+            "phase_curve_source": "simulation",
+            "outcome": "known-new",
+            "command_revision": 1,
+            "stage": "simulation-applied",
+            "readback": "simulation-state",
+        }
         with pytest.raises(ValueError, match="read-only"):
             commanded[0, 0] = 0.0
         slm.close()

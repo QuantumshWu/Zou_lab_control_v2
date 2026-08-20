@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -64,7 +64,16 @@ class SlmAdapter(Protocol):
     def apply_phase(self, radians: object) -> np.ndarray: ...
 
     @property
-    def last_commanded_phase(self) -> np.ndarray: ...
+    def last_commanded_phase(self) -> np.ndarray | None: ...
+
+    @property
+    def command_revision(self) -> int: ...
+
+    @property
+    def mapping_revision(self) -> int: ...
+
+    @property
+    def last_command_receipt(self) -> Mapping[str, object]: ...
 
     def close(self) -> None: ...
 
@@ -96,14 +105,31 @@ def bind_slm(
         ):
             raise ValueError("SLM identity must be non-empty text without surrounding space")
         shape = _shape(slm.shape_yx)
-        observed = np.asarray(slm.last_commanded_phase)
-        canonical = canonical_phase(observed, shape)
-        if observed.flags.writeable:
-            raise ValueError("SLM last_commanded_phase must be an immutable snapshot")
-        if not np.array_equal(observed, canonical):
-            raise ValueError(
-                "SLM last_commanded_phase must already be canonical wrapped radians"
-            )
+        observed_phase = slm.last_commanded_phase
+        if observed_phase is not None:
+            observed = np.asarray(observed_phase)
+            canonical = canonical_phase(observed, shape)
+            if observed.flags.writeable:
+                raise ValueError("SLM last_commanded_phase must be an immutable snapshot")
+            if not np.array_equal(observed, canonical):
+                raise ValueError(
+                    "SLM last_commanded_phase must already be canonical wrapped radians"
+                )
+        command_revision = slm.command_revision
+        mapping_revision = slm.mapping_revision
+        if type(command_revision) is not int or command_revision < 0:
+            raise ValueError("SLM command_revision must be a non-negative integer")
+        if type(mapping_revision) is not int or mapping_revision < 0:
+            raise ValueError("SLM mapping_revision must be a non-negative integer")
+        receipt = dict(slm.last_command_receipt)
+        if receipt.get("outcome") not in {"known-old", "known-new", "unknown"}:
+            raise ValueError("SLM command receipt has an invalid outcome")
+        if receipt.get("command_revision") != command_revision:
+            raise ValueError("SLM command receipt revision differs from device truth")
+        if receipt.get("mapping_revision") != mapping_revision:
+            raise ValueError("SLM command receipt mapping differs from device truth")
+        if (observed_phase is None) != (receipt["outcome"] == "unknown"):
+            raise ValueError("SLM phase knowledge differs from its command receipt")
         binding, proof = bind_verified_device(
             context.broker,
             key=ResourceKey.parse(f"device/{key}"),

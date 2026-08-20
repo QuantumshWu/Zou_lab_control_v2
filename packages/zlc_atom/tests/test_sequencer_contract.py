@@ -22,7 +22,12 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.sequencer import SequencerDevice
-from zlc_atom.devices.simulation import SimulationWorld, VirtualPulseStreamer, VirtualSequencer
+from zlc_atom.devices.simulation import (
+    SimulationWorld,
+    SimulationWorldConfig,
+    VirtualPulseStreamer,
+    VirtualSequencer,
+)
 
 
 def test_virtual_sequencer_is_the_canonical_sequencer_device() -> None:
@@ -67,7 +72,9 @@ def _virtual_streamer():
 
     from tests.pulse_fixture import build_calibration_pulse
 
-    streamer = VirtualPulseStreamer(world=SimulationWorld(seed=0))
+    streamer = VirtualPulseStreamer(
+        world=SimulationWorld(SimulationWorldConfig(seed=0))
+    )
     streamer.open()
     program = build_calibration_pulse(streamer.describe())
     return streamer, program

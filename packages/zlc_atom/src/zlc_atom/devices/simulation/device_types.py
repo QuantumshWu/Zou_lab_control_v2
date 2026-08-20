@@ -37,6 +37,12 @@ VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
         ),
         AuthoringField("seed", "int", "Seed", 0, minimum=0),
         AuthoringField(
+            "world_profile",
+            "str",
+            "Simulation world profile (JSON)",
+            "",
+        ),
+        AuthoringField(
             "exposure_seconds",
             "float",
             "Exposure seconds",
@@ -107,13 +113,18 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
 
 def _camera_world_config(values: dict) -> SimulationWorldConfig:
     authored = VIRTUAL_CAMERA_SCHEMA.project_values(values)
-    return SimulationWorldConfig(
-        SimulationGeometry(
-            grid_shape_yx=tuple(authored["grid_shape_yx"]),
-            image_shape_yx=tuple(authored["frame_shape_yx"]),
-        ),
-        seed=int(authored["seed"]),
+    geometry = SimulationGeometry(
+        grid_shape_yx=tuple(authored["grid_shape_yx"]),
+        image_shape_yx=tuple(authored["frame_shape_yx"]),
     )
+    profile = str(authored["world_profile"]).strip()
+    if profile:
+        return SimulationWorldConfig.from_profile(
+            profile,
+            geometry=geometry,
+            seed=int(authored["seed"]),
+        )
+    return SimulationWorldConfig(geometry, seed=int(authored["seed"]))
 
 
 def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
