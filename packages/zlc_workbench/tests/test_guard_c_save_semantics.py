@@ -213,6 +213,18 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         } == {(judged_signal, "image"), (frames_signal, "histogram")}
         assert not session.camera.capture_state()
 
+        # The retained publication is the whole overlay artifact.  Remove the
+        # stopped Logic row itself, then rebuild the panel from Runtime: no
+        # node/binding survives to lend it a SiteMap.
+        removed_occupancy = presenter.logic.pop(occupancy_id)
+        assert removed_occupancy.host is None and removed_occupancy.node is None
+        retained_panel = next(
+            binding
+            for binding in presenter.panels.values()
+            if binding.state.signal == judged_signal
+        )
+        assert presenter.refresh_panel_snapshot(retained_panel.panel_id)
+
         # Header Save Screenshot is one GUI image and creates no archive/layout.
         screenshot_path = tmp_path / "task-console.png"
         before_screenshot = set(tmp_path.rglob("*"))
@@ -230,6 +242,10 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             for binding in presenter.panels.values()
             if binding.state.signal == judged_signal
         )
+        deadline = time.monotonic() + 10.0
+        while target.frozen_data is None and time.monotonic() < deadline:
+            presenter.beat()
+            time.sleep(0.005)
         assert presenter.edit_panel(target.panel_id) is True
         frozen = target.frozen_data
         assert frozen is not None and frozen.publication is not None
@@ -279,12 +295,12 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         assert panel_state["overlay_signal"] == status_signal
         assert sections["overlay"]["overlay_signal"] == status_signal
         assert "calibration_path" not in sections["overlay"]
-        # The rings themselves are IN the archive: geometry once, and one
-        # status row per picture the overlay described.
+        # The rings themselves are IN the archive: geometry once, beside the
+        # typed status Dataset view it projects.  No flattened
+        # repeat/point status table is a second truth.
         assert set(arrays) >= {
             "overlay.coordinates",
-            "overlay.statuses",
-            "overlay.status_facets",
+            "overlay.status",
         }
 
         records = {record["node"]: record for record in _records(sections["run_chain"])}

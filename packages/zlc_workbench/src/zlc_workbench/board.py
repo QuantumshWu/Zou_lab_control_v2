@@ -22,6 +22,7 @@ seam is verified without a display.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from zlc_runtime import (
@@ -92,6 +93,15 @@ class LiveBoard:
         intervals: Sequence[int],
         notify: Callable[[], None] | None = None,
     ) -> None:
+        self._closed = False
+        # Canonical run assembly and companion projection happen before a
+        # RasterPlotHost can accept its PlotInput.  They are display work, so
+        # one board-owned worker performs them at the board cadence instead of
+        # making the Qt timer callback copy every finite run prefix.
+        self._projection_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="zlc-presentation",
+        )
         self.wake = OwnerWake(notify)
         self._channels = OwnerChannels(self.wake)
         self._arbiter = SurfaceBatchArbiter(self._channels)
@@ -126,6 +136,15 @@ class LiveBoard:
 
         return self._scheduler.on_tick()
 
+    def submit_projection(self, project: Callable[[], object]):
+        """Submit one coalesced panel input projection off the owner thread."""
+
+        if self._closed:
+            raise RuntimeError("live board is closed")
+        if not callable(project):
+            raise TypeError("panel projection must be callable")
+        return self._projection_executor.submit(project)
+
     def commit(self) -> None:
         """Put ready boards on screen.  The GUI thread, and only it.
 
@@ -143,8 +162,12 @@ class LiveBoard:
         return None
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self._scheduler.close()
         self._arbiter.close()
+        self._projection_executor.shutdown(wait=True, cancel_futures=True)
 
 
 def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:

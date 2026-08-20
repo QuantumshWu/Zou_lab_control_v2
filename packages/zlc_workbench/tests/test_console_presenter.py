@@ -11,11 +11,13 @@ layer rather than the presenter is the point: what is under test is the wiring.
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 import os
 import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -35,6 +37,12 @@ from zlc_workbench.panel_state import compose_panel_spec
 from zlc_workbench.session import ExperimentSession, Workspace
 from zlc_workbench.topology import format_signal_shape
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
+
+
+def _completed_surface_update() -> object:
+    future = Future()
+    future.set_result(None)
+    return SimpleNamespace(future=future)
 
 
 def _operation_value(operation):
@@ -752,6 +760,7 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
 
     binding = presenter.add_selected_panel("facet_grid")
     assert presenter.update_panel_state(binding.panel_id, {"signal": signal}) is True
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
     assert binding.host is not None
     first_host = binding.host
 
@@ -782,6 +791,7 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
             binding.panel_id, {"cell_kind": cell_kind}
         ) is True
         assert binding.state.cell_kind == cell_kind
+        _settle_panel_hosts(presenter, lambda: binding.host is not None)
         assert binding.host is not None
         assert binding.host is not previous_host, (
             "the plot host must be rebuilt for the new cell kind"
@@ -816,6 +826,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     assert presenter.update_panel_state(binding.panel_id, {"signal": signal}) is True
     assert binding.signal == signal
     assert binding.state.title == signal
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
     assert binding.host is not None
     assert binding.port is not None
     _settle_panel_hosts(
@@ -995,7 +1006,8 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
     )
     _settle_panel_hosts(
         presenter,
-        lambda: not binding.parameter_surface["display_unavailable"],
+        lambda: binding.host is not None
+        and not binding.parameter_surface["display_unavailable"],
     )
 
     assert presenter.update_panel_state(
@@ -1330,16 +1342,10 @@ def test_a_bridge_side_derivation_failure_is_reported_once(
     assert not [item for item in presenter.view.status if item[0] == "error"]
 
 
-def test_show_panel_fills_the_staged_widget_when_the_host_already_has_a_front(
+def test_show_panel_mounts_after_the_async_canonical_front_is_ready(
     session,
 ) -> None:
-    """A mounted host's existing front reaches pixels without waiting a beat.
-
-    Console panel widgets stage their fronts, so between mount and the next
-    beat the widget had NO front at all: pointer events resolved no axes and
-    were silently ignored.  When the host already rendered, the mount itself
-    must fill the staged widget.
-    """
+    """The card remains ready until its canonical host can be accepted."""
 
     pytest.importorskip("zlc_plot")
     from zlc_workbench.apps.task_console import build_panel_host
@@ -1358,8 +1364,12 @@ def test_show_panel_fills_the_staged_widget_when_the_host_already_has_a_front(
     try:
         node, snapshot = _one_shot(session)
         binding = presenter.add_panel(node.signal_key("frames"), snapshot)
-        # Deliberately NO presenter.beat(): the mount itself must present.
-        assert binding.initial_presented is True
+        assert binding.host is None
+        assert binding.initial_presented is False
+        _settle_panel_hosts(
+            presenter,
+            lambda: binding.host is not None and binding.initial_presented,
+        )
         presented = [
             front
             for panel_id, front in presenter.view.presented_fronts
@@ -1441,10 +1451,13 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
 
     node, snapshot = _one_shot(session)
     first = presenter.add_panel(node.signal_key("frames"), snapshot)
+    _settle_panel_hosts(presenter, lambda: first.host is not None)
     card = presenter.view.cards[0]
     old_host = first.host
     card.edit_requested.emit()
-    assert presenter.view.panel_editors[first.panel_id]["frozen_snapshot"] is snapshot
+    frozen = presenter.view.panel_editors[first.panel_id]["frozen_snapshot"]
+    assert frozen is not snapshot
+    assert frozen.block.schema == snapshot.block.schema
     old_editor_host = first.editor_host
     assert old_editor_host is not None and old_editor_host is not old_host
 
@@ -1457,18 +1470,25 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     binding = presenter.panels[first.panel_id]
     assert binding.signal == other.signal_key("frames")
     assert binding.host is not old_host
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
     assert presenter.view.cards[0] is card, "the card lost its place on the board"
     editor = presenter.view.panel_editors[first.panel_id]
     assert editor["stale"] is True
-    assert editor["frozen_snapshot"] is snapshot
+    assert editor["frozen_snapshot"] is frozen
     assert binding.editor_host is old_editor_host
     assert not old_editor_host._closing
 
     presenter.view.panel_snapshot_refresh_requested.emit(first.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.frozen_data is not None
+        and binding.frozen_data.signal == other.signal_key("frames"),
+    )
     editor = presenter.view.panel_editors[first.panel_id]
     assert editor["stale"] is False
     assert editor["frozen_signal"] == other.signal_key("frames")
-    assert editor["frozen_snapshot"] is other_snapshot
+    assert editor["frozen_snapshot"] is not other_snapshot
+    assert editor["frozen_snapshot"].block.schema == other_snapshot.block.schema
     replacement_editor_host = binding.editor_host
     assert replacement_editor_host is not None
     assert replacement_editor_host is not old_editor_host
@@ -1499,6 +1519,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     panel = presenter.add_panel(
         first_node.signal_key("frames"), first_snapshot, kind="image"
     )
+    _settle_panel_hosts(presenter, lambda: panel.host is not None)
     assert presenter.edit_panel(panel.panel_id)
     first_editor_host = panel.editor_host
     assert first_editor_host is not None
@@ -1574,6 +1595,12 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.logic[second_id].draft.values == second_before
 
     assert presenter.refresh_panel_snapshot(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.frozen_data is not None
+        and panel.frozen_data.signal == second_node.signal_key("frames")
+        and panel.editor_host is not first_editor_host,
+    )
     second_editor_host = panel.editor_host
     assert second_editor_host is not None and second_editor_host is not first_editor_host
     _settle_panel_hosts(
@@ -1680,7 +1707,10 @@ def test_a_panel_that_could_not_draw_says_so_on_its_own_card(presenter, session)
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frames"), snapshot, title="camera")
 
-    binding.port.reject(object(), RuntimeError("the renderer refused this frame"))
+    binding.port.reject(
+        _completed_surface_update(),
+        RuntimeError("the renderer refused this frame"),
+    )
     presenter.beat()
 
     card = presenter.view.cards[0]
@@ -1703,7 +1733,7 @@ def test_an_anonymous_render_error_is_named_after_its_class(
         node.signal_key("frames"), snapshot, title="camera"
     )
 
-    binding.port.reject(object(), AssertionError())
+    binding.port.reject(_completed_surface_update(), AssertionError())
     presenter.beat()
 
     card = presenter.view.cards[0]
@@ -1726,7 +1756,7 @@ def test_a_superseded_render_is_not_reported_at_all(presenter, session) -> None:
 
     from concurrent.futures import CancelledError
 
-    binding.port.reject(object(), CancelledError())
+    binding.port.reject(_completed_surface_update(), CancelledError())
     presenter.beat()
 
     assert binding.port.last_error is None
@@ -2395,7 +2425,7 @@ def test_incompatible_preview_reports_once_and_is_never_marked_successful(
     assert not presenter.panels
 
 
-def test_explicit_repeat_semantics_reads_runtime_history_but_default_stays_event(
+def test_finite_exact_projection_is_canonical_for_every_semantic(
     presenter,
     session,
     monkeypatch,
@@ -2436,17 +2466,24 @@ def test_explicit_repeat_semantics_reads_runtime_history_but_default_stays_event
     panel = presenter.add_blank_panel("image")
     assert panel is not None
     panel.state = replace(panel.state, signal="event-camera/frames")
-    value = SimpleNamespace(snapshot=event, growing=False)
+    value = SimpleNamespace(
+        snapshot=event,
+        canonical_schema=full_schema,
+        cell_origin=(0, 0),
+    )
     publication = object()
 
-    assert presenter._project_panel_input(panel, value, publication) is event
-    assert calls == []
+    assert presenter._project_panel_input(panel, value, publication) is full
+    assert calls == [("event-camera/frames", publication)]
     panel.state = replace(
         panel.state,
         semantic={"fate:repeat": "reduce"},
     )
     assert presenter._project_panel_input(panel, value, publication) is full
-    assert calls == [("event-camera/frames", publication)]
+    assert calls == [
+        ("event-camera/frames", publication),
+        ("event-camera/frames", publication),
+    ]
     panel.state = replace(
         panel.state,
         semantic={"scope:repeat": 1},
@@ -2455,7 +2492,283 @@ def test_explicit_repeat_semantics_reads_runtime_history_but_default_stays_event
     assert calls == [
         ("event-camera/frames", publication),
         ("event-camera/frames", publication),
+        ("event-camera/frames", publication),
     ]
+    monitor = SimpleNamespace(
+        snapshot=event,
+        canonical_schema=None,
+        cell_origin=None,
+    )
+    assert presenter._project_panel_input(panel, monitor, publication) is event
+    assert len(calls) == 3
+
+
+def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
+    presenter,
+    session,
+    monkeypatch,
+) -> None:
+    from threading import Event, get_ident
+
+    session.load_pulse(PULSE_NAME)
+    node = CameraMeasurementNode(
+        camera=session.camera,
+        request=CameraMeasurementRequest(
+            "camera",
+            0.02,
+            None,
+            30,
+            CAMERA_WINDOWS,
+        ),
+        signal_plane=session.signal_plane,
+        producer="repeat-camera",
+    )
+    capture = node.prepare()
+    session.fire(shots=30)
+    result = capture.collect()
+    signal = node.signal_key("frames")
+    event = result.publication.value(signal)
+    assert event is not None
+    assert event.snapshot.block.values.shape[0] == 1
+    assert event.canonical_schema is not None
+    assert event.canonical_schema.repeat_axis.size == 30
+
+    original = session.signal_plane.current_dataset
+    entered = Event()
+    release = Event()
+    projection_threads: list[int] = []
+
+    def blocked_current(name, publication=None):
+        projection_threads.append(get_ident())
+        entered.set()
+        assert release.wait(10.0)
+        return original(name, publication)
+
+    monkeypatch.setattr(session.signal_plane, "current_dataset", blocked_current)
+    binding = presenter.add_blank_panel("facet_grid")
+    started = time.perf_counter()
+    assert presenter.update_panel_state(binding.panel_id, {"signal": signal})
+    update_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    presenter.beat()
+    beat_seconds = time.perf_counter() - started
+
+    assert entered.wait(5.0)
+    assert binding.host is None
+    assert projection_threads and projection_threads[0] != get_ident()
+    release.set()
+    assert update_seconds < 0.01
+    assert beat_seconds < 0.01
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and bool(binding.parameter_surface.get("semantic")),
+    )
+    shown = binding.port.presented_input()
+    snapshot = getattr(shown, "snapshot", shown)
+    assert snapshot.block.values.shape[:2] == (30, CAMERA_WINDOWS)
+    assert np.all(snapshot.expanded_validity())
+
+    repeat_row = next(
+        field
+        for field in binding.parameter_surface["semantic"]
+        if str(field["key"]) == "fate:repeat"
+    )
+    next_fate = next(
+        value
+        for _label, value in repeat_row["choices"]
+        if value != repeat_row["value"]
+    )
+    publication = binding.display_publication
+    host = binding.host
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"semantic": {"fate:repeat": next_fate}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.state.semantic.get("fate:repeat") == next_fate,
+    )
+    assert binding.host is host
+    assert binding.display_publication is publication
+    assert binding.port.presented_input() is shown
+
+
+def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
+    presenter,
+    session,
+    tmp_path,
+) -> None:
+    from types import SimpleNamespace
+    from zlc_data import (
+        REPEAT,
+        SCAN_POINT,
+        AxisId,
+        AxisSpec,
+        BlockId,
+        CellValidity,
+        DataBlock,
+        DatasetRevision,
+        DatasetSchema,
+        GridTopology,
+        OwnedSnapshot,
+        PointColumn,
+        PointTable,
+        StreamGenerationId,
+        ValueSchema,
+    )
+    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_runtime.dataset import DatasetCoverage
+    from zlc_runtime.dataset_output import (
+        DatasetOutputDeclaration,
+        LiveDatasetOutput,
+    )
+
+    declaration = DatasetOutputDeclaration("frame", "test.grid.frame")
+    signal = "grid-scan/frame"
+    node = SimpleNamespace(
+        instance_id="grid-scan",
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"grid-scan/{name}",
+    )
+    repeat = AxisSpec(AxisId("grid.repeat"), "repeat", REPEAT, 1, (0,))
+    cell = ValueSchema.scalar(np.dtype("float64"), None)
+    x_id = AxisId("grid.x")
+    y_id = AxisId("grid.y")
+    canonical = DatasetSchema(
+        repeat,
+        PointTable(
+            4,
+            (
+                PointColumn(
+                    x_id,
+                    "x",
+                    SCAN_POINT,
+                    PointColumn.NUMERIC,
+                    (0.0, 1.0, 0.0, 1.0),
+                ),
+                PointColumn(
+                    y_id,
+                    "y",
+                    SCAN_POINT,
+                    PointColumn.NUMERIC,
+                    (0.0, 0.0, 1.0, 1.0),
+                ),
+            ),
+        ),
+        GridTopology(
+            (x_id, y_id),
+            ((0.0, 1.0), (0.0, 1.0)),
+            ((0, 0), (1, 0), (0, 1), (1, 1)),
+        ),
+        cell,
+    )
+    session.signal_plane.reserve(node)
+    for index, measured in enumerate((10.0, 20.0)):
+        point = PointColumn(
+            AxisId("event.point"),
+            "point",
+            SCAN_POINT,
+            PointColumn.NUMERIC,
+            (0.0,),
+        )
+        event_schema = DatasetSchema(
+            repeat,
+            PointTable(1, (point,)),
+            None,
+            cell,
+        )
+        block = DataBlock(
+            BlockId(f"grid-event-{index}"),
+            DatasetRevision(index + 1),
+            np.asarray([[[measured]]], dtype=np.float64),
+            CellValidity(np.ones((1, 1), dtype=np.bool_)),
+            event_schema,
+        )
+        event = OwnedSnapshot(
+            block.ref(StreamGenerationId("grid-plugin")),
+            block,
+        )
+        session.signal_plane.commit_live(
+            node,
+            {
+                "frame": LiveDatasetOutput(
+                    declaration,
+                    event,
+                    DatasetCoverage(index + 1, 4),
+                    canonical_schema=canonical,
+                    cell_origin=(0, index),
+                )
+            },
+        )
+    front = session.signal_plane.freeze()
+    value = front.value(signal)
+    assert value is not None
+    assert value.snapshot.block.schema.grid_topology is None
+    assert value.snapshot.block.schema.point_table.row_count == 1
+
+    binding = presenter.add_blank_panel("image")
+    assert presenter.update_panel_state(binding.panel_id, {"signal": signal})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and bool(binding.parameter_surface.get("semantic")),
+    )
+    shown = binding.port.presented_input()
+    snapshot = getattr(shown, "snapshot", shown)
+    assert snapshot.block.schema.grid_topology == canonical.grid_topology
+    assert snapshot.block.values.shape == (1, 4, 1)
+    validity = snapshot.expanded_validity()
+    assert np.all(validity[:, :2])
+    assert not np.any(validity[:, 2:])
+    assert presenter._shown_snapshot(binding) is snapshot
+    assert binding.parameter_surface["data_structure"]
+
+    fate = {
+        field["value"]: field
+        for field in binding.parameter_surface["semantic"]
+        if str(field["key"]).startswith("fate:")
+        and field["value"] in {"x", "y"}
+    }
+    assert set(fate) == {"x", "y"}
+    publication = binding.display_publication
+    host = binding.host
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {
+            "semantic": {
+                str(fate["x"]["key"]): "y",
+                str(fate["y"]["key"]): "x",
+            }
+        },
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.state.semantic.get(str(fate["x"]["key"])) == "y"
+        and binding.state.semantic.get(str(fate["y"]["key"])) == "x",
+    )
+    assert binding.host is host
+    assert binding.display_publication is publication
+    assert binding.port.presented_input() is shown
+
+    assert presenter.edit_panel(binding.panel_id)
+    assert binding.frozen_data is not None
+    assert binding.frozen_data.snapshot is snapshot
+    written = presenter.save_panel_figure(
+        binding.panel_id,
+        str(tmp_path / "partial-grid.png"),
+    )
+    assert written is not None
+    info, arrays = read_archive(written.archive)
+    saved = read_dataset(info, arrays, "data")
+    assert saved.block.schema == snapshot.block.schema
+    np.testing.assert_array_equal(saved.block.values, snapshot.block.values)
+    np.testing.assert_array_equal(
+        saved.expanded_validity(),
+        snapshot.expanded_validity(),
+    )
 
 
 def test_task_preview_retirement_uses_runtime_signal_existence(
@@ -2549,7 +2862,9 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     front = session.signal_plane.freeze()
     judged = front.value(judged_signal)
     publication = front.publication(judged_signal)
-    assert judged is not None and publication is not None
+    assert judged is not None and publication is not None, (
+        presenter.logic[occupancy_id].host.observation
+    )
 
     binding = presenter.add_panel(
         judged_signal,
@@ -2559,17 +2874,21 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
         overlay_signal=status_signal,
         initial_publication=publication,
     )
+    _settle_panel_hosts(presenter, lambda: binding.frozen_data is not None)
 
     assert binding.state.kind == "facet_grid"
     assert binding.state.overlay_signal == status_signal
     frame = binding.frozen_data.plot_input
     assert isinstance(frame, ImageFrame), frame
-    # One row per frame of the cycle, and NO pooled row: several frames
-    # averaged into one picture have no per-frame judgement, and inventing
-    # one would be a measurement claim nobody made.
-    assert set(frame.overlay.statuses) == {
-        float(value) for value in range(CAMERA_WINDOWS)
-    }
+    spec = task_console_fitting_spec(
+        frame.snapshot.block.schema,
+        "facet_grid",
+        "",
+    )
+    assert all(
+        frame.overlay.statuses_for(spec, float(value)) is not None
+        for value in range(CAMERA_WINDOWS)
+    )
     assert frame.overlay.point_ids == site_ids
     assert binding.frozen_data.overlay == {"overlay_signal": status_signal}
 
@@ -2726,7 +3045,12 @@ def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "histogram"}), (
         "an assignment authored under curve must not veto the histogram cell"
     )
-    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "histogram")
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and binding.configuration is None
+        and binding.state.semantic.get(row) == "pool",
+    )
     assert binding.state.cell_kind == "histogram"
     # An axis row is a question BOTH kinds answer, so the histogram's answer
     # for that axis -- pooled, which is what a distribution does to every axis

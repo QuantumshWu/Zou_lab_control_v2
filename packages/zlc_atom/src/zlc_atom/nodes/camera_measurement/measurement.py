@@ -914,14 +914,8 @@ class CameraMeasurementNode:
     def _commit_direct_outputs(
         self,
         outputs: Mapping[str, LiveDatasetOutput],
-        *,
-        growing_outputs: Sequence[str] = (),
     ) -> Mapping[str, SignalValue]:
-        return self.signal_plane.commit_live(
-            self,
-            outputs,
-            growing_outputs=growing_outputs,
-        )
+        return self.signal_plane.commit_live(self, outputs)
 
     def _commit_direct_cycle(
         self,

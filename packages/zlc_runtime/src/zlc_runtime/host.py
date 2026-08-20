@@ -139,15 +139,10 @@ class NodeExecutionContext:
     def commit_live(
         self,
         outputs: Mapping[str, LiveDatasetOutput],
-        *,
-        growing_outputs: Iterable[str] = (),
     ) -> Mapping[str, SignalValue]:
         """Commit one new immutable event bundle into this run's datasets."""
 
-        return self._host._commit_live(
-            outputs,
-            growing_outputs=growing_outputs,
-        )
+        return self._host._commit_live(outputs)
 
     def current_dataset(
         self,
@@ -598,8 +593,6 @@ class NodeHost:
     def _commit_live(
         self,
         outputs: Mapping[str, LiveDatasetOutput],
-        *,
-        growing_outputs: Iterable[str],
     ) -> Mapping[str, SignalValue]:
         if self._mode != "worker":
             raise RuntimeError("processor outputs publish through their source publication")
@@ -613,21 +606,7 @@ class NodeHost:
         declared = {value.name for value in self._dataset_outputs}
         if not set(values).issubset(declared):
             raise ValueError("live outputs contain an undeclared name")
-        growing = tuple(
-            canonical_text(value, "growing output name")
-            for value in growing_outputs
-        )
-        if len(set(growing)) != len(growing):
-            raise ValueError("growing output names must be unique")
-        if not set(growing).issubset(values):
-            raise ValueError("growing outputs must be present in this commit")
-        published = self._data_plane.commit_live(
-            self,
-            values,
-            growing_outputs=growing,
-        )
-        for name in growing:
-            self._data_plane.current_dataset(self.signal_key(name))
+        published = self._data_plane.commit_live(self, values)
         with self._start_lock:
             self._live_commit_count += 1
             self._committed_output_names.update(values)
@@ -1003,7 +982,11 @@ class NodeHost:
         if source.name != self._source_signal:
             raise ValueError("processor received another input signal")
 
-    def evaluate_processor(self, source: SignalValue) -> Mapping[str, LiveDatasetOutput]:
+    def evaluate_processor(
+        self,
+        source: SignalValue,
+        _source_publication: SignalPublication,
+    ) -> Mapping[str, LiveDatasetOutput]:
         self.validate_processor_source(source)
         return self._evaluate_processor_outputs(source)
 

@@ -77,8 +77,7 @@ class _Context:
     def report_progress(self, *args, **kwargs) -> None:
         self.progress.append((args, kwargs))
 
-    def commit_live(self, outputs, *, growing_outputs=()):
-        del growing_outputs
+    def commit_live(self, outputs):
         committed = dict(outputs)
         self.commits.append(committed)
         return committed

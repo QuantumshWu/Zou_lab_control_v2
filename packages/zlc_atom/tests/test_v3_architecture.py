@@ -50,12 +50,10 @@ class _CalibrationCoveragePlane(FakePlane):
         self.calibration_schema_fingerprints: list[str] = []
         self.calibration_preview_shapes: list[tuple[int, ...]] = []
 
-    def commit_live(self, producer, outputs, *, growing_outputs=()):
+    def commit_live(self, producer, outputs):
         output = outputs.get("capture_preview")
         if output is None:
-            return super().commit_live(
-                producer, outputs, growing_outputs=growing_outputs
-            )
+            return super().commit_live(producer, outputs)
         self.calibration_coverages.append(
             (output.coverage.written_cells, output.coverage.total_cells)
         )
@@ -63,9 +61,7 @@ class _CalibrationCoveragePlane(FakePlane):
             output.snapshot.block.schema.fingerprint
         )
         self.calibration_preview_shapes.append(output.snapshot.block.values.shape)
-        return super().commit_live(
-            producer, outputs, growing_outputs=growing_outputs
-        )
+        return super().commit_live(producer, outputs)
 
 
 class _RecordingCamera:
@@ -525,7 +521,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             camera_cycle_snapshot([(record,) for record in task_result.short]),
         )
         assert occupancy_result.counts.shape == (30, 1, 35)
-        assert occupancy_result.valid.shape == occupancy_result.counts.shape
+        assert (
+            occupancy_result.artifacts["occupied"].expanded_validity().shape
+            == occupancy_result.counts.shape
+        )
         assert occupancy_result.frame_judged.shape == (30, 1, 96, 128)
 
         assert tuple(value.argument_name for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
@@ -605,7 +604,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(output.name for output in descriptors["occupancy"].outputs) == (
             "counts",
             "occupied",
-            "valid",
             "rate",
             "frame_judged",
         )

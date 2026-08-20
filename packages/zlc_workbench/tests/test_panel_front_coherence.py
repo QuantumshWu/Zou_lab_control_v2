@@ -16,7 +16,23 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_runtime.presentation import HarmonicClock, SurfaceBatchArbiter
-from zlc_workbench.presentation import PlotPanelPort
+from zlc_workbench.presentation import PlotPanelPort as _PlotPanelPort
+
+
+def _submit_now(work):
+    from concurrent.futures import Future
+
+    completed = Future()
+    try:
+        completed.set_result(work())
+    except BaseException as error:
+        completed.set_exception(error)
+    return completed
+
+
+def PlotPanelPort(*args, **kwargs):
+    kwargs.setdefault("submit_projection", _submit_now)
+    return _PlotPanelPort(*args, **kwargs)
 
 
 class _Host:
@@ -99,6 +115,16 @@ def test_the_projection_is_handed_the_front_it_was_prepared_from() -> None:
 
     seen: list[object] = []
     front = object()
+    from test_signal_front import _publication
+
+    publication = _publication(
+        "camera",
+        "generation",
+        1,
+        "camera/frames",
+    )
+    value = publication.value("camera/frames")
+    assert value is not None
 
     class _Reached(Exception):
         """Raised once the projection has been handed its front."""
@@ -109,37 +135,17 @@ def test_the_projection_is_handed_the_front_it_was_prepared_from() -> None:
 
     port = PlotPanelPort(
         "panel-1",
-        "@logic/camera/frames",
+        "camera/frames",
         _Host(),
         display_interval_ms=100,
         project_input=project,
     )
 
+    update = port.prepare(value, publication, front)
+    assert update is not None
     try:
-        port.prepare(_Value(), _Publication(), front)
+        update.future.result()
     except _Reached:
         pass
 
     assert seen == [front], "the projection was not given the prepared front"
-
-
-class _Value:
-    def __init__(self) -> None:
-        self.snapshot = _Snapshot()
-        self.name = "@logic/camera/frames"
-
-
-class _Snapshot:
-    class ref:  # noqa: D106 - the port only reads a revision
-        class revision:
-            value = 1
-
-        class stream_generation:
-            value = "g"
-
-
-class _Publication:
-    event_ref = object()
-
-    def value(self, _name: str) -> None:
-        return None

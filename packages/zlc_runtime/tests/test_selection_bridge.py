@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event
 import time
 
@@ -144,6 +144,38 @@ def _source_setup(
     plane.commit_live(source, state)
     initial = plane.freeze()
     return plane, source, None, state, initial
+
+
+def _finite_source_setup(
+    canonical_schema: DatasetSchema,
+    event_schema: DatasetSchema,
+    values: np.ndarray,
+    *,
+    origin: tuple[int, int],
+):
+    declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
+    total = (
+        canonical_schema.repeat_axis.size
+        * canonical_schema.point_table.row_count
+    )
+    event_cells = (
+        event_schema.repeat_axis.size
+        * event_schema.point_table.row_count
+    )
+    state = {
+        "frame": LiveDatasetOutput(
+            declaration,
+            _snapshot("frame", 1, event_schema, values),
+            DatasetCoverage(event_cells, total),
+            canonical_schema=canonical_schema,
+            cell_origin=origin,
+        )
+    }
+    source = _Source(declaration)
+    plane = SignalDataPlane()
+    plane.reserve(source)
+    plane.commit_live(source, state)
+    return plane, source, state, plane.freeze()
 
 
 def _commit_source(
@@ -390,6 +422,175 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         assert publication.direct_parent_refs[0].sequence == 2
         assert float(front.value("@logic/image/roi_mean").snapshot.block.values.reshape(-1)[0]) == 109.0
     finally:
+        _close(bridge, plane, source)
+
+
+def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk() -> None:
+    event_schema = _image_schema()
+    canonical_schema = replace(
+        event_schema,
+        repeat_axis=replace(
+            event_schema.repeat_axis,
+            size=3,
+            coordinates=(0, 1, 2),
+        ),
+    )
+    first = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
+    plane, source, state, _initial = _finite_source_setup(
+        canonical_schema,
+        event_schema,
+        first,
+        origin=(0, 0),
+    )
+    events = _Events()
+    signal = "@logic/repeats/roi_mean"
+    plane.set_front_signals({"camera/frame", signal})
+    bridge = SelectionBridge(
+        plane,
+        "camera/frame",
+        events,
+        events,
+        bridge_id="repeats",
+    )
+    bridge.start()
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("x", -1.0, 2.0),
+            SelectionRange("y", 10.0, 30.0),
+        ),
+        revision=1,
+    )
+    try:
+        events.emit_selection(SelectionChange.COMMITTED, selection)
+        first_derived = plane.freeze().value(signal)
+        assert first_derived is not None, bridge.last_error
+        assert first_derived.snapshot.block.values.shape == (3, 1, 1)
+        np.testing.assert_array_equal(
+            first_derived.snapshot.expanded_validity()[..., 0],
+            np.asarray([[True], [False], [False]]),
+        )
+
+        second = first + 100.0
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 2, event_schema, second),
+            DatasetCoverage(2, 3),
+            canonical_schema=canonical_schema,
+            cell_origin=(1, 0),
+        )
+        _commit_source(plane, source, state)
+        front = _wait_for_signal(plane, bridge, signal, 2)
+        derived = front.value(signal)
+        assert derived is not None, bridge.last_error
+        np.testing.assert_allclose(
+            derived.snapshot.block.values[:2, 0, 0],
+            np.asarray([first.mean(), second.mean()]),
+        )
+        np.testing.assert_array_equal(
+            derived.snapshot.expanded_validity()[..., 0],
+            np.asarray([[True], [True], [False]]),
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
+    monkeypatch,
+) -> None:
+    event_schema = _image_schema()
+    canonical_schema = replace(
+        event_schema,
+        repeat_axis=replace(
+            event_schema.repeat_axis,
+            size=3,
+            coordinates=(0, 1, 2),
+        ),
+    )
+    first = np.full(event_schema.physical_shape, 1.0)
+    plane, source, state, _initial = _finite_source_setup(
+        canonical_schema,
+        event_schema,
+        first,
+        origin=(0, 0),
+    )
+    events = _Events()
+    signal = "@logic/exact-prefix/roi_mean"
+    plane.set_front_signals({"camera/frame", signal})
+    bridge = SelectionBridge(
+        plane,
+        "camera/frame",
+        events,
+        events,
+        bridge_id="exact-prefix",
+    )
+    bridge.start()
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("x", -1.0, 2.0),
+            SelectionRange("y", 10.0, 30.0),
+        ),
+        revision=1,
+    )
+    events.emit_selection(SelectionChange.COMMITTED, selection)
+    assert bridge.wait_for_wake(2.0)
+    plane.freeze()
+
+    entered = Event()
+    release = Event()
+    observed: list[OwnedSnapshot] = []
+    original_current_dataset = plane.current_dataset
+
+    def delayed_current_dataset(name, publication=None):
+        if publication is not None and publication.event_ref.sequence == 2:
+            entered.set()
+            assert release.wait(2.0)
+        snapshot = original_current_dataset(name, publication)
+        if publication is not None and publication.event_ref.sequence == 2:
+            observed.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(plane, "current_dataset", delayed_current_dataset)
+    try:
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 2, event_schema, np.full(event_schema.physical_shape, 2.0)),
+            DatasetCoverage(2, 3),
+            canonical_schema=canonical_schema,
+            cell_origin=(1, 0),
+        )
+        _commit_source(plane, source, state)
+        plane.freeze()
+        assert entered.wait(2.0)
+
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 3, event_schema, np.full(event_schema.physical_shape, 3.0)),
+            DatasetCoverage(3, 3),
+            canonical_schema=canonical_schema,
+            cell_origin=(2, 0),
+        )
+        _commit_source(plane, source, state)
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while not observed and time.monotonic() < deadline:
+            plane.freeze()
+            bridge.wait_for_wake(0.02)
+        assert observed
+        snapshot = observed[0]
+        np.testing.assert_array_equal(
+            snapshot.block.values[:, 0, 0, 0],
+            np.asarray([1.0, 2.0, 0.0]),
+        )
+        np.testing.assert_array_equal(
+            snapshot.expanded_validity()[:, 0, 0, 0],
+            np.asarray([True, True, False]),
+        )
+    finally:
+        release.set()
         _close(bridge, plane, source)
 
 
@@ -817,10 +1018,10 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
     gate = Event()
     original_evaluate = bridge._evaluate_processor
 
-    def delayed_evaluate(processor, signal):
+    def delayed_evaluate(processor, signal, publication):
         if signal.snapshot.ref.revision.value == 2:
             gate.wait(2.0)
-        return original_evaluate(processor, signal)
+        return original_evaluate(processor, signal, publication)
 
     monkeypatch.setattr(bridge, "_evaluate_processor", delayed_evaluate)
     try:
@@ -1323,6 +1524,77 @@ def _heatmap_schema(repeats: int = 2, *, with_columns: bool = True) -> DatasetSc
         topology,
         ValueSchema.scalar(np.dtype("float64"), None),
     )
+
+
+def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() -> None:
+    canonical_schema = _heatmap_schema(repeats=1)
+    event_schema = DatasetSchema(
+        canonical_schema.repeat_axis,
+        PointTable(1),
+        None,
+        canonical_schema.cell_schema,
+    )
+    plane, source, state, _initial = _finite_source_setup(
+        canonical_schema,
+        event_schema,
+        np.asarray([[[10.0]]]),
+        origin=(0, 0),
+    )
+    events = _Events()
+    signal = "@logic/point-prefix/roi_frame"
+    plane.set_front_signals({"camera/frame", signal})
+    bridge = SelectionBridge(
+        plane,
+        "camera/frame",
+        events,
+        events,
+        bridge_id="point-prefix",
+    )
+    bridge.start()
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("grad", 10.0, 30.0),
+            SelectionRange("bias_x", -1.0, 1.0),
+        ),
+        revision=1,
+    )
+    try:
+        events.emit_selection(SelectionChange.COMMITTED, selection)
+        first = plane.freeze().value(signal)
+        assert first is not None, bridge.last_error
+        assert first.snapshot.block.values.shape == (1, 9, 1)
+        assert first.snapshot.block.schema.grid_topology == canonical_schema.grid_topology
+        np.testing.assert_array_equal(
+            first.snapshot.expanded_validity()[..., 0],
+            np.asarray([[True, False, False, False, False, False, False, False, False]]),
+        )
+
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot(
+                "frame",
+                2,
+                event_schema,
+                np.asarray([[[44.0]]]),
+            ),
+            DatasetCoverage(2, 9),
+            canonical_schema=canonical_schema,
+            cell_origin=(0, 4),
+        )
+        _commit_source(plane, source, state)
+        front = _wait_for_signal(plane, bridge, signal, 2)
+        derived = front.value(signal)
+        assert derived is not None, bridge.last_error
+        assert float(derived.snapshot.block.values[0, 0, 0]) == 10.0
+        assert float(derived.snapshot.block.values[0, 4, 0]) == 44.0
+        np.testing.assert_array_equal(
+            derived.snapshot.expanded_validity()[..., 0],
+            np.asarray([[True, False, False, False, True, False, False, False, False]]),
+        )
+    finally:
+        _close(bridge, plane, source)
 
 
 def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:

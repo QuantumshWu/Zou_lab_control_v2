@@ -16,8 +16,9 @@ while an experiment is running.
 
 from __future__ import annotations
 
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, Future, InvalidStateError
 from dataclasses import dataclass, replace
+from threading import Lock
 from typing import Any, Callable
 
 from zlc_runtime import SurfaceUpdate
@@ -35,6 +36,7 @@ class _Prepared:
     front_refs: tuple[object, ...]
     replacement_host: object | None = None
     operation: object | None = None
+    completion: Future | None = None
 
 
 def _revision_of(snapshot: object) -> object | None:
@@ -63,6 +65,7 @@ class PlotPanelPort:
         shown: object | None = None,
         companion_signals: Callable[[], tuple[str, ...]] | None = None,
         project_input: Callable[[object, object, object], object] | None = None,
+        submit_projection: Callable[[Callable[[], object]], Future],
         current_dataset: Callable[[str, object], object] | None = None,
         replace_host: (
             Callable[[object, object, object], tuple[Any, object]] | None
@@ -77,6 +80,9 @@ class PlotPanelPort:
         self._panel_id = str(panel_id)
         self._signal_name = str(signal_name)
         self._host = host
+        self._host_token = (
+            object() if host is None else getattr(host, "host_id")
+        )
         self._interval_ms = int(display_interval_ms)
         self._presented: object | None = None
         self._presented_front_refs: tuple[object, ...] = ()
@@ -87,7 +93,10 @@ class PlotPanelPort:
         #: the scheduler unions them into the plane's coherent front set, so
         #: an annotation is frozen at the shot its picture came from.
         self._companion_signals = companion_signals
+        if not callable(submit_projection):
+            raise TypeError("plot panel port requires a projection submitter")
         self._current_dataset = current_dataset
+        self._submit_projection = submit_projection
         self._replace_host = replace_host
         self._accept_host = accept_host
         self._retire_host = retire_host
@@ -119,6 +128,11 @@ class PlotPanelPort:
         self._staged_front_refs: tuple[object, ...] = ()
         self._serial = 0
         self._pending: dict[int, _Prepared] = {}
+        # Projection completion runs on the board worker while accept, close,
+        # and the next tick run on the owner.  This lock protects only the
+        # port's small identity/pending record; Runtime materialization and
+        # plot rendering happen outside it.
+        self._state_lock = Lock()
         self._closed = False
         self.missing: list[str] = []
         #: The last render this panel could not show.  Read on the beat and put
@@ -156,17 +170,20 @@ class PlotPanelPort:
     def presented_publication(self) -> object | None:
         """What is on screen now, so the scheduler can skip an unchanged shot."""
 
-        return self._presented
+        with self._state_lock:
+            return self._presented
 
     def presented_front_refs(self) -> tuple[object, ...]:
         """EventRefs of the primary and companions currently on screen."""
 
-        return self._presented_front_refs
+        with self._state_lock:
+            return self._presented_front_refs
 
     def presented_input(self) -> object | None:
         """The exact plot input accepted beside ``presented_publication``."""
 
-        return self._presented_input
+        with self._state_lock:
+            return self._presented_input
 
     @staticmethod
     def _revision_value(revision: object) -> int | None:
@@ -191,28 +208,31 @@ class PlotPanelPort:
         plane-side retention window exists or is needed.
         """
 
-        wanted = self._revision_value(revision)
-        if wanted is None:
+        with self._state_lock:
+            wanted = self._revision_value(revision)
+            if wanted is None:
+                return None
+            for prepared in self._pending.values():
+                if self._revision_value(_revision_of(prepared.plot_input)) == wanted:
+                    return prepared.publication
+            if (
+                self._presented is not None
+                and self._revision_value(self._shown_revision) == wanted
+            ):
+                return self._presented
             return None
-        for prepared in self._pending.values():
-            if self._revision_value(_revision_of(prepared.plot_input)) == wanted:
-                return prepared.publication
-        if (
-            self._presented is not None
-            and self._revision_value(self._shown_revision) == wanted
-        ):
-            return self._presented
-        return None
 
     @property
     def host(self) -> Any:
-        return self._host
+        with self._state_lock:
+            return self._host
 
     @property
     def has_pending(self) -> bool:
         """Whether a staged render is still travelling toward this panel."""
 
-        return bool(self._pending)
+        with self._state_lock:
+            return bool(self._pending)
 
     # -------------------------------------------------------------- the tick
 
@@ -247,12 +267,24 @@ class PlotPanelPort:
         return tuple(refs)
 
     def _plot_value(self, value: object, publication: object) -> object:
-        if not bool(getattr(value, "growing", False)):
+        if getattr(value, "canonical_schema", None) is None:
             return value
         if self._current_dataset is None:
-            raise RuntimeError("growing presentation requires current_dataset")
+            raise RuntimeError(
+                "finite exact presentation requires current_dataset"
+            )
         snapshot = self._current_dataset(self._signal_name, publication)
-        return replace(value, snapshot=snapshot, growing=False)
+        # This is a presentation-local value.  Clearing placement metadata
+        # says its snapshot is already the canonical run view, so a Console
+        # projection callback does not ask Runtime to materialize it twice.
+        # The SurfaceUpdate still carries the original event value; exact
+        # Processor delivery therefore remains chunk based.
+        return replace(
+            value,
+            snapshot=snapshot,
+            canonical_schema=None,
+            cell_origin=None,
+        )
 
     def prepare(
         self,
@@ -274,163 +306,278 @@ class PlotPanelPort:
         question over and over.
         """
 
-        if self._closed:
-            raise RuntimeError("plot panel port is closed")
+        # Resolve companion membership before entering the state critical
+        # section.  The callback belongs to Console and may itself inspect the
+        # panel; holding the lock here made that ordinary re-entry deadlock.
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("plot panel port is closed")
         front_refs = self._front_refs(front, publication)
         publication_generation = _publication_generation(publication)
-        plot_value = self._plot_value(value, publication)
-        plot_input = (
-            plot_value.snapshot
-            if self._project_input is None
-            else self._project_input(plot_value, publication, front)
-        )
-        revision = _revision_of(plot_input)
-        for serial, prepared in tuple(self._pending.items()):
-            same_render = prepared.front_refs == front_refs or (
-                _publication_generation(prepared.publication)
-                == publication_generation
-                and _revision_of(prepared.plot_input) == revision
-                and prepared.front_refs[1:] == front_refs[1:]
-            )
-            if same_render:
-                # The renderer is already producing these exact pixels.  Move
-                # the pending causal target forward (typically LIVE -> FINAL)
-                # so accepting that one render cannot later regress identity.
-                if prepared.publication is not publication:
-                    self._pending[serial] = replace(
-                        prepared,
-                        publication=publication,
-                        plot_input=plot_input,
-                        front_refs=front_refs,
-                    )
-                return None
-        if (
-            self._shown_generation is None
-            and revision is not None
-            and revision == self._shown_revision
-        ):
-            # The host was constructed from this exact snapshot before the
-            # board first saw its publication.  Anchor the generation now so a
-            # later Restart with revision=1 cannot be mistaken for this run.
-            self._shown_generation = publication_generation
-            self._staged_generation = publication_generation
-            self._presented = publication
-            self._presented_input = plot_input
-            self._presented_front_refs = front_refs
-            self._staged_front_refs = front_refs
-            if self._on_presented is not None:
-                self._on_presented(publication, plot_input)
-            return None
-        if (
-            self._shown_generation is not None
-            and publication_generation != self._shown_generation
-        ):
-            if self._replace_host is None:
-                raise RuntimeError(
-                    "signal generation changed; the panel host must be replaced"
+        revision = _revision_of(value)
+        completion: Future = Future()
+        notify_presented: tuple[object, object] | None = None
+        serial: int | None = None
+        host_token: object | None = None
+
+        # Reserve one serial using only in-memory state.  Projection, host work,
+        # Future settlement, and Console callbacks all happen after release.
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("plot panel port is closed")
+            for pending_serial, prepared in tuple(self._pending.items()):
+                same_render = prepared.front_refs == front_refs or (
+                    _publication_generation(prepared.publication)
+                    == publication_generation
+                    and _revision_of(prepared.plot_input) == revision
+                    and prepared.front_refs[1:] == front_refs[1:]
                 )
-            if any(
-                prepared.replacement_host is not None
-                for prepared in self._pending.values()
-            ):
-                return None
-            replacement, future = self._replace_host(
-                plot_input, plot_value, publication
-            )
-            if replacement is None or not hasattr(replacement, "host_id"):
-                raise TypeError("panel host replacement must return a plotting host")
-            self._serial += 1
-            serial = self._serial
-            self._pending[serial] = _Prepared(
-                publication,
-                plot_input,
-                front_refs,
-                replacement,
-                future,
-            )
-            return SurfaceUpdate(
-                panel_id=self._panel_id,
-                serial=serial,
-                host_token=self._host.host_id,
-                publication=publication,
-                value=value,
-                front_refs=front_refs,
-                future=future,
-            )
-        if (
-            publication_generation == self._shown_generation
-            and revision is not None
-            and revision == self._shown_revision
-        ):
-            # A terminal sibling publication may deliberately reuse the last
-            # LIVE snapshot.  No pixels need rendering, but the displayed
-            # causal identity must still advance to FINAL; otherwise consumers
-            # wait forever for a publication the panel already depicts.
+                if same_render:
+                    if prepared.publication is not publication:
+                        self._pending[pending_serial] = replace(
+                            prepared,
+                            publication=publication,
+                            front_refs=front_refs,
+                        )
+                    return None
+
             if (
-                not self._pending
-                and self._presented is not publication
-                and front_refs[1:] == self._presented_front_refs[1:]
-            ):
-                self._presented = publication
-                self._presented_input = plot_input
-                self._presented_front_refs = front_refs
-                if self._on_presented is not None:
-                    self._on_presented(publication, plot_input)
-                return None
-            if front_refs == self._presented_front_refs:
-                return None
-        if any(
-            prepared.front_refs == front_refs
-            for prepared in self._pending.values()
-        ):
-            return None
-        if front_refs == self._staged_front_refs:
-            return None
-        staged_revision = self._revision_value(revision)
-        if (
-            staged_revision is not None
-            and self._staged_revision is not None
-            and publication_generation == self._staged_generation
-            and staged_revision <= self._staged_revision
-            and publication is not self._presented
-        ):
-            # The host already holds this revision — its render either
-            # presented, left with an abandoned cohort, or was rejected.
-            # The host's revisions are strictly monotonic, so re-offering it
-            # can only be refused; only a newer revision changes this panel.
-            return None
-        self._serial += 1
-        serial = self._serial
-        try:
-            # The host pipelines the frame as a complete pair: projection off
-            # the worker, an armed live fit solved on the fit executor, then
-            # one short paint-and-capture item.  The future resolves when the
-            # complete front is promoted.
-            if (
-                publication is self._presented
+                self._shown_generation is None
+                and revision is not None
                 and revision == self._shown_revision
-                and hasattr(plot_input, "overlay")
-                and callable(getattr(self._host, "update_image_overlay", None))
             ):
-                future = self._host.update_image_overlay(plot_input.overlay)
+                self._shown_generation = publication_generation
+                self._staged_generation = publication_generation
+                self._presented = publication
+                self._presented_front_refs = front_refs
+                self._staged_front_refs = front_refs
+                notify_presented = (publication, self._presented_input)
             else:
-                future = self._host.update_data(plot_input)
+                replacing_generation = (
+                    self._shown_generation is not None
+                    and publication_generation != self._shown_generation
+                )
+                if replacing_generation:
+                    if self._replace_host is None:
+                        raise RuntimeError(
+                            "signal generation changed; the panel host must be replaced"
+                        )
+                    if any(
+                        _publication_generation(prepared.publication)
+                        != self._shown_generation
+                        for prepared in self._pending.values()
+                    ):
+                        return None
+
+                if (
+                    publication_generation == self._shown_generation
+                    and revision is not None
+                    and revision == self._shown_revision
+                ):
+                    if (
+                        not self._pending
+                        and self._presented is not publication
+                        and front_refs[1:] == self._presented_front_refs[1:]
+                    ):
+                        self._presented = publication
+                        self._presented_front_refs = front_refs
+                        notify_presented = (publication, self._presented_input)
+                    elif front_refs == self._presented_front_refs:
+                        return None
+
+                if notify_presented is None:
+                    if any(
+                        prepared.front_refs == front_refs
+                        for prepared in self._pending.values()
+                    ):
+                        return None
+                    if front_refs == self._staged_front_refs:
+                        return None
+                    staged_revision = self._revision_value(revision)
+                    if (
+                        staged_revision is not None
+                        and self._staged_revision is not None
+                        and publication_generation == self._staged_generation
+                        and staged_revision <= self._staged_revision
+                        and publication is not self._presented
+                    ):
+                        return None
+
+                    self._serial += 1
+                    serial = self._serial
+                    host_token = self._host_token
+                    self._pending[serial] = _Prepared(
+                        publication,
+                        value.snapshot,
+                        front_refs,
+                        completion=completion,
+                    )
+
+        if notify_presented is not None:
+            if self._on_presented is not None:
+                self._on_presented(*notify_presented)
+            return None
+        assert serial is not None and host_token is not None
+
+        def project_and_stage() -> object:
+            plot_value = self._plot_value(value, publication)
+            plot_input = (
+                plot_value.snapshot
+                if self._project_input is None
+                else self._project_input(plot_value, publication, front)
+            )
+            with self._state_lock:
+                prepared = self._pending.get(serial)
+                if (
+                    self._closed
+                    or completion.cancelled()
+                    or prepared is None
+                    or prepared.completion is not completion
+                ):
+                    raise CancelledError()
+                host = self._host
+                replace_current_host = host is None or (
+                    self._shown_generation is not None
+                    and publication_generation != self._shown_generation
+                )
+                shown_revision = self._shown_revision
+                is_presented = publication is self._presented
+
+            # Host construction/configuration can be substantial.  Keeping it
+            # on this same projection job preserves ordering without holding
+            # the identity lock that close and owner acceptance need.
+            replacement = None
+            if replace_current_host:
+                if self._replace_host is None:
+                    raise RuntimeError(
+                        "signal generation changed; the panel host must be replaced"
+                    )
+                replacement, rendered = self._replace_host(
+                    plot_input,
+                    plot_value,
+                    publication,
+                )
+                if replacement is None or not hasattr(replacement, "host_id"):
+                    raise TypeError(
+                        "panel host replacement must return a plotting host"
+                    )
+            elif (
+                is_presented
+                and _revision_of(plot_input) == shown_revision
+                and hasattr(plot_input, "overlay")
+                and callable(getattr(host, "update_image_overlay", None))
+            ):
+                rendered = host.update_image_overlay(plot_input.overlay)
+            else:
+                rendered = host.update_data(plot_input)
+
+            with self._state_lock:
+                current = self._pending.get(serial)
+                stale = (
+                    self._closed
+                    or completion.cancelled()
+                    or current is None
+                    or current.completion is not completion
+                    or self._host is not host
+                )
+                if not stale:
+                    self._pending[serial] = replace(
+                        current,
+                        plot_input=plot_input,
+                        replacement_host=replacement,
+                        operation=rendered,
+                    )
+            if stale:
+                self._cancel_operation(rendered)
+                if replacement is not None:
+                    self._close_staged_host(replacement)
+                raise CancelledError()
+            return rendered
+
+        def render_finished(rendered: Future) -> None:
+            if completion.done():
+                return
+            try:
+                operation = rendered.result()
+            except CancelledError:
+                completion.cancel()
+            except BaseException as error:
+                try:
+                    completion.set_exception(error)
+                except InvalidStateError:
+                    pass
+            else:
+                try:
+                    completion.set_result(operation)
+                except InvalidStateError:
+                    pass
+
+        def projection_finished(resolved: Future) -> None:
+            if completion.done():
+                return
+            try:
+                rendered = resolved.result()
+            except CancelledError:
+                completion.cancel()
+                return
+            except BaseException as error:
+                try:
+                    completion.set_exception(error)
+                except InvalidStateError:
+                    pass
+                return
+            rendered.add_done_callback(render_finished)
+
+        def cancel_inflight(done: Future) -> None:
+            if not done.cancelled():
+                return
+            with self._state_lock:
+                prepared = self._pending.get(serial)
+                operation = (
+                    None
+                    if prepared is None or prepared.completion is not completion
+                    else prepared.operation
+                )
+            self._cancel_operation(operation)
+
+        # Register cancellation before submission.  Future invokes callbacks
+        # synchronously when already complete, so every registration and every
+        # settlement must remain outside the state lock.
+        completion.add_done_callback(cancel_inflight)
+        try:
+            projected = self._submit_projection(project_and_stage)
         except BaseException:
+            with self._state_lock:
+                current = self._pending.get(serial)
+                if current is not None and current.completion is completion:
+                    self._pending.pop(serial, None)
+            completion.cancel()
             raise
-        self._pending[serial] = _Prepared(
-            publication,
-            plot_input,
-            front_refs,
-            operation=future,
-        )
+
+        with self._state_lock:
+            current = self._pending.get(serial)
+            stale = (
+                self._closed
+                or completion.cancelled()
+                or current is None
+                or current.completion is not completion
+            )
+            if not stale and current.operation is None:
+                self._pending[serial] = replace(current, operation=projected)
+        if stale:
+            self._cancel_operation(projected)
+            completion.cancel()
+        else:
+            projected.add_done_callback(projection_finished)
+
         return SurfaceUpdate(
             panel_id=self._panel_id,
             serial=serial,
-            host_token=self._host.host_id,
+            host_token=host_token,
             publication=publication,
             value=value,
             front_refs=front_refs,
-            future=future,
+            future=completion,
         )
 
     def observe(self, update: SurfaceUpdate, operation: object) -> None:
@@ -443,7 +590,8 @@ class PlotPanelPort:
         batch is abandoned rather than showing one stale panel beside fresh ones.
         """
 
-        return not self._closed and update.host_token == self._host.host_id
+        with self._state_lock:
+            return not self._closed and update.host_token == self._host_token
 
     def _advance_staged(
         self,
@@ -463,49 +611,55 @@ class PlotPanelPort:
         elif self._staged_revision is None or value > self._staged_revision:
             self._staged_revision = value
 
-    def _note_completed_render(
-        self,
-        prepared: _Prepared | None,
-        update: SurfaceUpdate,
-    ) -> None:
-        """Advance the staged mark for a render the host actually committed.
+    @staticmethod
+    def _render_completed(update: SurfaceUpdate) -> bool:
+        """Whether the plotting host successfully committed this surface."""
 
-        Only a future that resolved with a promoted front proves the host
-        holds the revision; a cancelled render was coalesced away before the
-        host drew it, and a failed one rolled back — both may legitimately
-        be staged again.
-        """
-
-        if prepared is None:
-            return
-        if prepared.replacement_host is not None:
-            return
         future = update.future
         if not future.done() or future.cancelled():
-            return
+            return False
         try:
             if future.exception() is not None:
-                return
+                return False
         except CancelledError:
-            return
-        self._advance_staged(
-            _publication_generation(prepared.publication),
-            _revision_of(prepared.plot_input),
-            prepared.front_refs,
-        )
+            return False
+        return True
 
     def accept(self, update: SurfaceUpdate, operation: object) -> bool:
-        if not self.can_accept(update, operation):
-            return False
-        prepared = self._pending.pop(update.serial, None)
-        publication = (
-            update.publication if prepared is None else prepared.publication
-        )
-        replacement = None if prepared is None else prepared.replacement_host
+        """Accept bookkeeping atomically, then run fallible app callbacks unlocked."""
+
+        with self._state_lock:
+            if self._closed or update.host_token != self._host_token:
+                return False
+            prepared = self._pending.pop(update.serial, None)
+            publication = (
+                update.publication if prepared is None else prepared.publication
+            )
+            replacement = None if prepared is None else prepared.replacement_host
+            old_host = self._host
+            if replacement is not None:
+                self._host = replacement
+                self._host_token = replacement.host_id
+            self._presented = publication
+            self._presented_input = (
+                update.value.snapshot if prepared is None else prepared.plot_input
+            )
+            accepted_refs = (
+                update.front_refs if prepared is None else prepared.front_refs
+            )
+            self._shown_generation = _publication_generation(publication)
+            self._shown_revision = _revision_of(self._presented_input)
+            self._presented_front_refs = accepted_refs
+            self._advance_staged(
+                self._shown_generation,
+                self._shown_revision,
+                accepted_refs,
+            )
+            self.last_error = None
+            presented_input = self._presented_input
+
         callback_error: BaseException | None = None
         if replacement is not None:
-            old_host = self._host
-            self._host = replacement
             try:
                 if self._accept_host is not None:
                     self._accept_host(
@@ -519,22 +673,6 @@ class PlotPanelPort:
                 # bookkeeping failure is reported on this panel but must not
                 # tear an already-accepted cohort in half.
                 callback_error = error
-        self._presented = publication
-        self._presented_input = (
-            update.value.snapshot if prepared is None else prepared.plot_input
-        )
-        accepted_refs = (
-            update.front_refs if prepared is None else prepared.front_refs
-        )
-        self._shown_generation = _publication_generation(publication)
-        self._shown_revision = _revision_of(self._presented_input)
-        self._presented_front_refs = accepted_refs
-        self._advance_staged(
-            self._shown_generation,
-            self._shown_revision,
-            accepted_refs,
-        )
-        self.last_error = callback_error
         if self._present is not None:
             # The pixels, on the owner thread, inside the batch's one accept
             # pass -- this is the group's atomic present.  A refused present
@@ -545,9 +683,15 @@ class PlotPanelPort:
             try:
                 self._present(operation)
             except BaseException as error:
-                self.last_error = error
+                callback_error = error
         if self._on_presented is not None:
-            self._on_presented(publication, self._presented_input)
+            try:
+                self._on_presented(publication, presented_input)
+            except BaseException as error:
+                callback_error = error
+        if callback_error is not None:
+            with self._state_lock:
+                self.last_error = callback_error
         return True
 
     def reject(self, update: SurfaceUpdate, error: BaseException | None) -> None:
@@ -563,15 +707,27 @@ class PlotPanelPort:
         red on the card it read as the camera failing once per skipped frame.
         """
 
-        serial = getattr(update, "serial", None)
-        if serial is not None:
-            prepared = self._pending.pop(serial, None)
-            self._note_completed_render(prepared, update)
-            if prepared is not None and prepared.replacement_host is not None:
-                self._cancel_operation(prepared.operation)
-                self._close_staged_host(prepared.replacement_host)
-        if error is not None and not isinstance(error, CancelledError):
-            self.last_error = error
+        completed = self._render_completed(update)
+        prepared = None
+        with self._state_lock:
+            serial = getattr(update, "serial", None)
+            if serial is not None:
+                prepared = self._pending.pop(serial, None)
+                if (
+                    completed
+                    and prepared is not None
+                    and prepared.replacement_host is None
+                ):
+                    self._advance_staged(
+                        _publication_generation(prepared.publication),
+                        _revision_of(prepared.plot_input),
+                        prepared.front_refs,
+                    )
+            if error is not None and not isinstance(error, CancelledError):
+                self.last_error = error
+        if prepared is not None and prepared.replacement_host is not None:
+            self._cancel_operation(prepared.operation)
+            self._close_staged_host(prepared.replacement_host)
 
     def finish_unpresented(self, update: SurfaceUpdate) -> None:
         """Release a surface the batch decided not to show.
@@ -583,14 +739,26 @@ class PlotPanelPort:
         per beat until the next shot.
         """
 
-        serial = getattr(update, "serial", None)
-        if serial is not None:
-            prepared = self._pending.pop(serial, None)
-            self._note_completed_render(prepared, update)
-            if prepared is not None:
-                self._cancel_operation(prepared.operation)
-                if prepared.replacement_host is not None:
-                    self._close_staged_host(prepared.replacement_host)
+        completed = self._render_completed(update)
+        prepared = None
+        with self._state_lock:
+            serial = getattr(update, "serial", None)
+            if serial is not None:
+                prepared = self._pending.pop(serial, None)
+                if (
+                    completed
+                    and prepared is not None
+                    and prepared.replacement_host is None
+                ):
+                    self._advance_staged(
+                        _publication_generation(prepared.publication),
+                        _revision_of(prepared.plot_input),
+                        prepared.front_refs,
+                    )
+        if prepared is not None:
+            self._cancel_operation(prepared.operation)
+            if prepared.replacement_host is not None:
+                self._close_staged_host(prepared.replacement_host)
 
     @staticmethod
     def _cancel_operation(operation: object | None) -> None:
@@ -616,13 +784,15 @@ class PlotPanelPort:
     def close(self) -> None:
         """Cancel unpresented work; the mounted host remains its caller's."""
 
-        if self._closed:
-            return
-        self._closed = True
-        pending = tuple(self._pending.values())
-        self._pending.clear()
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            pending = tuple(self._pending.values())
+            self._pending.clear()
         for prepared in pending:
             self._cancel_operation(prepared.operation)
+            self._cancel_operation(prepared.completion)
             if prepared.replacement_host is not None:
                 self._close_staged_host(prepared.replacement_host)
 

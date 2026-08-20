@@ -237,7 +237,10 @@ class TemperatureTask:
         occupied = np.asarray(
             outputs["occupied"].snapshot.block.values, dtype=bool
         )[0]
-        valid = np.asarray(outputs["valid"].snapshot.block.values, dtype=bool)[0]
+        valid = np.asarray(
+            outputs["occupied"].snapshot.expanded_validity(),
+            dtype=bool,
+        )[0]
         eligible = valid[0] & valid[1] & occupied[0]
         survival = np.where(eligible, occupied[1].astype("<f8"), np.nan)
         self._written += 1

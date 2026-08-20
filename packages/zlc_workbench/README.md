@@ -47,6 +47,20 @@ Task's own outputs. At Task terminal, auto-preview panels whose Monitor signals
 retire are removed, while a retained Runtime camera dataset and the durable
 Task artifact keep their respective data and product truth.
 
+Finite exact signals have one presentation identity independent of Panel
+semantics: Logic shape, live Panel, Edit/Refresh/Save, selector, fit and overlay
+all use the accepted canonical full Dataset for that publication. Event chunks
+remain internal to acquisition and exact processors. Scope/reduction/fate only
+change how the canonical Dataset is drawn; they never switch the data source.
+Monitor signals remain latest-event views. Canonical assembly and companion
+projection run on the board-owned presentation worker at panel cadence, not in
+the Qt owner callback.
+
+Image overlay candidates are selected only by the neutral
+`IMAGE_POINT_OVERLAY_CONTRACT`. The geometry and numeric/bool status Dataset
+are adapted by `zlc_plot`; Workbench never imports a concrete Logic Node or
+reconstructs its domain result.
+
 While a Task runs, Add Logic and that Task's source/preview identities and data
 projection are frozen. Other panels and pure display controls remain usable;
 Workbench does not duplicate Task lifecycle or scientific state to enforce

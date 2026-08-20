@@ -7,9 +7,13 @@ selection-derived signals. It is Qt-free and contains no plugin physics.
 Logic Nodes submit only new immutable event chunks. `SignalDataPlane` assigns
 their generation/revision identity and, for finite data, places them into one
 canonical run dataset using the declared schema and `(repeat, point)` origin.
-Monitor outputs retain only their latest event. A growing view is explicitly
-materialized and cached by `current_dataset()`; `freeze()` only reads committed
-state and never calls plugin science or a plugin materializer.
+Exact scientific processors consume the immutable event; every display
+consumer sees the same publication's canonical full geometry through
+`current_dataset()`, with unwritten cells invalid. Monitor outputs have no
+finite canonical extent and retain only their latest event. Display
+materialization is presentation-paced, cached, and performed off the UI owner;
+`freeze()` only reads committed state and never calls plugin science or a
+plugin materializer.
 
 `seal_committed()` closes that same run truth as complete or explicitly
 partial, with unwritten cells remaining invalid. Save, late one-shot processing,

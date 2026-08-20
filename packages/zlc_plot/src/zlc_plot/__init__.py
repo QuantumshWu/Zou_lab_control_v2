@@ -34,6 +34,22 @@ _EXPORTS = {
     "PlotKind": ("zlc_plot.kinds", "PlotKind"),
     "ImageFrame": ("zlc_plot.primitives", "ImageFrame"),
     "ImagePointOverlay": ("zlc_plot.primitives", "ImagePointOverlay"),
+    "IMAGE_POINT_OVERLAY_CONTRACT": (
+        "zlc_plot.primitives",
+        "IMAGE_POINT_OVERLAY_CONTRACT",
+    ),
+    "IMAGE_POINT_OVERLAY_GEOMETRY_RECORD": (
+        "zlc_plot.primitives",
+        "IMAGE_POINT_OVERLAY_GEOMETRY_RECORD",
+    ),
+    "image_point_overlay_from_signal": (
+        "zlc_plot.primitives",
+        "image_point_overlay_from_signal",
+    ),
+    "image_point_overlay_geometry": (
+        "zlc_plot.primitives",
+        "image_point_overlay_geometry",
+    ),
     "PointStatus": ("zlc_plot.primitives", "PointStatus"),
     "PulseAnalogTrace": ("zlc_plot.primitives", "PulseAnalogTrace"),
     "PulseBlock": ("zlc_plot.primitives", "PulseBlock"),
@@ -128,6 +144,10 @@ __all__ = [
     "ImageFrame",
     "ImagePlot",
     "ImagePointOverlay",
+    "IMAGE_POINT_OVERLAY_CONTRACT",
+    "IMAGE_POINT_OVERLAY_GEOMETRY_RECORD",
+    "image_point_overlay_from_signal",
+    "image_point_overlay_geometry",
     "NumericRange",
     "PlotKind",
     "PlotLabels",

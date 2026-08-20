@@ -508,8 +508,16 @@ class _BridgeProcessor:
         if not isinstance(source.snapshot, OwnedSnapshot):
             raise TypeError("SelectionBridge processor source must own a snapshot")
 
-    def evaluate_processor(self, source: SignalValue) -> Mapping[str, LiveDatasetOutput]:
-        return self._bridge._evaluate_processor(self, source)
+    def evaluate_processor(
+        self,
+        source: SignalValue,
+        source_publication: SignalPublication,
+    ) -> Mapping[str, LiveDatasetOutput]:
+        return self._bridge._evaluate_processor(
+            self,
+            source,
+            source_publication,
+        )
 
     def accept_processor_result(
         self,
@@ -858,7 +866,10 @@ class SelectionBridge:
             self._withdraw_processor(old_processor)
         if not output_names:
             return
-        outputs = self._materialize_fit_outputs(source.snapshot, event)
+        outputs = self._materialize_fit_outputs(
+            self._source_snapshot(publication),
+            event,
+        )
         if not self._plane.is_generation_live(self._source_signal):
             if processor is not None:
                 with self._lock:
@@ -932,7 +943,10 @@ class SelectionBridge:
             source = publication.value(self._source_signal)
             if source is None:
                 raise RuntimeError("current source publication has no selected signal")
-            outputs = self._materialize_selection_outputs(source.snapshot, state)
+            outputs = self._materialize_selection_outputs(
+                self._source_snapshot(publication),
+                state,
+            )
 
             # A committed image selection may change the derived sub-box
             # schema.  The plane deliberately freezes schemas per generation,
@@ -972,7 +986,7 @@ class SelectionBridge:
                         "current source publication has no selected signal"
                     )
                 outputs = self._materialize_selection_outputs(
-                    source.snapshot,
+                    self._source_snapshot(publication),
                     state,
                 )
             processor = self._new_processor("selection", output_names)
@@ -1051,26 +1065,39 @@ class SelectionBridge:
         self,
         processor: _BridgeProcessor,
         source: SignalValue,
+        source_publication: SignalPublication,
     ) -> Mapping[str, LiveDatasetOutput]:
+        snapshot = self._source_snapshot(source_publication)
         with self._lock:
             if processor._role == "selection":
                 state = self._selection
                 if state is None:
                     raise RuntimeError("SelectionBridge has no committed selection")
                 return _TriggeredOutputs(
-                    self._materialize_selection_outputs(source.snapshot, state),
+                    self._materialize_selection_outputs(snapshot, state),
                     ("selection", state.revision),
                 )
             event = self._fit_event
             trigger_revision = self._fit_trigger_revision
             if event is None:
                 raise RuntimeError("SelectionBridge has no accepted fit event")
-            if source.snapshot.ref.revision.value != event.source_revision:
+            if snapshot.ref.revision.value != event.source_revision:
                 raise _StaleFit(trigger_revision)
             return _TriggeredOutputs(
-                self._materialize_fit_outputs(source.snapshot, event),
+                self._materialize_fit_outputs(snapshot, event),
                 ("fit", trigger_revision),
             )
+
+    def _source_snapshot(
+        self,
+        publication: SignalPublication,
+    ) -> OwnedSnapshot:
+        """The exact dataset prefix the panel and this derivation both mean."""
+
+        return self._plane.current_dataset(
+            self._source_signal,
+            publication,
+        )
 
     def _accept_processor_result(
         self,

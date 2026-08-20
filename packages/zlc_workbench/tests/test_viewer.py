@@ -30,8 +30,17 @@ from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_workbench.plot_annotations import PanelPlotAnnotations
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import FigureViewerPresenter, _panel_state, describe_archive
+from zlc_data import (
+    AxisId,
+    AxisSpec,
+    DatasetSchema,
+    SITE,
+    ValidityContract,
+    ValueSchema,
+    owned_snapshot_from_arrays,
+)
 from zlc_plot import AxisRef
-from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
+from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
@@ -456,19 +465,33 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         fit={"model": "anisotropic_gaussian_center", "live": False},
         overlay_signal="@logic/occupancy/occupied",
     )
+    source_schema = snapshot.block.schema
+    site_axis = AxisSpec(AxisId("site"), "site", SITE, 2, (0, 1))
+    status_schema = DatasetSchema(
+        source_schema.repeat_axis,
+        source_schema.point_table,
+        source_schema.grid_topology,
+        ValueSchema(
+            (site_axis,),
+            ValidityContract.value(),
+            np.dtype(np.bool_),
+            "1",
+        ),
+    )
+    status_shape = status_schema.physical_shape
+    occupied = owned_snapshot_from_arrays(
+        status_schema,
+        np.broadcast_to(np.asarray([False, True]), status_shape),
+        snapshot.ref.revision,
+        validity=np.ones(status_shape, dtype=np.bool_),
+    )
     overlay = ImagePointOverlay(
         7,
         np.asarray(((2.5, 3.5), (7.5, 9.5))),
         ("site-0", "site-1"),
         ("0", "1"),
-        {
-            None: (PointStatus.EMPTY, PointStatus.OCCUPIED),
-            0.0: (PointStatus.OCCUPIED, PointStatus.INVALID),
-        },
-        # Those keys are coordinates OF an axis, so the archive has to carry
-        # its name: without it a reopened figure holds numbers it cannot
-        # match to any picture, and draws no rings at all.
-        "frame",
+        None,
+        occupied,
     )
     frozen = PanelFrozenData(
         signal=state.signal,
@@ -494,6 +517,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     )
     with np.load(written.archive, allow_pickle=False) as payload:
         assert "overlay.coordinates" in payload.files
+        assert "overlay.status" in payload.files
 
     class _RestoredHost:
         def __init__(self) -> None:
@@ -538,8 +562,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         np.testing.assert_array_equal(frame.overlay.coordinates, overlay.coordinates)
         assert frame.overlay.point_ids == overlay.point_ids
         assert frame.overlay.labels == overlay.labels
-        assert frame.overlay.statuses == overlay.statuses
-        assert frame.overlay.status_axis == overlay.status_axis
+        assert frame.overlay.static_statuses is None
+        assert frame.overlay.status.exactly_equals(overlay.status)
 
         host = seen["host"]
         assert seen["state"].semantic == {"reduction": "mean"}

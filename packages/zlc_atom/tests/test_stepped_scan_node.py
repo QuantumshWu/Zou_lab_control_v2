@@ -484,7 +484,6 @@ def test_partial_scan_current_dataset_has_invalid_future_points() -> None:
             plane.commit_live(
                 producer,
                 {SCAN_OUTPUT.name: writer.write(source, row=row, visit=0)},
-                growing_outputs=(SCAN_OUTPUT.name,),
             )
         assert plane.seal_committed(producer, cut_short=True)
         current = plane.current_dataset(producer.signal_key(SCAN_OUTPUT.name))

@@ -22,6 +22,7 @@ Package README、旧GOAL、survey、acceptance、历史contract和旧tests不是
 - 默认删，不为旧测试、兼容或“以后可能”保留历史路径；
 - 每个事实只有一个owner；
 - 优先扩展现有Data、Plane、Host、Session和device骨架，不新增manager/registry/base-class；
+- Workbench不得import或分支判断`zlc_atom.nodes.<concrete_leaf>`；它只消费discovered descriptor、Runtime signal与Data/Plot等中立层拥有的通用contract。新增/删除普通Logic Node的修改必须闭合在该leaf目录、资源与测试内；只有新增真正跨节点能力时，才先在中立层定义contract。
 - 不用GPU、降采样、质量放宽、丢revision或增加timeout掩盖性能根因；
 - 不增加密码、认证、TLS、权限系统或新的content hash体系；
 - Domain validation、hardware acknowledgement、owner identity和strict format是功能正确性，不是防御性框架。
@@ -73,15 +74,23 @@ Logic Node只提交本次新增chunk/event；Runtime按run和signal identity累�
 ```text
 Node new chunk
   -> Runtime append/commit
-  -> immutable live view
+  -> immutable event view -> exact scientific Processor
+  -> canonical current view -> Signal description / Panel / Edit / Save /
+                               Selector / Overlay / display derivation
   -> retained partial seal
   -> final seal
-  -> Panel / Processor projections
 ```
 
 - Camera、Scan、Calibration和Task preview不得自建parallel slot/history/terminal truth。
 - Camera使用chunked append，避免每次复制全部历史；Scan按固定point geometry增长。
 - 未写位置invalid；coverage只描述实际写入extent。
+- Finite exact signal的event view只用于commit与exact Processor；所有UI/display consumer必须使用同一publication对应的canonical current view，从第一次publication起报告完整authored physical shape，未来位置invalid。
+- Monitor signal没有finite canonical extent，UI显示latest complete event。
+- `scope/reduction/fate`只决定怎样投影canonical view，绝不决定选择event还是canonical；同一publication不能因Panel semantic不同代表两份不同数据truth。
+- Incremental placement沿repeat与point rows；多维scan/grid通过point table与grid topology表达。一个cell payload原子完整发布，不新增cell-internal tile/slice streaming contract。
+- Canonical display materialization只在实际display consumer到期时合并/cache，并在Qt owner thread之外执行；不得让producer每commit强制复制full prefix，也不得因Panel存在与否改变采集结果。
+- Live Panel、Panel Edit/Refresh/Save、selector、fit input和overlay必须从同一accepted canonical presentation snapshot投影；无法唯一对齐即拒绝。
+- Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。只有scope/facet唯一选中一个cell时才能显示离散状态；对多个cells做reduce/pool时不得私自发明共识状态，未定义则显示UNKNOWN/隐藏。
 - UI freeze只读取已提交状态，不调用plugin materializer。
 - Stop/Final不受Panel、freeze或Processor订阅影响。
 
@@ -99,6 +108,7 @@ Node new chunk
 - Task必须发布progress与声明preview，或显式声明无preview。
 - 第一份真实publication前不显示live；terminal清除progress并seal/retire preview。
 - Descriptor outputs、runtime declarations和preview references只有一份typed vocabulary。
+- Concrete Logic Node不得要求Workbench识别其模块、output spelling或domain helper；通用显示/overlay/selection能力由中立层contract表达，Workbench只路由contract。
 - 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
 
 ### 4.4 Task运行中冻结
@@ -126,10 +136,11 @@ Node new chunk
 
 ### 5.3 Overlay与selector
 
-- Overlay是plugin发布的typed companion signal，不由Workbench重建science。
+- Overlay producer发布匹配中立Plot contract的numeric/bool companion signal，并在同一run record中携带该contract要求的geometry document；`zlc_plot`拥有通用adapter与renderer，Workbench只按contract路由，不import domain plugin，也不重建science。
 - Data、Fit和Overlay共同使用同一个scope/axis/fate projection；无法唯一对齐则拒绝。
 - ROI/binning坐标只由一个transform owner处理。
-- Selector Off时普通滚轮滚外层board；On时plot接管交互。
+- Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
+- Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。
 
 ## 6. UI与Lifecycle
 

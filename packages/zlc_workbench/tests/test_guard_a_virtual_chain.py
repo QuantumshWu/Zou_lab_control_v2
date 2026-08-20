@@ -27,7 +27,7 @@ from zlc_workbench.logic import (
     make_host,
     stable_signal_key,
 )
-import zlc_atom.nodes.occupancy.overlay as occupancy_overlay_module
+import zlc_plot.primitives as overlay_contract_module
 from zlc_workbench.session import Workspace
 
 
@@ -128,7 +128,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
     print(camera_logic_node.__file__)
     print(occupancy_logic_node.__file__)
     print(runtime_host.__file__)
-    print(occupancy_overlay_module.__file__)
+    print(overlay_contract_module.__file__)
 
     catalog = LogicCatalog()
     installation = create_installation("virtual")
@@ -399,7 +399,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert expected_outputs == {
             stable_signal_key("occupancy", "counts"),
             stable_signal_key("occupancy", "occupied"),
-            stable_signal_key("occupancy", "valid"),
             stable_signal_key("occupancy", "rate"),
             stable_signal_key("occupancy", "frame_judged"),
         }
@@ -407,19 +406,19 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         occupied = occupancy_publication.value(
             occupancy_host.signal_key("occupied")
         )
-        valid = occupancy_publication.value(occupancy_host.signal_key("valid"))
         rate = occupancy_publication.value(occupancy_host.signal_key("rate"))
         frame_judged = occupancy_publication.value(
             occupancy_host.signal_key("frame_judged")
         )
         assert all(
             value is not None
-            for value in (counts, occupied, valid, rate, frame_judged)
+            for value in (counts, occupied, rate, frame_judged)
         )
         n_sites = first_calibration.calibration.site_map.n_sites
         # (repeat cycles, frame points, sites): the classifier inherits the
         # camera's point axis and returns a site-shaped datum per frame.
-        assert counts.shape == occupied.shape == valid.shape == (3, 1, n_sites)
+        assert counts.shape == occupied.shape == (3, 1, n_sites)
+        assert occupied.snapshot.expanded_validity().shape == occupied.shape
         # The same (repeat, frame) pair over a SCALAR cell -- one occupied
         # fraction per frame, not a site-shaped datum.
         assert rate.shape == (3, 1, 1)

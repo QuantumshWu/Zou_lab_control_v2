@@ -40,10 +40,16 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
+    frames_snapshot,
 )
+from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_LOGIC_NODE
 from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS, OccupancyProcessor
-from zlc_data import DatasetSchema, owned_snapshot_from_arrays
+from zlc_plot import (
+    IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
+    image_point_overlay_geometry,
+)
+from zlc_data import AxisId, AxisSpec, DatasetSchema, SITE, owned_snapshot_from_arrays
 from zlc_runtime import DatasetCoverage, LiveDatasetOutput, MonitorCoverage
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
@@ -107,6 +113,40 @@ def _single_site_calibration(node, source) -> TrapCalibration:
     )
 
 
+def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
+    point = CameraWorkingPoint(
+        "EXTERNAL_TRIGGERED",
+        (4, 3),
+        (30, 40),
+        (10, 20),
+        (8, 9),
+        (2, 3),
+        np.dtype("<u2"),
+        "count",
+        0.01,
+        0.02,
+        0.0,
+        1.0,
+        "default",
+    )
+    frame = frames_snapshot(
+        ((CameraFrameRecord(np.zeros((4, 3), dtype="<u2"), 0),),),
+        producer="roi-camera",
+        generation="geometry-run",
+        revision=1,
+        working_point=point,
+    )
+    geometry = image_point_overlay_geometry(
+        frame,
+        np.asarray(((1.5, 2.0),)),
+        ("site-1",),
+        status_axis=AxisSpec(AxisId("site"), "site", SITE, 1, (1,)),
+        coordinates_are_indices=True,
+    )
+    assert geometry["coordinate_frame"] == "sensor_pixel_xy"
+    assert geometry["coordinates_xy"] == [[24.5, 14.0]]
+
+
 def test_a_finished_measurement_keeps_extent_while_runtime_owns_terminal(bench) -> None:
     plane, camera, sequencer, windows = bench
     node, result = _finished_shot(plane, camera, sequencer, windows)
@@ -148,18 +188,16 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     source_event = replace(
         source,
         coverage=coverage,
-        growing=True,
         canonical_schema=canonical_schema,
         cell_origin=(0, 0),
     )
     outputs = processor.evaluate(source_event)
-    for name in ("counts", "occupied", "valid", "rate"):
+    for name in ("counts", "occupied", "rate", "frame_judged"):
         output = outputs[name]
         assert output.snapshot.block.schema.repeat_axis.size == 1
         assert output.canonical_schema.repeat_axis.size == 3
         assert output.cell_origin == (0, 0)
         assert output.coverage == coverage
-    assert isinstance(outputs["frame_judged"].coverage, MonitorCoverage)
     assert outputs["frame_judged"].snapshot is source.snapshot
 
     validity = np.ones(source.snapshot.block.values.shape, dtype=np.bool_)
@@ -177,7 +215,6 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
         coverage=MonitorCoverage(event_cells, event_cells),
     )
     invalid = processor.evaluate(invalid_source)
-    assert not np.any(invalid["valid"].snapshot.block.values[:, 0])
     assert not np.any(invalid["occupied"].snapshot.block.values[:, 0])
     assert np.all(np.isnan(invalid["counts"].snapshot.block.values[:, 0]))
     assert np.all(np.isnan(invalid["rate"].snapshot.block.values[:, 0]))
@@ -210,7 +247,6 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
                     (0, 0),
                 )
             },
-            growing_outputs=("frames",),
         )
         wake = Event()
         event_host = NodeHost(
@@ -419,7 +455,6 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         assert set(publication.signals) == {
             "@logic/occupancy/counts",
             "@logic/occupancy/occupied",
-            "@logic/occupancy/valid",
             "@logic/occupancy/rate",
             "@logic/occupancy/frame_judged",
         }
@@ -427,7 +462,9 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             publication.value("@logic/occupancy/frame_judged").values,
             source.values,
         )
-        assert np.all(publication.value("@logic/occupancy/valid").values)
+        assert np.all(
+            publication.value("@logic/occupancy/occupied").snapshot.expanded_validity()
+        )
 
         from zlc_data import READOUT_EVENT, SITE
 
@@ -435,11 +472,11 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         # object: the frames it judged are the points it reports over.
         (parent_column,) = source.schema.point_table.columns
         assert parent_column.role is READOUT_EVENT
-        for name in ("counts", "occupied", "valid", "rate", "frame_judged"):
+        for name in ("counts", "occupied", "rate", "frame_judged"):
             value = publication.value(f"@logic/occupancy/{name}")
             assert value.schema.point_table.columns == (parent_column,), name
         # SITE is CELL data, carried by the calibration's one site axis.
-        for name in ("counts", "occupied", "valid"):
+        for name in ("counts", "occupied"):
             value = publication.value(f"@logic/occupancy/{name}")
             (site_axis,) = value.schema.cell_schema.data_axes
             assert site_axis == calibration.site_map.site_axis, name
@@ -463,8 +500,24 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             and value.coverage.complete
             for value in publication.signals.values()
         )
+        expected_geometry = image_point_overlay_geometry(
+            source.snapshot,
+            calibration.site_map.centers_xy,
+            calibration.site_map.site_ids,
+            status_axis=calibration.site_map.site_axis,
+            coordinates_are_indices=True,
+        )
+        expected_geometry["point_ids"] = tuple(expected_geometry["point_ids"])
+        expected_geometry["coordinates_xy"] = tuple(
+            tuple(center) for center in expected_geometry["coordinates_xy"]
+        )
+        expected_geometry["labels"] = tuple(expected_geometry["labels"])
+        expected_geometry["status_coordinates"] = tuple(
+            expected_geometry["status_coordinates"]
+        )
         expected_record = {
             "node": "occupancy",
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: expected_geometry,
             "parameters": {
                 "frames_signal": source_name,
                 "calibration_path": str(calibration_path.resolve()),

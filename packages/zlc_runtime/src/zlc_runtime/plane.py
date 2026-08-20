@@ -130,6 +130,7 @@ class LatestProcessorControl(SignalProducer, Protocol):
     def evaluate_processor(
         self,
         source: "SignalValue",
+        source_publication: "SignalPublication",
     ) -> Mapping[str, LiveDatasetOutput]: ...
 
     def accept_processor_result(
@@ -154,7 +155,6 @@ class SignalValue:
     snapshot: OwnedSnapshot
     coverage: DatasetCoverage | MonitorCoverage | None
     run_record: Mapping[str, object] = field(default_factory=dict)
-    growing: bool = False
     canonical_schema: DatasetSchema | None = None
     cell_origin: tuple[int, int] | None = None
 
@@ -167,8 +167,6 @@ class SignalValue:
             (DatasetCoverage, MonitorCoverage),
         ):
             raise TypeError("signal coverage has an unknown type")
-        if type(self.growing) is not bool:
-            raise TypeError("signal growing flag must be bool")
         if (self.canonical_schema is None) != (self.cell_origin is None):
             raise ValueError(
                 "signal canonical_schema and cell_origin must appear together"
@@ -480,7 +478,6 @@ class _GenerationState:
     publication_stream: AcquisitionStream[SignalPublication] | None = None
     exact_outputs: frozenset[str] | None = None
     canonical_schemas: Mapping[str, DatasetSchema] = field(default_factory=dict)
-    growing_outputs: frozenset[str] = frozenset()
     commit_values: dict[str, list[tuple[int, SignalValue]]] = field(
         default_factory=dict
     )
@@ -671,6 +668,7 @@ class _LatestOnlyProcessorLane:
             future = self._executor.submit(
                 entry.node.evaluate_processor,
                 source,
+                publication,
             )
         except Exception as error:
             self._processors.pop(_node_instance_id(entry.node), None)
@@ -1050,14 +1048,8 @@ class SignalDataPlane:
         self,
         node: object,
         outputs: Mapping[str, LiveDatasetOutput],
-        *,
-        growing_outputs: Iterable[str] = (),
     ) -> Mapping[str, SignalValue]:
-        return self._commit_outputs(
-            node,
-            outputs,
-            growing_outputs=growing_outputs,
-        )
+        return self._commit_outputs(node, outputs)
 
     def commit_processor(
         self,
@@ -1065,7 +1057,6 @@ class SignalDataPlane:
         outputs: Mapping[str, LiveDatasetOutput],
         *,
         source_publication: SignalPublication,
-        growing_outputs: Iterable[str] = (),
         trigger: tuple[str, int] | None = None,
         retain: bool = False,
     ) -> Mapping[str, SignalValue]:
@@ -1110,7 +1101,6 @@ class SignalDataPlane:
         return self._commit_outputs(
             node,
             selected,
-            growing_outputs=growing_outputs,
             source_publication=source_publication,
             trigger=trigger,
         )
@@ -1120,7 +1110,6 @@ class SignalDataPlane:
         node: object,
         outputs: Mapping[str, LiveDatasetOutput],
         *,
-        growing_outputs: Iterable[str],
         source_publication: SignalPublication | None = None,
         trigger: tuple[str, int] | None = None,
     ) -> Mapping[str, SignalValue]:
@@ -1128,10 +1117,6 @@ class SignalDataPlane:
 
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("live commit outputs must be a non-empty mapping")
-        growing = frozenset(
-            canonical_text(name, "growing output name")
-            for name in growing_outputs
-        )
         owner_id = _node_instance_id(node)
         kind = "producer" if source_publication is None else "processor"
         with self._lock:
@@ -1165,9 +1150,6 @@ class SignalDataPlane:
                 raise ValueError(
                     "live commit must cover the complete frozen output vocabulary"
                 )
-            if not growing.issubset(declared):
-                raise ValueError("growing outputs contain an undeclared name")
-
             if any(
                 not isinstance(output, LiveDatasetOutput)
                 for output in outputs.values()
@@ -1178,8 +1160,6 @@ class SignalDataPlane:
                 for bare, output in outputs.items()
                 if isinstance(output.coverage, DatasetCoverage)
             )
-            if not growing.issubset(exact_bare):
-                raise ValueError("only finite exact outputs may use a growing view")
             exact_qualified = frozenset(
                 qualified
                 for qualified in state.output_names
@@ -1190,9 +1170,6 @@ class SignalDataPlane:
                 and state.exact_outputs != exact_qualified
             ):
                 raise ValueError("live extent kinds changed inside one generation")
-            if state.exact_outputs is not None and growing != state.growing_outputs:
-                raise ValueError("growing output choice changed inside one generation")
-
             run_record = _freeze_run_record(_shared_run_record(outputs))
             if (
                 state.committed_run_record is not None
@@ -1281,7 +1258,6 @@ class SignalDataPlane:
                     snapshot=event,
                     coverage=output.coverage,
                     run_record=run_record,
-                    growing=bare in growing,
                     canonical_schema=output.canonical_schema,
                     cell_origin=output.cell_origin,
                 )
@@ -1298,7 +1274,6 @@ class SignalDataPlane:
                 occupied_cells[qualified] = mask
             state.exact_outputs = exact_qualified
             state.canonical_schemas = MappingProxyType(canonical_schemas)
-            state.growing_outputs = growing
             state.occupied_cells = occupied_cells
             state.committed_run_record = run_record
             if source_publication is not None:
@@ -1311,8 +1286,6 @@ class SignalDataPlane:
                 state.commit_origins.setdefault(qualified, []).append(
                     origins[qualified]
                 )
-            if exact_qualified:
-                state.materialized = {}
             producer = state.publication_stream
             if producer is not None:
                 producer.emit(
@@ -1365,13 +1338,13 @@ class SignalDataPlane:
             )
         snapshot = self._materialize_dataset(name, sequence, *materialization)
         with self._lock:
-            if (
-                self._states.get(state.owner_id) is state
-                and not state.retired
-                and selected is state.publication
-                and state.publication.event_ref.sequence == sequence
-            ):
-                state.materialized[name] = (sequence, snapshot)
+            if self._states.get(state.owner_id) is state and not state.retired:
+                cached = state.materialized.get(name)
+                # Keep one immutable prefix per signal, never a list of all
+                # prefixes.  A later materialization must not be displaced by
+                # an older request that happened to finish afterwards.
+                if cached is None or cached[0] <= sequence:
+                    state.materialized[name] = (sequence, snapshot)
         return snapshot
 
     def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
@@ -1536,7 +1509,15 @@ class SignalDataPlane:
                                 if state.publication is None
                                 else state.publication.event_ref.sequence
                             ),
-                            shape=None if value is None else value.shape,
+                            shape=(
+                                None
+                                if value is None
+                                else (
+                                    value.canonical_schema.physical_shape
+                                    if value.canonical_schema is not None
+                                    else value.shape
+                                )
+                            ),
                             failure=state.failure,
                         )
                     )

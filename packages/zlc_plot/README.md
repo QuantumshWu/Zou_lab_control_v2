@@ -279,20 +279,30 @@ Pulse preview 或嵌套 scroll area 可调用 `widget.set_interaction_enabled(Fa
 `facet_row_display_unit` 和 `facet_col_display_unit`，因此两个 facet 轴不会被错误地
 强制共用单位。
 
-坐标标记不是单独的 plot kind。普通 Image 可叠加独立、可动态更新的 `ImagePointOverlay`；`coordinates` 是 canonical x/y 的 `N×2` 数组，ID、label 可选；`statuses` 以 facet 坐标为键（`None` 表示不显示单一坐标的那个 surface，同时作为兜底），因此按 frame facet 的 grid 每个 cell 画出自己那一帧的状态。仅修改点层时可独立推进 overlay revision，不重投影 background：
+坐标标记不是单独的 plot kind。普通 Image 可叠加独立、可动态更新的
+`ImagePointOverlay`；`coordinates` 是 canonical x/y 的 `N×2` 数组，ID、label
+可选。手写或Calibration标记使用一个不可变的`static_statuses`向量：
 
 ```python
 overlay = ImagePointOverlay(
     revision=0,
     coordinates=np.array([[-2.0e-3, 1.0e-3], [0.0, -1.0e-3]]),
     point_ids=("a", "b"),
-    statuses={None: (PointStatus.EMPTY, PointStatus.OCCUPIED)},
+    static_statuses=(PointStatus.EMPTY, PointStatus.OCCUPIED),
 )
 image_session.update_image_overlay(overlay)
 image_session.set_parameter("show_point_labels", True)
 ```
 
-点环尺寸和状态颜色由 package style 统一解析，不属于可变显示参数。
+动态点状态不是plugin专用对象：producer给numeric/bool Dataset声明
+`IMAGE_POINT_OVERLAY_CONTRACT`，用`image_point_overlay_geometry(...)`记录image
+axes、XY坐标和完整status data axis，再由
+`image_point_overlay_from_signal(...)`构造同一个`ImagePointOverlay`。Dataset
+values表达EMPTY/OCCUPIED，Dataset validity表达INVALID；future-invalid或一个
+surface仍pool多个repeat/point cells时显示UNKNOWN，不发明跨cells共识。geometry
+严格绑定status axis identity与canonical coordinates，所以同数量但顺序不同的
+site vector也会被拒绝。点环尺寸和状态颜色由package style统一解析，不属于可变
+显示参数。
 
 同一 shot 的 image 与动态坐标/状态必须作为一个 `ImageFrame` 发布；frame revision 只来自 snapshot，不建立第二个 frame 时钟。data 与 overlay 作为同一 frame 提交；live fit随后只针对该当前 revision运行。overlay 自身仍保持单调 revision；清空点层使用 `ImagePointOverlay.empty(revision)`。如果 frame 在后台准备期间点层被独立更新，旧 frame 的 CAS 会失败，而不是覆盖较新的点层：
 

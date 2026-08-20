@@ -97,7 +97,10 @@ def test_the_published_rate_is_the_occupied_fraction_and_not_its_inverse() -> No
         camera_cycle_snapshot(frames),
     )
     occupied = np.asarray(occupancy.occupied, dtype=bool)
-    valid = np.asarray(occupancy.valid, dtype=bool)
+    valid = np.asarray(
+        occupancy.artifacts["occupied"].expanded_validity(),
+        dtype=bool,
+    )
     counted = np.where(valid, occupied, np.nan).astype(float)
 
     np.testing.assert_allclose(

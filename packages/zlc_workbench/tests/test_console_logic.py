@@ -7,6 +7,7 @@ a notebook running beside the window.
 
 from __future__ import annotations
 
+import ast
 import os
 import time
 from dataclasses import replace
@@ -36,6 +37,27 @@ from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary
 
 
 from test_console_presenter import _LogicRowView  # noqa: E402
+
+
+def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
+    """Leaf add/remove stays closed inside zlc_atom discovery and contracts."""
+
+    root = Path(__file__).parents[1] / "src" / "zlc_workbench"
+    violations: list[tuple[str, str]] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith("zlc_atom.nodes."):
+                    violations.append((str(path.relative_to(root)), module))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("zlc_atom.nodes."):
+                        violations.append(
+                            (str(path.relative_to(root)), alias.name)
+                        )
+    assert not violations, violations
 
 
 @pytest.fixture

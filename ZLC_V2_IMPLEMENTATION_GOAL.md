@@ -52,11 +52,15 @@
 
 - Logic Node只提交新增chunk/event，不在plugin维护另一份history；
 - Runtime是唯一run dataset累计owner；
-- Panel可在任意时刻访问截至当前的全部数据并应用scope/reduction/axis point/fate；
+- finite exact的event chunk只供commit/exact Processor；所有UI/display consumer从第一次publication起使用该publication的canonical full geometry，future cells invalid；Monitor才显示latest event；
+- Panel可在任意时刻访问截至当前的全部数据并应用任意axis的scope/reduction/point/fate；semantic不得决定event/current数据来源；
+- repeat与point rows是统一incremental placement轴；多维scan/grid通过point table/grid topology逐点填充，cell payload保持原子完整；
+- Live Panel、Edit/Refresh/Save、selector、fit和overlay必须共享同一accepted canonical presentation snapshot；
+- SITE保持cell data axis且每个occupancy event整组原子传递；overlay不累计第二份site状态。Occupancy发布通用numeric/bool status signal并用Dataset validity表达可读性；`zlc_plot`拥有geometry/renderer contract，Workbench只通用路由。跨多个cells的离散status reduction没有明确产品定义时必须UNKNOWN/隐藏；
 - Camera、Scan、Calibration只用同一commit/materialization/seal机制；
 - full raw、live、Stop partial和Final来自同一truth；
 - 未采数据invalid；UI freeze不改变结果；
-- Camera使用chunked append，避免每次复制全部历史；Scan按固定geometry增长；
+- Camera使用chunked append，避免producer每次复制全部历史；canonical display按实际Panel cadence后台materialize/cache，不阻塞Qt owner；Scan按固定geometry增长；
 - exact Processor逐event处理，display derivation可latest。
 
 ### 3.3 Data/Fit/Overlay
@@ -67,11 +71,12 @@
 - fit跟不上时明确报错，不静默drop；raw data仍完整保存并可离线重算；
 - worker可后台计算，但Qt呈现必须atomic且不阻塞owner thread；
 - Overlay与Data/Fit共享同一scope/axis/fate projection；无法唯一对齐即拒绝；
-- Selector Off时普通滚轮滚外层board，On时plot接管。
+- Selector Off时plot完全不接管area、zoom/pan、滚轮或双击focus，普通滚轮滚外层board；Selector On时FacetGrid overview只允许focus cell，不允许开始area selector。
 
 ### 3.4 Logic Node contract与Task UI
 
 - live/progress/preview/terminal成为Descriptor/NodeHost强制contract，不依赖实例作者记忆；
+- Workbench不得import`zlc_atom.nodes.<concrete_leaf>`或按具体node/output名称分支；新增/删除普通Logic Node只改该leaf目录、资源与测试。跨节点UI能力必须由Data/Runtime/Plot等中立层contract声明后通用路由；
 - Measurement bounded live；Task有progress与声明preview；first data前不假报live；terminal正确seal/retire；
 - Task运行中禁止Add Logic Node；冻结当前source/preview signal、overlay binding以及scope/reduction/fate等数据identity；
 - 允许其它Panel和当前Panel的纯显示参数；
@@ -247,7 +252,8 @@ Profiling：
 - 一次PanelState transaction幂等，no-op=0 solve/0 render；title/layout不re-fit；
 - 删除重复configure/clear/replay和多front handoff；
 - Overlay作为typed companion，Data/Fit/Overlay共同解析scope/axis/fate；ROI/binning使用同一坐标truth；
-- Selector Off滚board，On接管plot；
+- Selector Off时plot完全不接管area、zoom/pan、滚轮或双击focus，普通滚轮滚board；
+- Selector On时FacetGrid overview只允许双击进入cell，不允许开始area selector；area只在focused cell或非grid surface工作；
 - 修Form reconcile dependency graph、唯一PanelState parser、唯一owner wake；
 - 所有Qt window、worker、executor、claim有界close；Pulse window不得在safe/release前消失。
 

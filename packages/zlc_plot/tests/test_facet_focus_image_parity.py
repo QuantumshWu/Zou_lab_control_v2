@@ -27,7 +27,7 @@ from data_factory import (
     PointTable,
     PointTopology,
 )
-from zlc_data import SPATIAL_X, SPATIAL_Y
+from zlc_data import SITE, SPATIAL_X, SPATIAL_Y, ValidityContract, ValueSchema
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, ImagePlot, PlotSession
 from zlc_plot._kinds.image import default_spec as image_default
 from zlc_plot.config import DEFAULTS
@@ -64,6 +64,47 @@ def _frames_scan_snapshot(*, repeats: int = 1) -> DatasetSnapshot:
     return DatasetSnapshot(schema, values, revision=1)
 
 
+def _occupancy_overlay(
+    snapshot: DatasetSnapshot,
+    occupied: np.ndarray,
+    valid: np.ndarray,
+    *,
+    acquired: np.ndarray | None = None,
+):
+    from zlc_plot.primitives import ImagePointOverlay
+
+    source = snapshot.block.schema
+    site = Axis.create("site", size=2, role=SITE)
+    schema = DatasetSchema(
+        source.repeat_axis,
+        source.point_table,
+        source.grid_topology,
+        ValueSchema(
+            (site,),
+            ValidityContract.components(site.axis_id),
+            np.dtype(np.bool_),
+            "1",
+        ),
+    )
+    if acquired is None:
+        acquired = np.ones(occupied.shape[:2], dtype=np.bool_)
+    status_validity = (
+        np.asarray(valid, dtype=np.bool_)
+        & np.asarray(acquired, dtype=np.bool_)[..., None]
+    )
+    return ImagePointOverlay(
+        coordinates=((10.0, 12.0), (30.0, 24.0)),
+        revision=1,
+        point_ids=("s0", "s1"),
+        status=DatasetSnapshot(
+            schema,
+            np.asarray(occupied, dtype=np.bool_),
+            revision=1,
+            validity=status_validity,
+        ),
+    )
+
+
 def _single_frame_snapshot() -> DatasetSnapshot:
     """One point, one frame: the standalone twin of one focused facet cell."""
 
@@ -79,6 +120,31 @@ def _single_frame_snapshot() -> DatasetSnapshot:
     )
     frame = np.add.outer(np.arange(40.0), np.arange(60.0))
     return DatasetSnapshot(schema, frame[None, None], revision=1)
+
+
+def _grid_frames_snapshot() -> DatasetSnapshot:
+    table = PointTable.from_columns(
+        {
+            "bias": [-1.0, -1.0, 1.0, 1.0],
+            "grad": [10.0, 20.0, 10.0, 20.0],
+        }
+    )
+    topology = PointTopology.from_cartesian(
+        (
+            Axis.create("bias", values=[-1.0, 1.0]),
+            Axis.create("grad", values=[10.0, 20.0]),
+        ),
+        point_table=table,
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        table,
+        data_axes=_frame_axes(),
+        point_topology=topology,
+        dtype=np.float64,
+    )
+    values = np.zeros((1, 4, 40, 60), dtype=np.float64)
+    return DatasetSnapshot(schema, values, revision=1)
 
 
 def _cycle_frames_on_point_axis_snapshot() -> DatasetSnapshot:
@@ -467,29 +533,14 @@ def test_frames_on_point_axis_cycle_draws_as_a_standalone_image() -> None:
 
 
 def test_a_scoped_image_draws_the_point_it_shows() -> None:
-    """The rings follow the picture, whichever way the picture chose its point.
+    """A scoped surface selects the same exact leading cell for its rings."""
 
-    A grid cell shows its facet coordinate and drew that cell's judgement.  A
-    flat image shows whatever the SPEC pinned -- and asked the overlay for the
-    whole-picture row instead, which a cycle of several frames does not have,
-    so every site came back UNKNOWN while the frame beneath it was one this
-    node had judged.
-    """
-
-    from zlc_plot.primitives import ImagePointOverlay, PointStatus
-
-    occupied = (PointStatus.OCCUPIED, PointStatus.EMPTY)
-    empty = (PointStatus.EMPTY, PointStatus.OCCUPIED)
-    overlay = ImagePointOverlay(
-        coordinates=((10.0, 12.0), (30.0, 24.0)),
-        revision=1,
-        point_ids=("s0", "s1"),
-        # Per FRAME, exactly as an occupancy node states it, and with no
-        # whole-picture row: several frames pooled have no judgement.
-        statuses={-1.0: occupied, 0.0: empty, 1.0: occupied},
-        status_axis="bias",
-    )
     snapshot = _frames_scan_snapshot()
+    overlay = _occupancy_overlay(
+        snapshot,
+        occupied=np.asarray([[[True, False], [False, True], [True, False]]]),
+        valid=np.ones((1, 3, 2), dtype=np.bool_),
+    )
     scoped = PlotSession(
         snapshot,
         ImagePlot(
@@ -500,27 +551,62 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
         size="4x4",
     )
     try:
-        assert scoped._renderer._painted_axis_value("bias", None) == 0.0
         scoped.update_image_overlay(overlay)
         scoped.rgba()
-        collection = scoped._renderer._artists["image:points"]
-        assert collection.get_visible()
-        drawn = tuple(
-            tuple(round(float(value), 3) for value in colour)
-            for colour in collection.get_edgecolors()
+        assert _drawn_statuses(scoped, "image:points") == (
+            "EMPTY",
+            "OCCUPIED",
         )
-        # The colours of THIS frame's judgement, not of the unknown fallback.
-        expected = scoped._renderer.style.artists
-        assert drawn[0] != drawn[1], "both sites drew the same status"
     finally:
         scoped.close()
 
-    faceted = PlotSession(snapshot, _FACET_SPEC, size="4x4")
-    try:
-        assert faceted._renderer._painted_axis_value("bias", 1.0) == 1.0
-        assert faceted._renderer._painted_axis_value("bias", None) is None
-    finally:
-        faceted.close()
+
+def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
+    from zlc_plot import (
+        image_point_overlay_from_signal,
+        image_point_overlay_geometry,
+    )
+
+    image = _frames_scan_snapshot()
+    overlay = _occupancy_overlay(
+        image,
+        occupied=np.zeros((1, 3, 2), dtype=np.bool_),
+        valid=np.ones((1, 3, 2), dtype=np.bool_),
+    )
+    status = overlay.status
+    assert status is not None
+    status_axis = status.block.schema.cell_schema.data_axes[0]
+    geometry = image_point_overlay_geometry(
+        image,
+        overlay.coordinates,
+        overlay.point_ids,
+        status_axis=status_axis,
+    )
+    reversed_axis = Axis.create("site", values=(1, 0), role=SITE)
+    bad_schema = DatasetSchema(
+        status.block.schema.repeat_axis,
+        status.block.schema.point_table,
+        status.block.schema.grid_topology,
+        ValueSchema(
+            (reversed_axis,),
+            ValidityContract.components(reversed_axis.axis_id),
+            np.dtype(np.bool_),
+            "1",
+        ),
+    )
+    bad = DatasetSnapshot(
+        bad_schema,
+        status.block.values,
+        revision=1,
+        validity=status.expanded_validity(),
+    )
+    with pytest.raises(ValueError, match="status axis"):
+        image_point_overlay_from_signal(
+            geometry,
+            bad,
+            image,
+            revision=1,
+        )
 
 
 def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
@@ -548,65 +634,99 @@ def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
 
 
 def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None:
-    """An overlay's keys are coordinates OF an axis, and it says which.
+    """Only an exact repeat/point cell owns a site judgement.
 
-    Four presentations of one judged cycle.  The one that used to lie is the
-    last: a grid faceted over REPEATS handed each cell's repeat index to a
-    map keyed by the scan coordinate, matched 0 against 0, and drew the first
-    point's judgement on every cell -- while the picture underneath was the
-    point the operator had scoped to.
+    Scope and facet are the two ways a surface pins a leading axis.  An axis
+    left to the image reduction is deliberately UNKNOWN even when every shot
+    happened to agree; consensus is a scientific product, not a renderer
+    default.  The final future cell is invalid in the canonical prefix and is
+    likewise UNKNOWN rather than a false INVALID measurement.
     """
 
-    from zlc_plot.primitives import ImagePointOverlay, PointStatus
-
-    first = (PointStatus.OCCUPIED, PointStatus.EMPTY)
-    middle = (PointStatus.EMPTY, PointStatus.OCCUPIED)
-    last = (PointStatus.INVALID, PointStatus.INVALID)
-    overlay = ImagePointOverlay(
-        coordinates=((10.0, 12.0), (30.0, 24.0)),
-        revision=1,
-        point_ids=("s0", "s1"),
-        statuses={-1.0: first, 0.0: middle, 1.0: last},
-        status_axis="bias",
-    )
     snapshot = _frames_scan_snapshot(repeats=2)
+    overlay = _occupancy_overlay(
+        snapshot,
+        occupied=np.asarray(
+            [
+                [[True, False], [False, True], [True, True]],
+                [[False, True], [False, True], [False, False]],
+            ]
+        ),
+        valid=np.asarray(
+            [
+                [[True, True], [True, True], [False, True]],
+                [[True, True], [True, True], [False, False]],
+            ]
+        ),
+        acquired=np.asarray(
+            [[True, True, True], [True, True, False]],
+        ),
+    )
     unknown = ("UNKNOWN", "UNKNOWN")
 
     cases = (
         (
-            "a flat image pooling every point has no judgement to draw",
+            "pooling both leading axes has no single-shot judgement",
             ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
             {"image:points": unknown},
         ),
         (
-            "a flat image scoped to one point draws that point",
+            "scoping only point still pools repeats",
             ImagePlot(
                 AxisRef.data("sx"),
                 AxisRef.data("sy"),
-                scope=((AxisRef.point_dimension("bias"), 1.0),),
+                scope=((AxisRef.point_dimension("bias"), 0.0),),
             ),
-            {"image:points": ("INVALID", "INVALID")},
+            {"image:points": unknown},
         ),
         (
-            "a grid faceted over the judged axis draws each cell's own",
-            _FACET_SPEC,
+            "scoping repeat and point selects the exact cell",
+            ImagePlot(
+                AxisRef.data("sx"),
+                AxisRef.data("sy"),
+                scope=(
+                    (AxisRef.repeat(), 0.0),
+                    (AxisRef.point_dimension("bias"), 1.0),
+                ),
+            ),
+            {"image:points": ("INVALID", "OCCUPIED")},
+        ),
+        (
+            "point facets with repeat scoped draw each point cell",
+            FacetGridPlot(
+                AxisRef.point_dimension("bias"),
+                ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+                scope=((AxisRef.repeat(), 0.0),),
+            ),
             {
                 "facet:0:points": ("OCCUPIED", "EMPTY"),
                 "facet:1:points": ("EMPTY", "OCCUPIED"),
-                "facet:2:points": ("INVALID", "INVALID"),
+                "facet:2:points": ("INVALID", "OCCUPIED"),
             },
         ),
         (
-            "a grid faceted over another axis follows the scope, not the cell",
+            "repeat facets with point scoped draw each repeat cell",
             FacetGridPlot(
                 AxisRef.repeat(),
                 ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
-                scope=((AxisRef.point_dimension("bias"), 1.0),),
+                scope=((AxisRef.point_dimension("bias"), -1.0),),
             ),
             {
-                "facet:0:points": ("INVALID", "INVALID"),
-                "facet:1:points": ("INVALID", "INVALID"),
+                "facet:0:points": ("OCCUPIED", "EMPTY"),
+                "facet:1:points": ("EMPTY", "OCCUPIED"),
             },
+        ),
+        (
+            "a future invalid canonical cell is not a measured INVALID site",
+            ImagePlot(
+                AxisRef.data("sx"),
+                AxisRef.data("sy"),
+                scope=(
+                    (AxisRef.repeat(), 1.0),
+                    (AxisRef.point_dimension("bias"), 1.0),
+                ),
+            ),
+            {"image:points": unknown},
         ),
     )
     for title, spec, expected in cases:
@@ -616,5 +736,54 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
             session.rgba()
             for key, statuses in expected.items():
                 assert _drawn_statuses(session, key) == statuses, title
+        finally:
+            session.close()
+
+
+def test_multidimensional_grid_status_requires_every_point_dimension_to_resolve() -> None:
+    snapshot = _grid_frames_snapshot()
+    overlay = _occupancy_overlay(
+        snapshot,
+        occupied=np.asarray(
+            [[[True, False], [False, True], [True, True], [False, False]]]
+        ),
+        valid=np.ones((1, 4, 2), dtype=np.bool_),
+    )
+    exact = FacetGridPlot(
+        AxisRef.point_dimension("bias"),
+        ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+        scope=(
+            (AxisRef.repeat(), 0.0),
+            (AxisRef.point_dimension("grad"), 20.0),
+        ),
+    )
+    pooled = FacetGridPlot(
+        AxisRef.point_dimension("bias"),
+        ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+        scope=((AxisRef.repeat(), 0.0),),
+    )
+    cases = (
+        (
+            exact,
+            {
+                "facet:0:points": ("EMPTY", "OCCUPIED"),
+                "facet:1:points": ("EMPTY", "EMPTY"),
+            },
+        ),
+        (
+            pooled,
+            {
+                "facet:0:points": ("UNKNOWN", "UNKNOWN"),
+                "facet:1:points": ("UNKNOWN", "UNKNOWN"),
+            },
+        ),
+    )
+    for spec, expected in cases:
+        session = PlotSession(snapshot, spec, size="4x4")
+        try:
+            session.update_image_overlay(overlay)
+            session.rgba()
+            for key, statuses in expected.items():
+                assert _drawn_statuses(session, key) == statuses
         finally:
             session.close()

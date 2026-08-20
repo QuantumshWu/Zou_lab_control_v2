@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from zlc_data import snapshot_from_manifest, snapshot_manifest
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 
 from .archive import write_figure_file
@@ -111,29 +112,25 @@ def overlay_payload(
         )
         section["labels"] = "overlay.labels"
         section["blank_label_is_none"] = True
-    if overlay.statuses is not None:
-        # One row per picture the overlay describes: the facet coordinates it
-        # names, then NaN for the whole-picture row.  Rings that differ from
-        # cell to cell are the record; one flattened row would keep the
-        # geometry and throw the measurement away.
-        keys = tuple(overlay.statuses)
-        arrays["overlay.status_facets"] = np.asarray(
-            tuple(np.nan if key is None else float(key) for key in keys),
-            dtype="<f8",
-        )
-        arrays["overlay.statuses"] = np.asarray(
-            tuple(
-                tuple(status.value for status in overlay.statuses[key])
-                for key in keys
-            ),
+    if overlay.static_statuses is not None:
+        arrays["overlay.static_statuses"] = np.asarray(
+            tuple(status.value for status in overlay.static_statuses),
             dtype="U",
-        ).reshape((len(keys), overlay.count))
-        section["status_facets"] = "overlay.status_facets"
-        section["statuses"] = "overlay.statuses"
-        if overlay.status_axis is not None:
-            # The keys above are coordinates OF an axis; without its name a
-            # reopened figure holds numbers it cannot match to any picture.
-            section["status_axis"] = str(overlay.status_axis)
+        )
+        section["static_statuses"] = "overlay.static_statuses"
+    if overlay.status is not None:
+        stored: dict[str, np.ndarray] = {}
+        manifest = snapshot_manifest(
+            overlay.status,
+            stored,
+            values_key="overlay.status",
+            validity_key="overlay.status.validity",
+        )
+        ref = dict(manifest["ref"])
+        ref.pop("schema_fingerprint", None)
+        manifest["ref"] = ref
+        section["status"] = manifest
+        arrays.update(stored)
     return arrays, section
 
 
@@ -313,23 +310,25 @@ def restore_panel_plot_input(
             None if str(value) == "" else str(value)
             for value in arrays[str(section["labels"])]
         )
-    statuses = None
-    if "statuses" in section:
-        rows = np.atleast_2d(arrays[str(section["statuses"])])
-        facets = np.asarray(arrays[str(section["status_facets"])], dtype="<f8")
-        statuses = {
-            (None if not np.isfinite(facet) else float(facet)): tuple(
-                PointStatus(str(value)) for value in row
-            )
-            for facet, row in zip(facets, rows, strict=True)
-        }
-    status_axis = section.get("status_axis")
+    static_statuses = None
+    if "static_statuses" in section:
+        static_statuses = tuple(
+            PointStatus(str(value))
+            for value in np.asarray(
+                arrays[str(section["static_statuses"])]
+            ).reshape(-1)
+        )
+    status = (
+        None
+        if "status" not in section
+        else snapshot_from_manifest(section["status"], arrays)
+    )
     overlay = ImagePointOverlay(
         int(section.get("revision", 0)),
         coordinates,
         point_ids,
         labels,
-        statuses,
-        None if status_axis is None else str(status_axis),
+        static_statuses,
+        status,
     )
     return ImageFrame(snapshot, overlay)

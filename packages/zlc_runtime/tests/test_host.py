@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event, get_ident
+from threading import Event
 import time
 
 import pytest
@@ -187,37 +187,35 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
         plane.close()
 
 
-def test_growing_view_is_materialized_on_the_worker_before_owner_wake(
+def test_finite_commits_do_not_materialize_the_canonical_dataset(
     monkeypatch,
 ) -> None:
     declaration = DatasetOutputDeclaration("scan", "test.scan")
     wake = Event()
     plane = SignalDataPlane()
-    owner_thread = get_ident()
-    calls: list[tuple[int, object]] = []
+    calls: list[object] = []
     current_dataset = plane.current_dataset
 
     def observed(*args, **kwargs):
-        snapshot = current_dataset(*args, **kwargs)
-        calls.append((get_ident(), snapshot))
-        return snapshot
+        calls.append((args, kwargs))
+        return current_dataset(*args, **kwargs)
 
     monkeypatch.setattr(plane, "current_dataset", observed)
 
     class Node:
         def execute(self, context):
-            context.commit_live(
-                {
-                    "scan": _finite_output(
-                        declaration,
-                        value=5.0,
-                        total=1,
-                        origin=0,
-                        written=1,
-                    )
-                },
-                growing_outputs=("scan",),
-            )
+            for index in range(3):
+                context.commit_live(
+                    {
+                        "scan": _finite_output(
+                            declaration,
+                            value=float(index + 1),
+                            total=3,
+                            origin=index,
+                            written=index + 1,
+                        )
+                    }
+                )
 
     host = _host(
         Node(),
@@ -230,9 +228,12 @@ def test_growing_view_is_materialized_on_the_worker_before_owner_wake(
     try:
         host.start()
         assert _wait(host, wake).phase == "done"
-        assert len(calls) == 1
-        assert calls[0][0] != owner_thread
-        assert current_dataset(host.signal_key("scan")) is calls[0][1]
+        assert calls == []
+        assert current_dataset(host.signal_key("scan")).block.values[:, 0, 0].tolist() == [
+            1.0,
+            2.0,
+            3.0,
+        ]
     finally:
         host.shutdown()
         plane.close()

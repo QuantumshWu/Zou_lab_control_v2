@@ -21,7 +21,23 @@ from types import SimpleNamespace
 from zlc_runtime import LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.board import LiveBoard
-from zlc_workbench.presentation import PlotPanelPort
+from zlc_workbench.presentation import PlotPanelPort as _PlotPanelPort
+
+
+def _submit_now(work):
+    from concurrent.futures import Future
+
+    completed = Future()
+    try:
+        completed.set_result(work())
+    except BaseException as error:
+        completed.set_exception(error)
+    return completed
+
+
+def PlotPanelPort(*args, **kwargs):
+    kwargs.setdefault("submit_projection", _submit_now)
+    return _PlotPanelPort(*args, **kwargs)
 
 from test_signal_front import _output
 

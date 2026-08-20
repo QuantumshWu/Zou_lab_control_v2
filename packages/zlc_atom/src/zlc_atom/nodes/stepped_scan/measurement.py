@@ -293,10 +293,7 @@ class SteppedScanMeasurement:
         value = self.source.next_value(context)
         visit = sweep * self.shots_per_point + shot
         output = writer.write(value, row=index, visit=visit)
-        context.commit_live(
-            {SCAN_OUTPUT.name: output},
-            growing_outputs=(SCAN_OUTPUT.name,),
-        )
+        context.commit_live({SCAN_OUTPUT.name: output})
         context.report_progress(
             "Scanning",
             current=writer.written,

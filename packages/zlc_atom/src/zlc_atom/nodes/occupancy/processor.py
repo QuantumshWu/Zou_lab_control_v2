@@ -18,24 +18,21 @@ from zlc_data import (
     ValueSchema,
     owned_snapshot_from_arrays,
 )
-from zlc_runtime import DatasetCoverage, MonitorCoverage
+from zlc_runtime import DatasetCoverage
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime import SignalValue
+from zlc_plot import (
+    IMAGE_POINT_OVERLAY_CONTRACT,
+    IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
+    image_point_overlay_geometry,
+)
 
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
-
-
-#: The per-site, per-frame judgement an image panel annotates itself with.
-#: Named here because the console picks its overlay candidates by contract and
-#: must not learn a second spelling of this one.
-SITE_STATUS_CONTRACT = "occupancy.occupied.v1"
-
 OCCUPANCY_OUTPUTS = (
     DatasetOutputDeclaration("counts", "occupancy.counts.v1"),
-    DatasetOutputDeclaration("occupied", SITE_STATUS_CONTRACT),
-    DatasetOutputDeclaration("valid", "occupancy.valid.v1"),
+    DatasetOutputDeclaration("occupied", IMAGE_POINT_OVERLAY_CONTRACT),
     DatasetOutputDeclaration("rate", "occupancy.rate.v1"),
     DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged.v1"),
 )
@@ -63,10 +60,6 @@ class OccupancyResult:
     @property
     def occupied(self) -> np.ndarray:
         return self.artifacts["occupied"].block.values
-
-    @property
-    def valid(self) -> np.ndarray:
-        return self.artifacts["valid"].block.values
 
     @property
     def rate(self) -> np.ndarray:
@@ -273,9 +266,6 @@ class OccupancyProcessor:
             "occupied": with_cell(
                 ValueSchema((site_axis,), site_validity, np.dtype("?"), "1")
             ),
-            "valid": with_cell(
-                ValueSchema((site_axis,), site_validity, np.dtype("?"), "1")
-            ),
             "rate": with_cell(ValueSchema.scalar(np.dtype("<f8"), "1")),
         }
 
@@ -341,7 +331,6 @@ class OccupancyProcessor:
             "occupied": self._snapshot(
                 frames, schemas["occupied"], occupied, valid
             ),
-            "valid": self._snapshot(frames, schemas["valid"], valid, valid),
             "rate": self._snapshot(
                 frames,
                 schemas["rate"],
@@ -364,6 +353,17 @@ class OccupancyProcessor:
     ) -> dict[str, LiveDatasetOutput]:
         run_record = {
             "node": self.instance_id,
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: image_point_overlay_geometry(
+                source.snapshot,
+                self.readout.site_map.centers_xy,
+                self.readout.site_map.site_ids,
+                status_axis=self.readout.site_map.site_axis,
+                labels=tuple(
+                    str(index)
+                    for index in range(1, self.readout.site_map.n_sites + 1)
+                ),
+                coordinates_are_indices=True,
+            ),
             "parameters": {
                 "frames_signal": str(frames_signal),
                 "calibration_path": (
@@ -383,10 +383,12 @@ class OccupancyProcessor:
             if source.canonical_schema is None or source.cell_origin is None:
                 raise ValueError("finite source event lacks canonical placement")
             canonical = self._output_schemas(source.canonical_schema)
+            canonical["frame_judged"] = source.canonical_schema
             origin = source.cell_origin
         elif source.coverage is None:
             exact = True
             canonical = self._output_schemas(event_schema)
+            canonical["frame_judged"] = event_schema
             origin = (0, 0)
         else:
             canonical = {}
@@ -394,18 +396,13 @@ class OccupancyProcessor:
         outputs: dict[str, LiveDatasetOutput] = {}
         for declaration in OCCUPANCY_OUTPUTS:
             snapshot = result.artifacts[declaration.name]
-            if declaration.name == "frame_judged":
-                coverage = MonitorCoverage(event_cells, event_cells)
-                output_schema = None
-                output_origin = None
-            else:
-                coverage = (
-                    DatasetCoverage(event_cells, event_cells)
-                    if source.coverage is None
-                    else source.coverage
-                )
-                output_schema = canonical.get(declaration.name) if exact else None
-                output_origin = origin if exact else None
+            coverage = (
+                DatasetCoverage(event_cells, event_cells)
+                if source.coverage is None
+                else source.coverage
+            )
+            output_schema = canonical.get(declaration.name) if exact else None
+            output_origin = origin if exact else None
             outputs[declaration.name] = LiveDatasetOutput(
                 declaration,
                 snapshot,
@@ -438,7 +435,6 @@ class OccupancyProcessor:
 
 __all__ = [
     "OCCUPANCY_OUTPUTS",
-    "SITE_STATUS_CONTRACT",
     "OccupancyProcessor",
     "OccupancyResult",
 ]

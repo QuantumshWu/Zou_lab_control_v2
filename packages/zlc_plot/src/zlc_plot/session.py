@@ -551,11 +551,20 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         left: ImagePointOverlay,
         right: ImagePointOverlay,
     ) -> bool:
+        def same_snapshot(
+            first: OwnedSnapshot | None,
+            second: OwnedSnapshot | None,
+        ) -> bool:
+            if first is None or second is None:
+                return first is second
+            return first.exactly_equals(second)
+
         return bool(
             left.revision == right.revision
             and left.point_ids == right.point_ids
             and left.labels == right.labels
-            and left.statuses == right.statuses
+            and left.static_statuses == right.static_statuses
+            and same_snapshot(left.status, right.status)
             and np.array_equal(left.coordinates, right.coordinates)
         )
 

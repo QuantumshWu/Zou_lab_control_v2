@@ -582,12 +582,10 @@ def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path
         ),
         point_ids=site_map.site_ids,
         labels=tuple(str(index + 1) for index in range(site_map.n_sites)),
-        statuses={
-            None: tuple(
-                PointStatus.UNKNOWN if valid else PointStatus.INVALID
-                for valid in site_map.valid_sites
-            )
-        },
+        static_statuses=tuple(
+            PointStatus.UNKNOWN if valid else PointStatus.INVALID
+            for valid in site_map.valid_sites
+        ),
     )
     with image(
         site_map_snapshot,

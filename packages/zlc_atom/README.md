@@ -128,14 +128,18 @@ opens those report files, and no calibration object/report blob is put on the
 signal plane.
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
-It owns only each frame's per-site counts, occupied boolean, validity, and
-pooled occupancy rate. The concrete Temperature Task reuses those facts for
-its authored before/trap-off/after cycles: only a valid, initially occupied
-pair is a survival trial. It publishes the binary per-site `survival` dataset
-only. Its declared preview and artifact both pool that same dataset and its
-validity into survival rate against trap-off time; there is no second rate
-history. It does not fit a temperature or lifetime and does not derive a 1/e
-crossing.
+It owns only each frame's per-site counts, one occupied boolean Dataset, and
+the pooled occupancy rate. The occupied Dataset's component validity is the
+only truth for whether each site was readable; there is no separate validity
+signal. Its generic `zlc_plot` overlay contract and same-run geometry document
+let any compatible presenter draw those numeric statuses without knowing the
+Occupancy plugin. The concrete Temperature Task reuses the occupied values and
+their expanded validity for its authored before/trap-off/after cycles: only a
+valid, initially occupied pair is a survival trial. It publishes the binary
+per-site `survival` dataset only. Its declared preview and artifact both pool
+that same dataset and its validity into survival rate against trap-off time;
+there is no second rate history. It does not fit a temperature or lifetime and
+does not derive a 1/e crossing.
 
 The `slm_feedback` Task accepts one sparse target point per calibrated site.
 Every coarse or validation measurement is a canonical Camera Measurement

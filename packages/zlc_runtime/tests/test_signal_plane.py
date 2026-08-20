@@ -20,6 +20,7 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    GridTopology,
     OwnedSnapshot,
     PointColumn,
     PointTable,
@@ -102,6 +103,54 @@ def _latest(
     )
 
 
+def _finite_grid_point(
+    declaration: DatasetOutputDeclaration,
+    *,
+    value: float,
+    point_origin: int,
+    written: int,
+) -> LiveDatasetOutput:
+    event = _event(declaration.name, value)
+    schema = event.block.schema
+    x_id = AxisId(f"{declaration.name}.grid-x")
+    y_id = AxisId(f"{declaration.name}.grid-y")
+    canonical = DatasetSchema(
+        schema.repeat_axis,
+        PointTable(
+            4,
+            (
+                PointColumn(
+                    x_id,
+                    "x",
+                    SCAN_POINT,
+                    PointColumn.NUMERIC,
+                    (0.0, 1.0, 0.0, 1.0),
+                ),
+                PointColumn(
+                    y_id,
+                    "y",
+                    SCAN_POINT,
+                    PointColumn.NUMERIC,
+                    (0.0, 0.0, 1.0, 1.0),
+                ),
+            ),
+        ),
+        GridTopology(
+            (x_id, y_id),
+            ((0.0, 1.0), (0.0, 1.0)),
+            ((0, 0), (1, 0), (0, 1), (1, 1)),
+        ),
+        schema.cell_schema,
+    )
+    return LiveDatasetOutput(
+        declaration,
+        event,
+        DatasetCoverage(written, 4),
+        canonical_schema=canonical,
+        cell_origin=(0, point_origin),
+    )
+
+
 def _node(instance_id: str, *declarations: DatasetOutputDeclaration):
     return SimpleNamespace(
         instance_id=instance_id,
@@ -180,6 +229,250 @@ def test_partial_current_has_invalid_future_and_overlap_is_rejected() -> None:
                 },
             )
         assert plane.seal_committed(node, cut_short=True)
+    finally:
+        plane.close()
+
+
+def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_stop() -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    node = _node("repeat-display", declaration)
+    plane = SignalDataPlane()
+    try:
+        plane.reserve(node)
+        event_value = plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=10.0,
+                    total=30,
+                    origin=0,
+                    written=1,
+                )
+            },
+        )["repeat-display/frame"]
+
+        # Exact Processors still receive the one-event chunk.
+        assert event_value.shape == (1, 1, 1)
+        description = plane.describe_signals()[0]
+        assert description.shape == (30, 1, 1)
+        current = plane.current_dataset(description.name)
+        assert current.block.values.shape == (30, 1, 1)
+        assert current.expanded_validity()[:, 0, 0].tolist() == [
+            True,
+            *([False] * 29),
+        ]
+
+        assert plane.seal_committed(node, cut_short=True)
+        stopped = plane.describe_signals()[0]
+        assert not stopped.live
+        assert stopped.shape == (30, 1, 1)
+    finally:
+        plane.close()
+
+
+def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> None:
+    declaration = DatasetOutputDeclaration("scan", "test.scan")
+    node = _node("grid-display", declaration)
+    plane = SignalDataPlane()
+    try:
+        plane.reserve(node)
+        plane.commit_live(
+            node,
+            {
+                "scan": _finite_grid_point(
+                    declaration,
+                    value=10.0,
+                    point_origin=0,
+                    written=1,
+                )
+            },
+        )
+        description = plane.describe_signals()[0]
+        assert description.shape == (1, 4, 1)
+        first = plane.current_dataset(description.name)
+        assert first.block.schema.grid_topology is not None
+        assert first.block.schema.grid_topology.logical_shape == (2, 2)
+        assert first.expanded_validity()[0, :, 0].tolist() == [
+            True,
+            False,
+            False,
+            False,
+        ]
+
+        plane.commit_live(
+            node,
+            {
+                "scan": _finite_grid_point(
+                    declaration,
+                    value=40.0,
+                    point_origin=3,
+                    written=2,
+                )
+            },
+        )
+        second = plane.current_dataset(description.name)
+        assert second.block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
+        assert second.expanded_validity()[0, :, 0].tolist() == [
+            True,
+            False,
+            False,
+            True,
+        ]
+        assert plane.seal_committed(node, cut_short=True)
+        assert plane.describe_signals()[0].shape == (1, 4, 1)
+    finally:
+        plane.close()
+
+
+def test_monitor_to_finite_generation_changes_from_event_to_authored_shape() -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    node = _node("restart-shape", declaration)
+    plane = SignalDataPlane()
+    try:
+        plane.begin_generation(node)
+        plane.commit_live(node, {"frame": _latest(declaration, 1.0)})
+        old_publication = plane.latest_publication("restart-shape/frame")
+        assert old_publication is not None
+        assert plane.describe_signals()[0].shape == (1, 1, 1)
+
+        plane.retire(node)
+        plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=2.0,
+                    total=30,
+                    origin=0,
+                    written=1,
+                )
+            },
+        )
+        assert plane.describe_signals()[0].shape == (30, 1, 1)
+        with pytest.raises(ValueError, match="another signal generation"):
+            plane.current_dataset("restart-shape/frame", old_publication)
+    finally:
+        plane.close()
+
+
+def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) -> None:
+    import zlc_runtime.plane as plane_module
+
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    node = _node("presentation-cache", declaration)
+    calls = 0
+    real = plane_module.owned_snapshot_from_arrays
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(plane_module, "owned_snapshot_from_arrays", counted)
+    plane = SignalDataPlane()
+    try:
+        plane.reserve(node)
+        plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=1.0,
+                    total=3,
+                    origin=0,
+                    written=1,
+                )
+            },
+        )
+        first_publication = plane.latest_publication("presentation-cache/frame")
+        assert first_publication is not None
+        first = plane.current_dataset(
+            "presentation-cache/frame",
+            first_publication,
+        )
+        assert calls == 1
+
+        plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=2.0,
+                    total=3,
+                    origin=1,
+                    written=2,
+                )
+            },
+        )
+        # Committing an event neither materializes a prefix nor discards the
+        # accepted display prefix.  Semantic/Edit/Save reads of that same
+        # publication therefore reuse one immutable snapshot.
+        assert calls == 1
+        assert (
+            plane.current_dataset(
+                "presentation-cache/frame",
+                first_publication,
+            )
+            is first
+        )
+        assert calls == 1
+
+        second = plane.current_dataset("presentation-cache/frame")
+        assert calls == 2
+        assert second.block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
+        assert plane.seal_committed(node, cut_short=True)
+        assert calls == 2
+    finally:
+        plane.close()
+
+
+def test_canonical_prefix_is_bound_to_its_publication_when_next_event_wins_race() -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    node = _node("publication-prefix", declaration)
+    plane = SignalDataPlane()
+    try:
+        plane.reserve(node)
+        plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=1.0,
+                    total=3,
+                    origin=0,
+                    written=1,
+                )
+            },
+        )
+        first_publication = plane.latest_publication("publication-prefix/frame")
+        assert first_publication is not None
+        plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=2.0,
+                    total=3,
+                    origin=1,
+                    written=2,
+                )
+            },
+        )
+
+        first = plane.current_dataset(
+            "publication-prefix/frame",
+            first_publication,
+        )
+        latest = plane.current_dataset("publication-prefix/frame")
+        assert first.block.values[:, 0, 0].tolist() == [1.0, 0.0, 0.0]
+        assert first.expanded_validity()[:, 0, 0].tolist() == [
+            True,
+            False,
+            False,
+        ]
+        assert latest.block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
     finally:
         plane.close()
 
@@ -335,10 +628,9 @@ def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> 
                     ),
                     "phase": _latest(phase_declaration, float(index + 1)),
                 },
-                growing_outputs=("history",),
             )
-            assert values["mixed/history"].growing
-            assert not values["mixed/phase"].growing
+            assert values["mixed/history"].canonical_schema is not None
+            assert values["mixed/phase"].canonical_schema is None
             publication = plane.latest_publication("mixed/history")
             assert publication is not None
             if index == 0:
@@ -385,7 +677,7 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
         def validate_processor_source(self, _source) -> None:
             return None
 
-        def evaluate_processor(self, selected):
+        def evaluate_processor(self, selected, _publication):
             sequence = selected.snapshot.ref.revision.value
             with self.lock:
                 self.calls.append(sequence)

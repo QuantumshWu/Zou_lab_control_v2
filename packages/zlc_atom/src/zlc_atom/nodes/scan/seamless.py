@@ -199,10 +199,7 @@ class SeamlessScanMeasurement:
                             for name, output in companions.items()
                         }
                     )
-                context.commit_live(
-                    front,
-                    growing_outputs=tuple(front),
-                )
+                context.commit_live(front)
                 if (played + 1) % shots == 0:
                     context.report_progress(
                         "Scanning",

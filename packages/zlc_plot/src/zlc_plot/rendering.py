@@ -50,7 +50,6 @@ from .selectors import (
     SelectorSnapshot,
     SelectorState,
 )
-from .kinds import AxisDomain
 from .specs import (
     CurvePlot,
     FacetGridPlot,
@@ -78,19 +77,6 @@ class _PreparedSeries:
 def _display_array(value: Any) -> np.ndarray:
     raw = getattr(value, "display", value)
     return np.asarray(raw)
-
-
-def _names_axis(ref: Any, axis_id: str) -> bool:
-    """Whether an axis reference is the axis a producer named by id.
-
-    A point column and the scan dimension it carries are one physical axis
-    under two identities, and both spell it with the same coordinate id --
-    which is why this compares the id and not the domain.  Repeat and
-    point-row references name no column at all and can never be it.
-    """
-
-    candidate = getattr(ref, "axis_id", None)
-    return candidate is not None and str(candidate) == str(axis_id)
 
 
 def _valid_array(value: Any, shape: tuple[int, ...]) -> np.ndarray:
@@ -3186,33 +3172,6 @@ class MatplotlibRenderer:
             labelleft=True,
         )
 
-    def _painted_axis_value(
-        self,
-        axis_id: str,
-        facet_value: float | None,
-    ) -> float | None:
-        """What value THIS surface pins ONE named axis to, or None.
-
-        The question an overlay's rings need answered, asked about the axis
-        the overlay itself names.  A surface pins an axis in exactly two ways:
-        it is the axis this grid facets over -- then the cell's coordinate IS
-        the value -- or the spec scopes it, which is the same fate given by
-        hand.  Neither means the surface shows every value of that axis at
-        once, and a judgement per value has nothing to say about that.
-
-        Asking "which point row is on screen" instead is what drew frame
-        zero's rings on every cell of a grid faceted over repeats: the cell's
-        coordinate was a repeat index, and an index is not a frame.
-        """
-
-        facet = getattr(self.spec, "facet", None)
-        if facet_value is not None and _names_axis(facet, axis_id):
-            return float(facet_value)
-        for ref, value in tuple(getattr(self.spec, "scope", ())):
-            if _names_axis(ref, axis_id):
-                return float(value)
-        return None
-
     def _update_image_point_overlay(
         self,
         axis: Any,
@@ -3220,7 +3179,7 @@ class MatplotlibRenderer:
         overlay: ImagePointOverlay | None,
         state: DisplayState,
         key: str,
-        facet_value: float | None,
+        facet_value: object | None,
     ) -> None:
         """Mutate ONE image surface's point layer, independently of its raster.
 
@@ -3228,21 +3187,14 @@ class MatplotlibRenderer:
         gates on the SEMANTIC spec, so a FacetGrid of image cells carries the
         site overlay on each cell instead of dropping it at the outer spec.
 
-        ``facet_value`` is the coordinate THIS surface shows when it is a
-        cell.  Which judgement it draws is resolved from the axis the OVERLAY
-        names -- the cell's coordinate counts only when the grid faces that
-        same axis, and a scope pin on it counts wherever it is -- so a grid
-        faceted over anything else can no longer hand a repeat index to a map
-        keyed by frames.
+        The overlay keeps the same repeat/point carrier as the image.  Its one
+        resolution rule applies this PlotSpec's scopes and the current facet;
+        a surface that still pools either leading axis has no single-shot
+        status and paints UNKNOWN rather than an invented consensus.
         """
 
         if not isinstance(self.semantic_spec, ImagePlot):
             return
-        painted_point = (
-            None
-            if overlay is None or overlay.status_axis is None
-            else self._painted_axis_value(overlay.status_axis, facet_value)
-        )
         x_quantity = getattr(payload, "x", None)
         y_quantity = getattr(payload, "y", None)
         if x_quantity is None or y_quantity is None:
@@ -3250,7 +3202,7 @@ class MatplotlibRenderer:
         signature = (
             None if overlay is None else overlay.revision,
             None if overlay is None else id(overlay),
-            None if painted_point is None else float(painted_point),
+            facet_value,
             bool(state["show_point_labels"]),
             str(getattr(x_quantity, "display_unit", "")),
             str(getattr(y_quantity, "display_unit", "")),
@@ -3315,7 +3267,7 @@ class MatplotlibRenderer:
 
         radius_x = display_radius(x_quantity)
         radius_y = display_radius(y_quantity)
-        statuses = overlay.statuses_for(painted_point) or (
+        statuses = overlay.statuses_for(self.spec, facet_value) or (
             PointStatus.UNKNOWN,
         ) * overlay.count
         tokens = {
