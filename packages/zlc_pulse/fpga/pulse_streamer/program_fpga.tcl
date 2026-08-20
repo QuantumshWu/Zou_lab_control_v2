@@ -1,7 +1,11 @@
 # Program the FINAL pulse-streamer bitstream and leave the JTAG-to-AXI master
 # discoverable as a hw_axi core (the host then drives it with axi_session.py).
-proc env_or {name default} {
+proc path_env_or {name default} {
     if {[info exists ::env($name)] && $::env($name) ne ""} { return [file normalize $::env($name)] }
+    return $default
+}
+proc raw_env_or {name default} {
+    if {[info exists ::env($name)] && $::env($name) ne ""} { return $::env($name) }
     return $default
 }
 proc zlc_default_project_root {script_dir} {
@@ -13,13 +17,15 @@ proc zlc_default_project_root {script_dir} {
 
 set script_dir [file normalize [file dirname [info script]]]
 set project_root [zlc_default_project_root $script_dir]
-set project_dir [env_or ZLC_PS_PROJECT_DIR [file join $project_root ps]]
+set project_dir [path_env_or ZLC_PS_PROJECT_DIR [file join $project_root ps]]
 set top zlc_pulse_streamer_top
 set default_bit_path [file join $project_dir ps.runs impl_1 ${top}.bit]
 set default_ltx_path [file join $project_dir ps.runs impl_1 ${top}.ltx]
-set bit_path [env_or ZLC_PS_VIVADO_BIT [env_or ZLC_PS_BIT $default_bit_path]]
-set ltx_path [env_or ZLC_PS_VIVADO_LTX [env_or ZLC_PS_LTX $default_ltx_path]]
-set hw_server_url [env_or ZLC_PS_HW_SERVER_URL [env_or ZLC_HW_SERVER_URL ""]]
+set bit_path [path_env_or ZLC_PS_VIVADO_BIT [path_env_or ZLC_PS_BIT $default_bit_path]]
+set ltx_path [path_env_or ZLC_PS_VIVADO_LTX [path_env_or ZLC_PS_LTX $default_ltx_path]]
+set hw_server_url [raw_env_or ZLC_PS_HW_SERVER_URL [raw_env_or ZLC_HW_SERVER_URL ""]]
+set expected_part [raw_env_or ZLC_PS_FPGA_PART ""]
+if {$expected_part eq ""} { error "ZLC_PS_FPGA_PART is required; validate streamer_config.json before programming" }
 
 puts "ZLC program_fpga contract: CHANNEL_COUNT=62 NUM_SLOTS=4 control=JTAG-to-AXI (final BRAM tables + streaming)"
 puts "ZLC program_fpga project_dir: $project_dir"
@@ -49,8 +55,10 @@ if {[catch {set zlc_targets [get_hw_targets]} zlc_target_error]} {
     set zlc_targets {}
 }
 puts "Available hardware targets: $zlc_targets"
-set zlc_target [lindex $zlc_targets 0]
-if {$zlc_target eq ""} { error "No Vivado hardware target found. Check the USB/JTAG cable, board power, and hw_server." }
+if {[llength $zlc_targets] != 1} {
+    error "Expected exactly one Vivado hardware target, found [llength $zlc_targets]: $zlc_targets"
+}
+set zlc_target $zlc_targets
 current_hw_target $zlc_target
 if {[catch {open_hw_target $zlc_target} zlc_open_target_error]} {
     puts "open_hw_target failed: $zlc_open_target_error"
@@ -59,8 +67,15 @@ if {[catch {open_hw_target $zlc_target} zlc_open_target_error]} {
         error "No FPGA device could be opened on '$zlc_target'. Check power/JTAG. Last error: $zlc_open_target_jtag_error"
     }
 }
-set device [lindex [get_hw_devices] 0]
-if {$device eq ""} { error "Vivado opened the target but found no FPGA device. Check power, JTAG chain/mode jumpers, Auto Connect." }
+set zlc_devices [get_hw_devices]
+if {[llength $zlc_devices] != 1} {
+    error "Expected exactly one FPGA device, found [llength $zlc_devices]: $zlc_devices"
+}
+set device $zlc_devices
+set actual_part [get_property PART $device]
+if {$actual_part ne $expected_part} {
+    error "FPGA part mismatch: streamer_config.json requires '$expected_part', hardware reports '$actual_part'"
+}
 
 set_property PROGRAM.FILE $bit_path $device
 if {[file exists $ltx_path]} {
@@ -73,8 +88,10 @@ if {[file exists $ltx_path]} {
 program_hw_devices $device
 refresh_hw_device $device
 
-set zlc_axi {}
-catch {set zlc_axi [get_hw_axis]}
+set zlc_axi [get_hw_axis]
+if {[llength $zlc_axi] != 1} {
+    error "Programmed device must expose exactly one JTAG-to-AXI core, found [llength $zlc_axi]: $zlc_axi"
+}
 puts "Programmed $device"
 puts "Bitstream: $bit_path"
 puts "JTAG-to-AXI cores: $zlc_axi"

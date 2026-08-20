@@ -12,6 +12,7 @@ from zlc_pulse import (
     PulseSequence,
     PulseSlot,
     PulseTarget,
+    RepeatRegion,
     compile_sequence,
 )
 from zlc_pulse.model import PulseFieldRef
@@ -63,7 +64,6 @@ def test_slot_compile_changes_only_affine_data_and_dac_selectors() -> None:
     assert program.slot_kinds == ("duration",)
     assert program.slot_count == 1
     assert program.tick_slot_coeffs[1][0] != 0
-    assert program.scan_points == ()
 
 
 def test_negative_bus_delay_shifts_every_driven_ttl_lane() -> None:
@@ -98,34 +98,35 @@ def test_model_rejects_non_binary_states_and_non_dac_value_slots() -> None:
         )
 
 
-def test_a_bracket_around_the_whole_pulse_is_the_pulse_saying_how_many_times() -> None:
-    """Who decides "forever or N times" -- the document, once.
+def test_a_full_span_repeat_is_only_an_internal_timeline_loop() -> None:
+    """A region's position never decides finite/forever execution policy."""
 
-    A bracket over PART of a pulse repeats that part inside a cycle that still
-    runs until stopped.  A bracket END TO END is a statement about the pulse
-    itself and overrides the default.  That rule was worked out by the preview
-    (to pick which brackets to draw) and by nobody at all on the path that
-    fires, so a whole-pulse bracket was drawn faithfully and then run forever
-    anyway -- N times over and over reads exactly like over and over.
-    """
-
-    from zlc_pulse import RepeatRegion
-
-    plain = _sequence()
-    assert plain.whole_pulse_repeat is None, "no bracket means until stopped"
-
-    part = replace(plain, repeat=RepeatRegion("p0", "p1", 3))
-    assert part.whole_pulse_repeat is None, "a partial bracket leaves the outer level alone"
-
-    whole = replace(plain, repeat=RepeatRegion("p0", "p2", 3))
-    assert whole.whole_pulse_repeat == 3
-
-    # And the count is what the board is handed: one loop region over the whole
-    # program, so ONE fire plays the pulse three times.
+    whole = replace(_sequence(), repeat=RepeatRegion("p0", "p2", 3))
     program = compile_sequence(whole, StreamerParams(max_edges=8, bank_size=2), 50e6)
     assert program.loop_start_index == 0
     assert program.loop_count == 3
     assert program.loop_end_tick == program.ticks[-1]
-    assert not program.repeat_forever
     assert trigger_windows(program, "d0") == ((0, 1), (3, 4), (6, 7))
     assert trigger_windows(program, "d1") == ((1, 2), (4, 5), (7, 8))
+
+
+def test_repeat_count_and_scan_slot_domain_are_strict() -> None:
+    for invalid in (True, 1.5, 1, 0, -1, 2**32):
+        with np.testing.assert_raises((TypeError, ValueError)):
+            RepeatRegion("p0", "p2", invalid)
+
+    with np.testing.assert_raises(ValueError):
+        PulseSlot(
+            "delay",
+            PulseFieldRef("delay", port="d0"),
+            "ns",
+            "d0_delay",
+        )
+
+
+def test_compile_binds_the_document_clock_and_complete_geometry() -> None:
+    geometry = StreamerParams(max_edges=8, bank_size=2)
+    program = compile_sequence(_sequence(), geometry, 50e6)
+    assert program.geometry_fingerprint != 0
+    with np.testing.assert_raises(ValueError):
+        compile_sequence(_sequence(), geometry, 25e6)

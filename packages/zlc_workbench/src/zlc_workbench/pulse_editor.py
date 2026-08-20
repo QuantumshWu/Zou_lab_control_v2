@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from zlc_pulse import (
@@ -762,8 +763,12 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     # always true of a running pulse was the one thing the preview never said.
     markers: list[Any] = []
     ids = [period.period_id for period in sequence.periods]
-    # Asked, not re-derived: the document decides what its own bracket means.
-    spans_everything = sequence.whole_pulse_repeat is not None
+    spans_everything = bool(
+        sequence.repeat is not None
+        and ids
+        and sequence.repeat.start_period_id == ids[0]
+        and sequence.repeat.end_period_id == ids[-1]
+    )
     if sequence.repeat is not None:
         try:
             first = ids.index(sequence.repeat.start_period_id)
@@ -862,7 +867,6 @@ class BoardState:
     #: idle, and shown differently, because "I cannot tell" is an answer.
     answering: bool = True
     firing: bool = False
-    forever: bool = False
     loaded: bool = False
     cursor: int | None = None
     #: What the board is holding, as the board named it.  NOT "is it what the
@@ -897,15 +901,9 @@ class PulseEditorPresenter:
         path: str = "",
         default_endpoint: str = "",
         connection_label: str = "Experiment session",
-        run_preview_work: Callable[
-            [
-                Callable[[], object],
-                Callable[[object], None],
-                Callable[[BaseException], None],
-            ],
-            None,
-        ]
-        | None = None,
+        run_preview_work: Callable[..., None] | None = None,
+        run_device_work: Callable[..., None] | None = None,
+        run_safe_work: Callable[..., None] | None = None,
         request_preview_close: Callable[[], None] | None = None,
     ) -> None:
         self.view = view
@@ -927,6 +925,14 @@ class PulseEditorPresenter:
         if self._make_preview is not None and not callable(self._run_preview_work):
             raise TypeError("a preview host requires a preview worker")
         self._request_preview_close = request_preview_close
+        self._run_device_work = run_device_work
+        self._run_safe_work = run_safe_work
+        if (run_device_work is None) != (run_safe_work is None):
+            raise ValueError("device command and SAFE workers must be supplied together")
+        if run_device_work is not None and (
+            not callable(run_device_work) or not callable(run_safe_work)
+        ):
+            raise TypeError("device command and SAFE workers must be callable")
         self._preview_busy = False
         self._preview_pending: tuple[PulseSequence, bool, str | None] | None = None
         self._preview_close_requested = False
@@ -966,6 +972,10 @@ class PulseEditorPresenter:
         self._device_owner = object()
         self._drive_lease: DeviceLease | None = None
         self._finite_drive = False
+        self._device_busy = False
+        self._device_operation = 0
+        self._device_done: Event | None = None
+        self._stop_busy = False
         # How to get one.  Dialling belongs to whoever knows what a "remote
         # server" is on this bench, which is the composition root, not here.
         self._dial = dial
@@ -1066,7 +1076,7 @@ class PulseEditorPresenter:
         view.scan_array_save_requested.connect(self.save_scan_array)
         view.scan_progress_refresh_requested.connect(self.refresh_scan_progress)
         view.connection_requested.connect(self.connect_to)
-        view.fire_requested.connect(self.fire)
+        view.fire_requested.connect(self._fire_from_view)
         view.stop_requested.connect(self.stop)
         view.sync_requested.connect(self.sync_from_sequencer)
         view.save_requested.connect(self.save_pulse)
@@ -1784,7 +1794,7 @@ class PulseEditorPresenter:
                 "its pulse, so there is nothing an editor can show"
             )
             return False
-        wire_rows = tuple(getattr(state, "scan_rows", ()) or ())
+        wire_rows = tuple(getattr(state, "rows", ()) or ())
         authored_rows: tuple[tuple[float, ...], ...] = ()
         if wire_rows:
             # Back into the units this window writes tables in.  The board
@@ -1855,18 +1865,22 @@ class PulseEditorPresenter:
     def _prepare_execution(self) -> tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int]:
         """Compile every local fact before attempting to acquire the device."""
 
+        source, rows, sweeps = self._execution_request()
+        return source, self.compile(source), rows, sweeps
+
+    def _execution_request(
+        self,
+    ) -> tuple[PulseSequence, tuple[tuple[int, ...], ...], int]:
         source = self._execution_sequence()
         rows = self._wire_rows(self._state.scan_rows) if self._scan_armed() else ()
-        return source, self.compile(source), rows, max(1, self._state.scan_repeats)
+        return source, rows, self._state.scan_repeats
 
     def _load_prepared(
         self,
         prepared: tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int],
     ) -> None:
-        source, program, rows, sweeps = prepared
-        self.sequencer.load(program, source=source)
-        if rows:
-            self.sequencer.write_scan_table(rows, sweeps=sweeps)
+        source, program, rows, _sweeps = prepared
+        self.sequencer.load(program, source=source, rows=rows)
         self._remember_applied_scan(program.digest, source, rows)
 
     def _remember_applied_scan(
@@ -1892,7 +1906,7 @@ class PulseEditorPresenter:
             scan_rows_from_wire(wire_rows, columns),
         )
 
-    def _acquire_command(self) -> bool:
+    def _acquire_command(self, *, present: bool = True) -> bool:
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
@@ -1905,6 +1919,8 @@ class PulseEditorPresenter:
                 (DeviceClaim("sequencer", "sequencer", self.sequencer),),
             )
         except DeviceUseBusy as error:
+            if not present:
+                raise RuntimeError(str(error)) from error
             self._warn(str(error))
             return False
         return True
@@ -1932,7 +1948,105 @@ class PulseEditorPresenter:
             source = resolve_scan_point(source)
         return source
 
-    def fire(self, *, forever: bool | None = None) -> bool:
+    def _fire_from_view(self) -> None:
+        if self._run_device_work is None:
+            self.fire()
+            return
+        if self._device_busy or self._stop_busy:
+            self._warn("a pulse command is already in progress")
+            return
+        if self.sequence is None:
+            self._warn("no pulse is open")
+            return
+        sequencer = self.sequencer
+        if sequencer is None:
+            self._warn("this editor is not connected to a sequencer")
+            return
+        try:
+            source, rows, sweeps = self._execution_request()
+        except Exception as error:
+            self._warn(f"cannot load this pulse: {error}")
+            return
+        if not self._acquire_command():
+            return
+
+        requested_cycles = len(rows) * sweeps if rows and sweeps else None
+        self._device_operation += 1
+        operation = self._device_operation
+        done = Event()
+        self._device_done = done
+        self._device_busy = True
+        self.view.set_summary("Starting...")
+        self._render_run_state()
+
+        def work() -> object:
+            program = None
+            error: BaseException | None = None
+            touched_device = False
+            try:
+                if operation == self._device_operation:
+                    program = self.compile(source)
+                if operation == self._device_operation:
+                    if bool(sequencer.snapshot().get("firing")):
+                        touched_device = True
+                        sequencer.safe()
+                if operation == self._device_operation:
+                    touched_device = True
+                    sequencer.load(program, source=source, rows=rows)
+                if operation == self._device_operation:
+                    sequencer.fire(cycles=requested_cycles)
+                if operation != self._device_operation and touched_device:
+                    sequencer.safe()
+            except BaseException as caught:
+                error = caught
+                if touched_device:
+                    try:
+                        sequencer.safe()
+                    except BaseException as safe_error:
+                        error = RuntimeError(f"{caught}; SAFE also failed: {safe_error}")
+            finally:
+                state = self._board_state_for(sequencer)
+                done.set()
+            return program, state, error
+
+        def delivered(result: object) -> None:
+            program, state, error = result
+            self._device_done = None
+            self._device_busy = False
+            if operation == self._device_operation:
+                self._board_state = state
+                if error is None:
+                    self._finite_drive = requested_cycles is not None
+                    self._remember_applied_scan(program.digest, source, rows)
+                    self._digest = program.digest
+                    self._digest_revision = self.revision
+                    self.view.set_summary("Started")
+                else:
+                    if not state.firing:
+                        self._release_drive()
+                    if error is not None:
+                        message = f"firing stopped: {error}"
+                        self.view.set_summary(message)
+                        self._warn(message)
+                self._render_run_state()
+            self._wake_close_guard()
+
+        def failed(error: BaseException) -> None:
+            done.set()
+            delivered((None, self._board_state, error))
+
+        self._submit_work(self._run_device_work, work, delivered, failed)
+
+    @staticmethod
+    def _submit_work(runner, work, delivered, failed) -> bool:
+        try:
+            runner(work, delivered, failed)
+        except BaseException as error:
+            failed(error)
+            return False
+        return True
+
+    def fire(self, *, cycles: int | None = None) -> bool:
         """On Pulse: load what is on screen and run it the way the pulse says.
 
         A pulse is a cycle, and an experiment holds it running -- the MOT loads
@@ -1940,12 +2054,10 @@ class PulseEditorPresenter:
         the normal thing an operator means by On Pulse, so forever is the
         default.
 
-        Unless the pulse says otherwise, and it can: a bracket spanning the
-        whole pulse means "play it this many times", and the count reaches the
-        board inside the compiled program as its one loop region.  Wrapping
-        that in a forever run is what made the outermost bracket look like it
-        did nothing -- N times, over and over, is indistinguishable from over
-        and over.  So the document is asked, here, on the path that fires.
+        A RepeatRegion remains an internal timeline loop and never chooses the
+        outer execution count.  An armed scan is finite by its explicit rows
+        and sweep count; an ordinary On Pulse is forever unless a caller
+        explicitly supplies finite ``cycles``.
 
         NOTHING here waits for the board.  A run is started and the display
         beat says what the board is doing, which is how the forever path always
@@ -1954,8 +2066,8 @@ class PulseEditorPresenter:
         blocked event loop cannot deliver.
 
         There is nothing left for that wait to protect.  Firing over an
-        unfinished shot cannot happen: ``load``, ``write_slots``,
-        ``write_scan_table`` and ``fire`` all call ``_require_idle()`` and
+        unfinished shot cannot happen: ``load`` and ``fire`` both call
+        ``_require_idle()`` and
         raise, and On Pulse stops a running board before loading anyway.  The
         invariant lives with the device that owns it.
         """
@@ -1966,13 +2078,9 @@ class PulseEditorPresenter:
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
-        if forever is None:
-            # A finite number of sweeps is a finite run: the table uploaded
-            # already contains every point that will be played, so wrapping it
-            # in an endless outer loop would repeat the whole scan for ever and
-            # the count would mean nothing.
-            finite_scan = self._scan_armed() and self._state.scan_repeats > 0
-            forever = self.sequence.whole_pulse_repeat is None and not finite_scan
+        if cycles is not None and (type(cycles) is not int or cycles <= 0):
+            self._warn("cycles must be a positive integer or None")
+            return False
         try:
             prepared = self._prepare_execution()
         except Exception as error:
@@ -1984,8 +2092,12 @@ class PulseEditorPresenter:
             return False
         try:
             self._load_prepared(prepared)
-            self.sequencer.fire(forever=bool(forever))
-            self._finite_drive = not bool(forever)
+            _source, _program, rows, sweeps = prepared
+            requested_cycles = cycles
+            if cycles is None and rows and sweeps:
+                requested_cycles = len(rows) * sweeps
+            self.sequencer.fire(cycles=requested_cycles)
+            self._finite_drive = requested_cycles is not None
             self._poll_board()
         except Exception as error:
             self._warn(f"firing stopped: {error}")
@@ -2003,7 +2115,7 @@ class PulseEditorPresenter:
 
         The device is right to refuse the alternative.  Loading a program into
         a firing streamer would rewrite the tables under the engine, so
-        ``load``, ``write_slots``, ``write_scan_table`` and ``fire`` all demand
+        ``load`` and ``fire`` both demand
         an idle board; a device that silently stopped a running experiment
         because someone called ``load`` would be a far worse thing to own.
         What was missing is that nobody was doing the stopping.
@@ -2028,8 +2140,11 @@ class PulseEditorPresenter:
     def _safe_drive(self, *, release: bool, present: bool = True) -> bool:
         if self.sequencer is None:
             return True
-        if not self._acquire_command():
-            self._poll_board()
+        if not self._acquire_command(present=present):
+            if present:
+                self._poll_board()
+            else:
+                self._board_state = self.board_state()
             return False
         worked = True
         try:
@@ -2061,11 +2176,55 @@ class PulseEditorPresenter:
         doing first.
         """
 
-        # Safe first, then look.  Recording "stopped" before the board has
-        # stopped is how a window comes to claim idle over driving outputs: if
-        # safe() refuses, the board is still playing and must still read as
-        # playing, with the refusal on screen next to it.
-        self._safe_drive(release=True)
+        if self._stop_busy:
+            return
+        self._device_operation += 1
+        if self._run_safe_work is None:
+            self._safe_drive(release=True)
+            return
+        sequencer = self.sequencer
+        if sequencer is None or not self._acquire_command():
+            return
+
+        command_done = self._device_done
+        self._stop_busy = True
+        self.view.set_summary("Stopping...")
+        self._render_run_state()
+
+        def work() -> object:
+            def go_safe() -> BaseException | None:
+                try:
+                    sequencer.safe()
+                    return None
+                except BaseException as caught:
+                    return caught
+
+            error = go_safe()
+            if command_done is not None:
+                command_done.wait(5.0)
+                error = go_safe()
+            return self._board_state_for(sequencer), error
+
+        def delivered(result: object) -> None:
+            state, error = result
+            self._stop_busy = False
+            self._board_state = state
+            worked = error is None and state.answering and not state.firing
+            if worked:
+                self._release_drive()
+            self._render_run_state()
+            if worked:
+                self.view.set_summary("Stopped")
+            else:
+                message = f"Stop failed: {error}" if error else "the board did not confirm SAFE"
+                self.view.set_summary(message)
+                self._warn(message)
+            self._wake_close_guard()
+
+        def failed(error: BaseException) -> None:
+            delivered((self._board_state, error))
+
+        self._submit_work(self._run_safe_work, work, delivered, failed)
 
     @property
     def running(self) -> bool:
@@ -2096,8 +2255,12 @@ class PulseEditorPresenter:
 
         if self.sequencer is None:
             return BoardState()
+        return self._board_state_for(self.sequencer)
+
+    @staticmethod
+    def _board_state_for(sequencer: object) -> BoardState:
         try:
-            reported = dict(self.sequencer.snapshot())
+            reported = dict(sequencer.snapshot())
         except Exception as error:
             return BoardState(attached=True, answering=False, fault=str(error))
         cursor = reported.get("cursor")
@@ -2105,7 +2268,6 @@ class PulseEditorPresenter:
             attached=True,
             answering=True,
             firing=bool(reported.get("firing")),
-            forever=bool(reported.get("forever")),
             loaded=bool(reported.get("loaded")),
             cursor=None if cursor is None else int(cursor),
             applied_digest=str(reported.get("applied_digest") or ""),
@@ -2195,15 +2357,16 @@ class PulseEditorPresenter:
         """
 
         live = self.sequencer is not None and self.sequence is not None
+        synchronized = False if self._device_busy else bool(self.synchronized)
         self.view.set_control_state(
             running=bool(self.running),
-            synchronized=bool(self.synchronized),
+            synchronized=synchronized,
             file_dirty=self._state != self._saved_state,
-            can_run=live,
+            can_run=live and not self._device_busy and not self._stop_busy,
             # Going safe needs a board and nothing else.  Requiring a pulse to
             # be open, or the window to believe the board is busy, makes Stop
             # unavailable in exactly the situations it exists for.
-            can_stop=self.sequencer is not None,
+            can_stop=self.sequencer is not None and not self._stop_busy,
         )
         # Capabilities go through the shell, which also gates the Scan page's
         # hold and step -- those need a board just as much as Sync does.
@@ -2226,7 +2389,11 @@ class PulseEditorPresenter:
             # answer instead is how a window sits green over a dead server.
             return "unreachable"
         if state.firing:
-            return "running-synced" if self.synchronized else "running-stale"
+            return (
+                "running-synced"
+                if not self._device_busy and self.synchronized
+                else "running-stale"
+            )
         return "dirty-ready" if self.sequence is not None else "idle"
 
     def save_pulse(self) -> str:
@@ -2760,7 +2927,7 @@ class PulseEditorPresenter:
             return False
         try:
             self.sequencer.load(program, source=resolved)
-            self.sequencer.fire(forever=True)
+            self.sequencer.fire(cycles=None)
             self._finite_drive = False
         except Exception as error:
             self._scan_progress = f"cannot hold that point: {error}"
@@ -3399,12 +3566,22 @@ class PulseEditorPresenter:
         if done is not None:
             done(text)
 
-    def prepare_preview_close(self) -> bool:
-        """Stop accepting preview work and report when its delivery is idle."""
+    def _wake_close_guard(self) -> None:
+        if self._preview_close_requested and self._request_preview_close is not None:
+            self._request_preview_close()
 
+    def prepare_preview_close(self) -> bool:
+        """Stop accepting work and report when every owned delivery is idle."""
+
+        if not self._preview_close_requested:
+            self._device_operation += 1
         self._preview_close_requested = True
         self._preview_pending = None
-        return not self._preview_busy
+        return not (
+            self._preview_busy
+            or self._device_busy
+            or self._stop_busy
+        )
 
     def cancel_preview_close(self) -> None:
         """Resume preview requests after owned retirement was refused."""

@@ -552,21 +552,15 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
     class Sequencer:
         def __init__(self) -> None:
             self.loaded = None
-            self.fires: list[bool] = []
-            self.scan_sweeps = 0
-            self.scan_sweeps_history: list[int] = []
+            self.fires: list[int | None] = []
 
-        def load(self, program, *, source=None) -> None:
+        def load(self, program, *, source=None, rows=()) -> None:
+            assert not rows
             self.loaded = (program, source)
 
-        def write_scan_table(self, rows, *, sweeps=1) -> None:
-            assert tuple(tuple(row) for row in rows) == ((),)
-            self.scan_sweeps = int(sweeps)
-            self.scan_sweeps_history.append(self.scan_sweeps)
-
-        def fire(self, *, forever=False) -> None:
-            self.fires.append(bool(forever))
-            camera.trigger(self.scan_sweeps * 3)
+        def fire(self, *, cycles=1) -> None:
+            self.fires.append(cycles)
+            camera.trigger(int(cycles) * 3)
 
         def wait_done(self, timeout=None):
             del timeout
@@ -618,8 +612,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated
         assert not missing
-        assert sequencer.fires == [False]
-        assert sequencer.scan_sweeps_history == [10]
+        assert sequencer.fires == [10]
         assert armed_buffer_sizes == [30]
         signal = "@logic/slm_feedback/camera/frames"
         raw = plane.current_dataset(signal)
@@ -684,16 +677,12 @@ def test_feedback_averages_dark_subtracted_brightness_over_all_shots(
             del timeout
             return SimpleNamespace(fault=None)
 
-        def load(self, program, *, source=None) -> None:
+        def load(self, program, *, source=None, rows=()) -> None:
+            assert not rows
             self.loaded = (program, source)
 
-        def write_scan_table(self, rows, *, sweeps=1) -> None:
-            assert tuple(tuple(row) for row in rows) == ((),)
-            self.sweeps = int(sweeps)
-
-        def fire(self, *, forever=False) -> None:
-            assert not forever
-            camera.trigger(self.sweeps * 3)
+        def fire(self, *, cycles=1) -> None:
+            camera.trigger(int(cycles) * 3)
 
         def safe(self):
             return None

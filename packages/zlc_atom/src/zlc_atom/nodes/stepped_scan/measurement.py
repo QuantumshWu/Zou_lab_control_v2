@@ -11,9 +11,10 @@ HOW A FRESH VALUE IS TAKEN IS THE OPERATOR'S DECLARATION.  Between two points
 the world changes, and whether the publication that straddles the change must
 be thrown away depends on the SOURCE, not on the board:
 
-Each point is applied and fired once.  ``shots_per_point`` is the finite
-whole-pulse repeat count compiled into that runtime copy; ``repeats`` returns
-to the beginning and walks the whole plan again.
+Each point is applied and fired once.  ``shots_per_point`` is the finite cycle
+count handed to that fire; ``repeats`` returns to the beginning and walks the
+whole plan again.  A timeline ``RepeatRegion`` remains the pulse author's
+internal loop and never stands in for either fact.
 
 * ``pulse_gated``: each outer pulse iteration produces one publication, so
   the next ``shots_per_point`` publications are retained.  Nothing is discarded.
@@ -30,11 +31,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 
 from zlc_pulse import (
     PulseSequence,
-    RepeatRegion,
     compile_sequence,
     pulse_field_value,
     resolve_api_parameters,
@@ -177,15 +176,17 @@ class SteppedScanMeasurement:
         )
         self.source.open(context, cycles=self.repeats * len(rows) * shots)
         try:
-            # Sweeps are the OUTERMOST loop.  Shots are the pulse program's
-            # own finite whole-pulse repeat, so one point is loaded and fired
-            # once while the board plays all of its shots.
+            # Sweeps are the OUTERMOST host loop.  Shots are the fire's finite
+            # cycle count, so one point is loaded and fired once while the
+            # board plays all of its shots.
             total_shots = self.repeats * len(rows) * shots
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
                     check_cancelled(context)
-                    program = self._apply(row, board)
-                    self.source.arm(program)
+                    source, program = self._apply(row, board)
+                    self.source.validate(program, cycles=shots)
+                    self.sequencer.load(program, source=source)
+                    self.source.arm()
                     self._collect(
                         context,
                         writer,
@@ -213,32 +214,10 @@ class SteppedScanMeasurement:
         resolved = resolve_api_parameters(
             self.sequence, self._api_values(pulse_values)
         )
-        repeat = resolved.repeat
-        whole = (
-            repeat is not None
-            and repeat.start_period_id == resolved.periods[0].period_id
-            and repeat.end_period_id == resolved.periods[-1].period_id
-        )
-        if self.shots_per_point > 1:
-            if repeat is not None and not whole:
-                raise ValueError(
-                    "Shots per point needs a whole-pulse repeat, but this "
-                    "template already has a partial repeat and pulse repeats "
-                    "cannot be nested"
-                )
-            repeat = RepeatRegion(
-                resolved.periods[0].period_id,
-                resolved.periods[-1].period_id,
-                self.shots_per_point,
-            )
-        elif whole:
-            repeat = None
-        resolved = replace(resolved, repeat=repeat)
         if resolved.target != board.target:
             raise ValueError("pulse target differs from the connected board")
         program = compile_sequence(resolved, board.geometry, board.clock_hz)
-        self.sequencer.load(program, source=resolved)
-        return program
+        return resolved, program
 
     def _collect(
         self,
@@ -252,10 +231,10 @@ class SteppedScanMeasurement:
         """Fire one point and retain every outer pulse iteration."""
 
         shots = self.shots_per_point
-        self.sequencer.fire()
+        self.sequencer.fire(cycles=shots)
         fired_at = time.monotonic()
         if self.gating == "sw_gated":
-            single_repeat_seconds = float(program.duration_seconds) / shots
+            single_repeat_seconds = float(program.duration_seconds)
             for shot in range(shots):
                 deadline = (
                     fired_at

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from numbers import Integral
+
 import numpy as np
 
 from .compile import CompiledProgram, evaluate_affine_tick
+from .model import MAXIMUM_REPEAT_COUNT
 
 
 def trigger_times(
     prog: CompiledProgram,
     channel: str,
     table: np.ndarray | None = None,
+    *,
+    cycles: int = 1,
 ) -> np.ndarray:
     """Return rising-edge ticks for one physical digital lane.
 
@@ -19,7 +24,11 @@ def trigger_times(
     """
 
     return np.asarray(
-        [tick for tick, high in _channel_transitions(prog, channel, table) if high],
+        [
+            tick
+            for tick, high in _channel_transitions(prog, channel, table, cycles)
+            if high
+        ],
         dtype=np.uint64,
     )
 
@@ -28,6 +37,8 @@ def trigger_windows(
     prog: CompiledProgram,
     channel: str,
     table: np.ndarray | None = None,
+    *,
+    cycles: int = 1,
 ) -> tuple[tuple[int, int], ...]:
     """Return (rise, fall) tick pairs for one lane, over one finite run.
 
@@ -39,7 +50,7 @@ def trigger_windows(
 
     windows: list[tuple[int, int]] = []
     rise: int | None = None
-    for tick, high in _channel_transitions(prog, channel, table):
+    for tick, high in _channel_transitions(prog, channel, table, cycles):
         if high and rise is None:
             rise = tick
         elif not high and rise is not None:
@@ -55,13 +66,15 @@ def trigger_windows(
 def run_duration_seconds(
     prog: CompiledProgram,
     table: np.ndarray | None = None,
+    *,
+    cycles: int = 1,
 ) -> float:
     """Return the exact finite playback duration for one program/table run."""
 
     return sum(
         total for _effective, _loop_start, _loop_end, _final, _span, total in (
             _point_timing(prog, point, index)
-            for index, point in enumerate(_scan_points(prog, table))
+            for index, point in enumerate(_scan_points(prog, table, cycles))
         )
     ) / float(prog.clock_hz)
 
@@ -70,13 +83,12 @@ def _channel_transitions(
     prog: CompiledProgram,
     channel: str,
     table: np.ndarray | None,
+    cycles: int,
 ) -> tuple[tuple[int, bool], ...]:
     """Project the exact finite edge stream played by one digital channel."""
 
     if not isinstance(prog, CompiledProgram):
         raise TypeError("prog must be CompiledProgram")
-    if prog.repeat_forever:
-        raise ValueError("a forever program has no finite trigger result")
     physical = dict(prog.logical_digital_outputs).get(channel, channel)
     if physical not in prog.channels:
         raise ValueError(f"unknown channel {channel!r}")
@@ -84,7 +96,7 @@ def _channel_transitions(
     if prog.clk_enable & (1 << bit):
         raise ValueError("clock lanes do not have digital trigger results")
 
-    points = _scan_points(prog, table)
+    points = _scan_points(prog, table, cycles)
 
     transitions: list[tuple[int, bool]] = []
     previous = False
@@ -133,23 +145,36 @@ def _channel_transitions(
 def _scan_points(
     prog: CompiledProgram,
     table: np.ndarray | None,
+    cycles: int,
 ) -> tuple[tuple[int, ...], ...]:
     if not isinstance(prog, CompiledProgram):
         raise TypeError("prog must be CompiledProgram")
-    if prog.repeat_forever:
-        raise ValueError("a forever program has no finite trigger result")
+    if isinstance(cycles, bool) or not isinstance(cycles, Integral):
+        raise TypeError("cycles must be an integer")
+    cycles = int(cycles)
+    if not 1 <= cycles <= MAXIMUM_REPEAT_COUNT:
+        raise ValueError("cycles must be in the hardware range [1, 2^32-1]")
     if table is None:
-        points = prog.scan_points or ((),)
+        if prog.slot_count:
+            raise ValueError("a slotted program requires an explicit value table")
+        rows = ((),)
     else:
         array = np.asarray(table)
         if array.ndim == 1:
             array = array.reshape(1, -1)
         if array.ndim != 2 or array.shape[1] != prog.slot_count:
             raise ValueError("table width differs from the program slot count")
-        points = tuple(tuple(int(value) for value in row) for row in array)
-    if any(len(point) != prog.slot_count for point in points):
-        raise ValueError("table width differs from the program slot count")
-    return points
+        raw_rows = tuple(tuple(value for value in row) for row in array.tolist())
+        if not raw_rows:
+            raise ValueError("table must contain at least one row")
+        if any(
+            isinstance(value, bool) or not isinstance(value, Integral)
+            for row in raw_rows
+            for value in row
+        ):
+            raise TypeError("table values must be integers")
+        rows = tuple(tuple(int(value) for value in row) for row in raw_rows)
+    return tuple(rows[index % len(rows)] for index in range(cycles))
 
 
 def _point_timing(

@@ -29,6 +29,7 @@ from zlc_runtime import SignalPublication
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
+    CameraCaptureSpec,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
@@ -383,6 +384,7 @@ class CameraCycleSource:
         self._capture = None
         self._taken = 0
         self._should_stop: Callable[[], bool] | None = None
+        self._cycles: int | None = None
 
     def open(self, context: object, *, cycles: int) -> None:
         # The frames belong to the run that opened this source, so they are
@@ -392,6 +394,7 @@ class CameraCycleSource:
         # which is where a scan waiting on a trigger that never came can
         # actually be stopped.
         self._should_stop = context.cancel_requested
+        self._taken = 0
         # The camera was built for a definite acquisition; if the plan plays a
         # different number of cycles, one of the two is wrong about what this
         # run is, and an exact capture would deadlock waiting for frames that
@@ -402,23 +405,44 @@ class CameraCycleSource:
                 f"the plan plays {int(cycles)} cycles and the camera is armed "
                 f"for {request.repeat}"
             )
+        self._cycles = int(cycles)
 
-    def arm(self, program: object, table: object = None) -> None:
-        """Arm for the whole run.
+    def validate(
+        self,
+        program: object,
+        table: object = None,
+        *,
+        cycles: int | None = None,
+    ) -> None:
+        """Reject an actual played program before LOAD or camera arm."""
 
-        A camera reads frames.  How many arrive per cycle is what this
-        measurement was configured to read, and nothing here opens the pulse
-        to check that against the windows some port happens to declare: a
-        capture that counts a template's triggers is a capture that breaks
-        when the operator writes their own pulse, and it makes the acquisition
-        depend on a document it does not own.
-        """
-
+        if self._cycles is None:
+            raise RuntimeError("the camera cycle source was not opened")
         if self._capture is None:
-            self._capture = self.camera_node.prepare(
-                owns_generation=False,
-                should_stop=self._should_stop,
-            )
+            self.camera_node._configure_capture()
+        request = self.camera_node.request
+        CameraCaptureSpec.for_program(
+            program,
+            table,
+            cycles=self._cycles if cycles is None else cycles,
+            frames_per_cycle=request.frames_per_cycle,
+            working_point=self.camera_node.actual_working_point,
+        )
+
+    def arm(self) -> None:
+        """Arm the already-configured camera once for the whole run."""
+
+        if self._cycles is None:
+            raise RuntimeError("the camera cycle source was not opened")
+        if self._capture is None:
+            try:
+                self._capture = self.camera_node._arm_configured(
+                    owns_generation=False,
+                    should_stop=self._should_stop,
+                )
+            except BaseException:
+                self.camera_node.camera.finish_record_capture()
+                raise
 
     def next_value(self, context: object) -> SignalValue:
         if self._capture is None:
@@ -834,6 +858,42 @@ class CameraMeasurementNode:
             raise TypeError("camera set_exposure_seconds must return CameraWorkingPoint")
         return point
 
+    def _configure_capture(self) -> CameraWorkingPoint:
+        """Apply and freeze the requested working point without arming."""
+
+        self._configure_for_run()
+        self._freeze_working_point(self.camera.working_point())
+        assert self._actual_working_point is not None
+        return self._actual_working_point
+
+    def _arm_configured(
+        self,
+        *,
+        owns_generation: bool,
+        should_stop: Callable[[], bool] | None,
+    ) -> FiniteCapture:
+        """Arm a capture whose hardware working point is already frozen."""
+
+        if self._actual_working_point is None or self._run_record is None:
+            raise RuntimeError("camera capture must be configured before arm")
+        timeout = float(self.camera.timeout)
+        total = self.request.repeat * self.request.frames_per_cycle
+        groups = (self.request.frames_per_cycle,) * self.request.repeat
+        self.camera.arm(
+            total,
+            source_group_sizes=groups,
+            buffer_frame_count=total,
+            timeout=timeout,
+        )
+        return FiniteCapture(
+            self,
+            repeat=self.request.repeat,
+            frames_per_cycle=self.request.frames_per_cycle,
+            timeout=timeout,
+            owns_generation=owns_generation,
+            should_stop=should_stop,
+        )
+
     def read_records(
         self,
         count: int,
@@ -953,22 +1013,8 @@ class CameraMeasurementNode:
         if owns_generation:
             self._generation = self.signal_plane.begin_generation(self)
         try:
-            self._configure_for_run()
-            timeout = float(self.camera.timeout)
-            total = self.request.repeat * self.request.frames_per_cycle
-            groups = (self.request.frames_per_cycle,) * self.request.repeat
-            self.camera.arm(
-                total,
-                source_group_sizes=groups,
-                buffer_frame_count=total,
-                timeout=timeout,
-            )
-            self._freeze_working_point(self.camera.working_point())
-            return FiniteCapture(
-                self,
-                repeat=self.request.repeat,
-                frames_per_cycle=self.request.frames_per_cycle,
-                timeout=timeout,
+            self._configure_capture()
+            return self._arm_configured(
                 owns_generation=owns_generation,
                 should_stop=should_stop,
             )

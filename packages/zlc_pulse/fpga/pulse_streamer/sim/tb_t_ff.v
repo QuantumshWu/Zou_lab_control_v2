@@ -99,6 +99,95 @@ module axi_bram_ctrl_0(
   end
 endmodule
 
+`ifdef ZLC_IVERILOG
+// Icarus-only black boxes for the pin-boundary test below.  The test forces
+// the engine-side signals and checks the real top-level pin equations; BRAM
+// behaviour is deliberately outside this small SAFE-gate proof.
+module blk_mem_gen_edge_tick(
+  input clka, input ena, input [3:0] wea, input [11:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [3:0] web, input [11:0] addrb, input [31:0] dinb, output [31:0] doutb);
+  assign douta=0; assign doutb=0;
+endmodule
+module blk_mem_gen_edge_coeff(
+  input clka, input ena, input [3:0] wea, input [12:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [7:0] web, input [11:0] addrb, input [63:0] dinb, output [63:0] doutb);
+  assign douta=0; assign doutb=0;
+endmodule
+module blk_mem_gen_edge_mask(
+  input clka, input ena, input [3:0] wea, input [12:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [7:0] web, input [11:0] addrb, input [63:0] dinb, output [63:0] doutb);
+  assign douta=0; assign doutb=0;
+endmodule
+module blk_mem_gen_scan(
+  input clka, input ena, input [3:0] wea, input [13:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [15:0] web, input [11:0] addrb, input [127:0] dinb, output [127:0] doutb);
+  assign douta=0; assign doutb=0;
+endmodule
+module blk_mem_gen_busimg(
+  input clka, input ena, input [3:0] wea, input [10:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [3:0] web, input [10:0] addrb, input [31:0] dinb, output [31:0] doutb);
+  assign douta=0; assign doutb=0;
+endmodule
+
+module tb_safe_gate;
+  reg clk=0; always #10 clk=~clk;
+  wire [1:0] led;
+  wire cooling,cooling_pgc,repump,probe,pushout,state_pre,trig,coil,grey_cooling,trap,UV,emCCD;
+  wire microwave,address_w,cooling_shutter,repump_shutter,probe_shutter,bias;
+  wire GND1,GND4,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
+  wire [9:0] da_dipole,da_bias_y,da_bias_x,da_bias_z;
+  wire da_clk0,da_clk1,da_clk2,da_clk3,uart_tx;
+  zlc_pulse_streamer_top dut(
+    .clk(clk),.uart_rx(1'b1),.uart_tx(uart_tx),.led(led),
+    .cooling(cooling),.cooling_pgc(cooling_pgc),.repump(repump),.probe(probe),
+    .pushout(pushout),.state_pre(state_pre),.trig(trig),.coil(coil),.grey_cooling(grey_cooling),
+    .trap(trap),.UV(UV),.emCCD(emCCD),.microwave(microwave),.address(address_w),
+    .GND1(GND1),.GND4(GND4),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
+    .GND9(GND9),.GND10(GND10),.GND11(GND11),.cooling_shutter(cooling_shutter),
+    .GND12(GND12),.repump_shutter(repump_shutter),.GND13(GND13),.probe_shutter(probe_shutter),
+    .GND14(GND14),.bias(bias),.GND15(GND15),.da_dipole(da_dipole),.da_clk0(da_clk0),
+    .da_bias_y(da_bias_y),.da_clk1(da_clk1),.da_bias_x(da_bias_x),.da_clk2(da_clk2),
+    .da_bias_z(da_bias_z),.da_clk3(da_clk3));
+
+  task expect_safe; begin
+    #1;
+    if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b0000)
+      $fatal(1,"DAC clocks were not gated safe: %b",{da_clk3,da_clk2,da_clk1,da_clk0});
+    if ({da_bias_z,da_bias_x,da_bias_y,da_dipole} !== {4{10'd512}})
+      $fatal(1,"DAC data was not midpoint-safe");
+  end endtask
+
+  initial begin
+    force dut.clk_en = {62{1'b1}};
+    force dut.out = {62{1'b0}};
+    force dut.zlc_bus_out = {4{10'd37}};
+    force dut.zlc_physical_active = 1'b1;
+    force dut.eng_reset = 1'b1;
+    repeat(3) begin @(posedge clk); expect_safe; @(negedge clk); expect_safe; end
+
+    force dut.eng_reset = 1'b0;
+    @(posedge clk); #1;
+    if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b0000)
+      $fatal(1,"inverted DAC clocks had the wrong active phase");
+    @(negedge clk); #1;
+    if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b1111)
+      $fatal(1,"enabled DAC clocks did not toggle while physically active");
+
+    // A single SAFE assertion dominates an active engine and arbitrary bus data.
+    force dut.eng_reset = 1'b1;
+    repeat(3) begin @(posedge clk); expect_safe; @(negedge clk); expect_safe; end
+
+    // Decoder faults are not only wire replies: the top latches a loud STATUS.ERROR.
+    force dut.u_protocol_error = 1'b1;
+    @(posedge clk); #1; release dut.u_protocol_error;
+    repeat(3) @(posedge clk);
+    if (!dut.ctrl_reg[2][3]) $fatal(1,"UART protocol fault was not sticky in STATUS.ERROR");
+    $display("TOP-SAFE-PIN-GATE-OK");
+    $finish;
+  end
+endmodule
+`endif
+
 // ---- the testbench ----
 module tb_t_ff;
 `include "replay_t_frame.vh"

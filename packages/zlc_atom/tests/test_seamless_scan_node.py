@@ -181,13 +181,57 @@ def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
     }
 
 
+def test_source_preflight_rejects_before_the_board_is_loaded(monkeypatch) -> None:
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    bench = None
+    host = None
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"), plane, publications_per_fire=1
+        )
+        bench.publish(SCRIPTED_SEED_VALUE)
+        descriptor = {
+            value.api_name: value for value in discover_logic_nodes()
+        }["seamless_scan"]
+        node = descriptor.instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
+            plan=ScanPlan((ScanAxis(BIAS_X_PORT, (0.0,)),)).to_tree(),
+            repeats=1,
+            shots_per_point=1,
+            settle_seconds=0.0,
+        )
+
+        def reject(*_args, **_kwargs) -> None:
+            raise ValueError("invalid camera cadence")
+
+        monkeypatch.setattr(node.source, "validate", reject)
+        host = _scan_host(node, plane)
+        host.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+        assert "invalid camera cadence" in str(host.observation.error)
+        assert bench.loads == 0, "the board was mutated before source preflight"
+    finally:
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+
 def test_the_table_carries_every_row_and_shot_and_the_shots_land_in_order() -> None:
     """One load, one fire: the table IS the plan, and order is the assignment.
 
-    Two points, two shots each, two sweeps: the board is handed a table whose
-    rows repeat per shot and whose sweep count is the repeats, and the eight
-    publications land on (visit, row) in played order -- red the moment a
-    shot is credited to the point beside it.
+    Two points, two shots each, two sweeps: the board is handed one four-row
+    table and one explicit eight-cycle execution, and the publications land
+    on (visit, row) in played order -- red the moment a shot is credited to
+    the point beside it.
     """
 
     kept, bench = _scripted_run(
@@ -202,9 +246,9 @@ def test_the_table_carries_every_row_and_shot_and_the_shots_land_in_order() -> N
     assert SCRIPTED_SEED_VALUE not in kept.reshape(-1).tolist()
 
     assert len(bench.scan_tables) == 1, "the table is written once, not per point"
-    table, sweeps = bench.scan_tables[0]
-    assert sweeps == 2, "whole-table sweeps are the board's own repeat count"
+    table = bench.scan_tables[0]
     assert len(table) == 4, "one wire row per plan row per shot"
+    assert bench.fired_cycles == [8]
     first, second, third, fourth = (tuple(row) for row in np.asarray(table))
     assert first == second and third == fourth, "a shot repeats its row in place"
     assert first != third, "the two plan points must reach the board apart"

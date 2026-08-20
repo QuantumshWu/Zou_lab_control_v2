@@ -36,22 +36,12 @@ class SequencerDevice:
         prog: CompiledProgram,
         *,
         source: PulseSequence | None = None,
+        rows: Sequence[Sequence[int]] = (),
     ) -> None:
-        self.streamer.load(prog, source=source)
+        self.streamer.load(prog, source=source, rows=rows)
 
-    def write_slots(self, values: Sequence[int]) -> None:
-        self.streamer.write_slots(values)
-
-    def write_scan_table(
-        self,
-        rows: Sequence[Sequence[int]],
-        *,
-        sweeps: int = 1,
-    ) -> None:
-        self.streamer.write_scan_table(rows, sweeps=sweeps)
-
-    def fire(self, *, forever: bool = False) -> None:
-        self.streamer.fire(forever=forever)
+    def fire(self, *, cycles: int | None = 1) -> None:
+        self.streamer.fire(cycles=cycles)
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         return self.streamer.wait_done(timeout)

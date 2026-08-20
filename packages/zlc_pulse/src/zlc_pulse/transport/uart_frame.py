@@ -56,7 +56,7 @@ def encode_write(word_addr: int, values: Sequence[int], *, seq: int = 0) -> byte
     address, count = _span(word_addr, len(values))
     sequence = _unsigned(seq, 0xFF, "seq")
     body = bytes((OP_WRITE, sequence)) + address.to_bytes(4, "little") + count.to_bytes(2, "little")
-    body += struct.pack(f"<{count}I", *[_unsigned(int(value), MASK32, "value") for value in values])
+    body += struct.pack(f"<{count}I", *[_unsigned(value, MASK32, "value") for value in values])
     return _frame(body)
 
 
@@ -73,7 +73,7 @@ def encode_reply(seq: int, status: int, words: Sequence[int] = ()) -> bytes:
         raise ValueError("reply is too long")
     body = bytes((RESP, sequence, status)) + len(words).to_bytes(2, "little")
     if words:
-        body += struct.pack(f"<{len(words)}I", *[_unsigned(int(value), MASK32, "word") for value in words])
+        body += struct.pack(f"<{len(words)}I", *[_unsigned(value, MASK32, "word") for value in words])
     return _frame(body)
 
 
@@ -81,6 +81,8 @@ def decode_reply(frame: bytes) -> tuple[int, int, list[int]]:
     if len(frame) < 9 or frame[:2] != bytes((SYNC0, SYNC1)) or frame[2] != RESP:
         raise FrameError("invalid UART reply header")
     count = int.from_bytes(frame[5:7], "little")
+    if count > MAX_FRAME_WORDS:
+        raise FrameError("UART reply count exceeds the wire limit")
     length = 2 + 3 + 2 + 4 * count + CRC_LEN
     if len(frame) != length:
         raise FrameError("invalid UART reply length")
@@ -97,17 +99,24 @@ def reply_frame_len(count: int) -> int:
 
 
 def coalesce_runs(pairs: Sequence[tuple[int, int]], *, max_words: int = MAX_FRAME_WORDS) -> list[tuple[int, list[int]]]:
-    maximum = _unsigned(int(max_words), MAX_FRAME_WORDS, "max_words")
+    maximum = _unsigned(max_words, MAX_FRAME_WORDS, "max_words")
     if maximum == 0:
         raise ValueError("max_words must be positive")
+    normalized = tuple(
+        (
+            _unsigned(address, MASK32, "word_addr"),
+            _unsigned(value, MASK32, "value"),
+        )
+        for address, value in pairs
+    )
     result: list[tuple[int, list[int]]] = []
     index = 0
-    while index < len(pairs):
-        base, value = pairs[index]
+    while index < len(normalized):
+        base, value = normalized[index]
         values = [value]
         cursor = index + 1
-        while cursor < len(pairs) and len(values) < maximum and pairs[cursor][0] == base + len(values):
-            values.append(pairs[cursor][1])
+        while cursor < len(normalized) and len(values) < maximum and normalized[cursor][0] == base + len(values):
+            values.append(normalized[cursor][1])
             cursor += 1
         result.append((int(base), values))
         index = cursor

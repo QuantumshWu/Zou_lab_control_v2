@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import json
 from pathlib import Path
-from typing import Any
 
 from zlc_pulse import (
     PulseSequence,
@@ -15,6 +13,7 @@ from zlc_pulse import (
     resolve_api_parameters,
     sequence_from_tree,
 )
+from zlc_pulse.codec import parse_pulse_tree_json
 from zlc_pulse.device import BoardDescription
 
 
@@ -26,7 +25,6 @@ class ResolvedPulse:
     path: Path
     sequence: PulseSequence
     program: object
-    metadata: Mapping[str, Any]
 
 
 def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
@@ -36,7 +34,7 @@ def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
     if source.suffix.lower() != ".json" or not source.is_file():
         raise ValueError("calibration pulse template must be an existing JSON file")
     sequence = sequence_from_tree(
-        json.loads(source.read_text(encoding="utf-8"))
+        parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
     _validate_calibration_sequence(sequence)
     return sequence
@@ -115,13 +113,11 @@ def resolve_pulse(
             "calibration pulse target is incompatible with the connected board"
         )
     program = compile_sequence(resolved, board.geometry, board.clock_hz)
-    metadata = {"repeat_forever": program.repeat_forever}
     return ResolvedPulse(
         sequence.name,
         source,
         resolved,
         program,
-        metadata,
     )
 
 

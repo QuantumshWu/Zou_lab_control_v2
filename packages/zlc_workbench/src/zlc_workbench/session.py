@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date as _date
 import json
+from numbers import Integral
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -393,31 +394,22 @@ class ExperimentSession:
         )
 
     def fire(self, shots: int = 1, timeout: float = 5.0) -> None:
-        """Fire the loaded pulse, waiting for each shot to finish.
+        """Fire one finite execution and wait for its terminal report."""
 
-        Waiting is not optional: the board detects commands on a rising edge and
-        drops a second fire issued while the first is still running, so a bare
-        loop takes exactly one shot on hardware while a virtual sequencer
-        accepts them all.
-        """
-
+        if isinstance(shots, bool) or not isinstance(shots, Integral):
+            raise TypeError("shots must be an integer")
         count = int(shots)
         lease = self._acquire_pulse_device()
         try:
-            for shot in range(count):
-                self.sequencer.fire()
-                report = self.sequencer.wait_done(timeout)
-                # The report is the point of waiting.  Throwing it away made a shot
-                # that reported an error, underran, or never finished at all look
-                # exactly like a clean one -- and whatever the camera did or did not
-                # collect was published as though the pulse had run.
-                if report is None:
-                    raise TimeoutError(
-                        f"shot {shot + 1} of {count} did not report done within "
-                        f"{timeout:g}s"
-                    )
-                if report.fault:
-                    raise RuntimeError(f"shot {shot + 1} of {count}: {report.fault}")
+            self.sequencer.fire(cycles=count)
+            report = self.sequencer.wait_done(float(timeout) * count)
+            if report is None:
+                raise TimeoutError(
+                    f"{count} pulse cycle(s) did not report done within "
+                    f"{float(timeout) * count:g}s"
+                )
+            if report.fault:
+                raise RuntimeError(f"pulse execution failed: {report.fault}")
         except BaseException as error:
             try:
                 self.sequencer.safe()

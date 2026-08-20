@@ -10,8 +10,12 @@
 #   * the board's MODE jumper/strap must select SPI/QSPI boot (not JTAG) so it loads from flash;
 #   * set ZLC_PS_CFGMEM_PART to YOUR board's SPI flash if it is not the default below -- list the
 #     valid names in Vivado with:  get_cfgmem_parts
-proc env_or {name default} {
+proc path_env_or {name default} {
     if {[info exists ::env($name)] && $::env($name) ne ""} { return [file normalize $::env($name)] }
+    return $default
+}
+proc raw_env_or {name default} {
+    if {[info exists ::env($name)] && $::env($name) ne ""} { return $::env($name) }
     return $default
 }
 proc zlc_default_project_root {script_dir} {
@@ -23,15 +27,20 @@ proc zlc_default_project_root {script_dir} {
 
 set script_dir [file normalize [file dirname [info script]]]
 set project_root [zlc_default_project_root $script_dir]
-set project_dir [env_or ZLC_PS_PROJECT_DIR [file join $project_root ps]]
+set project_dir [path_env_or ZLC_PS_PROJECT_DIR [file join $project_root ps]]
 set top zlc_pulse_streamer_top
 set default_bit_path [file join $project_dir ps.runs impl_1 ${top}.bit]
-set bit_path [env_or ZLC_PS_VIVADO_BIT [env_or ZLC_PS_BIT $default_bit_path]]
-set hw_server_url [env_or ZLC_PS_HW_SERVER_URL [env_or ZLC_HW_SERVER_URL ""]]
+set bit_path [path_env_or ZLC_PS_VIVADO_BIT [path_env_or ZLC_PS_BIT $default_bit_path]]
+set hw_server_url [raw_env_or ZLC_PS_HW_SERVER_URL [raw_env_or ZLC_HW_SERVER_URL ""]]
+set expected_part [raw_env_or ZLC_PS_FPGA_PART ""]
+if {$expected_part eq ""} { error "ZLC_PS_FPGA_PART is required; validate streamer_config.json before programming flash" }
 # The board's SPI configuration flash.  Default targets the common xc7a35tfgg484 boards
 # (Arty-A7-class, 128 Mb QSPI); OVERRIDE with ZLC_PS_CFGMEM_PART for a different flash.
-set cfgmem_part_name [env_or ZLC_PS_CFGMEM_PART "s25fl128sxxxxxx0-spi-x1_x2_x4"]
-set flash_size_mb [env_or ZLC_PS_CFGMEM_SIZE_MB 16]
+set cfgmem_part_name [raw_env_or ZLC_PS_CFGMEM_PART "s25fl128sxxxxxx0-spi-x1_x2_x4"]
+set flash_size_mb [raw_env_or ZLC_PS_CFGMEM_SIZE_MB 16]
+if {![string is integer -strict $flash_size_mb] || $flash_size_mb <= 0} {
+    error "ZLC_PS_CFGMEM_SIZE_MB must be a positive integer"
+}
 
 puts "ZLC program_flash: persisting bitstream to SPI flash (survives power cycle)"
 puts "ZLC program_flash bitstream: $bit_path"
@@ -64,17 +73,30 @@ catch {refresh_hw_server}
 set zlc_targets {}
 catch {set zlc_targets [get_hw_targets]}
 puts "Available hardware targets: $zlc_targets"
-set zlc_target [lindex $zlc_targets 0]
-if {$zlc_target eq ""} { error "No Vivado hardware target found. Check the USB/JTAG cable, board power, and hw_server." }
+if {[llength $zlc_targets] != 1} {
+    error "Expected exactly one Vivado hardware target, found [llength $zlc_targets]: $zlc_targets"
+}
+set zlc_target $zlc_targets
 current_hw_target $zlc_target
 if {[catch {open_hw_target $zlc_target}]} { catch {close_hw_target}; after 2000; open_hw_target $zlc_target }
-set device [lindex [get_hw_devices] 0]
-if {$device eq ""} { error "Vivado opened the target but found no FPGA device. Check power, JTAG chain/mode jumpers." }
+set zlc_devices [get_hw_devices]
+if {[llength $zlc_devices] != 1} {
+    error "Expected exactly one FPGA device, found [llength $zlc_devices]: $zlc_devices"
+}
+set device $zlc_devices
+set actual_part [get_property PART $device]
+if {$actual_part ne $expected_part} {
+    error "FPGA part mismatch: streamer_config.json requires '$expected_part', hardware reports '$actual_part'"
+}
 current_hw_device $device
 refresh_hw_device -update_hw_probes false $device
 
 # --- attach the configuration flash and program the .mcs into it ---
-if {[catch {create_hw_cfgmem -hw_device $device [lindex [get_cfgmem_parts $cfgmem_part_name] 0]} zlc_cfgmem_err]} {
+set zlc_cfgmem_parts [get_cfgmem_parts $cfgmem_part_name]
+if {[llength $zlc_cfgmem_parts] != 1} {
+    error "Expected exactly one cfgmem part named '$cfgmem_part_name', found [llength $zlc_cfgmem_parts]: $zlc_cfgmem_parts"
+}
+if {[catch {create_hw_cfgmem -hw_device $device $zlc_cfgmem_parts} zlc_cfgmem_err]} {
     error "Could not attach cfgmem part '$cfgmem_part_name': $zlc_cfgmem_err.\n\
            Run 'get_cfgmem_parts' in Vivado and set ZLC_PS_CFGMEM_PART to your board's SPI flash."
 }

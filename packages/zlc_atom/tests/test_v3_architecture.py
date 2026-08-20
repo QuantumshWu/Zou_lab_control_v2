@@ -118,15 +118,21 @@ class _RecordingSequencer:
         self.events: list[tuple[str, object]] = []
         self.fail_on_fire = fail_on_fire
 
-    def load(self, program: object, *, source: object | None = None) -> None:
+    def load(
+        self,
+        program: object,
+        *,
+        source: object | None = None,
+        rows: tuple[tuple[int, ...], ...] = (),
+    ) -> None:
         self.events.append(("load", program))
-        self.sequencer.load(program, source=source)  # type: ignore[attr-defined]
+        self.sequencer.load(program, source=source, rows=rows)  # type: ignore[attr-defined]
 
     def describe(self):
         self.events.append(("describe", None))
         return self.sequencer.describe()  # type: ignore[attr-defined]
 
-    def fire(self, *, forever: bool = False) -> None:
+    def fire(self, *, cycles: int | None = 1) -> None:
         """Fire, and nothing else.
 
         This used to wait for the shot as well, which is what the code under
@@ -135,10 +141,10 @@ class _RecordingSequencer:
         test hides whether the real code performs it.
         """
 
-        self.events.append(("fire", forever))
+        self.events.append(("fire", cycles))
         if self.fail_on_fire:
             raise RuntimeError("recording sequencer fire failure")
-        self.sequencer.fire(forever=forever)  # type: ignore[attr-defined]
+        self.sequencer.fire(cycles=cycles)  # type: ignore[attr-defined]
 
     def wait_done(self, timeout: float | None = None) -> object:
         self.events.append(("wait_done", timeout))
@@ -339,10 +345,6 @@ def test_pulse_resolver_uses_the_project_json_document(
             api_values=api_values,
         )
         assert resolved.path == asset.resolve()
-        assert set(resolved.metadata) == {"repeat_forever"}
-        assert resolved.program.camera_window_exposures("emCCD") == pytest.approx(
-            (0.031, 0.006, 0.031)
-        )
         assert resolved.program.slot_count == 0
         assert resolved.program.clock_hz == board.clock_hz
         assert resolved.program.channels == board.target.raw_lanes
@@ -387,6 +389,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             # a finite prepare() must author its acquisition explicitly.
             repeat=1,
             frames_per_cycle=3,
+            exposure_seconds=0.005,
         )
         assert camera_node.camera is camera
         pulse = resolve_pulse(
@@ -499,7 +502,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         # camera's own transfer.
         assert [
             value for event, value in sequencer.events if event == "fire"
-        ][fires_before_task:] == [True]
+        ][fires_before_task:] == [30]
         assert len(
             [event for event, _ in sequencer.events if event == "wait_done"]
         ) == waits_before_task

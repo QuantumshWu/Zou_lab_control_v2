@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from collections.abc import Callable, Sequence
 import math
+from numbers import Integral
 import threading
 import time
 
@@ -12,6 +13,7 @@ from collections.abc import Mapping
 
 from .compile import CompiledProgram, evaluate_affine_tick, slot_operand_width
 from .model import PORT_DAC, PulseSequence, PulseTarget
+from .schedule import trigger_windows
 from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
 from .wire import (
     CMD_FIRE,
@@ -42,6 +44,18 @@ SAFE_RETRY_AFTER = 0.05
 #: courtesy stalled every lost FIRE ack for five seconds.
 STROBE_VERIFY_AFTER = 0.3
 SAFE_POLL_INTERVAL = 0.001
+MAXIMUM_CYCLE_COUNT = (1 << 32) - 1
+
+
+def _execution_cycles(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError("cycles must be an integer or None for forever")
+    result = int(value)
+    if not 1 <= result <= MAXIMUM_CYCLE_COUNT:
+        raise ValueError("cycles must be in the hardware range [1, 2^32-1]")
+    return result
 
 
 @dataclass(frozen=True)
@@ -117,13 +131,12 @@ class SafeReadback:
 
 @dataclass(frozen=True)
 class AppliedState:
-    """Immutable echo of the last program/table application owned by the device."""
+    """Immutable echo of the executable application owned by the device."""
 
     program: CompiledProgram
     source: PulseSequence | None
-    slot_values: tuple[int, ...]
-    scan_rows: tuple[tuple[int, ...], ...]
-    forever: bool
+    rows: tuple[tuple[int, ...], ...]
+    cycles: int | None
     loaded_at: float
 
     def __post_init__(self) -> None:
@@ -131,20 +144,25 @@ class AppliedState:
             raise TypeError("applied program must be CompiledProgram")
         if self.source is not None and not isinstance(self.source, PulseSequence):
             raise TypeError("applied source must be PulseSequence or None")
-        slot_values = tuple(int(value) for value in self.slot_values)
-        scan_rows = tuple(tuple(int(value) for value in row) for row in self.scan_rows)
-        if slot_values and scan_rows:
-            raise ValueError("applied state cannot contain both slot_values and scan_rows")
-        if len(slot_values) not in (0, self.program.slot_count):
-            raise ValueError("applied slot row width differs from the compiled program")
-        if any(len(row) != self.program.slot_count for row in scan_rows):
-            raise ValueError("applied scan row width differs from the compiled program")
+        rows = tuple(tuple(row) for row in self.rows)
+        if any(len(row) != self.program.slot_count for row in rows):
+            raise ValueError("applied row width differs from the compiled program")
+        if any(
+            isinstance(value, bool) or not isinstance(value, Integral)
+            for row in rows
+            for value in row
+        ):
+            raise TypeError("applied row values must be integers")
+        if self.program.slot_count and not rows:
+            raise ValueError("a slotted program requires applied rows")
+        if not self.program.slot_count and rows:
+            raise ValueError("an unslotted program has no value rows")
+        cycles = _execution_cycles(self.cycles)
         loaded_at = float(self.loaded_at)
         if not math.isfinite(loaded_at) or loaded_at < 0:
             raise ValueError("applied loaded_at must be a finite non-negative timestamp")
-        object.__setattr__(self, "slot_values", slot_values)
-        object.__setattr__(self, "scan_rows", scan_rows)
-        object.__setattr__(self, "forever", bool(self.forever))
+        object.__setattr__(self, "rows", tuple(tuple(int(value) for value in row) for row in rows))
+        object.__setattr__(self, "cycles", cycles)
         object.__setattr__(self, "loaded_at", loaded_at)
 
 
@@ -207,8 +225,10 @@ class PulseStreamer:
             raise TypeError("geom must be StreamerParams")
         if not isinstance(target, PulseTarget):
             raise TypeError("target must be PulseTarget")
-        if clock_hz <= 0:
-            raise ValueError("clock_hz must be positive")
+        if isinstance(clock_hz, bool) or not isinstance(clock_hz, (int, float)):
+            raise TypeError("clock_hz must be numeric")
+        if not math.isfinite(float(clock_hz)) or clock_hz <= 0:
+            raise ValueError("clock_hz must be positive and finite")
         buses = tuple(port for port in target.ports if port.kind == PORT_DAC)
         widths = {port.width for port in buses}
         mismatches = []
@@ -246,14 +266,12 @@ class PulseStreamer:
         self._loaded = False
         self._hardware_loaded = self._last_fire_reloaded = False
         self._firing = False
-        self._forever = False
+        self._cycles: int | None = 1
         self._scan_rows: tuple[tuple[int, ...], ...] = ()
         self._scan_next_chunk = 2
         self._scan_ready = 0
         self._scan_armed = False
         self._scan_count = 0
-        #: How many times the table is played.  One table, many sweeps.
-        self._scan_sweeps = 1
         self._cursor_value: int | None = None
         self._underflow = False
         self._terminal_status_reads: tuple[int, int] = ()
@@ -316,30 +334,61 @@ class PulseStreamer:
             self._applied_digest = ""
             self._safe_status_word = None
             self._safe_clock_enable_words = None
-    def load(self, prog: CompiledProgram, *, source: PulseSequence | None = None) -> None:
+    def load(
+        self,
+        prog: CompiledProgram,
+        *,
+        source: PulseSequence | None = None,
+        rows: Sequence[Sequence[int]] = (),
+    ) -> None:
         if not isinstance(prog, CompiledProgram):
             raise TypeError("prog must be CompiledProgram")
         if source is not None and not isinstance(source, PulseSequence):
             raise TypeError("source must be PulseSequence or None")
+        if (
+            source is not None
+            and source.target.abi_fingerprint != prog.target_abi_fingerprint
+        ):
+            raise ValueError("source target ABI differs from the compiled program")
+        normalized = tuple(tuple(row) for row in rows)
+        if any(len(row) != prog.slot_count for row in normalized):
+            raise ValueError("application row width differs from the compiled program")
+        if any(
+            isinstance(value, bool) or not isinstance(value, Integral)
+            for row in normalized
+            for value in row
+        ):
+            raise TypeError("application row values must be integers")
+        normalized = tuple(tuple(int(value) for value in row) for row in normalized)
+        if prog.slot_count and not normalized:
+            raise ValueError("a slotted program requires a non-empty value table")
+        if not prog.slot_count and normalized:
+            raise ValueError("an unslotted program does not accept value rows")
         with self._lock:
             self._require_open()
             self._require_idle()
+            self._stop.clear()
+            self._validate_application(prog, normalized)
+            words = pack_program(prog, self.geom)
             if not self._safe_readback_current_locked():
                 self._drive_physical_safe(deadline=time.monotonic() + SAFE_TIMEOUT)
             self._clear_safe_readback_locked()
             self._loaded = self._hardware_loaded = False; self._program = None; self._applied = None
             self._applied_digest = ""
-            self._scan_rows = (); self._scan_count = 0; self._scan_sweeps = 1; self._scan_armed = False
-            words = pack_program(prog, self.geom)
+            self._scan_rows = normalized or ((),)
+            self._scan_count = 1
+            self._cycles = 1
+            self._scan_armed = False
             self._write(
                 tuple(sorted(words.items()))
-                + ((CtrlWords.BANK_READY, 0b11),)
+                + ((CtrlWords.BANK_READY, 0b11),),
+                stop=self._stop,
             )
-            self._strobe(CMD_LOAD, repeatable=True)
-            self._await_loaded(); self._hardware_loaded = True; self._program = prog
+            self._strobe(CMD_LOAD, repeatable=True, stop=self._stop)
+            self._await_loaded(stop=self._stop)
+            self._hardware_loaded = True
+            self._program = prog
             self._loaded = True
-            self._scan_rows = tuple(prog.scan_points)
-            self._scan_count = len(self._scan_rows)
             self._scan_next_chunk = 2
             self._scan_ready = self._initial_ready(self._scan_count)
             self._scan_armed = False
@@ -350,83 +399,35 @@ class PulseStreamer:
             self._applied = AppliedState(
                 program=prog,
                 source=source,
-                slot_values=(),
-                scan_rows=tuple(self._scan_rows),
-                forever=False,
+                rows=normalized,
+                cycles=1,
                 loaded_at=time.time(),
             )
             self._applied_digest = prog.digest
-    def write_slots(self, values: Sequence[int]) -> None:
+    def fire(self, *, cycles: int | None = 1) -> None:
+        cycles = _execution_cycles(cycles)
         with self._lock:
             self._require_open()
             self._require_loaded()
             self._require_idle()
+            self._stop.clear()
             assert self._program is not None
-            values = tuple(int(value) for value in values)
-            if len(values) != self._program.slot_count:
-                raise ValueError("slot row width differs from the compiled program")
-            self._validate_slot_row(values)
-            self._scan_rows = (values,)
-            self._scan_count = 1; self._scan_armed = False
-            self._write(
-                ((CtrlWords.SCAN_COUNT, 1), (CtrlWords.SCAN_ENABLE, 1))
-                + self._scan_bank_arming()
-            )
-            assert self._applied is not None
-            self._applied = replace(self._applied, slot_values=values, scan_rows=())
-    def write_scan_table(self, rows: Sequence[Sequence[int]], *, sweeps: int = 1) -> None:
-        """Give the board one scan table, played ``sweeps`` times.
-
-        The table crosses the wire ONCE.  There is no sweep register in the
-        RTL -- scan_count is a point count, repeat_forever is a bit, and
-        loop_count is the pulse timeline's own loop inside each point -- so N
-        sweeps is N*len(rows) points, and which row a point takes is decided
-        when a bank is refilled.  Duplicating the rows to say "again" would
-        send the same numbers N times and hold N copies of them here.
-        """
-
-        with self._lock:
-            self._require_open()
-            self._require_loaded()
-            self._require_idle()
-            assert self._program is not None
-            normalized = tuple(tuple(int(value) for value in row) for row in rows)
-            if not normalized:
-                raise ValueError("scan table must contain at least one row")
-            if any(len(row) != self._program.slot_count for row in normalized):
-                raise ValueError("scan table width differs from the compiled program")
-            for row in normalized:
-                self._validate_slot_row(row)
-            self._scan_rows = normalized
-            self._scan_sweeps = max(1, int(sweeps))
-            self._scan_count = len(normalized) * self._scan_sweeps
+            self._validate_delay_capacity(self._program, self._scan_rows, cycles)
+            self._cycles = cycles
+            forever = cycles is None
+            self._scan_count = len(self._scan_rows) if forever else cycles
             self._scan_armed = False
-            self._write(
-                (
-                    (CtrlWords.SCAN_COUNT, self._scan_count),
-                    (CtrlWords.SCAN_ENABLE, 1),
-                )
-                + self._scan_bank_arming()
-            )
             assert self._applied is not None
-            self._applied = replace(self._applied, slot_values=(), scan_rows=normalized)
-    def fire(self, *, forever: bool = False) -> None:
-        with self._lock:
-            self._require_open()
-            self._require_loaded()
-            self._require_idle()
-            self._forever = bool(forever)
-            assert self._applied is not None
-            self._applied = replace(self._applied, forever=self._forever)
+            self._applied = replace(self._applied, cycles=cycles)
             # DONE/SAFE clear the RTL's LOADED gate; replay only its resident mini-loader.
             self._last_fire_reloaded = not self._hardware_loaded
             if self._last_fire_reloaded:
-                self._write(self._scan_bank_arming())
-                self._strobe(CMD_LOAD, repeatable=True)
-                self._await_loaded(); self._hardware_loaded = True
+                self._write(self._scan_bank_arming(), stop=self._stop)
+                self._strobe(CMD_LOAD, repeatable=True, stop=self._stop)
+                self._await_loaded(stop=self._stop)
+                self._hardware_loaded = True
             self._firing = True; self._hardware_loaded = False
             self._done.clear()
-            self._stop.clear()
             self._underflow = False
             self._cursor_value = 0
             self._terminal_status_reads = ()
@@ -439,10 +440,19 @@ class PulseStreamer:
             self._worker.start()
             try:
                 self._write(
-                    ((CtrlWords.REPEAT_FOREVER, int(self._forever)),)
-                    + self._scan_bank_arming()
+                    (
+                        (CtrlWords.SCAN_COUNT, self._scan_count),
+                        (CtrlWords.SCAN_ENABLE, 1),
+                        (CtrlWords.REPEAT_FOREVER, int(forever)),
+                    )
+                    + self._scan_bank_arming(),
+                    stop=self._stop,
                 )
-                self._strobe(CMD_FIRE, took_effect=self._fire_took_effect)
+                self._strobe(
+                    CMD_FIRE,
+                    took_effect=self._fire_took_effect,
+                    stop=self._stop,
+                )
             except BaseException:
                 self._stop_worker()
                 raise
@@ -457,6 +467,8 @@ class PulseStreamer:
         worker = self._worker
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=1.0)
+            if worker.is_alive():
+                raise RuntimeError("pulse observer did not exit after terminal readback")
         with self._lock:
             status_reads = self._terminal_status_reads
             cursor_reads = self._terminal_cursor_reads
@@ -493,7 +505,7 @@ class PulseStreamer:
                     deadline=time.monotonic() + SAFE_TIMEOUT
                 )
                 self._record_safe_readback_locked(status_reads[-1], clock_words)
-            self._firing = self._hardware_loaded = False
+            self._firing = self._hardware_loaded = self._scan_armed = False
             self._done.clear()
             self._terminal_status = status_reads[-1]
             return SafeReadback(status_reads, clock_words, True)
@@ -520,7 +532,7 @@ class PulseStreamer:
                 "opened": self._opened,
                 "loaded": self._loaded,
                 "firing": self._firing,
-                "forever": self._forever,
+                "cycles": self._cycles,
                 "reloaded_before_fire": self._last_fire_reloaded,
                 "cursor": self._cursor_value,
                 "scan_count": self._scan_count,
@@ -545,9 +557,11 @@ class PulseStreamer:
                     return
             while not self._stop.is_set():
                 try:
-                    status = self._read(CtrlWords.STATUS)
-                    cursor = self._read(CtrlWords.CURSOR)
+                    status = self._read(CtrlWords.STATUS, stop=self._stop)
+                    cursor = self._read(CtrlWords.CURSOR, stop=self._stop)
                 except Exception:
+                    if self._stop.is_set():
+                        return
                     self._record_observer_failure()
                     self._done.set()
                     return
@@ -562,9 +576,10 @@ class PulseStreamer:
                     self._finish_observation(status, cursor)
                     self._done.set()
                     return
-                if self._scan_rows and not self._forever:
+                if self._scan_rows and self._cycles is not None:
                     self._refill(cursor)
-                time.sleep(self._observer_interval)
+                if self._stop.wait(self._observer_interval):
+                    return
         except Exception:
             if not self._stop.is_set():
                 self._record_observer_failure()
@@ -577,8 +592,8 @@ class PulseStreamer:
             self._terminal_status = STATUS_ERROR
     def _finish_observation(self, first_status: int, first_cursor: int) -> None:
         try:
-            second_status = self._read(CtrlWords.STATUS)
-            second_cursor = self._read(CtrlWords.CURSOR)
+            second_status = self._read(CtrlWords.STATUS, stop=self._stop)
+            second_cursor = self._read(CtrlWords.CURSOR, stop=self._stop)
         except Exception:
             second_status = first_status
             second_cursor = first_cursor
@@ -629,8 +644,27 @@ class PulseStreamer:
 
         return ((CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, int(code)))
 
-    def _validate_slot_row(self, row: Sequence[int]) -> None:
-        assert self._program is not None
+    def _validate_application(
+        self,
+        program: CompiledProgram,
+        rows: tuple[tuple[int, ...], ...],
+    ) -> None:
+        if program.target_abi_fingerprint != self._target.abi_fingerprint:
+            raise ValueError("compiled target ABI does not match the connected sequencer")
+        if float(program.clock_hz) != self.clock_hz:
+            raise ValueError("compiled clock does not match the connected sequencer")
+        expected_geometry = build_fingerprint(self.geom)
+        if program.geometry_fingerprint != expected_geometry:
+            raise ValueError("compiled geometry does not match the connected sequencer")
+        for row in rows:
+            self._validate_slot_row(program, row)
+        self._validate_delay_capacity(program, rows or ((),), 1)
+
+    def _validate_slot_row(
+        self,
+        program: CompiledProgram,
+        row: Sequence[int],
+    ) -> None:
         # A value the multiplier cannot hold is refused, not wrapped.  The host
         # and the board now agree about what a wrapped value plays, which means
         # they agree on something nobody asked for: a duration slot is in ticks,
@@ -646,33 +680,181 @@ class PulseStreamer:
                     f"([{-limit}, {limit - 1}])"
                 )
         effective = tuple(
-            evaluate_affine_tick(base, coeffs, row, self._program.scan_coeff_frac_bits)
-            for base, coeffs in zip(self._program.ticks, self._program.tick_slot_coeffs)
+            evaluate_affine_tick(base, coeffs, row, program.scan_coeff_frac_bits)
+            for base, coeffs in zip(program.ticks, program.tick_slot_coeffs)
         )
         if effective[0] != 0 or any(right <= left for left, right in zip(effective, effective[1:])):
             raise ValueError("slot row makes compiled edge ticks collide or move before time zero")
         loop_start = evaluate_affine_tick(
-            self._program.ticks[self._program.loop_start_index],
-            self._program.tick_slot_coeffs[self._program.loop_start_index],
+            program.ticks[program.loop_start_index],
+            program.tick_slot_coeffs[program.loop_start_index],
             row,
-            self._program.scan_coeff_frac_bits,
+            program.scan_coeff_frac_bits,
         )
         loop_end = evaluate_affine_tick(
-            self._program.loop_end_tick,
-            self._program.loop_end_slot_coeffs,
+            program.loop_end_tick,
+            program.loop_end_slot_coeffs,
             row,
-            self._program.scan_coeff_frac_bits,
+            program.scan_coeff_frac_bits,
         )
         if loop_end <= loop_start or loop_end > effective[-1]:
             raise ValueError("slot row makes compiled loop metadata invalid")
 
-    def _await_loaded(self) -> None:
+    def _validate_delay_capacity(
+        self,
+        program: CompiledProgram,
+        rows: tuple[tuple[int, ...], ...],
+        cycles: int | None,
+    ) -> None:
+        """Reject an application whose delayed events overflow frozen FIFOs.
+
+        A queue entry remains live through the edge on which it is emitted;
+        the RTL computes push eligibility from the pre-edge count.  Capacity
+        therefore uses a closed ``delay`` window, including events exactly one
+        delay apart.
+        """
+
+        ttl = tuple(
+            (index, int(delay))
+            for index, delay in enumerate(program.channel_delays)
+            if int(delay) >= 2
+        )
+        bus_delays = {
+            int(item.bus_index): int(item.delay_ticks)
+            for item in program.bus_delays
+            if int(item.delay_ticks) > 0
+        }
+        if not ttl and not bus_delays:
+            return
+
+        table = rows or ((),)
+        # Every execution has the same number of digital transitions and bus
+        # descriptors; after ``depth`` preceding executions the FIFO has either
+        # overflowed or reached the periodic table state.  One full table plus
+        # that warm-up covers every row boundary without expanding an arbitrary
+        # 32-bit cycle count.
+        depth = max(self.geom.evt_fifo_depth, self.geom.bus_evt_fifo_depth)
+        requested = len(table) + depth
+        checked_cycles = requested if cycles is None else min(cycles, requested)
+        # The same argument bounds an internal RepeatRegion: depth+1 bodies are
+        # enough to prove overflow or periodic boundedness.
+        checked_program = (
+            program
+            if program.loop_count <= depth + 1
+            else replace(program, loop_count=depth + 1)
+        )
+
+        physical_to_logical = {
+            physical: logical
+            for logical, physical in program.logical_digital_outputs
+        }
+        for bit, delay in ttl:
+            if bit >= len(program.channels):
+                raise ValueError(f"channel delay index {bit} is outside the program")
+            physical = program.channels[bit]
+            logical = physical_to_logical.get(physical, physical)
+            windows = trigger_windows(
+                checked_program,
+                logical,
+                table,
+                cycles=checked_cycles,
+            )
+            events = sorted(tick for window in windows for tick in window)
+            self._check_delay_window(
+                events,
+                delay,
+                self.geom.evt_fifo_depth,
+                f"channel {physical!r}",
+            )
+
+        if bus_delays:
+            by_bus: dict[int, list[int]] = {bus: [] for bus in bus_delays}
+            run_offset = 0
+            for point_index in range(checked_cycles):
+                point = table[point_index % len(table)]
+                effective = tuple(
+                    evaluate_affine_tick(
+                        base,
+                        coefficients,
+                        point,
+                        checked_program.scan_coeff_frac_bits,
+                    )
+                    for base, coefficients in zip(
+                        checked_program.ticks,
+                        checked_program.tick_slot_coeffs,
+                    )
+                )
+                loop_start = effective[checked_program.loop_start_index]
+                loop_end = evaluate_affine_tick(
+                    checked_program.loop_end_tick,
+                    checked_program.loop_end_slot_coeffs,
+                    point,
+                    checked_program.scan_coeff_frac_bits,
+                )
+                span = loop_end - loop_start
+                final = effective[-1]
+                total = final + (checked_program.loop_count - 1) * span
+                for segment in checked_program.bus_segments:
+                    bus = int(segment.bus_index)
+                    if bus not in by_bus:
+                        continue
+                    start = evaluate_affine_tick(
+                        segment.start_tick,
+                        segment.start_tick_coeffs,
+                        point,
+                        checked_program.scan_coeff_frac_bits,
+                    )
+                    if start < loop_start:
+                        by_bus[bus].append(run_offset + start)
+                    elif start < loop_end:
+                        by_bus[bus].extend(
+                            run_offset + start + iteration * span
+                            for iteration in range(checked_program.loop_count)
+                        )
+                    else:
+                        by_bus[bus].append(
+                            run_offset
+                            + start
+                            + (checked_program.loop_count - 1) * span
+                        )
+                run_offset += total
+            # Finite completion captures one final SAFE descriptor per bus.
+            if cycles is not None:
+                for events in by_bus.values():
+                    events.append(run_offset)
+            for bus, events in by_bus.items():
+                self._check_delay_window(
+                    sorted(events),
+                    bus_delays[bus],
+                    self.geom.bus_evt_fifo_depth,
+                    f"DAC bus {bus}",
+                )
+
+    @staticmethod
+    def _check_delay_window(
+        events: Sequence[int],
+        delay: int,
+        capacity: int,
+        label: str,
+    ) -> None:
+        first = 0
+        for last, tick in enumerate(events):
+            while first < last and events[first] < tick - delay:
+                first += 1
+            required = last - first + 1
+            if required > capacity:
+                raise ValueError(
+                    f"{label} needs {required} delayed events in flight but the "
+                    f"connected geometry holds {capacity}"
+                )
+
+    def _await_loaded(self, *, stop: threading.Event | None = None) -> None:
         """The RTL gates FIRE on STATUS_LOADED, so an incomplete load would
         turn every later fire into a silent no-op.  Report it here instead."""
 
         deadline = time.monotonic() + LOAD_TIMEOUT
         while True:
-            status = self._read(CtrlWords.STATUS)
+            status = self._read(CtrlWords.STATUS, stop=stop)
             if status & STATUS_ERROR:
                 raise RuntimeError(f"pulse streamer reported STATUS_ERROR during load (0x{status:08X})")
             if status & STATUS_LOADED:
@@ -687,8 +869,8 @@ class PulseStreamer:
     def _scan_bank_arming(self) -> tuple[tuple[int, int], ...]:
         """Rows that put the scan banks back at chunks 0/1, ready for point 0.
 
-        Single source for arming (write_slots / write_scan_table / a replaying
-        fire); empty when the banks already hold chunks 0/1.
+        Single source for arming the application rows for a fire; empty when
+        the banks already hold chunks 0/1.
         """
 
         if self._scan_count == 0 or self._scan_armed:
@@ -698,7 +880,7 @@ class PulseStreamer:
         for chunk in (0, 1):
             if chunk * self.geom.bank_size < self._scan_count:
                 rows.extend(sorted(pack_scan_rows(
-                    self._scan_rows, self.geom, chunk & 1, chunk, self._scan_sweeps
+                    self._scan_rows, self.geom, chunk & 1, chunk, self._scan_count
                 ).items()))
         rows.append((CtrlWords.BANK0_CHUNK, 0))
         if self.geom.bank_size < self._scan_count:
@@ -728,39 +910,55 @@ class PulseStreamer:
             bank = chunk & 1
             bit = 1 << bank
             unarmed = self._scan_ready & ~bit
-            words = pack_scan_rows(self._scan_rows, self.geom, bank, chunk, self._scan_sweeps)
+            words = pack_scan_rows(
+                self._scan_rows, self.geom, bank, chunk, self._scan_count
+            )
             chunk_reg = CtrlWords.BANK0_CHUNK if bank == 0 else CtrlWords.BANK1_CHUNK
             self._write((
                 (CtrlWords.BANK_READY, unarmed),
                 *tuple(sorted(words.items())),
                 (chunk_reg, chunk),
                 (CtrlWords.BANK_READY, self._scan_ready | bit),
-            ))
+            ), stop=self._stop)
             self._scan_next_chunk += 1
             self._scan_armed = False
 
     def _stop_worker(self) -> None:
+        self._stop.set()
         worker = self._worker
         if worker is None:
             return
-        self._stop.set()
         if self._fire_gate is not None:
             self._fire_gate.set()
         if worker is not threading.current_thread():
             worker.join(timeout=2.0)
+        if worker.is_alive():
+            raise RuntimeError("pulse observer did not stop")
         with self._lock:
-            self._worker = None
-            self._fire_gate = None
-            self._firing = False
+            if self._worker is worker:
+                self._worker = None
+                self._fire_gate = None
 
-    def _read(self, address: int, *, deadline: float | None = None) -> int:
-        if deadline is None:
-            value = self.transport.read_word(address)
-        else:
-            value = self.transport.read_word(address, deadline=deadline)
+    def _read(
+        self,
+        address: int,
+        *,
+        stop: threading.Event | None = None,
+        deadline: float | None = None,
+    ) -> int:
+        options = {} if stop is None else {"stop": stop}
+        if deadline is not None:
+            options["deadline"] = deadline
+        value = self.transport.read_word(address, **options)
         return int(value) & 0xFFFFFFFF
 
-    def _write(self, rows: Sequence[tuple[int, int]], *, deadline: float | None = None) -> None:
+    def _write(
+        self,
+        rows: Sequence[tuple[int, int]],
+        *,
+        stop: threading.Event | None = None,
+        deadline: float | None = None,
+    ) -> None:
         """Write register words; a frame the link loses is sent again.
 
         Data only.  A COMMAND strobe goes through _strobe, which does NOT
@@ -773,10 +971,10 @@ class PulseStreamer:
         assert not any(address == CtrlWords.COMMAND for address, _ in normalized), (
             "a command strobe must go through _strobe, which never resends"
         )
-        if deadline is None:
-            self.transport.write_words(normalized)
-        else:
-            self.transport.write_words(normalized, deadline=deadline)
+        options = {} if stop is None else {"stop": stop}
+        if deadline is not None:
+            options["deadline"] = deadline
+        self.transport.write_words(normalized, **options)
 
     def _strobe(
         self,
@@ -785,6 +983,7 @@ class PulseStreamer:
         deadline: float | None = None,
         repeatable: bool = False,
         took_effect: "Callable[[], bool] | None" = None,
+        stop: threading.Event | None = None,
     ) -> None:
         """Fire one command, and never a second time BLINDLY.
 
@@ -826,10 +1025,12 @@ class PulseStreamer:
         attempts = 3 if verified else 1
         for attempt in range(attempts):
             options: dict = {} if deadline is None else {"deadline": deadline}
+            if stop is not None:
+                options["stop"] = stop
             if verified and deadline is None:
                 # The acknowledgement gets a short window, because it is not
                 # the authority -- the status read below is.
-                options = {"deadline": time.monotonic() + STROBE_VERIFY_AFTER}
+                options["deadline"] = time.monotonic() + STROBE_VERIFY_AFTER
             try:
                 self.transport.write_words(rows, resend=repeatable, **options)
                 return
@@ -850,7 +1051,7 @@ class PulseStreamer:
         command.
         """
 
-        status = self._read(CtrlWords.STATUS)
+        status = self._read(CtrlWords.STATUS, stop=self._stop)
         heard = bool(status & (STATUS_RUNNING | STATUS_DONE))
         return heard or not bool(status & STATUS_LOADED)
 

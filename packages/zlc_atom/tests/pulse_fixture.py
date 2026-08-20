@@ -35,7 +35,7 @@ def build_calibration_pulse(
     *,
     reference_exposure_seconds: float = 0.020,
     readout_exposure_seconds: float = 0.005,
-) -> tuple[object, object]:
+) -> object:
     resolved = resolve_pulse(
         IMAGING_PULSE_RESOURCE.value,
         path=IMAGING_PULSE_RESOURCE.path,
@@ -46,7 +46,7 @@ def build_calibration_pulse(
             "reference_probe_duration_after": reference_exposure_seconds,
         },
     )
-    return resolved.program, resolved.metadata
+    return resolved.program
 
 
 __all__ = [

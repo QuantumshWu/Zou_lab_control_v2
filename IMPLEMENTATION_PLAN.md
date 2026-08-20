@@ -7,20 +7,21 @@
 更新时间：2026-08-20
 启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
-用户执行边界：Milestone 1–4及各自post-milestone residual sweep均已完成；Milestone 4由单一commit `Make data, fit, overlay, and Qt lifecycle exact and atomic`落盘后立即停止。下一步只与用户讨论已记录的Plot/Fit profile，不进入M5。
+用户执行边界：Milestone 1–5及各自post-milestone residual sweep均已完成；M4 cleanup与performance follow-up分别独立提交，M5以`Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`单独提交。M5于2026-08-20 14:31 PDT完成验证，早于用户给出的15:30门，因此下一步进入M6；不得访问真实SLM或其它hardware。
 
 ### 当前状态
 
 - 审计：完成；逐文件证据在`AUDIT/`。
 - 用户裁决：完成；记录在`AUDIT/USER-DECISIONS-2026-08-17.md`与根Goal。
-- Production代码：Milestone 1–4及其residual closure均已完成。
+- Production代码：Milestone 1–5及其residual closure均已完成。
 - Hardware：未访问；本Goal不授权program/flash或实验机device操作。
 - Milestone 0：`COMPLETE` — commit `e854ddf`（`Establish approved architecture and implementation checkpoint`）；唯一Architecture、Plan、Handoff、Goal与Audit证据已纳入版本控制，未改production。
 - Milestone 1：`COMPLETE / SWEEP COMPLETE` — test-owned Pulse engine、dead Qt wake、compat aliases、false-green API/notebook/dependency tests与重复contract docs已删除。
 - Milestone 2：`COMPLETE / SWEEP COMPLETE` — nested immutable truth、strict embedded manifest grammar、archive-first Panel Save与唯一Figure入口已闭合。
 - Milestone 3：`COMPLETE / SWEEP COMPLETE` — replay lineage、selection lock域、canonical presentation/overlay alignment、Refresh/layout lifecycle及测试残余已闭合。
 - Milestone 4：`COMPLETE / SWEEP COMPLETE` — exact pair/resync、原子PanelState、canonical selector/threshold、streaming archive以及Qt worker/close均已闭合；全树1498 tests通过。
-- Milestone 5–7：`PENDING`；本次不得开始。
+- Milestone 5：`COMPLETE / SWEEP COMPLETE` — Pulse执行词汇、camera cadence、Remote takeover、Stop/SAFE、RTL/build与strict transport均闭合。
+- Milestone 6–7：`PENDING`；下一步按M6 USB-only SLM、Science Context与robust Feedback边界实施。
 
 ### Milestone 3完成边界
 
@@ -28,7 +29,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 4、cleanup与performance follow-up均已完成；下一步进入M5。100 ms仍是profile警戒线，不是硬验收门。
+Milestone 5已完成；下一步进入M6。不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -39,7 +40,7 @@ Milestone 4、cleanup与performance follow-up均已完成；下一步进入M5。
 | 2 | Data/Durable/Installation truth | COMPLETE / SWEEP COMPLETE | 原commit + residual fix；见§8 |
 | 3 | Canonical Runtime live与Logic Node contract | COMPLETE / SWEEP COMPLETE | 两个M3 commits + residual fix；见§8 |
 | 4 | Exact Data/Fit/Overlay与Qt lifecycle | COMPLETE / SWEEP COMPLETE | `Make data, fit, overlay, and Qt lifecycle exact and atomic`；见§9 |
-| 5 | Pulse/Camera/Remote/FPGA | PENDING | — |
+| 5 | Pulse/Camera/Remote/FPGA | COMPLETE / SWEEP COMPLETE | `Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`；见§10 |
 | 6 | USB-only SLM与robust Feedback | PENDING | — |
 | 7 | One distribution、evidence lanes、final docs | PENDING | — |
 
@@ -273,7 +274,20 @@ M4 cleanup follow-up commit：`Remove residual M4 adapters and duplicate tests`�
 
 Performance commit：`Make derived history continuous and presentation capacity-one`。完成后进入M5，不把indexed Dataset、gap或window放进任何Plot-kind/Logic plugin/Workbench专用lane。
 
-## 10. Checkpoint更新规则
+## 10. Milestone 5完成证据
+
+- `RepeatRegion`只编译timeline内部loop；唯一应用入口为原子`load(program, source, rows)`，唯一outer执行入口为`fire(cycles=int|None)`。旧`write_slots`、`write_scan_table`、`fire(forever)`、CompiledProgram重复scan/forever字段及compat为0。
+- Load在任何program write前核target ABI、clock、geometry、uint32 count与TTL/DAC delay FIFO capacity。Camera每个实际program/table/cycles在LOAD和camera arm前核window count、相邻及wrap cadence；Virtual按compiled wall cadence逐cycle，camera busy保留physical ordinal gap，Temperature 20 ms exposure有15.1 ms recapture gap。
+- PulseGUI正式Qt Fire只冻结request并提交device worker；Preview、ordinary device command、SAFE各有独立existing worker owner。Stop立即显示Stopping，SAFE可取消active transport并在普通command结束后再次确认，迟到Fire token不能覆盖Stopped；window等待三owner真实退休。
+- Remote使用短owner epoch锁与唯一command lane：takeover先撤旧owner/drop socket，以SAFE取消旧transport，等lane退出后在lane内二次稳定SAFE才授予新owner；SAFE失败保持无owner/fault。正常client无idle timeout，explicit UART只探一个给定port；strict JSON拒duplicate/NaN/unknown/type，UART/AXI bounds与close lifecycle fail closed。
+- RTL physical active覆盖running+draining，public DONE等待TTL/DAC FIFO、final latch和SAFE；point0 resident、underflow/overflow/protocol error sticky/loud；50 MHz XDC clock存在。显式`streamer_config.board.lanes`生成host target并把XDC/top当unordered checked projection。Build默认build-only，delete需要contained marked child，program/flash exactly-one target/device/AXI/cfgmem。
+- RTL四条existing bench均用`$fatal`，Vivado Simulator 2019.1实跑通过finite tail、sticky overflow、UART watchdog/bounds及top SAFE/status；Python Icarus runner在本机因无`iverilog/vvp`明确4 skip。未program/flash真板、未连接camera/SLM，active FPGA README记录独立hardware acceptance runbook与receipt字段。
+- Frozen-tree residual sweep：75 files；production/config `+2428/-1212`（净+1216），RTL/build `+493/-236`（净+257），tests `+1527/-735`（净+792），docs/notebook净删175。正增长KEEP：Remote ownership/strict protocol、Pulse atomic application/capacity/SAFE cancellation、manifest、camera cadence、Qt command/safety owners及其纵向证据；无新增production file/class。DELETE/MERGE已闭合旧执行API、全COM枚举、idle-timeout文案、ResolvedPulse dead metadata、unreachable Remote takeover test、Camera `_capture_spec`、BoardState dead forever、flaky wall-clock gesture gate与三个不完整Qt teardown。
+- 验证均先打印current-checkout路径：Pulse `133 passed, 4 skipped`；Atom `311 passed`；Workbench Pulse/Console `134 passed`；最终全树`1514 passed, 4 skipped, 6 warnings in 416.74s`，warnings仅vendor SWIG deprecation。AST/JSON/notebook、active旧名、CRLF batch、launcher help与`git diff --check`均green。
+
+Milestone 5 commit：`Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`。下一步M6，不把SLM物理truth塞进Workbench或simulation旁路。
+
+## 11. Checkpoint更新规则
 
 每个milestone开始/完成、长测试前或新用户裁决后立即更新：
 

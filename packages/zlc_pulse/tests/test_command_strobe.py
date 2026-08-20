@@ -10,7 +10,7 @@ So writing the same command code twice in a row produces no edge and the board
 silently ignores the second one -- while the host still starts its observer and
 reports a normal DoneReport.  The standalone host shipped without the
 return-to-zero that the v1 host always wrote, which killed every fire after the
-first one in a write_slots/fire scan loop.
+first one in a repeated-fire acquisition loop.
 
 These tests replay the recorded COMMAND writes through the RTL's own edge rule,
 so they fail for exactly the reason the board would go quiet.
@@ -19,6 +19,8 @@ so they fail for exactly the reason the board would go quiet.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,7 +35,88 @@ from test_wire_device import _sequence
 
 
 RTL = Path(__file__).resolve().parents[1] / "fpga" / "pulse_streamer" / "zlc_pulse_streamer_top.v"
+RTL_DIR = RTL.parent
 _BOARD_TARGET = pulse_target_from_xdc()
+
+
+@pytest.mark.parametrize(
+    ("top", "sources", "defines", "marker"),
+    (
+        (
+            "tb_delay_sched",
+            ("zlc_edge_streamer.v", "sim/tb_delay_sched.v"),
+            (),
+            "DELAY-SCHED-PHYSICAL-DONE-OK",
+        ),
+        (
+            "tb_evt_depth",
+            ("zlc_edge_streamer.v", "sim/tb_evt_depth.v"),
+            (),
+            "EVT-DEPTH-STICKY-OVERFLOW-OK",
+        ),
+        (
+            "tb_uart_pipeline",
+            ("zlc_uart_bridge.v", "tb_uart_pipeline.v"),
+            (),
+            "UART-PIPELINE-WATCHDOG-BOUNDS-OK",
+        ),
+        (
+            "tb_safe_gate",
+            (
+                "zlc_uart_bridge.v",
+                "zlc_edge_streamer.v",
+                "zlc_pulse_streamer_top.v",
+                "sim/tb_t_ff.v",
+            ),
+            ("ZLC_IVERILOG",),
+            "TOP-SAFE-PIN-GATE-OK",
+        ),
+    ),
+)
+def test_rtl_contracts_execute_with_nonzero_failure(
+    tmp_path: Path,
+    top: str,
+    sources: tuple[str, ...],
+    defines: tuple[str, ...],
+    marker: str,
+) -> None:
+    iverilog = shutil.which("iverilog")
+    vvp = shutil.which("vvp")
+    if iverilog is None or vvp is None:
+        pytest.skip("RTL simulation not executed: iverilog and vvp are not installed")
+
+    image = tmp_path / f"{top}.vvp"
+    compile_result = subprocess.run(
+        [
+            iverilog,
+            "-g2012",
+            "-Wall",
+            "-s",
+            top,
+            "-I",
+            str(RTL_DIR),
+            *[f"-D{name}" for name in defines],
+            "-o",
+            str(image),
+            *[str(RTL_DIR / source) for source in sources],
+        ],
+        cwd=RTL_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
+
+    run_result = subprocess.run(
+        [vvp, str(image)],
+        cwd=RTL_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    transcript = run_result.stdout + run_result.stderr
+    assert run_result.returncode == 0, transcript
+    assert marker in transcript, transcript
 
 
 def _dropped(writes: list[int]) -> list[int]:
@@ -77,9 +160,9 @@ class _Recorder(MemoryRegisterTransport):
         return super().write_words(words, **kwargs)
 
 
-def _streamer() -> tuple[PulseStreamer, _Recorder, object]:
+def _streamer(*, auto_done: bool = True) -> tuple[PulseStreamer, _Recorder, object]:
     geom = StreamerParams()
-    transport = _Recorder(geom=geom, auto_done=True)
+    transport = _Recorder(geom=geom, auto_done=auto_done)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
@@ -98,13 +181,12 @@ def test_rtl_still_detects_commands_on_a_rising_edge_and_never_self_clears() -> 
 
 
 def test_every_fire_in_a_scan_loop_reaches_the_board() -> None:
-    """The scan workflow: one compile, then a slot row and a shot per point."""
+    """A loaded finite application can be fired repeatedly without a lost edge."""
 
     streamer, transport, program = _streamer()
-    streamer.load(program)
-    for value in (1, 2, 3):
-        streamer.write_slots((value,))
-        streamer.fire()
+    streamer.load(program, rows=((1,),))
+    for _ in range(3):
+        streamer.fire(cycles=1)
         streamer.wait_done(2.0)
 
     assert _acted(transport.commands).count(CMD_FIRE) == 3, (
@@ -116,8 +198,8 @@ def test_every_fire_in_a_scan_loop_reaches_the_board() -> None:
 
 def test_reloading_the_same_program_reaches_the_board() -> None:
     streamer, transport, program = _streamer()
-    streamer.load(program)
-    streamer.load(program)
+    streamer.load(program, rows=((1,),))
+    streamer.load(program, rows=((1,),))
     assert _acted(transport.commands).count(CMD_LOAD) == 2
 
 
@@ -125,16 +207,15 @@ def test_no_command_the_host_issues_is_ever_dropped() -> None:
     """The general invariant, over every command-issuing entry point."""
 
     streamer, transport, program = _streamer()
-    streamer.load(program)
-    streamer.fire()
+    streamer.load(program, rows=((1,),))
+    streamer.fire(cycles=1)
     streamer.wait_done(2.0)
-    streamer.write_slots((1,))
-    streamer.fire()
+    streamer.fire(cycles=1)
     streamer.wait_done(2.0)
     streamer.safe()
     streamer.safe()
-    streamer.load(program)
-    streamer.fire()
+    streamer.load(program, rows=((1,),))
+    streamer.fire(cycles=1)
     streamer.wait_done(2.0)
 
     assert _dropped(transport.commands) == [], (
@@ -165,7 +246,7 @@ def test_load_reports_a_loader_that_never_acknowledges() -> None:
     device.LOAD_TIMEOUT = 0.05
     try:
         with pytest.raises(RuntimeError, match="LOADED"):
-            streamer.load(program)
+            streamer.load(program, rows=((1,),))
     finally:
         device.LOAD_TIMEOUT = 5.0
 
@@ -180,16 +261,15 @@ def test_replaying_a_scan_table_re_arms_the_banks_at_point_zero() -> None:
     """
 
     streamer, transport, program = _streamer()
-    streamer.load(program)
     rows = tuple((value,) for value in range(1, 3 * StreamerParams().bank_size))
-    streamer.write_scan_table(rows)
-    streamer.fire()
+    streamer.load(program, rows=rows)
+    streamer.fire(cycles=len(rows))
     streamer.wait_done(2.0)
 
     streamer._refill(2 * StreamerParams().bank_size)  # the observer's own path
     assert transport.read_word(CtrlWords.BANK0_CHUNK) != 0
 
-    streamer.fire()
+    streamer.fire(cycles=len(rows))
     streamer.wait_done(2.0)
     assert transport.read_word(CtrlWords.BANK0_CHUNK) == 0
     assert transport.read_word(CtrlWords.BANK1_CHUNK) == 1
@@ -208,7 +288,7 @@ def test_load_drives_v1_physical_safe_before_the_image_and_load_strobe() -> None
     """
 
     streamer, transport, program = _streamer()
-    streamer.load(program)
+    streamer.load(program, rows=((1,),))
 
     strobe = ((CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, CMD_SAFE))
     assert transport.write_batches[:5] == [
@@ -368,15 +448,19 @@ def test_the_host_refills_one_chunk_ahead_of_the_cursor() -> None:
     """
 
     bank = StreamerParams().bank_size
-    streamer, _transport, program = _streamer()
-    streamer.load(program)
-    streamer.write_scan_table(tuple((value,) for value in range(1, 4 * bank)))
-
-    armed = streamer.snapshot()["scan_next_chunk"]
-    # The cursor has only entered chunk 1; chunk 2 must already be on its way.
-    streamer._refill(bank)
-
-    assert streamer.snapshot()["scan_next_chunk"] > armed
+    streamer, _transport, program = _streamer(auto_done=False)
+    streamer.load(
+        program,
+        rows=tuple((value,) for value in range(1, 4 * bank)),
+    )
+    try:
+        streamer.fire(cycles=4 * bank)
+        armed = streamer.snapshot()["scan_next_chunk"]
+        # The cursor has only entered chunk 1; chunk 2 must already be on its way.
+        streamer._refill(bank)
+        assert streamer.snapshot()["scan_next_chunk"] > armed
+    finally:
+        streamer.safe()
 
 
 def test_the_memory_twin_drops_a_repeated_command_the_way_the_board_does() -> None:
@@ -438,9 +522,12 @@ def test_a_fire_whose_acknowledgement_dies_is_verified_not_guessed() -> None:
     transport = _AckLosingOnce(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
-    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
+    streamer.load(
+        compile_sequence(_sequence(slotted=True), geom, 50e6),
+        rows=((1,),),
+    )
 
-    streamer.fire()
+    streamer.fire(cycles=1)
     assert streamer.wait_done(1.0) is not None
     # Verified as executed: CMD_FIRE was strobed exactly once.
     assert transport.commands.count(CMD_FIRE) == 1
@@ -478,9 +565,12 @@ def test_a_fire_that_provably_never_ran_is_strobed_again() -> None:
     transport = _AckAndCommandLosingOnce(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
-    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
+    streamer.load(
+        compile_sequence(_sequence(slotted=True), geom, 50e6),
+        rows=((1,),),
+    )
 
-    streamer.fire()
+    streamer.fire(cycles=1)
     assert streamer.wait_done(1.0) is not None
     # Two attempts on the wire, one commit: the drop, then the verified retry.
     assert transport.fire_attempts == 2, "verified idle, so strobed again"
@@ -502,8 +592,8 @@ def test_safe_and_load_strobes_ride_the_resending_line() -> None:
         return original(words, **kwargs)
 
     transport.write_words = _watch
-    streamer.load(program)
-    streamer.fire()
+    streamer.load(program, rows=((1,),))
+    streamer.fire(cycles=1)
     assert streamer.wait_done(1.0) is not None
     streamer.safe()
 
@@ -547,8 +637,11 @@ def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> N
     transport = _DeadlineRecorder(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
-    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
-    streamer.fire()
+    streamer.load(
+        compile_sequence(_sequence(slotted=True), geom, 50e6),
+        rows=((1,),),
+    )
+    streamer.fire(cycles=1)
     assert streamer.wait_done(1.0) is not None
 
     assert transport.fire_windows, "the FIRE strobe must carry its short window"
@@ -584,8 +677,11 @@ def test_a_transport_that_never_loses_anything_gets_no_verify_machinery() -> Non
     assert getattr(transport, "lossy_line", False) is False
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
-    streamer.load(compile_sequence(_sequence(slotted=True), geom, 50e6))
-    streamer.fire()
+    streamer.load(
+        compile_sequence(_sequence(slotted=True), geom, 50e6),
+        rows=((1,),),
+    )
+    streamer.fire(cycles=1)
     assert streamer.wait_done(1.0) is not None
 
     assert transport.fire_deadlines == [None], (

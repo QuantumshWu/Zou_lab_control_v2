@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 if /I not "%~1"=="--inner" (
-  set "ZLC_ACTION=build/program"
+  set "ZLC_ACTION=build"
   if /I "%~1"=="--check" set "ZLC_ACTION=synth check"
   if /I "%~1"=="--diagnose" set "ZLC_ACTION=hardware diagnose"
   if /I "%~1"=="--build-only" set "ZLC_ACTION=build"
@@ -40,19 +40,21 @@ set "ZLC_CREATE_TCL=create_project.tcl"
 set "ZLC_PROGRAM_TCL=program_fpga.tcl"
 set "ZLC_PROJ_SUB=ps"
 
-set "MODE=all"
+set "MODE=build"
+set "ZLC_OPTION_OK="
+if "%~1"=="" set "ZLC_OPTION_OK=1"
 if "%~1"=="--help" goto zlc_help
 if "%~1"=="/?" goto zlc_help
-if /I "%~1"=="--check" set "MODE=check"
-if /I "%~1"=="--diagnose" set "MODE=diagnose"
-if /I "%~1"=="--build-only" set "MODE=build"
-if /I "%~1"=="--program-only" set "MODE=program"
-if /I "%~1"=="--flash" set "MODE=flash"
+if /I "%~1"=="--check" (set "MODE=check"& set "ZLC_OPTION_OK=1")
+if /I "%~1"=="--diagnose" (set "MODE=diagnose"& set "ZLC_OPTION_OK=1")
+if /I "%~1"=="--build-only" (set "MODE=build"& set "ZLC_OPTION_OK=1")
+if /I "%~1"=="--program-only" (set "MODE=program"& set "ZLC_OPTION_OK=1")
+if /I "%~1"=="--flash" (set "MODE=flash"& set "ZLC_OPTION_OK=1")
 rem --force-build / --rebuild: rebuild even if the sources are unchanged (default mode otherwise
 rem skips the build and programs the existing bitstream when nothing changed).
-if /I "%~1"=="--force-build" set "ZLC_FORCE_BUILD=1"
-if /I "%~1"=="--rebuild" set "ZLC_FORCE_BUILD=1"
-if not "%~1"=="" if "%MODE%"=="all" if not defined ZLC_FORCE_BUILD (
+if /I "%~1"=="--force-build" (set "ZLC_FORCE_BUILD=1"& set "ZLC_OPTION_OK=1")
+if /I "%~1"=="--rebuild" (set "ZLC_FORCE_BUILD=1"& set "ZLC_OPTION_OK=1")
+if not defined ZLC_OPTION_OK (
   echo Unknown option: %~1
   echo.
   goto zlc_help
@@ -62,6 +64,15 @@ call "%FPGA_DIR%_resolve_tools.bat" vivado
 if errorlevel 1 exit /b 1
 call :zlc_default_paths
 call :zlc_verify_sources
+if errorlevel 1 exit /b 1
+
+call "%FPGA_DIR%_resolve_tools.bat" python "%REPO_ROOT%"
+if errorlevel 1 exit /b 1
+set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
+set "ZLC_CFG_JSON=%REPO_ROOT%\fpga\board_config\streamer_config.json"
+call :zlc_require_config
+if errorlevel 1 exit /b 1
+call :zlc_resolve_part
 if errorlevel 1 exit /b 1
 
 if /I "%MODE%"=="diagnose" (
@@ -82,9 +93,6 @@ if /I "%MODE%"=="program" goto zlc_program
 
 rem Only a real build/check may derive source files from streamer_config.json.
 rem Diagnose/program/flash consume the already-built frozen artifact and must be read-only.
-call "%FPGA_DIR%_resolve_tools.bat" python "%REPO_ROOT%"
-if errorlevel 1 exit /b 1
-call :zlc_resolve_part
 call :zlc_emit_geom
 if errorlevel 1 exit /b 1
 call :zlc_print_capacity_estimate
@@ -94,11 +102,11 @@ rem Skip the (slow) synth+impl when a bitstream already exists and NONE of the s
 rem into it changed since it was built -- just program the existing .bit.  Only in the default
 rem (build+program) mode, and only when --force-build / --rebuild was NOT given.
 call :zlc_check_prebuilt
-if /I "%MODE%"=="all" if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
+if /I "%MODE%"=="build" if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
   echo ZLC bitstream is up to date ^(sources unchanged since last build^) -- skipping build.
   echo ZLC   bit: !ZLC_BIT!
   echo ZLC   ^(force a rebuild with: build_and_program.bat --force-build^)
-  goto zlc_program
+  exit /b 0
 )
 
 echo ZLC FPGA pulse streamer: build FINAL bitstream (1-tick FIFO prefetch + autonomous scan, JTAG-to-AXI)
@@ -120,7 +128,7 @@ echo Control path: JTAG-to-AXI master -^> AXI BRAM controller -^> edge/scan BRAM
 echo Engine: 1-tick (20 ns) FIFO prefetch + streamed autonomous ping-pong scan.
 echo.
 echo Usage:
-echo   fpga\build_and_program.bat              Build (only if sources changed) and program
+echo   fpga\build_and_program.bat              Build only (skips when sources are unchanged)
 echo   fpga\build_and_program.bat --force-build Rebuild even if the sources are unchanged
 echo   fpga\build_and_program.bat --build-only Build only
 echo   fpga\build_and_program.bat --program-only Program existing bitstream (VOLATILE: lost on power-off)
@@ -136,7 +144,7 @@ echo (run 'get_cfgmem_parts' in Vivado to list valid names).
 echo.
 echo The default mode SKIPS the (slow) synth+impl when a bitstream already exists and none of
 echo the sources that go into it (engine/top HDL, create/program tcl, board XDC, streamer_config,
-echo geom tcl) changed since it was built -- it just programs the existing .bit.  --force-build
+echo geom tcl) changed since it was built. It never programs hardware. --force-build
 echo (or --rebuild) forces a rebuild.  The build-cache key is fpga\build\ps\.zlc_src_hash.
 echo.
 echo Real build XDC:
@@ -215,21 +223,47 @@ echo ZLC FINAL source contract: channels=62 num_slots=4 control=JTAG-to-AXI (jta
 echo ZLC FINAL XDC: !ZLC_SELECTED_XDC!
 exit /b 0
 
+:zlc_require_config
+if not exist "%ZLC_CFG_JSON%" (
+  echo ERROR: canonical FPGA config is missing: %ZLC_CFG_JSON%
+  exit /b 1
+)
+pushd "%ZLC_HOME%"
+%ZLC_PY_CMD% -c "import dataclasses,json,pathlib,sys;import zou_lab_control_v2;from zlc_pulse.fpga import load_streamer_config;from zlc_pulse.wire import StreamerParams;p=pathlib.Path(sys.argv[1]).resolve();pairs=lambda x:dict(x) if len(x)==len(dict(x)) else (_ for _ in ()).throw(ValueError('duplicate key in streamer_config.json'));raw=json.loads(p.read_text(encoding='utf-8'),object_pairs_hook=pairs,parse_constant=lambda x:(_ for _ in ()).throw(ValueError('non-finite JSON constant '+x)));top={'_README','_field_docs','fpga_part','clock_hz','target_pct','params','board'};expected={f.name for f in dataclasses.fields(StreamerParams)}|{'slot_mul_width'};assert isinstance(raw,dict) and set(raw)==top,'streamer_config.json fields are not exact';assert isinstance(raw['params'],dict) and set(raw['params'])==expected,'streamer_config.json params fields are not exact';assert isinstance(raw['board'],dict),'streamer_config.json board must be an object';assert isinstance(raw['fpga_part'],str) and raw['fpga_part'].strip(),'fpga_part must be non-empty text';cfg=load_streamer_config(p);assert cfg['source'] is not None and pathlib.Path(cfg['source']).resolve()==p,'build config fell back from the requested file';assert not cfg['warnings'],'; '.join(cfg['warnings']);print(cfg['fpga_part'])" "%ZLC_CFG_JSON%"
+set "ZLC_CONFIG_STATUS=%ERRORLEVEL%"
+popd
+if not "%ZLC_CONFIG_STATUS%"=="0" (
+  echo ERROR: streamer_config.json is invalid; build/program/flash/diagnose refuse fallback geometry.
+  exit /b 1
+)
+exit /b 0
+
 :zlc_resolve_part
 rem Single source: take the synthesis part from fpga\board_config\streamer_config.json
 rem (unless ZLC_PS_FPGA_PART is already set) and export it so create_project.tcl targets
 rem the configured board.  Python was resolved once at the build boundary above.
 if not "%ZLC_PS_FPGA_PART%"=="" goto :zlc_resolve_part_done
-set "ZLC_CFG_JSON=%REPO_ROOT%\fpga\board_config\streamer_config.json"
-if not exist "%ZLC_CFG_JSON%" goto :zlc_resolve_part_done
+if not exist "%ZLC_CFG_JSON%" (
+  echo ERROR: canonical FPGA config is missing: %ZLC_CFG_JSON%
+  exit /b 1
+)
 rem Through a file, not for /f: cmd re-parses the command inside for /f and
 rem eats the quotes around an interpreter given as a full path.
 set "ZLC_PART_FILE=%TEMP%\zlc_fpga_part.txt"
 %ZLC_PY_CMD% -c "import json;print(json.load(open(r'%ZLC_CFG_JSON%'))['fpga_part'])" > "%ZLC_PART_FILE%"
+if errorlevel 1 (
+  del "%ZLC_PART_FILE%" >nul 2>&1
+  echo ERROR: could not read fpga_part from canonical FPGA config.
+  exit /b 1
+)
 if exist "%ZLC_PART_FILE%" set /p ZLC_PS_FPGA_PART=<"%ZLC_PART_FILE%"
 del "%ZLC_PART_FILE%" >nul 2>&1
 :zlc_resolve_part_done
-if not "%ZLC_PS_FPGA_PART%"=="" echo ZLC synthesis part: %ZLC_PS_FPGA_PART% (from streamer_config.json / env)
+if "%ZLC_PS_FPGA_PART%"=="" (
+  echo ERROR: canonical FPGA config did not provide fpga_part.
+  exit /b 1
+)
+echo ZLC synthesis part: %ZLC_PS_FPGA_PART% (from streamer_config.json / env)
 exit /b 0
 
 :zlc_emit_geom
@@ -351,6 +385,7 @@ if defined ZLC_PS_BUILD_ROOT if "!ZLC_PS_BUILD_ROOT: =!"=="" set "ZLC_PS_BUILD_R
 if defined ZLC_PS_PROJECT_DIR if "!ZLC_PS_PROJECT_DIR: =!"=="" set "ZLC_PS_PROJECT_DIR="
 if defined ZLC_PS_LOG_DIR if "!ZLC_PS_LOG_DIR: =!"=="" set "ZLC_PS_LOG_DIR="
 if not defined ZLC_PS_BUILD_ROOT set "ZLC_PS_BUILD_ROOT=%FPGA_DIR%build"
+set "ZLC_PS_PROJECT_ROOT=!ZLC_PS_BUILD_ROOT!"
 if not exist "!ZLC_PS_BUILD_ROOT!\" mkdir "!ZLC_PS_BUILD_ROOT!" >nul 2>nul
 rem Stop cloud-sync (Dropbox) from syncing -- and thus file-locking -- the Vivado build artifacts:
 rem a held IP-cache handle makes create_project's project-dir delete fail with "permission denied".

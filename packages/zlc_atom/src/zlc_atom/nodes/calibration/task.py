@@ -1116,7 +1116,7 @@ class CalibrationTask:
             # board and a handshake, serialised the sequence against the
             # camera's own transfer, and could fail a run whose frames were
             # perfectly fine because a report arrived late.
-            self.sequencer.fire(forever=True)
+            self.sequencer.fire(cycles=self.request.repeats)
             firing = True
             for _ in range(self.request.repeats):
                 if context is not None and context.cancel_requested():

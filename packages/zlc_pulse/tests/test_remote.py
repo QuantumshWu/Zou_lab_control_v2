@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
-import inspect
 import socket
 import threading
 import time
@@ -19,10 +18,13 @@ from zlc_pulse import (
     PulseTarget,
     compile_sequence,
     pulse_target_from_xdc,
+    sequence_from_tree,
+    sequence_to_tree,
 )
+from zlc_pulse.canonical import canonical_bytes
+from zlc_pulse import codec as pulse_codec
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.remote import (
-    REMOTE_METHODS,
     BackendResolution,
     BackendResolutionError,
     PulseRemoteServer,
@@ -81,17 +83,229 @@ def _client(server: PulseRemoteServer) -> RemotePulseStreamer:
     return client
 
 
-def test_remote_replays_device_path_with_short_done_poll() -> None:
+def test_canonical_and_pulse_json_boundaries_do_not_coerce_or_drop_input() -> None:
+    with pytest.raises(TypeError, match="mapping keys must be strings"):
+        canonical_bytes({1: "not the same key as text one"})
+
+    tree = sequence_to_tree(_sequence())
+    tree["periods"][0]["period_id"] = None
+    with pytest.raises(TypeError, match="period_id must be non-empty text"):
+        sequence_from_tree(tree)
+
+    tree = sequence_to_tree(_sequence())
+    tree["periods"][0]["typo"] = 1
+    with pytest.raises(ValueError, match="unknown.*period"):
+        sequence_from_tree(tree)
+
+    with pytest.raises(ValueError, match="duplicate key.*format"):
+        pulse_codec.parse_pulse_tree_json(
+            '{"format":"wrong","format":"zlc.pulse.v1"}'
+        )
+    with pytest.raises(ValueError, match="non-finite JSON constant.*NaN"):
+        pulse_codec.parse_pulse_tree_json('{"format":"zlc.pulse.v1","x":NaN}')
+
+    remote_tree = remote_module.encode_tree(_sequence())
+    remote_tree["typo"] = 1
+    with pytest.raises(ValueError, match="unknown PulseSequence remote field"):
+        remote_module.decode_tree(remote_tree)
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    (
+        (b'{"id":1,"id":2,"method":"snapshot","params":{}}', "duplicate key.*id"),
+        (b'{"id":1,"method":"snapshot","params":{"x":NaN}}', "non-finite JSON constant.*NaN"),
+    ),
+)
+def test_remote_json_frame_rejects_lossy_json(payload: bytes, message: str) -> None:
+    sender, receiver = socket.socketpair()
+    try:
+        sender.sendall(len(payload).to_bytes(4, "big") + payload)
+        with pytest.raises(ValueError, match=message):
+            remote_module._recv_frame(receiver)
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def _sequence_geometry() -> StreamerParams:
+    return replace(
+        StreamerParams(),
+        channel_count=3,
+        bus_count=1,
+        bus_width=2,
+        max_edges=8,
+        bank_size=2,
+    )
+
+
+def test_remote_owner_transfer_requires_stable_safe_and_rejects_stale_handler(
+    monkeypatch,
+) -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
+    streamer.open()
+    server = PulseRemoteServer(("127.0.0.1", 0), streamer)
+    a_server, a_peer = socket.socketpair()
+    b_server, b_peer = socket.socketpair()
+    original_safe = streamer.safe
+    try:
+        server.claim_client("A", a_server)
+
+        def fail_safe():
+            raise RuntimeError("injected SAFE failure")
+
+        monkeypatch.setattr(streamer, "safe", fail_safe)
+        with pytest.raises(RuntimeError, match="takeover.*SAFE"):
+            server.claim_client("B", b_server)
+        assert server.owner_status()[0] is None
+        with pytest.raises(RuntimeError, match="no longer owns"):
+            server.dispatch("snapshot", {}, client="A", connection=a_server)
+
+        monkeypatch.setattr(streamer, "safe", original_safe)
+        server.claim_client("B", b_server)
+        assert server.owner_status()[0] == "B"
+        with pytest.raises(RuntimeError, match="no longer owns"):
+            server.dispatch("snapshot", {}, client="A", connection=a_server)
+    finally:
+        for connection in (a_server, a_peer, b_server, b_peer):
+            try:
+                connection.close()
+            except OSError:
+                pass
+        monkeypatch.setattr(streamer, "safe", original_safe)
+        server.server_close()
+        streamer.close()
+
+
+def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None:
+    source = _sequence()
+    geom = _sequence_geometry()
+    program = compile_sequence(source, geom, 50e6)
+    transport = MemoryRegisterTransport(geom=geom)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
+    streamer.open()
+    server = PulseRemoteServer(("127.0.0.1", 0), streamer)
+    a_server, a_peer = socket.socketpair()
+    b_server, b_peer = socket.socketpair()
+    command_entered = threading.Event()
+    natural_release = threading.Event()
+    command_cancelled = threading.Event()
+    safe_started = threading.Event()
+    safe_finished = threading.Event()
+    safe_calls: list[str] = []
+    events: list[str] = []
+    old_failures: list[BaseException] = []
+    takeover_failures: list[BaseException] = []
+    original_write = transport.write_words
+    original_safe = streamer.safe
+
+    def blocked_write(rows, *, stop=None, deadline=None, resend=True):
+        if stop is not None and not command_entered.is_set():
+            events.append("A command entered transport")
+            command_entered.set()
+            while not natural_release.is_set():
+                if stop.wait(0.01):
+                    events.append("A command cancelled")
+                    command_cancelled.set()
+                    raise RuntimeError("blocked transport command cancelled")
+            events.append("A command completed naturally")
+        return original_write(
+            rows, stop=stop, deadline=deadline, resend=resend
+        )
+
+    def recorded_safe():
+        phase = "cancel" if not safe_calls else "final"
+        safe_calls.append(phase)
+        events.append(f"{phase} SAFE started")
+        if phase == "cancel":
+            safe_started.set()
+        result = original_safe()
+        events.append(f"{phase} SAFE finished")
+        if phase == "final":
+            safe_finished.set()
+        return result
+
+    def run_old_command() -> None:
+        try:
+            server.dispatch(
+                "load",
+                {"program": program, "source": source, "rows": []},
+                client="A",
+                connection=a_server,
+            )
+        except BaseException as exc:
+            old_failures.append(exc)
+
+    def take_over() -> None:
+        try:
+            server.claim_client("B", b_server)
+        except BaseException as exc:
+            takeover_failures.append(exc)
+
+    monkeypatch.setattr(transport, "write_words", blocked_write)
+    monkeypatch.setattr(streamer, "safe", recorded_safe)
+    old_command = threading.Thread(target=run_old_command)
+    takeover = threading.Thread(target=take_over)
+    try:
+        server.claim_client("A", a_server)
+        old_command.start()
+        assert command_entered.wait(1.0)
+        takeover.start()
+        safe_was_prompt = safe_started.wait(0.5)
+        cancelled_without_natural_release = command_cancelled.wait(0.5)
+        if not cancelled_without_natural_release:
+            natural_release.set()
+        old_command.join(timeout=2.0)
+        takeover.join(timeout=2.0)
+
+        assert not old_command.is_alive()
+        assert not takeover.is_alive()
+        assert safe_was_prompt is True
+        assert cancelled_without_natural_release is True
+        assert len(old_failures) == 1
+        assert "no longer owns" in str(old_failures[0])
+        assert takeover_failures == []
+        assert safe_finished.is_set()
+        assert events == [
+            "A command entered transport",
+            "cancel SAFE started",
+            "A command cancelled",
+            "cancel SAFE finished",
+            "final SAFE started",
+            "final SAFE finished",
+        ]
+        assert server.owner_status()[0] == "B"
+        assert streamer.applied() is None
+        with pytest.raises(RuntimeError, match="no longer owns"):
+            server.dispatch("snapshot", {}, client="A", connection=a_server)
+    finally:
+        natural_release.set()
+        old_command.join(timeout=2.0)
+        takeover.join(timeout=2.0)
+        for connection in (a_server, a_peer, b_server, b_peer):
+            try:
+                connection.close()
+            except OSError:
+                pass
+        monkeypatch.setattr(transport, "write_words", original_write)
+        monkeypatch.setattr(streamer, "safe", original_safe)
+        server.server_close()
+        streamer.close()
+
+
+def test_remote_replays_device_path_with_short_done_poll() -> None:
+    geom = _sequence_geometry()
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
         client = _client(server)
         try:
-            client.load(program, source=source)
-            client.write_slots((1,))
+            client.load(program, source=source, rows=((1,),))
             client.fire()
             report = client.wait_done(1.0)
             assert report is not None
@@ -101,21 +315,23 @@ def test_remote_replays_device_path_with_short_done_poll() -> None:
             state = client.applied()
             assert state is not None
             assert state.source == source
-            assert state.slot_values == (1,)
+            assert state.rows == ((1,),)
+            assert state.cycles == 1
         finally:
             client.close()
 
 
 def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    program = compile_sequence(_sequence(), geom, 50e6)
+    geom = _sequence_geometry()
+    source = _sequence()
+    program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
         client = _client(server)
         try:
             client.load(program)
-            client.fire(forever=True)
+            client.fire(cycles=None)
             result: list[object] = []
 
             def interrupt() -> None:
@@ -133,20 +349,18 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
 
 
 def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = _sequence_geometry()
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
         client = _client(server)
         try:
-            client.load(program, source=source)
+            client.load(program, source=source, rows=((1,), (2,)))
             assert client.snapshot()["opened"] is True
             assert client.cursor() == 0
             assert client.applied() is not None
-            client.write_slots((1,))
-            client.write_scan_table(((1,), (2,)))
             client.fire()
             assert client.wait_done(1.0) is not None
             safe = client.safe()
@@ -160,13 +374,12 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "ZLC LOAD" in output
     assert "edges=3" in output
     assert "ZLC FIRE" in output
-    assert "mode=ONCE" in output
+    assert "cycles=1" in output
     assert "reloaded_before_fire=False" in output
     assert "ZLC SNAPSHOT client=127.0.0.1:" in output
     assert "ZLC CURSOR client=127.0.0.1:" in output
     assert "ZLC APPLIED client=127.0.0.1:" in output
-    assert "ZLC WRITE SLOTS client=127.0.0.1:" in output
-    assert "ZLC WRITE SCAN TABLE client=127.0.0.1:" in output
+    assert "rows=2" in output
     assert "ZLC DONE" in output
     assert "ZLC STOP/SAFE" in output
     assert "stable=True" in output
@@ -206,7 +419,7 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
 
     output = capsys.readouterr().out
     assert "ZLC CLIENT REPLACED" in output
-    assert "replaced by" in output
+    assert "by=127.0.0.1:" in output
 
 
 def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
@@ -219,15 +432,16 @@ def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
     request, no reply, and the board still firing and still owned.
     """
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    program = compile_sequence(_sequence(), geom, 50e6)
+    geom = _sequence_geometry()
+    source = _sequence()
+    program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
         client = _client(server)
         try:
             client.load(program)
-            client.fire(forever=True)
+            client.fire(cycles=None)
             owner = server.owner_status()[0]
             time.sleep(0.3)  # not one word from us
             assert streamer.snapshot()["firing"] is True
@@ -236,22 +450,6 @@ def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
         finally:
             client.close()
             client.disconnect()
-
-
-def test_the_handler_reads_without_any_deadline() -> None:
-    """The mechanical form of the rule above: silence is not measured anywhere.
-
-    A read deadline is how the old defect was built, and it is also how it
-    would come back -- ``socket.timeout`` cannot distinguish "nobody has spoken
-    yet" from "the peer is gone", so a handler that polls by deadline must
-    guess.  This one blocks, and the only thing that ends the wait is the
-    connection itself.
-    """
-
-    source = inspect.getsource(remote_module._RemoteHandler.handle)
-    assert "settimeout" not in source
-    assert "socket.timeout" not in source
-    assert "select" not in source
 
 
 def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, capsys) -> None:
@@ -274,112 +472,57 @@ def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, c
     assert "0.0.0.0 is listen-only" in output
 
 
-def _fake_resolution(tmp_path, outcomes, *, requested="auto", ports=("COM1",)):
+def test_only_the_configured_uart_is_probed(monkeypatch) -> None:
     calls: list[tuple[str, float]] = []
+    monkeypatch.setattr(
+        remote_module,
+        "_probe_uart_port",
+        lambda port, timeout, **_kwargs: calls.append((port, timeout)),
+    )
 
-    def probe(port: str, timeout: float) -> None:
-        calls.append((port, timeout))
-        outcome = outcomes.get(port)
-        if outcome is not None:
-            raise outcome
+    result = resolve_backend(
+        "auto",
+        uart_port="COM9",
+        target=_BOARD_TARGET,
+        params=StreamerParams(),
+        clock_hz=50e6,
+    )
 
+    assert result.backend == "uart"
+    assert result.uart_port == "COM9"
+    assert calls == [("COM9", 0.5)]
+
+
+@pytest.mark.parametrize(
+    "requested, expected",
+    (("auto", "jtag-axi"), ("uart", "error"), ("jtag-axi", "jtag-axi")),
+)
+def test_backend_without_a_configured_uart_never_touches_serial(
+    monkeypatch, requested: str, expected: str
+) -> None:
+    monkeypatch.setattr(
+        remote_module,
+        "_probe_uart_port",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an undeclared UART was probed")
+        ),
+    )
+    if expected == "error":
+        with pytest.raises(BackendResolutionError, match="requires --uart-port"):
+            resolve_backend(
+                requested,
+                target=_BOARD_TARGET,
+                params=StreamerParams(),
+                clock_hz=50e6,
+            )
+        return
     result = resolve_backend(
         requested,
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
-        port_provider=lambda: ports,
-        probe=probe,
     )
-    return result, calls
-
-
-def test_backend_auto_selects_first_uart_with_matching_word63(tmp_path) -> None:
-    result, calls = _fake_resolution(tmp_path, {})
-
-    assert result.backend == "uart"
-    assert result.uart_port == "COM1"
-    assert "word63 fingerprint match" in result.reason
-    assert calls == [("COM1", 0.5)]
-
-
-def test_backend_auto_skips_failed_port_and_selects_later_uart(tmp_path) -> None:
-    result, calls = _fake_resolution(
-        tmp_path,
-        {"COM1": TimeoutError("UART reply timed out")},
-        ports=("COM1", "COM2"),
-    )
-
-    assert result.backend == "uart"
-    assert result.uart_port == "COM2"
-    assert result.attempts == ("COM1: timeout", "COM2: word63 fingerprint matched")
-    assert calls == [("COM1", 0.5), ("COM2", 0.5)]
-
-
-def test_backend_auto_probes_every_os_port_with_physical_usb_first(monkeypatch, tmp_path) -> None:
-    class Port:
-        def __init__(self, device, description, *, vid=None, pid=None):
-            self.device, self.description, self.vid, self.pid = device, description, vid, pid
-
-    discovered = (
-        Port("COM3", "Intel AMT Serial-over-LAN"),
-        Port("COM6", "USB-SERIAL CH340", vid=0x1A86, pid=0x7523),
-        Port("COM5", "Bluetooth serial"),
-        Port("COM4", "Bluetooth serial"),
-    )
-    from serial.tools import list_ports
-    monkeypatch.setattr(list_ports, "comports", lambda: discovered)
-    calls: list[str] = []
-
-    def probe(port, _timeout):
-        calls.append(port)
-        if port != "COM4":
-            raise TimeoutError("not the pulse streamer")
-
-    result = resolve_backend(
-        "auto",
-        target=_BOARD_TARGET,
-        params=StreamerParams(),
-        clock_hz=50e6,
-        probe=probe,
-    )
-
-    assert result.candidates == ("COM6", "COM3", "COM5", "COM4")
-    assert calls == ["COM6", "COM3", "COM5", "COM4"]
-    assert result.uart_port == "COM4"
-
-
-def test_backend_auto_falls_back_to_jtag_after_uart_timeout(tmp_path) -> None:
-    result, calls = _fake_resolution(
-        tmp_path,
-        {"COM1": TimeoutError("UART reply timed out")},
-    )
-
-    assert result.backend == "jtag-axi"
-    assert result.uart_port is None
-    assert result.attempts == ("COM1: timeout",)
-    assert "fallback to jtag-axi" in result.reason
-    assert calls == [("COM1", 0.5)]
-
-
-def test_backend_auto_classifies_crc_failure_before_fallback(tmp_path) -> None:
-    result, _ = _fake_resolution(
-        tmp_path,
-        {"COM1": framing.FrameError("UART reply CRC mismatch")},
-    )
-
-    assert result.backend == "jtag-axi"
-    assert result.attempts == ("COM1: CRC error",)
-
-
-def test_backend_auto_classifies_fingerprint_mismatch_before_fallback(tmp_path) -> None:
-    result, _ = _fake_resolution(
-        tmp_path,
-        {"COM1": RuntimeError("geometry/layout mismatch: device=0x12345678")},
-    )
-
-    assert result.backend == "jtag-axi"
-    assert result.attempts == ("COM1: fingerprint mismatch",)
+    assert result.backend == expected
 
 
 def test_backend_failure_categories_use_real_transport_exceptions() -> None:
@@ -432,38 +575,6 @@ def test_real_uart_crc_status_exception_maps_to_crc_category(tmp_path) -> None:
         transport.close()
 
 
-def test_backend_auto_distinguishes_open_failure_and_no_ports(tmp_path) -> None:
-    open_failed, _ = _fake_resolution(
-        tmp_path,
-        {"COM1": OSError("could not open port COM1: Access is denied")},
-    )
-    no_ports, calls = _fake_resolution(tmp_path, {}, ports=())
-
-    assert open_failed.attempts == ("COM1: open failed",)
-    assert no_ports.backend == "jtag-axi"
-    assert no_ports.attempts == ("no UART ports detected",)
-    assert calls == []
-
-
-def test_backend_auto_missing_pyserial_falls_back_without_probe(tmp_path) -> None:
-    def missing_pyserial():
-        raise ModuleNotFoundError("No module named 'serial'")
-
-    calls: list[tuple[str, float]] = []
-    result = resolve_backend(
-        "auto",
-        target=_BOARD_TARGET,
-        params=StreamerParams(),
-        clock_hz=50e6,
-        port_provider=missing_pyserial,
-        probe=lambda port, timeout: calls.append((port, timeout)),
-    )
-
-    assert result.backend == "jtag-axi"
-    assert result.attempts[0].startswith("pyserial missing; install with:")
-    assert calls == []
-
-
 def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> None:
     params = StreamerParams()
     records: list[tuple[str, int, float]] = []
@@ -501,7 +612,7 @@ def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> 
         target=_BOARD_TARGET,
         params=params,
         clock_hz=50e6,
-        port_provider=lambda: ("COM7",),
+        uart_port="COM7",
     )
 
     assert result.backend == "uart"
@@ -511,80 +622,22 @@ def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> 
     assert len(open_calls) == 1
 
 
-def test_uart_probe_direct_helper_uses_existing_open_handshake(monkeypatch, tmp_path) -> None:
-    params = StreamerParams()
-    addresses: list[int] = []
-
-    class FakeTransport:
-        def __init__(self, *, port, baud, action_timeout):
-            self.started = False
-
-        def start(self) -> None:
-            self.started = True
-
-        def read_word(self, address: int) -> int:
-            addresses.append(address)
-            return build_fingerprint(params)
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(transport_module, "UartRegisterTransport", FakeTransport)
-
-    remote_module._probe_uart_port(
-        "COM7",
-        0.5,
-        target=_BOARD_TARGET,
-        params=params,
-        clock_hz=50e6,
-        baud=3_000_000,
+def test_explicit_uart_failure_does_not_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        remote_module,
+        "_probe_uart_port",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("UART reply timed out")
+        ),
     )
-
-    assert addresses == [CtrlWords.LAYOUT_ID]
-
-
-def test_explicit_uart_failure_does_not_fallback(tmp_path) -> None:
     with pytest.raises(BackendResolutionError, match="explicit UART backend failed"):
-        _fake_resolution(
-            tmp_path,
-            {"COM3": TimeoutError("UART reply timed out")},
-            requested="uart",
-            ports=("COM3",),
+        resolve_backend(
+            "uart",
+            uart_port="COM3",
+            target=_BOARD_TARGET,
+            params=StreamerParams(),
+            clock_hz=50e6,
         )
-
-
-def test_explicit_jtag_skips_uart_probe(tmp_path) -> None:
-    calls: list[tuple[str, float]] = []
-
-    result = resolve_backend(
-        "jtag-axi",
-        target=_BOARD_TARGET,
-        params=StreamerParams(),
-        clock_hz=50e6,
-        port_provider=lambda: (_ for _ in ()).throw(AssertionError("UART enumeration must be skipped")),
-        probe=lambda port, timeout: calls.append((port, timeout)),
-    )
-
-    assert result.backend == "jtag-axi"
-    assert calls == []
-
-
-def test_uart_port_override_is_the_only_auto_candidate(tmp_path) -> None:
-    calls: list[tuple[str, float]] = []
-
-    result = resolve_backend(
-        "auto",
-        uart_port="COM9",
-        target=_BOARD_TARGET,
-        params=StreamerParams(),
-        clock_hz=50e6,
-        port_provider=lambda: (_ for _ in ()).throw(AssertionError("port enumeration must be skipped")),
-        probe=lambda port, timeout: calls.append((port, timeout)),
-    )
-
-    assert result.backend == "uart"
-    assert result.uart_port == "COM9"
-    assert calls == [("COM9", 0.5)]
 
 
 def test_server_cli_defaults_to_auto_and_accepts_explicit_backends() -> None:
@@ -597,6 +650,19 @@ def test_server_cli_defaults_to_auto_and_accepts_explicit_backends() -> None:
     assert not hasattr(parser.parse_args([]), "client_idle_timeout")
 
 
+def test_server_refuses_deployment_config_fallback(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        remote_module,
+        "load_streamer_config",
+        lambda: {
+            "source": None,
+            "warnings": ("using built-in defaults",),
+        },
+    )
+    assert remote_module._main(["--check-config"]) == 2
+    assert "without fallback" in capsys.readouterr().err
+
+
 def test_main_logs_final_backend_reason_attempts_and_jtag_note(monkeypatch, capsys, tmp_path) -> None:
     resolution = BackendResolution(
         "auto",
@@ -604,7 +670,6 @@ def test_main_logs_final_backend_reason_attempts_and_jtag_note(monkeypatch, caps
         None,
         "auto fallback to jtag-axi after UART probe: COM7: timeout",
         ("COM7: timeout",),
-        ("COM7",),
     )
 
     class FakeJtagTransport(MemoryRegisterTransport):
@@ -613,7 +678,6 @@ def test_main_logs_final_backend_reason_attempts_and_jtag_note(monkeypatch, caps
             super().__init__(geom=StreamerParams())
 
     def fake_resolve(*args, **kwargs):
-        kwargs["on_candidates"](("COM7",), ())
         return resolution
 
     monkeypatch.setattr(remote_module, "resolve_backend", fake_resolve)
@@ -623,8 +687,6 @@ def test_main_logs_final_backend_reason_attempts_and_jtag_note(monkeypatch, caps
     output = capsys.readouterr().out
     assert "ZLC SERVER STARTING" in output
     assert "endpoint=0.0.0.0:18861" in output
-    assert "ZLC UART PROBE" in output
-    assert "ports=COM7" in output
     assert "ZLC BACKEND RESOLVED" in output
     assert "selected=jtag-axi" in output
     assert "reason=" in output
@@ -646,15 +708,14 @@ def test_main_explicit_backend_failure_is_logged_and_returns_two(monkeypatch, ca
 
 
 def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = _sequence_geometry()
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
         client_a = _client(server)
-        client_a.load(program, source=source)
-        client_a.write_slots((1,))
+        client_a.load(program, source=source, rows=((1,),))
         client_a.disconnect()
 
         client_b = _client(server)
@@ -662,41 +723,16 @@ def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None
             state = client_b.applied()
             assert state is not None
             assert state.source == source
-            assert state.slot_values == (1,)
-            assert state.scan_rows == ()
-            assert state.forever is False
+            assert state.rows == ((1,),)
+            assert state.cycles == 1
             assert state.source is not None
             rebuilt = compile_sequence(state.source, geom, 50e6)
             assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
-            assert pack_scan_rows((state.slot_values,), geom, 0, 0) == pack_scan_rows(((1,),), geom, 0, 0)
+            assert pack_scan_rows(state.rows, geom, 0, 0, state.cycles) == pack_scan_rows(((1,),), geom, 0, 0, 1)
         finally:
             client_b.close()
     assert streamer.applied() is None
     assert "ZLC AUTO-SAFE" in capsys.readouterr().out
-
-
-def test_remote_surface_is_exactly_the_contract_method_set() -> None:
-    """The protocol is a frozen list, and growing it is a deliberate act.
-
-    ``describe`` was added because the set below could open, load and fire a
-    board but not ask what the board was, so every client had to read its own
-    XDC and config and hope they matched the bitstream.
-    """
-
-    assert REMOTE_METHODS == (
-        "open",
-        "describe",
-        "close",
-        "load",
-        "write_slots",
-        "write_scan_table",
-        "fire",
-        "wait_done",
-        "cursor",
-        "safe",
-        "snapshot",
-        "applied",
-    )
 
 
 def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:

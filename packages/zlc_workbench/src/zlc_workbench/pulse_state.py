@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import json
 from numbers import Real
 import os
 from pathlib import Path
@@ -18,6 +17,7 @@ from zlc_pulse import (
     sequence_to_tree,
     validate_scan_table,
 )
+from zlc_pulse.codec import parse_pulse_tree_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +87,9 @@ _EDITOR_FIELDS = (
 def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     """Decode the pulse and its sole ``editor`` section as one candidate."""
 
-    sequence = sequence_from_tree(tree)
-    raw = tree["editor"] if "editor" in tree else {}
+    sequence_tree = dict(tree)
+    raw = sequence_tree.pop("editor", {})
+    sequence = sequence_from_tree(sequence_tree)
     if not isinstance(raw, Mapping):
         raise TypeError("pulse editor state must be an object")
     unknown = tuple(key for key in raw if key not in _EDITOR_FIELDS)
@@ -162,9 +163,7 @@ def read_pulse(path: str | os.PathLike[str]) -> PulseEditorState:
     source = Path(path)
     if source.suffix.lower() != ".json":
         raise ValueError(f"pulse files must be JSON: {source}")
-    tree = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(tree, Mapping):
-        raise TypeError(f"pulse must be a JSON object: {source}")
+    tree = parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     return state_from_tree(tree)
 
 

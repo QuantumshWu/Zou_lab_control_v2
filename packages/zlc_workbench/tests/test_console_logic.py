@@ -155,7 +155,8 @@ def test_a_row_draft_keeps_every_field_and_authored_patch(presenter) -> None:
 def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None:
     session.load_pulse(PULSE_NAME)
     node_id = presenter.add_logic(
-        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 3}
+        "camera_measurement",
+        values={"repeat": 1, "frames_per_cycle": 3, "exposure_seconds": 0.005},
     )
     row = presenter.view._rows[node_id]
 
@@ -672,7 +673,7 @@ def test_pulse_drive_rejects_whole_logic_candidate_before_any_logic_is_stopped(
 
     _view, pulse = _pulse_presenter_on_session(presenter)
     try:
-        assert pulse.fire(forever=True) is True
+        assert pulse.fire(cycles=None) is True
         assert pulse.running is True
         assert presenter.start_logic(candidate_id) is False
         assert pulse.running is True

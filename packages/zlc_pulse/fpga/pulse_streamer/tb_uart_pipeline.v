@@ -10,15 +10,20 @@ module tb_uart_pipeline;
     real BITT = 333.333;
     reg clk = 1'b0; always #10 clk = ~clk;
     reg rst = 1'b1, uart_rx = 1'b1; wire uart_tx;
-    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active;
+    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_error;
     wire [5:0] u_rd_word; wire u_rd_req; reg [31:0] u_rd_data; reg [31:0] ctrl_reg [0:63];
+    integer commits = 0; integer error_pulses = 0;
 
-    always @(posedge clk) if (u_active && u_we) ctrl_reg[u_word_addr[5:0]] <= u_wdata;
+    always @(posedge clk) begin
+        if (u_active && u_we) begin ctrl_reg[u_word_addr[5:0]] <= u_wdata; commits = commits + 1; end
+        if (u_error) error_pulses = error_pulses + 1;
+    end
     always @(*) u_rd_data = ctrl_reg[u_rd_word];
 
-    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000)) dut (
+    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000),
+                      .ADDRESS_WORDS(64), .FRAME_TIMEOUT_CYCLES(2000)) dut (
         .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
-        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active),
+        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
         .u_rd_word(u_rd_word), .u_rd_req(u_rd_req), .u_rd_data(u_rd_data));
 
     task send_byte(input [7:0] b); integer i; begin
@@ -34,7 +39,7 @@ module tb_uart_pipeline;
     reg [7:0] wr [0:63];    // 4 WRITE frames (16 B each) = 64 B, sent back-to-back
     reg [7:0] rd [0:47];    // 4 READ  frames (12 B each) = 48 B
     reg [7:0] rb [0:127];
-    integer k, j, fails; integer nrx;
+    integer k, j, fails; integer nrx; integer bad_base; integer commits_before_faults;
 
     initial begin : collector
         nrx = 0; forever begin recv_byte(rb[nrx]); nrx = nrx + 1; end
@@ -79,9 +84,39 @@ module tb_uart_pipeline;
             $display("TB: read w%0d = 0x%08X (expect 0x%08X)", 40+k, pw, 32'h11111111*(k+1) & 32'hFFFFFFFF);
             if (pw !== (32'h11111111*(k+1) & 32'hFFFFFFFF)) fails=fails+1;
         end
-        if (fails==0) $display("TB RESULT: PASS -- 4 pipelined writes all ACKed AND all 4 words committed");
-        else          $display("TB RESULT: FAIL -- %0d error(s) (nrx=%0d)", fails, nrx);
+        commits_before_faults = commits;
+
+        // Truncate a WRITE after sequence/address begins.  The bounded watchdog
+        // must release arbitration, pulse protocol error and return CRC_FAIL.
+        bad_base = nrx;
+        send_byte(8'h5a); send_byte(8'ha5); send_byte(8'h01); send_byte(8'h21); send_byte(8'h00);
+        wait (!u_active);
+        wait (nrx >= bad_base + 9);
+        if (!(rb[bad_base+3] == 8'h21 && rb[bad_base+4] == 8'h01)) begin
+            fails=fails+1; $display("TB: truncated-frame reply missing/wrong");
+        end
+
+        // COUNT=257 exceeds FRAME_WORDS before any payload can commit.  Bounds
+        // rejection is explicit (ADDR_RANGE) and arbitration is released.
+        bad_base = nrx;
+        send_byte(8'h5a); send_byte(8'ha5); send_byte(8'h01); send_byte(8'h22);
+        send_byte(8'h00); send_byte(8'h00); send_byte(8'h00); send_byte(8'h00);
+        send_byte(8'h01); send_byte(8'h01);
+        wait (!u_active);
+        wait (nrx >= bad_base + 9);
+        if (!(rb[bad_base+3] == 8'h22 && rb[bad_base+4] == 8'h03)) begin
+            fails=fails+1; $display("TB: oversize-count reply missing/wrong");
+        end
+        if (commits != commits_before_faults) begin
+            fails=fails+1; $display("TB: malformed frame committed data");
+        end
+        if (error_pulses < 2) begin
+            fails=fails+1; $display("TB: protocol error pulse was not raised for both faults");
+        end
+
+        if (fails!=0) $fatal(1, "UART pipeline/watchdog/bounds had %0d error(s) (nrx=%0d)", fails, nrx);
+        $display("UART-PIPELINE-WATCHDOG-BOUNDS-OK");
         $finish;
     end
-    initial begin #2000000 $display("TB RESULT: FAIL -- timeout"); $finish; end
+    initial begin #4000000 $fatal(1, "UART pipeline test timeout"); end
 endmodule

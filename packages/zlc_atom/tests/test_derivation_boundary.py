@@ -64,7 +64,7 @@ def bench():
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer.describe())
         sequencer.load(program)
         yield plane, camera, sequencer, CALIBRATION_FRAMES_PER_CYCLE
     finally:

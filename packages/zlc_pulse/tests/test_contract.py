@@ -12,14 +12,22 @@ def test_pure_function_signatures_match_contract() -> None:
     assert tuple(inspect.signature(compile_sequence).parameters) == ("sequence", "geom", "clock_hz")
     assert tuple(inspect.signature(pack_program).parameters) == ("program", "params")
     assert tuple(inspect.signature(pack_scan_rows).parameters) == (
-        "rows", "geom", "bank", "chunk", "sweeps",
+        "rows", "geom", "bank", "chunk", "cycles",
     )
-    assert tuple(inspect.signature(trigger_times).parameters) == ("prog", "channel", "table")
+    assert tuple(inspect.signature(trigger_times).parameters) == (
+        "prog", "channel", "table", "cycles",
+    )
 
 
 def test_applied_state_device_contract_signature() -> None:
-    assert tuple(inspect.signature(PulseStreamer.load).parameters) == ("self", "prog", "source")
+    assert tuple(inspect.signature(PulseStreamer.load).parameters) == (
+        "self", "prog", "source", "rows",
+    )
+    assert tuple(inspect.signature(PulseStreamer.fire).parameters) == ("self", "cycles")
     assert tuple(inspect.signature(PulseStreamer.applied).parameters) == ("self",)
     assert AppliedState.__dataclass_params__.frozen is True
-    assert tuple(inspect.signature(RemotePulseStreamer.load).parameters) == ("self", "prog", "source")
+    assert tuple(inspect.signature(RemotePulseStreamer.load).parameters) == (
+        "self", "prog", "source", "rows",
+    )
+    assert tuple(inspect.signature(RemotePulseStreamer.fire).parameters) == ("self", "cycles")
     assert tuple(inspect.signature(RemotePulseStreamer.applied).parameters) == ("self",)

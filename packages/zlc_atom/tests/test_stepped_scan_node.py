@@ -139,8 +139,8 @@ def _scripted_run(
             # source hands over one boundary straddler plus S samples; a
             # pulse-driven source publishes exactly S pulse-gated samples.
             publications_per_fire=8 * shots if gating == "sw_gated" else shots,
-            paced_by_pulse_repeat=True,
-            publications_per_repeat=8 if gating == "sw_gated" else 1,
+            paced_by_cycle=True,
+            publications_per_cycle=8 if gating == "sw_gated" else 1,
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan((ScanAxis(BIAS_PORTS[0], values),))
@@ -208,8 +208,64 @@ def test_gating_is_the_operators_declaration_and_the_old_fields_are_gone() -> No
     assert "advance" not in STEPPED_SCAN_SCHEMA.field_names
 
 
-def test_shots_are_the_pulse_outer_repeat_and_repeats_rescan_the_plan() -> None:
-    """The board loops each point's pulse; the host reapplies each point once."""
+def test_each_resolved_point_is_preflighted_before_its_load(monkeypatch) -> None:
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    bench = None
+    host = None
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"),
+            plane,
+            publications_per_fire=1,
+            paced_by_cycle=True,
+            publications_per_cycle=1,
+        )
+        bench.publish(SCRIPTED_SEED_VALUE)
+        descriptor = {
+            value.api_name: value for value in discover_logic_nodes()
+        }["stepped_scan"]
+        node = descriptor.instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(_template_sequence()),
+            plan=ScanPlan((ScanAxis(BIAS_PORTS[0], (-1.0, 1.0)),)).to_tree(),
+            repeats=1,
+            shots_per_point=1,
+            settle_seconds=0.0,
+            gating="pulse_gated",
+            free_run_delay_seconds=0.0,
+        )
+        validations = 0
+
+        def validate(*_args, **_kwargs) -> None:
+            nonlocal validations
+            validations += 1
+            if validations == 2:
+                raise ValueError("invalid second camera cadence")
+
+        monkeypatch.setattr(node.source, "validate", validate)
+        host = _scan_host(node, plane)
+        host.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+        assert "invalid second camera cadence" in str(host.observation.error)
+        assert validations == 2
+        assert bench.loads == 1, "the invalid second program reached LOAD"
+        assert bench.fired_cycles == [1]
+    finally:
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+
+def test_shots_are_fire_cycles_and_repeats_rescan_the_plan() -> None:
+    """The board executes finite cycles; the host reapplies each point once."""
 
     kept, bench = _scripted_run(
         gating="sw_gated", shots=2, repeats=2, settle=0.0
@@ -218,20 +274,22 @@ def test_shots_are_the_pulse_outer_repeat_and_repeats_rescan_the_plan() -> None:
     assert SCRIPTED_SEED_VALUE not in kept.reshape(-1).tolist()
     assert bench.published == [SCRIPTED_SEED_VALUE, *range(64)]
     assert bench.loads == 4
-    assert bench.loaded_loop_counts == [2, 2, 2, 2]
-    assert all(source.whole_pulse_repeat == 2 for source in bench.loaded_sources)
+    assert bench.loaded_loop_counts == [1, 1, 1, 1]
+    assert all(source.repeat is None for source in bench.loaded_sources)
+    assert bench.fired_cycles == [2, 2, 2, 2]
     assert sum(kind == "fire" for kind, _when in bench.events) == 4
     assert len(bench.stop_intervals()) == 4
 
 
 def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:
-    """The pulse's outer repeat owns the shots; the host fires each point once."""
+    """The fire's cycle count owns the shots; the host applies each point once."""
 
     kept, bench = _scripted_run(gating="pulse_gated", shots=2, settle=0.0)
     assert kept.tolist() == [[0.0, 2.0], [1.0, 3.0]]
     assert bench.published == [SCRIPTED_SEED_VALUE, 0, 1, 2, 3]
     assert bench.loads == 2
-    assert bench.loaded_loop_counts == [2, 2]
+    assert bench.loaded_loop_counts == [1, 1]
+    assert bench.fired_cycles == [2, 2]
     assert sum(kind == "fire" for kind, _when in bench.events) == 2
 
 

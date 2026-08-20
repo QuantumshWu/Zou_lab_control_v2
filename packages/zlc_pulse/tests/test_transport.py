@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 import sys
 
+import pytest
+
 from zlc_pulse.transport import VivadoAxiRegisterTransport
 from zlc_pulse.transport import uart_frame as framing
 from zlc_pulse.transport.axi import JTAG_AXI_OBSERVER_INTERVAL
@@ -21,6 +23,20 @@ def test_uart_frame_round_trip_and_crc_guard() -> None:
         pass
     else:
         raise AssertionError("CRC corruption was accepted")
+
+
+def test_uart_codec_rejects_oversize_reply_and_coerced_words() -> None:
+    count = framing.MAX_FRAME_WORDS + 1
+    body = bytes((framing.RESP, 7, framing.ST_OK)) + count.to_bytes(2, "little")
+    body += bytes(4 * count)
+    oversize = bytes((framing.SYNC0, framing.SYNC1)) + body
+    oversize += framing.crc16_ccitt(body).to_bytes(2, "little")
+    with pytest.raises(framing.FrameError, match="count"):
+        framing.decode_reply(oversize)
+
+    for value in (True, -1, 1 << 32):
+        with pytest.raises(ValueError, match="value"):
+            framing.encode_write(0, (value,))
 
 
 def test_uart_coalescing_respects_gaps_and_frame_limit() -> None:
@@ -77,6 +93,49 @@ def test_uart_open_disables_modem_control_lines_before_any_write(monkeypatch) ->
     assert serial_port.dtr is False
     assert serial_port.rts is False
     link.close()
+
+
+def test_uart_open_failure_closes_handle_and_transport_start_is_idempotent(
+    monkeypatch,
+) -> None:
+    closed: list[bool] = []
+
+    class BrokenSerialPort:
+        def __init__(self, *args, **kwargs):
+            self.rts = True
+
+        @property
+        def dtr(self):
+            return True
+
+        @dtr.setter
+        def dtr(self, _value):
+            raise OSError("DTR failure")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=BrokenSerialPort))
+    with pytest.raises(OSError, match="DTR failure"):
+        PySerialLink("COM7").open()
+    assert closed == [True]
+
+    class Link:
+        def __init__(self):
+            self.opened = 0
+
+        def open(self):
+            self.opened += 1
+
+        def close(self):
+            pass
+
+    link = Link()
+    transport = UartRegisterTransport(link=link)
+    transport.start()
+    transport.start()
+    assert link.opened == 1
+    transport.close()
 
 
 def test_uart_crc_status_is_reported_as_crc_error(tmp_path) -> None:
@@ -163,3 +222,38 @@ def test_default_vivado_discovers_fake_installed_release(monkeypatch, tmp_path) 
     monkeypatch.setattr(axi_module, "VIVADO_SEARCH_ROOTS", (root,))
     monkeypatch.delenv("ZLC_PS_VIVADO_BIN", raising=False)
     assert axi_module._default_vivado() == str(new)
+
+
+def test_axi_rejects_addresses_and_values_instead_of_wrapping(tmp_path) -> None:
+    transport = VivadoAxiRegisterTransport(
+        state_dir=tmp_path,
+        tcl_executor=lambda _lines, _action, _remaining: "",
+    )
+    transport.start()
+    for address in (True, -1, 1 << 30):
+        with pytest.raises(ValueError, match="word address"):
+            transport.write_words(((address, 1),))
+        with pytest.raises(ValueError, match="word address"):
+            transport.read_word(address)
+    for value in (True, -1, 1 << 32):
+        with pytest.raises(ValueError, match="word value"):
+            transport.write_words(((0, value),))
+
+
+def test_axi_timeout_retires_transport_before_another_command(tmp_path) -> None:
+    calls: list[str] = []
+
+    def execute(_lines, action, _remaining):
+        calls.append(action)
+        raise TimeoutError("uncertain AXI command")
+
+    transport = VivadoAxiRegisterTransport(
+        state_dir=tmp_path,
+        tcl_executor=execute,
+    )
+    transport.start()
+    with pytest.raises(TimeoutError, match="uncertain AXI command"):
+        transport.write_words(((0, 1),))
+    with pytest.raises(RuntimeError, match="closed"):
+        transport.write_words(((0, 2),))
+    assert calls == ["axi_write"]

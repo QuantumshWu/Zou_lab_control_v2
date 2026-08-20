@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from numbers import Integral
 import os
 import struct
 import zlib
@@ -248,12 +249,16 @@ def _to_unsigned(value: int, width: int) -> int:
     return int(value) & ((1 << width) - 1)
 
 def _checked_unsigned(value: int, width: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
     value = int(value)
     if value < 0 or value >= (1 << width):
         raise ValueError(f"{name}={value} does not fit the unsigned {width}-bit wire field")
     return value
 
 def _checked_signed(value: int, width: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
     value = int(value)
     low = -(1 << (width - 1))
     high = 1 << (width - 1)
@@ -345,8 +350,8 @@ def _bus_mode_name(v: int) -> str:
     return {1: "edge", 2: "ramp"}.get(int(v)) or _raise_mode(v)
 
 # --------------------------------------------------------------------------- pack
-def scan_bank_words(program, p: StreamerParams, chunk_index: int,
-                    target_bank: int | None = None, sweeps: int = 1) -> dict[int, int]:
+def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
+                    target_bank: int | None = None, cycles: int = 1) -> dict[int, int]:
     """Words to (re)load scan chunk ``chunk_index`` into a ping-pong bank.
 
     Chunk c = scan_points[c*bank_size:(c+1)*bank_size].  By default it lands in bank
@@ -356,26 +361,32 @@ def scan_bank_words(program, p: StreamerParams, chunk_index: int,
     matches the engine's scan_bank_base parity so the wrap is seamless.  Returns a
     sparse ``{word_offset: value}`` for just that bank.  Empty if the chunk is out of range.
 
-    ``sweeps`` plays the same table that many times.  The RTL has no sweep
-    counter -- ``scan_count`` is a point count and ``repeat_forever`` is a bit --
-    so a finite number of sweeps is N*len(points) points, and WHICH row a point
-    takes is decided here, where the chunk-to-point mapping already lives.  The
-    alternative is to hand the device a table with the rows duplicated, which
-    sends the same numbers across the wire N times and holds N copies in memory
-    to describe a repeat."""
+    ``cycles`` is the number of outer program executions.  Rows are only the
+    value table and repeat modulo their own length; sweep and shot meaning stay
+    with the Measurement caller that selected the cycle count."""
     bases = region_bases(p)
-    points = [list(pt) for pt in (getattr(program, "scan_points", None) or [])]
-    slot_count = int(getattr(program, "slot_count", 0) or 0)
-    if slot_count < 0 or slot_count > p.num_slots:
-        raise ValueError(f"program slot count {slot_count} exceeds wire capacity {p.num_slots}")
+    points = [list(point) for point in rows]
+    if not points:
+        raise ValueError("scan rows must be non-empty")
+    slot_count = len(points[0])
+    if slot_count > p.num_slots:
+        raise ValueError(f"scan slot count {slot_count} exceeds wire capacity {p.num_slots}")
     if any(len(point) != slot_count for point in points):
-        raise ValueError("program scan row width differs from slot count")
+        raise ValueError("scan rows must have equal widths")
+    cycles = _checked_unsigned(cycles, 32, "cycle count")
+    if cycles < 1:
+        raise ValueError("cycle count must be at least one")
+    if isinstance(chunk_index, bool) or not isinstance(chunk_index, Integral) or chunk_index < 0:
+        raise ValueError("chunk_index must be a non-negative integer")
     first = chunk_index * p.bank_size
-    total = len(points) * max(1, int(sweeps))
+    total = cycles
 
     if first >= total:
         return {}
-    bank = (chunk_index % 2) if target_bank is None else (int(target_bank) & 1)
+    bank = chunk_index % 2 if target_bank is None else target_bank
+    if isinstance(bank, bool) or not isinstance(bank, Integral) or bank not in (0, 1):
+        raise ValueError("target_bank must be 0 or 1")
+    bank = int(bank)
     base = bases["scan"] + bank * p.bank_size * p.scan_words
     words: dict[int, int] = {}
     for off in range(p.bank_size):
@@ -394,10 +405,9 @@ HOST_REPEAT_FROM_INDEX = 0  # The frozen RTL supports this register; host Compil
 def pack_program(program, params: StreamerParams | None = None) -> dict[int, int]:
     """Pack a CompiledProgram into the FINAL AXI write image (sparse).
 
-    Edges -> TICK/COEFF/MASK regions; the initial two bank-local scan chunks -> the two
-    banks; bus -> BUS region; scalars -> CTRL. The transport streams subsequent
-    chunks into each freed bank. COMMAND/STATUS/CURSOR/BANK_READY are runtime
-    mailbox words."""
+    Edges -> TICK/COEFF/MASK regions and bus -> BUS region.  Runtime rows,
+    cycle count and forever state are applied only by ``PulseStreamer.fire``.
+    COMMAND/STATUS/CURSOR/BANK_READY are runtime mailbox words."""
     p = params or StreamerParams()
     check_rtl_assumptions(p)   # hard gate: never pack for a geometry the shipped RTL corrupts
     bases = region_bases(p)
@@ -410,24 +420,22 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     if slot_count < 0 or slot_count > p.num_slots:
         raise ValueError(f"program slot count {slot_count} exceeds wire capacity {p.num_slots}")
     coeffs = list(getattr(program, "tick_slot_coeffs", None) or [[0] * slot_count for _ in ticks])
-    points = [list(pt) for pt in (getattr(program, "scan_points", None) or [])]
-    if any(len(row) != slot_count for row in points):
-        raise ValueError("program scan row width differs from slot count")
-    if len(points) >= (1 << 32):
-        raise ValueError("program scan point count does not fit the CTRL word")
     bus_segments = list(getattr(program, "bus_segments", None) or [])
 
     w: dict[int, int] = {}
     w[CtrlWords.MAGIC] = IMAGE_MAGIC
     w[CtrlWords.PROG_COUNT] = n_edges
-    w[CtrlWords.SCAN_COUNT] = len(points)
-    w[CtrlWords.SCAN_ENABLE] = 1 if points else 0
-    w[CtrlWords.REPEAT_FOREVER] = 1 if bool(getattr(program, "repeat_forever", False)) else 0
+    w[CtrlWords.SCAN_COUNT] = 0
+    w[CtrlWords.SCAN_ENABLE] = 0
+    w[CtrlWords.REPEAT_FOREVER] = 0
     # The frozen RTL supports an additive repeat register, but the host API exposes
     # only the compiled loop bracket. Keep the hardware field at its named safe value.
     w[CtrlWords.LOOP_START] = int(program.loop_start_index)
     w[CtrlWords.REPEAT_FROM_LOOP_START] = HOST_REPEAT_FROM_INDEX
-    w[CtrlWords.LOOP_COUNT] = int(getattr(program, "loop_count", 1) or 1)
+    loop_count = _checked_unsigned(program.loop_count, 32, "loop count")
+    if loop_count < 1:
+        raise ValueError("loop count must be at least one")
+    w[CtrlWords.LOOP_COUNT] = loop_count
     w[CtrlWords.LOOP_END_TICK] = _checked_unsigned(
         int(getattr(program, "loop_end_tick", 0)), p.tick_width, "loop end tick"
     )
@@ -448,10 +456,7 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
         for k in range(p.mask_words):
             w[bases["mask"] + i * p.mask_words + k] = mw[k] if k < len(mw) else 0
 
-    # Preload the first two chunks and record their identities.  The runtime
-    # transport owns every subsequent ping-pong refill.
-    for chunk in (0, 1):
-        w.update(scan_bank_words(program, p, chunk))
+    # Runtime rows do not belong to the compiled image.
     w[CtrlWords.BANK0_CHUNK] = 0
     w[CtrlWords.BANK1_CHUNK] = 1
 
@@ -1181,21 +1186,18 @@ def _main(argv: Sequence[str] | None = None) -> int:
 if __name__ == "__main__":
     raise SystemExit(_main())
 
-def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, sweeps: int = 1) -> dict[int, int]:
+def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, cycles: int = 1) -> dict[int, int]:
     """Pack one bank-sized chunk of slot rows into a resident scan bank.
 
-    ``sweeps`` repeats the table without repeating the rows: the chunk a bank
-    is being filled with decides which point it holds, and a point past the end
-    of the table is that table again.
+    The caller supplies the finite outer cycle count.  A point past the end of
+    the value table reads that table again.
     """
 
     if not isinstance(geom, StreamerParams):
         raise TypeError("geom must be StreamerParams")
-    bank = int(bank)
-    chunk = int(chunk)
-    if bank not in (0, 1):
+    if isinstance(bank, bool) or not isinstance(bank, Integral) or bank not in (0, 1):
         raise ValueError("scan bank must be 0 or 1")
-    if chunk < 0:
+    if isinstance(chunk, bool) or not isinstance(chunk, Integral) or chunk < 0:
         raise ValueError("scan chunk must be non-negative")
     points = [list(row) for row in rows]
     if not points:
@@ -1205,5 +1207,10 @@ def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, sweeps: in
         raise ValueError("scan rows must have equal widths")
     if slot_count > geom.num_slots:
         raise ValueError("scan row has more slots than the wire geometry")
-    program = type("_Rows", (), {"scan_points": points, "slot_count": slot_count})()
-    return scan_bank_words(program, geom, chunk, target_bank=bank, sweeps=sweeps)
+    return scan_bank_words(
+        points,
+        geom,
+        int(chunk),
+        target_bank=int(bank),
+        cycles=cycles,
+    )

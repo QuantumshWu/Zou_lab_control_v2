@@ -80,6 +80,7 @@ class VirtualCamera:
         self._next_ordinal = 0
         self._triggered_count = 0
         self._produced_count = 0
+        self._busy_until_source_seconds: float | None = None
         self._worker: threading.Thread | None = None
         self._worker_stop: threading.Event | None = None
         self._worker_error: BaseException | None = None
@@ -247,6 +248,7 @@ class VirtualCamera:
             self._next_ordinal = 0
             self._triggered_count = 0
             self._produced_count = 0
+            self._busy_until_source_seconds = None
             self._worker_error = None
             self._terminal = None
             stop = threading.Event()
@@ -368,23 +370,52 @@ class VirtualCamera:
                     self._worker_stop = None
                 self._condition.notify_all()
 
-    def trigger(self, count: int = 1, *, frame: np.ndarray | None = None) -> None:
+    def trigger(
+        self,
+        count: int = 1,
+        *,
+        frame: np.ndarray | None = None,
+        source_time_seconds: float | None = None,
+    ) -> None:
         if self._free_running:
             raise RuntimeError("free-running virtual camera does not accept triggers")
         count = int(count)
         if count <= 0:
             raise ValueError("trigger count must be positive")
+        source_time = (
+            None if source_time_seconds is None else float(source_time_seconds)
+        )
+        if source_time is not None and not np.isfinite(source_time):
+            raise ValueError("source_time_seconds must be finite")
         with self._condition:
             if not self._armed or not self._accepting:
                 return
-            if self._expected_frames is not None and self._triggered_count + count > self._expected_frames:
+            if (
+                source_time is None
+                and self._expected_frames is not None
+                and self._triggered_count + count > self._expected_frames
+            ):
                 raise RuntimeError("virtual trigger count exceeds the finite arm")
             for _ in range(count):
-                self._trigger_queue.append((self._next_ordinal, None if frame is None else np.asarray(frame)))
+                ordinal = self._next_ordinal
                 self._next_ordinal += 1
+                if source_time is not None:
+                    busy_until = self._busy_until_source_seconds
+                    if busy_until is not None and source_time < busy_until:
+                        continue
+                    self._busy_until_source_seconds = (
+                        source_time + self._exposure_seconds
+                    )
+                self._trigger_queue.append(
+                    (ordinal, None if frame is None else np.asarray(frame))
+                )
                 self._triggered_count += 1
-            if self._expected_frames is not None and self._triggered_count == self._expected_frames:
-                self._accepting = False
+                if (
+                    self._expected_frames is not None
+                    and self._triggered_count == self._expected_frames
+                ):
+                    self._accepting = False
+                    break
             self._condition.notify_all()
 
     def read_frame_records(self, n: int, *, timeout: float, exact: bool) -> list[CameraFrameRecord]:

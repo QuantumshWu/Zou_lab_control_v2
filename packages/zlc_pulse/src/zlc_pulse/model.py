@@ -27,7 +27,7 @@ FIELD_DURATION = "duration"
 FIELD_DAC = "dac"
 FIELD_DELAY = "delay"
 FIELD_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
-SLOT_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
+SLOT_KINDS = frozenset((FIELD_DURATION, FIELD_DAC))
 BINDING_SCAN = "scan"
 BINDING_API = "api"
 #: The legal binding transition for each physical pulse field.  Binding
@@ -474,6 +474,7 @@ class OutputDelay:
 
 #: The smallest count that IS a repeat: once is the sequence itself.
 MINIMUM_REPEAT_COUNT = 2
+MAXIMUM_REPEAT_COUNT = (1 << 32) - 1
 
 
 @dataclass(frozen=True)
@@ -490,6 +491,8 @@ class RepeatRegion:
         object.__setattr__(self, "count", _nonnegative_int(self.count, "repeat count"))
         if self.count < MINIMUM_REPEAT_COUNT:
             raise ValueError(f"a repeat plays at least {MINIMUM_REPEAT_COUNT} times; once is not a repeat")
+        if self.count > MAXIMUM_REPEAT_COUNT:
+            raise ValueError("repeat count does not fit the hardware 32-bit count")
 
     @property
     def start(self) -> str:
@@ -630,34 +633,6 @@ class PulseSequence:
     @property
     def slot_kinds(self) -> tuple[str, ...]:
         return tuple(slot.kind for slot in self.slots)
-
-    @property
-    def whole_pulse_repeat(self) -> int | None:
-        """How many times the WHOLE pulse plays: a count, or None for until-stopped.
-
-        A pulse is a cycle an experiment holds running, so the outer level
-        repeats forever by default.  A bracket over PART of the pulse repeats
-        that part inside each cycle and leaves the outer level alone; a bracket
-        that spans the pulse END TO END is instead a statement about the pulse
-        itself -- play it this many times -- and it overrides the default.
-
-        This is that rule, and it belongs to the document rather than to any
-        one reader of it.  It had been worked out separately by the preview
-        (to decide which brackets to draw), by a presentation helper that no
-        longer had a caller, and by nobody at all on the path that actually
-        fires: a bracket around the whole pulse was drawn faithfully and then
-        run forever anyway, which is exactly the shape of "spans the whole
-        thing" being invisible on the board.
-        """
-
-        repeat = self.repeat
-        if repeat is None or not self.periods:
-            return None
-        if repeat.start_period_id != self.periods[0].period_id:
-            return None
-        if repeat.end_period_id != self.periods[-1].period_id:
-            return None
-        return int(repeat.count)
 
     @property
     def period_by_id(self) -> Mapping[str, PulsePeriod]:

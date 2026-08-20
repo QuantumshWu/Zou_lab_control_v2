@@ -17,6 +17,7 @@ from .base import JTAG_AXI_OBSERVER_INTERVAL, TransportAborted
 
 
 AXI_BURST_BOUNDARY_BYTES = 4096
+_MAX_WORD_ADDRESS = 0xFFFFFFFF // 4
 VIVADO_SEARCH_ROOTS = tuple(
     Path(f"{drive}:/{vendor}/Vivado")
     for drive in ("C", "D")
@@ -48,6 +49,22 @@ def _default_probes() -> str | None:
         return None
     candidate = Path(root) / "ps.runs" / "impl_1" / "zlc_pulse_streamer_top.ltx"
     return str(candidate) if candidate.exists() else None
+
+
+def _byte_address(value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _MAX_WORD_ADDRESS
+    ):
+        raise ValueError("AXI word address is outside the 32-bit byte-address range")
+    return value * 4
+
+
+def _word_value(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError("AXI word value is outside the unsigned 32-bit range")
+    return value
 
 
 class VivadoAxiRegisterTransport:
@@ -93,86 +110,70 @@ class VivadoAxiRegisterTransport:
             raise ValueError("AXI transport timeouts must be finite and positive")
         self.startup_timeout = float(startup_timeout)
         self.action_timeout = float(action_timeout)
-        self.write_batch = max(1, int(write_batch))
-        self.burst_max = max(1, min(256, int(burst_max)))
+        if isinstance(write_batch, bool) or not isinstance(write_batch, int) or write_batch <= 0:
+            raise ValueError("write_batch must be a positive integer")
+        if isinstance(burst_max, bool) or not isinstance(burst_max, int) or not 1 <= burst_max <= 256:
+            raise ValueError("burst_max must be in the hardware range [1, 256]")
+        self.write_batch = write_batch
+        self.burst_max = burst_max
         self._external_executor = tcl_executor
         self._io_lock = threading.RLock()
         self._process: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._counter = 0
-        self._closed = False
+        self._closed = True
         self._log_path = self.state_dir / "vivado_axi_transport.log"
 
     def start(self) -> None:
-        if self._external_executor is not None:
+        with self._io_lock:
+            if not self._closed:
+                return
             self._closed = False
-            return
-        if self._process is not None:
-            return
-        self._closed = False
-        try:
-            process = subprocess.Popen(
-                [self.vivado, "-mode", "tcl", "-nolog", "-nojournal"],
-                cwd=self.state_dir,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+            if self._external_executor is not None:
+                return
+            try:
+                process = subprocess.Popen(
+                    [self.vivado, "-mode", "tcl", "-nolog", "-nojournal"],
+                    cwd=self.state_dir,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            except FileNotFoundError as error:
+                self._closed = True
+                self._record_diagnostic(
+                    "start_failure",
+                    f"Vivado executable was not found: {self.vivado!r}",
+                )
+                raise RuntimeError("persistent Vivado transport could not start") from error
+            self._process = process
+            generation_queue: queue.Queue[str | None] = queue.Queue()
+            self._queue = generation_queue
+            self._reader = threading.Thread(
+                target=self._read_stdout,
+                args=(process, generation_queue),
+                name="zlc-vivado-axi-reader",
+                daemon=True,
             )
-        except FileNotFoundError as error:
-            self._record_diagnostic(
-                "start_failure",
-                f"Vivado executable was not found: {self.vivado!r}",
-            )
-            raise RuntimeError("persistent Vivado transport could not start") from error
-        self._process = process
-        generation_queue: queue.Queue[str | None] = queue.Queue()
-        self._queue = generation_queue
-        self._reader = threading.Thread(
-            target=self._read_stdout,
-            args=(process, generation_queue),
-            name="zlc-vivado-axi-reader",
-            daemon=True,
-        )
-        self._reader.start()
-        try:
-            self._run_tcl(
-                self._init_tcl(),
-                action="transport_start",
-                deadline=time.monotonic() + self.startup_timeout,
-            )
-        except BaseException:
-            self.close()
-            raise
+            self._reader.start()
+            try:
+                self._run_tcl(
+                    self._init_tcl(),
+                    action="transport_start",
+                    deadline=time.monotonic() + self.startup_timeout,
+                )
+            except BaseException:
+                self._closed = True
+                self._stop_process(graceful=False)
+                raise
 
     def close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
-        process = self._process
-        if process is None:
-            return
-        try:
-            if process.stdin is not None:
-                process.stdin.write(
-                    "catch {close_hw_target}\n"
-                    "catch {disconnect_hw_server}\n"
-                    "exit\n"
-                )
-                process.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        self._process = None
+        with self._io_lock:
+            self._stop_process(graceful=True)
 
     def write_words(
         self,
@@ -190,7 +191,7 @@ class VivadoAxiRegisterTransport:
     ) -> None:
         absolute_deadline = self._effective_deadline(deadline)
         pending = tuple(
-            (int(word_offset) * 4, int(value) & 0xFFFFFFFF)
+            (_byte_address(word_offset), _word_value(value))
             for word_offset, value in rows
         )
         lines: list[str] = []
@@ -225,7 +226,7 @@ class VivadoAxiRegisterTransport:
         absolute_deadline = self._effective_deadline(deadline)
         marker = "ZLCDATA"
         output = self._run_tcl(
-            self._read_txn_tcl(int(word_offset) * 4, marker),
+            self._read_txn_tcl(_byte_address(word_offset), marker),
             action="axi_read",
             deadline=absolute_deadline,
             stop=stop,
@@ -267,10 +268,12 @@ class VivadoAxiRegisterTransport:
             [
                 "catch {refresh_hw_server}",
                 "set zlc_targets [get_hw_targets]",
-                'if {$zlc_targets eq ""} { error "No Vivado hardware target" }',
-                "current_hw_target [lindex $zlc_targets 0]",
+                'if {[llength $zlc_targets] != 1} { error "Expected exactly one Vivado hardware target" }',
+                "current_hw_target $zlc_targets",
                 "if {[catch {open_hw_target}]} { catch {close_hw_target}; after 2000; open_hw_target }",
-                "current_hw_device [lindex [get_hw_devices] 0]",
+                "set zlc_devices [get_hw_devices]",
+                'if {[llength $zlc_devices] != 1} { error "Expected exactly one Vivado hardware device" }',
+                "current_hw_device $zlc_devices",
             ]
         )
         if self.probes:
@@ -285,7 +288,7 @@ class VivadoAxiRegisterTransport:
             [
                 "refresh_hw_device [current_hw_device]",
                 "set zlc_axi [get_hw_axis]",
-                'if {$zlc_axi eq ""} { error "No JTAG-to-AXI core found" }',
+                'if {[llength $zlc_axi] != 1} { error "Expected exactly one JTAG-to-AXI core" }',
             ]
         )
         return lines
@@ -317,9 +320,9 @@ class VivadoAxiRegisterTransport:
 
     @staticmethod
     def _write_burst_tcl(byte_address: int, values: Sequence[int]) -> list[str]:
-        address = f"{byte_address & 0xFFFFFFFF:08X}"
+        address = f"{byte_address:08X}"
         data = "".join(
-            f"{int(value) & 0xFFFFFFFF:08X}" for value in reversed(values)
+            f"{value:08X}" for value in reversed(values)
         )
         return [
             f"create_hw_axi_txn zlc_w [get_hw_axis] -address {address} -data {data} -len {len(values)} -type write -burst INCR -force",
@@ -329,7 +332,7 @@ class VivadoAxiRegisterTransport:
 
     @staticmethod
     def _read_txn_tcl(byte_address: int, marker: str) -> list[str]:
-        address = f"{byte_address & 0xFFFFFFFF:08X}"
+        address = f"{byte_address:08X}"
         return [
             f"create_hw_axi_txn zlc_r [get_hw_axis] -address {address} -len 1 -type read -force",
             "run_hw_axi zlc_r",
@@ -369,11 +372,15 @@ class VivadoAxiRegisterTransport:
             if stop is not None and stop.is_set():
                 raise TransportAborted(f"{action} aborted before issue")
             if self._external_executor is not None:
-                return self._external_executor(
-                    list(lines),
-                    action,
-                    self._remaining(deadline, action),
-                )
+                try:
+                    return self._external_executor(
+                        list(lines),
+                        action,
+                        self._remaining(deadline, action),
+                    )
+                except (TimeoutError, TransportAborted):
+                    self._closed = True
+                    raise
             return self._execute(
                 lines,
                 action=action,
@@ -419,14 +426,39 @@ class VivadoAxiRegisterTransport:
             raise RuntimeError(f"persistent Vivado {action} failed: {detail}")
         return output
 
-    def _kill_process(self) -> None:
-        process = self._process
-        self._process = None
+    def _stop_process(self, *, graceful: bool) -> None:
+        process, self._process = self._process, None
+        reader, self._reader = self._reader, None
         if process is not None:
+            if graceful:
+                try:
+                    if process.stdin is not None:
+                        process.stdin.write(
+                            "catch {close_hw_target}\n"
+                            "catch {disconnect_hw_server}\n"
+                            "exit\n"
+                        )
+                        process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+            else:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
             try:
-                process.kill()
-            except Exception:
-                pass
+                process.wait(timeout=5 if graceful else 3)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait(timeout=3)
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(timeout=5)
+            if reader.is_alive():
+                raise RuntimeError("Vivado AXI reader did not stop")
+        self._queue = queue.Queue()
 
     @staticmethod
     def _wrap_tcl(lines: Sequence[str], marker: str) -> str:
@@ -462,12 +494,17 @@ class VivadoAxiRegisterTransport:
     ) -> str:
         lines: list[str] = []
         while True:
+            if self._closed:
+                self._stop_process(graceful=False)
+                raise TransportAborted(f"transport closed waiting for {marker}")
             if stop is not None and stop.is_set():
+                self._closed = True
+                self._stop_process(graceful=False)
                 raise TransportAborted(f"read aborted waiting for {marker}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._closed = True
-                self._kill_process()
+                self._stop_process(graceful=False)
                 raise TimeoutError(f"Vivado action timed out waiting for {marker}")
             slice_seconds = min(0.2, remaining)
             try:

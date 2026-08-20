@@ -1,9 +1,9 @@
 `timescale 1ns/1ps
 // TTL EVENT-SCHEDULER delay verification on the REAL engine: channels with delays
-// {0, 1, 2, 7, 1000} ticks, a dense-toggle program (incl. 1-tick edges) repeating
-// forever, behavioral aligned-latency edge BRAMs.  ORACLE: record the engine's
+// {0, 1, 2, 7, 1000} ticks and a finite dense-toggle program (incl. 1-tick edges),
+// with behavioral aligned-latency edge BRAMs.  ORACLE: record the engine's
 // UNDELAYED stream (dut.state_mask) every cycle and assert out[t] == in[t-d] for
-// every delayed channel on every cycle (0 before t=d), across frames and seams.
+// every delayed channel on every cycle (0 before t=d), including the physical tail.
 module tb_delay_sched;
   localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
   localparam integer NE=8;
@@ -44,9 +44,9 @@ module tb_delay_sched;
   assign delay_ticks_w[CH*TDW-1: 5*TDW] = {(CH-5)*TDW{1'b0}};
 
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
-  wire running, done; wire [31:0] scan_cursor; wire underflow;
+  wire running, done, overflow, physical_active; wire [31:0] scan_cursor; wire underflow;
   zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.repeat_forever(1'b1),
+    .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.repeat_forever(1'b0),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd2400),.loop_end_coeffs({NS*CW{1'b0}}),
     .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
@@ -60,7 +60,8 @@ module tb_delay_sched;
     .bus_prog_stop_value(10'd0),.bus_prog_mode(2'd0),.bus_prog_value_select(3'd0),
     .bus_prog_stop_value_select(3'd0),.bus_counts({BUSC*7{1'b0}}),
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks(delay_ticks_w),
-    .out(out),.bus_out(bus_out),.running(running),.done(done));
+    .out(out),.bus_out(bus_out),.running(running),.done(done),
+    .overflow(overflow),.physical_active(physical_active));
 
   initial begin
     reset=1; start=0;
@@ -96,18 +97,35 @@ module tb_delay_sched;
     end
   end
 
-  integer dbg=0;
-  always @(posedge clk) if (started && dbg<25) begin
-    $display("  dbg t=%0d sm=%h prev=%h dct2=%0d cnt2=%0d out2=%b evtout2=%b g=%0d",
-      t, dut.state_mask, dut.prev_undelayed, dut.del_ch_ticks[2], dut.g_evtfifo[2].cnt,
-      out[2], dut.evt_out[2], dut.g_time);
-    dbg=dbg+1;
+  integer saw_drain = 0; integer saw_tail = 0;
+  always @(posedge clk) begin
+    if (dut.draining) begin
+      saw_drain = 1;
+      if (|out) saw_tail = 1;
+      if (done) $fatal(1, "DONE asserted while delayed outputs were draining");
+      if (!physical_active) $fatal(1, "physical_active dropped during delayed tail");
+    end
   end
   initial begin
     wait(reset==1); wait(reset==0);
-    repeat (NT) @(posedge clk);
-    $display("==== delay scheduler: %0d cycles checked, %0d mismatches ====", t, errs);
-    $display("%s", (errs==0 && t > 7000) ? "DELAY-SCHED-OK" : "**FAIL**");
-    $finish;
+    fork : completion
+      begin
+        wait(done);
+        @(posedge clk);
+        if (errs != 0) $fatal(1, "delay scheduler had %0d mismatches", errs);
+        if (!saw_drain || !saw_tail) $fatal(1, "finite run did not exercise a non-empty delayed tail");
+        if (physical_active) $fatal(1, "physical_active remained high after DONE");
+        if (out !== {CH{1'b0}}) $fatal(1, "TTL pins were not safe at DONE: %h", out);
+        if (bus_out !== {BUSC{10'd512}}) $fatal(1, "DAC pins were not safe at DONE: %h", bus_out);
+        if (underflow || overflow) $fatal(1, "unexpected sticky engine error at DONE");
+        $display("DELAY-SCHED-PHYSICAL-DONE-OK cycles=%0d", t);
+        $finish;
+      end
+      begin
+        repeat (NT) @(posedge clk);
+        $fatal(1, "timeout waiting for physical DONE");
+      end
+    join_any
+    disable completion;
   end
 endmodule

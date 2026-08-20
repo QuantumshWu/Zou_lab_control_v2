@@ -23,6 +23,22 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
 
 
+_FORMAL_CONSOLE_EPILOGUE = """
+deadline = time.monotonic() + 20.0
+while not presenter.close():
+    if time.monotonic() >= deadline:
+        raise AssertionError('TaskConsole presenter did not retire')
+    presenter.beat()
+    application.processEvents()
+    time.sleep(0.005)
+view.set_close_guard(lambda: True)
+view.close()
+application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+application.processEvents()
+session.close()
+"""
+
+
 @pytest.fixture
 def workspace(tmp_path) -> Path:
     pulses = tmp_path / "pulses"
@@ -755,7 +771,8 @@ def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace
             + os.environ.get("PYTHONPATH", "")
         ),
     )
-    script = """import zou_lab_control_v2
+    script = """import time
+import zou_lab_control_v2
 from zlc_ui import ensure_qt_app
 application = ensure_qt_app([])
 from PyQt5 import QtCore, QtTest
@@ -823,9 +840,8 @@ assert presenter.update_panel_state(site_grid.panel_id, {'cell_kind': 'image'})
 assert site_grid.state.cell_kind == 'image'
 assert site_grid.parameter_surface['display_unavailable'] == ''
 print('STOPPED_DRAFT')
-presenter.close()
-session.close()
-""" % workspace
+""" + _FORMAL_CONSOLE_EPILOGUE
+    script %= workspace
     completed = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True, text=True, env=environment, timeout=300,
@@ -918,9 +934,8 @@ assert view._view.add_panel_button.isEnabled()
 assert view._rows['calibration'].start_button.isEnabled()
 assert all(panel.state.signal != preview_signal for panel in presenter.panels.values())
 print('TASK_TAKEOVER_PREVIEW_OK')
-presenter.close()
-session.close()
-""" % workspace
+""" + _FORMAL_CONSOLE_EPILOGUE
+    script %= workspace
     completed = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -1098,9 +1113,8 @@ assert all(
     for panel in presenter.panels.values()
 )
 print('CALIBRATION_FILES_WITHOUT_REPORT_UI_OK')
-presenter.close()
-session.close()
-""" % workspace
+""" + _FORMAL_CONSOLE_EPILOGUE
+    script %= workspace
     completed = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,

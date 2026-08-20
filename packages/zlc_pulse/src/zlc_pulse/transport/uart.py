@@ -25,28 +25,38 @@ class UartLink(Protocol):
 
 class PySerialLink:
     def __init__(self, port: str, baud: int = 3_000_000) -> None:
-        if not port:
+        if not isinstance(port, str) or not port.strip():
             raise ValueError("UART port is required")
-        self.port = str(port)
-        self.baud = int(baud)
+        if isinstance(baud, bool) or not isinstance(baud, int) or baud <= 0:
+            raise ValueError("UART baud must be a positive integer")
+        self.port = port.strip()
+        self.baud = baud
         self._serial = None
         #: What the last short read looked like, for whoever decides it is fatal.
         self.last_shortfall = ""
 
     def open(self) -> None:
         import serial
-        serial_port = serial.Serial(
-            self.port,
-            self.baud,
-            timeout=0.05,
-            write_timeout=1.0,
-            dsrdtr=False,
-            rtscts=False,
-            xonxoff=False,
-        )
-        # Never let opening the pulse-streamer reset or drive another instrument on the bus.
-        serial_port.dtr = False
-        serial_port.rts = False
+        if self._serial is not None:
+            return
+        serial_port = None
+        try:
+            serial_port = serial.Serial(
+                self.port,
+                self.baud,
+                timeout=0.05,
+                write_timeout=1.0,
+                dsrdtr=False,
+                rtscts=False,
+                xonxoff=False,
+            )
+            # Never let opening the pulse-streamer reset or drive another instrument on the bus.
+            serial_port.dtr = False
+            serial_port.rts = False
+        except BaseException:
+            if serial_port is not None:
+                serial_port.close()
+            raise
         self._serial = serial_port
 
     def close(self) -> None:
@@ -168,22 +178,31 @@ class UartRegisterTransport:
         #: How many frames have had to be sent again, so a link that is quietly
         #: degrading can be seen before it fails.
         self.resends = 0
-        self.max_frame_words = max(1, min(int(max_frame_words), framing.MAX_FRAME_WORDS))
-        self._link = link or PySerialLink(str(port or ""), baud)
+        if (
+            isinstance(max_frame_words, bool)
+            or not isinstance(max_frame_words, int)
+            or not 1 <= max_frame_words <= framing.MAX_FRAME_WORDS
+        ):
+            raise ValueError("max_frame_words is outside the UART frame range")
+        self.max_frame_words = max_frame_words
+        self._link = link or PySerialLink(port, baud)
         self._lock = threading.RLock()
         self._sequence = 0
         self._closed = True
 
     def start(self) -> None:
         with self._lock:
-            self._link.open()
-            self._closed = False
+            if self._closed:
+                self._link.open()
+                self._closed = False
 
     def close(self) -> None:
         with self._lock:
-            if not self._closed:
-                self._link.close()
-            self._closed = True
+            try:
+                if not self._closed:
+                    self._link.close()
+            finally:
+                self._closed = True
 
     def write_words(
         self,
@@ -215,7 +234,7 @@ class UartRegisterTransport:
 
         with self._lock:
             self._require_open()
-            pending = tuple((int(address), int(value) & 0xFFFFFFFF) for address, value in rows)
+            pending = tuple(rows)
             frames = [
                 framing.encode_write(base, values, seq=self._next_sequence())
                 for base, values in framing.coalesce_runs(pending, max_words=self.max_frame_words)
@@ -362,7 +381,7 @@ class UartRegisterTransport:
         absolute = self._deadline(deadline)
         with self._lock:
             self._require_open()
-            request = framing.encode_read(int(word_offset), 1, seq=self._next_sequence())
+            request = framing.encode_read(word_offset, 1, seq=self._next_sequence())
             return self._read_with_retry(request, absolute, stop)
 
     def _read_with_retry(

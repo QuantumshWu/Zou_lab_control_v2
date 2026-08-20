@@ -32,6 +32,7 @@ def test_source_imports_only_the_package_and_allowed_dependencies() -> None:
         "hashlib",
         "json",
         "math",
+        "numbers",
         "os",
         "pathlib",
         "re",

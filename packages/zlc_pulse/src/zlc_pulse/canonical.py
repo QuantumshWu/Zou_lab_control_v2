@@ -29,6 +29,10 @@ def _normal(value: Any) -> Any:
         return {"__bytes__": value.hex()}
     if np is not None and isinstance(value, np.ndarray):
         array = np.ascontiguousarray(value)
+        if array.dtype.kind not in "biuf":
+            raise TypeError("canonical arrays must have a real numeric dtype")
+        if array.dtype.kind == "f" and not bool(np.isfinite(array).all()):
+            raise ValueError("canonical arrays must contain only finite values")
         return {
             "__ndarray__": True,
             "dtype": array.dtype.str,
@@ -36,9 +40,11 @@ def _normal(value: Any) -> Any:
             "values": array.tolist(),
         }
     if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("canonical mapping keys must be strings")
         return {
-            str(key): _normal(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            key: _normal(value[key])
+            for key in sorted(value)
         }
     if isinstance(value, (tuple, list)):
         return [_normal(item) for item in value]
@@ -48,8 +54,6 @@ def _normal(value: Any) -> Any:
             for field in fields(value)
             if field.init
         }
-    if hasattr(value, "__dict__"):
-        return _normal(vars(value))
     raise TypeError(f"unsupported canonical value {type(value).__name__}")
 
 

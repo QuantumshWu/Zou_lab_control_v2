@@ -2,9 +2,9 @@
 // EVENT-FIFO DEPTH BOUNDARY on the real engine: with EVT_DEPTH=16,
 //   * a burst of EXACTLY 16 toggles inside one delay window is delayed
 //     tick-exactly (the FIFO full-at-16 boundary must not corrupt anything);
-//   * a burst of 18 toggles drops ONLY the two excess toggles (the documented
-//     overflow behaviour the host validator guards against) -- the output is
-//     the ideal delayed waveform minus the one extra pulse, never garbage.
+//   * a burst of 18 toggles exceeds capacity and MUST set sticky overflow.
+// The exact-depth lane remains tick-exact; the overflowing lane may drop data,
+// but that corruption can no longer be silent.
 // bit0 carries the 16-toggle burst, bit1 the 18-toggle burst; both delayed by
 // d=200 so the whole burst is in flight at once.
 module tb_evt_depth;
@@ -47,9 +47,9 @@ module tb_evt_depth;
   assign delay_ticks_w[CH*TDW-1: 2*TDW] = {(CH-2)*TDW{1'b0}};
 
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
-  wire running, done; wire [31:0] scan_cursor; wire underflow;
+  wire running, done, overflow, physical_active; wire [31:0] scan_cursor; wire underflow;
   zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .EVT_DEPTH(16)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd21),.repeat_forever(1'b1),
+    .clk(clk),.reset(reset),.start(start),.prog_count(13'd21),.repeat_forever(1'b0),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd501),.loop_end_coeffs({NS*CW{1'b0}}),
     .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
@@ -63,22 +63,21 @@ module tb_evt_depth;
     .bus_prog_stop_value(10'd0),.bus_prog_mode(2'd0),.bus_prog_value_select(3'd0),
     .bus_prog_stop_value_select(3'd0),.bus_counts({BUSC*7{1'b0}}),
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks(delay_ticks_w),
-    .out(out),.bus_out(bus_out),.running(running),.done(done));
+    .out(out),.bus_out(bus_out),.running(running),.done(done),
+    .overflow(overflow),.physical_active(physical_active));
 
   initial begin
     reset=1; start=0;
-    repeat (50) @(posedge clk);
+    repeat (200) @(posedge clk);
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
 
   // oracle: history of the undelayed stream + per-cycle asserts.
   // ch0 (16 toggles = depth): out0[t] == in0[t-D] EXACTLY.
-  // ch1 (18 toggles): toggles 17,18 drop -> out1 == in1[t-D] except the final
-  //   1-pulse (in1 high during ticks [44,46) -> delayed window [244,246)).
+  // ch1 intentionally overflows; its waveform is invalid once overflow is set.
   reg [CH-1:0] hist [0:NT];
-  integer t = -1; integer errs0 = 0; integer errs1 = 0; integer started = 0;
-  integer drop_window_mismatch = 0;
-  reg exp0, exp1; reg in_drop_window;
+  integer t = -1; integer errs0 = 0; integer started = 0;
+  reg exp0;
   always @(posedge clk) begin : oracle
     if (running && !started) begin started = 1; t = -1; end
     if (started) begin
@@ -90,26 +89,30 @@ module tb_evt_depth;
           errs0 = errs0 + 1;
           if (errs0 <= 5) $display("  MISMATCH ch0 t=%0d out=%b expect=%b", t, out[0], exp0);
         end
-        // drop window: the 17th/18th toggles' pulse (undelayed [44,46)) is lost.
-        in_drop_window = (t >= D+44) && (t < D+46);
-        exp1 = (t >= D && !in_drop_window) ? hist[t-D][1] : 1'b0;
-        if (in_drop_window) begin
-          // ideal would be 1 here; the overflow drop must leave it 0.
-          if (out[1] !== 1'b0) drop_window_mismatch = drop_window_mismatch + 1;
-        end else if (out[1] !== exp1) begin
-          errs1 = errs1 + 1;
-          if (errs1 <= 5) $display("  MISMATCH ch1 t=%0d out=%b expect=%b", t, out[1], exp1);
-        end
       end
     end
   end
 
   initial begin
     wait(reset==1); wait(reset==0);
-    repeat (NT) @(posedge clk);
-    $display("==== evt depth boundary: %0d cycles, ch0(=depth) errs=%0d, ch1(depth+2) errs=%0d, dropwin=%0d ====",
-             t, errs0, errs1, drop_window_mismatch);
-    $display("%s", (errs0==0 && errs1==0 && drop_window_mismatch==0 && t > 1000) ? "EVT-DEPTH-OK" : "**FAIL**");
-    $finish;
+    fork : completion
+      begin
+        wait(done);
+        @(posedge clk);
+        if (errs0 != 0) $fatal(1, "exact-capacity FIFO corrupted %0d ticks", errs0);
+        if (!overflow) $fatal(1, "FIFO overflow was not sticky through DONE");
+        if (underflow) $fatal(1, "unexpected scan underflow");
+        $display("EVT-DEPTH-STICKY-OVERFLOW-OK cycles=%0d", t);
+        $finish;
+      end
+      begin
+        repeat (NT) @(posedge clk);
+        $fatal(1, "timeout waiting for overflow run DONE (running=%b draining=%b busy=%b time=%0d final=%0d edge=%0d cnt0=%0d cnt1=%0d out=%h)",
+               running, dut.draining, dut.delay_runtime_busy,
+               dut.time_count, dut.final_tick, dut.edge_index,
+               dut.g_evtfifo[0].cnt, dut.g_evtfifo[1].cnt, out);
+      end
+    join_any
+    disable completion;
   end
 endmodule

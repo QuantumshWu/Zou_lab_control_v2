@@ -21,16 +21,11 @@
 // CRC-16/CCITT-FALSE (poly 1021, init FFFF) over OP/RESP..last payload byte.
 //
 // SAFETY: a whole WRITE frame is BUFFERED (<= FRAME_WORDS words) and its CRC
-// verified BEFORE any u_we fires, so a corrupt frame commits NOTHING -- this
-// exactly mirrors the Python oracle host/uart_bridge_model.py (equivalence-tested).
-// On any fault (bad SYNC/opcode/CRC/framing) it resynchronises by re-hunting the
-// SYNC pair (idle line 0xFF never matches 5A,A5).
-//
-// Verified: the protocol/decoder logic is proven in Python (uart_bridge_model +
-// tests/test_uart_bridge_equivalence.py, always-run).  tb_uart_bridge.v drives THIS
-// module under Vivado xsim as the on-demand cross-check (needs the Xilinx toolchain;
-// not in CI) -- same pattern as the engine tbs.  Real 3 Mbaud baud-lock + FT2232
-// ch-B wiring are the rig steps.
+// verified BEFORE any u_we fires, so a corrupt frame commits NOTHING.  Bounds,
+// bad CRC/opcode, framing faults and truncated-frame timeout release arbitration,
+// pulse u_error for sticky top-level STATUS.ERROR, and return a non-OK reply once
+// a sequence byte is known.  The automated tb_uart_pipeline bench exercises the
+// normal pipeline plus these failure paths; real baud-lock/wiring remain rig work.
 //
 // Single sys-clk domain (no CDC).  Every output has exactly ONE driving always
 // block (synthesisable, no multi-driver).
@@ -41,7 +36,9 @@ module zlc_uart_bridge #(
     parameter integer BAUD      = 3_000_000,      // fractional NCO divider -> any FT/CP2102 rate
     parameter integer OVERSAMPLE = 16,            // samples per bit (RX + TX)
     parameter integer ADDR_WORD_WIDTH = 30,       // == top word_addr width
-    parameter integer FRAME_WORDS = 256           // max data words per frame (== host MAX_FRAME_WORDS)
+    parameter integer FRAME_WORDS = 256,          // max data words per frame (== host MAX_FRAME_WORDS)
+    parameter integer ADDRESS_WORDS = (1 << ADDR_WORD_WIDTH),
+    parameter integer FRAME_TIMEOUT_CYCLES = 2_500_000 // 50 ms at 50 MHz; truncated frame releases arbitration
 )(
     input  wire clk,
     input  wire rst,                              // power-on reset only, NOT eng_reset
@@ -52,6 +49,7 @@ module zlc_uart_bridge #(
     output reg  [31:0]                u_wdata,
     output reg                        u_we,       // 1-clk commit pulse
     output reg                        u_active,   // level: high from a frame's OP byte to frame done
+    output reg                        u_error,    // protocol fault pulse; top latches STATUS.ERROR
     // CTRL-region read tap (STATUS/CURSOR/LAYOUT_ID)
     output reg  [5:0]  u_rd_word,
     output reg         u_rd_req,                  // 1-clk pulse; top returns u_rd_data next cycle
@@ -61,7 +59,8 @@ module zlc_uart_bridge #(
 
     localparam [7:0] SYNC0 = 8'h5A, SYNC1 = 8'hA5;
     localparam [7:0] OP_WRITE = 8'h01, OP_READ = 8'h02, RESP = 8'h81;
-    localparam [7:0] ST_OK = 8'h00;
+    localparam [7:0] ST_OK = 8'h00, ST_CRC_FAIL = 8'h01,
+                     ST_BAD_OP = 8'h02, ST_ADDR_RANGE = 8'h03;
 
     // ---------------------------------------------------------------- CRC-16/CCITT-FALSE
     function [15:0] crc_byte;
@@ -113,23 +112,34 @@ module zlc_uart_bridge #(
 
     // ---------------------------------------------------------------- decoder FSM
     localparam D_HUNT=4'd0, D_SYNC1=4'd1, D_OP=4'd2, D_SEQ=4'd3, D_ADDR=4'd4, D_CNT=4'd5,
-               D_DATA=4'd6, D_CRC=4'd7, D_COMMIT=4'd8, D_READ=4'd9, D_RLAT=4'd10, D_WEND=4'd11;
+               D_DATA=4'd6, D_CRC=4'd7, D_COMMIT=4'd8, D_READ=4'd9, D_RLAT=4'd10,
+               D_WEND=4'd11, D_BAD_SEQ=4'd12;
     reg [3:0]  dst;
     reg [7:0]  f_op, f_seq;
     reg [31:0] f_addr, word_acc;
     reg [15:0] f_count, w_idx, rd_i;
     reg [1:0]  b_idx, byte_in_word, crc_bytes;
     reg [15:0] crc_run, crc_rx;
+    reg [31:0] frame_idle;
+    reg seq_valid;
     (* ram_style="distributed" *) reg [31:0] wbuf [0:FRAME_WORDS-1];   // WRITE payload + READ reply staging
 
     // handshake to the reply serializer (single-writer here, single-reader there)
-    reg        rpl_go; reg [7:0] rpl_seq; reg [15:0] rpl_count;
+    reg        rpl_go; reg [7:0] rpl_seq, rpl_status; reg [15:0] rpl_count;
 
     always @(posedge clk) begin
-        if (rst) begin dst<=D_HUNT; u_we<=1'b0; u_active<=1'b0; u_rd_req<=1'b0; rpl_go<=1'b0; end
+        if (rst) begin dst<=D_HUNT; u_we<=1'b0; u_active<=1'b0; u_error<=1'b0; u_rd_req<=1'b0; rpl_go<=1'b0; frame_idle<=32'd0; seq_valid<=1'b0; end
         else begin
-            u_we<=1'b0; u_rd_req<=1'b0; rpl_go<=1'b0;
-            if (rx_ferr) begin dst<=D_HUNT; u_active<=1'b0; end   // framing error -> abort + resync
+            u_we<=1'b0; u_error<=1'b0; u_rd_req<=1'b0; rpl_go<=1'b0;
+            if (!u_active || rx_valid) frame_idle <= 32'd0;
+            else frame_idle <= frame_idle + 1'b1;
+            if (u_active && frame_idle >= FRAME_TIMEOUT_CYCLES-1) begin
+                dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1; frame_idle<=32'd0;
+                if (seq_valid) begin rpl_seq<=f_seq; rpl_status<=ST_CRC_FAIL; rpl_count<=16'd0; rpl_go<=1'b1; end
+            end else if (rx_ferr) begin
+                dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1;
+                if (u_active && seq_valid) begin rpl_seq<=f_seq; rpl_status<=ST_CRC_FAIL; rpl_count<=16'd0; rpl_go<=1'b1; end
+            end   // framing error -> abort + resync
             else begin
                 case (dst)
                     D_HUNT:  begin u_active<=1'b0; if (rx_valid && rx_byte==SYNC0) dst<=D_SYNC1; end
@@ -138,9 +148,12 @@ module zlc_uart_bridge #(
                                  else if (rx_byte==SYNC0) dst<=D_SYNC1;
                                  else dst<=D_HUNT; end
                     D_OP:    if (rx_valid) begin
-                                 f_op<=rx_byte; crc_run<=crc_byte(16'hFFFF, rx_byte); u_active<=1'b1;
-                                 dst <= (rx_byte==OP_WRITE || rx_byte==OP_READ) ? D_SEQ : D_HUNT; end
-                    D_SEQ:   if (rx_valid) begin f_seq<=rx_byte; crc_run<=crc_byte(crc_run,rx_byte); b_idx<=0; dst<=D_ADDR; end
+                                 f_op<=rx_byte; crc_run<=crc_byte(16'hFFFF, rx_byte); u_active<=1'b1; seq_valid<=1'b0;
+                                 dst <= (rx_byte==OP_WRITE || rx_byte==OP_READ) ? D_SEQ : D_BAD_SEQ; end
+                    D_BAD_SEQ: if (rx_valid) begin
+                                 f_seq<=rx_byte; rpl_seq<=rx_byte; rpl_status<=ST_BAD_OP; rpl_count<=16'd0; rpl_go<=1'b1;
+                                 dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1; end
+                    D_SEQ:   if (rx_valid) begin f_seq<=rx_byte; seq_valid<=1'b1; crc_run<=crc_byte(crc_run,rx_byte); b_idx<=0; dst<=D_ADDR; end
                     D_ADDR:  if (rx_valid) begin
                                  f_addr<={rx_byte, f_addr[31:8]}; crc_run<=crc_byte(crc_run,rx_byte);
                                  if (b_idx==2'd3) begin b_idx<=0; dst<=D_CNT; end else b_idx<=b_idx+1'b1; end
@@ -149,7 +162,20 @@ module zlc_uart_bridge #(
                                  if (b_idx==2'd0) begin f_count[7:0]<=rx_byte; b_idx<=1; end
                                  else begin
                                      f_count[15:8]<=rx_byte; b_idx<=0; w_idx<=0; byte_in_word<=0; crc_bytes<=0;
-                                     if (f_op==OP_WRITE) dst <= ({rx_byte,f_count[7:0]}==16'd0) ? D_CRC : D_DATA;
+                                     if (
+                                         {rx_byte,f_count[7:0]} == 16'd0
+                                         || {rx_byte,f_count[7:0]} > FRAME_WORDS
+                                         || |f_addr[31:ADDR_WORD_WIDTH]
+                                         || ({1'b0,f_addr} + {17'b0,rx_byte,f_count[7:0]}) > ADDRESS_WORDS
+                                         || (f_op==OP_READ && (
+                                             |f_addr[31:6]
+                                             || ({1'b0,f_addr[5:0]} + {1'b0,rx_byte,f_count[7:0]}) > 17'd64
+                                         ))
+                                     ) begin
+                                         rpl_seq<=f_seq; rpl_status<=ST_ADDR_RANGE; rpl_count<=16'd0; rpl_go<=1'b1;
+                                         dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1;
+                                     end
+                                     else if (f_op==OP_WRITE) dst<=D_DATA;
                                      else dst<=D_CRC;
                                  end end
                     D_DATA:  if (rx_valid) begin
@@ -162,18 +188,12 @@ module zlc_uart_bridge #(
                                  if (crc_bytes==2'd0) begin crc_rx[7:0]<=rx_byte; crc_bytes<=1; end
                                  else begin
                                      if ({rx_byte, crc_rx[7:0]}==crc_run) begin
-                                         if (f_count==16'd0) begin
-                                             // A protocol-legal count==0 frame commits / reads NOTHING and
-                                             // ACKs with count 0 (matches the Python oracle UartBridgeModel).
-                                             // No u_we is asserted, so u_active drops now.  This guards the
-                                             // `w_idx==f_count-1` / `rd_i==f_count-1` UNDERFLOW (0-1==0xFFFF)
-                                             // that would else loop D_COMMIT/D_RLAT 65536 times, scribbling
-                                             // the whole register/BRAM map.
-                                             rpl_seq<=f_seq; rpl_count<=16'd0; rpl_go<=1'b1;
-                                             dst<=D_HUNT; u_active<=1'b0;
-                                         end else if (f_op==OP_WRITE) begin w_idx<=0; dst<=D_COMMIT; end
+                                         if (f_op==OP_WRITE) begin w_idx<=0; dst<=D_COMMIT; end
                                          else begin rd_i<=0; dst<=D_READ; end
-                                     end else begin dst<=D_HUNT; u_active<=1'b0; end   // bad CRC -> commit nothing
+                                     end else begin
+                                         rpl_seq<=f_seq; rpl_status<=ST_CRC_FAIL; rpl_count<=16'd0; rpl_go<=1'b1;
+                                         dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1;
+                                     end   // bad CRC -> commit nothing
                                  end end
                     // --- COMMIT: one u_we per buffered word (CRC already verified), then ACK ---
                     D_COMMIT: begin
@@ -181,7 +201,7 @@ module zlc_uart_bridge #(
                                  u_wdata     <= wbuf[w_idx[FW_AW-1:0]];
                                  u_we        <= 1'b1;
                                  if (w_idx==f_count-1) begin
-                                     rpl_seq<=f_seq; rpl_count<=16'd0; rpl_go<=1'b1;   // ACK (count 0) -> host retries on timeout
+                                     rpl_seq<=f_seq; rpl_status<=ST_OK; rpl_count<=16'd0; rpl_go<=1'b1;   // ACK (count 0) -> host retries on timeout
                                      dst<=D_WEND;                                      // hold u_active 1 more cycle (see D_WEND)
                                  end else w_idx<=w_idx+1'b1;
                               end
@@ -195,7 +215,7 @@ module zlc_uart_bridge #(
                     D_RLAT:  begin
                                  wbuf[rd_i[FW_AW-1:0]] <= u_rd_data;    // 1-cycle read latency
                                  if (rd_i==f_count-1) begin
-                                     rpl_seq<=f_seq; rpl_count<=f_count; rpl_go<=1'b1; dst<=D_HUNT; u_active<=1'b0;
+                                     rpl_seq<=f_seq; rpl_status<=ST_OK; rpl_count<=f_count; rpl_go<=1'b1; dst<=D_HUNT; u_active<=1'b0;
                                  end else begin rd_i<=rd_i+1'b1; dst<=D_READ; end
                               end
                     default: dst<=D_HUNT;
@@ -239,7 +259,7 @@ module zlc_uart_bridge #(
             S_IDLE: begin
                 tx_send<=1'b0;
                 if (rpl_go) begin
-                    hdr[0]<=SYNC0; hdr[1]<=SYNC1; hdr[2]<=RESP; hdr[3]<=rpl_seq; hdr[4]<=ST_OK;
+                    hdr[0]<=SYNC0; hdr[1]<=SYNC1; hdr[2]<=RESP; hdr[3]<=rpl_seq; hdr[4]<=rpl_status;
                     hdr[5]<=rpl_count[7:0]; hdr[6]<=rpl_count[15:8];
                     t_pcut  <= 16'd7 + (rpl_count<<2);
                     t_total <= 16'd7 + (rpl_count<<2) + 16'd2;

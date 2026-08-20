@@ -123,6 +123,8 @@ def build(
     allow_dial: bool = True,
     connection_label: str | None = None,
     run_off_thread=None,
+    run_device_work=None,
+    run_safe_work=None,
     request_close=None,
 ) -> object:
     """Wire one editor window, with or without a pulse in it."""
@@ -185,6 +187,8 @@ def build(
             "Experiment session" if connection_label is None else str(connection_label)
         ),
         run_preview_work=run_off_thread,
+        run_device_work=run_device_work,
+        run_safe_work=run_safe_work,
         request_preview_close=request_close,
     )
 
@@ -225,8 +229,8 @@ def resolve(workspace=None, pulse=None):
 def _guard_window_close(
     window: object,
     *,
-    run_off_thread,
-    close_worker,
+    run_close_work,
+    close_workers,
     request_close,
     refresh_timer: object | None = None,
 ) -> None:
@@ -255,7 +259,7 @@ def _guard_window_close(
     def guard() -> bool:
         nonlocal closing
         if retired:
-            return close_worker()
+            return all(close() for close in close_workers)
         if closing:
             return False
         if refresh_timer is not None:
@@ -265,7 +269,7 @@ def _guard_window_close(
             return False
         closing = True
         try:
-            run_off_thread(
+            run_close_work(
                 lambda: window.presenter.close(present=False),
                 completed,
                 failed,
@@ -300,7 +304,10 @@ def create_window(
     window = open_pulse_editor(
         title="PulseGUI@Zou lab", window_ratio=window_ratio
     )
-    run_off_thread, close_worker = attach_qt_worker("zlc-pulse-preview")
+    run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
+    run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
+    run_safe_work, close_safe_worker = attach_qt_worker("zlc-pulse-safe")
+    close_workers = (close_preview_worker, close_device_worker, close_safe_worker)
     request_close = attach_qt_owner_turn(window.close)
     try:
         window.presenter = build(
@@ -309,16 +316,19 @@ def create_window(
             path=path,
             pulses_directory=str(space.pulses) if space is not None else "",
             run_off_thread=run_off_thread,
+            run_device_work=run_device_work,
+            run_safe_work=run_safe_work,
             request_close=request_close,
         )
     except BaseException:
-        close_worker()
+        for close_worker in close_workers:
+            close_worker()
         window.close()
         raise
     _guard_window_close(
         window,
-        run_off_thread=run_off_thread,
-        close_worker=close_worker,
+        run_close_work=run_safe_work,
+        close_workers=close_workers,
         request_close=request_close,
     )
     if connect:
@@ -353,7 +363,10 @@ def create_bound_window(
     window = open_pulse_editor(
         title="PulseGUI@Zou lab", window_ratio=window_ratio
     )
-    run_off_thread, close_worker = attach_qt_worker("zlc-pulse-preview")
+    run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
+    run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
+    run_safe_work, close_safe_worker = attach_qt_worker("zlc-pulse-safe")
+    close_workers = (close_preview_worker, close_device_worker, close_safe_worker)
     request_close = attach_qt_owner_turn(window.close)
     try:
         window.presenter = build(
@@ -366,21 +379,29 @@ def create_bound_window(
             allow_dial=False,
             connection_label="Experiment session",
             run_off_thread=run_off_thread,
+            run_device_work=run_device_work,
+            run_safe_work=run_safe_work,
             request_close=request_close,
         )
     except BaseException:
-        close_worker()
+        for close_worker in close_workers:
+            close_worker()
         window.close()
         raise
     from ..board import attach_qt
 
-    refresh_timer = attach_qt(window.presenter.refresh_run_state, interval_ms=100)
+    refresh_timer = attach_qt(
+        lambda: None
+        if window.presenter._device_busy or window.presenter._stop_busy
+        else window.presenter.refresh_run_state(),
+        interval_ms=100,
+    )
     window._device_control_refresh_timer = refresh_timer
 
     _guard_window_close(
         window,
-        run_off_thread=run_off_thread,
-        close_worker=close_worker,
+        run_close_work=run_safe_work,
+        close_workers=close_workers,
         request_close=request_close,
         refresh_timer=refresh_timer,
     )

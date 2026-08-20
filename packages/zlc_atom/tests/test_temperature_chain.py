@@ -35,7 +35,8 @@ import time
 
 import numpy as np
 from zlc_data import SITE
-from zlc_pulse import sequence_from_tree
+from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
+from zlc_pulse.schedule import trigger_windows
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.install import create_installation
@@ -78,6 +79,26 @@ def _wait_terminal(host: object, *, timeout: float) -> None:
     observed = host.observation
     assert observed.error is None, observed.error
     assert observed.terminal, "the host never finished"
+
+
+def test_temperature_template_spaces_twenty_millisecond_exposures() -> None:
+    installation = create_installation("virtual")
+    try:
+        board = installation.device("sequencer").describe()
+        authored = sequence_from_tree(
+            json.loads(temperature_pulse_template_bytes().decode("utf-8"))
+        )
+        for release_ms in T_OFF_MS:
+            sequence = resolve_api_parameters(authored, {"t_off": release_ms})
+            program = compile_sequence(sequence, board.geometry, board.clock_hz)
+            starts = tuple(
+                start / program.clock_hz
+                for start, _end in trigger_windows(program, "emCCD")
+            )
+            assert len(starts) == 2
+            assert starts[1] - starts[0] >= 0.02
+    finally:
+        installation.close()
 
 
 def test_the_temperature_task_publishes_release_recapture_survival(

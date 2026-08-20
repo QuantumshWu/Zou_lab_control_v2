@@ -14,6 +14,7 @@ experiment keeps things, which is not this package.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from typing import Any
 
 from .model import (
@@ -32,6 +33,55 @@ from .model import (
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse.v1"
+
+
+def parse_pulse_tree_json(text: str | bytes) -> Mapping[str, Any]:
+    """Parse one pulse JSON document without losing malformed input facts."""
+
+    if isinstance(text, bytes):
+        text = text.decode("utf-8")
+    if not isinstance(text, str):
+        raise TypeError("pulse JSON must be text or UTF-8 bytes")
+
+    def object_from_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key {key!r} in pulse JSON")
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON constant {value!r} in pulse JSON")
+
+    value = json.loads(
+        text,
+        object_pairs_hook=object_from_pairs,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(value, Mapping):
+        raise TypeError("pulse JSON must contain one object")
+    return value
+
+
+def _object(value: Any, expected: tuple[str, ...], name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be an object")
+    if any(not isinstance(key, str) for key in value):
+        raise TypeError(f"{name} keys must be text")
+    unknown = tuple(key for key in value if key not in expected)
+    if unknown:
+        raise ValueError(f"unknown {name} field(s): {', '.join(unknown)}")
+    missing = tuple(key for key in expected if key not in value)
+    if missing:
+        raise ValueError(f"missing {name} field(s): {', '.join(missing)}")
+    return value
+
+
+def _array(value: Any, name: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise TypeError(f"{name} must be a JSON array")
+    return value
 
 
 def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
@@ -124,88 +174,189 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     describes an illegal pulse is refused here rather than becoming one.
     """
 
-    if not isinstance(tree, Mapping):
-        raise TypeError("a pulse tree must be a mapping")
-    declared = str(tree.get("format", ""))
+    tree = _object(
+        tree,
+        (
+            "format",
+            "name",
+            "time_step_ns",
+            "target",
+            "periods",
+            "slots",
+            "api_parameters",
+            "delays",
+            "repeat",
+        ),
+        "pulse",
+    )
+    declared = tree["format"]
+    if not isinstance(declared, str):
+        raise TypeError("pulse format must be text")
     if declared != PULSE_TREE_FORMAT:
         raise ValueError(f"not a {PULSE_TREE_FORMAT} pulse: {declared or 'no format'}")
 
-    target_tree = tree["target"]
+    target_tree = _object(
+        tree["target"],
+        ("raw_lanes", "package_pins", "ports"),
+        "pulse target",
+    )
+    package_pins = target_tree["package_pins"]
+    if not isinstance(package_pins, Mapping):
+        raise TypeError("pulse target package_pins must be an object")
+    if any(
+        not isinstance(lane, str) or not isinstance(pin, str)
+        for lane, pin in package_pins.items()
+    ):
+        raise TypeError("pulse target package_pins must map text to text")
     target = PulseTarget(
-        tuple(str(lane) for lane in target_tree["raw_lanes"]),
+        tuple(_array(target_tree["raw_lanes"], "pulse target raw_lanes")),
         tuple(
             PulsePortSpec(
-                key=str(port["key"]),
-                kind=str(port["kind"]),
-                lanes=tuple(str(lane) for lane in port["lanes"]),
-                label=str(port.get("label", "")),
-                bus_index=port.get("bus_index"),
-                width=port.get("width"),
-                encoding=port.get("encoding"),
-                safe_value=port.get("safe_value"),
-                latch_clock=port.get("latch_clock"),
+                key=port["key"],
+                kind=port["kind"],
+                lanes=tuple(_array(port["lanes"], "pulse port lanes")),
+                label=port["label"],
+                bus_index=port["bus_index"],
+                width=port["width"],
+                encoding=port["encoding"],
+                safe_value=port["safe_value"],
+                latch_clock=port["latch_clock"],
             )
-            for port in target_tree["ports"]
+            for port in (
+                _object(
+                    item,
+                    (
+                        "key",
+                        "kind",
+                        "lanes",
+                        "label",
+                        "bus_index",
+                        "width",
+                        "encoding",
+                        "safe_value",
+                        "latch_clock",
+                    ),
+                    "pulse port",
+                )
+                for item in _array(target_tree["ports"], "pulse target ports")
+            )
         ),
-        package_pins=dict(target_tree.get("package_pins", {})),
+        package_pins=dict(package_pins),
     )
     periods = tuple(
         PulsePeriod(
-            period_id=str(period["period_id"]),
+            period_id=period["period_id"],
             duration=period["duration"],
-            unit=str(period["unit"]),
-            states=tuple(int(state) for state in period["states"]),
+            unit=period["unit"],
+            states=tuple(_array(period["states"], "pulse period states")),
             analog_steps=tuple(
-                AnalogStep(str(step["port"]), str(step["mode"]), step["value"])
-                for step in period.get("analog_steps", ())
+                AnalogStep(step["port"], step["mode"], step["value"])
+                for step in (
+                    _object(
+                        item,
+                        ("port", "mode", "value"),
+                        "pulse analog step",
+                    )
+                    for item in _array(
+                        period["analog_steps"], "pulse period analog_steps"
+                    )
+                )
             ),
-            name=str(period.get("name", "")),
+            name=period["name"],
         )
-        for period in tree["periods"]
+        for period in (
+            _object(
+                item,
+                ("period_id", "duration", "unit", "states", "name", "analog_steps"),
+                "pulse period",
+            )
+            for item in _array(tree["periods"], "pulse periods")
+        )
     )
     slots = tuple(
         PulseSlot(
-            kind=str(slot["kind"]),
+            kind=slot["kind"],
             field_ref=PulseFieldRef(
-                kind=str(slot["field_ref"]["kind"]),
-                period_id=slot["field_ref"].get("period_id"),
-                port=slot["field_ref"].get("port"),
+                kind=field["kind"],
+                period_id=field["period_id"],
+                port=field["port"],
             ),
-            unit=str(slot["unit"]),
-            slot_id=str(slot["slot_id"]),
+            unit=slot["unit"],
+            slot_id=slot["slot_id"],
         )
-        for slot in tree["slots"]
+        for slot, field in (
+            (
+                slot,
+                _object(
+                    slot["field_ref"],
+                    ("kind", "period_id", "port"),
+                    "pulse field reference",
+                ),
+            )
+            for slot in (
+                _object(
+                    item,
+                    ("kind", "unit", "slot_id", "field_ref"),
+                    "pulse slot",
+                )
+                for item in _array(tree["slots"], "pulse slots")
+            )
+        )
     )
     api_parameters = tuple(
         PulseApiParameter(
-            parameter_id=str(parameter["parameter_id"]),
+            parameter_id=parameter["parameter_id"],
             field_ref=PulseFieldRef(
-                kind=str(parameter["field_ref"]["kind"]),
-                period_id=parameter["field_ref"].get("period_id"),
-                port=parameter["field_ref"].get("port"),
+                kind=field["kind"],
+                period_id=field["period_id"],
+                port=field["port"],
             ),
-            unit=str(parameter["unit"]),
+            unit=parameter["unit"],
         )
-        for parameter in tree["api_parameters"]
+        for parameter, field in (
+            (
+                parameter,
+                _object(
+                    parameter["field_ref"],
+                    ("kind", "period_id", "port"),
+                    "pulse field reference",
+                ),
+            )
+            for parameter in (
+                _object(
+                    item,
+                    ("parameter_id", "unit", "field_ref"),
+                    "pulse API parameter",
+                )
+                for item in _array(
+                    tree["api_parameters"], "pulse API parameters"
+                )
+            )
+        )
     )
     delays = tuple(
-        OutputDelay(str(delay["port"]), delay["value"], str(delay["unit"]))
-        for delay in tree.get("delays", ())
+        OutputDelay(delay["port"], delay["value"], delay["unit"])
+        for delay in (
+            _object(item, ("port", "value", "unit"), "pulse delay")
+            for item in _array(tree["delays"], "pulse delays")
+        )
     )
-    repeat_tree = tree.get("repeat")
+    repeat_tree = tree["repeat"]
     repeat = (
         None
         if repeat_tree is None
         else RepeatRegion(
-            str(repeat_tree["start_period_id"]),
-            str(repeat_tree["end_period_id"]),
-            int(repeat_tree["count"]),
+            **_object(
+                repeat_tree,
+                ("start_period_id", "end_period_id", "count"),
+                "pulse repeat",
+            )
         )
     )
     return PulseSequence(
-        name=str(tree.get("name", "sequence")),
+        name=tree["name"],
         target=target,
-        time_step_ns=float(tree["time_step_ns"]),
+        time_step_ns=tree["time_step_ns"],
         periods=periods,
         slots=slots,
         api_parameters=api_parameters,
@@ -214,4 +365,9 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     )
 
 
-__all__ = ["PULSE_TREE_FORMAT", "sequence_from_tree", "sequence_to_tree"]
+__all__ = [
+    "PULSE_TREE_FORMAT",
+    "parse_pulse_tree_json",
+    "sequence_from_tree",
+    "sequence_to_tree",
+]

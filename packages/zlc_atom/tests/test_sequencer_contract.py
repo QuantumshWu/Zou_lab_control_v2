@@ -69,7 +69,7 @@ def _virtual_streamer():
 
     streamer = VirtualPulseStreamer(world=SimulationWorld(seed=0))
     streamer.open()
-    program, _metadata = build_calibration_pulse(streamer.describe())
+    program = build_calibration_pulse(streamer.describe())
     return streamer, program
 
 
@@ -143,16 +143,6 @@ def test_loading_while_firing_is_refused(sequencer) -> None:
     streamer.fire()
     with pytest.raises(RuntimeError):
         streamer.load(program)
-
-
-def test_changing_slots_while_firing_is_refused(sequencer) -> None:
-    """A scan row that changes mid-shot corrupts the point it belongs to."""
-
-    streamer, program = sequencer
-    streamer.load(program)
-    streamer.fire()
-    with pytest.raises(RuntimeError):
-        streamer.write_slots((0,))
 
 
 def test_a_closed_device_refuses_everything(sequencer) -> None:

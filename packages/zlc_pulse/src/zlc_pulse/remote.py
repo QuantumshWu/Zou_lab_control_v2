@@ -1,12 +1,4 @@
-"""Small single-connection RPC for a separated FPGA control machine.
-
-The server owns one real :class:`PulseStreamer`; the wire layer only carries
-plain JSON trees and never grows a second device state machine.  Every request
-is one length-prefixed frame and every response is one frame.  In particular,
-``wait_done`` is a non-blocking server probe; the client implements the public
-wait by polling short ``snapshot``/``cursor``/``wait_done`` calls so ``safe``
-can use the same connection at any time.
-"""
+"""Thin JSON RPC between one PulseStreamer server and its current client."""
 
 from __future__ import annotations
 
@@ -18,7 +10,7 @@ from .endpoint import (
     DEFAULT_REQUEST_TIMEOUT,
 )
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 import argparse
 import json
@@ -72,8 +64,6 @@ REMOTE_METHODS = (
     "describe",
     "close",
     "load",
-    "write_slots",
-    "write_scan_table",
     "fire",
     "wait_done",
     "cursor",
@@ -194,7 +184,6 @@ def _program_summary(program: object, *, source: object = None) -> str:
         dac_segments=len(program.bus_segments),
         slots=program.slot_count,
         duration_us=f"{program.duration_seconds * 1e6:.3f}",
-        repeat_forever=program.repeat_forever,
         source="provided" if source is not None else "none",
     )
 
@@ -344,7 +333,6 @@ class BackendResolution:
     uart_port: str | None
     reason: str
     attempts: tuple[str, ...] = ()
-    candidates: tuple[str, ...] = ()
 
 
 class BackendResolutionError(RuntimeError):
@@ -353,41 +341,6 @@ class BackendResolutionError(RuntimeError):
     def __init__(self, message: str, *, attempts: Iterable[str] = ()) -> None:
         super().__init__(message)
         self.attempts = tuple(attempts)
-
-
-def _list_uart_ports() -> tuple[object, ...]:
-    """Enumerate serial device names lazily so importing zlc_pulse stays UART-optional."""
-    from serial.tools import list_ports
-    return tuple(list_ports.comports())
-
-
-def _uart_candidates(
-    uart_port: str | None,
-    port_provider: Callable[[], Iterable[object]] | None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return candidate ports plus an enumeration failure, if one occurred."""
-    selected = str(uart_port).strip() if uart_port is not None else ""
-    if selected:
-        return (selected,), ()
-    provider = port_provider or _list_uart_ports
-    try:
-        raw_ports = provider()
-    except ModuleNotFoundError as exc:
-        name = str(getattr(exc, "name", "") or "")
-        if name.startswith("serial") or "serial" in str(exc).lower():
-            return (), (f'pyserial missing; install with: "{sys.executable}" -m pip install pyserial',)
-        return (), (f"port enumeration failed: {type(exc).__name__}",)
-    except Exception as exc:
-        return (), (f"port enumeration failed: {type(exc).__name__}: {exc}",)
-    if isinstance(raw_ports, str):
-        raw_ports = (raw_ports,)
-    raw_ports = sorted(raw_ports, key=lambda item: getattr(item, "vid", None) is None or getattr(item, "pid", None) is None)
-    ports: list[str] = []
-    for descriptor in raw_ports:
-        port = str(getattr(descriptor, "device", descriptor)).strip()
-        if port and port not in ports:
-            ports.append(port)
-    return tuple(ports), (() if ports else ("no UART ports detected",))
 
 
 def _probe_uart_port(
@@ -445,11 +398,8 @@ def resolve_backend(
     target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
-    port_provider: Callable[[], Iterable[object]] | None = None,
-    probe: Callable[[str, float], None] | None = None,
-    on_candidates: Callable[[tuple[str, ...], tuple[str, ...]], None] | None = None,
 ) -> BackendResolution:
-    """Resolve one physical backend, probing UART only when requested by policy."""
+    """Resolve one backend without ever probing an undeclared serial port."""
 
     choice = str(requested).strip().lower()
     if choice not in BACKEND_CHOICES:
@@ -459,34 +409,44 @@ def resolve_backend(
     if choice == "jtag-axi":
         return BackendResolution(choice, "jtag-axi", None, "explicit jtag-axi backend; UART probe skipped")
 
-    ports, setup_attempts = _uart_candidates(uart_port, port_provider)
-    if on_candidates is not None:
-        on_candidates(ports, setup_attempts)
-    attempts = list(setup_attempts)
-    probe_fn = probe
-    if probe_fn is None:
-        probe_fn = lambda port, timeout: _probe_uart_port(
+    if uart_port is not None and not isinstance(uart_port, str):
+        raise TypeError("uart_port must be text or None")
+    port = "" if uart_port is None else uart_port.strip()
+    if not port:
+        if choice == "uart":
+            raise BackendResolutionError(
+                "explicit UART backend requires --uart-port; no COM ports are scanned"
+            )
+        return BackendResolution(
+            choice,
+            "jtag-axi",
+            None,
+            "auto selected jtag-axi because no explicit UART port was configured",
+        )
+
+    try:
+        _probe_uart_port(
             port,
-            timeout,
+            UART_PROBE_TIMEOUT,
             target=target,
             params=params,
             clock_hz=clock_hz,
             baud=int(uart_baud),
         )
-    for port in ports:
-        try:
-            probe_fn(port, UART_PROBE_TIMEOUT)
-        except Exception as exc:
-            attempts.append(f"{port}: {_probe_failure_reason(exc)}")
-            continue
-        attempts.append(f"{port}: word63 fingerprint matched")
-        if choice == "uart":
-            reason = f"explicit uart selected {port}@{int(uart_baud) / 1_000_000:g}M after word63 fingerprint match"
-        else:
-            reason = f"auto selected UART {port}@{int(uart_baud) / 1_000_000:g}M after word63 fingerprint match"
-        return BackendResolution(choice, "uart", port, reason, tuple(attempts), ports)
+    except Exception as exc:
+        attempts = (f"{port}: {_probe_failure_reason(exc)}",)
+    else:
+        attempts = (f"{port}: word63 fingerprint matched",)
+        mode = "explicit uart" if choice == "uart" else "auto"
+        return BackendResolution(
+            choice,
+            "uart",
+            port,
+            f"{mode} selected UART {port}@{int(uart_baud) / 1_000_000:g}M after word63 fingerprint match",
+            attempts,
+        )
 
-    failure = "; ".join(attempts) if attempts else "no UART ports detected"
+    failure = "; ".join(attempts)
     if choice == "uart":
         raise BackendResolutionError(
             f"explicit UART backend failed; no matching device: {failure}",
@@ -497,8 +457,7 @@ def resolve_backend(
         "jtag-axi",
         None,
         f"auto fallback to jtag-axi after UART probe: {failure}",
-        tuple(attempts),
-        ports,
+        attempts,
     )
 
 
@@ -512,7 +471,9 @@ def encode_tree(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [encode_tree(item) for item in value]
     if isinstance(value, Mapping):
-        return {str(key): encode_tree(item) for key, item in value.items()}
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("remote tree mapping keys must be strings")
+        return {key: encode_tree(item) for key, item in value.items()}
     if is_dataclass(value):
         return {
             "__type__": type(value).__name__,
@@ -542,15 +503,36 @@ _TREE_KEPT = {"PulseTarget": ("package_pins",)}
 def decode_tree(value: Any) -> Any:
     """Decode a JSON tree into the small set of public model dataclasses."""
 
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("remote trees cannot contain non-finite floats")
     if isinstance(value, list):
         return [decode_tree(item) for item in value]
     if not isinstance(value, dict):
         return value
-    type_name = value.get("__type__")
-    if type_name is not None:
+    if any(not isinstance(key, str) for key in value):
+        raise TypeError("remote tree mapping keys must be strings")
+    if "__type__" in value:
+        type_name = value["__type__"]
         if not isinstance(type_name, str) or type_name not in _TREE_TYPES:
             raise ValueError(f"unknown remote tree type: {type_name!r}")
         cls = _TREE_TYPES[type_name]
+        expected = {
+            field.name
+            for field in fields(cls)
+            if not field.name.startswith("_")
+        }
+        expected.update(_TREE_KEPT.get(type_name, ()))
+        actual = set(value).difference(("__type__",))
+        unknown = sorted(actual.difference(expected))
+        missing = sorted(expected.difference(actual))
+        if unknown:
+            raise ValueError(
+                f"unknown {type_name} remote field(s): {', '.join(unknown)}"
+            )
+        if missing:
+            raise ValueError(
+                f"missing {type_name} remote field(s): {', '.join(missing)}"
+            )
         kwargs = {
             key: decode_tree(item)
             for key, item in value.items()
@@ -589,25 +571,50 @@ def _recv_frame(connection: socket.socket) -> Any | None:
     payload = _recv_exact(connection, size)
     if payload is None:
         raise ConnectionError("remote connection closed before frame payload")
-    return decode_tree(json.loads(payload.decode("utf-8")))
+
+    def object_from_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key {key!r} in remote JSON")
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON constant {value!r} in remote JSON")
+
+    return decode_tree(
+        json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=object_from_pairs,
+            parse_constant=reject_constant,
+        )
+    )
 
 
 class _RemoteHandler(socketserver.BaseRequestHandler):
+    def setup(self) -> None:
+        super().setup()
+        server = self.server
+        assert isinstance(server, PulseRemoteServer)
+        self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        with server._client_lock:
+            server._connections.add(self.request)
+
+    def finish(self) -> None:
+        server = self.server
+        assert isinstance(server, PulseRemoteServer)
+        with server._client_lock:
+            server._connections.discard(self.request)
+        super().finish()
+
     def handle(self) -> None:
         server = self.server
         assert isinstance(server, PulseRemoteServer)
         client = f"{self.client_address[0]}:{self.client_address[1]}"
-        # Keep the human-facing "client CONNECTED" wording recognizable in the server log.
-        server.claim_client(client, self.request)
-        _server_log("CLIENT CONNECTED", client=client, detail="status=OWNER")
         disconnect_reason = "client disconnect"
+        claimed = False
         try:
-            # A blocking read, with no deadline of any kind.  Nothing here ever
-            # asks whether the client is still alive, because nothing needs the
-            # answer: an owner that has gone away is displaced by the next one
-            # to connect, and until somebody wants the board nobody cares.
-            # Sending nothing is what editing a pulse looks like for minutes at
-            # a time, and it must remain indistinguishable from anything else.
             while True:
                 request = _recv_frame(self.request)
                 if request is None:
@@ -617,13 +624,47 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                 try:
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")
-                    method = request.get("method")
-                    params = request.get("params", {})
+                    unknown = tuple(
+                        key for key in request if key not in {"id", "method", "params"}
+                    )
+                    missing = tuple(
+                        key for key in ("id", "method", "params") if key not in request
+                    )
+                    if unknown:
+                        raise ValueError(
+                            f"unknown request field(s): {', '.join(unknown)}"
+                        )
+                    if missing:
+                        raise ValueError(
+                            f"missing request field(s): {', '.join(missing)}"
+                        )
+                    request_id = request["id"]
+                    if (
+                        isinstance(request_id, bool)
+                        or not isinstance(request_id, int)
+                        or request_id <= 0
+                    ):
+                        raise TypeError("request id must be a positive integer")
+                    method = request["method"]
+                    params = request["params"]
                     if not isinstance(method, str):
                         raise ValueError("request method must be text")
+                    if method not in REMOTE_METHODS:
+                        raise ValueError(f"unknown remote method: {method}")
                     if not isinstance(params, Mapping):
                         raise ValueError("request params must be an object")
-                    result = server.dispatch(method, params, client=client)
+                    if not claimed:
+                        server.claim_client(client, self.request)
+                        claimed = True
+                        _server_log(
+                            "CLIENT CONNECTED", client=client, detail="status=OWNER"
+                        )
+                    result = server.dispatch(
+                        method,
+                        params,
+                        client=client,
+                        connection=self.request,
+                    )
                     response = {"id": request_id, "ok": True, "result": result}
                 except Exception as exc:
                     _server_log(
@@ -640,39 +681,43 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                         "error": {"type": type(exc).__name__, "message": str(exc)},
                     }
                 _send_frame(self.request, response)
+                if not claimed:
+                    return
         except OSError as exc:
             # Closed, reset, or dropped by a newer client taking the board.
             # Each of those ends this session; none is a server defect.
             disconnect_reason = f"client connection dropped: {type(exc).__name__}"
         finally:
-            outputs_safe = server.client_disconnected(client=client, reason=disconnect_reason)
+            outputs_safe = (
+                server.client_disconnected(
+                    client=client,
+                    connection=self.request,
+                    reason=disconnect_reason,
+                )
+                if claimed
+                else None
+            )
             _forget_polls(client)
+            status = (
+                "SAFE"
+                if outputs_safe is True
+                else "NOT_VERIFIED"
+                if outputs_safe is False
+                else "NO_ACTION"
+            )
             _server_log(
                 "CLIENT DISCONNECTED",
                 client=client,
-                detail=_log_fields(outputs="SAFE" if outputs_safe else "NOT_VERIFIED", reason=disconnect_reason),
+                detail=_log_fields(outputs=status, reason=disconnect_reason),
             )
 
 
 class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    """An RPC façade over one PulseStreamer, held by whoever connected last.
-
-    One board cannot take two conversations at once, so one connection owns it.
-    Which one is decided by arrival: a new client takes the board and the
-    previous connection is dropped.  That is the whole ownership policy, and it
-    is what lets the server never ask whether a client is still alive.
-
-    The question used to matter because the FIRST client held the board until
-    it went away, so a connection that died without saying so -- a pulled
-    cable, a sleeping laptop -- locked the hardware until the server was
-    restarted.  Guarding that with an idle timer then disconnected people for
-    editing quietly.  Nobody cares whether a silent client is alive until
-    somebody else wants the board, and at that moment the newcomer settles it.
-    """
+    """One board owner; a newcomer takes over only after stable physical SAFE."""
 
     allow_reuse_address = True
-    daemon_threads = True
-    block_on_close = False
+    daemon_threads = False
+    block_on_close = True
     request_queue_size = 8
 
     def __init__(
@@ -684,10 +729,22 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             raise TypeError("streamer must be a PulseStreamer")
         self.streamer = streamer
         self._client_lock = threading.RLock()
+        self._command_lock = threading.Lock()
+        self._owner_epoch = 0
         self._owner_client: str | None = None
         self._owner_connection: socket.socket | None = None
         self._owner_started = 0.0
+        self._fault: str | None = None
+        self._connections: set[socket.socket] = set()
         super().__init__(address, _RemoteHandler)
+
+    def server_close(self) -> None:
+        self.client_disconnected(client="server", reason="server shutdown")
+        with self._client_lock:
+            connections = tuple(self._connections)
+        for connection in connections:
+            _drop_connection(connection)
+        super().server_close()
 
     def handle_error(self, request, client_address) -> None:
         """Prefix real handler defects with timestamp/client, then keep the traceback."""
@@ -698,37 +755,82 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         super().handle_error(request, client_address)
 
     def claim_client(self, client: str, connection: socket.socket) -> None:
-        """Give the board to the newest connection and drop the previous one.
-
-        Ending the old session first is what makes this safe: its outputs go
-        SAFE and it stops owning anything before the newcomer is told it may
-        start, so the two never overlap.  The old handler then unwinds on its
-        own -- its own release is a no-op, because it is no longer the owner.
-        """
+        """Transfer ownership only after the previous physical state is SAFE."""
 
         with self._client_lock:
             previous, connection_to_drop = self._owner_client, self._owner_connection
-            if previous is not None:
-                _server_log("CLIENT REPLACED", client=previous, detail=_log_fields(by=client))
-                self.client_disconnected(client=previous, reason=f"replaced by {client}")
-                if connection_to_drop is not None:
-                    _drop_connection(connection_to_drop)
-            self._owner_client = client
-            self._owner_connection = connection
-            self._owner_started = time.monotonic()
+            if previous is None and self._fault is None:
+                self._owner_epoch += 1
+                self._owner_client = client
+                self._owner_connection = connection
+                self._owner_started = time.monotonic()
+                return
+            self._owner_client = None
+            self._owner_connection = None
+            self._owner_started = 0.0
+            self._owner_epoch += 1
+            transition_epoch = self._owner_epoch
+            self._fault = "takeover SAFE has not completed"
+        if previous is not None:
+            _server_log(
+                "CLIENT REPLACED",
+                client=previous,
+                detail=_log_fields(by=client),
+            )
+        if connection_to_drop is not None:
+            _drop_connection(connection_to_drop)
+
+        # This first SAFE is the only operation allowed beside the active
+        # command lane: its stop event interrupts a pending transport action.
+        try:
+            result = self.streamer.safe()
+            if not result.stable:
+                raise RuntimeError("SAFE readback was not stable")
+        except Exception:
+            pass
+
+        failure_message: str | None = None
+        with self._command_lock:
+            safe_failure: Exception | None = None
+            try:
+                result = self.streamer.safe()
+                if not result.stable:
+                    raise RuntimeError("SAFE readback was not stable")
+            except Exception as exc:
+                try:
+                    opened = bool(self.streamer.snapshot().get("opened"))
+                except Exception:
+                    opened = True
+                if opened:
+                    safe_failure = exc
+            with self._client_lock:
+                if self._owner_epoch != transition_epoch:
+                    raise RuntimeError("client takeover was superseded")
+                if safe_failure is None:
+                    self._fault = None
+                    self._owner_client = client
+                    self._owner_connection = connection
+                    self._owner_started = time.monotonic()
+                else:
+                    failure_message = (
+                        "takeover SAFE failed: "
+                        f"{type(safe_failure).__name__}: "
+                        f"{str(safe_failure).replace(chr(10), ' ')}"
+                    )
+                    self._fault = failure_message
+        if failure_message is not None:
+            _server_log(
+                "TAKEOVER FAILED",
+                client=client,
+                detail=_log_fields(error=failure_message),
+            )
+            raise RuntimeError(failure_message) from safe_failure
 
     def owner_status(self) -> tuple[str | None, float]:
         with self._client_lock:
             if self._owner_client is None:
                 return None, 0.0
             return self._owner_client, max(0.0, time.monotonic() - self._owner_started)
-
-    def _release_client(self, client: str | None, *, force: bool = False) -> None:
-        with self._client_lock:
-            if force or client is None or self._owner_client == client:
-                self._owner_client = None
-                self._owner_connection = None
-                self._owner_started = 0.0
 
     def _link_health(self) -> str:
         """Frames that had to be sent again, when there have been any.
@@ -748,142 +850,248 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         method: str,
         params: Mapping[str, Any],
         *,
-        client: str = "server",
+        client: str,
+        connection: socket.socket,
     ) -> Any:
-        if method not in REMOTE_METHODS:
-            raise ValueError(f"unknown remote method: {method}")
-        if method == "open":
-            self.streamer.open()
-            _server_log("OPEN", client=client, detail=_log_fields(device_session="ready"))
-            return None
-        if method == "describe":
-            result = self.streamer.describe()
-            _server_log(
-                "DESCRIBE",
-                client=client,
-                detail=_log_fields(
-                    ports=len(result.target.ports),
-                    lanes=len(result.target.raw_lanes),
-                    pins=len(result.target.package_pins),
-                    clock_hz=result.clock_hz,
-                    layout=f"0x{result.layout_fingerprint:08X}",
-                ),
-            )
-            return result
-        if method == "close":
-            before = self.streamer.snapshot()
-            self.streamer.close()
-            _server_log(
-                "CLOSE",
-                client=client,
-                detail=_log_fields(
-                    firing=before.get("firing"),
-                    device_session="closed",
-                ),
-            )
-            return None
-        if method == "load":
-            program = params.get("program")
-            source = params.get("source")
-            self.streamer.load(program, source=source)
-            _server_log(
-                "LOAD",
-                client=client,
-                detail=f"{_program_summary(program, source=source)}{self._link_health()}",
-            )
-            return None
-        if method == "write_slots":
-            values = tuple(int(value) for value in params.get("values", ()))
-            self.streamer.write_slots(values)
-            # The VALUES, not just how many.  Holding a scan point and
-            # stepping through one both arrive here, one row at a time, and
-            # which row it is is the only thing this line could usefully say
-            # -- the count is always the slot count and never changes.
-            _server_log(
-                "WRITE SLOTS",
-                client=client,
-                detail=_log_fields(slots=len(values), values=list(values)),
-            )
-            return None
-        if method == "write_scan_table":
-            rows = tuple(tuple(int(value) for value in row) for row in params.get("rows", ()))
-            sweeps = max(1, int(params.get("sweeps", 1)))
-            self.streamer.write_scan_table(rows, sweeps=sweeps)
-            _server_log(
-                "WRITE SCAN TABLE",
-                client=client,
-                detail=_log_fields(rows=len(rows), sweeps=sweeps, points=len(rows) * sweeps),
-            )
-            return None
-        if method == "fire":
-            forever = bool(params.get("forever", False))
-            self.streamer.fire(forever=forever)
-            applied = self.streamer.applied()
-            program = applied.program if applied is not None else None
-            fire_fields = _log_fields(
-                mode="FOREVER" if forever else "ONCE",
-                reloaded_before_fire=self.streamer.snapshot().get("reloaded_before_fire"),
-            )
-            _server_log(
-                "FIRE",
-                client=client,
-                detail=f"{fire_fields} "
-                f"{_program_summary(program, source=applied.source if applied is not None else None)}",
-            )
-            return None
-        if method == "wait_done":
-            # Never honor a network timeout here: the client owns the short poll loop.
-            result = self.streamer.wait_done(0.0)
-            if result is not None:
-                _server_log(
-                    "DONE",
-                    client=client,
-                    detail=_log_fields(
-                        status=f"0x{result.status:02X}",
-                        cursor=result.cursor,
-                        underflow=result.underflow,
-                        tail_ms=f"{result.tail_elapsed * 1e3:.3f}",
-                    ),
-                )
-            else:
-                _server_log_change("WAIT DONE", client=client, detail="state=PENDING")
-            return result
-        if method == "cursor":
-            result = self.streamer.cursor()
-            _server_log_change("CURSOR", client=client, detail=_log_fields(value=result))
-            return result
-        if method == "safe":
-            result = self.streamer.safe()
-            _server_log(
-                "STOP/SAFE",
-                client=client,
-                detail=_log_fields(
-                    stable=result.stable,
-                    status_reads=_compact_tuple(result.status_reads),
-                    clock_enable_words=_compact_tuple(result.clock_enable_words),
-                ),
-            )
-            return result
-        if method == "snapshot":
-            result = self.streamer.snapshot()
-            _server_log_change("SNAPSHOT", client=client, detail=_log_fields(**{key: result.get(key) for key in ("opened", "loaded", "firing", "forever", "cursor")}))
-            return result
-        result = self.streamer.applied()
-        _server_log("APPLIED", client=client, detail=_log_fields(present=result is not None, slots=len(result.slot_values) if result is not None else None, scan_rows=len(result.scan_rows) if result is not None else None, forever=result.forever if result is not None else None))
-        return result
+        with self._client_lock:
+            if (
+                self._fault is not None
+                or self._owner_client != client
+                or self._owner_connection is not connection
+            ):
+                raise RuntimeError("this connection no longer owns the pulse server")
+            owner_epoch = self._owner_epoch
 
-    def client_disconnected(self, *, client: str | None = None, reason: str = "client disconnect") -> bool:
+        with self._command_lock:
+            with self._client_lock:
+                if (
+                    self._fault is not None
+                    or self._owner_epoch != owner_epoch
+                    or self._owner_client != client
+                    or self._owner_connection is not connection
+                ):
+                    raise RuntimeError("this connection no longer owns the pulse server")
+            try:
+                no_params = {
+                    "open",
+                    "describe",
+                    "close",
+                    "wait_done",
+                    "cursor",
+                    "safe",
+                    "snapshot",
+                    "applied",
+                }
+                expected = (
+                    {"program", "source", "rows"}
+                    if method == "load"
+                    else {"cycles"}
+                    if method == "fire"
+                    else set()
+                )
+                if method not in REMOTE_METHODS:
+                    raise ValueError(f"unknown remote method: {method}")
+                if method in no_params and params:
+                    raise ValueError(f"{method} does not accept parameters")
+                if method not in no_params and set(params) != expected:
+                    raise ValueError(
+                        f"{method} parameters must be exactly {', '.join(sorted(expected))}"
+                    )
+                if method == "open":
+                    self.streamer.open()
+                    _server_log("OPEN", client=client, detail=_log_fields(device_session="ready"))
+                    result = None
+                elif method == "describe":
+                    result = self.streamer.describe()
+                    _server_log(
+                        "DESCRIBE",
+                        client=client,
+                        detail=_log_fields(
+                            ports=len(result.target.ports),
+                            lanes=len(result.target.raw_lanes),
+                            pins=len(result.target.package_pins),
+                            clock_hz=result.clock_hz,
+                            layout=f"0x{result.layout_fingerprint:08X}",
+                        ),
+                    )
+                elif method == "close":
+                    before = self.streamer.snapshot()
+                    self.streamer.close()
+                    _server_log(
+                        "CLOSE",
+                        client=client,
+                        detail=_log_fields(
+                            firing=before.get("firing"),
+                            device_session="closed",
+                        ),
+                    )
+                    result = None
+                elif method == "load":
+                    program = params["program"]
+                    source = params["source"]
+                    rows = params["rows"]
+                    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, list):
+                        raise TypeError("load rows must be a JSON array")
+                    self.streamer.load(program, source=source, rows=rows)
+                    _server_log(
+                        "LOAD",
+                        client=client,
+                        detail=(
+                            f"{_program_summary(program, source=source)} "
+                            f"rows={len(rows)}{self._link_health()}"
+                        ),
+                    )
+                    result = None
+                elif method == "fire":
+                    cycles = params["cycles"]
+                    if cycles is not None and (
+                        isinstance(cycles, bool) or not isinstance(cycles, int)
+                    ):
+                        raise TypeError("fire cycles must be an integer or null")
+                    self.streamer.fire(cycles=cycles)
+                    applied = self.streamer.applied()
+                    program = applied.program if applied is not None else None
+                    fire_fields = _log_fields(
+                        cycles="FOREVER" if cycles is None else cycles,
+                        reloaded_before_fire=self.streamer.snapshot().get("reloaded_before_fire"),
+                    )
+                    _server_log(
+                        "FIRE",
+                        client=client,
+                        detail=f"{fire_fields} "
+                        f"{_program_summary(program, source=applied.source if applied is not None else None)}",
+                    )
+                    result = None
+                elif method == "wait_done":
+                    # Never honor a network timeout here: the client owns the short poll loop.
+                    result = self.streamer.wait_done(0.0)
+                    if result is not None:
+                        _server_log(
+                            "DONE",
+                            client=client,
+                            detail=_log_fields(
+                                status=f"0x{result.status:02X}",
+                                cursor=result.cursor,
+                                underflow=result.underflow,
+                                tail_ms=f"{result.tail_elapsed * 1e3:.3f}",
+                            ),
+                        )
+                    else:
+                        _server_log_change("WAIT DONE", client=client, detail="state=PENDING")
+                elif method == "cursor":
+                    result = self.streamer.cursor()
+                    _server_log_change("CURSOR", client=client, detail=_log_fields(value=result))
+                elif method == "safe":
+                    result = self.streamer.safe()
+                    _server_log(
+                        "STOP/SAFE",
+                        client=client,
+                        detail=_log_fields(
+                            stable=result.stable,
+                            status_reads=_compact_tuple(result.status_reads),
+                            clock_enable_words=_compact_tuple(result.clock_enable_words),
+                        ),
+                    )
+                elif method == "snapshot":
+                    result = self.streamer.snapshot()
+                    _server_log_change("SNAPSHOT", client=client, detail=_log_fields(**{key: result.get(key) for key in ("opened", "loaded", "firing", "cycles", "cursor")}))
+                else:
+                    result = self.streamer.applied()
+                    _server_log("APPLIED", client=client, detail=_log_fields(present=result is not None, rows=len(result.rows) if result is not None else None, cycles=result.cycles if result is not None else None))
+            except BaseException as exc:
+                with self._client_lock:
+                    stale = (
+                        self._fault is not None
+                        or self._owner_epoch != owner_epoch
+                        or self._owner_client != client
+                        or self._owner_connection is not connection
+                    )
+                if stale:
+                    raise RuntimeError(
+                        "this connection no longer owns the pulse server"
+                    ) from exc
+                raise
+            with self._client_lock:
+                if (
+                    self._fault is not None
+                    or self._owner_epoch != owner_epoch
+                    or self._owner_client != client
+                    or self._owner_connection is not connection
+                ):
+                    raise RuntimeError("this connection no longer owns the pulse server")
+            return result
+
+    def client_disconnected(
+        self,
+        *,
+        client: str | None = None,
+        connection: socket.socket | None = None,
+        reason: str = "client disconnect",
+    ) -> bool | None:
         """Release physical outputs without clearing the server-process echo; outputs are SAFE on success."""
 
-        owned = client in {None, "server"} or self.owner_status()[0] == client
-        if not owned:
-            return True
+        with self._client_lock:
+            force = client in {None, "server"}
+            if not force and (
+                self._owner_client != client
+                or self._owner_connection is not connection
+            ):
+                return None
+            connection_to_drop = self._owner_connection
+            self._owner_client = None
+            self._owner_connection = None
+            self._owner_started = 0.0
+            self._owner_epoch += 1
+            transition_epoch = self._owner_epoch
+            self._fault = "disconnect SAFE has not completed"
+        if connection_to_drop is not None:
+            _drop_connection(connection_to_drop)
+        _server_log("AUTO-SAFE", client=client, detail=_log_fields(reason=reason))
+
+        # Cancel first; the command lane remains owned by the old handler until
+        # it observes the revocation and retires.
         try:
-            if not self.streamer.snapshot().get("opened"):
-                self._release_client(client, force=client == "server")
-                return True
-            _server_log("AUTO-SAFE", client=client, detail=_log_fields(reason=reason))
             result = self.streamer.safe()
+            if not result.stable:
+                raise RuntimeError("SAFE readback was not stable")
+        except Exception:
+            pass
+
+        failure_message: str | None = None
+        with self._command_lock:
+            result = None
+            safe_failure: Exception | None = None
+            try:
+                result = self.streamer.safe()
+                if not result.stable:
+                    raise RuntimeError("SAFE readback was not stable")
+            except Exception as exc:
+                try:
+                    opened = bool(self.streamer.snapshot().get("opened"))
+                except Exception:
+                    opened = True
+                if opened:
+                    safe_failure = exc
+            with self._client_lock:
+                if self._owner_epoch != transition_epoch:
+                    return None
+                if safe_failure is None:
+                    self._fault = None
+                else:
+                    failure_message = (
+                        "disconnect SAFE failed: "
+                        f"{type(safe_failure).__name__}: "
+                        f"{str(safe_failure).replace(chr(10), ' ')}"
+                    )
+                    self._fault = failure_message
+        if failure_message is not None:
+            _server_log(
+                "AUTO-SAFE FAILED",
+                client=client,
+                detail=_log_fields(error=failure_message),
+            )
+            return False
+        if result is not None:
             _server_log(
                 "AUTO-SAFE DONE",
                 client=client,
@@ -893,16 +1101,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     clock_enable_words=_compact_tuple(result.clock_enable_words),
                 ),
             )
-            self._release_client(client, force=client == "server")
-            return result.stable
-        except Exception as exc:
-            _server_log(
-                "AUTO-SAFE FAILED",
-                client=client,
-                detail=_log_fields(error=f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')}"),
-            )
-            self._release_client(client, force=client == "server")
-            return False
+        return True
 
 
 class RemotePulseStreamer:
@@ -917,9 +1116,9 @@ class RemotePulseStreamer:
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         poll_interval: float = 0.01,
     ) -> None:
-        if not host:
+        if not isinstance(host, str) or not host:
             raise ValueError("remote host is required")
-        if int(port) <= 0 or int(port) > 65535:
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 < port <= 65535:
             raise ValueError("remote port is outside the TCP range")
         if request_timeout <= 0 or not math.isfinite(float(request_timeout)):
             raise ValueError("request_timeout must be finite and positive")
@@ -927,8 +1126,8 @@ class RemotePulseStreamer:
             raise ValueError("connect_timeout must be finite and positive")
         if poll_interval <= 0 or not math.isfinite(float(poll_interval)):
             raise ValueError("poll_interval must be finite and positive")
-        self.host = str(host)
-        self.port = int(port)
+        self.host = host
+        self.port = port
         self.request_timeout = float(request_timeout)
         self.connect_timeout = float(connect_timeout)
         self.poll_interval = float(poll_interval)
@@ -971,23 +1170,24 @@ class RemotePulseStreamer:
         with self._io_lock:
             self._disconnect_locked()
 
-    def load(self, prog: CompiledProgram, *, source: PulseSequence | None = None) -> None:
-        self._call("load", {"program": prog, "source": source})
-
-    def write_slots(self, values) -> None:
-        self._call("write_slots", {"values": tuple(int(value) for value in values)})
-
-    def write_scan_table(self, rows, *, sweeps: int = 1) -> None:
+    def load(
+        self,
+        prog: CompiledProgram,
+        *,
+        source: PulseSequence | None = None,
+        rows=(),
+    ) -> None:
         self._call(
-            "write_scan_table",
+            "load",
             {
-                "rows": tuple(tuple(int(value) for value in row) for row in rows),
-                "sweeps": int(sweeps),
+                "program": prog,
+                "source": source,
+                "rows": tuple(tuple(row) for row in rows),
             },
         )
 
-    def fire(self, *, forever: bool = False) -> None:
-        self._call("fire", {"forever": bool(forever)})
+    def fire(self, *, cycles: int | None = 1) -> None:
+        self._call("fire", {"cycles": cycles})
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         """Poll the board until the shot reports done, or the deadline passes.
@@ -1000,7 +1200,7 @@ class RemotePulseStreamer:
 
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         while True:
-            result = self._call("wait_done", {"timeout": 0.0})
+            result = self._call("wait_done", {})
             if result is not None:
                 return result
             if deadline is not None:
@@ -1069,7 +1269,7 @@ class RemotePulseStreamer:
         request = {
             "id": self._request_id,
             "method": method,
-            "params": encode_tree(dict(params)),
+            "params": dict(params),
         }
         try:
             _send_frame(self._socket, request)
@@ -1089,16 +1289,31 @@ class RemotePulseStreamer:
             # what happened.
             self._disconnect_locked()
             raise ConnectionError(_CONNECTION_ENDED)
-        if not isinstance(response, Mapping):
-            raise ConnectionError("remote response is not an object")
-        if response.get("id") != self._request_id:
-            raise ConnectionError("remote response id differs from the request")
-        if not response.get("ok"):
-            error = response.get("error")
-            if isinstance(error, Mapping):
-                raise RemoteError(str(error.get("type", "RemoteError")), str(error.get("message", "")))
-            raise RemoteError("RemoteError", "remote request failed")
-        return decode_tree(response.get("result"))
+        try:
+            if not isinstance(response, Mapping):
+                raise ConnectionError("remote response is not an object")
+            if response.get("id") != self._request_id:
+                raise ConnectionError("remote response id differs from the request")
+            ok = response.get("ok")
+            if not isinstance(ok, bool):
+                raise ConnectionError("remote response ok field is not boolean")
+            expected = {"id", "ok", "result"} if ok else {"id", "ok", "error"}
+            if set(response) != expected:
+                raise ConnectionError("remote response fields differ from the protocol")
+            if ok:
+                return response["result"]
+            error = response["error"]
+            if (
+                not isinstance(error, Mapping)
+                or set(error) != {"type", "message"}
+                or not isinstance(error["type"], str)
+                or not isinstance(error["message"], str)
+            ):
+                raise ConnectionError("remote error response differs from the protocol")
+        except ConnectionError:
+            self._disconnect_locked()
+            raise
+        raise RemoteError(error["type"], error["message"])
 
     def __enter__(self) -> "RemotePulseStreamer":
         self.open()
@@ -1155,10 +1370,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=BACKEND_CHOICES,
         default="auto",
-        help="transport policy: probe UART first, or explicitly select a backend",
+        help="transport policy; UART is considered only with --uart-port",
     )
     parser.add_argument("--state-dir", default="fpga/build/state")
-    parser.add_argument("--uart-port", default=None, help="probe only this UART port")
+    parser.add_argument("--uart-port", default=None, help="the one configured Pulse UART port")
     parser.add_argument("--uart-baud", type=int, default=3_000_000)
     parser.add_argument("--check-config", action="store_true")
     return parser
@@ -1166,12 +1381,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def _main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    config = load_streamer_config()
+    try:
+        config = load_streamer_config()
+    except Exception as exc:
+        print(f"ERROR: invalid streamer_config.json: {exc}", file=sys.stderr, flush=True)
+        return 2
+    if config["source"] is None or config["warnings"]:
+        detail = "; ".join(config["warnings"]) or "canonical config source is missing"
+        print(
+            f"ERROR: deployment requires a valid streamer_config.json without fallback: {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     target = pulse_target_from_xdc(config_path=config["source"])
     if args.check_config:
         print(f"python={sys.executable}")
         print(f"backend={args.backend}")
-        print(f"uart_port={args.uart_port or 'auto-discover'}")
+        print(f"uart_port={args.uart_port or 'not-configured'}")
         print(f"listen_bind={args.host}:{args.port}")
         normalized_host = str(args.host).strip().lower()
         same_host = (
@@ -1196,15 +1423,6 @@ def _main(argv: list[str] | None = None) -> int:
         ),
     )
 
-    def report_candidates(candidates: tuple[str, ...], setup_attempts: tuple[str, ...]) -> None:
-        _server_log(
-            "UART PROBE",
-            detail=_log_fields(
-                ports=",".join(candidates) if candidates else "none",
-                setup_reason="; ".join(setup_attempts) or None,
-            ),
-        )
-
     try:
         resolution = resolve_backend(
             args.backend,
@@ -1213,7 +1431,6 @@ def _main(argv: list[str] | None = None) -> int:
             target=target,
             params=config["params"],
             clock_hz=config["clock_hz"],
-            on_candidates=report_candidates,
         )
     except BackendResolutionError as exc:
         _server_log(

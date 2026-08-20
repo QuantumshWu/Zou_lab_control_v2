@@ -44,7 +44,9 @@ class VirtualPulseStreamer(PulseStreamer):
         self.world = world
         self.camera_trigger_channel = channel
         self._world_thread: threading.Thread | None = None
-        self._logical_deadline: float | None = None
+        self._world_error: BaseException | None = None
+        self._logical_time_seconds = 0.0
+        self._logical_wall_at = time.monotonic()
         super().__init__(
             MemoryRegisterTransport(
                 geom=geometry,
@@ -56,118 +58,119 @@ class VirtualPulseStreamer(PulseStreamer):
             target=pulse_target_from_xdc(config_path=config["source"]),
         )
 
-    def fire(self, *, forever: bool = False) -> None:
-        super().fire(forever=forever)
+    def fire(self, *, cycles: int | None = 1) -> None:
+        worker = self._world_thread
+        if worker is not None and worker.is_alive():
+            raise RuntimeError("the previous virtual pulse is still playing")
+        super().fire(cycles=cycles)
         applied = self.applied()
         if applied is None:  # PulseStreamer.fire() requires a loaded program.
             raise RuntimeError("virtual sequencer fired without an applied program")
         points = self._world_points(applied)
-        duration = sum(
-            run_duration_seconds(
-                applied.program,
-                None if point is None else point,
-            )
-            for point in points
-        )
         with self._lock:
-            self._logical_deadline = (
-                None
-                if forever
-                else time.monotonic() + duration
-            )
-        self._fire_world(applied, points)
-        if forever:
-            self._world_thread = threading.Thread(
-                target=self._repeat_world,
-                args=(applied, points, duration),
-                name="zlc-virtual-world",
-                daemon=True,
-            )
-            self._world_thread.start()
+            self._world_error = None
+        worker = threading.Thread(
+            target=self._play_world,
+            args=(applied, points, cycles is None),
+            name="zlc-virtual-world",
+            daemon=True,
+        )
+        self._world_thread = worker
+        try:
+            worker.start()
+        except BaseException:
+            self._world_thread = None
+            super().safe()
+            raise
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
-        with self._lock:
-            deadline = self._logical_deadline
-        if deadline is not None:
-            remaining = max(0.0, deadline - time.monotonic())
-            if timeout is not None and remaining > max(0.0, float(timeout)):
-                # A timeout is "answer within this long", not "answer now":
-                # returning immediately turns every polling caller into a spin
-                # at full speed for the length of the table.  The slice the
-                # caller asked for is the slice it waits.
-                time.sleep(max(0.0, float(timeout)))
+        started = time.monotonic()
+        worker = self._world_thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(None if timeout is None else max(0.0, float(timeout)))
+            if worker.is_alive():
                 return None
-            if remaining > 0.0:
-                time.sleep(remaining)
-            timeout = (
-                None
-                if timeout is None
-                else max(0.0, float(timeout) - remaining)
-            )
+            self._world_thread = None
+        with self._lock:
+            error, self._world_error = self._world_error, None
+        if error is not None:
+            raise RuntimeError("virtual world playback failed") from error
+        if timeout is not None:
+            timeout = max(0.0, float(timeout) - (time.monotonic() - started))
         report = super().wait_done(timeout)
-        if report is not None:
-            with self._lock:
-                self._logical_deadline = None
         return report
 
     def safe(self) -> SafeReadback:
         try:
             return super().safe()
         finally:
-            with self._lock:
-                self._logical_deadline = None
-            self._join_world()
-            callback = getattr(self.world, "safe", None)
-            if callable(callback):
-                callback()
+            try:
+                self._join_world()
+            finally:
+                callback = getattr(self.world, "safe", None)
+                if callable(callback):
+                    callback()
 
-    def _repeat_world(
+    def _play_world(
         self,
         applied: AppliedState,
         points: tuple[tuple[int, ...] | None, ...],
-        duration: float,
+        forever: bool,
     ) -> None:
-        cadence = max(0.001, duration)
-        while not self._stop.wait(cadence):
-            state = self.snapshot()
-            if not state["firing"] or not state["forever"]:
-                return
-            self._fire_world(applied, points)
+        callback = getattr(self.world, "fire", None)
+        try:
+            while True:
+                for point in points:
+                    if self._stop.is_set():
+                        return
+                    cycle_start = time.monotonic()
+                    with self._lock:
+                        logical_cycle_start = self._logical_time_seconds + max(
+                            0.0, cycle_start - self._logical_wall_at
+                        )
+                    if callable(callback):
+                        callback(
+                            applied.program,
+                            table=point,
+                            camera_channel=self.camera_trigger_channel,
+                            cycle_start_seconds=logical_cycle_start,
+                        )
+                    duration = run_duration_seconds(
+                        applied.program,
+                        None if point is None else point,
+                    )
+                    cycle_end = cycle_start + duration
+                    with self._lock:
+                        self._logical_time_seconds = logical_cycle_start + duration
+                        self._logical_wall_at = cycle_end
+                    if self._stop.wait(max(0.0, cycle_end - time.monotonic())):
+                        return
+                if not forever:
+                    return
+        except BaseException as error:
+            with self._lock:
+                self._world_error = error
 
     def _join_world(self) -> None:
-        worker, self._world_thread = self._world_thread, None
+        worker = self._world_thread
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=2.0)
+            if worker.is_alive():
+                raise RuntimeError("virtual world playback did not stop")
+        self._world_thread = None
+        with self._lock:
+            error, self._world_error = self._world_error, None
+        if error is not None:
+            raise RuntimeError("virtual world playback failed") from error
 
     def _world_points(
         self,
         applied: AppliedState,
     ) -> tuple[tuple[int, ...] | None, ...]:
-        if applied.slot_values:
-            rows = (applied.slot_values,)
-        elif applied.scan_rows:
-            rows = applied.scan_rows
-        else:
-            return (None,)
-        with self._lock:
-            sweeps = self._scan_sweeps
-        return rows * sweeps
-
-    def _fire_world(
-        self,
-        applied: AppliedState,
-        points: tuple[tuple[int, ...] | None, ...],
-    ) -> None:
-        callback = getattr(self.world, "fire", None)
-        if not callable(callback):
-            return
-        for point in points:
-            callback(
-                applied.program,
-                table=point,
-                camera_channel=self.camera_trigger_channel,
-            )
-
+        rows: tuple[tuple[int, ...] | None, ...] = applied.rows or (None,)
+        if applied.cycles is None:
+            return rows
+        return tuple(rows[index % len(rows)] for index in range(applied.cycles))
 
 class VirtualSequencer(SequencerDevice):
     def __init__(

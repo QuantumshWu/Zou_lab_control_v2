@@ -835,7 +835,7 @@ class _AppliedEcho:
     """What the board is holding, in the shape the real one reports it."""
 
     source: object
-    scan_rows: tuple
+    rows: tuple
 
 
 class _Sequencer:
@@ -860,7 +860,7 @@ class _Sequencer:
         self.never_done = never_done
         self._digest = ""
         self._firing = False
-        self._forever = False
+        self._cycles: int | None = 1
         self._applied = None
         self.wait_timeouts: list[object] = []
         self.scan_rows: tuple[tuple[int, ...], ...] = ()
@@ -874,27 +874,21 @@ class _Sequencer:
         self.events.append("describe")
         return self.description or _board_description()
 
-    def load(self, prog, *, source=None) -> None:
+    def load(self, prog, *, source=None, rows=()) -> None:
         self.events.append("load")
         self._digest = prog.digest
         self._firing = False
+        self.scan_rows = tuple(tuple(int(value) for value in row) for row in rows)
         # The real board keeps what it was handed, which is what Sync reads
         # back; a double that forgets it answers "nothing applied" forever.
         self._applied = _AppliedEcho(source, self.scan_rows)
 
-    def write_scan_table(self, rows, *, sweeps: int = 1) -> None:
-        self.events.append("write_scan_table")
-        self.scan_rows = tuple(tuple(int(value) for value in row) for row in rows)
-        #: A table is given once and played this many times; the double has to
-        #: declare that, or a caller could go back to duplicating rows unseen.
-        self.scan_sweeps = int(sweeps)
-
-    def fire(self, *, forever: bool = False) -> None:
-        self.events.append("fire forever" if forever else "fire")
+    def fire(self, *, cycles: int | None = 1) -> None:
+        self.events.append("fire forever" if cycles is None else "fire")
         if self.fail_on_fire:
             raise RuntimeError("board refused the shot")
         self._firing = True
-        self._forever = bool(forever)
+        self._cycles = cycles
 
     def wait_done(self, timeout=None) -> object | None:
         self.events.append("wait_done")
@@ -915,7 +909,7 @@ class _Sequencer:
             "opened": True,
             "loaded": bool(self._digest),
             "firing": self._firing,
-            "forever": self._forever,
+            "cycles": self._cycles,
             "applied_digest": self._digest,
         }
 
@@ -992,7 +986,7 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
     )
     board.events.clear()
     try:
-        assert presenter.fire(forever=False) is True
+        assert presenter.fire(cycles=1) is True
         assert board.events == ["load", "fire"]
         # Started, not finished: nothing waits for the board any more, so a run
         # that was just asked for is a run that is going.
@@ -1050,15 +1044,15 @@ def test_a_finite_run_does_not_block_on_the_board(sequence) -> None:
     could not be delivered.
 
     Nothing is lost by not waiting.  Firing over an unfinished shot cannot
-    happen: the device requires an idle board for load, write_slots,
-    write_scan_table and fire, and raises otherwise.
+    happen: the device requires an idle board for load and fire, and raises
+    otherwise.
     """
 
     view = _EditorView()
     board = _Sequencer(never_done=True)
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
     try:
-        assert presenter.fire(forever=False) is True
+        assert presenter.fire(cycles=1) is True
         assert "wait_done" not in board.events, "the GUI thread waited on the board"
         assert board.events.count("fire") == 1
         assert not view.warnings, repr(view.warnings)
@@ -1313,7 +1307,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         presenter.connect_to("given", "")
     presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
     assert presenter.compile().scan_coeff_frac_bits == 3
-    assert presenter.fire(forever=True) is True
+    assert presenter.fire(cycles=None) is True
     presenter.close()
     assert board.closed is False
     assert board.events[-1] == "safe"
@@ -1328,7 +1322,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         sequencer=refusing,
         device_use=retained_use,
     )
-    assert retained.fire(forever=True) is True
+    assert retained.fire(cycles=None) is True
     with pytest.raises(RuntimeError, match="could not release"):
         retained.close()
     with pytest.raises(RuntimeError, match="PulseGUI"):
@@ -1466,7 +1460,8 @@ def test_pulse_window_waits_for_asynchronous_retirement(
     monkeypatch.setattr(window, "set_summary", summaries.append)
     monkeypatch.setattr(window, "show_warning", warnings.append)
     window.fire_requested.emit()
-    assert board.snapshot()["firing"] is True
+    _process_qt_until(application, lambda: board.snapshot()["firing"] is True)
+    summaries.clear()
 
     try:
         owner_turn: list[bool] = []
@@ -1493,6 +1488,134 @@ def test_pulse_window_waits_for_asynchronous_retirement(
         if window.is_visible():
             window.close()
             _process_qt_until(application, lambda: not window.is_visible())
+
+
+def test_pulse_window_stop_projects_stopping_before_background_safe(
+    tmp_path, monkeypatch
+) -> None:
+    """The ordinary Stop click leaves Qt before the board acknowledges SAFE."""
+
+    from threading import Event, Timer
+
+    started = Event()
+    release = Event()
+
+    class _SlowSafe(_Sequencer):
+        def safe(self) -> None:
+            started.set()
+            release.wait(1.0)
+            super().safe()
+
+    board = _SlowSafe(description=_board_description())
+    application, _QtCore, window = _formal_pulse_window(
+        tmp_path,
+        monkeypatch,
+        sequence=_ordinary_sequence(),
+        board=board,
+    )
+    summaries: list[str] = []
+    monkeypatch.setattr(window, "set_summary", summaries.append)
+    window.fire_requested.emit()
+    _process_qt_until(application, lambda: board.snapshot()["firing"] is True)
+    summaries.clear()
+    try:
+        fallback = Timer(0.1, release.set)
+        fallback.start()
+        before = time.monotonic()
+        window.stop_requested.emit()
+        elapsed = time.monotonic() - before
+        assert elapsed < 0.05, "Stop waited for SAFE on the Qt owner thread"
+        assert summaries == ["Stopping..."]
+        _process_qt_until(application, started.is_set)
+        release.set()
+        _process_qt_until(application, lambda: not board.snapshot()["firing"])
+    finally:
+        fallback.cancel()
+        release.set()
+        if window.is_visible():
+            window.close()
+            _process_qt_until(application, lambda: not window.is_visible())
+
+
+def test_formal_stop_bypasses_blocked_preview_and_device_command(
+    tmp_path, monkeypatch
+) -> None:
+    """Preview, ordinary device work and SAFE are three independent owners."""
+
+    from threading import Event
+
+    from zlc_plot import RasterPlotHost
+
+    preview_started = Event()
+    release_preview = Event()
+    load_started = Event()
+    release_load = Event()
+    safe_started = Event()
+    release_safe = Event()
+    real_wait = RasterPlotHost.wait_for_front
+
+    def blocked_front(self, *args, **kwargs):
+        preview_started.set()
+        assert release_preview.wait(2.0)
+        return real_wait(self, *args, **kwargs)
+
+    class _BlockedLoad(_Sequencer):
+        def load(self, *args, **kwargs) -> None:
+            load_started.set()
+            assert release_load.wait(2.0)
+            super().load(*args, **kwargs)
+
+        def safe(self) -> None:
+            safe_started.set()
+            assert release_safe.wait(2.0)
+            super().safe()
+
+    monkeypatch.setattr(RasterPlotHost, "wait_for_front", blocked_front)
+    board = _BlockedLoad(description=_board_description())
+    application, QtCore, window = _formal_pulse_window(
+        tmp_path, monkeypatch, sequence=_ordinary_sequence(), board=board
+    )
+    summaries: list[str] = []
+    monkeypatch.setattr(window, "set_summary", summaries.append)
+    try:
+        window.page_changed.emit("Preview")
+        _process_qt_until(application, preview_started.is_set)
+
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        before = time.monotonic()
+        window.fire_requested.emit()
+        assert time.monotonic() - before < 0.05
+        _process_qt_until(
+            application, lambda: load_started.is_set() and bool(heartbeat), 0.2
+        )
+
+        before = time.monotonic()
+        window.stop_requested.emit()
+        assert time.monotonic() - before < 0.05
+        assert summaries[-1] == "Stopping..."
+        _process_qt_until(application, safe_started.is_set, 0.2)
+        assert not release_preview.is_set()
+        assert not release_load.is_set(), "SAFE waited behind ordinary device work"
+
+        release_safe.set()
+        release_load.set()
+        _process_qt_until(
+            application,
+            lambda: not window.presenter._device_busy
+            and not window.presenter._stop_busy,
+            3.0,
+        )
+        assert board.snapshot()["firing"] is False
+        assert summaries[-1] == "Stopped", summaries
+        assert summaries.count("Started") == 0, "late fire completion overwrote Stop"
+    finally:
+        release_safe.set()
+        release_load.set()
+        release_preview.set()
+        if window.is_visible():
+            window.close()
+            _process_qt_until(application, lambda: not window.is_visible(), 4.0)
 
 
 def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
@@ -2211,8 +2334,6 @@ def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, s
     """A held point is resolved into an ordinary repeating pulse."""
 
     board = _Sequencer()
-    written: list = []
-    board.write_slots = lambda values: written.append(tuple(values))
     presenter.sequencer = board
     assert presenter.adopt_board() is True
     board.events.clear()
@@ -2226,7 +2347,7 @@ def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, s
 
     presenter.view.scan_hold_requested.emit()
     assert board.events[-3:] == ["safe", "load", "fire forever"]
-    assert written == [], "a held point must not become a one-row scan table"
+    assert board._applied.rows == (), "a held point must not become a one-row scan"
 
     presenter.view.scan_step_requested.emit(1)
     assert board.events[-3:] == ["safe", "load", "fire forever"]
@@ -2237,13 +2358,17 @@ def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, s
     for _ in range(10):
         presenter.view.scan_step_requested.emit(-1)
     assert presenter._held_point == 0
-    assert written == []
+    assert board._applied.rows == ()
 
 
 def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     uploaded: list = []
     board = _Sequencer()
-    board.write_scan_table = lambda rows, sweeps=1: uploaded.append(tuple(rows))
+    original_load = board.load
+    board.load = lambda program, *, source=None, rows=(): (
+        uploaded.append(tuple(rows)),
+        original_load(program, source=source, rows=rows),
+    )[-1]
     presenter.sequencer = board
     assert presenter.adopt_board() is True
     board.events.clear()
@@ -2844,18 +2969,8 @@ def test_new_pulse_replaces_the_whole_editor_state_in_one_candidate(
         presenter.close()
 
 
-def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
-    """The preview said "x3" and the board was told "forever" anyway.
-
-    A bracket over the whole pulse replaces the outer level -- that rule was
-    drawn in the preview and enforced nowhere, so the outermost bracket was
-    the one bracket with no effect on the hardware, while an inner one worked.
-    N times, over and over, is indistinguishable from over and over.
-
-    The count itself never needed carrying: the compiler already encodes the
-    span as the program's one loop region, so ONE fire plays it N times.  All
-    that was missing was not wrapping that in a forever run.
-    """
+def test_repeat_regions_never_choose_the_outer_execution_count(sequence) -> None:
+    """Whole and partial brackets are timeline loops; On Pulse remains continuous."""
 
     view = _EditorView()
     board = _Sequencer()
@@ -2868,25 +2983,13 @@ def test_a_bracket_around_the_whole_pulse_reaches_the_board(sequence) -> None:
 
         presenter.set_repeat(ids[0], ids[-1], 3)
         assert presenter.fire() is True
-        assert board.events == ["load", "fire"], board.events
+        assert board.events == ["load", "fire forever"], board.events
         assert presenter.compile().loop_count == 3
 
-        # A bracket over PART leaves the outer level alone: still until Stop.
+        # A bracket over PART has the same outer execution meaning.
         board.events.clear()
         presenter.set_repeat(ids[1], ids[2], 5)
         assert presenter.fire() is True
-        # The finite run above is still going -- nothing waits it out any more
-        # -- so this press stops it first, which is what "off then on" means.
-        assert board.events == ["safe", "load", "fire forever"], board.events
-
-        # And asking explicitly still wins over what the document says.  The
-        # board is playing forever by now, so this press is the ordinary bench
-        # case: On Pulse over a running pulse, which is off THEN on.  A program
-        # cannot be loaded into a firing streamer -- the device refuses, and is
-        # right to -- so the stop belongs to the gesture that needs it.
-        board.events.clear()
-        presenter.set_repeat(ids[0], ids[-1], 3)
-        assert presenter.fire(forever=True) is True
         assert board.events == ["safe", "load", "fire forever"], board.events
     finally:
         presenter.close()
@@ -2990,8 +3093,6 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
 
     view = presenter.view
     board = _Sequencer()
-    written: list = []
-    board.write_slots = lambda row: written.append(tuple(row))
     board.cursor = lambda: 4
     presenter.sequencer = board
     assert presenter.adopt_board() is True
@@ -3008,7 +3109,7 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
     assert board.events == ["safe", "load", "fire forever"], board.events
     assert presenter._held_point == 4
     held = board._applied.source
-    assert written == []
+    assert board._applied.rows == ()
 
     board.events.clear()
     view.scan_step_requested.emit(1)
@@ -3018,7 +3119,7 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
 
     view.scan_step_requested.emit(-1)
     assert board._applied.source == held, "stepping back returns to the same row"
-    assert written == []
+    assert board._applied.rows == ()
 
 
 def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
@@ -3030,9 +3131,11 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
 
     uploaded: list = []
     board = _Sequencer()
-    board.write_scan_table = lambda rows, sweeps=1: uploaded.append(
-        (len(rows), len(rows[0]), sweeps)
-    )
+    original_load = board.load
+    board.load = lambda program, *, source=None, rows=(): (
+        uploaded.append((len(rows), len(rows[0]))),
+        original_load(program, source=source, rows=rows),
+    )[-1]
     presenter.sequencer = board
     assert presenter.adopt_board() is True
     board.events.clear()
@@ -3048,9 +3151,7 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
 
-    # The default is until Stop, which is what On Pulse means everywhere else
-    # in this window -- and the alternative is a finite run the client waits
-    # out by asking the server every 10 ms whether it is done.
+    # Zero repeats means until Stop; a positive repeat count is finite.
     board.events.clear()
     assert presenter.fire() is True
     assert "fire forever" in board.events, board.events
@@ -3062,7 +3163,8 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     # register in the RTL, but there is no reason to send the same numbers
     # three times to say so: which row a point takes is decided when a bank
     # is refilled.
-    assert uploaded[-1] == (7, 1, 3), "seven one-scan-slot rows, played three times"
+    assert uploaded[-1] == (7, 1)
+    assert board._cycles == 21, "seven rows, played for three complete sweeps"
     assert len(board._applied.source.slots) == 1
     assert board._applied.source.api_parameters == ()
     # And a counted number of sweeps is a finite run: wrapping it in the outer
@@ -3073,7 +3175,8 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     view.scan_repeats_committed.emit(0)
     board.events.clear()
     assert presenter.fire() is True
-    assert uploaded[-1] == (7, 1, 1), "zero means until Stop: one sweep, forever"
+    assert uploaded[-1] == (7, 1)
+    assert board._cycles is None, "zero means until Stop"
     assert "fire forever" in board.events, board.events
 
 
@@ -3109,7 +3212,7 @@ def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -
 
     board.events.clear()
     assert presenter.fire() is True
-    assert "write_scan_table" not in board.events
+    assert board._applied.rows == ()
     assert "fire forever" in board.events, (
         "with no scan, the pulse's own repeat meaning governs: " + str(board.events)
     )
@@ -3130,11 +3233,11 @@ def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:
     presenter = PulseEditorPresenter(view, sequence, dial=lambda _m, _e: board)
     try:
         presenter.connect_to("virtual", "")
-        assert presenter.fire(forever=True) is True
+        assert presenter.fire(cycles=None) is True
         assert presenter.running is True
 
         board.events.clear()
-        assert presenter.fire(forever=True) is True, "a second On Pulse must work"
+        assert presenter.fire(cycles=None) is True, "a second On Pulse must work"
         assert board.events == ["safe", "load", "fire forever"], board.events
     finally:
         presenter.close()

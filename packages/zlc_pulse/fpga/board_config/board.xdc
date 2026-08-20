@@ -1,5 +1,6 @@
  #IO 管脚约束
 set_property -dict {PACKAGE_PIN R4 IOSTANDARD LVCMOS33} [get_ports clk]
+create_clock -period 20.000 -name zlc_fabric_clk [get_ports clk]
 # UART 快速控制侧信道 (fast-control link; ~82ms 程序上传 / ~sub-ms scan step vs ~1s JTAG-Tcl).
 # 正点原子达芬奇 ATK-DF7A35 板载 USB-UART (CH340C, U14, 3.3V 直连无电平转换) -> "USB_UART" 连接器.
 # 引脚来自达芬奇 IO 引脚分配表 + 原理图 POWER&UART.SchDoc: uart_rxd=U5(FPGA收<-CH340_TXD), uart_txd=T6(FPGA发->CH340_RXD).

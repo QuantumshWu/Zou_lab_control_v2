@@ -35,7 +35,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, CAMERA_CHANNEL, build_calibration_pulse
+from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
 def _fire_windows(sequencer, windows: int) -> None:
@@ -52,7 +52,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         assert installation.failures == {}
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer.describe())
         sequencer.load(program)
 
         windows = CALIBRATION_FRAMES_PER_CYCLE
@@ -78,45 +78,6 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         plane.close()
 
 
-def test_resolving_a_pulse_says_nothing_about_the_camera() -> None:
-    """A resolved pulse is a program to play, not a description of frames.
-
-    It used to report how many camera windows it opened and how long each was,
-    and the measurement believed it -- which made an acquisition depend on the
-    shape of a document the operator writes.  A camera reads the frames it was
-    configured to read.
-    """
-
-    installation = create_installation("virtual")
-    try:
-        _program, metadata = build_calibration_pulse(
-            installation.device("sequencer").describe()
-        )
-    finally:
-        installation.close()
-    assert set(metadata) == {"repeat_forever"}
-
-
-def test_the_pulse_and_the_device_agree_on_which_line_triggers_the_camera() -> None:
-    """The two live in different packages and may not import each other.
-
-    They can only agree by being checked against each other, so a rename on
-    either side fails here instead of producing a wrong frame count at the
-    bench.
-    """
-
-    from zlc_atom.devices.simulation import CAMERA_TRIGGER_CHANNEL
-
-    installation = create_installation("virtual")
-    try:
-        _program, metadata = build_calibration_pulse(
-            installation.device("sequencer").describe()
-        )
-    finally:
-        installation.close()
-    assert CAMERA_CHANNEL == CAMERA_TRIGGER_CHANNEL
-
-
 def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
     """Superseding is what makes a second run possible; check it happens."""
 
@@ -125,7 +86,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program, metadata = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer.describe())
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(

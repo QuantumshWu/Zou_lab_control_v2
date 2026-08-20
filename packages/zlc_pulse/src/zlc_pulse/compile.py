@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 import math
-from typing import Mapping, Sequence
 
 from .canonical import canonical_digest
 from .model import (
     FIELD_DAC,
-    FIELD_DELAY,
     FIELD_DURATION,
+    MAXIMUM_REPEAT_COUNT,
     PORT_CLOCK,
     PORT_DAC,
     PulseFieldRef,
@@ -18,7 +19,7 @@ from .model import (
     PulseSlot,
     exact_ticks,
 )
-from .wire import StreamerParams
+from .wire import StreamerParams, build_fingerprint
 
 
 COMPILER_ID = "zlc-pulse-native"
@@ -72,19 +73,17 @@ class TargetBusSegment:
 class CompiledProgram:
     clock_hz: float
     target_abi_fingerprint: str
+    geometry_fingerprint: int
     channels: tuple[str, ...]
     ticks: tuple[int, ...]
     masks: tuple[int, ...]
     duration_seconds: float
-    repeat_forever: bool
     loop_start_index: int
     loop_end_tick: int
     loop_count: int
     slot_kinds: tuple[str, ...] = ()
     loop_end_slot_coeffs: tuple[int, ...] = ()
     tick_slot_coeffs: tuple[tuple[int, ...], ...] = ()
-    scan_points: tuple[tuple[int, ...], ...] = ()
-    scan_point_durations: tuple[float, ...] = ()
     scan_coeff_frac_bits: int = 0
     bus_names: tuple[str, ...] = ()
     bus_segments: tuple[TargetBusSegment, ...] = ()
@@ -93,12 +92,18 @@ class CompiledProgram:
     clk_enable: int = 0
     logical_digital_outputs: tuple[tuple[str, str], ...] = ()
     bus_safe_values: tuple[int, ...] = ()
-    slot_units: tuple[str, ...] = ()
-    slot_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if isinstance(self.clock_hz, bool) or not isinstance(self.clock_hz, (int, float)):
+            raise TypeError("clock_hz must be numeric")
         if not math.isfinite(float(self.clock_hz)) or self.clock_hz <= 0:
             raise ValueError("clock_hz must be positive and finite")
+        if (
+            isinstance(self.geometry_fingerprint, bool)
+            or not isinstance(self.geometry_fingerprint, int)
+            or not 0 <= self.geometry_fingerprint < (1 << 32)
+        ):
+            raise ValueError("geometry_fingerprint must be an unsigned 32-bit integer")
         channels = tuple(self.channels)
         ticks = tuple(int(value) for value in self.ticks)
         masks = tuple(int(value) for value in self.masks)
@@ -113,7 +118,7 @@ class CompiledProgram:
             raise ValueError("program edge tick bases must be non-decreasing")
         if not slot_kinds and any(right <= left for left, right in zip(ticks, ticks[1:])):
             raise ValueError("static program edge ticks must be strictly increasing")
-        if any(kind not in (FIELD_DURATION, FIELD_DAC, FIELD_DELAY) for kind in slot_kinds):
+        if any(kind not in (FIELD_DURATION, FIELD_DAC) for kind in slot_kinds):
             raise ValueError("program contains an unsupported slot kind")
         slot_count = len(slot_kinds)
         coeffs = tuple(tuple(int(value) for value in row) for row in self.tick_slot_coeffs)
@@ -122,71 +127,36 @@ class CompiledProgram:
         loop_coeffs = tuple(int(value) for value in self.loop_end_slot_coeffs)
         if len(loop_coeffs) != slot_count:
             raise ValueError("program loop coefficient width differs from slot count")
-        points = tuple(tuple(int(value) for value in row) for row in self.scan_points)
-        if any(len(row) != slot_count for row in points):
-            raise ValueError("program scan row width differs from slot count")
-        if len(self.scan_point_durations) != len(points):
-            raise ValueError("scan point duration count differs from scan rows")
         channel_delays = tuple(self.channel_delays) or (0,) * len(channels)
         if len(channel_delays) != len(channels):
             raise ValueError("channel delay vector must match channels")
-        if self.loop_start_index < 0 or self.loop_start_index >= len(ticks):
+        if (
+            isinstance(self.loop_start_index, bool)
+            or not isinstance(self.loop_start_index, int)
+            or self.loop_start_index < 0
+            or self.loop_start_index >= len(ticks)
+        ):
             raise ValueError("loop_start_index is outside the edge table")
-        if self.loop_count < 1 or self.loop_end_tick <= ticks[self.loop_start_index]:
+        if (
+            isinstance(self.loop_count, bool)
+            or not isinstance(self.loop_count, int)
+            or not 1 <= self.loop_count <= MAXIMUM_REPEAT_COUNT
+            or self.loop_end_tick <= ticks[self.loop_start_index]
+        ):
             raise ValueError("program loop metadata is invalid")
-        if len(self.slot_units) not in (0, slot_count):
-            raise ValueError("slot unit width differs from slot count")
-        if len(self.slot_ids) not in (0, slot_count):
-            raise ValueError("slot id width differs from slot count")
         object.__setattr__(self, "channels", channels)
         object.__setattr__(self, "ticks", ticks)
         object.__setattr__(self, "masks", masks)
         object.__setattr__(self, "slot_kinds", slot_kinds)
         object.__setattr__(self, "tick_slot_coeffs", coeffs)
         object.__setattr__(self, "loop_end_slot_coeffs", loop_coeffs)
-        object.__setattr__(self, "scan_points", points)
         object.__setattr__(self, "bus_segments", tuple(self.bus_segments))
         object.__setattr__(self, "bus_delays", tuple(self.bus_delays))
         object.__setattr__(self, "channel_delays", tuple(int(value) for value in channel_delays))
-        object.__setattr__(self, "slot_units", tuple(self.slot_units))
-        object.__setattr__(self, "slot_ids", tuple(self.slot_ids))
 
     @property
     def slot_count(self) -> int:
         return len(self.slot_kinds)
-
-    @property
-    def scan_enabled(self) -> bool:
-        return bool(self.scan_points)
-
-    def camera_window_count(self, channel: str, table: object = None) -> int:
-        """How many windows this program opens on one lane.
-
-        Asked of the program, so a device twin does not keep its own copy of
-        the rising-edge rule -- a copy is a second answer to a question the
-        board settles in hardware.
-
-        A program that carries SLOTS has no timing of its own: the scan table
-        supplies it.  Pass the played rows to ask about them; pass one row to
-        ask what a single played cycle opens.
-        """
-
-        from .schedule import trigger_times  # noqa: PLC0415 -- one direction only
-
-        return int(len(trigger_times(self, str(channel), table)))
-
-    def camera_window_exposures(
-        self, channel: str, table: object = None
-    ) -> tuple[float, ...]:
-        """How long each of those windows is open, in seconds."""
-
-        from .schedule import trigger_windows  # noqa: PLC0415 -- one direction only
-
-        clock = float(self.clock_hz)
-        return tuple(
-            (end - start) / clock
-            for start, end in trigger_windows(self, str(channel), table)
-        )
 
     @property
     def digest(self) -> str:
@@ -281,41 +251,13 @@ def _default_slot_value(sequence: PulseSequence, slot: PulseSlot) -> int:
         step = next(item for item in period.analog_steps if item.port == ref.port)
         port = sequence.target.by_key[ref.port]
         return int(step.value - port.signed_range[0])
-    delay = next((item for item in sequence.delays if item.port == ref.port), None)
-    if delay is None:
-        return 0
-    return exact_ticks(delay.value, delay.unit, sequence.time_step_ns, "slot delay", minimum=None)
+    raise ValueError(f"unsupported scan slot kind {ref.kind!r}")
 
 
-def _slot_row(sequence: PulseSequence, values: Mapping[str, object] | Sequence[object] | None = None) -> tuple[int, ...]:
-    if values is None:
-        return tuple(_default_slot_value(sequence, slot) for slot in sequence.slots)
-    if isinstance(values, Mapping):
-        raw = [values.get(slot.slot_id, values.get(slot.field_ref.period_id or slot.field_ref.port)) for slot in sequence.slots]
-    else:
-        raw = list(values)
-    if len(raw) != sequence.slot_count:
-        raise ValueError("slot row width differs from the sequence slot count")
-    result = []
-    for slot, value in zip(sequence.slots, raw):
-        if slot.kind == FIELD_DAC:
-            port = sequence.target.by_key[slot.field_ref.port]
-            code = int(round(float(value)))
-            if port.signed_range[0] <= code <= port.signed_range[1]:
-                code -= port.signed_range[0]
-            result.append(code)
-        elif slot.kind == FIELD_DURATION:
-            result.append(exact_ticks(value, slot.unit, sequence.time_step_ns, "slot duration"))
-        else:
-            result.append(exact_ticks(value, slot.unit, sequence.time_step_ns, "slot delay", minimum=None))
-    return tuple(result)
+def _nominal_slot_row(sequence: PulseSequence) -> tuple[int, ...]:
+    """The authored values used only to validate the compiled affine form."""
 
-
-def _table_rows(sequence: PulseSequence) -> tuple[tuple[int, ...], ...]:
-    # Table data is deliberately not part of a compiled program.  The single
-    # nominal row is used only to check the affine edge ordering and duration;
-    # runtime rows arrive through the device table methods.
-    return (_slot_row(sequence),) if sequence.slots else ()
+    return tuple(_default_slot_value(sequence, slot) for slot in sequence.slots)
 
 
 def _period_starts(sequence: PulseSequence, binding: Mapping[PulseFieldRef, int], frac_bits: int) -> list[tuple[int, tuple[int, ...]]]:
@@ -495,14 +437,17 @@ def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: fl
         raise ValueError("sequence has more DAC buses than the streamer geometry")
     if any(port.width > params.bus_width for port in sequence.target.ports if port.kind == PORT_DAC):
         raise ValueError("a DAC port is wider than the streamer geometry")
+    if isinstance(clock_hz, bool) or not isinstance(clock_hz, (int, float)):
+        raise TypeError("clock_hz must be numeric")
     clock_hz = float(clock_hz)
     if not math.isfinite(clock_hz) or clock_hz <= 0:
         raise ValueError("clock_hz must be positive and finite")
+    if Fraction(str(sequence.time_step_ns)) * Fraction(str(clock_hz)) != 1_000_000_000:
+        raise ValueError("sequence time_step_ns does not match the compiler clock_hz")
     frac_bits = params.coeff_frac_bits if sequence.slots else 0
     binding = _slot_index(sequence)
     starts = _period_starts(sequence, binding, frac_bits)
-    rows = _table_rows(sequence)
-    reference = rows[0] if rows else tuple()
+    reference = _nominal_slot_row(sequence)
     ticks, masks, coeffs = _effective_rows(sequence, starts, frac_bits, reference)
     clk_enable = 0
     lane_index = {lane: index for index, lane in enumerate(sequence.target.raw_lanes)}
@@ -524,14 +469,15 @@ def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: fl
             repeat_start_index = repeat_matches[0]
         loop_end_tick, loop_end_coeffs = starts[end_period + 1]
         loop_count = sequence.repeat.count
-    point_durations = []
-    for point in rows:
-        final_tick = evaluate_affine_tick(ticks[-1], coeffs[-1], point, frac_bits)
-        loop_start = evaluate_affine_tick(ticks[repeat_start_index], coeffs[repeat_start_index], point, frac_bits)
-        loop_end = evaluate_affine_tick(loop_end_tick, loop_end_coeffs, point, frac_bits)
-        point_durations.append((final_tick + (loop_count - 1) * (loop_end - loop_start)) / clock_hz)
-    duration = sum(point_durations) if point_durations else (
-        ticks[-1] + (loop_count - 1) * (loop_end_tick - ticks[repeat_start_index])
+    final_tick = evaluate_affine_tick(ticks[-1], coeffs[-1], reference, frac_bits)
+    loop_start = evaluate_affine_tick(
+        ticks[repeat_start_index], coeffs[repeat_start_index], reference, frac_bits
+    )
+    nominal_loop_end = evaluate_affine_tick(
+        loop_end_tick, loop_end_coeffs, reference, frac_bits
+    )
+    duration = (
+        final_tick + (loop_count - 1) * (nominal_loop_end - loop_start)
     ) / clock_hz
     logical = tuple(sorted(
         (port.key, port.lanes[0])
@@ -545,19 +491,17 @@ def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: fl
     return CompiledProgram(
         clock_hz=clock_hz,
         target_abi_fingerprint=sequence.target.abi_fingerprint,
+        geometry_fingerprint=build_fingerprint(params),
         channels=sequence.target.raw_lanes,
         ticks=tuple(ticks),
         masks=tuple(masks),
         duration_seconds=duration,
-        repeat_forever=False,
         loop_start_index=repeat_start_index,
         loop_end_tick=loop_end_tick,
         loop_count=loop_count,
         slot_kinds=tuple(slot.kind for slot in sequence.slots),
         loop_end_slot_coeffs=tuple(loop_end_coeffs),
         tick_slot_coeffs=tuple(coeffs),
-        scan_points=(),
-        scan_point_durations=(),
         scan_coeff_frac_bits=frac_bits,
         bus_names=bus_names,
         bus_segments=bus_segments,
@@ -566,8 +510,6 @@ def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: fl
         clk_enable=clk_enable,
         logical_digital_outputs=logical,
         bus_safe_values=safe_values,
-        slot_units=tuple(slot.unit for slot in sequence.slots),
-        slot_ids=tuple(slot.slot_id for slot in sequence.slots),
     )
 
 

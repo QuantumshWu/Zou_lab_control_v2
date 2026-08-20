@@ -538,7 +538,6 @@ class SlmFeedbackTask:
         try:
             self.sequencer.safe()
             arm_sequencer(self.sequencer, pulse)
-            self.sequencer.write_scan_table(((),), sweeps=requested)
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
             if actual is None:
@@ -550,7 +549,7 @@ class SlmFeedbackTask:
                 current=0,
                 total=requested,
             )
-            self.sequencer.fire()
+            self.sequencer.fire(cycles=requested)
             result = capture.collect(retain_cycles=False)
             _check_cancelled(context)
             wait_for_board(self.sequencer, context)

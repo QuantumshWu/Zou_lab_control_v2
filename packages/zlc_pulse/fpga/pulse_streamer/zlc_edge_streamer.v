@@ -187,7 +187,9 @@ module zlc_edge_streamer #(
     output wire [CHANNEL_COUNT-1:0] out,
     output wire [BUS_COUNT*BUS_WIDTH-1:0] bus_out,
     output reg  running = 1'b0,
-    output reg  done = 1'b0
+    output reg  done = 1'b0,
+    output reg  overflow = 1'b0,
+    output wire physical_active
 );
 
     localparam integer MAX_BUS_SEGMENTS = (1 << BUS_SEG_ADDR_WIDTH);
@@ -349,6 +351,11 @@ module zlc_edge_streamer #(
     // inside any d-window.
     reg [GTIME_WIDTH-1:0] g_time = {GTIME_WIDTH{1'b0}};         // free-running ticks since FIRE
     reg [CHANNEL_COUNT-1:0] prev_undelayed = {CHANNEL_COUNT{1'b0}};
+    wire [NUM_DELAY_CH-1:0] evt_fifo_busy;
+    wire [NUM_DELAY_CH-1:0] evt_fifo_overflow;
+    wire [BUS_COUNT-1:0] bus_delay_busy;
+    wire [BUS_COUNT-1:0] bus_delay_overflow;
+    wire delay_runtime_busy = |evt_fifo_busy | |bus_delay_busy;
     // Event FIFOs are stored by DELAY SLOT (0..NUM_DELAY_CH-1), not by channel: slot s
     // serves channel evt_ch_of(s).  Only pin-driving channels get a slot, so the deep
     // (EVT_DEPTH) distributed RAM is not paid for the bus-member bits.
@@ -451,7 +458,7 @@ module zlc_edge_streamer #(
     // free-running g_time base, so its output IS the live output shifted by d, by construction.
     // Before its first descriptor emits the bus holds BUS_SAFE_VALUE (mid code = 0 V, first frame
     // correct); a ramp that reaches the frame boundary FREEZES (g_time >= dfend) instead of ramping
-    // into the next frame's idle window; g_time keeps advancing at done so the last d ticks drain
+    // into the next frame's idle window; g_time keeps advancing while draining so the last d ticks drain
     // (done-tail).  d==0 -> passthrough; d==1 -> one register; d>=2 -> the delayed player.
     localparam integer O_ISRAMP = 0;
     localparam integer O_STEEP  = O_ISRAMP + 1;
@@ -499,10 +506,16 @@ module zlc_edge_streamer #(
         wire                   h_up    = shead[O_UP];
         wire                   h_steep = shead[O_STEEP];
         wire                   h_ramp  = shead[O_ISRAMP];
+        wire bus_want_pop = (scnt != {(BEVT_ADDR+1){1'b0}}) && (h_emit == g_time);
         assign bus_out[gbs*BUS_WIDTH +: BUS_WIDTH] =
             (dbus == {TTL_DELAY_WIDTH{1'b0}})                    ? bus_value_active[gbs] :   // d==0
             (dbus == {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1})       ? dprev :                    // d==1
             (dstarted ? dval : BSAFE);                                                       // d>=2
+        assign bus_delay_busy[gbs] =
+            (scnt != {(BEVT_ADDR+1){1'b0}})
+            || (bus_out[gbs*BUS_WIDTH +: BUS_WIDTH] != BSAFE);
+        assign bus_delay_overflow[gbs] =
+            bus_seg_push[gbs] && (scnt == BUS_EVT_DEPTH[BEVT_ADDR:0]) && !bus_want_pop;
         always @(posedge clk) begin
             if (reset_sync) begin
                 swr <= {BEVT_ADDR{1'b0}}; srd <= {BEVT_ADDR{1'b0}}; scnt <= {(BEVT_ADDR+1){1'b0}};
@@ -512,8 +525,9 @@ module zlc_edge_streamer #(
                 dprev <= bus_value_active[gbs];                    // one-tick register for d==1
                 // PUSH a captured descriptor (the apply strobe is from LAST cycle; emit is far
                 // enough ahead for d>=2 that it cannot race the pop below).
-                dpushf = bus_seg_push[gbs] && (scnt != BUS_EVT_DEPTH[BEVT_ADDR:0]);
-                dpopf  = (scnt != {(BEVT_ADDR+1){1'b0}}) && (h_emit == g_time);
+                dpopf  = bus_want_pop;
+                dpushf = bus_seg_push[gbs]
+                         && ((scnt != BUS_EVT_DEPTH[BEVT_ADDR:0]) || dpopf);
                 if (dpushf) begin
                     sfifo[swr] <= { bus_seg_emit[gbs], bus_seg_rstop[gbs], bus_seg_fend[gbs],
                                     bus_seg_vstart[gbs], bus_seg_target[gbs], bus_seg_denom[gbs],
@@ -644,6 +658,8 @@ module zlc_edge_streamer #(
     wire scan_point0_ready_next =
         bank_ready[scan_wrap_base_next] &&
         ((scan_wrap_base_next ? bank_chunk1 : bank_chunk0) == {SCAN_COUNT_WIDTH{1'b0}});
+    wire scan_point0_ready_at_start = !(scan_enable && scan_count != 0)
+                                      || (bank_ready[0] && bank_chunk0 == 0);
 
     task zlc_bus_clear_runtime;
         integer i;
@@ -662,8 +678,8 @@ module zlc_edge_streamer #(
 
     // At DONE the undelayed bus snaps to BUS_SAFE_VALUE (zlc_bus_clear_runtime).  For a DELAYED bus
     // that snap must reach the output d ticks LATER (out[t]=in[t-d]); the delayed re-player only sees
-    // segments the engine APPLIED during RUN, so capture the done-time SAFE transition as a SAFE-HOLD
-    // edge descriptor (emit=g_time+d, isramp=0) -> the re-player drains to SAFE d ticks after done,
+    // segments the engine APPLIED during RUN, so capture the terminal SAFE transition as a SAFE-HOLD
+    // edge descriptor (emit=g_time+d, isramp=0) -> the re-player drains to SAFE d ticks later,
     // exactly like d==0 (bus_value_active) and d==1 (the dprev register) already do.  A bus with d<=1
     // needs no descriptor.  Called ONLY at the finite-program done edge (NOT at FIRE, where reset_sync
     // flushes the whole g_busseg FIFO anyway).
@@ -985,9 +1001,12 @@ module zlc_edge_streamer #(
     reg [EDGE_ADDR_WIDTH:0] bnd_count;   // edge count to seed with: prog_count at FIRE,
                                           // active_count at the (committed) frame/scan seams
     // EVENT-SCHEDULER boundary work: keep g_time advancing so queued toggles / value-changes pop.
-    // Set on EVERY tick once the engine has fired (running OR done-but-emitting), so the
+    // Set on EVERY physical tick once the engine has fired (running or draining), so the
     // schedulers delay the WHOLE output stream. No frame seam / skip counter is needed.
     reg bnd_delay_advance;     // advance the event schedulers' free-running g_time this tick
+    reg draining = 1'b0;       // logical program ended; physical delayed tail still owns pins
+    reg [1:0] drain_settle = 2'd0; // covers one-tick TTL/DAC registers before DONE
+    assign physical_active = running || draining;
 
     always @(posedge clk) begin
         reset_meta <= reset; reset_sync <= reset_meta;
@@ -997,7 +1016,7 @@ module zlc_edge_streamer #(
         // DAC segment-delay capture strobe: default LOW EVERY cycle so it is a clean 1-cycle pulse
         // regardless of which FSM path runs (zlc_bus_apply_segment during RUN, or the done-tail SAFE
         // hold below, both re-assert it LATER in this block -> the last NBA wins).  Previously it was
-        // only cleared inside zlc_bus_tick, so at done (tick engine idle) it latched high and re-pushed
+        // only cleared inside zlc_bus_tick, so at logical terminal it latched high and re-pushed
         // duplicate descriptors.
         for (bus_seg_i0 = 0; bus_seg_i0 < BUS_COUNT; bus_seg_i0 = bus_seg_i0 + 1) bus_seg_push[bus_seg_i0] <= 1'b0;
 
@@ -1020,7 +1039,7 @@ module zlc_edge_streamer #(
         bnd_delay_advance = 1'b0;
 
         if (reset_sync) begin
-            running <= 1'b0; done <= 1'b0; underflow <= 1'b0;
+            running <= 1'b0; done <= 1'b0; underflow <= 1'b0; overflow <= 1'b0; draining <= 1'b0; drain_settle <= 2'd0;
             state_mask <= {CHANNEL_COUNT{1'b0}};
             arm_nv <= 3'd0; pend <= {PIPE{1'b0}};
             zlc_bus_clear_runtime();
@@ -1068,7 +1087,10 @@ module zlc_edge_streamer #(
                 end
             end
         end else if (start_event && !running) begin
-            running <= (prog_count != 0); done <= (prog_count == 0); underflow <= 1'b0;
+            running <= (prog_count != 0) && scan_point0_ready_at_start;
+            done <= (prog_count == 0);
+            underflow <= !scan_point0_ready_at_start;
+            overflow <= 1'b0; draining <= 1'b0; drain_settle <= 2'd0;
             active_count <= prog_count; repeat_forever_active <= repeat_forever;
             scan_enable_active <= scan_enable && scan_count != 0; active_scan_count <= scan_count;
             slot_active <= scan_first_values; scan_point_index <= {SCAN_COUNT_WIDTH{1'b0}};
@@ -1088,9 +1110,11 @@ module zlc_edge_streamer #(
             // heavy affine work (final/loop_end recompute, bus (re)start, edge-0 seed)
             // is dispatched ONCE after the chain via these flags (see SLOT_MUL_WIDTH /
             // bnd_* notes): same cycle, same slots -> identical behavior, far fewer MACs.
-            bnd_slots = scan_first_values; bnd_recompute_final = 1'b1;
-            bnd_count = prog_count;   // FIRE: active_count <= prog_count not yet committed
-            bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
+            if ((prog_count != 0) && scan_point0_ready_at_start) begin
+                bnd_slots = scan_first_values; bnd_recompute_final = 1'b1;
+                bnd_count = prog_count;   // FIRE: active_count <= prog_count not yet committed
+                bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
+            end
         end else if (running) begin
             landed = pend[PIPE-1];   // data valid PIPE (=RD_LAT+1) cycles after issue
             // every RUNNING output tick advances the event schedulers' g_time; a toggle pushed at
@@ -1114,7 +1138,6 @@ module zlc_edge_streamer #(
                     if (!scan_point_resident(scan_point_index+1'b1)) begin
                         underflow <= 1'b1;          // STALL: next chunk not (yet) resident
                     end else begin
-                        underflow <= 1'b0;
                         scan_point_index <= scan_point_index+1'b1;
                         scan_cursor <= scan_point_index+1'b1;
                         scan_raddr <= scan_addr_of(scan_point_index+2'd2);   // pre-read following point
@@ -1129,7 +1152,6 @@ module zlc_edge_streamer #(
                         // shadows), NOT edge 0, so the real-startup preamble plays once.
                         // Same gapless reseed as the finite-bracket rewind, but
                         // loops_remaining is untouched (this repeat is infinite).
-                        underflow <= 1'b0;
                         state_mask <= sh_ls0_m; time_count <= zlc_effective_tick(sh_ls0_t,sh_ls0_c,slot_active)+1'b1;
                         edge_index <= {1'b0,loop_start_addr}+1'b1;
                         arm_t[0]<=sh_ls1_t; arm_c[0]<=sh_ls1_c; arm_m[0]<=sh_ls1_m;
@@ -1151,7 +1173,6 @@ module zlc_edge_streamer #(
                         underflow <= 1'b1;
                         scan_cursor <= active_scan_count;
                     end else begin
-                        underflow <= 1'b0;
                         scan_bank_base <= scan_wrap_base_next;     // cyclic bank flip (0 if resident)
                         slot_active <= scan_first_values; scan_point_index <= {SCAN_COUNT_WIDTH{1'b0}}; scan_cursor <= {SCAN_COUNT_WIDTH{1'b0}};
                         // pre-read point 1 (chunk 0) from the NEW base's bank
@@ -1161,7 +1182,7 @@ module zlc_edge_streamer #(
                         bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
                     end
                 end else begin
-                    running <= 1'b0; done <= 1'b1; state_mask <= {CHANNEL_COUNT{1'b0}};
+                    running <= 1'b0; done <= 1'b0; draining <= 1'b1; drain_settle <= 2'd2; state_mask <= {CHANNEL_COUNT{1'b0}};
                     zlc_bus_clear_runtime();          // undelayed bus -> SAFE now
                     zlc_bus_capture_safe_hold();       // delayed buses drain to SAFE d ticks later
                 end
@@ -1205,16 +1226,17 @@ module zlc_edge_streamer #(
                 if (issue) begin edge_raddr <= fetch_idx; fetch_idx <= fetch_idx + 1'b1; end
                 pend <= {pend[PIPE-2:0], issue};
             end
-        end else if (done) begin
-            // DONE-but-emitting: keep the free-running g_time advancing after the final tick so a
-            // DELAYED channel/bus drains the events still QUEUED in its scheduler (the last d
-            // ticks of toggles) and then settles at its REST value -- state_mask was cleared to 0
-            // and bus_value_active to BUS_SAFE_VALUE (mid code = 0 V) at done, so the queued tail
-            // carries those rest values and out[t] = in[t-d] holds for the WHOLE stream. Without this g_time would
-            // FREEZE at done and a delayed channel would hold a STALE (possibly HIGH) value until
-            // the host reacts (ms over JTAG).  A new FIRE takes the start_event branch above
-            // (clears every scheduler's wr/rd/cnt), so this free-running advance is never harmful.
+        end else if (draining) begin
+            // Public DONE means physical completion: every delayed TTL toggle,
+            // delayed DAC segment and one-tick register has reached its safe
+            // value.  Until then the physical scheduler keeps advancing.
             bnd_delay_advance = 1'b1;
+            if (drain_settle != 0) begin
+                drain_settle <= drain_settle - 1'b1;
+            end else if (!delay_runtime_busy) begin
+                draining <= 1'b0;
+                done <= 1'b1;
+            end
         end
 
         // ---- dispatch the boundary's heavy affine work ONCE (a single shared MAC
@@ -1227,6 +1249,7 @@ module zlc_edge_streamer #(
         end
         if (bnd_bus_tick) zlc_bus_tick(bnd_bus_reinit, bnd_slots);
         if (bnd_seed) seed_from_edge0(bnd_slots, bnd_count);
+        if (!reset_sync && (|evt_fifo_overflow || |bus_delay_overflow)) overflow <= 1'b1;
         // (The DAC delay is INSTRUCTION-LEVEL: zlc_bus_apply_segment captures each resolved segment
         // and the g_busseg generate re-runs it d ticks later.  bnd_delay_advance is unused.)
     end
@@ -1239,7 +1262,7 @@ module zlc_edge_streamer #(
     //     event FIFO (d_ch >= 2 here; d == 1 is the prev_undelayed register, d == 0 bypass).
     //   * cycle u == t + d - 1: the head matches g_time -> evt_out[ch] <= level (NBA),
     //     visible during cycle t + d  ==>  out[t] = in[t-d] exactly, 0 before the first event.
-    //   * g_time keeps counting after done so a long delayed tail drains; CMD_SAFE (reset)
+    //   * g_time keeps counting through draining so a long delayed tail completes; CMD_SAFE (reset)
     //     clears the queues and drops the outputs immediately (same as the old line).
     // Per-channel pushes are strictly time-ordered (one toggle per cycle per channel), so a
     // plain FIFO + equality compare is exact.  The host validates that no more than
@@ -1270,7 +1293,14 @@ module zlc_edge_streamer #(
         reg [EVT_ADDR:0]   cnt = {(EVT_ADDR+1){1'b0}};
         reg                obit = 1'b0;                        // this channel's scheduled (delayed) level
         reg pushf, popf;
+        wire want_push = (state_mask[GEVC] != prev_undelayed[GEVC])
+                         && (del_ch_ticks[GEVC] > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1});
         wire [GTIME_WIDTH:0] headw = fifo[rd];                 // async-read FIFO head (LUTRAM read port)
+        wire want_pop = (cnt != {(EVT_ADDR+1){1'b0}})
+                        && (headw[GTIME_WIDTH:1] == g_time);
+        assign evt_fifo_busy[gevs] = (cnt != {(EVT_ADDR+1){1'b0}}) || obit;
+        assign evt_fifo_overflow[gevs] = want_push
+                                          && (cnt == EVT_DEPTH[EVT_ADDR:0]) && !want_pop;
         // obit -> bit GEVC; un-served channels contribute 0 (GEVC is a per-instance constant)
         assign evt_out_contrib[gevs] = {{(CHANNEL_COUNT-1){1'b0}}, obit} << GEVC;
         always @(posedge clk) begin
@@ -1280,11 +1310,8 @@ module zlc_edge_streamer #(
                 cnt  <= {(EVT_ADDR+1){1'b0}};
                 obit <= 1'b0;
             end else begin
-                pushf = (state_mask[GEVC] != prev_undelayed[GEVC])
-                        && (del_ch_ticks[GEVC] > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1})
-                        && (cnt != EVT_DEPTH[EVT_ADDR:0]);
-                popf  = (cnt != {(EVT_ADDR+1){1'b0}})
-                        && (headw[GTIME_WIDTH:1] == g_time);
+                popf  = want_pop;
+                pushf = want_push && ((cnt != EVT_DEPTH[EVT_ADDR:0]) || popf);
                 if (pushf) begin
                     // zero-EXTEND the 32b delay to the 48b time base (an out-of-range
                     // part-select here would X-poison the entry and kill the compare)

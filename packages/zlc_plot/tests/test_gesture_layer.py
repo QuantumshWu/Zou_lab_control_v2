@@ -10,7 +10,6 @@ faster wrong picture is not a faster picture.
 
 from __future__ import annotations
 
-import time
 from threading import Event
 
 import numpy as np
@@ -71,8 +70,8 @@ def test_a_move_paints_the_same_pixels_as_a_compose() -> None:
         session.close()
 
 
-def test_a_move_costs_a_fraction_of_a_compose() -> None:
-    """Not a wall-clock promise: the ratio is the architecture being right."""
+def test_a_move_reuses_the_gesture_capture_without_composing(monkeypatch) -> None:
+    """The cheap path is structural, not a noisy wall-clock ratio."""
 
     session = PlotSession(
         _image_snapshot(), ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")), size="4x4"
@@ -81,21 +80,23 @@ def test_a_move_costs_a_fraction_of_a_compose() -> None:
         renderer = session._renderer
         session.rgba()
 
-        def timed(call, count: int) -> float:
-            call(0)
-            start = time.perf_counter()
-            for index in range(count):
-                call(index)
-            return (time.perf_counter() - start) / count
-
-        compose = timed(lambda _index: renderer._compose_frame(chrome_stable=True), 8)
         renderer.begin_selector_gesture(SelectorKind.X_RANGE)
         moves = [
             SelectorState(SelectorKind.X_RANGE, NumericRange(60.0 + index, 190.0 + index))
             for index in range(16)
         ]
-        move = timed(lambda index: renderer.preview_selector(moves[index % 16]), 16)
-        assert move < compose / 2.0, (move, compose)
+        # The first candidate creates the selector artist and recaptures the
+        # scene. Subsequent pointer moves must reuse that exact topology.
+        assert renderer.preview_selector(moves[0]) is True
+
+        def forbidden_compose(*_args, **_kwargs) -> None:
+            raise AssertionError("a pointer move re-entered full frame composition")
+
+        monkeypatch.setattr(renderer, "_compose_frame", forbidden_compose)
+        generation = renderer.raster_generation
+        for move in moves[1:]:
+            assert renderer.preview_selector(move) is True
+        assert renderer.raster_generation == generation + len(moves) - 1
     finally:
         session.close()
 

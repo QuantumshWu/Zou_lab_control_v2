@@ -8,4 +8,4 @@
 
 恢复任务时依次完整读取上述三份文件，再读取当前Checkpoint所引用的`AUDIT/`报告并核对HEAD/dirty state。Package README、旧GOAL、survey、acceptance、历史contracts和旧tests不是实施authority。
 
-当前用户边界：Milestone 1–4、M4 cleanup与通用indexed/capacity-one performance follow-up均已完成；同harness publication→main P50/P95 338/435→131/163 ms，Rolling 339/435→191/224 ms，source primary index连续且render逐像素不变。下一步是M5；M5完成时若本地时间不晚于15:30才开始M6。未授权任何真实hardware、program或flash。
+当前用户边界：Milestone 1–5、M4 cleanup与通用indexed/capacity-one performance follow-up均已完成。M5全树`1514 passed, 4 skipped`，Vivado Simulator四条RTL bench通过，未program/flash或访问真实hardware；M5于2026-08-20 14:31 PDT完成验证，满足15:30门。下一步是M6 USB-only SLM、Science Context与robust Feedback；未授权真实SLM/camera/FPGA实验。

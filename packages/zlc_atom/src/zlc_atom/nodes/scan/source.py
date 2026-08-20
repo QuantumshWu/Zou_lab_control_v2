@@ -17,8 +17,9 @@ a camera capture wearing this protocol, so it lives with the camera
 (``camera_measurement.measurement.CameraCycleSource``) -- no scan node uses
 it, and the scan package is what the scan NODES stand on.
 
-Both are sources: open before the board is loaded, arm just before the fire,
-one value per played point, closed at the end.
+Both are sources: open before the board is loaded, validate the actual played
+program before LOAD, arm just before the fire, return one value per played
+point, and close at the end.
 """
 
 from __future__ import annotations
@@ -103,10 +104,20 @@ class PublishedSignalSource:
             raise RuntimeError("the scan source was not opened")
         return tap
 
-    def arm(self, program: object, table: object = None) -> None:
+    def validate(
+        self,
+        program: object,
+        table: object = None,
+        *,
+        cycles: int | None = None,
+    ) -> None:
+        """A watched signal imposes no pulse/camera compatibility constraint."""
+
+        del program, table, cycles
+
+    def arm(self) -> None:
         """Everything published so far belongs to the world before this point."""
 
-        del program, table
         self.discard_pending()
 
     def discard_pending(self) -> None:

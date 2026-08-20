@@ -115,8 +115,8 @@ class ScriptedScanBench:
     * every frame is a constant image whose value is that publication's
       index, so a kept shot can be named in an assertion;
     * one ``fire`` produces exactly ``publications_per_fire`` of them.  The
-      stepped test may pace those publications by the loaded pulse's outer
-      repeat; the seamless test publishes its whole hardware table at once.
+      stepped test may pace those publications by the finite cycle count;
+      the seamless test publishes its whole hardware table at once.
 
     Everything else is the production path: the real virtual board compiles,
     loads, writes its scan table and fires; the real camera adapter, the real
@@ -131,17 +131,17 @@ class ScriptedScanBench:
         plane: object,
         *,
         publications_per_fire: int,
-        paced_by_pulse_repeat: bool = False,
-        publications_per_repeat: int | None = None,
+        paced_by_cycle: bool = False,
+        publications_per_cycle: int | None = None,
         exposure_seconds: float = 0.001,
     ) -> None:
         self._sequencer = sequencer
         self._plane = plane
         self.publications_per_fire = int(publications_per_fire)
-        self.paced_by_pulse_repeat = bool(paced_by_pulse_repeat)
-        self.publications_per_repeat = (
-            None if publications_per_repeat is None
-            else int(publications_per_repeat)
+        self.paced_by_cycle = bool(paced_by_cycle)
+        self.publications_per_cycle = (
+            None if publications_per_cycle is None
+            else int(publications_per_cycle)
         )
         if self.publications_per_fire < 1:
             raise ValueError("a fire produces at least one publication")
@@ -178,7 +178,8 @@ class ScriptedScanBench:
         self.loaded_sources: list[object | None] = []
         self._loaded_program = None
         self._publisher: threading.Thread | None = None
-        self.scan_tables: list[tuple[np.ndarray, int]] = []
+        self.scan_tables: list[np.ndarray] = []
+        self.fired_cycles: list[int | None] = []
         self._next_value = 0
 
     # ------------------------------------------------------- the source
@@ -188,8 +189,11 @@ class ScriptedScanBench:
 
         image = np.full(SCRIPTED_FRAME_SHAPE_YX, int(value), dtype="<u2")
         self.camera.trigger(1, frame=image)
-        if self.monitor.poll() is None:
-            raise RuntimeError("the scripted camera did not produce its frame")
+        deadline = time.monotonic() + 1.0
+        while self.monitor.poll() is None:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("the scripted camera did not produce its frame")
+            time.sleep(0.001)
         self.published.append(int(value))
         self._plane.freeze()
 
@@ -204,47 +208,54 @@ class ScriptedScanBench:
     def describe(self) -> object:
         return self._sequencer.describe()
 
-    def load(self, prog: object, *, source: object | None = None) -> None:
+    def load(
+        self,
+        prog: object,
+        *,
+        source: object | None = None,
+        rows: object = (),
+    ) -> None:
         self.loads += 1
         self.loaded_loop_counts.append(int(getattr(prog, "loop_count")))
         self.loaded_sources.append(source)
         self._loaded_program = prog
-        self._sequencer.load(prog, source=source)
+        normalized = tuple(tuple(row) for row in rows)
+        if normalized:
+            self.scan_tables.append(np.asarray(normalized))
+        self._sequencer.load(prog, source=source, rows=normalized)
 
-    def write_scan_table(self, rows: object, *, sweeps: int = 1) -> None:
-        self.scan_tables.append((np.array(rows, copy=True), int(sweeps)))
-        self._sequencer.write_scan_table(rows, sweeps=sweeps)
-
-    def fire(self, *, forever: bool = False) -> None:
+    def fire(self, *, cycles: int | None = 1) -> None:
         self.events.append(("fire", time.monotonic()))
-        self._sequencer.fire(forever=forever)
-        if not self.paced_by_pulse_repeat:
+        self.fired_cycles.append(cycles)
+        self._sequencer.fire(cycles=cycles)
+        if not self.paced_by_cycle:
             for _ in range(self.publications_per_fire):
                 self.publish(self._next_value)
                 self._next_value += 1
             return
         program = self._loaded_program
-        loop_count = int(getattr(program, "loop_count"))
-        per_repeat = (
-            self.publications_per_fire // loop_count
-            if self.publications_per_repeat is None
-            else self.publications_per_repeat
+        if cycles is None:
+            raise AssertionError("scripted scan tests require a finite fire")
+        per_cycle = (
+            self.publications_per_fire // cycles
+            if self.publications_per_cycle is None
+            else self.publications_per_cycle
         )
-        period = float(getattr(program, "duration_seconds")) / loop_count
+        period = float(getattr(program, "duration_seconds"))
         started = time.monotonic()
 
-        def publish_repeats() -> None:
-            for shot in range(loop_count):
+        def publish_cycles() -> None:
+            for shot in range(cycles):
                 deadline = started + shot * period + min(0.01, period * 0.25)
                 remaining = deadline - time.monotonic()
                 if remaining > 0.0:
                     time.sleep(remaining)
-                for _ in range(per_repeat):
+                for _ in range(per_cycle):
                     self.publish(self._next_value)
                     self._next_value += 1
                     time.sleep(0.004)
 
-        self._publisher = threading.Thread(target=publish_repeats, daemon=True)
+        self._publisher = threading.Thread(target=publish_cycles, daemon=True)
         self._publisher.start()
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:

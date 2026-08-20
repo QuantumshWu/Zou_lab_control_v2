@@ -110,7 +110,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     """v1's On Pulse is a cycle an experiment holds running, not one shot.
 
     Asked of a real board, not of the source text.  Reading fire() for the
-    string "forever=True" passed for as long as that literal happened to be
+    explicit outer ``cycles`` passed for as long as that execution was requested
     spelled that way and said nothing about what the board was told -- so it
     broke the moment the value stopped being written out longhand, while the
     behaviour it names was intact.
@@ -143,7 +143,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
         assert presenter.fire() is True, presenter.view.warnings
         applied = streamer.applied()
         assert applied is not None, "the board was never told anything"
-        assert applied.forever is True, (
+        assert applied.cycles is None, (
             "On Pulse must ask the board to repeat until Stop, which is what v1 does"
         )
     finally:
@@ -189,7 +189,6 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     from zlc_pulse import load_streamer_config, pulse_target_from_xdc
     from zlc_pulse.device import PulseStreamer
     from zlc_pulse.transport import MemoryRegisterTransport
-    from zlc_pulse.wire import CtrlWords
     from zlc_workbench.device_use import DeviceUseCoordinator
     from zlc_workbench.pulse_editor import PulseEditorPresenter
     from zlc_workbench.pulse_state import PulseEditorState
@@ -222,24 +221,21 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         )
         presenter.view.scan_run_requested.emit()
         presenter.set_scan_repeats(0)
-        assert presenter.load_into_sequencer() is True
-        assert transport.words[CtrlWords.SCAN_COUNT] > 1, (
-            "this fixture is meant to have a scan on the board to begin with"
-        )
+        assert presenter.fire(cycles=5) is True
+        scanned = board.applied()
+        assert scanned is not None and len(scanned.rows) == 5
 
         assert presenter._hold(0) is True, presenter.view.warnings
-        assert transport.words[CtrlWords.SCAN_ENABLE] == 0, (
-            "a held point left the board scanning"
-        )
-        assert transport.words[CtrlWords.SCAN_COUNT] == 0, (
-            "a held point left a scan table on the board"
-        )
-        assert transport.words[CtrlWords.REPEAT_FOREVER] == 1, (
-            "a held point must keep playing until something else is asked for"
-        )
+        held = board.applied()
+        assert held is not None
+        assert held.rows == ()
+        assert held.program.slot_count == 0
+        assert held.source is not None and held.source.slots == ()
+        assert held.cycles is None
 
         assert presenter.step_scan_point(100) is True, presenter.view.warnings
-        assert transport.words[CtrlWords.SCAN_ENABLE] == 0
+        stepped = board.applied()
+        assert stepped is not None and stepped.rows == () and stepped.cycles is None
         assert not presenter.view.warnings, presenter.view.warnings
     finally:
         presenter.stop()

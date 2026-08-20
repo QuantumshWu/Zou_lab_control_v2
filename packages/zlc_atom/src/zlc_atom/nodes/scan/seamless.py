@@ -169,10 +169,10 @@ class SeamlessScanMeasurement:
             streamed, columns = self._streamed_sequence(board)
             wire = self._wire_table(rows, columns)
             program = compile_sequence(streamed, board.geometry, board.clock_hz)
-            self.sequencer.load(program, source=streamed)
-            self.sequencer.write_scan_table(wire, sweeps=self.repeats)
-            self.source.arm(program, wire)
-            self.sequencer.fire()
+            self.source.validate(program, wire, cycles=cycles)
+            self.sequencer.load(program, source=streamed, rows=wire)
+            self.source.arm()
+            self.sequencer.fire(cycles=cycles)
             per_sweep = len(rows) * shots
             for played in range(cycles):
                 check_cancelled(context)

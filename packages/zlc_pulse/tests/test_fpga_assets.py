@@ -113,6 +113,45 @@ def test_deployed_config_is_the_default_geometry_source(monkeypatch) -> None:
     assert loaded["params"] == default_params()
 
 
+def test_clock_and_safe_pin_boundary_are_explicit() -> None:
+    xdc = (ROOT / "fpga/board_config/board.xdc").read_text(encoding="utf-8")
+    top = (ROOT / "fpga/pulse_streamer/zlc_pulse_streamer_top.v").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(r"create_clock\s+-period\s+20(?:\.0+)?\s+.*get_ports\s+clk", xdc)
+    assert "eng_reset ? 1'b0" in top
+    assert "zlc_physical_active && clk_en" in top
+    assert "bus_out_final" in top
+    assert "eng_reset ? bus_safe_pack : zlc_bus_out" in top
+
+
+def test_public_done_waits_for_the_physical_tail_and_errors_are_sticky() -> None:
+    engine = (ROOT / "fpga/pulse_streamer/zlc_edge_streamer.v").read_text(
+        encoding="utf-8"
+    )
+    top = (ROOT / "fpga/pulse_streamer/zlc_pulse_streamer_top.v").read_text(
+        encoding="utf-8"
+    )
+    assert "draining <= 1'b1" in engine
+    assert "if (!delay_runtime_busy)" in engine
+    assert "done <= 1'b1" in engine
+    assert "underflow <= 1'b0" not in engine[engine.index("else if (running)") :]
+    assert "overflow <= 1'b1" in engine
+    assert "(zlc_overflow || protocol_error) ? ST_ERROR" in top
+    assert "bank_ready[0] && bank_chunk0 == 0" in engine
+
+
+def test_uart_decoder_releases_truncated_frames_and_rejects_bounds() -> None:
+    bridge = (ROOT / "fpga/pulse_streamer/zlc_uart_bridge.v").read_text(
+        encoding="utf-8"
+    )
+    assert "FRAME_TIMEOUT_CYCLES" in bridge
+    assert "frame_idle >= FRAME_TIMEOUT_CYCLES-1" in bridge
+    assert "{rx_byte,f_count[7:0]} > FRAME_WORDS" in bridge
+    assert "|f_addr[31:ADDR_WORD_WIDTH]" in bridge
+    assert "17'd64" in bridge
+
+
 def test_fpga_launchers_use_the_package_wire_cli() -> None:
     # In bin\, with everything else a human clicks.  They still drive THIS
     # layer's board, which is why this layer is what checks them.

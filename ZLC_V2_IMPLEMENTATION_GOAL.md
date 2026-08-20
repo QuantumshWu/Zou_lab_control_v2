@@ -1,6 +1,6 @@
 # ZLC v2 Architecture Convergence — Implementation Goal
 
-状态：ACTIVE；Milestone 1–4及residual closure完成。当前按用户要求停止在M4 commit，下一步讨论已记录的Plot/Fit profile；Milestone 5–7尚未开始。准确状态看`IMPLEMENTATION_PLAN.md`。
+状态：ACTIVE；Milestone 1–5及residual closure完成。M5于2026-08-20 14:31 PDT完成验证，早于用户给出的15:30门，下一步进入M6；Milestone 6–7尚未完成。准确状态看`IMPLEMENTATION_PLAN.md`。
 
 ## 1. 唯一目标
 

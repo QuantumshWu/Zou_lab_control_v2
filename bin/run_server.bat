@@ -75,7 +75,7 @@ echo Host:                %ZLC_PS_HOST%:%ZLC_PS_PORT%
 echo Port:                %ZLC_PS_PORT%
 echo Server listen bind: %ZLC_PS_HOST%:%ZLC_PS_PORT%
 echo Server port:        %ZLC_PS_PORT%
-echo Default backend policy: auto ^(UART word63 probe, then JTAG-to-AXI fallback^)
+echo Default backend policy: auto ^(JTAG-to-AXI unless --uart-port names one port^)
 echo Explicit backend override: --backend jtag-axi ^| uart ^| memory
 if /I "%ZLC_PS_HOST%"=="0.0.0.0" (
   echo remote_server same-computer endpoint: 127.0.0.1:%ZLC_PS_PORT%
@@ -100,8 +100,8 @@ endlocal & exit /b !ZLC_STATUS!
 echo Start the thin zlc_pulse JSON server on the FPGA/control machine.
 echo.
 echo Usage:
-echo   fpga\run_server.bat
-echo   fpga\run_server.bat --check-config
+echo   bin\run_server.bat
+echo   bin\run_server.bat --check-config
 echo.
 echo Environment:
 echo   ZLC_FPGA_PYTHON=path\to\python.exe         (optional interpreter override)
@@ -111,12 +111,11 @@ echo   ZLC_PS_PORT=18861
 echo   ZLC_PS_STATE_DIR=path\to\state
 echo.
 echo CLI backend overrides:
-echo   fpga\run_server.bat --backend jtag-axi
-echo   fpga\run_server.bat --backend uart --uart-port COM6
-echo   fpga\run_server.bat --backend memory
-echo   fpga\run_server.bat --uart-baud 3000000
-echo   fpga\run_server.bat --client-idle-timeout 300
-echo   If other COM instruments are connected, pass --uart-port explicitly to skip port enumeration.
+echo   bin\run_server.bat --backend jtag-axi
+echo   bin\run_server.bat --backend uart --uart-port COM6
+echo   bin\run_server.bat --backend memory
+echo   bin\run_server.bat --uart-port COM6 --uart-baud 3000000
+echo   UART is considered only when --uart-port names exactly one configured port.
 echo.
 echo Client address rules:
 echo   same computer: 127.0.0.1:18861

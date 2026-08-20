@@ -127,7 +127,7 @@ module zlc_pulse_streamer_top #(
     // CTRL regfile word offsets (== host.image.CtrlWords).
     localparam integer C_MAGIC = 0;
     localparam integer C_COMMAND = 1;   // bit0 LOAD bit1 FIRE bit2 RESET bit3 SAFE
-    localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ERROR(host-only) bit4 UNDERFLOW
+    localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ERROR bit4 UNDERFLOW
     localparam integer C_PROG_COUNT = 3;
     localparam integer C_SCAN_COUNT = 4;
     localparam integer C_SCAN_ENABLE = 5;
@@ -155,8 +155,9 @@ module zlc_pulse_streamer_top #(
     // engine outputs
     wire [CHANNEL_COUNT-1:0] out;
     wire [BUS_COUNT*BUS_WIDTH-1:0] zlc_bus_out;
-    wire zlc_running, zlc_done, zlc_underflow;
+    wire zlc_running, zlc_done, zlc_underflow, zlc_overflow, zlc_physical_active;
     wire [SCAN_COUNT_WIDTH-1:0] zlc_cursor;
+    reg eng_reset = 1'b1, eng_start = 1'b0;
 
     // --- delays: BOTH TTL channels AND DAC buses use the 32b/word R_DELAY register region,
     // driving the per-signal event scheduler (long delays; see zlc_edge_streamer).
@@ -193,6 +194,10 @@ module zlc_pulse_streamer_top #(
     wire [CLK_ENABLE_WORDS*32-1:0] clk_enable_pack;
     wire [CHANNEL_COUNT-1:0] clk_en;
     wire [CHANNEL_COUNT-1:0] out_final;
+    localparam [BUS_WIDTH-1:0] BUS_SAFE_CODE = {1'b1, {(BUS_WIDTH-1){1'b0}}};
+    wire [BUS_COUNT*BUS_WIDTH-1:0] bus_safe_pack = {BUS_COUNT{BUS_SAFE_CODE}};
+    wire [BUS_COUNT*BUS_WIDTH-1:0] bus_out_final =
+        eng_reset ? bus_safe_pack : zlc_bus_out;
 
     // --- JTAG-to-AXI master -> FULL AXI4 -> AXI BRAM controller ---------------
     // Full AXI4 (not Lite) so the host issues INCR burst writes (up to 256 words per
@@ -223,14 +228,14 @@ module zlc_pulse_streamer_top #(
     // word map.  It and JTAG-AXI are never used simultaneously (JTAG = bring-up/ILA, UART = runtime),
     // so a priority mux (UART wins when u_active) is correct + free; a UART write is byte-for-byte a
     // JTAG write to the same word (only the operands are re-sourced, decode/timing unchanged).
-    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active;
+    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_protocol_error;
     wire [5:0]  u_rd_word;   wire u_rd_req; reg [31:0] u_rd_data;
     reg  [3:0]  uart_por = 4'h0;                            // power-on reset, independent of eng_reset
     always @(posedge clk) if (uart_por != 4'hF) uart_por <= uart_por + 1'b1;
     wire uart_rst = (uart_por != 4'hF);
-    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000)) zlc_uart_i (
+    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000), .ADDRESS_WORDS(R_TOTAL_WORDS)) zlc_uart_i (
         .clk(clk), .rst(uart_rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
-        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active),
+        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_protocol_error),
         .u_rd_word(u_rd_word), .u_rd_req(u_rd_req), .u_rd_data(u_rd_data)
     );
     wire        uart_sel  = u_active;
@@ -287,7 +292,8 @@ module zlc_pulse_streamer_top #(
     genvar cmx;
     generate
         for (cmx = 0; cmx < CHANNEL_COUNT; cmx = cmx + 1) begin : zlc_clk_mux_gen
-            assign out_final[cmx] = clk_en[cmx] ? ~clk : out[cmx];
+            assign out_final[cmx] = eng_reset ? 1'b0 :
+                ((zlc_physical_active && clk_en[cmx]) ? ~clk : out[cmx]);
         end
     endgenerate
 
@@ -400,13 +406,14 @@ module zlc_pulse_streamer_top #(
     // straight from the dense CTRL words (no image to copy).  Bus rows are 7 words = [start_tick,
     // stop_tick, sc_lo, sc_hi, ec_lo, ec_hi, flags] (host.image).  Rising-edge-detected commands.
     localparam CMD_LOAD = 4'b0001, CMD_FIRE = 4'b0010, CMD_RESET = 4'b0100, CMD_SAFE = 4'b1000;
-    // STATUS bit map MUST match host.image: LOADED=1 RUNNING=2 DONE=4 ERROR=8(host-only,
-    // never set here) UNDERFLOW=16.  Underflow is bit4 (NOT bit3) so a transient
+    // STATUS bit map MUST match host.image: LOADED=1 RUNNING=2 DONE=4 ERROR=8
+    // UNDERFLOW=16.  Underflow is bit4 (NOT bit3) so a transient
     // streaming STALL is never confused with the host's fatal ERROR bit.
-    localparam [4:0] ST_LOADED = 5'd1, ST_RUNNING = 5'd2, ST_DONE = 5'd4, ST_UNDERFLOW = 5'd16;
+    localparam [4:0] ST_LOADED = 5'd1, ST_RUNNING = 5'd2, ST_DONE = 5'd4,
+                     ST_ERROR = 5'd8, ST_UNDERFLOW = 5'd16;
     localparam integer CNT_W = BUS_SEG_ADDR_WIDTH + 1;
 
-    reg eng_reset = 1'b1, eng_start = 1'b0;
+    reg protocol_error = 1'b0;
     // FSM-owned "engine is in its RUNNING/DONE-tracking phase" flag.  The DONE/
     // UNDERFLOW refresh is gated on THIS (not on ctrl_reg[C_STATUS], which a separate
     // block writes back one cycle late): a command clears it atomically here, so a
@@ -451,14 +458,15 @@ module zlc_pulse_streamer_top #(
         ldr_status_we <= 1'b0;
         ldr_cmd_clear <= 1'b0;
         eng_start <= 1'b0;
+        if (u_protocol_error) protocol_error <= 1'b1;
         case (lstate)
         L_IDLE: begin
             cmd_seen <= cmd_now;
-            if (cmd_edge & CMD_RESET) begin eng_reset <= 1'b1; status_running <= 1'b0; ldr_status_we <= 1'b1; ldr_status_val <= 32'b0; end
-            else if (cmd_edge & CMD_SAFE) begin eng_reset <= 1'b1; status_running <= 1'b0; ldr_status_we <= 1'b1; ldr_status_val <= 32'b0; end
+            if (cmd_edge & CMD_RESET) begin eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0; ldr_status_we <= 1'b1; ldr_status_val <= 32'b0; end
+            else if (cmd_edge & CMD_SAFE) begin eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0; ldr_status_we <= 1'b1; ldr_status_val <= 32'b0; end
             else if (cmd_edge & CMD_LOAD) begin
-                eng_reset <= 1'b1; status_running <= 1'b0; bcur <= 0; baddr <= 0; bcnt <= bus_count_of(0); wi <= 0; lstate <= L_NEXT;
-            end else if ((cmd_edge & CMD_FIRE) && (ctrl_reg[C_STATUS][0])) begin
+                eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0; bcur <= 0; baddr <= 0; bcnt <= bus_count_of(0); wi <= 0; lstate <= L_NEXT;
+            end else if ((cmd_edge & CMD_FIRE) && (ctrl_reg[C_STATUS][0]) && !(ctrl_reg[C_STATUS][3])) begin
                 lstate <= L_FIRE;
             end
         end
@@ -533,8 +541,14 @@ module zlc_pulse_streamer_top #(
         // cycle, while still tracking done/underflow on the quiescent run cycles.
         if ((lstate == L_IDLE) && (cmd_edge == 4'b0) && status_running) begin
             ldr_status_we <= 1'b1;
-            ldr_status_val <= {27'b0, ((zlc_done ? 5'b0 : ST_RUNNING) | (zlc_done ? ST_DONE : 5'b0) | (zlc_underflow ? ST_UNDERFLOW : 5'b0))};
+            ldr_status_val <= {27'b0, ((zlc_done ? 5'b0 : ST_RUNNING)
+                              | (zlc_done ? ST_DONE : 5'b0)
+                              | ((zlc_overflow || protocol_error) ? ST_ERROR : 5'b0)
+                              | (zlc_underflow ? ST_UNDERFLOW : 5'b0))};
             if (zlc_done) status_running <= 1'b0;   // DONE latched; stop re-asserting STATUS
+        end else if ((lstate == L_IDLE) && (cmd_edge == 4'b0) && protocol_error) begin
+            ldr_status_we <= 1'b1;
+            ldr_status_val <= ctrl_reg[C_STATUS] | ST_ERROR;
         end
     end
 
@@ -615,7 +629,8 @@ module zlc_pulse_streamer_top #(
         // queues each output's toggles against g_time and pops them d ticks later).
         .bus_delay_ticks(bus_delay_ticks_w),
         .delay_ticks(delay_ticks_w),
-        .out(out), .bus_out(zlc_bus_out), .running(zlc_running), .done(zlc_done)
+        .out(out), .bus_out(zlc_bus_out), .running(zlc_running), .done(zlc_done),
+        .overflow(zlc_overflow), .physical_active(zlc_physical_active)
     );
 
     // ---- JTAG-to-AXI + AXI BRAM controller IP --------------------------------
@@ -669,29 +684,29 @@ module zlc_pulse_streamer_top #(
     assign microwave = out_final[12]; assign address = out_final[13];
     assign cooling_shutter = out_final[14]; assign repump_shutter = out_final[15]; assign probe_shutter = out_final[16];
     assign bias = out_final[17];
-    assign da_dipole[0] = zlc_bus_out[0]; assign da_dipole[1] = zlc_bus_out[1];
-    assign da_dipole[2] = zlc_bus_out[2]; assign da_dipole[3] = zlc_bus_out[3];
-    assign da_dipole[4] = zlc_bus_out[4]; assign da_dipole[5] = zlc_bus_out[5];
-    assign da_dipole[6] = zlc_bus_out[6]; assign da_dipole[7] = zlc_bus_out[7];
-    assign da_dipole[8] = zlc_bus_out[8]; assign da_dipole[9] = zlc_bus_out[9];
+    assign da_dipole[0] = bus_out_final[0]; assign da_dipole[1] = bus_out_final[1];
+    assign da_dipole[2] = bus_out_final[2]; assign da_dipole[3] = bus_out_final[3];
+    assign da_dipole[4] = bus_out_final[4]; assign da_dipole[5] = bus_out_final[5];
+    assign da_dipole[6] = bus_out_final[6]; assign da_dipole[7] = bus_out_final[7];
+    assign da_dipole[8] = bus_out_final[8]; assign da_dipole[9] = bus_out_final[9];
     assign da_clk0 = out_final[28];
-    assign da_bias_y[0] = zlc_bus_out[10]; assign da_bias_y[1] = zlc_bus_out[11];
-    assign da_bias_y[2] = zlc_bus_out[12]; assign da_bias_y[3] = zlc_bus_out[13];
-    assign da_bias_y[4] = zlc_bus_out[14]; assign da_bias_y[5] = zlc_bus_out[15];
-    assign da_bias_y[6] = zlc_bus_out[16]; assign da_bias_y[7] = zlc_bus_out[17];
-    assign da_bias_y[8] = zlc_bus_out[18]; assign da_bias_y[9] = zlc_bus_out[19];
+    assign da_bias_y[0] = bus_out_final[10]; assign da_bias_y[1] = bus_out_final[11];
+    assign da_bias_y[2] = bus_out_final[12]; assign da_bias_y[3] = bus_out_final[13];
+    assign da_bias_y[4] = bus_out_final[14]; assign da_bias_y[5] = bus_out_final[15];
+    assign da_bias_y[6] = bus_out_final[16]; assign da_bias_y[7] = bus_out_final[17];
+    assign da_bias_y[8] = bus_out_final[18]; assign da_bias_y[9] = bus_out_final[19];
     assign da_clk1 = out_final[39];
-    assign da_bias_x[0] = zlc_bus_out[20]; assign da_bias_x[1] = zlc_bus_out[21];
-    assign da_bias_x[2] = zlc_bus_out[22]; assign da_bias_x[3] = zlc_bus_out[23];
-    assign da_bias_x[4] = zlc_bus_out[24]; assign da_bias_x[5] = zlc_bus_out[25];
-    assign da_bias_x[6] = zlc_bus_out[26]; assign da_bias_x[7] = zlc_bus_out[27];
-    assign da_bias_x[8] = zlc_bus_out[28]; assign da_bias_x[9] = zlc_bus_out[29];
+    assign da_bias_x[0] = bus_out_final[20]; assign da_bias_x[1] = bus_out_final[21];
+    assign da_bias_x[2] = bus_out_final[22]; assign da_bias_x[3] = bus_out_final[23];
+    assign da_bias_x[4] = bus_out_final[24]; assign da_bias_x[5] = bus_out_final[25];
+    assign da_bias_x[6] = bus_out_final[26]; assign da_bias_x[7] = bus_out_final[27];
+    assign da_bias_x[8] = bus_out_final[28]; assign da_bias_x[9] = bus_out_final[29];
     assign da_clk2 = out_final[50];
-    assign da_bias_z[0] = zlc_bus_out[30]; assign da_bias_z[1] = zlc_bus_out[31];
-    assign da_bias_z[2] = zlc_bus_out[32]; assign da_bias_z[3] = zlc_bus_out[33];
-    assign da_bias_z[4] = zlc_bus_out[34]; assign da_bias_z[5] = zlc_bus_out[35];
-    assign da_bias_z[6] = zlc_bus_out[36]; assign da_bias_z[7] = zlc_bus_out[37];
-    assign da_bias_z[8] = zlc_bus_out[38]; assign da_bias_z[9] = zlc_bus_out[39];
+    assign da_bias_z[0] = bus_out_final[30]; assign da_bias_z[1] = bus_out_final[31];
+    assign da_bias_z[2] = bus_out_final[32]; assign da_bias_z[3] = bus_out_final[33];
+    assign da_bias_z[4] = bus_out_final[34]; assign da_bias_z[5] = bus_out_final[35];
+    assign da_bias_z[6] = bus_out_final[36]; assign da_bias_z[7] = bus_out_final[37];
+    assign da_bias_z[8] = bus_out_final[38]; assign da_bias_z[9] = bus_out_final[39];
     assign da_clk3 = out_final[61];
     assign GND1 = 1'b0; assign GND4 = 1'b0; assign GND5 = 1'b0; assign GND6 = 1'b0;
     assign GND7 = 1'b0; assign GND8 = 1'b0; assign GND9 = 1'b0; assign GND10 = 1'b0;

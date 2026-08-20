@@ -149,14 +149,7 @@ def test_a_column_needs_a_range_to_sweep() -> None:
         ScanColumnSpec("a", 1.0, 1.0)
 
 
-def test_a_table_is_played_many_times_without_being_sent_many_times() -> None:
-    """The RTL has no sweep register.
-
-    ``scan_count`` is a point count, ``repeat_forever`` is a bit, and
-    ``loop_count`` is the pulse timeline's own loop INSIDE each point.  So a
-    finite number of sweeps is N*len(rows) points -- but which row a point
-    takes is decided when a bank is refilled, so the rows cross the wire once.
-    """
+def test_cycle_count_reuses_one_value_table_without_copying_rows() -> None:
 
     from zlc_pulse import load_streamer_config
     from zlc_pulse.wire import pack_scan_rows
@@ -164,27 +157,27 @@ def test_a_table_is_played_many_times_without_being_sent_many_times() -> None:
     geometry = load_streamer_config()["params"]
     rows = [(10,), (20,), (30,)]
 
-    def slot0(sweeps):
-        words = pack_scan_rows(rows, geometry, 0, 0, sweeps)
+    def slot0(cycles):
+        words = pack_scan_rows(rows, geometry, 0, 0, cycles)
         ordered = [words[key] for key in sorted(words)]
         return ordered[:: geometry.num_slots]
 
-    assert slot0(1) == [10, 20, 30]
-    assert slot0(3) == [10, 20, 30, 10, 20, 30, 10, 20, 30]
+    assert slot0(3) == [10, 20, 30]
+    assert slot0(9) == [10, 20, 30, 10, 20, 30, 10, 20, 30]
 
 
 def test_a_repeated_table_is_seamless_across_a_bank_boundary() -> None:
     """The hard case: a table length that does NOT divide the bank size.
 
-    The end of one sweep then falls in the MIDDLE of a chunk.  It stays
-    seamless because a finite sweep count does not wrap anything: the board is
-    given one stream of N*len points and the host fills chunks 0,1,2,... into
+    The end of one table traversal then falls in the MIDDLE of a chunk.  It
+    stays seamless because a finite cycle count does not re-arm anything: the
+    board is given one stream of cycles and the host fills chunks 0,1,2,... into
     alternating banks, exactly as it does for any long scan.  The boundary
-    between two sweeps is the boundary between two points and nothing else --
+    between two traversals is the boundary between two points and nothing else --
     no re-arm, no bank-parity wrap, no gap.
 
-    (repeat_forever is the other path, where the RTL itself re-sweeps and
-    toggles scan_bank_base by n_chunks & 1.  That one is untouched.)
+    (repeat_forever is the other path, where the RTL repeats the application
+    until SAFE.  That one is untouched.)
     """
 
     from dataclasses import replace
@@ -197,7 +190,7 @@ def test_a_repeated_table_is_seamless_across_a_bank_boundary() -> None:
 
     played: list[int] = []
     for chunk in range(4):
-        words = pack_scan_rows(rows, geometry, chunk & 1, chunk, 3)
+        words = pack_scan_rows(rows, geometry, chunk & 1, chunk, 9)
         if not words:
             break
         ordered = [words[key] for key in sorted(words)]

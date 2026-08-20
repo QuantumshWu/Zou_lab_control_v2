@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -35,6 +36,7 @@ from zlc_atom.devices.slm.solver import (
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
+from zlc_atom.nodes.camera_measurement.measurement import CameraCycleSource
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_runtime import SignalDataPlane
 from zlc_pulse import (
@@ -44,6 +46,7 @@ from zlc_pulse import (
     PulseSequence,
     compile_sequence,
     load_streamer_config,
+    resolve_api_parameters,
 )
 from tests.pulse_fixture import (
     CAMERA_CHANNEL,
@@ -881,8 +884,7 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
                 timeout=1.0,
             )
             arm_sequencer(sequencer, pulse)
-            sequencer.write_scan_table(((),), sweeps=1)
-            sequencer.fire()
+            sequencer.fire(cycles=1)
             records = camera.read_frame_records(3, timeout=2.0, exact=True)
             assert sequencer.wait_done(1.0) is not None
             terminal = camera.finish_record_capture()
@@ -1214,25 +1216,24 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
     )
     streamer.open()
     try:
-        pulse = resolve_pulse(
+        sequence = resolve_api_parameters(
             IMAGING_PULSE_RESOURCE.value,
-            path=IMAGING_PULSE_RESOURCE.path,
-            board=streamer.describe(),
-            api_values={
+            {
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,
                 "reference_probe_duration_after": 0.02,
             },
         )
-        program = pulse.program
-        streamer.load(program, source=pulse.sequence)
+        board = streamer.describe()
+        program = compile_sequence(sequence, board.geometry, board.clock_hz)
+        streamer.load(program, source=sequence)
         started = time.monotonic()
         streamer.fire()
         time.sleep(program.duration_seconds * 0.25)
         assert streamer.wait_done(0.0) is None
         assert streamer.wait_done(1.0) is not None
         assert time.monotonic() - started >= program.duration_seconds * 0.8
-        streamer.fire(forever=True)
+        streamer.fire(cycles=None)
         deadline = time.monotonic() + 0.5
         while world._fire_count < 3 and time.monotonic() < deadline:
             time.sleep(0.005)
@@ -1241,24 +1242,36 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         stopped_at = world._fire_count
         time.sleep(0.08)
         assert world._fire_count == stopped_at
+
+        streamer.fire(cycles=20)
+        deadline = time.monotonic() + 0.5
+        while world._fire_count < stopped_at + 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        streamer.safe()
+        interrupted_at = world._fire_count
+        assert stopped_at + 2 <= interrupted_at < stopped_at + 20
+        time.sleep(0.08)
+        assert world._fire_count == interrupted_at
     finally:
         streamer.close()
 
 
-def test_zero_slot_scan_sweeps_are_independent_three_frame_shots(monkeypatch) -> None:
+def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None:
     """Each empty-row point reloads once; its three camera windows share it."""
 
     installation = create_installation("virtual")
     world = installation.world
     camera = installation.device("camera")
     sequencer = installation.device("sequencer")
-    sweeps = 5
+    cycles = 5
     loaded: list[np.ndarray] = []
     rendered: list[np.ndarray] = []
+    loaded_at: list[float] = []
     original_load = world._load_shot
     original_render = world.render_frame
 
     def record_load() -> np.ndarray:
+        loaded_at.append(time.monotonic())
         occupancy = original_load()
         loaded.append(np.array(occupancy, copy=True))
         return occupancy
@@ -1293,28 +1306,135 @@ def test_zero_slot_scan_sweeps_are_independent_three_frame_shots(monkeypatch) ->
         )
         assert pulse.program.slot_count == 0
         camera.arm(
-            sweeps * 3,
-            source_group_sizes=(3,) * sweeps,
-            buffer_frame_count=sweeps * 3,
+            cycles * 3,
+            source_group_sizes=(3,) * cycles,
+            buffer_frame_count=cycles * 3,
             timeout=1.0,
         )
         arm_sequencer(sequencer, pulse)
-        sequencer.write_scan_table(((),), sweeps=sweeps)
-        sequencer.fire()
-        records = camera.read_frame_records(sweeps * 3, timeout=2.0, exact=True)
+        sequencer.fire(cycles=cycles)
+        records = camera.read_frame_records(cycles * 3, timeout=2.0, exact=True)
         assert sequencer.wait_done(1.0) is not None
         terminal = camera.finish_record_capture()
 
-        assert len(records) == sweeps * 3
-        assert terminal.produced_count == sweeps * 3
-        assert world._fire_count == sweeps
-        assert len(loaded) == sweeps
-        assert len(rendered) == sweeps * 3
+        assert len(records) == cycles * 3
+        assert [record.source_ordinal for record in records] == list(
+            range(cycles * 3)
+        )
+        assert terminal.produced_count == cycles * 3
+        assert world._fire_count == cycles
+        assert len(loaded) == cycles
+        assert len(rendered) == cycles * 3
+        assert np.all(
+            np.diff(loaded_at) >= pulse.program.duration_seconds * 0.8
+        ), "virtual cycles must arrive at the compiled wall cadence"
         for shot, occupancy in enumerate(loaded):
             for frame_occupancy in rendered[shot * 3 : (shot + 1) * 3]:
                 np.testing.assert_array_equal(frame_occupancy, occupancy)
     finally:
         installation.close()
+
+
+def test_camera_cycle_source_preflights_compiled_windows_and_cadence() -> None:
+    world = SimulationWorld(seed=5)
+    camera = VirtualCamera(frame_source=world.render_frame)
+    streamer = VirtualPulseStreamer(world=world)
+    streamer.open()
+    try:
+        sequence = resolve_api_parameters(
+            IMAGING_PULSE_RESOURCE.value,
+            {
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
+            },
+        )
+        board = streamer.describe()
+        program = compile_sequence(sequence, board.geometry, board.clock_hz)
+        context = SimpleNamespace(
+            generation=object(), cancel_requested=lambda: False
+        )
+        prepared: list[dict[str, object]] = []
+
+        def node(*, frames_per_cycle: int, exposure: float = 0.02):
+            camera.set_exposure_seconds(exposure)
+            return SimpleNamespace(
+                request=SimpleNamespace(
+                    repeat=2,
+                    frames_per_cycle=frames_per_cycle,
+                    camera_key="camera",
+                ),
+                actual_working_point=camera.working_point(),
+                _configure_capture=camera.working_point,
+                _arm_configured=lambda **kwargs: prepared.append(kwargs)
+                or SimpleNamespace(close=lambda: None),
+            )
+
+        mismatched = CameraCycleSource(node(frames_per_cycle=2))
+        mismatched.open(context, cycles=2)
+        with pytest.raises(ValueError, match="camera window"):
+            mismatched.validate(program, np.empty((2, 0), dtype=np.int64))
+        assert prepared == [], "an invalid program armed the camera"
+
+        too_slow = CameraCycleSource(node(frames_per_cycle=3, exposure=0.021))
+        too_slow.open(context, cycles=2)
+        with pytest.raises(ValueError, match="trigger interval"):
+            too_slow.validate(program, np.empty((2, 0), dtype=np.int64))
+        assert prepared == [], "an invalid cadence armed the camera"
+
+        source = CameraCycleSource(node(frames_per_cycle=3))
+        source.open(context, cycles=2)
+        source.validate(program, np.empty((2, 0), dtype=np.int64))
+        source.arm()
+        assert len(prepared) == 1
+    finally:
+        streamer.close()
+
+
+def test_virtual_camera_busy_edges_leave_physical_ordinal_gaps() -> None:
+    target = IMAGING_PULSE_RESOURCE.value.target
+    lane = target.raw_lanes.index(target.by_key[CAMERA_CHANNEL].lanes[0])
+
+    def states(high: bool) -> tuple[int, ...]:
+        values = [0] * len(target.raw_lanes)
+        values[lane] = int(high)
+        return tuple(values)
+
+    sequence = PulseSequence(
+        "busy_camera",
+        target,
+        20.0,
+        (
+            PulsePeriod("first", 1.0, "ms", states(True)),
+            PulsePeriod("gap", 4.0, "ms", states(False)),
+            PulsePeriod("second", 1.0, "ms", states(True)),
+            PulsePeriod("tail", 1.0, "ms", states(False)),
+        ),
+    )
+    config = load_streamer_config()
+    program = compile_sequence(
+        sequence,
+        config["params"],
+        float(config["clock_hz"]),
+    )
+    world = SimulationWorld(seed=7)
+    camera = VirtualCamera(frame_source=world.render_frame)
+    world.register_camera(camera)
+    camera.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=1.0)
+    world.fire(
+        program,
+        camera_channel=CAMERA_CHANNEL,
+        cycle_start_seconds=0.0,
+    )
+    world.fire(
+        program,
+        camera_channel=CAMERA_CHANNEL,
+        cycle_start_seconds=1.0,
+    )
+    records = camera.read_frame_records(2, timeout=1.0, exact=True)
+    terminal = camera.finish_record_capture()
+    assert [record.source_ordinal for record in records] == [0, 2]
+    assert terminal.produced_count == 2
 
 
 def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> None:
@@ -1344,8 +1464,8 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         expected = []
         for _ in range(repeats):
             sequencer.fire()
-            expected.append(np.array(installation.world._occupancy, copy=True))
             sequencer.wait_done(1.0)
+            expected.append(np.array(installation.world._occupancy, copy=True))
         result = capture.collect()
         labels = np.asarray(expected, dtype=bool)
         centers = installation.world.geometry.site_centers_xy
