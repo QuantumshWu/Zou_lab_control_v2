@@ -254,6 +254,7 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 
 ### 明确defer与停止门
 
+- 用户保留的M4 cleanup待办（只记录，尚未授权实施）：production可安全净删约180–240行，首要目标是`RasterPlotHost`内约246行的单消费者`_WorkerSessionAdapter`转发层；tests可安全MERGE/DELETE约500–800行，增量高度集中在9个Plot/Workbench纵向文件。执行时必须保持exact backlog/ROI/invalid gap/Qt lifecycle核心证据，另做明确follow-up commit，不能把删断言冒充简化。
 - 100 ms只保留为正式链profile警戒线。当前P50/P95约150/167 ms已无额外cadence、HOL、错误串行或重复render；是否继续做更大性能取舍由用户在本commit后讨论，本milestone不为百分之几/十几的边际收益新增executor/cache/framework。
 - 不可中断的vendor discovery保持window可见并拒绝close，直到真实future结束；hardware transport cancellation/priority属于M5，不把`shutdown(wait=False)`冒充安全退出。
 - 普通Pulse Stop/FIRE wire priority、Camera/Remote/FPGA归M5；SLM USB/context/feedback归M6；single distribution/fresh install/notebook与final docs归M7。M4未访问hardware，也不把offscreen/virtual证据冒充实验机验收。
