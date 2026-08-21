@@ -473,3 +473,70 @@ def test_regular_image_warm_start_reproduces_the_cold_solution(
         atol=1e-9,
     )
     assert np.all(np.isfinite(warm.standard_errors))
+
+
+def test_large_curves_solve_on_binned_statistics_and_report_full_data() -> None:
+    """Compression decides where the solver ITERATES, never what is reported.
+
+    A curve past ``max_exact_points`` iterates on x-binned means, yet the
+    result's fitted values, residuals and indices stay per-point: they are
+    what overlays and published outputs consume.  The parameters must agree
+    with the exact solve far inside any physical error bar.
+    """
+
+    engine = FitEngine()
+    rng = np.random.default_rng(17)
+    n = 60_000
+    x = np.linspace(-4.0, 4.0, n)
+    y = 0.3 + 2.0 * np.exp(-0.5 * ((x - 0.4) / 0.9) ** 2)
+    y = y + rng.normal(0.0, 0.03, n)
+    exact = engine.fit(
+        "gaussian_offset", (x,), y, options=FitOptions(max_exact_points=None)
+    )
+    binned = engine.fit("gaussian_offset", (x,), y)
+    assert exact.success and binned.success
+    for name, value in exact.parameters.items():
+        assert abs(binned.parameters[name] - value) <= 1e-4 * max(
+            1e-12, abs(value)
+        )
+    assert binned.fitted_values.shape == (n,)
+    assert binned.residuals.shape == (n,)
+    assert binned.selected_indices.shape == (n,)
+    # The reported quality is the full data's, not the binned statistics'.
+    assert binned.reduced_chi_square == pytest.approx(
+        float(np.dot(binned.residuals, binned.residuals))
+        / (n - len(binned.parameter_values)),
+        rel=1e-12,
+    )
+
+
+def test_max_exact_points_none_solves_every_point() -> None:
+    engine = FitEngine()
+    rng = np.random.default_rng(23)
+    n = 20_000
+    x = np.linspace(0.0, 8.0, n)
+    y = 0.1 + 2.5 * np.exp(-x / 1.7) + rng.normal(0.0, 0.02, n)
+    first = engine.fit(
+        "exponential_decay", (x,), y, options=FitOptions(max_exact_points=None)
+    )
+    second = engine.fit(
+        "exponential_decay", (x,), y, options=FitOptions(max_exact_points=None)
+    )
+    assert first.success and second.success
+    assert tuple(first.parameter_values) == tuple(second.parameter_values)
+
+
+def test_small_curves_never_compress() -> None:
+    """Below the threshold the solver sees every point, exactly as before."""
+
+    engine = FitEngine()
+    rng = np.random.default_rng(29)
+    n = 4_000
+    x = np.linspace(-4.0, 4.0, n)
+    y = 0.3 + 2.0 * np.exp(-0.5 * ((x - 0.2) / 0.8) ** 2)
+    y = y + rng.normal(0.0, 0.02, n)
+    default = engine.fit("gaussian_offset", (x,), y)
+    exact = engine.fit(
+        "gaussian_offset", (x,), y, options=FitOptions(max_exact_points=None)
+    )
+    assert tuple(default.parameter_values) == tuple(exact.parameter_values)
