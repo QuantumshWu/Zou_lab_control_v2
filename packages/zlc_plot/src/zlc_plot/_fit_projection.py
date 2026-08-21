@@ -379,6 +379,7 @@ class FitProjection:
         unit_registry: UnitRegistry | None,
         defaults: PlotLibraryDefaults,
         histogram_projection: HistogramProjection | None,
+        inherit_view: "DataView | None" = None,
     ) -> None:
         if not isinstance(context, ProjectionContext):
             raise TypeError("context must be ProjectionContext")
@@ -395,6 +396,11 @@ class FitProjection:
             )
         self._histogram_projection = histogram_projection
         self._view = None
+        #: The previous revision's built DataView, handed across the fork so
+        #: coordinate-domain work (an np.unique over a million-point axis)
+        #: carries over when the coordinate plane did not change.  Consumed
+        #: and released by the first _build_view.
+        self._inherit_view = inherit_view
         self._scoped_cache: tuple[object, OwnedSnapshot] | None = None
         self._payload = None
         selected_revision = integer(revision, "projection revision", minimum=0)
@@ -430,6 +436,7 @@ class FitProjection:
             unit_registry=self._unit_registry,
             defaults=self._defaults,
             histogram_projection=self._histogram_projection,
+            inherit_view=self._view,
         )
 
     def _reproject(
@@ -632,7 +639,11 @@ class FitProjection:
             axis_display_units=overrides,
             value_display_unit=value_unit,
             unit_registry=self._unit_registry,
+            inherit_domains_from=(
+                self._view if self._view is not None else self._inherit_view
+            ),
         )
+        self._inherit_view = None
 
     def _build_payload_from_view(self) -> None:
         """Reproject the plot payload without rebuilding unit-aware DataView state."""

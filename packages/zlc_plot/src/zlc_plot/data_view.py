@@ -415,6 +415,8 @@ class DataView:
         "_axis_cache",
         "_flat_cache",
         "_pooled_cache",
+        "_positions_cache",
+        "_domain_carry",
     )
 
     def __init__(
@@ -424,6 +426,7 @@ class DataView:
         axis_display_units: Mapping[AxisRef, str | Unit] | None = None,
         value_display_unit: str | Unit | None = None,
         unit_registry: UnitRegistry | None = None,
+        inherit_domains_from: "DataView | None" = None,
     ) -> None:
         if not isinstance(snapshot, OwnedSnapshot):
             raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
@@ -475,6 +478,22 @@ class DataView:
             tuple[NDArray[Any], NDArray[np.int64]],
         ] = {}
         self._pooled_cache: NDArray[Any] | None = None
+        self._positions_cache: NDArray[np.int64] | None = None
+        #: Whole-dataset domains carried from the PREVIOUS revision's view.
+        #: A domain is a fact about the coordinate plane alone -- np.unique
+        #: over a million-point x column costs ~60 ms and its input rarely
+        #: changes between live revisions -- so each entry keeps the exact
+        #: coordinate array it was derived from and is reused only after an
+        #: equality check against the current one (~1 ms for the same
+        #: million points).  Display-unit context must match exactly.
+        self._domain_carry: dict[AxisRef, tuple[NDArray[Any], _Domain]] = {}
+        if (
+            inherit_domains_from is not None
+            and isinstance(inherit_domains_from, DataView)
+            and inherit_domains_from._axis_display_units == overrides
+            and inherit_domains_from._unit_registry is registry
+        ):
+            self._domain_carry = inherit_domains_from._domain_carry
         self._samples = SampleProjection(
             revision=snapshot_revision(snapshot),
             generation=snapshot_generation(snapshot),
@@ -1566,7 +1585,11 @@ class DataView:
         )
 
     def _all_positions(self) -> NDArray[np.int64]:
-        return np.arange(self._samples.value.canonical.size, dtype=np.int64)
+        cached = self._positions_cache
+        if cached is None:
+            cached = np.arange(self._samples.value.canonical.size, dtype=np.int64)
+            self._positions_cache = cached
+        return cached
 
     def _groups(
         self,
@@ -1625,6 +1648,16 @@ class DataView:
         ref: AxisRef,
         positions: NDArray[np.int64],
     ) -> _Domain:
+        whole = positions is self._positions_cache
+        if whole:
+            carried = self._domain_carry.get(ref)
+            if carried is not None:
+                coords, domain = carried
+                current = np.asarray(self._resolve(ref).coordinate.canonical).reshape(-1)
+                if coords.shape == current.shape and np.array_equal(
+                    coords, current
+                ):
+                    return domain
         resolved = self._resolve(ref)
         # ``CoordinateArray`` keeps broadcast tensor views for renderers.
         # Grouping is flat and hot, so the one materialization lives in this
@@ -1755,12 +1788,18 @@ class DataView:
                 )
             )
 
-        return _Domain(
+        domain = _Domain(
             _readonly(_scalar_kind_array(canonical_values)),
             _readonly(_scalar_kind_array(display_values)),
             codes,
             build_values,
         )
+        if whole:
+            self._domain_carry[ref] = (
+                np.asarray(resolved.coordinate.canonical).reshape(-1),
+                domain,
+            )
+        return domain
 
     def _resolve(self, ref: AxisRef) -> _ResolvedAxis:
         if not isinstance(ref, AxisRef):
