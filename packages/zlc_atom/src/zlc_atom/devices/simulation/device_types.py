@@ -24,9 +24,21 @@ from .world import (
 VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
-            "frame_shape_yx",
+            "exposure_seconds",
+            "float",
+            "Exposure seconds",
+            0.02,
+            minimum=1e-9,
+        ),
+    )
+)
+
+SIMULATION_WORLD_SCHEMA = AuthoringSchema(
+    (
+        AuthoringField(
+            "image_shape_yx",
             "pair",
-            "Frame shape (Y,X)",
+            "Image shape (Y,X)",
             DEFAULT_SIMULATION_IMAGE_SHAPE_YX,
         ),
         AuthoringField(
@@ -41,13 +53,6 @@ VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
             "str",
             "Simulation world profile (JSON)",
             "",
-        ),
-        AuthoringField(
-            "exposure_seconds",
-            "float",
-            "Exposure seconds",
-            0.02,
-            minimum=1e-9,
         ),
     )
 )
@@ -84,7 +89,7 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     world = context.world
     geometry = world.geometry
     config = VirtualCameraConfig(
-        frame_shape_yx=tuple(authored["frame_shape_yx"]),
+        frame_shape_yx=geometry.image_shape_yx,
         exposure_seconds=float(authored["exposure_seconds"]),
         # The world's own numbers, read from it rather than restated here:
         # it converts electrons to counts to make the frame, and this is the
@@ -92,8 +97,6 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
         offset_counts=world.offset_counts,
         electrons_per_count=world.conversion_e_per_count,
     )
-    if config.frame_shape_yx != geometry.image_shape_yx:
-        raise ValueError("virtual camera frame must share SimulationWorld geometry")
     camera = VirtualCamera(
         config,
         frame_source=lambda ordinal, exposure: world.render_frame(
@@ -111,13 +114,16 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _camera_world_config(values: dict) -> SimulationWorldConfig:
-    authored = VIRTUAL_CAMERA_SCHEMA.project_values(values)
+def _simulation_world_config(values: dict) -> SimulationWorldConfig:
+    authored = SIMULATION_WORLD_SCHEMA.project_values(values)
     geometry = SimulationGeometry(
         grid_shape_yx=tuple(authored["grid_shape_yx"]),
-        image_shape_yx=tuple(authored["frame_shape_yx"]),
+        image_shape_yx=tuple(authored["image_shape_yx"]),
     )
-    profile = str(authored["world_profile"]).strip()
+    profile_value = authored["world_profile"]
+    if not isinstance(profile_value, str):
+        raise TypeError("Simulation world profile (JSON) must be text")
+    profile = profile_value.strip()
     if profile:
         return SimulationWorldConfig.from_profile(
             profile,
@@ -165,11 +171,6 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _mot_camera_world_config(values: dict) -> None:
-    VIRTUAL_MOT_CAMERA_SCHEMA.project_values(values)
-    return None
-
-
 def _sequencer_factory(context, key: str, values: dict) -> InstalledLeaf:
     VIRTUAL_SEQUENCER_SCHEMA.project_values(values)
     if not isinstance(context.world, SimulationWorld):
@@ -185,13 +186,6 @@ def _sequencer_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _sequencer_world_config(values: dict) -> None:
-    """Request the default shared world without claiming camera geometry."""
-
-    VIRTUAL_SEQUENCER_SCHEMA.project_values(values)
-    return None
-
-
 def _slm_factory(context, key: str, values: dict) -> InstalledLeaf:
     VIRTUAL_SLM_SCHEMA.project_values(values)
     if not isinstance(context.world, SimulationWorld):
@@ -204,11 +198,6 @@ def _slm_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _slm_world_config(values: dict) -> None:
-    VIRTUAL_SLM_SCHEMA.project_values(values)
-    return None
-
-
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
         "camera.virtual",
@@ -216,7 +205,7 @@ DEVICE_TYPES = (
         VIRTUAL_CAMERA_SCHEMA,
         ("camera.adapter",),
         factory=_camera_factory,
-        world_config=_camera_world_config,
+        world_config=_simulation_world_config,
     ),
     DeviceTypeDescriptor(
         "sequencer.virtual",
@@ -224,7 +213,7 @@ DEVICE_TYPES = (
         VIRTUAL_SEQUENCER_SCHEMA,
         ("sequencer.streamer",),
         factory=_sequencer_factory,
-        world_config=_sequencer_world_config,
+        world_config=_simulation_world_config,
         control_factory=open_sequencer_control,
     ),
     DeviceTypeDescriptor(
@@ -233,7 +222,7 @@ DEVICE_TYPES = (
         VIRTUAL_MOT_CAMERA_SCHEMA,
         ("camera.adapter",),
         factory=_mot_camera_factory,
-        world_config=_mot_camera_world_config,
+        world_config=_simulation_world_config,
     ),
     DeviceTypeDescriptor(
         "slm.virtual",
@@ -241,7 +230,7 @@ DEVICE_TYPES = (
         VIRTUAL_SLM_SCHEMA,
         ("slm.phase",),
         factory=_slm_factory,
-        world_config=_slm_world_config,
+        world_config=_simulation_world_config,
         control_factory=open_slm_control,
     ),
 )
@@ -249,6 +238,7 @@ DEVICE_TYPES = (
 
 __all__ = [
     "DEVICE_TYPES",
+    "SIMULATION_WORLD_SCHEMA",
     "VIRTUAL_CAMERA_SCHEMA",
     "VIRTUAL_MOT_CAMERA_SCHEMA",
     "VIRTUAL_SEQUENCER_SCHEMA",

@@ -9,6 +9,7 @@ from functools import cached_property
 from math import isfinite, sqrt
 
 from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -635,6 +636,8 @@ class ReadoutModel:
     bright_mean: np.ndarray
     usable_sites: np.ndarray
     quality: np.ndarray
+    dark_sample_count: np.ndarray | None = None
+    dark_sample_variance: np.ndarray | None = None
     kind: ReadoutModelKind = ReadoutModelKind.BOX
     integration_half_width: int = 1
     reducer: str | None = "mean"
@@ -654,6 +657,34 @@ class ReadoutModel:
         bright_mean = _immutable_array(self.bright_mean, "<f8", (len(site_ids),))
         usable = _immutable_array(self.usable_sites, "?", (len(site_ids),))
         quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
+        if self.dark_sample_count is None and self.dark_sample_variance is None:
+            dark_count = _immutable_array(
+                np.zeros(len(site_ids), dtype="<i8"), "<i8"
+            )
+            dark_variance = _immutable_array(
+                np.full(len(site_ids), np.nan), "<f8"
+            )
+        else:
+            raw_count = np.asarray(self.dark_sample_count)
+            if (
+                self.dark_sample_count is None
+                or self.dark_sample_variance is None
+                or raw_count.shape != (len(site_ids),)
+                or raw_count.dtype.kind not in "iu"
+                or np.any(raw_count < 0)
+                or np.any(raw_count > np.iinfo(np.int64).max)
+            ):
+                raise ValueError("dark sample statistics have invalid counts")
+            dark_count = _immutable_array(raw_count, "<i8")
+            dark_variance = _immutable_array(
+                self.dark_sample_variance, "<f8", (len(site_ids),)
+            )
+            known = dark_count >= 2
+            if np.any(
+                (known & (~np.isfinite(dark_variance) | (dark_variance < 0.0)))
+                | (~known & np.isfinite(dark_variance))
+            ):
+                raise ValueError("dark sample variance must match its effective count")
         with np.errstate(invalid="ignore", over="ignore"):
             response = bright_mean - dark_mean
         if np.any(
@@ -712,6 +743,8 @@ class ReadoutModel:
         object.__setattr__(self, "bright_mean", bright_mean)
         object.__setattr__(self, "usable_sites", usable)
         object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "dark_sample_count", dark_count)
+        object.__setattr__(self, "dark_sample_variance", dark_variance)
         object.__setattr__(self, "integration_half_width", half_width)
         object.__setattr__(self, "reducer", reducer)
         object.__setattr__(self, "threshold_method", threshold_method)
@@ -729,6 +762,10 @@ class ReadoutModel:
             "bright_mean": _nullable_floats(self.bright_mean),
             "usable_sites": self.usable_sites.tolist(),
             "quality": _nullable_floats(self.quality),
+            "dark_statistics": {
+                "sample_count": self.dark_sample_count.tolist(),
+                "sample_variance": _nullable_floats(self.dark_sample_variance),
+            },
             "threshold_method": self.threshold_method,
             "integration": {
                 "half_width": self.integration_half_width,
@@ -742,22 +779,27 @@ class ReadoutModel:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ReadoutModel":
+        legacy_fields = frozenset(
+            {
+                "kind", "site_ids", "thresholds", "dark_mean", "bright_mean",
+                "usable_sites", "quality", "threshold_method", "integration",
+            }
+        )
+        legacy = type(payload) is dict and set(payload) == legacy_fields
         values = _exact_fields(
             payload,
             "ReadoutModel",
-            frozenset(
-                {
-                    "kind",
-                    "site_ids",
-                    "thresholds",
-                    "dark_mean",
-                    "bright_mean",
-                    "usable_sites",
-                    "quality",
-                    "threshold_method",
-                    "integration",
-                }
-            ),
+            legacy_fields if legacy else legacy_fields | {"dark_statistics"},
+        )
+        dark_statistics = (
+            {"sample_count": [0] * len(values["site_ids"]),
+             "sample_variance": [None] * len(values["site_ids"])}
+            if legacy
+            else _exact_fields(
+                values["dark_statistics"],
+                "ReadoutModel.dark_statistics",
+                frozenset({"sample_count", "sample_variance"}),
+            )
         )
         integration = _exact_fields(
             values["integration"],
@@ -780,6 +822,10 @@ class ReadoutModel:
             _floats_from_json(values["bright_mean"]),
             np.asarray(values["usable_sites"]),
             _floats_from_json(values["quality"]),
+            dark_sample_count=np.asarray(dark_statistics["sample_count"]),
+            dark_sample_variance=_floats_from_json(
+                dark_statistics["sample_variance"]
+            ),
             kind=ReadoutModelKind(values["kind"]),
             integration_half_width=integration["half_width"],
             reducer=integration["reducer"],
@@ -789,7 +835,10 @@ class ReadoutModel:
             background=integration["background"],
             psf_padding=integration["padding"],
         )
-        _require_canonical(result.to_dict(), dict(values), "ReadoutModel")
+        canonical = result.to_dict()
+        if legacy:
+            canonical.pop("dark_statistics")
+        _require_canonical(canonical, dict(values), "ReadoutModel")
         return result
 
 
@@ -1010,7 +1059,11 @@ class TrapCalibration:
             FrameContract.from_dict(values["frame_contract"]),
             report,
         )
-        _require_canonical(result.to_dict(), dict(values), "TrapCalibration")
+        canonical = result.to_dict()
+        for index, model in enumerate(models):
+            if type(model) is dict and "dark_statistics" not in model:
+                canonical["models"][index].pop("dark_statistics")
+        _require_canonical(canonical, dict(values), "TrapCalibration")
         return result
 
     def save(self, path: str | Path) -> Path:
@@ -2115,6 +2168,8 @@ def _train_readout_model(
     gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
     dark_means = np.full(len(centers), np.nan, dtype=float)
     bright_means = np.full(len(centers), np.nan, dtype=float)
+    dark_sample_count = np.zeros(len(centers), dtype=np.int64)
+    dark_sample_variance = np.full(len(centers), np.nan, dtype=float)
     n_train_dark = np.zeros(len(centers), dtype=int)
     n_train_bright = np.zeros(len(centers), dtype=int)
     for site in range(len(centers)):
@@ -2124,6 +2179,15 @@ def _train_readout_model(
         dark = short_signals[train_mask & ~labels_occupied[:, site], site]
         bright_values = short_signals[train_mask & labels_occupied[:, site], site]
         n_train_dark[site], n_train_bright[site] = dark.size, bright_values.size
+        # A registered-but-never-bright site still owns a real camera box.
+        # With no occupied label, every finite sample is a conservative dark
+        # reference: any undetected fluorescence can only raise this baseline
+        # and make later visibility harder, never manufacture a response.
+        dark_reference = dark if dark.size >= 2 else short_signals[finite, site]
+        if dark_reference.size >= 2:
+            dark_means[site] = float(np.mean(dark_reference))
+            dark_sample_count[site] = dark_reference.size
+            dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
         if dark.size >= 2 and bright_values.size >= 2:
             dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
             dark_means[site], bright_means[site] = dark_mean, bright_mean
@@ -2181,6 +2245,8 @@ def _train_readout_model(
         bright_means,
         usable_sites,
         site_fidelity,
+        dark_sample_count=dark_sample_count,
+        dark_sample_variance=dark_sample_variance,
         kind=kind,
         threshold_method=threshold_method,
         **dict(model_parameters),
@@ -2204,6 +2270,410 @@ def _train_readout_model(
     return readout_model, report
 
 
+def validate_target_registration(
+    site_map: SiteMap,
+    *,
+    frame_shape: tuple[int, int],
+    box_half_width: int,
+    _check_uniqueness: bool = True,
+) -> tuple[np.ndarray, Mapping[str, Any]]:
+    """Validate and return one registered Target roster in stable site order."""
+
+    if not isinstance(site_map, SiteMap) or not isinstance(site_map.topology, Mapping):
+        raise ValueError("Calibration SiteMap has no registered Target topology")
+    topology = site_map.topology
+    if set(topology) != {
+        "kind", "version", "target_support_yx", "target_site_intensity",
+        "observed_sites", "affine_target_xy_to_image_xy", "provenance",
+    } or topology.get("kind") != "slm_target_registration" or topology.get(
+        "version"
+    ) != 1:
+        raise ValueError("Calibration SiteMap has invalid registered Target topology")
+    support = np.asarray(topology["target_support_yx"])
+    intensity = np.asarray(topology["target_site_intensity"])
+    observed = np.asarray(topology["observed_sites"])
+    affine = np.asarray(topology["affine_target_xy_to_image_xy"])
+    centers = np.asarray(site_map.centers_xy)
+    provenance = topology["provenance"]
+    shape = tuple(int(value) for value in frame_shape)
+    radius = int(box_half_width)
+    if (
+        support.ndim != 2
+        or support.shape[1:] != (2,)
+        or not len(support)
+        or support.dtype.kind not in "iu"
+        or np.any(support < 0)
+        or len({tuple(value) for value in support.tolist()}) != len(support)
+        or intensity.shape != (len(support),)
+        or intensity.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(intensity))
+        or np.any(intensity <= 0.0)
+        or observed.shape != (len(support),)
+        or observed.dtype != np.dtype(bool)
+        or not np.any(observed)
+        or not np.array_equal(observed, site_map.valid_sites)
+        or site_map.site_ids
+        != tuple(f"site_{index:04d}" for index in range(len(support)))
+        or affine.shape != (3, 2)
+        or affine.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(affine))
+        or centers.shape != (len(support), 2)
+        or centers.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(centers))
+        or len(shape) != 2
+        or any(value <= 0 for value in shape)
+        or radius < 0
+    ):
+        raise ValueError("Calibration target registration fields are invalid")
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "science_context_path", "command_receipt",
+    }:
+        raise ValueError("Calibration target registration provenance is invalid")
+    if (
+        not isinstance(provenance["science_context_path"], str)
+        or not provenance["science_context_path"]
+        or not isinstance(provenance["command_receipt"], Mapping)
+    ):
+        raise ValueError("Calibration target registration provenance is invalid")
+
+    target_xy = support[:, ::-1].astype(float, copy=False)
+    design = np.column_stack((target_xy, np.ones(len(support), dtype=float)))
+    predicted = design @ np.asarray(affine, dtype=float)
+    if not np.allclose(
+        centers[~observed], predicted[~observed], rtol=1e-12, atol=1e-9
+    ):
+        raise ValueError("unobserved SiteMap centers differ from registered prediction")
+    target_rank = int(
+        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
+    )
+    if int(np.sum(observed)) < target_rank + 1:
+        raise ValueError("too few observed sites span the registered Target geometry")
+    if not np.all(observed):
+        rows, columns = support.T
+        points = {tuple(point) for point in target_xy.tolist()}
+        reflected_x = np.column_stack(
+            (np.min(columns) + np.max(columns) - columns, rows)
+        )
+        reflected_y = np.column_stack(
+            (columns, np.min(rows) + np.max(rows) - rows)
+        )
+        reflected_xy = np.column_stack((reflected_x[:, 0], reflected_y[:, 1]))
+        if any(
+            not np.array_equal(reflected, target_xy)
+            and {tuple(point) for point in reflected.tolist()} == points
+            for reflected in (reflected_x, reflected_y, reflected_xy)
+        ):
+            raise ValueError(
+                "unresolved symmetric Target registration needs an asymmetric "
+                "spatial fiducial or trusted registered calibration"
+            )
+
+    measured = centers[observed]
+    residuals = np.linalg.norm(predicted[observed] - measured, axis=1)
+    if len(measured) > 1:
+        separations = np.linalg.norm(
+            measured[:, np.newaxis, :] - measured[np.newaxis, :, :], axis=2
+        )
+        separations[np.diag_indices_from(separations)] = np.inf
+        spacing = float(np.min(separations))
+        if not np.isfinite(spacing) or spacing <= 0.0:
+            raise ValueError("Calibration SiteMap geometry is ambiguous")
+        if float(np.max(residuals)) > 0.25 * spacing:
+            raise ValueError("Calibration sites do not fit the authored Target geometry")
+        predicted_separation = np.linalg.norm(
+            predicted[:, np.newaxis, :] - predicted[np.newaxis, :, :], axis=2
+        )
+        predicted_separation[np.diag_indices_from(predicted_separation)] = np.inf
+        if float(np.min(predicted_separation)) + 1e-9 * spacing < 0.5 * spacing:
+            raise ValueError("predicted Target site separation is ambiguous")
+
+    target_spans = np.ptp(target_xy, axis=0)
+    measured_spans = np.ptp(measured, axis=0)
+    if target_spans[0] > 0.0 and target_spans[1] == 0.0:
+        tilted = measured_spans[1] / measured_spans[0] > 0.25
+    elif target_spans[0] == 0.0 and target_spans[1] > 0.0:
+        tilted = measured_spans[0] / measured_spans[1] > 0.25
+    else:
+        tilted = False
+    if tilted:
+        raise ValueError("Calibration differs from the trusted apparatus orientation")
+    normalized_target = np.zeros_like(target_xy)
+    normalized_measured = np.zeros_like(measured)
+    for axis in range(2):
+        if target_spans[axis] > 0.0:
+            measured_span = measured_spans[axis]
+            if measured_span == 0.0:
+                raise ValueError("Calibration geometry cannot register Target support")
+            normalized_target[:, axis] = (
+                target_xy[:, axis] - float(np.min(target_xy[:, axis]))
+            ) / target_spans[axis]
+            normalized_measured[:, axis] = (
+                measured[:, axis] - float(np.min(measured[:, axis]))
+            ) / measured_span
+    if target_rank == 2:
+        normalized_design = np.column_stack(
+            (normalized_target[observed], np.ones(int(np.sum(observed))))
+        )
+        normalized_affine, *_unused = np.linalg.lstsq(
+            normalized_design, normalized_measured, rcond=None
+        )
+        linear = normalized_affine[:2]
+        if (
+            float(np.linalg.det(linear)) <= 0.0
+            or float(np.linalg.cond(linear)) > 3.0
+            or float(np.max(np.abs(linear - np.eye(2)))) > 0.25
+            or float(np.linalg.cond(affine[:2])) > 1.75
+        ):
+            raise ValueError(
+                "Calibration differs from the trusted apparatus orientation"
+            )
+    for axis in range(2):
+        authored = target_xy[observed, axis]
+        if float(np.ptp(authored)) > 0.0 and float(
+            np.sum(
+                (authored - np.mean(authored))
+                * (measured[:, axis] - np.mean(measured[:, axis]))
+            )
+        ) <= 0.0:
+            raise ValueError("Calibration differs from the trusted Target orientation")
+    if any(not box_fits(tuple(center), radius, shape) for center in centers):
+        raise ValueError("a registered Target BOX lies outside the camera frame")
+    rounded = np.rint(centers).astype(int)
+    if len({tuple(center) for center in rounded.tolist()}) != len(rounded):
+        raise ValueError("registered Target BOX centers collide in camera pixels")
+    if radius > 0 and len(rounded) > 1:
+        delta = np.abs(rounded[:, np.newaxis, :] - rounded[np.newaxis, :, :])
+        overlaps = np.all(delta <= 2 * radius, axis=2)
+        overlaps[np.diag_indices_from(overlaps)] = False
+        if np.any(overlaps):
+            raise ValueError("registered Target BOX windows overlap in camera pixels")
+    if _check_uniqueness and len(measured) < len(support):
+        initial_cost = np.sum(
+            (
+                normalized_target[:, np.newaxis, :]
+                - normalized_measured[np.newaxis, :, :]
+            )
+            ** 2,
+            axis=2,
+        )
+        observed_indices = np.flatnonzero(observed)
+        primary = set(zip(observed_indices.tolist(), range(len(measured))))
+        for forbidden_target, forbidden_measured in primary:
+            alternate_cost = np.array(initial_cost, copy=True)
+            alternate_cost[forbidden_target, forbidden_measured] = np.inf
+            try:
+                alternate_target, alternate_measured = linear_sum_assignment(
+                    alternate_cost
+                )
+            except ValueError:
+                continue
+            alternate_affine = None
+            for _iteration in range(6):
+                alternate_design = design[alternate_target]
+                if np.linalg.matrix_rank(alternate_design) < target_rank + 1:
+                    alternate_affine = None
+                    break
+                alternate_affine, *_unused = np.linalg.lstsq(
+                    alternate_design, measured[alternate_measured], rcond=None
+                )
+                alternate_prediction = design @ alternate_affine
+                alternate_cost = np.sum(
+                    (
+                        alternate_prediction[:, np.newaxis, :]
+                        - measured[np.newaxis, :, :]
+                    )
+                    ** 2,
+                    axis=2,
+                )
+                alternate_cost[forbidden_target, forbidden_measured] = np.inf
+                try:
+                    updated_target, updated_measured = linear_sum_assignment(
+                        alternate_cost
+                    )
+                except ValueError:
+                    alternate_affine = None
+                    break
+                if np.array_equal(updated_target, alternate_target) and np.array_equal(
+                    updated_measured, alternate_measured
+                ):
+                    break
+                alternate_target, alternate_measured = (
+                    updated_target, updated_measured
+                )
+            if alternate_affine is None:
+                continue
+            alternate_affine, *_unused = np.linalg.lstsq(
+                design[alternate_target], measured[alternate_measured], rcond=None
+            )
+            alternate_prediction = design @ alternate_affine
+            alternate_observed = np.zeros(len(support), dtype=bool)
+            alternate_observed[alternate_target] = True
+            alternate_centers = np.array(alternate_prediction, copy=True)
+            alternate_centers[alternate_target] = measured[alternate_measured]
+            alternate_topology = dict(topology)
+            alternate_topology["observed_sites"] = alternate_observed.tolist()
+            alternate_topology[
+                "affine_target_xy_to_image_xy"
+            ] = alternate_affine.tolist()
+            alternate_site_map = replace(
+                site_map,
+                centers_xy=alternate_centers,
+                valid_sites=alternate_observed,
+                topology=alternate_topology,
+            )
+            try:
+                validate_target_registration(
+                    alternate_site_map,
+                    frame_shape=shape,
+                    box_half_width=radius,
+                    _check_uniqueness=False,
+                )
+            except (TypeError, ValueError):
+                continue
+            alternate = set(
+                zip(alternate_target.tolist(), alternate_measured.tolist())
+            )
+            if alternate != primary:
+                raise ValueError(
+                    "Calibration target registration is ambiguous; add an "
+                    "asymmetric spatial fiducial or trusted registered calibration"
+                )
+    return _immutable_array(support, "<i8"), provenance
+
+
+def _register_target_sites(
+    detected: SiteMap,
+    target_intensity: object,
+    provenance: Mapping[str, Any] | None,
+    *,
+    frame_shape: tuple[int, int],
+    measurement_radius: int,
+) -> SiteMap:
+    """Fit the authored SLM roster to detected camera sites without deleting gaps."""
+
+    target = np.asarray(target_intensity, dtype=np.float32)
+    if (
+        target.ndim != 2
+        or min(target.shape) < 2
+        or not np.all(np.isfinite(target))
+        or np.any(target < 0.0)
+    ):
+        raise ValueError("registration Target must be finite non-negative intensity")
+    rows, columns = np.nonzero(target > 0.0)
+    roster_count = len(rows)
+    measured_count = detected.n_sites
+    if not roster_count:
+        raise ValueError("registration Target support is empty")
+    if measured_count > roster_count:
+        raise ValueError("Calibration detected more sites than the authored Target roster")
+    if not isinstance(provenance, Mapping):
+        raise TypeError("registration provenance must be a mapping")
+
+    target_xy = np.column_stack((columns, rows)).astype(float, copy=False)
+    measured_xy = np.asarray(detected.centers_xy, dtype=float)
+    target_rank = int(
+        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
+    )
+    if measured_count < target_rank + 1:
+        raise ValueError("too few detected sites to register the authored Target roster")
+    if roster_count == measured_count == 1:
+        predicted = np.array(measured_xy, copy=True)
+        target_indices = calibration_indices = np.asarray([0], dtype=np.intp)
+        affine = np.zeros((3, 2), dtype=float)
+        affine[2] = measured_xy[0]
+    else:
+        normalized_target = np.zeros_like(target_xy)
+        normalized_measured = np.zeros_like(measured_xy)
+        for axis in range(2):
+            target_span = float(np.ptp(target_xy[:, axis]))
+            measured_span = float(np.ptp(measured_xy[:, axis]))
+            if target_span > 0.0:
+                if measured_span == 0.0:
+                    raise ValueError("Calibration geometry cannot register Target support")
+                normalized_target[:, axis] = (
+                    target_xy[:, axis] - float(np.min(target_xy[:, axis]))
+                ) / target_span
+                normalized_measured[:, axis] = (
+                    measured_xy[:, axis] - float(np.min(measured_xy[:, axis]))
+                ) / measured_span
+        cost = np.sum(
+            (
+                normalized_target[:, np.newaxis, :]
+                - normalized_measured[np.newaxis, :, :]
+            )
+            ** 2,
+            axis=2,
+        )
+        target_indices, calibration_indices = linear_sum_assignment(cost)
+        full_design = np.column_stack(
+            (target_xy, np.ones(roster_count, dtype=float))
+        )
+        for _iteration in range(6):
+            matched_design = full_design[target_indices]
+            if np.linalg.matrix_rank(matched_design) < target_rank + 1:
+                raise ValueError("detected sites do not span the authored Target geometry")
+            affine, *_unused = np.linalg.lstsq(
+                matched_design,
+                measured_xy[calibration_indices],
+                rcond=None,
+            )
+            predicted = full_design @ affine
+            cost = np.sum(
+                (predicted[:, np.newaxis, :] - measured_xy[np.newaxis, :, :])
+                ** 2,
+                axis=2,
+            )
+            updated_target, updated_calibration = linear_sum_assignment(cost)
+            if np.array_equal(updated_target, target_indices) and np.array_equal(
+                updated_calibration, calibration_indices
+            ):
+                break
+            target_indices, calibration_indices = (
+                updated_target,
+                updated_calibration,
+            )
+        matched_design = full_design[target_indices]
+        affine, *_unused = np.linalg.lstsq(
+            matched_design,
+            measured_xy[calibration_indices],
+            rcond=None,
+        )
+        predicted = full_design @ affine
+
+    source_indices = np.full(roster_count, -1, dtype=int)
+    source_indices[target_indices] = calibration_indices
+    observed = source_indices >= 0
+    centers = np.array(predicted, dtype="<f8", copy=True)
+    centers[observed] = measured_xy[source_indices[observed]]
+    valid = np.zeros(roster_count, dtype=bool)
+    valid[observed] = detected.valid_sites[source_indices[observed]]
+    quality = np.full(roster_count, np.nan, dtype="<f8")
+    quality[observed] = detected.quality[source_indices[observed]]
+    topology = {
+        "kind": "slm_target_registration",
+        "version": 1,
+        "target_support_yx": np.column_stack((rows, columns)).astype(int).tolist(),
+        "target_site_intensity": target[rows, columns].astype(float).tolist(),
+        "observed_sites": observed.tolist(),
+        "affine_target_xy_to_image_xy": affine.astype(float).tolist(),
+        "provenance": dict(provenance),
+    }
+    result = SiteMap(
+        tuple(f"site_{index:04d}" for index in range(roster_count)),
+        centers,
+        valid,
+        quality,
+        detected.coordinate_frame,
+        topology,
+    )
+    validate_target_registration(
+        result,
+        frame_shape=frame_shape,
+        box_half_width=measurement_radius,
+    )
+    return result
+
+
 def calibrate(
     reference_frames: object,
     short_frames: object,
@@ -2219,6 +2689,8 @@ def calibrate(
     detection_sigma: float = 6.0,
     train_fraction: float = 0.9,
     split_seed: int = 0,
+    target_intensity: object | None = None,
+    registration_provenance: Mapping[str, Any] | None = None,
 ) -> CalibrationResult:
     """Discover sites once and train all readout models from one capture."""
 
@@ -2247,6 +2719,7 @@ def calibrate(
     # what makes a place a site is being seen there repeatedly, and no summary
     # of the run keeps that -- an average or a quantile mixes "how bright when
     # loaded" with "how often loaded", and traps differ in the second.
+    measurement_radius = max(box_half_width, psf_half_width + psf_padding)
     site_map = detect_sites(
         references.reshape(-1, *references.shape[2:]),
         spot_sigma=detection_spot_sigma,
@@ -2254,8 +2727,25 @@ def calibrate(
         # Every box this calibration will read out of a site: the integration
         # box, and the PSF box with the background ring round it.  A place that
         # cannot carry all of them is not a site THIS calibration can use.
-        measurement_radius=max(box_half_width, psf_half_width + psf_padding),
+        measurement_radius=measurement_radius,
     )
+    if (target_intensity is None) != (registration_provenance is None):
+        raise ValueError(
+            "target intensity and registration provenance must be supplied together"
+        )
+    if target_intensity is not None:
+        site_map = _register_target_sites(
+            site_map,
+            target_intensity,
+            registration_provenance,
+            frame_shape=references.shape[-2:],
+            measurement_radius=box_half_width,
+        )
+        if any(
+            not box_fits(tuple(center), measurement_radius, references.shape[-2:])
+            for center in site_map.centers_xy
+        ):
+            raise ValueError("a predicted Target readout window lies outside the frame")
     centers = site_map.centers_xy
 
     box_extractor: Callable[[np.ndarray], np.ndarray] = lambda frame: extract_box_signals(

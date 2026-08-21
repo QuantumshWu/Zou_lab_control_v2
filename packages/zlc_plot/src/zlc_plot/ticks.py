@@ -273,8 +273,14 @@ class SmartOffsetLocator(ticker.Locator):
         step: int,
         decade: int,
         use_offset: bool,
+        *,
+        max_count: int | None = None,
     ) -> tuple[list[float], list[int], int, int, int, int]:
-        """One complete tick layout: ticks, their indices, and the offset."""
+        """One complete tick layout: ticks, their indices, and the offset.
+
+        ``max_count`` prices an already-settled unit without enumerating a
+        lattice that is known to be inadmissibly dense for this axis.
+        """
 
         with localcontext() as context:
             context.prec = 32
@@ -311,6 +317,8 @@ class SmartOffsetLocator(ticker.Locator):
                     rounding=ROUND_FLOOR
                 )
             )
+            if max_count is not None and last - first + 1 > max_count:
+                return [], [], 0, 0, 0, decade
             distinct: dict[float, tuple[Decimal, int]] = {}
             for n in range(first, last + 1):
                 target = Decimal(n) * unit + offset
@@ -401,7 +409,14 @@ class SmartOffsetLocator(ticker.Locator):
         settled = self._settled
         if settled is not None:
             held_step, held_decade = settled
-            held = self._lay_out(lower, upper, held_step, held_decade, False)
+            held = self._lay_out(
+                lower,
+                upper,
+                held_step,
+                held_decade,
+                False,
+                max_count=self.max_ticks,
+            )
             if (
                 self.FLOOR <= len(held[0]) <= self.max_ticks
                 and self._clears(

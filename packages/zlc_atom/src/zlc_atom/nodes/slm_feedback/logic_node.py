@@ -6,7 +6,7 @@ from zlc_pulse import PulseSequence
 from zlc_plot import Reduction
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.slm.solver import load_science_context, load_target
+from zlc_atom.devices.slm.solver import load_science_context
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactCodec,
     ArtifactInputSpec,
@@ -32,11 +32,8 @@ from .task import (
 )
 
 
-TARGET_CODEC = ArtifactCodec(
-    "zlc.slm.target.v2", "SLM targets (*.json)", (".json",), load_target
-)
 _SCIENCE_CONTEXT_CODEC = ArtifactCodec(
-    "zlc.slm.science-context.v1",
+    SLM_PHASE_ARTIFACT_CONTRACT,
     "SLM Science Contexts (*.npz)",
     (".npz",),
     load_science_context,
@@ -80,7 +77,6 @@ def _build(
     slm_key: str,
     signal_plane: object,
     calibration: ResolvedArtifact,
-    target: ResolvedArtifact,
     science_context: ResolvedArtifact,
     pulse_resource: ResolvedWorkspaceResource,
     artifact_directory: object,
@@ -91,14 +87,6 @@ def _build(
         calibration.value, TrapCalibration
     ):
         raise TypeError("calibration must be a resolved calibration artifact")
-    if not isinstance(target, ResolvedArtifact):
-        raise TypeError("target must be a resolved SLM target")
-    if (
-        not isinstance(target.value, tuple)
-        or len(target.value) != 2
-        or target.value[1] != "spots"
-    ):
-        raise ValueError("SLM fluorescence feedback accepts sparse spot targets only")
     if not isinstance(science_context, ResolvedArtifact):
         raise TypeError("science_context must be a resolved Science Context artifact")
     if not isinstance(pulse_resource, ResolvedWorkspaceResource) or not isinstance(
@@ -115,9 +103,6 @@ def _build(
         signal_plane=signal_plane,
         calibration=calibration.value,
         calibration_path=calibration.path,
-        target=target.value[0],
-        target_objective=target.value[1],
-        target_path=target.path,
         science_context=science_context.value,
         science_context_path=science_context.path,
         pulse_sequence=pulse_resource.value,
@@ -137,7 +122,6 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactInputSpec(
             "calibration_path", "Calibration artifact", CALIBRATION_ARTIFACT_CODEC, argument_name="calibration"
         ),
-        ArtifactInputSpec("target_path", "SLM target", TARGET_CODEC, argument_name="target"),
         ArtifactInputSpec(
             "science_context_path",
             "SLM Science Context",
@@ -178,5 +162,4 @@ LOGIC_NODE = LogicNodeDescriptor(
 __all__ = [
     "LOGIC_NODE",
     "SLM_FEEDBACK_SCHEMA",
-    "TARGET_CODEC",
 ]

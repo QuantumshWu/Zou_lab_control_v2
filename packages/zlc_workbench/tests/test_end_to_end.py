@@ -139,6 +139,17 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
     )
 
     write_ordinary_pulse(tmp_path)
+    (tmp_path / "simulation-world.json").write_text(
+        json.dumps(
+            {
+                "format": "zlc.simulation.world_profile",
+                "version": 1,
+                "offset_counts": 123.0,
+                "conversion_e_per_count": 0.2,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     save_installation_config(
         InstallationConfig(
@@ -147,14 +158,16 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
                     "camera",
                     "camera",
                     "camera.virtual",
-                    {
-                        "frame_shape_yx": [80, 110],
-                        "grid_shape_yx": [4, 6],
-                        "seed": 3,
-                    },
+                    {"exposure_seconds": 0.02},
                 ),
                 DeviceInstanceConfig("sequencer", "sequencer", "sequencer.virtual", {}),
-            )
+            ),
+            simulation={
+                "image_shape_yx": [80, 110],
+                "grid_shape_yx": [4, 6],
+                "seed": 3,
+                "world_profile": "simulation-world.json",
+            },
         ),
         tmp_path / "apparatus.json",
     )
@@ -164,6 +177,7 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
         assert session.failures == {}
         assert session.installation.world.geometry.grid_shape_yx == (4, 6)
         assert session.installation.world.geometry.image_shape_yx == (80, 110)
+        assert session.camera.photoelectron_conversion == (123.0, 0.2)
         session.load_pulse(PULSE_NAME)
 
         node = CameraMeasurementNode(
@@ -180,6 +194,76 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
         assert frames.size
     finally:
         session.close()
+
+
+def _world_profile_config(profile: object):
+    from zlc_atom.install.configuration import (
+        DeviceInstanceConfig,
+        InstallationConfig,
+    )
+
+    return InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                "camera",
+                "camera",
+                "camera.virtual",
+                {"exposure_seconds": 0.02},
+            ),
+        ),
+        simulation={"world_profile": profile},
+    )
+
+
+def _write_world_profile(path):
+    path.write_text(
+        '{"format":"zlc.simulation.world_profile","version":1}',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_workspace_world_profile_is_relative_typed_and_contained(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from pathlib import Path
+
+    outside = _write_world_profile(
+        tmp_path.parent / f"{tmp_path.name}-outside-world.json"
+    )
+    _write_world_profile(tmp_path / "123")
+    try:
+        for profile, error_type, message in (
+            (str(outside), ValueError, "must be relative"),
+            (f"../{outside.name}", ValueError, "escapes its root"),
+            (123, TypeError, "must be text"),
+            (None, TypeError, "must be text"),
+        ):
+            with pytest.raises(error_type, match=message):
+                ExperimentSession.from_config(
+                    tmp_path,
+                    _world_profile_config(profile),
+                )
+        link = tmp_path / "simulation-world.json"
+        native_resolve = Path.resolve
+
+        def resolved(path, *args, **kwargs):
+            if path == link:
+                return native_resolve(outside, *args, **kwargs)
+            return native_resolve(path, *args, **kwargs)
+
+        # A symlink is exactly the case where resolving an inside path yields
+        # an outside target.  Model that filesystem answer directly so the
+        # containment proof also runs on Windows without symlink privilege.
+        monkeypatch.setattr(Path, "resolve", resolved)
+        with pytest.raises(ValueError, match="escapes its root"):
+            ExperimentSession.from_config(
+                tmp_path,
+                _world_profile_config(link.name),
+            )
+    finally:
+        outside.unlink()
 
 
 def test_starting_without_an_apparatus_says_how_to_start_anyway(tmp_path) -> None:

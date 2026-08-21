@@ -216,7 +216,7 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
         configured.config.atom_rate = 1.0
 
 
-def test_workspace_world_profile_is_resolved_before_virtual_device_init(
+def test_direct_world_profile_is_resolved_before_virtual_device_init(
     tmp_path: Path,
 ) -> None:
     profile = tmp_path / "simulation-world.json"
@@ -239,9 +239,10 @@ def test_workspace_world_profile_is_resolved_before_virtual_device_init(
             {
                 "key": "camera",
                 "type_id": "camera.virtual",
-                "config": {"world_profile": str(profile)},
+                "config": {},
             },
-        )
+        ),
+        simulation={"world_profile": str(profile)},
     )
     try:
         world = installation.world
@@ -2718,6 +2719,7 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
     tmp_path: Path,
 ) -> None:
     shape = (8, 10)
+    target = preset_grid(shape, (2, 3))
     yy, xx = np.ogrid[: shape[0], : shape[1]]
     pattern = canonical_phase(np.broadcast_to(0.1 + xx / 5.0, shape), shape)
     wavefront = canonical_phase(np.broadcast_to(-0.2 + yy / 7.0, shape), shape)
@@ -2767,6 +2769,7 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
         operator_wavefront=wavefront,
         pupil_amplitude=amplitude,
         pupil_support=support,
+        target_intensity=target,
         objective_kind="spots",
         pupil={
             "enabled": True,
@@ -2785,6 +2788,7 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
         ("operator_wavefront", wavefront),
         ("pupil_amplitude", amplitude),
         ("pupil_support", support),
+        ("target_intensity", target),
     ):
         np.testing.assert_array_equal(context[key], expected)
         assert not context[key].flags.writeable
@@ -2793,6 +2797,22 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
     assert context["command_receipt"] == receipt
     assert context["pupil"]["center_xy"] == [4.5, 3.5]
 
+    legacy_path = tmp_path / "legacy-context.npz"
+    with np.load(path, allow_pickle=False) as archive:
+        legacy_metadata = json.loads(str(archive["metadata"].item()))
+        legacy_metadata["version"] = 1
+        np.savez(
+            legacy_path,
+            **{
+                key: archive[key]
+                for key in archive.files
+                if key not in {"target_intensity", "metadata"}
+            },
+            metadata=np.asarray(json.dumps(legacy_metadata)),
+        )
+    legacy = load_science_context(legacy_path)
+    assert legacy["target_intensity"] is None
+
     save_science_context(
         tmp_path / "response-context.npz",
         phase,
@@ -2800,6 +2820,7 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
         operator_wavefront=wavefront,
         pupil_amplitude=amplitude,
         pupil_support=support,
+        target_intensity=target,
         objective_kind="spots",
         pupil={
             "enabled": True,
@@ -2830,6 +2851,7 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
             operator_wavefront=wavefront,
             pupil_amplitude=amplitude,
             pupil_support=support,
+            target_intensity=target,
             objective_kind="spots",
             pupil={
                 "enabled": True,

@@ -49,14 +49,16 @@ _AXIS_LIMIT_EFFECTS = (
     | RenderEffect.OVERLAY
     | RenderEffect.INTERACTION_REPROJECT
 )
-_HISTOGRAM_PROJECTION_EFFECTS = (
-    RenderEffect.PAYLOAD_PROJECTION
-    | RenderEffect.BASE_GEOMETRY
+_HISTOGRAM_REPRESENTATION_EFFECTS = (
+    RenderEffect.BASE_GEOMETRY
     | RenderEffect.AXIS_TRANSFORM
     | RenderEffect.CHROME
     | RenderEffect.OVERLAY
     | RenderEffect.FIT_SELECTION
     | RenderEffect.INTERACTION_REPROJECT
+)
+_HISTOGRAM_PROJECTION_EFFECTS = (
+    RenderEffect.PAYLOAD_PROJECTION | _HISTOGRAM_REPRESENTATION_EFFECTS
 )
 _IMAGE_COLOR_EFFECTS = (
     RenderEffect.BASE_STYLE
@@ -495,14 +497,14 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
         ParameterSpec(
             "density",
             bool,
-            _HISTOGRAM_PROJECTION_EFFECTS | RenderEffect.TEXT,
+            _HISTOGRAM_REPRESENTATION_EFFECTS | RenderEffect.TEXT,
             default=False,
             label="Density",
         ),
         ParameterSpec(
             "cumulative",
             bool,
-            _HISTOGRAM_PROJECTION_EFFECTS,
+            _HISTOGRAM_REPRESENTATION_EFFECTS,
             default=False,
             label="Cumulative",
         ),

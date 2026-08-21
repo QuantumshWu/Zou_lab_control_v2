@@ -26,6 +26,7 @@ import pytest
 from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA, PYLON_CAMERA_SCHEMA
 from zlc_atom.devices.sequencer.device_types import HARDWARE_SEQUENCER_SCHEMA
 from zlc_atom.devices.simulation.device_types import (
+    SIMULATION_WORLD_SCHEMA,
     VIRTUAL_CAMERA_SCHEMA,
     VIRTUAL_MOT_CAMERA_SCHEMA,
     VIRTUAL_SEQUENCER_SCHEMA,
@@ -79,13 +80,25 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
                 schema.project_values({field: 2})
 
 
-def test_the_virtual_camera_keeps_its_own_vocabulary() -> None:
-    assert _fields(VIRTUAL_CAMERA_SCHEMA) >= {"grid_shape_yx", "seed"}
+def test_virtual_devices_and_shared_world_have_disjoint_strict_vocabularies() -> None:
+    assert _fields(VIRTUAL_CAMERA_SCHEMA) == {"exposure_seconds"}
+    assert _fields(SIMULATION_WORLD_SCHEMA) == {
+        "image_shape_yx",
+        "grid_shape_yx",
+        "seed",
+        "world_profile",
+    }
     assert "device_index" not in _fields(VIRTUAL_CAMERA_SCHEMA)
     assert _fields(VIRTUAL_MOT_CAMERA_SCHEMA) == {
         "frame_shape_yx",
         "exposure_seconds",
     }
+    with pytest.raises(ValueError, match="unknown authoring fields"):
+        SIMULATION_WORLD_SCHEMA.project_values({"camera_seed": 3})
+    with pytest.raises(TypeError, match="Seed must be an integer"):
+        SIMULATION_WORLD_SCHEMA.project_values({"seed": 1.5})
+    with pytest.raises(TypeError, match="item must be an integer"):
+        SIMULATION_WORLD_SCHEMA.project_values({"image_shape_yx": [80, 1.5]})
 
 
 def test_a_real_board_has_an_endpoint_and_a_virtual_one_does_not() -> None:

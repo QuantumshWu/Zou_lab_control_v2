@@ -134,30 +134,27 @@ def _topological(specs: tuple[DeviceSpec, ...], descriptors: Mapping[str, Device
 def _world_from_apparatus(
     specs: tuple[DeviceSpec, ...],
     descriptors: Mapping[str, DeviceTypeDescriptor],
+    simulation: Mapping[str, Any],
 ) -> object:
-    """Build one shared world from device-declared apparatus contributions."""
+    """Build one shared world from the installation's root simulation truth."""
 
     from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 
-    contributions = tuple(
-        descriptor.world_config(
-            descriptor.authoring_schema.project_values(spec.config)
-        )
+    resolvers = {
+        descriptor.world_config
         for spec in specs
         for descriptor in (descriptors[spec.type_id],)
         if descriptor.world_config is not None
-    )
-    if not contributions:
+    }
+    if not resolvers:
+        if simulation:
+            raise ValueError("installation simulation requires a virtual device")
         return None
-    configs = tuple(config for config in contributions if config is not None)
-    if not configs:
-        return SimulationWorld()
-    if not all(isinstance(config, SimulationWorldConfig) for config in configs):
-        raise TypeError("device world_config returned the wrong type")
-    unique = set(configs)
-    if len(unique) != 1:
-        raise ValueError("devices in one installation declared different simulation worlds")
-    config = next(iter(unique))
+    if len(resolvers) != 1:
+        raise ValueError("one installation cannot have different world owners")
+    config = next(iter(resolvers))(dict(simulation))
+    if not isinstance(config, SimulationWorldConfig):
+        raise TypeError("simulation world resolver returned the wrong type")
     return SimulationWorld(config)
 
 
@@ -165,18 +162,26 @@ def create_installation(
     specs: tuple[DeviceSpec, ...] | list[DeviceSpec] | str,
     *,
     world: object | None = None,
+    simulation: Mapping[str, Any] | None = None,
     broker: object | None = None,
     catalog: DeviceCatalogSnapshot | None = None,
     connect_pulse: object | None = None,
 ) -> Installation:
     from zlc_atom.execution import DeviceBroker
+    simulation_supplied = simulation is not None
     snapshot = catalog if catalog is not None else discover_device_catalog()
     if not isinstance(snapshot, DeviceCatalogSnapshot):
         raise TypeError("catalog must be DeviceCatalogSnapshot or None")
     if isinstance(specs, str):
         from .templates import installation_config_from_template
 
-        specs = installation_config_from_template(snapshot, specs).specs()
+        config = installation_config_from_template(snapshot, specs)
+        specs = config.specs()
+        if simulation is None:
+            simulation = config.simulation
+    if simulation is not None and not isinstance(simulation, Mapping):
+        raise TypeError("simulation must be a mapping or None")
+    simulation = _freeze_plain(dict(simulation or {}), "installation simulation")
     normalized = tuple(spec if isinstance(spec, DeviceSpec) else DeviceSpec(**spec) for spec in specs)  # type: ignore[arg-type]
     seen_keys: set[str] = set()
     duplicate_keys: set[str] = set()
@@ -192,7 +197,9 @@ def create_installation(
     if unknown:
         raise KeyError(f"unknown device types: {sorted(unknown)}")
     if world is None:
-        world = _world_from_apparatus(normalized, by_type)
+        world = _world_from_apparatus(normalized, by_type, simulation)
+    elif simulation_supplied:
+        raise ValueError("pass an explicit world or simulation config, not both")
     if broker is None:
         broker = DeviceBroker()
     ordered = _topological(normalized, by_type)

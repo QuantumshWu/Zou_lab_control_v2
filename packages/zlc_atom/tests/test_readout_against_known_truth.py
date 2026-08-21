@@ -223,3 +223,80 @@ def test_weighting_beats_a_box_when_the_spot_is_wider_than_the_box() -> None:
     }
     assert fidelity["psf"] >= fidelity["box"], fidelity
     assert fidelity["uniform_psf"] >= fidelity["box"], fidelity
+
+
+def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
+    tmp_path: Path,
+) -> None:
+    rng = np.random.default_rng(41)
+    cycles, height, width = 100, 50, 50
+    support_yx = [
+        (row, column)
+        for row in (4, 10, 16)
+        for column in (3, 9, 15)
+    ]
+    support_yx[0] = (3, 2)
+    camera_centers = [
+        (10.0 + (5.0 / 3.0) * column, (25.0 / 3.0) + (5.0 / 3.0) * row)
+        for row, column in support_yx
+    ]
+    missing = 4
+    grid_y, grid_x = np.mgrid[:height, :width]
+    spots = np.stack(
+        [
+            np.exp(
+                -(
+                    (grid_x - center_x) ** 2 + (grid_y - center_y) ** 2
+                )
+                / (2.0 * 1.1**2)
+            )
+            for center_x, center_y in camera_centers
+        ]
+    )
+    occupied = rng.random((cycles, len(camera_centers))) < 0.5
+    occupied[:, missing] = False
+    reference = rng.normal(100.0, 3.0, (cycles, 2, height, width))
+    short = rng.normal(100.0, 3.0, (cycles, height, width))
+    for site, spot in enumerate(spots):
+        if site == missing:
+            continue
+        reference[occupied[:, site], 0] += 800.0 * spot
+        reference[occupied[:, site], 1] += 800.0 * spot
+        short[occupied[:, site]] += 200.0 * spot
+
+    target = np.zeros((20, 20), dtype=np.float32)
+    for row, column in support_yx:
+        target[row, column] = 1.0
+    provenance = {
+        "science_context_path": "contexts/nine.npz",
+        "command_receipt": {"identity": "slm", "mapping_revision": 7},
+    }
+    result = calibrate(
+        reference,
+        short,
+        frame_contract=FrameContract((height, width), exposure_seconds=0.005),
+        box_half_width=1,
+        psf_half_width=2,
+        psf_padding=2,
+        detection_spot_sigma=1.1,
+        target_intensity=target,
+        registration_provenance=provenance,
+    )
+
+    saved = result.calibration.save(tmp_path / "registered-calibration.json")
+    calibration = type(result.calibration).load(saved)
+    site_map = calibration.site_map
+    assert site_map.n_sites == 9
+    assert site_map.site_ids == tuple(f"site_{index:04d}" for index in range(9))
+    assert np.flatnonzero(~site_map.valid_sites).tolist() == [missing]
+    np.testing.assert_allclose(
+        site_map.centers_xy[missing], camera_centers[missing], atol=0.1
+    )
+    assert site_map.topology["kind"] == "slm_target_registration"
+    assert site_map.topology["version"] == 1
+    assert site_map.topology["target_support_yx"][missing] == (10, 9)
+    assert site_map.topology["provenance"] == provenance
+    for model in calibration.models:
+        assert not model.usable_sites[missing]
+    box = calibration.select_model(ReadoutModelKind.BOX)
+    assert np.isfinite(box.dark_mean[missing])

@@ -197,9 +197,11 @@ def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
         with np.load(phase_path, allow_pickle=False) as archive:
             assert set(archive.files) == {
                 "phase", "pattern_phase", "operator_wavefront",
-                "pupil_amplitude", "pupil_support", "metadata",
+                "pupil_amplitude", "pupil_support", "target_intensity",
+                "metadata",
             }
         context = editor.load_science_context(phase_path)
+        np.testing.assert_array_equal(context["target_intensity"], same_support)
         assert "spot_optimizer_state" not in repr(context)
         assert "workspace" not in repr(context)
 
@@ -550,6 +552,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         assert target_path.is_file() and phase_path.is_file()
         context = editor.load_science_context(phase_path)
         np.testing.assert_array_equal(context["phase"], phase)
+        np.testing.assert_array_equal(context["target_intensity"], control._target)
         loaded_target, objective_kind = editor.load_target(target_path)
         np.testing.assert_array_equal(loaded_target, control._target)
         assert objective_kind == "image"
@@ -733,14 +736,35 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
         assert context["operator_metadata"]["carrier_waves_xy"] == [1.25, -0.5]
         assert context["system_correction"] is None
 
+        frozen_target = np.array(context["target_intensity"], copy=True)
+        control.set_target(np.zeros(control.shape), objective_kind="image")
+        target_revision = control._target_revision
+        target_updates = []
+        update_target = control._target_host.update_data
+
+        def record_target(snapshot):
+            target_updates.append(snapshot)
+            return update_target(snapshot)
+
+        monkeypatch.setattr(control._target_host, "update_data", record_target)
         control.set_phase(np.zeros(control.shape), {})
         control._set_context(editor.load_science_context(final_path))
+        np.testing.assert_array_equal(control._target, frozen_target)
+        assert control._target_revision == target_revision + 1
+        np.testing.assert_array_equal(
+            target_updates[-1].block.values.squeeze(), frozen_target
+        )
         np.testing.assert_array_equal(control._pattern_phase, pattern)
         np.testing.assert_array_equal(control._phase, expected)
         assert control._carrier_x.value() == 1.25
         assert control._carrier_y.value() == -0.5
         assert control._zernike["defocus"].value() == 0.125
         assert control._zernike_enabled.isChecked()
+
+        draft_target = np.zeros(control.shape, dtype=np.float32)
+        control.set_target(draft_target, objective_kind="image")
+        control._set_context({**context, "target_intensity": None})
+        np.testing.assert_array_equal(control._target, draft_target)
 
         control.set_phase(np.zeros(control.shape), {})
         control._zernike_enabled.setChecked(True)
@@ -1267,6 +1291,9 @@ def test_context_prevalidation_never_partially_mutates_editor(
         wrong_shape = deepcopy(valid)
         wrong_shape["phase"] = wrong_shape["phase"][:-1]
         malformed.append(wrong_shape)
+        wrong_target = deepcopy(valid)
+        wrong_target["target_intensity"] = wrong_target["target_intensity"][:-1]
+        malformed.append(wrong_target)
         bad_operator = deepcopy(valid)
         bad_operator["operator_metadata"]["carrier_waves_xy"] = [np.nan, 0.0]
         malformed.append(bad_operator)

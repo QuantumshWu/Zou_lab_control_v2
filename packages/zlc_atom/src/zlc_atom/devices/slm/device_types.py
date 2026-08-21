@@ -1,7 +1,8 @@
-"""USB-only Hamamatsu X15213 hardware leaf."""
+"""Local USB X15213 and the thin remote SLM device leaf."""
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import json
 import os
@@ -19,7 +20,7 @@ from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from . import open_slm_control
-from .device import bind_slm, canonical_phase
+from .device import _RemoteSlmAdapter, _open_slm_server, bind_slm, canonical_phase
 
 
 _SHAPE_YX = (1024, 1272)
@@ -55,6 +56,22 @@ HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
         AuthoringField("flip_x", "bool", "Flip X", False),
         AuthoringField("flip_y", "bool", "Flip Y", False),
     ),
+)
+
+REMOTE_SLM_SCHEMA = AuthoringSchema(
+    (
+        AuthoringField("host", "str", "SLM server host", "127.0.0.1", required=True),
+        AuthoringField(
+            "port", "int", "SLM server port", 18862, minimum=1, maximum=65535
+        ),
+        AuthoringField(
+            "timeout_seconds",
+            "float",
+            "SLM command timeout (s)",
+            10.0,
+            minimum=0.001,
+        ),
+    )
 )
 
 
@@ -772,6 +789,16 @@ def _factory(context, key: str, values: Mapping[str, object]) -> InstalledLeaf:
     return bind_slm(context, key, adapter, _TYPE_ID)
 
 
+def _remote_factory(context, key: str, values: Mapping[str, object]) -> InstalledLeaf:
+    authored = REMOTE_SLM_SCHEMA.project_values(values)
+    adapter = _RemoteSlmAdapter(
+        str(authored["host"]),
+        int(authored["port"]),
+        float(authored["timeout_seconds"]),
+    )
+    return bind_slm(context, key, adapter, "slm.remote")
+
+
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
         _TYPE_ID,
@@ -782,7 +809,101 @@ DEVICE_TYPES = (
         discover=_discover_x15213,
         control_factory=open_slm_control,
     ),
+    DeviceTypeDescriptor(
+        "slm.remote",
+        "slm",
+        REMOTE_SLM_SCHEMA,
+        ("slm.phase",),
+        factory=_remote_factory,
+        control_factory=open_slm_control,
+    ),
 )
 
 
-__all__ = ["DEVICE_TYPES", "HAMAMATSU_X15213_SCHEMA", "X15213Adapter"]
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Serve one local Hamamatsu USB SLM to local or LAN clients."
+    )
+    parser.add_argument("--host", default=os.environ.get("ZLC_SLM_HOST", "0.0.0.0"))
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("ZLC_SLM_PORT", "18862"))
+    )
+    parser.add_argument("--sdk-directory", default="")
+    parser.add_argument("--device-profile", default="LSH0804382")
+    parser.add_argument("--wavelength-nm", type=float, default=852.0)
+    parser.add_argument("--correction-path", default="")
+    parser.add_argument("--flip-x", action="store_true")
+    parser.add_argument("--flip-y", action="store_true")
+    parser.add_argument("--check-config", action="store_true")
+    arguments = parser.parse_args(argv)
+    if (
+        not arguments.host.strip()
+        or arguments.host != arguments.host.strip()
+        or any(character.isspace() for character in arguments.host)
+    ):
+        parser.error("SLM server host must be non-empty text without whitespace")
+    if not 1 <= arguments.port <= 65535:
+        parser.error("SLM server port must be from 1 through 65535")
+    authored = HAMAMATSU_X15213_SCHEMA.project_values(
+        {
+            "sdk_directory": arguments.sdk_directory,
+            "device_profile": arguments.device_profile,
+            "wavelength_nm": arguments.wavelength_nm,
+            "correction_path": arguments.correction_path,
+            "flip_x": arguments.flip_x,
+            "flip_y": arguments.flip_y,
+        }
+    )
+    profile = _load_profile(str(authored["device_profile"]))
+    _phase_lut(
+        np.asarray(profile["phase_pi_by_gray"], dtype=np.float64),
+        float(authored["wavelength_nm"]),
+        float(profile["phase_curve_wavelength_nm"]),
+    )
+    directory = _find_sdk_directory(str(authored["sdk_directory"]))
+    if directory is None:
+        parser.error(
+            "Hamamatsu hpkSLMdaLV.dll and hpkSLMda.dll were not found; "
+            "set --sdk-directory or HAMAMATSU_SLM_SDK"
+        )
+    if authored["correction_path"]:
+        _load_correction(
+            str(authored["correction_path"]),
+            expected_serial=str(profile["serial"]),
+            wavelength_nm=float(authored["wavelength_nm"]),
+        )
+    if arguments.check_config:
+        print(
+            "SLM server config OK: "
+            f"{profile['serial']} at {arguments.host}:{arguments.port}"
+        )
+        return 0
+
+    adapter = X15213Adapter(authored)
+    try:
+        with _open_slm_server(adapter, arguments.host, arguments.port) as server:
+            address = server.server_address
+            print(
+                f"ZLC SLM SERVER READY {address[0]}:{address[1]} "
+                f"device={adapter.identity}",
+                flush=True,
+            )
+            try:
+                server.serve_forever(poll_interval=0.1)
+            except KeyboardInterrupt:
+                pass
+    finally:
+        adapter.close()
+    return 0
+
+
+__all__ = [
+    "DEVICE_TYPES",
+    "HAMAMATSU_X15213_SCHEMA",
+    "REMOTE_SLM_SCHEMA",
+    "X15213Adapter",
+]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

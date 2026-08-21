@@ -118,8 +118,8 @@ def test_the_console_assembles_and_beats(workspace) -> None:
     assert "0 panel" in completed.stdout
 
 
-def test_formal_console_panel_state_is_one_atomic_plot_operation(workspace) -> None:
-    """The real handle path mounts once and ignores non-plot PanelState edits."""
+def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) -> None:
+    """The real card and Edit hosts present each accepted plot state once."""
 
     import time
 
@@ -183,6 +183,49 @@ def test_formal_console_panel_state_is_one_atomic_plot_operation(workspace) -> N
         view.panel_state_changed.emit(panel_id, {"title": "Card title only"})
         settle(lambda: binding.state.title == "Card title only")
         assert binding.host.front.identity.sequence == first_sequence
+
+        existing = set(presenter.panels)
+        view.add_panel_requested.emit("histogram")
+        histogram_id = next(iter(set(presenter.panels) - existing))
+        view.panel_state_changed.emit(
+            histogram_id,
+            {"signal": node.signal_key("frames")},
+        )
+        histogram = presenter.panels[histogram_id]
+        settle(
+            lambda: histogram.host is not None
+            and histogram.initial_presented
+            and bool(histogram.parameter_surface.get("display"))
+        )
+        view.panel_edit_requested.emit(histogram_id)
+        settle(
+            lambda: histogram.editor_open
+            and histogram.editor_host is not None
+            and histogram.editor_host.front is not None
+        )
+
+        for patch in (
+            {"bin_count": 32},
+            {"bin_count": 64},
+            {"bin_count": 128},
+            {"density": True},
+            {"cumulative": True},
+            {"density": False},
+        ):
+            previous = histogram.host.front.identity.sequence
+            previous_editor = histogram.editor_host.front.identity.sequence
+            view.panel_state_changed.emit(histogram_id, {"display": patch})
+            settle(
+                lambda: histogram.configuration is None
+                and histogram.editor_configuration is None
+                and histogram.host.front.identity.sequence > previous
+                and histogram.editor_host.front.identity.sequence > previous_editor
+                and all(
+                    histogram.state.display.get(name) == value
+                    for name, value in patch.items()
+                )
+            )
+            assert histogram.reported_error is None
     finally:
         if presenter is not None:
             presenter.close()

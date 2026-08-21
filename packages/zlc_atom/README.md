@@ -12,6 +12,16 @@ Virtual implementations live only under
 and the real Hamamatsu LCOS-SLM X15213 leaf implement the same narrow
 `SlmAdapter` canonical-radians contract.
 
+One apparatus-level `simulation` mapping owns the virtual world's
+`image_shape_yx`, `grid_shape_yx`, `seed`, and optional workspace-local
+`world_profile`. The profile path is resolved under the workspace before any
+device factory runs. `camera.virtual` consequently authors only camera facts
+(currently exposure) and consumes the world's image geometry; the independent
+`camera.virtual_mot` keeps its own frame geometry and does not declare a site
+grid. The installation grammar is strict: files with the former camera-owned
+world fields are refused with the required root migration instead of silently
+creating a second owner.
+
 Both `slm.virtual` and `slm.hamamatsu_x15213` open the concrete SLM Editor
 lazily from the loaded device card. The Editor has one continuous non-negative
 target and solves only its latest edit into a Pattern/base phase in the
@@ -27,14 +37,20 @@ uniform full-raster solver illumination. Wavefront puts full-raster Steering
 X/Y and Noll Z4-Z11 under the same Zernike switch. Pattern authoring offers
 exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
 and English/Chinese Text with both minimum site spacing and atom budget.
-A strict Target JSON stores intensity plus objective. A strict Science Context
-NPZ stores Pattern/base phase, numeric pupil, operator wavefront, typed reusable
-system-correction reference and command receipt. Loading either artifact never
-writes hardware; it establishes an authoring draft and the current external-
-change baseline. Only **Send to SLM** takes an exclusive claim and applies the
-composed science phase. If a Task changes the command or correction mapping,
-the Editor shows the divergence and refuses the old draft until explicit Adopt
-or Context reload; closing preserves the currently commanded phase.
+A strict Target JSON stores intensity plus objective only for Editor authoring
+import/export. Run consumers take no separate Target: a strict Science Context
+v2 NPZ is their sole Target truth and freezes it together with Pattern/base
+phase, numeric pupil,
+operator wavefront, typed reusable system-correction reference and command
+receipt. Loading a v2 Context atomically adopts all of those authored facts but
+never writes hardware. A v1 Context loads only as an explicit authoring
+migration with `target=None`; the Editor preserves its current Target draft,
+while registered Feedback refuses the legacy Context until it is resaved as v2.
+Only **Send to SLM** takes an exclusive claim
+and applies the composed science phase. If a Task changes the command or
+correction mapping, the Editor shows the divergence and refuses the old draft
+until explicit Adopt or Context reload; closing preserves the currently
+commanded phase.
 
 The X15213 leaf supports the series' `1272 x 1024` active LCOS raster only
 through the official USB frame-memory SDK. Generic **Scan hardware** reports a
@@ -43,6 +59,25 @@ controller and read its head serial; scanning does not send a phase. A new real
 adapter starts with unknown command truth. A command becomes known only after
 write, display-slot selection, exact active-frame readback, and the profile's
 settle wait all complete.
+
+When the USB controller is attached to another computer, that computer runs
+`bin/slm_server.bat` and is the only process that loads the SDK.  An apparatus
+uses `slm.remote` with its host, port (default `18862`), and command timeout;
+`127.0.0.1` is the same-machine form.  The proxy reads identity, shape, current
+phase and receipt once when the installation opens, then serves all Editor
+display/state reads from that local immutable cache.  Target edits never cross
+the network. A healthy **Send to SLM** or Task phase command sends one bounded
+raw command: an 8-byte length header, strict-JSON metadata (at most 1 MiB), and
+canonical `float32` phase bytes (at most 16 MiB). The apply carries expected
+command and mapping revisions, so a stale window cannot overwrite a command
+issued by another client. A malformed/partial/oversize reply or uncertain
+transport outcome marks the local command truth unknown; the next command
+first describes current physical truth and then applies. Correction and
+profile paths remain server-local and are fixed by the server command line
+rather than being sent from a remote UI. As required by the experiment remote
+policy, this service deliberately has no authentication or TLS and belongs
+only on the trusted laboratory LAN; it must not be exposed to the public
+Internet.
 
 Each supported head has a strict profile under `devices/slm/profiles/` with
 model, serial, working and phase-curve wavelengths, curve provenance, and
@@ -142,16 +177,30 @@ The runtime has one direction of responsibility:
 For a manually controlled experiment, the notebook calls `resolve_pulse`,
 `sequencer.load`, and `sequencer.fire` around a pure camera measurement. For
 an automated experiment, `CalibrationTask.run()` owns that whole sequence and
-returns a saved calibration artifact. Calibration discovers its site count and
-centers from acquired images; it accepts no authored grid rows, columns, or
-site count. While hosted it publishes only the current `capture_preview` for
-Monitor. When the loop finishes it computes one result, writes one plain JSON,
-and passes the same in-memory result to `zlc_plot` to save site-map, fidelity,
-three classifier grids, and a PSF-kernel grid. Workbench neither renders nor
-opens those report files, and no calibration object/report blob is put on the
-signal plane. Each classifier grid binds every finite threshold to the
-canonical `calibration.site` coordinate that measured it rather than to the
-current facet index.
+returns a saved calibration artifact. Without registration artifacts,
+Calibration discovers its site count and centers from acquired images and
+accepts no authored grid rows, columns, or site count. Optionally, one strict
+Science Context v2 registers its frozen Target as the full stable roster; there
+is no second Target input. Sites not captured in the calibration remain
+explicit predicted boxes instead of disappearing. One topology validator runs
+both when that SiteMap is created and when it is loaded, rechecking geometry,
+rounded BOX overlap/bounds and runner-up uniqueness. The mapping trusts the
+apparatus convention of positive Target x/y to camera x/y with no reflection,
+shear or axis swap. An incompletely observed x/y/180°-symmetric support, or
+another equally plausible alternate mapping, is refused until the Target has
+an asymmetric spatial fiducial. Calibration capture does not claim or command
+the SLM, so the experiment
+workflow must keep the selected Context command unchanged throughout capture;
+Feedback checks it again before starting. While hosted Calibration publishes
+only the current `capture_preview` for Monitor. When the loop finishes it
+computes one result, writes one plain JSON, and passes that same result to
+`zlc_plot` for the six reports. Workbench neither renders nor opens those files,
+and no calibration object/report blob is put on the signal plane. Each
+classifier grid binds every finite threshold to the canonical
+`calibration.site` coordinate that measured it rather than to the current facet
+index. The BOX readout model also persists its dark sample count and sample
+variance; legacy `n=0`/`NaN` artifacts remain readable but cannot authorize
+registered Feedback.
 
 Camera Measurement and camera-backed Calibration request photoelectrons by
 default. A camera with a complete configured offset/scale publishes converted
@@ -180,29 +229,51 @@ that same dataset and its validity into survival rate against trap-off time;
 there is no second rate history. It does not fit a temperature or lifetime and
 does not derive a 1/e crossing.
 
-The `slm_feedback` Task accepts one sparse target point per calibrated site.
-Every coarse or validation measurement is a canonical Camera Measurement
-generation under the stable companion producer `<task>/camera`: it commits all
-`repeat=N` three-frame cycles, seals them, selects readout-event `frame=1`, and
-uses every shot in the repeat statistics. The displayed camera preview applies
-that same frame selection and repeat mean. The estimator subtracts each BOX
-model's dark mean but does not threshold shots through Occupancy; loading and
-occupied-atom brightness both remain part of the measured all-shot
-fluorescence observable.
+The `slm_feedback` Task takes only a registered Calibration and one strict
+Science Context v2. That Context's frozen spots Target is the unique Target
+truth, and the Calibration must be registered to the same Context. The full
+roster, including predicted zero-capture sites, remains the stable site index.
+At execution start the current SLM phase, complete command receipt
+and mapping revision must still exactly equal the frozen incoming Context or
+the Task fails before changing hardware. Every coarse or validation measurement
+is a canonical Camera Measurement generation under the stable companion
+producer `<task>/camera`: it commits all `repeat=N` three-frame cycles, seals
+them, selects readout-event `frame=1`, and uses every shot in the repeat
+statistics. The displayed preview applies that same selection and repeat mean.
+The estimator integrates raw BOX samples and subtracts the persisted dark mean;
+it neither thresholds through Occupancy nor divides by Calibration bright mean.
+Its total SEM combines shot SEM with `dark sample variance / n` exactly once, so
+loading and occupied-atom brightness remain part of the measured all-shot
+fluorescence observable. Every measurement must replay Calibration's effective
+raw/photoelectron mode and exact raw dtype/count-unit provenance; electron mode
+also requires the same offset and scale. Saturation is derived from the raw
+integer maximum and transformed into the effective unit, never inferred from a
+converted floating-point dtype.
 
-The controller updates only the frozen Context's Pattern: simultaneous
-uncertainty shrinks unresolved log residuals, each step is clipped, and a
-non-improving candidate rolls back to the confidence-best Pattern while the
-gain falls. It performs no Zernike, modal, hidden-aberration, or continuous-
-wavefront fit and makes no claim about pixels between measured sites. The
-Task's typed previews are the latest candidate phase and the complete
-uniformity-history curve. One confidence-best candidate receives a held-out
-validation in 100-shot batches, bounded by 1000 shots and 60 seconds by
-default; the terminal Science Context reports `accepted` or `inconclusive`
-with estimate and simultaneous interval. Stop accepts the confidence-best
-valid candidate, reapplies it, republishes it beside current history, and
-returns its durable Context; a genuine failure restores the known incoming
-command. The default 100 coarse shots are not a finite-shot proof of 1%.
+Each candidate may accumulate at most three coarse batches. A site whose
+simultaneous lower fluorescence bound still crosses zero is censored, not
+fabricated as a valid value. Before any valid candidate exists, at most three
+bootstrap updates raise only censored target sites by a clipped log step of
+`0.2` while renormalizing total target power; after a valid best exists, a
+censored candidate rolls back to it. The controller otherwise updates only the
+frozen Context's Pattern using uncertainty, clipped steps, trust and rollback;
+it performs no Zernike, modal, hidden-aberration or continuous-wavefront fit.
+If the run ends or is stopped without a valid result, incoming candidate 0 is
+saved with no invented measurement. With a valid best, Stop accepts and
+reapplies it; a Stop already requested before the initial solve makes zero
+solver calls. A genuine failure restores the known incoming command. Each
+candidate Context freezes its actual evolving Target and can be selected
+directly for the next run because neither descriptor asks for a Target file.
+
+The held-out validation applies its 95% family correction across both sites and
+the maximum number of looks. It uses bounded batches without dropping a tail
+(for example, 101 shots become 99 + 2), and remains bounded by the authored
+shot limit and 60 seconds. The terminal Science Context reports `accepted` or
+`inconclusive` with the measured estimate and simultaneous interval. In the
+persistent virtual weak-site vertical, Calibration observed 34 of 35 sites;
+three censored candidates led to a valid fourth candidate, after which honest
+validation was inconclusive and retained that valid best. This is software/
+virtual evidence, not hardware or optical acceptance.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,

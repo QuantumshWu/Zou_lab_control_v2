@@ -97,6 +97,53 @@ Facet surfaces at DPR 1/2 and `2x2`/`8x8`: the occupied-style hollow ring and
 `2.25 pt²` center remained visible, and the existing DPR1/2 compose check stayed
 pixel-identical to a full draw.
 
+## Histogram representation edits and settled-tick bound (2026-08-21)
+
+`bin_count` changes scientific edges/counts, so each accepted edit performs
+exactly one necessary payload projection and one render. `density` and
+`cumulative` change only the representation of the already projected
+`HistogramData`; they reuse the same counts/edges identity, perform zero payload
+projections and exactly one render. They still refit the axes and invalidate fit
+selection as before. This is one shared Histogram lifecycle, not a second
+plot-kind lane.
+
+The A/B compared a clean detached `9571cd6` worktree with the frozen candidate.
+It used fixed-seed continuous `float32` samples, `2048×2048` qCMOS and
+`1200×1920` MOT payloads, the `2x2` preset, fresh `PlotSession` instances and
+three rounds. Bin edits used `32 → 64 → 128` in one session per round;
+density/cumulative each used three fresh sessions. Values below are aggregate
+primitive wall P50/P95 in milliseconds; profiling and representation/payload
+inspection were outside the timed region.
+
+| Payload / edit | Baseline | Candidate |
+|---|---:|---:|
+| qCMOS bins | 71.539/73.763 | 71.957/74.487 |
+| qCMOS density | 73.049/73.128 | 7.448/9.520 |
+| qCMOS cumulative | 71.301/71.973 | 7.709/7.880 |
+| MOT bins | 45.057/46.206 | 44.355/45.149 |
+| MOT density | 46.257/46.429 | 8.508/9.354 |
+| MOT cumulative | 44.607/45.628 | 9.212/10.026 |
+
+An instrumented qCMOS density edit changed from one payload projection at
+62.469/64.193 ms to zero calls, while retaining one render at
+8.716/10.264 → 9.270/9.330 ms. A 120-bin edit retained exactly one projection
+(65.609/66.796 → 64.251/64.708 ms) and one render. The change therefore
+removes the redundant O(N) sample materialization/rebin only from
+representation edits; no memory percentage is claimed. Baseline and candidate
+RGBA hashes matched for base, bins, density, cumulative and combined modes at
+DPR 1 and 2 (ten exact comparisons).
+
+The settled tick unit is only a hysteresis candidate, not permission to
+enumerate an arbitrarily dense old lattice. Before this cut, the real 2048²
+RasterHost sequence `density On → cumulative On → density Off` remained in
+the `Decimal` lattice loop after five seconds. The candidate checks the implied
+count before enumeration; a count above `max_ticks=8` enumerates zero old-unit
+ticks and falls back to the existing unit search. Every actual `range` in the
+old-red proof was at most `max_ticks + 1 = 9`, and final ticks were exactly equal
+to a fresh locator. The same full host sequence promoted fronts 1 through 7
+without timeout or error; after the initial/bin work, representation edits were
+8.08--9.85 ms.
+
 The older tables below remain dated numeric references for projection and
 render costs. Their former queue/lifecycle policies are not product contracts;
 the closure above is authoritative.

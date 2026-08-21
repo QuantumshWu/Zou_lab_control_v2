@@ -6,8 +6,8 @@ code happened to construct it.  Two properties matter more than round-tripping:
 * the document is UNFORGIVING about its shape.  A configuration that silently
   drops a key it does not recognise is how an experiment runs all afternoon with
   a setting that was never applied.
-* what comes back builds the same devices, verified by actually installing from
-  a reopened file rather than comparing dictionaries.
+* what comes back builds the same shared world and devices, verified by actually
+  installing from a reopened file rather than comparing dictionaries.
 """
 
 from __future__ import annotations
@@ -30,26 +30,36 @@ from zlc_atom.install.configuration import (
 def _virtual_apparatus() -> InstallationConfig:
     return InstallationConfig(
         (
-            DeviceInstanceConfig("camera", "camera", "camera.virtual", {"seed": 7}),
+            DeviceInstanceConfig(
+                "camera",
+                "camera",
+                "camera.virtual",
+                {"exposure_seconds": 0.02},
+            ),
             DeviceInstanceConfig("sequencer", "sequencer", "sequencer.virtual", {}),
-        )
+        ),
+        simulation={
+            "image_shape_yx": (80, 110),
+            "grid_shape_yx": (4, 6),
+            "seed": 7,
+            "world_profile": "",
+        },
     )
 
 
-def test_an_apparatus_round_trips_through_a_file(tmp_path) -> None:
+def test_a_reopened_apparatus_installs_the_same_world_and_devices(tmp_path) -> None:
     path = save_installation_config(_virtual_apparatus(), tmp_path / "apparatus.json")
     reopened = load_installation_config(path)
     assert reopened == _virtual_apparatus()
-
-
-def test_a_reopened_apparatus_installs_the_same_devices(tmp_path) -> None:
-    """The property that matters: it builds, not merely that it compares equal."""
-
-    path = save_installation_config(_virtual_apparatus(), tmp_path / "apparatus.json")
-    installation = create_installation(load_installation_config(path).specs())
+    installation = create_installation(
+        reopened.specs(), simulation=reopened.simulation
+    )
     try:
         assert installation.failures == {}
         assert set(installation.devices) == {"camera", "sequencer"}
+        assert installation.world.geometry.image_shape_yx == (80, 110)
+        assert installation.world.geometry.grid_shape_yx == (4, 6)
+        assert installation.world.config.seed == 7
     finally:
         installation.close()
 
@@ -110,17 +120,44 @@ def test_a_document_that_is_not_ours_is_refused(tmp_path) -> None:
         load_installation_config(path)
 
 
+def test_legacy_camera_owned_world_configuration_is_refused(tmp_path) -> None:
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "format": DOCUMENT_FORMAT,
+                "devices": [
+                    {
+                        "instance_id": "camera",
+                        "role": "camera",
+                        "type_id": "camera.virtual",
+                        "parameters": {"grid_shape_yx": [4, 6], "seed": 7},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="root simulation"):
+        load_installation_config(path)
+
+
 def test_a_duplicate_key_or_a_nan_is_refused(tmp_path) -> None:
     """Both are ways a file can look valid and mean something else."""
 
     duplicate = tmp_path / "duplicate.json"
-    duplicate.write_text('{"format": "zlc.installation", "devices": [], "devices": []}', encoding="utf-8")
+    duplicate.write_text(
+        '{"format":"zlc.installation","simulation":{},'
+        '"devices":[],"devices":[]}',
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match="duplicate key"):
         load_installation_config(duplicate)
 
     nan = tmp_path / "nan.json"
     nan.write_text(
-        '{"format": "zlc.installation", "devices": [{"instance_id": "c", "role": "c", '
+        '{"format":"zlc.installation","simulation":{},'
+        '"devices":[{"instance_id":"c","role":"c",'
         '"type_id": "camera.virtual", "parameters": {"exposure_seconds": NaN}}]}',
         encoding="utf-8",
     )
@@ -133,3 +170,11 @@ def test_a_parameter_that_a_file_cannot_hold_is_refused() -> None:
 
     with pytest.raises(TypeError, match="plain data"):
         DeviceInstanceConfig("camera", "camera", "camera.dcam", {"driver": object()})
+
+
+def test_an_explicit_world_and_simulation_mapping_are_two_owners() -> None:
+    with pytest.raises(
+        ValueError,
+        match="pass an explicit world or simulation config, not both",
+    ):
+        create_installation((), world=object(), simulation={})

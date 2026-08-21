@@ -1,5 +1,6 @@
 import inspect
 import time
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -12,9 +13,10 @@ from zlc_runtime import NodeHost, SignalDataPlane
 from zlc_atom.devices.camera import CameraWorkingPoint
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.slm import canonical_phase
-from zlc_atom.devices.slm.solver import load_science_context, preset_grid
+from zlc_atom.devices.slm.solver import load_science_context, preset_grid, solve_phase
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import discover_logic_nodes
+from zlc_atom.nodes._framework.descriptor import ResolvedArtifact
 from zlc_atom.nodes.calibration import (
     FrameContract,
     ReadoutModel,
@@ -26,8 +28,13 @@ from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
+    _censored_sites,
     _ratio_interval,
     _updated_target,
+)
+from zlc_atom.nodes.calibration.calibration import (
+    _register_target_sites,
+    validate_target_registration,
 )
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 
@@ -153,6 +160,8 @@ def _calibration(
         np.full(35, 10.0),
         np.ones(35, bool),
         np.ones(35),
+        dark_sample_count=np.full(35, 100),
+        dark_sample_variance=np.zeros(35),
         kind=ReadoutModelKind.BOX,
         integration_half_width=0,
         reducer="mean",
@@ -181,6 +190,8 @@ def _calibration_at(
         np.full(count, 10.0),
         np.ones(count, bool),
         np.ones(count),
+        dark_sample_count=np.full(count, 100),
+        dark_sample_variance=np.zeros(count),
         kind=ReadoutModelKind.BOX,
         integration_half_width=0,
         reducer="mean",
@@ -201,9 +212,18 @@ def _grid_target(shape: tuple[int, int]) -> np.ndarray:
     return target
 
 
+def _asymmetric_target(shape: tuple[int, int] = (17, 23)) -> np.ndarray:
+    target = _grid_target(shape)
+    row, column = np.argwhere(target > 0.0)[0]
+    target[row, column] = 0.0
+    target[row - 1, column + 1] = 1.0
+    return target
+
+
 def _science_context(
     slm: _Slm,
     *,
+    target: np.ndarray,
     pattern: np.ndarray | None = None,
     wavefront: np.ndarray | None = None,
     pupil: np.ndarray | None = None,
@@ -229,6 +249,7 @@ def _science_context(
         "operator_wavefront": operator,
         "pupil_amplitude": amplitude,
         "pupil_support": amplitude > 0.0,
+        "target_intensity": np.array(target, copy=True),
         "objective_kind": "spots",
         "pupil": {
             "enabled": True,
@@ -247,6 +268,79 @@ def _load_candidate(path: str | Path) -> tuple[np.ndarray, dict[str, object]]:
     return context["phase"], context["pattern_metadata"]
 
 
+def _registered_calibration(
+    calibration: TrapCalibration,
+    target: np.ndarray,
+    *,
+    context_path: Path,
+    receipt: dict[str, object],
+) -> TrapCalibration:
+    site_map = _register_target_sites(
+        calibration.site_map,
+        target,
+        {
+            "science_context_path": str(context_path.resolve()),
+            "command_receipt": receipt,
+        },
+        frame_shape=calibration.frame_contract.image_shape,
+        measurement_radius=0,
+    )
+    return TrapCalibration(
+        site_map,
+        tuple(replace(model, site_ids=site_map.site_ids) for model in calibration.models),
+        calibration.default_model_kind,
+        calibration.frame_contract,
+        calibration.report,
+    )
+
+
+def _calibration_with_unresolved_site(
+    target: np.ndarray,
+    *,
+    receipt: dict[str, object],
+    context_path: Path,
+    missing: int,
+) -> TrapCalibration:
+    rows, columns = np.nonzero(target > 0.0)
+    keep = np.arange(len(rows)) != int(missing)
+    detected = SiteMap(
+        tuple(f"detected_{index:04d}" for index in range(np.count_nonzero(keep))),
+        np.column_stack((columns[keep], rows[keep])).astype(float),
+        np.ones(np.count_nonzero(keep), dtype=bool),
+        np.ones(np.count_nonzero(keep)),
+    )
+    site_map = _register_target_sites(
+        detected,
+        target,
+        {
+            "science_context_path": str(context_path.resolve()),
+            "command_receipt": receipt,
+        },
+        frame_shape=target.shape,
+        measurement_radius=0,
+    )
+    usable = np.array(site_map.valid_sites, copy=True)
+    model = ReadoutModel(
+        site_map.site_ids,
+        np.where(usable, 5.0, np.nan),
+        np.zeros(site_map.n_sites),
+        np.where(usable, 10.0, np.nan),
+        usable,
+        np.where(usable, 1.0, np.nan),
+        dark_sample_count=np.full(site_map.n_sites, 100),
+        dark_sample_variance=np.zeros(site_map.n_sites),
+        kind=ReadoutModelKind.BOX,
+        integration_half_width=0,
+        reducer="mean",
+    )
+    return TrapCalibration(
+        site_map,
+        (model,),
+        ReadoutModelKind.BOX,
+        FrameContract(target.shape, exposure_seconds=0.020),
+    )
+
+
 def _task(
     tmp_path: Path,
     *,
@@ -254,14 +348,35 @@ def _task(
     camera: object,
     sequencer: object,
     plane: SignalDataPlane,
-    target: np.ndarray,
+    target: np.ndarray | None = None,
     calibration: TrapCalibration | None = None,
     shots: int = 10,
     validation_shots: int = 20,
     updates: int = 3,
     science_context: dict[str, object] | None = None,
+    registered_calibration: bool = True,
 ) -> SlmFeedbackTask:
-    frozen_context = _science_context(slm) if science_context is None else science_context
+    if science_context is None:
+        if target is None:
+            raise ValueError("test must supply a Target or Science Context")
+        frozen_context = _science_context(slm, target=target)
+    else:
+        frozen_context = science_context
+    context_target = frozen_context.get("target_intensity")
+    frozen_target = (
+        None
+        if context_target is None
+        else np.asarray(context_target, dtype=np.float32)
+    )
+    selected_calibration = _calibration() if calibration is None else calibration
+    context_path = tmp_path / "science_context.npz"
+    if registered_calibration and frozen_target is not None:
+        selected_calibration = _registered_calibration(
+            selected_calibration,
+            frozen_target,
+            context_path=context_path,
+            receipt=dict(frozen_context["command_receipt"]),
+        )
     return SlmFeedbackTask(
         camera=camera,
         camera_key="qcmos",
@@ -270,13 +385,10 @@ def _task(
         slm=slm,
         slm_key="slm",
         signal_plane=plane,
-        calibration=_calibration() if calibration is None else calibration,
+        calibration=selected_calibration,
         calibration_path=tmp_path / "calibration.json",
-        target=target,
-        target_objective="spots",
-        target_path=tmp_path / "target.json",
         science_context=frozen_context,
-        science_context_path=tmp_path / "science_context.npz",
+        science_context_path=context_path,
         pulse_sequence=IMAGING_PULSE_RESOURCE.value,
         pulse_path=IMAGING_PULSE_RESOURCE.path,
         shots_per_candidate=shots,
@@ -287,25 +399,25 @@ def _task(
 
 
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
-    descriptor = {item.api_name: item for item in discover_logic_nodes()}[
-        "slm_feedback"
-    ]
+    descriptors = {item.api_name: item for item in discover_logic_nodes()}
+    descriptor = descriptors["slm_feedback"]
+    calibration_inputs = descriptors["calibration"].input_specs
+    assert tuple(item.name for item in calibration_inputs) == ("science_context_path",)
+    assert all(not item.required for item in calibration_inputs)
     assert tuple(item.name for item in descriptor.input_specs) == (
         "calibration_path",
-        "target_path",
         "science_context_path",
     )
     assert tuple(item.contract_id for item in descriptor.input_specs) == (
         "calibration.readout.v1",
-        "zlc.slm.target.v2",
-        "zlc.slm.science-context.v1",
+        "zlc.slm.science-context.v2",
     )
     assert tuple(item.field_name for item in descriptor.workspace_resources) == (
         "pulse_template",
     )
     assert tuple(
         (item.name, item.contract_id) for item in descriptor.artifact_outputs
-    ) == (("artifact_path", "zlc.slm.science-context.v1"),)
+    ) == (("artifact_path", "zlc.slm.science-context.v2"),)
     assert tuple((item.name, item.contract_id) for item in descriptor.outputs) == (
         ("candidate_phase", "slm-feedback.candidate-phase.v1"),
         ("uniformity_history", "slm-feedback.uniformity-history.v1"),
@@ -357,6 +469,13 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert lower <= estimate <= upper
     assert estimate == pytest.approx(1.4 / 0.6)
     assert max_relative_sem == pytest.approx(0.02)
+    _estimate3, lower3, upper3, _relative3 = _ratio_interval(
+        fluorescence, standard_error, looks=3
+    )
+    assert lower3 < lower and upper3 > upper
+    assert set(_censored_sites(fluorescence, standard_error)) <= set(
+        _censored_sites(fluorescence, standard_error, looks=3)
+    )
 
 
 def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
@@ -373,8 +492,13 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
     )
     incoming = canonical_phase(pattern.astype(float) + wavefront.astype(float), shape)
     slm.apply_phase(incoming)
+    frozen_target = _grid_target(shape)
     science_context = _science_context(
-        slm, pattern=pattern, wavefront=wavefront, pupil=pupil
+        slm,
+        target=frozen_target,
+        pattern=pattern,
+        wavefront=wavefront,
+        pupil=pupil,
     )
     solved_pattern = canonical_phase(pattern.astype(float) + 0.05, shape)
 
@@ -407,6 +531,24 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
         ),
     )
     plane = SignalDataPlane()
+
+    def build(
+        *,
+        selected_context=science_context,
+        selected_calibration=None,
+        register=True,
+    ):
+        return _task(
+            tmp_path,
+            slm=slm,
+            camera=object(),
+            sequencer=SimpleNamespace(describe=lambda: object()),
+            plane=plane,
+            calibration=selected_calibration,
+            science_context=selected_context,
+            registered_calibration=register,
+        )
+
     unknown = {
         **science_context,
         "command_receipt": {
@@ -415,24 +557,91 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
         },
     }
     with pytest.raises(ValueError, match="known incoming command receipt"):
-        _task(
-            tmp_path,
-            slm=slm,
-            camera=object(),
-            sequencer=SimpleNamespace(describe=lambda: object()),
-            plane=plane,
-            target=_grid_target(shape),
-            science_context=unknown,
+        build(selected_context=unknown)
+    with pytest.raises(ValueError, match="legacy Science Context"):
+        build(
+            selected_context={**science_context, "target_intensity": None}
         )
-    task = _task(
-        tmp_path,
-        slm=slm,
-        camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
-        plane=plane,
-        target=_grid_target(shape),
-        science_context=science_context,
+    with pytest.raises(ValueError, match="registered Target topology"):
+        build(register=False)
+    registered = _registered_calibration(
+        _calibration(),
+        frozen_target,
+        context_path=tmp_path / "original-context.npz",
+        receipt=dict(science_context["command_receipt"]),
     )
+    build(selected_calibration=registered, register=False)
+    legacy_dark = replace(
+        registered,
+        models=tuple(
+            replace(
+                model,
+                dark_sample_count=None,
+                dark_sample_variance=None,
+            )
+            for model in registered.models
+        ),
+    )
+    with pytest.raises(ValueError, match="dark mean, sample count"):
+        build(selected_calibration=legacy_dark, register=False)
+    corrupt_topology = dict(registered.site_map.topology)
+    corrupt_affine = np.asarray(
+        corrupt_topology["affine_target_xy_to_image_xy"], dtype=float
+    )
+    corrupt_affine[2, 0] += 100.0
+    corrupt_topology["affine_target_xy_to_image_xy"] = corrupt_affine.tolist()
+    support_yx = np.asarray(corrupt_topology["target_support_yx"])
+    corrupt_centers = np.column_stack(
+        (support_yx[:, 1], support_yx[:, 0], np.ones(len(support_yx)))
+    ) @ corrupt_affine
+    outside_registration = replace(
+        registered,
+        site_map=replace(
+            registered.site_map,
+            centers_xy=corrupt_centers,
+            topology=corrupt_topology,
+        ),
+    )
+    with pytest.raises(ValueError, match="outside"):
+        build(selected_calibration=outside_registration, register=False)
+    overlap_topology = dict(registered.site_map.topology)
+    overlap_affine = np.asarray(
+        overlap_topology["affine_target_xy_to_image_xy"], dtype=float
+    )
+    overlap_affine[2] += 1.0
+    overlap_topology["affine_target_xy_to_image_xy"] = overlap_affine.tolist()
+    overlap_centers = np.column_stack(
+        (support_yx[:, 1], support_yx[:, 0], np.ones(len(support_yx)))
+    ) @ overlap_affine
+    overlap_registration = replace(
+        registered,
+        site_map=replace(
+            registered.site_map,
+            centers_xy=overlap_centers,
+            topology=overlap_topology,
+        ),
+        models=tuple(
+            replace(model, integration_half_width=1)
+            for model in registered.models
+        ),
+        frame_contract=replace(registered.frame_contract, image_shape=(7, 9)),
+    )
+    with pytest.raises(ValueError, match="overlap"):
+        build(selected_calibration=overlap_registration, register=False)
+    mismatched_receipt = {
+        **science_context,
+        "command_receipt": {
+            **science_context["command_receipt"],
+            "correction_path": "different_mapping.bmp",
+        },
+    }
+    with pytest.raises(ValueError, match="registration differs"):
+        build(
+            selected_calibration=registered,
+            selected_context=mismatched_receipt,
+            register=False,
+        )
+    task = build()
     try:
         result = task.execute(_Context())
         artifact = load_science_context(result["artifact_path"])
@@ -442,11 +651,10 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
         np.testing.assert_array_equal(artifact["pattern_phase"], solved_pattern)
         np.testing.assert_array_equal(artifact["operator_wavefront"], wavefront)
         np.testing.assert_array_equal(artifact["pupil_amplitude"], pupil)
+        np.testing.assert_array_equal(artifact["target_intensity"], frozen_target)
         np.testing.assert_array_equal(artifact["phase"], expected)
         np.testing.assert_array_equal(slm.last_commanded_phase, expected)
         assert artifact["pattern_metadata"]["solver"]["iterations_run"] == 19
-        assert len(artifact["pattern_metadata"]["target_support_yx"]) == 35
-        assert artifact["pattern_metadata"]["target_site_intensity"] == [1.0] * 35
         assert artifact["command_receipt"]["outcome"] == "known-new"
         mapping_stale = _task(
             tmp_path,
@@ -504,7 +712,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
     target_fluorescence = np.asarray([0.7, 1.4, 0.9, 1.2, 0.8, 1.1])
     measured = iter(
         (
-            target_fluorescence[calibration_order],
+            target_fluorescence,
             np.ones(len(rows)),
             np.ones(len(rows)),
         )
@@ -553,10 +761,18 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             gain=0.25,
         )
         np.testing.assert_allclose(solved_targets[1], expected)
+        candidates = {
+            context["pattern_metadata"]["candidate"]: context
+            for context in map(
+                load_science_context,
+                tmp_path.glob("slm_feedback_candidate_*.npz"),
+            )
+        }
+        np.testing.assert_allclose(candidates[2]["target_intensity"], expected)
         _saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_allclose(
             metadata["history"][0]["fluorescence"],
-            target_fluorescence[calibration_order],
+            target_fluorescence,
         )
     finally:
         plane.close()
@@ -628,8 +844,8 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         plane.close()
 
 
-@pytest.mark.parametrize("failure", ("count", "distortion", "ambiguous"))
-def test_sparse_geometry_refuses_non_bijective_calibration(
+@pytest.mark.parametrize("failure", ("distortion", "ambiguous"))
+def test_sparse_geometry_refuses_distorted_or_ambiguous_calibration(
     tmp_path: Path, failure: str
 ) -> None:
     target = np.zeros((17, 23), dtype=np.float32)
@@ -637,15 +853,13 @@ def test_sparse_geometry_refuses_non_bijective_calibration(
     columns = np.asarray([3, 12, 5, 15])
     target[rows, columns] = 1.0
     centers = np.column_stack((10.0 + 2.0 * columns, 15.0 + 3.0 * rows))
-    if failure == "count":
-        centers = centers[:-1]
-    elif failure == "distortion":
+    if failure == "distortion":
         centers[2] += (20.0, 15.0)
     else:
         centers[1] = centers[0]
     plane = SignalDataPlane()
     try:
-        with pytest.raises(ValueError, match="count|unmatched|ambiguous"):
+        with pytest.raises(ValueError, match="geometry|ambiguous"):
             _task(
                 tmp_path,
                 slm=_Slm(target.shape),
@@ -657,6 +871,106 @@ def test_sparse_geometry_refuses_non_bijective_calibration(
             )
     finally:
         plane.close()
+
+
+def test_registration_refuses_colliding_predicted_site_boxes() -> None:
+    target = np.zeros((16, 16), dtype=np.float32)
+    target[(2, 2, 12, 2), (2, 12, 2, 7)] = 1.0
+    detected = SiteMap(
+        ("a", "b", "c"),
+        np.asarray(((20.0, 20.0), (40.0, 20.0), (20.0, 40.0))),
+        np.ones(3, dtype=bool),
+        np.ones(3),
+    )
+    with pytest.raises(ValueError, match="collide|separation|overlap"):
+        _register_target_sites(
+            detected,
+            target,
+            {"science_context_path": "c", "command_receipt": {}},
+            frame_shape=(64, 64),
+            measurement_radius=6,
+        )
+
+
+def test_unresolved_regular_grid_requires_an_asymmetric_fiducial() -> None:
+    target = np.zeros((20, 20), dtype=np.float32)
+    target[np.ix_((4, 10, 16), (3, 9, 15))] = 1.0
+    centers = np.asarray(
+        [(15.0 + 10.0 * column, 15.0 + 10.0 * row)
+         for row in range(3) for column in range(3)]
+    )
+    detected = SiteMap(
+        tuple(f"site_{index}" for index in range(8)),
+        np.delete(centers, 4, axis=0),
+        np.ones(8, dtype=bool),
+        np.ones(8),
+    )
+    with pytest.raises(ValueError, match="asymmetric spatial fiducial"):
+        _register_target_sites(
+            detected,
+            target,
+            {"science_context_path": "c", "command_receipt": {}},
+            frame_shape=(64, 64),
+            measurement_radius=0,
+        )
+    shifted = np.zeros((12, 12), dtype=np.float32)
+    shifted[6, (2, 3, 4, 6)] = 1.0
+    shifted_detected = SiteMap(
+        ("a", "b", "c"),
+        np.asarray(((10.0, 20.0), (20.0, 20.0), (30.0, 20.0))),
+        np.ones(3, dtype=bool),
+        np.ones(3),
+    )
+    with pytest.raises(ValueError, match="ambiguous.*fiducial"):
+        _register_target_sites(
+            shifted_detected,
+            shifted,
+            {"science_context_path": "c", "command_receipt": {}},
+            frame_shape=(64, 64),
+            measurement_radius=0,
+        )
+    wrong_loaded = SiteMap(
+        tuple(f"site_{index:04d}" for index in range(4)),
+        np.asarray(((18.0, 18.0), (18.0, 22.0), (54.0, 62.0), (50.4, 65.6))),
+        np.asarray((True, True, True, False)),
+        np.ones(4),
+        topology={
+            "kind": "slm_target_registration",
+            "version": 1,
+            "target_support_yx": [[2, 2], [3, 2], [12, 12], [13, 11]],
+            "target_site_intensity": [1.0] * 4,
+            "observed_sites": [True, True, True, False],
+            "affine_target_xy_to_image_xy": [
+                [3.6, 0.4], [0.0, 4.0], [10.8, 9.2]
+            ],
+            "provenance": {
+                "science_context_path": "c",
+                "command_receipt": {},
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="ambiguous.*fiducial"):
+        validate_target_registration(
+            wrong_loaded, frame_shape=(80, 80), box_half_width=0
+        )
+    support_yx = np.asarray(((2, 2), (3, 2), (12, 12), (13, 11)))
+    two_dimensional = np.zeros((16, 16), dtype=np.float32)
+    two_dimensional[support_yx[:, 0], support_yx[:, 1]] = 1.0
+    camera_xy = 10.0 + 4.0 * support_yx[:, ::-1]
+    two_dimensional_detected = SiteMap(
+        ("a", "b", "c"),
+        np.delete(camera_xy, 2, axis=0),
+        np.ones(3, dtype=bool),
+        np.ones(3),
+    )
+    with pytest.raises(ValueError, match="ambiguous.*fiducial"):
+        _register_target_sites(
+            two_dimensional_detected,
+            two_dimensional,
+            {"science_context_path": "c", "command_receipt": {}},
+            frame_shape=(80, 80),
+            measurement_radius=0,
+        )
 
 
 def test_sparse_geometry_refuses_a_large_global_shear(
@@ -808,6 +1122,17 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
     monkeypatch.setattr(camera, "arm", record_arm)
     plane = SignalDataPlane()
     slm = _Slm((5, 7))
+    raw_calibration = replace(
+        _calibration(),
+        report={
+            "run_record": {
+                "request": {"photoelectrons": False},
+                "actual_devices": {
+                    "qcmos": {"dtype": "<u2", "count_unit": "count"}
+                },
+            }
+        },
+    )
     task = _task(
         tmp_path,
         slm=slm,
@@ -815,6 +1140,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         sequencer=sequencer,
         plane=plane,
         target=np.ones((5, 7), dtype=np.float32),
+        calibration=raw_calibration,
     )
     try:
         from zlc_atom.install import create_installation
@@ -853,6 +1179,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         np.testing.assert_allclose(error, 0.0, atol=1e-15)
         assert not saturated
         assert not missing
+        assert measured[17] == fluorescence[17]
         assert sequencer.fires == [10]
         assert armed_buffer_sizes == [30]
         signal = "@logic/slm_feedback/camera/frames"
@@ -891,16 +1218,16 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         sample = 0
 
-        def partial_signals(self, image, *, model_kind=None):
+        def partial_signals(image, centers, *, radius, reducer):
             nonlocal sample
-            del image, model_kind
+            del image, centers, radius, reducer
             sample += 1
-            values = np.ones(self.n_sites)
+            values = np.ones(task.calibration.n_sites)
             if sample > 2:
                 values[0] = np.nan
             return values
 
-        monkeypatch.setattr(TrapCalibration, "signals", partial_signals)
+        monkeypatch.setattr(feedback_module, "extract_box_signals", partial_signals)
         partial_mean, partial_error, _saturated, partial_missing = task._measure(
             pulse, _Context(), 0, shots=10
         )
@@ -909,16 +1236,18 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         sample = 0
 
-        def partial_validation(self, image, *, model_kind=None):
+        def partial_validation(image, centers, *, radius, reducer):
             nonlocal sample
-            del image, model_kind
+            del image, centers, radius, reducer
             sample += 1
-            values = np.ones(self.n_sites)
+            values = np.ones(task.calibration.n_sites)
             if sample > 12:
                 values[0] = np.nan
             return values
 
-        monkeypatch.setattr(TrapCalibration, "signals", partial_validation)
+        monkeypatch.setattr(
+            feedback_module, "extract_box_signals", partial_validation
+        )
         monkeypatch.setattr(feedback_module, "resolve_pulse", lambda *args, **kwargs: pulse)
         monkeypatch.setattr(
             feedback_module,
@@ -940,6 +1269,325 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         camera.close()
 
 
+def test_electron_measurement_freezes_conversion_and_saturation(
+    tmp_path: Path,
+) -> None:
+    target = np.ones((5, 7), dtype=np.float32)
+    recorded_offset, recorded_scale = 10.0, 0.5
+
+    def calibration() -> TrapCalibration:
+        return replace(
+            _calibration(),
+            report={
+                "run_record": {
+                    "request": {"photoelectrons": True},
+                    "actual_devices": {
+                        "qcmos": {
+                            "dtype": "<u2",
+                            "count_unit": "count",
+                            "offset_counts": recorded_offset,
+                            "electrons_per_count": recorded_scale,
+                        }
+                    },
+                }
+            },
+        )
+
+    class Sequencer:
+        def __init__(self, camera):
+            self.camera = camera
+
+        def describe(self):
+            return object()
+
+        def load(self, program, *, source=None, rows=()):
+            return None
+
+        def fire(self, *, cycles=1):
+            self.camera.trigger(int(cycles) * 3)
+
+        def wait_done(self, timeout=None):
+            return SimpleNamespace(fault=None)
+
+        def safe(self):
+            return None
+
+    installation = create_installation("virtual")
+    try:
+        pulse = resolve_pulse(
+            IMAGING_PULSE_RESOURCE.value,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=installation.device("sequencer").describe(),
+            api_values={
+                "reference_probe_duration_before": 0.02,
+                "readout_probe_duration": 0.005,
+                "reference_probe_duration_after": 0.02,
+            },
+        )
+    finally:
+        installation.close()
+
+    def run(offset, scale, expected_error=None):
+        def frame_source(ordinal, exposure):
+            image = np.zeros((5, 7), dtype="<u2")
+            if ordinal % 3 == 1:
+                image[2, 3] = np.iinfo("<u2").max
+            return image
+
+        camera = VirtualCamera(
+            VirtualCameraConfig(
+                frame_shape_yx=(5, 7),
+                exposure_seconds=0.02,
+                offset_counts=offset,
+                electrons_per_count=scale,
+            ),
+            frame_source=frame_source,
+        )
+        plane = SignalDataPlane()
+        task = _task(
+            tmp_path,
+            slm=_Slm(target.shape),
+            camera=camera,
+            sequencer=Sequencer(camera),
+            plane=plane,
+            target=target,
+            calibration=calibration(),
+        )
+        try:
+            if expected_error is not None:
+                with pytest.raises(ValueError, match=expected_error):
+                    task._measure(pulse, _Context(), 0, shots=10)
+                return
+            _mean, _error, saturated, missing = task._measure(
+                pulse, _Context(), 0, shots=10
+            )
+            assert saturated == (17,) and not missing
+        finally:
+            plane.close()
+            camera.close()
+
+    run(recorded_offset, recorded_scale)
+    run(None, None, "effective photoelectron mode")
+    run(recorded_offset, 0.6, "conversion differs")
+
+
+def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = _asymmetric_target()
+    slm = _Slm(target.shape)
+    context_mapping = _science_context(slm, target=target)
+    calibration = _calibration_with_unresolved_site(
+        target,
+        receipt=slm.last_command_receipt,
+        context_path=tmp_path / "science_context.npz",
+        missing=17,
+    )
+    requested: list[int] = []
+    measurements = iter(
+        [
+            (np.where(np.arange(35) == 17, 0.0, 1.0), np.full(35, 0.1), (), ())
+            for _ in range(3)
+        ]
+        + [
+            (np.ones(35), np.zeros(35), (), ()),
+            (np.ones(35), np.zeros(35), (), ()),
+        ]
+    )
+    solved_targets: list[np.ndarray] = []
+
+    def solve(candidate, **_kwargs):
+        solved_targets.append(np.array(candidate, copy=True))
+        return np.full(candidate.shape, 0.1 * len(solved_targets), np.float32), {}
+
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+
+    def measure(self, pulse, context, iteration, *, shots=None):
+        requested.append(self.shots if shots is None else int(shots))
+        return next(measurements)
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+    plane = SignalDataPlane()
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        calibration=calibration,
+        science_context=context_mapping,
+        registered_calibration=False,
+        updates=2,
+    )
+    try:
+        result = task.execute(_Context())
+        assert result["validation_status"] == "accepted"
+        assert requested == [10, 10, 10, 10, 20]
+        rows, columns = np.nonzero(target > 0.0)
+        assert solved_targets[1][rows[17], columns[17]] > solved_targets[1][
+            rows[0], columns[0]
+        ]
+        assert np.sum(solved_targets[1]) == pytest.approx(np.sum(target))
+        support_values = solved_targets[1][rows, columns]
+        assert float(
+            np.max(support_values) / np.min(support_values)
+        ) == pytest.approx(np.exp(0.2), rel=1e-6)
+        candidate_context = load_science_context(result["artifact_path"])
+        metadata = candidate_context["pattern_metadata"]
+        assert metadata["history"][0]["censored_sites"] == [17]
+        assert metadata["history"][0]["shots"] == 30
+        descriptor = {item.api_name: item for item in discover_logic_nodes()}[
+            "slm_feedback"
+        ]
+        reused = descriptor.instantiate(
+            slm=slm,
+            slm_key="slm",
+            camera=object(),
+            camera_key="qcmos",
+            sequencer=SimpleNamespace(describe=lambda: object()),
+            sequencer_key="sequencer",
+            signal_plane=plane,
+            calibration=ResolvedArtifact(
+                tmp_path / "calibration.json",
+                "calibration.readout.v1",
+                calibration,
+            ),
+            science_context=ResolvedArtifact(
+                Path(result["artifact_path"]),
+                "zlc.slm.science-context.v2",
+                candidate_context,
+            ),
+            pulse_resource=IMAGING_PULSE_RESOURCE,
+            artifact_directory=tmp_path,
+            max_updates=1,
+        )
+        np.testing.assert_array_equal(reused.target, candidate_context["target_intensity"])
+    finally:
+        plane.close()
+
+
+def test_adaptive_pooling_keeps_frozen_dark_uncertainty_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    slm = _Slm((17, 23))
+    target = _grid_target(slm.shape_yx)
+    calibration = _calibration()
+    model = replace(
+        calibration.select_model(),
+        dark_sample_count=np.full(35, 100),
+        dark_sample_variance=np.full(35, 4.0),
+    )
+    plane = SignalDataPlane()
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=object(),
+        plane=plane,
+        target=target,
+        calibration=replace(calibration, models=(model,)),
+    )
+    calls = 0
+
+    def measure(pulse, context, iteration, *, shots=None):
+        nonlocal calls
+        calls += 1
+        return np.full(35, 0.5), np.full(35, np.sqrt(0.05)), (), ()
+
+    monkeypatch.setattr(task, "_measure", measure)
+    try:
+        _mean, error, _saturated, _missing, censored, _attempts, shots = (
+            task._coarse_measure(object(), _Context(), 0)
+        )
+        assert calls == 3 and shots == 30 and censored
+        expected = np.sqrt(0.04 + (3.0 * 0.01 * 10.0 * 9.0) / (29.0 * 30.0))
+        np.testing.assert_allclose(error, expected)
+    finally:
+        plane.close()
+
+
+@pytest.mark.parametrize("stop_after_first", (False, True))
+def test_persistently_censored_bootstrap_preserves_incoming(
+    tmp_path: Path, monkeypatch, stop_after_first: bool
+) -> None:
+    target = _asymmetric_target()
+    slm = _Slm(target.shape)
+    incoming = np.array(slm.last_commanded_phase, copy=True)
+    calibration = _calibration_with_unresolved_site(
+        target,
+        receipt=slm.last_command_receipt,
+        context_path=tmp_path / "science_context.npz",
+        missing=17,
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    context = _Context()
+    solve_calls = 0
+
+    def solve(candidate, **_kwargs):
+        nonlocal solve_calls
+        solve_calls += 1
+        if stop_after_first and solve_calls == 2:
+            context.cancelled = True
+        return np.full(candidate.shape, 0.25, np.float32), {}
+
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
+    calls = 0
+
+    def censored(self, pulse, context, iteration, *, shots=None):
+        nonlocal calls
+        calls += 1
+        return (
+            np.where(np.arange(35) == 17, 0.0, 1.0),
+            np.full(35, 0.1),
+            (),
+            (),
+        )
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", censored)
+    plane = SignalDataPlane()
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=target,
+        calibration=calibration,
+        registered_calibration=False,
+        updates=10,
+    )
+    try:
+        result = task.execute(context)
+        artifact = load_science_context(result["artifact_path"])
+        np.testing.assert_array_equal(artifact["phase"], incoming)
+        np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+        metadata = artifact["pattern_metadata"]
+        assert metadata["candidate"] == 0
+        assert metadata["measurement"] is None
+        if stop_after_first:
+            assert result["validation_status"] is None
+            assert metadata["status"] == "stopped"
+            assert calls == 3
+        else:
+            assert result["validation_status"] == "inconclusive"
+            assert calls == 12
+            assert metadata["best"]["validation"]["reason"] == (
+                "censored sites remained after bounded bootstrap"
+            )
+            assert metadata["history"][-1]["bootstrap_updates"] == 3
+    finally:
+        plane.close()
+
+
 def test_virtual_feedback_runs_repeated_real_qcmos_candidates_and_restores(
     tmp_path: Path,
 ) -> None:
@@ -950,17 +1598,40 @@ def test_virtual_feedback_runs_repeated_real_qcmos_candidates_and_restores(
     sequencer = installation.device("sequencer")
     slm = installation.device("slm")
     try:
+        target = preset_grid(slm.shape_yx, (5, 7))
+        support = np.argwhere(target > 0.0)
+        row, column = support[0]
+        target = np.array(target, copy=True)
+        target[row, column] = 0.0
+        target[row - 2, column + 3] = 1.0  # asymmetric spatial fiducial
+        weak_row, weak_column = support[17]
+        target[weak_row, weak_column] = 0.1
+        pattern, _metadata = solve_phase(
+            target, objective_kind="spots", iterations=None
+        )
+        slm.apply_phase(pattern)
         calibration_node = descriptors["calibration"].instantiate(
             camera=camera,
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
+            science_context=ResolvedArtifact(
+                tmp_path / "science_context.npz",
+                "zlc.slm.science-context.v2",
+                _science_context(slm, target=target),
+            ),
             signal_plane=plane,
             pulse_resource=IMAGING_PULSE_RESOURCE,
             artifact_directory=tmp_path,
             repeats=30,
         )
-        calibration = calibration_node.run().calibration
+        calibration_result = calibration_node.run()
+        calibration = TrapCalibration.load(calibration_result.artifact_path)
+        unresolved = np.flatnonzero(~calibration.site_map.valid_sites)
+        np.testing.assert_array_equal(unresolved, [17])
+        box = calibration.select_model(ReadoutModelKind.BOX)
+        assert box.dark_sample_count[17] >= 2
+        assert np.isfinite(box.dark_sample_variance[17])
         context = _Context()
         task = SlmFeedbackTask(
             camera=camera,
@@ -971,33 +1642,35 @@ def test_virtual_feedback_runs_repeated_real_qcmos_candidates_and_restores(
             slm_key="slm",
             signal_plane=plane,
             calibration=calibration,
-            calibration_path=calibration_node.result.artifact_path,
-            target=preset_grid(slm.shape_yx, (5, 7)),
-            target_objective="spots",
-            target_path=tmp_path / "target.json",
-            science_context=_science_context(slm),
+            calibration_path=calibration_result.artifact_path,
+            science_context=_science_context(slm, target=target),
             science_context_path=tmp_path / "science_context.npz",
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             shots_per_candidate=40,
             validation_shots=80,
-            max_updates=2,
+            max_updates=4,
             artifact_directory=tmp_path,
         )
         result = task.execute(context)
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(slm.last_commanded_phase, saved)
+        assert not np.array_equal(saved, pattern)
         assert result["validation_status"] in {"accepted", "inconclusive"}
         assert metadata["status"] == result["validation_status"]
+        assert [item["valid"] for item in metadata["history"]] == [
+            False, False, False, True
+        ]
+        assert metadata["candidate"] == 4 and metadata["measurement"]["valid"]
         assert not camera.capture_state()
-        ratio_messages = [
+        censored_messages = [
             args[0]
             for args, _kwargs in context.progress
-            if args and str(args[0]).startswith("qCMOS fluorescence ratio")
+            if args and "was censored" in str(args[0])
         ]
-        assert len(ratio_messages) == 2
+        assert len(censored_messages) == 3
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
-        assert len(artifacts) == 2
+        assert len(artifacts) == 4
         assert { _load_candidate(path)[1]["status"] for path in artifacts } <= {
             "measured", "accepted", "inconclusive"
         }
@@ -1142,8 +1815,15 @@ def test_non_improving_candidate_rolls_back_best_and_reduces_controller_gain(
         plane.close()
 
 
+@pytest.mark.parametrize(
+    ("validation_shots", "expected_shots"),
+    ((20, [10, 20]), (101, [10, 99, 2])),
+)
 def test_validation_refuses_a_point_estimate_with_wide_qcmos_uncertainty(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch,
+    validation_shots: int,
+    expected_shots: list[int],
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
     incoming = np.array(slm.last_commanded_phase, copy=True)
@@ -1161,17 +1841,20 @@ def test_validation_refuses_a_point_estimate_with_wide_qcmos_uncertainty(
             {"method": "test"},
         ),
     )
+    requested: list[int] = []
     batches = iter(
-        (
-            (np.ones(35), np.zeros(35), (), ()),
-            (np.ones(35), np.full(35, 0.02), (), ()),
-        )
+        [(np.ones(35), np.zeros(35), (), ())]
+        + [
+            (np.ones(35), np.full(35, 0.02), (), ())
+            for _ in expected_shots[1:]
+        ]
     )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: next(batches),
-    )
+
+    def measure(self, pulse, context, iteration, *, shots=None):
+        requested.append(self.shots if shots is None else int(shots))
+        return next(batches)
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
         tmp_path,
         slm=slm,
@@ -1180,6 +1863,7 @@ def test_validation_refuses_a_point_estimate_with_wide_qcmos_uncertainty(
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=1,
+        validation_shots=validation_shots,
     )
     try:
         result = task.execute(_Context())
@@ -1194,6 +1878,7 @@ def test_validation_refuses_a_point_estimate_with_wide_qcmos_uncertainty(
         assert metadata["best"]["validation"]["reason"] == (
             "maximum validation shots reached"
         )
+        assert requested == expected_shots
     finally:
         plane.close()
 
@@ -1216,14 +1901,14 @@ def test_validation_adapts_in_independent_batches_until_confidence_resolves(
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (
-            np.full(slm.shape_yx, 0.5, dtype=np.float32),
-            {"method": "test"},
-        ),
-    )
+    solve_calls = 0
+
+    def solve(*args, **kwargs):
+        nonlocal solve_calls
+        solve_calls += 1
+        return np.full(slm.shape_yx, 0.5, dtype=np.float32), {"method": "test"}
+
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
 
     def measure(self, pulse, context, iteration, *, shots=None):
         requested.append(self.shots if shots is None else int(shots))
@@ -1248,6 +1933,8 @@ def test_validation_adapts_in_independent_batches_until_confidence_resolves(
         validation = metadata["best"]["validation"]
         assert validation["shots"] == 200
         assert validation["maximum_shots"] == 300
+        assert validation["maximum_looks"] == 3
+        assert validation["confidence_family_alpha"] == 0.05
         assert validation["uniformity_confidence_upper"] <= 1.01
     finally:
         plane.close()
@@ -1700,14 +2387,14 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (
-            np.full(slm.shape_yx, 0.5, dtype=np.float32),
-            {"method": "test"},
-        ),
-    )
+    solve_calls = 0
+
+    def solve(*args, **kwargs):
+        nonlocal solve_calls
+        solve_calls += 1
+        return np.full(slm.shape_yx, 0.5, dtype=np.float32), {"method": "test"}
+
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
 
     def cancelled(self, pulse, context, iteration, *, shots=None):
         raise RuntimeError("SLM feedback was cancelled")
@@ -1724,6 +2411,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
     try:
         context = _Context(cancelled=True)
         result = task.execute(context)
+        assert solve_calls == 0
         assert context.terminal_sealed
         saved, metadata = _load_candidate(result["artifact_path"])
         assert metadata["status"] == "stopped"

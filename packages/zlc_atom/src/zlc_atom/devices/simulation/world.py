@@ -145,7 +145,7 @@ class SimulationGeometry:
 
 @dataclass(frozen=True)
 class SimulationWorldConfig:
-    """Resolved apparatus contribution used to construct one shared world."""
+    """Resolved immutable physics configuration for one shared world."""
 
     geometry: SimulationGeometry = field(default_factory=SimulationGeometry)
     seed: int = 0

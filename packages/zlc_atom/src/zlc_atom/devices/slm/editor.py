@@ -993,6 +993,10 @@ class SlmEditorControl(QtCore.QObject):
 
     def _set_context(self, context: dict[str, object]) -> None:
         pupil, operator = context["pupil"], context["operator_metadata"]
+        context_target = context.get("target_intensity")
+        frozen_target = (
+            None if context_target is None else validate_target(context_target)
+        )
         carrier = operator.get("carrier_waves_xy", [0.0, 0.0])
         coefficients = operator.get("zernike_noll_waves_rms", {})
         arrays = (
@@ -1002,6 +1006,8 @@ class SlmEditorControl(QtCore.QObject):
         )
         if any(np.asarray(array).shape != self.shape for array in arrays):
             raise ValueError(f"Science Context shape must be {self.shape!r}")
+        if frozen_target is not None and frozen_target.shape != self.shape:
+            raise ValueError(f"Science Context Target shape must be {self.shape!r}")
         if (
             type(operator.get("enabled", False)) is not bool
             or not isinstance(carrier, list) or len(carrier) != 2
@@ -1061,6 +1067,12 @@ class SlmEditorControl(QtCore.QObject):
                 widget.blockSignals(previous)
         self._request_revision += 1
         self._pending, self._spot_optimizer_state = None, None
+        if frozen_target is not None:
+            self._target = frozen_target
+            self._target_revision += 1
+            self._target_host.update_data(
+                _snapshot(frozen_target, "target", self._target_revision)
+            )
         self._phase = context["phase"]
         self._pattern_phase = context["pattern_phase"]
         self._wavefront_phase = context["operator_wavefront"]
@@ -1090,6 +1102,7 @@ class SlmEditorControl(QtCore.QObject):
             operator_wavefront=np.array(self._wavefront_phase, copy=True),
             pupil_amplitude=np.array(self._pupil_amplitude, copy=True),
             pupil_support=np.array(self._pupil_support, copy=True),
+            target_intensity=np.array(self._target, copy=True),
             objective_kind=self._objective_kind,
             pupil={"enabled": self._pupil_enabled.isChecked(),
                    "center_xy": list(self._pupil_center_xy),

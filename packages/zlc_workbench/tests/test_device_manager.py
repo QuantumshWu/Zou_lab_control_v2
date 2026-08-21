@@ -156,13 +156,14 @@ def test_one_catalog_snapshot_drives_choices_unavailable_and_templates(tmp_path)
     )
     assert isinstance(manager.catalog, DeviceCatalogSnapshot)
     assert manager.new_from_template("virtual") is True
-    assert InstallationConfig(tuple(manager.devices)) == installation_config_from_template(
-        catalog,
-        "virtual",
+    assert InstallationConfig(
+        tuple(manager.devices), simulation=manager.simulation
+    ) == installation_config_from_template(
+        catalog, "virtual"
     )
     camera = next(item for item in manager.devices if item.role == "camera")
-    manager.view.values[camera.instance_id]["seed"] += 1
-    manager.view.parameter_committed.emit(camera.instance_id, "seed")
+    manager.view.values[camera.instance_id]["exposure_seconds"] += 0.01
+    manager.view.parameter_committed.emit(camera.instance_id, "exposure_seconds")
     assert manager.view.installation_source[0] is None, (
         "a template name describes the complete canonical configuration, "
         "not only its device type outline"
@@ -219,18 +220,18 @@ def test_a_value_a_device_would_refuse_is_refused_while_it_is_on_screen(manager)
     """Not at save time, when the operator has moved on to something else."""
 
     manager.view.device_add_requested.emit("camera.virtual")
-    manager.view.values["camera"]["seed"] = -1
+    manager.view.values["camera"]["exposure_seconds"] = -1
 
-    manager.view.parameter_committed.emit("camera", "seed")
+    manager.view.parameter_committed.emit("camera", "exposure_seconds")
 
-    assert manager.devices[0].parameters["seed"] == 0
+    assert manager.devices[0].parameters["exposure_seconds"] == 0.02
     assert manager.view.status[-1][0] == "warning"
 
 
 def test_a_frame_shape_is_edited_as_one_fact(manager) -> None:
     """A shape with a half-edited width is not a state worth reaching."""
 
-    manager.view.device_add_requested.emit("camera.virtual")
+    manager.view.device_add_requested.emit("camera.virtual_mot")
     manager.view.values["camera"]["frame_shape_yx"] = "64, 96"
 
     manager.view.parameter_committed.emit("camera", "frame_shape_yx")
@@ -238,11 +239,12 @@ def test_a_frame_shape_is_edited_as_one_fact(manager) -> None:
     assert manager.devices[0].parameters["frame_shape_yx"] == (64, 96)
 
 
-def test_what_is_saved_is_what_a_session_opens(manager, tmp_path) -> None:
-    """The whole point.  An apparatus nothing can read is not an apparatus."""
+def test_save_and_reopen_preserve_devices_and_root_simulation(manager, tmp_path) -> None:
+    """Device forms and the hand-edited root mapping survive one save/reopen."""
 
     manager.view.device_add_requested.emit("camera.virtual")
     manager.view.device_add_requested.emit("sequencer.virtual")
+    manager.simulation = {"seed": 7}
 
     manager.view.save_requested.emit()
 
@@ -253,29 +255,20 @@ def test_what_is_saved_is_what_a_session_opens(manager, tmp_path) -> None:
         "camera.virtual",
         "sequencer.virtual",
     ]
+    assert reopened.simulation["seed"] == 7
+    reopened_manager = DeviceManagerPresenter(
+        _ManagerView(),
+        written,
+    )
+    assert reopened_manager.simulation["seed"] == 7
+    assert "seed" not in reopened_manager.view.values["camera"]
+    assert reopened_manager.close()
     # Plain data, readable without any zlc_ package.
     assert json.loads(written.read_text(encoding="utf-8"))["format"] == "zlc.installation"
 
 
-def test_reopening_shows_what_was_saved(manager, tmp_path) -> None:
-    manager.view.device_add_requested.emit("camera.virtual")
-    manager.view.values["camera"]["seed"] = 7
-    manager.view.parameter_committed.emit("camera", "seed")
-    manager.view.save_requested.emit()
-
-    reopened = DeviceManagerPresenter(_ManagerView(), tmp_path / "apparatus.json")
-
-    assert [item.role for item in reopened.devices] == ["camera"]
-    assert reopened.devices[0].parameters["seed"] == 7
-    assert reopened.view.values["camera"]["seed"] == 7
-
-
-def test_an_apparatus_a_session_could_not_open_is_not_written(manager, tmp_path) -> None:
-    """The refusal comes from the thing that decides what a legal apparatus is.
-
-    Checking it here as well would be a second opinion, and the one that matters
-    is the one the session will use tomorrow.
-    """
+def test_a_structurally_duplicate_apparatus_is_not_written(manager, tmp_path) -> None:
+    """The exact file grammar refuses duplicate roles before writing."""
 
     manager.view.device_add_requested.emit("camera.virtual")
     # Reach past the presenter to forge the state a duplicate role would leave.
@@ -346,8 +339,7 @@ def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
     assert schema.project_values({"binning": 2}) == {"binning": 2}
 
 
-def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -> None:
-    """Schema defaults become part of both the draft and its visible form."""
+def test_legacy_camera_owned_world_fields_are_reported_not_guessed(tmp_path) -> None:
 
     path = tmp_path / "apparatus.json"
     path.write_text(
@@ -359,7 +351,6 @@ def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -
                         "instance_id": "camera",
                         "role": "camera",
                         "type_id": "camera.virtual",
-                        # As an older release wrote it: one setting, not four.
                         "parameters": {"seed": 7},
                     }
                 ],
@@ -371,24 +362,9 @@ def test_an_apparatus_saved_before_a_type_gained_a_field_still_opens(tmp_path) -
     view = _ManagerView()
     presenter = DeviceManagerPresenter(view, path, confirm_overwrite=lambda _p: True)
 
-    spec = view.forms["camera"]
-    values = view.values["camera"]
-    assert {field.key for field in spec.fields} == set(values), (
-        "every declared field must arrive, filled from the schema when the "
-        "file is silent about it"
-    )
-    assert values["seed"] == 7, "and what WAS stored still wins"
-    projected = DeviceInstanceConfig(
-        "camera",
-        "camera",
-        "camera.virtual",
-        presenter.types["camera.virtual"].authoring_schema.project_values(
-            dict(view.read_values("camera"))
-        ),
-    )
-    assert projected.parameters == presenter.devices[0].parameters, (
-        "the form and the draft must project one canonical configuration"
-    )
+    assert presenter.devices == []
+    assert view.status[-1][0] == "error"
+    assert "root simulation" in view.status[-1][1]
     del presenter
 
 

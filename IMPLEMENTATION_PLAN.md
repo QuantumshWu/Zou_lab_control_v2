@@ -7,8 +7,8 @@
 更新时间：2026-08-21
 启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
-当前HEAD：`55d6ee7 Optimize dense plot projection and regular image fits`
-用户执行边界：Milestone 1–6及各自post-milestone residual sweep均已完成；M4 cleanup、performance、M5与M6均为独立commit。Plot projection/fit baseline已由`55d6ee7`提交。随后获批的Axis memo、camera effective-unit fallback和Image fit style也已完成冻结验证；当前只待本follow-up提交，不自动进入M7，不得访问真实SLM或其它hardware。
+当前HEAD：`9571cd6 Cache smart ticks and make camera units capability-aware`
+用户执行边界：Milestone 1–6、Plot projection/fit baseline及Axis/camera/style follow-up均已提交。当前获批Goal只处理Histogram/tick配置、SimulationWorld ownership、registered SLM Feedback与SLM local/remote owner；不进入M7，不访问真实SLM或其它hardware。
 
 ### 当前状态
 
@@ -26,7 +26,11 @@ Branch：`master`
 - Plot performance closure：`COMPLETE / SWEEP COMPLETE` — active+latest solve timeout、live FitEvent/raster解耦、renderer/fit直接热路径、重复测试及冻结树残余均已闭合。
 - Plot projection/fit baseline：`COMPLETE / SWEEP COMPLETE` — commit `55d6ee7`；large projection、Histogram/Rolling pool、regular-image bounds/exact retry与最终两处first-frame copy均闭合。
 - Axis/camera/style follow-up：`COMPLETE / SWEEP COMPLETE` — SmartOffset steady memo、capability-dependent camera unit、Calibration/Occupancy unit lineage与Image fit occupied-ring style均已闭合；全树验证green。
-- Milestone 7：`PENDING`；single distribution、wheel/fresh install、evidence lanes和final docs等待用户后续指令。
+- SLM local/remote owner：`IMPLEMENTED / SWEEP COMPLETE` — `slm.remote`只在installation握手及phase command联网；bounded length-prefix/strict-JSON/raw-float32 server独占本机USB adapter，profile/correction固定在server端，expected command/mapping revision拒绝陈旧写入；`bin/slm_server.bat`为本地/LAN同一入口。healthy/stale/failure/malformed/oversize/timeout/concurrent/close定向17 passed，未访问hardware。
+- Histogram/tick配置：`IMPLEMENTED / SWEEP COMPLETE` — bins继续exact一次必要reprojection；density/cumulative只重画bins且不再扫描full payload；qCMOS P50从73.049/71.301 ms降至7.448/7.709 ms，bins 71.539→71.957 ms无material change，10组DPR1/2 RGBA exact。旧settled tick lattice在枚举前限界，百万级range切换不再卡死。Plot全套423、formal/focused72 passed；production净增17，无新class/kind lane。
+- SimulationWorld ownership：`IMPLEMENTED / SWEEP COMPLETE` — apparatus root `simulation`唯一拥有image/grid/seed/profile；qCMOS只消费world geometry，MOT geometry独立；workspace-local profile containment、strict legacy拒绝、DeviceManager preservation和双owner拒绝均闭合。最终定向28 passed，无新production file/class。
+- Registered SLM Feedback：`IMPLEMENTED / SWEEP COMPLETE` — Context v2是run的唯一frozen Target truth；Target JSON只作Editor authoring，Feedback inputs只有Calibration+Context，Calibration optional registration也只选Context。唯一topology validator在创建/load时重核physics、BOX overlap/bounds和runner-up uniqueness，alternate mapping要求asymmetric fiducial。ReadoutModel持久化dark n/variance；Feedback使用raw BOX-dark、raw/electron provenance与converted saturation、sites×looks correction、最多3个coarse batches/3次power-preserving boost，Stop-before-solve为0 solver calls，无valid result保留incoming candidate 0。相关12 files：production `+1163/-282`（净+881）、tests `+924/-91`（净+833）；无新file/class/lane。6个新production defs仅为`validate_target_registration`、`_register_target_sites`、`_censored_sites`、`_boost_target`、`_incoming_candidate`和`_coarse_measure`，均有直接owner/consumer。Owner Feedback 34/43.68 s、physics/truth 24、descriptor 3以及独立Feedback+truth 41/45.53 s passed，12 files AST与diff-check green；未访问hardware/optical。
+- 本Goal combined Gate 17/18：`COMPLETE / SWEEP COMPLETE / READY TO COMMIT` — 冻结candidate 38 files `+3702/-638`（净3064）；production 18 files净+1453、tests 14 files净+1476、active docs 5 files净+130、launcher 1 file +5。Test functions净增16，均覆盖独立业务边界；无剩余production/test blocker、dead owner、旧API、double truth或已知safe deletion。首轮全树是`1555 passed, 1 failed, 4 skipped, 6 warnings in 475.07 s`，唯一failure为既有gallery offscreen Qt teardown subprocess exit `0xC0000005`，不冒充green；随后该exact gallery独立三次全pass（`1.58/1.52/1.52 s`），第二次完整全树`1556 passed, 4 skipped, 6 warnings in 466.48 s`。Warnings仅既有vendor SWIG deprecation，skips仅本机无Icarus。Milestone 7仍`PENDING`，single distribution、wheel/fresh install、evidence lanes和final docs等待用户后续指令。
 
 ### Milestone 3完成边界
 
@@ -34,7 +38,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 6、Plot performance closure与commit `55d6ee7` baseline均已完成；当前follow-up冻结验证完成并只待提交。本轮不自动进入M7，不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
+Milestone 6、Plot performance closure、commit `55d6ee7`及`9571cd6`均已完成。当前只执行用户批准的四项follow-up并统一commit；不自动进入M7，不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -319,7 +323,7 @@ Milestone 5 commit：`Close pulse, camera, remote, FPGA stop, timing, and owners
 - Target strict v2保存`intensity + objective`；bare phase artifact与objective-less v1保活路径删除。Science Context保存Pattern/base、numeric pupil amplitude/support、operator wavefront、typed system correction（kind/reference/wavelength/pupil/coordinate/valid-region/method）和command receipt；所有arrays immutable且strict roundtrip。
 - Editor在unknown硬件上只建立deterministic authoring draft，不虚构device zero；Load Context是显式takeover但仍显示unknown/unsent，Send后才known。外部Task或mapping revision变化使draft可见diverge并拒绝旧Send，Adopt/Load snapshot在session claim内；correction load/enable复用同一DeviceUse seam。Target/Context import/load/save在existing worker执行，Qt只冻结input/交付结果；context在任何widget mutation前核shape/operator/pupil/receipt，close有2秒deadline且completion-driven retry。Atom不再反向import Workbench claim类型。
 - Sparse WGS-Kim、iteration-12 fixed far phase、selected DFT与caller-owned optimizer state保留；initial/hot均`iterations=None`走canonical numerical gate。Dense Gaussian有finite signal/noise region与vortex-free initial phase，Flat Top用quality-preservingFOM stagnation stop；1024×1272实测Gaussian 26.37s/300轮/3.10% RMS，Flat Top 13.97s/210轮/0.488% RMS。不得宣称dense CPU明显改善，不引GPU。
-- Feedback只接受spots Target+known Science Context，只更新Pattern并保留pupil/wavefront/system correction。每个candidate复用canonical Camera Measurement sealed Dataset和相同readout projection；所有requested shots必须对每site finite，否则candidate invalid。Controller以simultaneous uncertainty shrink residual、step clip、confidence trust rollback和gain reduction更新；persistent invalid同phase重试两次后停止。100-shot coarse后只锁一个confidence-best做独立100-shot batch validation，默认最多1000 shots/60s，terminal明确`accepted`或`inconclusive`并保存CI。Stop应用confidence-best并写formal Context；没有valid best时保留known incoming，异常只在incoming known时restore。
+- Feedback只接受含frozen spots Target的Science Context v2与注册到该Context的Calibration，不另选Target artifact；只更新Pattern并保留pupil/wavefront/system correction。每个candidate复用canonical Camera Measurement sealed Dataset和相同readout projection；missing/saturation同phase重试两次，统计上censored site则按最多3个batches/3次bounded boost处理，不伪造finite value。Controller以simultaneous uncertainty、step clip、confidence trust rollback和gain reduction更新。Final validation按sites×maximum looks做family correction，默认最多1000 shots/60s，terminal明确`accepted`或`inconclusive`并保存CI。Stop应用confidence-best并写formal Context；没有valid best时以incoming candidate 0落盘，异常只在incoming known时restore。
 - SimulationWorld保持单一class/state owner；一个frozen`SimulationWorldConfig`拥有全部physics inputs，public projections read-only。唯一构造入口接config；optional strict workspace `world_profile`在任何device factory前解析，duplicate/NaN/unknown/type拒绝；tests用config replace而非运行时mutation。
 - Frozen-tree residual：functional candidate 21 files `+3396/-1958`（净+1438）；production净+1084、tests净+329、active product docs净+22、profile净+3。加入三份Checkpoint状态文档后最终24 files净+1453。无新增production file/class，test functions净删8。正增长KEEP为strict Context codec+dense metrics、Feedback estimator/controller、Editor async ownership、immutable Simulation；DELETE/MERGE已闭合DVI、bare phase codec、fixed12/8、point-only/repeated validation、ScanLiveSlot/private average、O(K²) history、公开mutable physics、错误outcome tests及重复Context tests。
 - 验证均打印current-checkout路径：M6合并纵向`122 passed`；Atom整包`300 passed`；Gate回修定向`104 passed`；最终全树`1504 passed, 4 skipped, 6 warnings in 424.33s`，warnings仍仅vendor SWIG deprecation，4 skips仍是无Icarus的M5 RTL runner。AST/strict JSON/old-name/import-boundary/diff-check均green。

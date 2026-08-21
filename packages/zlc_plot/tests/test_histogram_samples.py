@@ -124,3 +124,50 @@ def test_representation_toggles_refit_the_count_axis() -> None:
         assert ceiling() > counts_ceiling  # fewer bins, taller peaks, refit
     finally:
         session.close()
+
+
+def test_only_bin_edits_reproject_histogram_samples(monkeypatch) -> None:
+    """Density/cumulative transform bins; only a bin edit reprojects samples."""
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=512),
+        PointTable.from_columns({"point": [0.0]}),
+        dtype=np.float64,
+        generation="histogram-parameter-projection",
+    )
+    samples = np.linspace(-5.0, 7.0, 512, dtype=np.float64)[:, np.newaxis]
+    session = PlotSession(
+        DatasetSnapshot(schema, samples, revision=0),
+        HistogramPlot(),
+    )
+    try:
+        native_rebuild = session._rebuild_projection
+        rebuilds = 0
+
+        def counted_rebuild(*, payload_only: bool = False) -> None:
+            nonlocal rebuilds
+            rebuilds += 1
+            native_rebuild(payload_only=payload_only)
+
+        monkeypatch.setattr(session, "_rebuild_projection", counted_rebuild)
+        projected = session._payload
+        counts = np.asarray(projected.counts).copy()
+        edges = np.asarray(projected.edges.display).copy()
+
+        session.set_parameter("density", True)
+        assert session._payload is projected
+        session.set_parameter("cumulative", True)
+        assert session._payload is projected
+        assert rebuilds == 0
+        np.testing.assert_array_equal(session._payload.counts, counts)
+        np.testing.assert_array_equal(session._payload.edges.display, edges)
+
+        for expected_rebuilds, bin_count in enumerate((32, 64, 128), start=1):
+            previous = session._payload
+            session.set_parameter("bin_count", bin_count)
+            assert rebuilds == expected_rebuilds
+            assert session._payload is not previous
+            assert len(session._payload.counts) == bin_count
+            assert len(session._payload.edges.display) == bin_count + 1
+    finally:
+        session.close()

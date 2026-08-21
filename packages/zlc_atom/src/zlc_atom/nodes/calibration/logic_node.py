@@ -8,11 +8,18 @@ from zlc_atom.devices.camera.photoelectrons import (
     photoelectron_switch,
     resolve_photoelectron_availability,
 )
+from zlc_atom.devices.slm.solver import (
+    SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
+    load_science_context,
+)
 from zlc_atom.nodes._framework.descriptor import (
+    ArtifactCodec,
+    ArtifactInputSpec,
     ArtifactOutputSpec,
     DeviceRequirement,
     LogicNodeDescriptor,
     NodeKind,
+    ResolvedArtifact,
     ResolvedWorkspaceResource,
     NodePreviewSpec,
     WorkspaceResourceSpec,
@@ -38,6 +45,12 @@ _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
     (".json",),
     load_calibration_pulse_template,
     argument_name="pulse_resource",
+)
+_SCIENCE_CONTEXT_CODEC = ArtifactCodec(
+    SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
+    "SLM Science Contexts (*.npz)",
+    (".npz",),
+    load_science_context,
 )
 
 
@@ -220,6 +233,7 @@ def _build(
     pulse_resource: ResolvedWorkspaceResource,
     signal_plane: object,
     artifact_directory: object,
+    science_context: ResolvedArtifact | None = None,
     **values: object,
 ) -> CalibrationTask:
     authored = CALIBRATION_SCHEMA.project_values(values)
@@ -230,6 +244,16 @@ def _build(
         or not isinstance(pulse_resource.value, PulseSequence)
     ):
         raise TypeError("pulse_resource must be a resolved calibration pulse")
+    registration: dict[str, object] = {}
+    if science_context is not None:
+        if not isinstance(science_context, ResolvedArtifact):
+            raise TypeError(
+                "science_context must be a resolved Science Context artifact"
+            )
+        registration = {
+            "science_context": science_context.value,
+            "science_context_path": science_context.path,
+        }
     return CalibrationTask(
         camera=camera,  # type: ignore[arg-type]
         sequencer=sequencer,
@@ -262,6 +286,7 @@ def _build(
         pulse_path=pulse_resource.path,
         signal_plane=signal_plane,
         artifact_directory=artifact_directory,  # type: ignore[arg-type]
+        **registration,
     )
 
 
@@ -269,6 +294,15 @@ LOGIC_NODE = LogicNodeDescriptor(
     "calibration",
     NodeKind.TASK,
     CALIBRATION_SCHEMA,
+    input_specs=(
+        ArtifactInputSpec(
+            "science_context_path",
+            "SLM Science Context",
+            _SCIENCE_CONTEXT_CODEC,
+            required=False,
+            argument_name="science_context",
+        ),
+    ),
     outputs=(CAPTURE_PREVIEW_DECLARATION,),
     # Long reference, short readout, long reference: three frames whose whole
     # point is to be compared with each other, so they are faceted rather than

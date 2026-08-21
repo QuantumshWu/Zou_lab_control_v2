@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
+from zlc_durable.paths import resolve_under
 
 from .device_use import DeviceClaim, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse
@@ -299,9 +300,17 @@ class ExperimentSession:
         if not isinstance(config, InstallationConfig):
             raise TypeError("config must be InstallationConfig")
 
+        simulation = dict(config.simulation)
+        profile = simulation.get("world_profile", "")
+        if isinstance(profile, str) and profile.strip():
+            simulation["world_profile"] = str(
+                resolve_under(space.root, profile.strip())
+            )
+
         return cls(
             installation=create_installation(
                 config.specs(),
+                simulation=simulation,
                 catalog=catalog,
                 connect_pulse=_connect_pulse,
             ),

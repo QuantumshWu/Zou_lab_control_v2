@@ -28,6 +28,9 @@ TOOLS = {
     #: The pulse server, for the same reason: run_server.bat starts it on
     #: the machine wired to the board, and it must be THIS tree's server.
     "pulse_server": "zlc_pulse.remote",
+    #: The matching thin owner for a USB SLM.  Local and remote installations
+    #: both use the same phase adapter contract; only this process loads the SDK.
+    "slm_server": "zlc_atom.devices.slm.device_types",
     #: What update.bat runs to prove the pull still imports.  It has to be
     #: asked through the entry or it proves it about the wrong tree.
     "check": "zlc_workbench.tools.check_environment",

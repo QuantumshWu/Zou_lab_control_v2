@@ -35,6 +35,8 @@ def _calibration(
                 [9.0],
                 [True],
                 [1.0],
+                dark_sample_count=np.asarray([8]),
+                dark_sample_variance=np.asarray([4.0]),
                 kind=kind,
                 integration_half_width=1,
                 reducer="mean" if kind is ReadoutModelKind.BOX else None,
@@ -81,7 +83,24 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     assert loaded.select_model().threshold_method == "empirical"
     np.testing.assert_allclose(loaded.select_model().dark_mean, [1.0])
     np.testing.assert_allclose(loaded.select_model().bright_mean, [9.0])
+    np.testing.assert_array_equal(loaded.select_model().dark_sample_count, [8])
+    np.testing.assert_allclose(loaded.select_model().dark_sample_variance, [4.0])
     np.testing.assert_allclose(loaded.signals(image), [5.0])
+
+    legacy_payload = calibration.to_dict()
+    legacy_payload["models"][0].pop("dark_statistics")
+    legacy = TrapCalibration.from_dict(legacy_payload).select_model()
+    np.testing.assert_array_equal(legacy.dark_sample_count, [0])
+    assert np.isnan(legacy.dark_sample_variance[0])
+    with pytest.raises(ValueError, match="invalid counts"):
+        replace(
+            calibration.select_model(),
+            dark_sample_count=np.asarray([2**63], dtype=np.uint64),
+        )
+    overflow_payload = calibration.to_dict()
+    overflow_payload["models"][0]["dark_statistics"]["sample_count"] = [2**63]
+    with pytest.raises(ValueError, match="invalid counts"):
+        TrapCalibration.from_dict(overflow_payload)
 
 
 def test_calibration_document_is_actual_json_data_not_python_container_aliases() -> None:

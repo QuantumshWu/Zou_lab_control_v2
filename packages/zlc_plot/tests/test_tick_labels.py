@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
+import zlc_plot.ticks as ticks_module
 from zlc_plot.ticks import SmartOffsetLocator, apply_smart_ticks
 
 
@@ -199,6 +200,28 @@ def test_identical_tick_input_reuses_layout_but_range_and_extent_do_not(
         assert calls == 3
     finally:
         plt.close(figure)
+
+
+def test_a_settled_fine_unit_is_rejected_before_a_large_range_is_enumerated(
+    monkeypatch,
+) -> None:
+    """A representation-scale jump must not enumerate the old tick lattice."""
+
+    locator = SmartOffsetLocator(max_ticks=8, label_pt=LABEL_PT)
+    locator.tick_values(0.0, 1.0)
+    native_range = range
+
+    def bounded_range(*args: int):
+        candidate = native_range(*args)
+        assert len(candidate) <= locator.max_ticks + 1
+        return candidate
+
+    monkeypatch.setattr(ticks_module, "range", bounded_range, raising=False)
+    values = locator.tick_values(0.0, 4_200_000.0)
+    fresh = SmartOffsetLocator(max_ticks=8, label_pt=LABEL_PT)
+
+    assert 2 <= len(values) <= locator.max_ticks
+    assert values == fresh.tick_values(0.0, 4_200_000.0)
 
 
 def _rendered_labels(renderer):

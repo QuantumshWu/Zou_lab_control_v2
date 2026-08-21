@@ -120,8 +120,10 @@ class DeviceManagerPresenter:
             for descriptor in self.catalog.available
         }
         self.devices: list[DeviceInstanceConfig] = []
+        self.simulation = {}
         self.discovered: tuple[DeviceInstanceConfig, ...] = ()
         self._baseline_devices: tuple[DeviceInstanceConfig, ...] = ()
+        self._baseline_simulation = {}
         self.saved = True
         self.busy = False
         self._closed = False
@@ -202,12 +204,17 @@ class DeviceManagerPresenter:
         if path is not None:
             self.path = Path(path)
         if not self.path.exists():
-            self.devices = list(
-                self._initial_config.devices
+            initial = (
+                self._initial_config
                 if _use_initial and self._initial_config is not None
-                else ()
+                else None
             )
+            self.devices = list(
+                () if initial is None else initial.devices
+            )
+            self.simulation = {} if initial is None else initial.simulation
             self._baseline_devices = tuple(self.devices)
+            self._baseline_simulation = self.simulation
             self.saved = True
             self._show()
             if self.devices:
@@ -224,7 +231,9 @@ class DeviceManagerPresenter:
             self._report(f"cannot read {self.path.name}: {error}", severity="error")
             return False
         self.devices = devices
+        self.simulation = config.simulation
         self._baseline_devices = tuple(self.devices)
+        self._baseline_simulation = self.simulation
         self.saved = True
         self._show()
         self._report(f"{len(self.devices)} device(s) from {self.path.name}")
@@ -245,6 +254,7 @@ class DeviceManagerPresenter:
             self._report(str(error), severity="warning")
             return False
         self.devices = list(config.devices)
+        self.simulation = config.simulation
         self._touch(f"new {name} apparatus draft")
         return True
 
@@ -263,9 +273,13 @@ class DeviceManagerPresenter:
     def cancel(self) -> bool:
         """Discard local edits and restore the last loaded/saved baseline."""
 
-        if tuple(self.devices) == self._baseline_devices:
+        if (
+            tuple(self.devices) == self._baseline_devices
+            and self.simulation == self._baseline_simulation
+        ):
             return False
         self.devices = list(self._baseline_devices)
+        self.simulation = self._baseline_simulation
         self.saved = True
         self._show()
         self._report("discarded unsaved apparatus edits")
@@ -536,7 +550,9 @@ class DeviceManagerPresenter:
             )
             return False
         try:
-            candidate = InstallationConfig(tuple(self.devices))
+            candidate = InstallationConfig(
+                tuple(self.devices), simulation=self.simulation
+            )
         except Exception as error:
             self._report(f"this apparatus cannot be initialized: {error}", severity="error")
             return False
@@ -669,16 +685,18 @@ class DeviceManagerPresenter:
     # ------------------------------------------------------------------ saving
 
     def save(self) -> str:
-        """Write the apparatus, refusing anything a session could not open.
+        """Write one structurally exact, plain-data apparatus document.
 
-        The refusal comes from InstallationConfig, which is the thing that
-        decides what a legal apparatus is -- duplicate roles, missing fields.
-        Checking it here instead would be a second opinion, and the one that
-        matters is the one the session will use tomorrow.
+        InstallationConfig owns the file grammar: duplicate roles and values
+        JSON cannot preserve are refused here.  Simulation semantics stay with
+        the single world resolver and are checked by Init before device
+        factories run; Workbench does not carry a second copy of that grammar.
         """
 
         try:
-            config = InstallationConfig(tuple(self.devices))
+            config = InstallationConfig(
+                tuple(self.devices), simulation=self.simulation
+            )
         except Exception as error:
             self._report(f"this apparatus cannot be saved: {error}", severity="error")
             return ""
@@ -695,6 +713,7 @@ class DeviceManagerPresenter:
             self._report(f"cannot write {self.path.name}: {error}", severity="error")
             return ""
         self._baseline_devices = tuple(self.devices)
+        self._baseline_simulation = self.simulation
         self.saved = True
         # The dot and the [*] follow the file, so the projection runs again.
         self._show()
@@ -774,7 +793,10 @@ class DeviceManagerPresenter:
         return False
 
     def _touch(self, message: str) -> None:
-        self.saved = tuple(self.devices) == self._baseline_devices
+        self.saved = (
+            tuple(self.devices) == self._baseline_devices
+            and self.simulation == self._baseline_simulation
+        )
         self._show()
         self._report(message)
 
@@ -873,7 +895,7 @@ class DeviceManagerPresenter:
         self,
         devices: Sequence[DeviceInstanceConfig],
     ) -> str | None:
-        current = InstallationConfig(tuple(devices))
+        current = InstallationConfig(tuple(devices), simulation=self.simulation)
         for name in installation_template_names():
             try:
                 config = installation_config_from_template(self.catalog, name)
@@ -887,7 +909,9 @@ class DeviceManagerPresenter:
         if self._active_config is None:
             return False
         try:
-            candidate = InstallationConfig(tuple(self.devices))
+            candidate = InstallationConfig(
+                tuple(self.devices), simulation=self.simulation
+            )
         except Exception:
             return True
         return candidate != self._active_config

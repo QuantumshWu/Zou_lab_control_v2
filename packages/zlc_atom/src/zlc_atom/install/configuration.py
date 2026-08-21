@@ -1,24 +1,26 @@
 """An apparatus, written down.
 
 What is in the lab is not knowledge the code should carry: which camera, which
-serial, what exposure, which board at which address.  That belongs in a file the
-operator edits and today's session starts from.
+serial, what exposure, which board at which address, and which one shared
+simulation world a virtual apparatus uses.  That belongs in a file the operator
+edits and today's session starts from.
 
 The document is deliberately unforgiving about its shape.  A device entry has
-exactly four keys and a document exactly two, and anything else is rejected
+exactly four keys and a document exactly three, and anything else is rejected
 rather than ignored -- a configuration that silently drops a key it does not
 recognise is how an experiment runs all afternoon with a setting that was never
 applied.
 
-Migrated from the pre-split tree, whose field set this reproduces exactly so
-existing files still load.  What did NOT come with it is a content digest: an
-apparatus file is meant to be edited by hand.
+The former camera-owned simulation fields are deliberately not kept as a
+second grammar: an old document is refused with the root field it must add.
+What did NOT come with the split is a content digest: an apparatus file is
+meant to be edited by hand.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -38,7 +40,7 @@ __all__ = [
 
 DOCUMENT_FORMAT = "zlc.installation"
 DEVICE_ENTRY_KEYS = frozenset({"instance_id", "role", "type_id", "parameters"})
-_DOCUMENT_KEYS = frozenset({"format", "devices"})
+_DOCUMENT_KEYS = frozenset({"format", "simulation", "devices"})
 
 
 def _text(value: object, what: str) -> str:
@@ -60,7 +62,7 @@ def _plain(value: object, what: str) -> Any:
 
 
 def _freeze_plain(value: object, what: str) -> object:
-    """Validate, deep-own, and freeze one device-configuration value."""
+    """Validate, deep-own, and freeze one installation-configuration value."""
 
     plain = _plain(value, what)
 
@@ -125,9 +127,10 @@ class DeviceInstanceConfig:
 
 @dataclass(frozen=True)
 class InstallationConfig:
-    """Every device in one apparatus."""
+    """Every device and the one shared simulation config in an apparatus."""
 
     devices: tuple[DeviceInstanceConfig, ...]
+    simulation: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         devices = tuple(self.devices)
@@ -139,23 +142,46 @@ class InstallationConfig:
             if duplicates:
                 raise ValueError(f"duplicate device {what}: {sorted(duplicates)}")
         object.__setattr__(self, "devices", devices)
+        if not isinstance(self.simulation, Mapping):
+            raise TypeError("installation simulation must be a mapping")
+        object.__setattr__(
+            self,
+            "simulation",
+            _freeze_plain(dict(self.simulation), "installation simulation"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"format": DOCUMENT_FORMAT, "devices": [item.to_dict() for item in self.devices]}
+        return {
+            "format": DOCUMENT_FORMAT,
+            "simulation": _plain(self.simulation, "installation simulation"),
+            "devices": [item.to_dict() for item in self.devices],
+        }
 
     @classmethod
     def from_dict(cls, value: object) -> "InstallationConfig":
-        if not isinstance(value, Mapping) or set(value) != _DOCUMENT_KEYS:
+        if not isinstance(value, Mapping):
+            raise TypeError("installation document must be a mapping")
+        if value.get("format") != DOCUMENT_FORMAT:
+            raise ValueError(f"unknown installation format {value.get('format')!r}")
+        if set(value) == {"format", "devices"}:
+            raise ValueError(
+                "legacy installation has no root simulation mapping; add "
+                "'simulation': {}, rename camera 'frame_shape_yx' to root "
+                "'simulation.image_shape_yx', and move grid_shape_yx, seed and "
+                "world_profile there"
+            )
+        if set(value) != _DOCUMENT_KEYS:
             raise ValueError(f"an installation document has exactly {sorted(_DOCUMENT_KEYS)}")
-        if value["format"] != DOCUMENT_FORMAT:
-            raise ValueError(f"unknown installation format {value['format']!r}")
         devices = value["devices"]
         if not isinstance(devices, Sequence) or isinstance(devices, (str, bytes)):
             raise TypeError("installation devices must be a list")
-        return cls(tuple(DeviceInstanceConfig.from_dict(item) for item in devices))
+        return cls(
+            tuple(DeviceInstanceConfig.from_dict(item) for item in devices),
+            simulation=value["simulation"],
+        )
 
     def specs(self) -> tuple[dict[str, Any], ...]:
-        """The device specs ``create_installation`` takes."""
+        """The device specs for ``create_installation``; simulation is separate."""
 
         return tuple(
             {

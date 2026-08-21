@@ -133,6 +133,7 @@ Node new chunk
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
+- Histogram只有`bins`变更需要一次完整sample projection；`density`/`cumulative`只是已接受bins的representation，不得再扫描full payload。复用已settle tick unit时必须在枚举lattice前先核上界，不得因range大幅变化卡住UI。
 - 正式96×128 Camera、小Area ROI、主图atomic fit、并行ROI image与一个fit-parameter Rolling Panel链路以100 ms作为profile警戒线；明显的额外cadence、HOL、错误串行和重复render必须删除。若剩余是必要fit/raster/Qt成本，只有能带来实质收益且不增加不相称复杂度的优化才实施。
 - 性能以真实TaskConsole、1/4/8 panels、fit+overlay、Setting/Edit和Qt owner latency为profile对象。
 
@@ -194,6 +195,8 @@ Node new chunk
 ### 8.1 USB-only device
 
 - 正式transport只有Hamamatsu USB SDK；DVI production/discovery/UI/tests/docs删除。
+- 跨机使用时仍只有server process持有USB SDK与profile/correction；`slm.remote`只通过bounded length-prefix、strict-JSON metadata和canonical `float32`相位payload做一次握手与command代理，不形成第二个hardware owner。Remote UI的普通state读取使用握手cache；apply携带expected command/mapping revision并拒绝stale writer，不确定transport outcome后必须采样真实hardware state再继续。
+- SLM proxy无authentication/TLS，只能部署在trusted laboratory LAN，不得暴露到public Internet。
 - Initial command state是unknown，只有成功write/display/readback/settle后才known。
 - Side effect失败区分known-old、known-new和unknown outcome。
 - Correction mutation取得同一DeviceUse claim并冻结mapping revision。
@@ -202,8 +205,8 @@ Node new chunk
 
 ### 8.2 Context与artifacts
 
-- Target保存intensity和objective。
-- Science Context保存numeric pupil、Pattern/base、operator wavefront和system correction引用。
+- Target v2保存intensity和objective，只是Editor authoring import/export artifact，不是run consumer的第二Target truth。
+- Science Context v2保存run的唯一strict frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor的v2 Load是一次atomic adopt。v1只允许显式migration为`target=None`的authoring input，Calibration registration与Feedback必须拒绝。Candidate Context保存实际evolving Target，可直接作为下一run的唯一Context input。
 - Command receipt保存USB/profile/wavelength/orientation/correction/outcome。
 - `SystemCorrectionArtifact`明确区分pupil phase map与target response map；不得把per-geometry site weights冒充通用wavefront correction。
 
@@ -213,18 +216,23 @@ Node new chunk
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
 - Current Feedback observable是all-shot fluorescence，不宣称trap depth。
 - SLM Feedback复用canonical Camera Measurement `repeat=N`及同一Runtime dataset/projection；不另写camera average。
-- Controller使用uncertainty、step clip、trust、rollback和invalid stop。
-- 100 shots是coarse；final validation根据实测variance自适应并有最大time/shots，输出estimate、uncertainty或inconclusive。
-- Stop接受并apply本run confidence-best phase；异常failure只在incoming known时恢复。
+- Feedback使用raw BOX integration减persisted dark mean，不除Calibration bright mean；total SEM只合并shot SEM与`dark sample variance / n`一次。
+- Feedback camera必须重放Calibration的effective raw/photoelectron mode、raw dtype/count unit与working-point provenance；photoelectron时offset/scale必须exact一致，saturation由raw integer maximum转换到当前effective unit判断，不得用converted dtype猜上界。
+- Censored site最多累积三个coarse batches，然后最多三次有界、总power守恒的bootstrap boost；一旦已有valid best，后续censored candidate必须rollback。Controller其他更新仍使用uncertainty、step clip、trust与rollback。
+- Final validation按sites × maximum looks做simultaneous family correction，根据实测variance自适应并有最大time/shots，输出estimate、uncertainty或inconclusive。
+- 开始Feedback时必须将current SLM phase和receipt与frozen Context exact对齐，不符即fail closed。无valid candidate的normal terminal或Stop以incoming candidate 0落盘，measurement为None；有valid best时Stop接受并apply它，异常failure只在incoming known时恢复。
 - Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
 
 ## 9. Calibration、Scan与Simulation
 
 - 不重设计Calibration对外流程、主要artifact、默认raw policy或三帧report。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
+- Calibration可选消费single strict Science Context v2内的frozen Target，把未拍到的site也以predicted BOX保留在stable full roster中；不接受另一个Target artifact。同一SiteMap topology validator在创建和load时都重新核physics、rounded-window overlap/bounds与runner-up uniqueness。Registration信任apparatus的positive Target x/y → camera x/y、no reflection/shear/axis swap；未观测部分存在x/y/180°对称或其他同样可行的alternate mapping时必须loud要求asymmetric spatial fiducial。
+- Registered BOX model必须持久化dark sample count与sample variance；legacy `n=0/NaN`可被读取，但不得用于Feedback。Calibration capture不claim SLM，实验workflow必须保持所选Context command未变。
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。
-- Simulation参数在init前通过单一API/immutable config确定；可读取workspace-local profile，Device Manager Init不运行时改写。
+- Apparatus root `simulation`是image/grid geometry、seed与profile的唯一持久化owner；virtual qCMOS只声明camera事实并消费world image geometry，virtual MOT保持独立的camera geometry。旧的camera-owned world字段不保留双owner或静默migration，必须loud refusal并给出root grammar。
+- Simulation参数在init前通过单一API/immutable config确定；workspace-relative profile必须在任何device factory前解析且保持在workspace内，Device Manager Init不运行时改写。
 - Tests使用config override，不修改public mutable world attributes；hidden truth不泄漏给production算法。
 
 ## 10. Deployment、Evidence与Docs
