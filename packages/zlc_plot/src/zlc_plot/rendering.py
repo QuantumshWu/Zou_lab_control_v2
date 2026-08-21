@@ -3997,22 +3997,28 @@ class MatplotlibRenderer:
             self._fit_hidden_source_lines = tuple((line, True) for line in visible)
         else:
             active_lines = tuple(line for line, was_visible in hidden if was_visible)
-        point_groups: list[np.ndarray] = []
+        # Count before materializing: past the cap the scatter is refused
+        # anyway, and a large source (a million-point trace) should not pay
+        # for column stacks it will never draw.
+        pairs: list[tuple[np.ndarray, np.ndarray]] = []
         point_count = 0
+        cap = self.style.render.fit_source_scatter_max_points
         for line in active_lines:
             x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
             y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
             if x.shape != y.shape:
                 continue
+            pairs.append((x, y))
+            point_count += int(np.count_nonzero(np.isfinite(x) & np.isfinite(y)))
+            if point_count >= cap:
+                self._restore_fit_source_lines()
+                return
+        point_groups: list[np.ndarray] = []
+        for x, y in pairs:
             finite = np.isfinite(x) & np.isfinite(y)
             if bool(np.any(finite)):
-                points = np.column_stack((x[finite], y[finite]))
-                point_groups.append(points)
-                point_count += len(points)
-        if (
-            not point_groups
-            or point_count >= self.style.render.fit_source_scatter_max_points
-        ):
+                point_groups.append(np.column_stack((x[finite], y[finite])))
+        if not point_groups:
             self._restore_fit_source_lines()
             return
         scatter = self._fit_source_scatter
