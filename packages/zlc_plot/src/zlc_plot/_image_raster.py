@@ -391,12 +391,24 @@ class ImageFrontStore:
         # One vectorized pass straight to the requested level: cascading
         # through intermediate halvings would re-read the full plane once
         # per step for identical block means.
-        reduced = source.reshape(
+        blocks = source.reshape(
             rows // level,
             level,
             columns // level,
             level,
-        ).mean(axis=(1, 3), dtype=mean_dtype)
+        )
+        if source.dtype.kind in "bui" and source.dtype.itemsize <= 2:
+            # Integer sources sum exactly in int32 (block sums stay far below
+            # 2**31) and the float32 mean of the same block is exact too (a
+            # block sum of <=2**20 fits float32's 24-bit mantissa), so summing
+            # with SIMD integer adds and scaling once is bit-identical to
+            # mean() while roughly halving the pass over a camera frame.
+            reduced = blocks.sum(axis=(1, 3), dtype=np.int32).astype(
+                mean_dtype
+            )
+            reduced *= mean_dtype.type(1.0) / mean_dtype.type(level * level)
+        else:
+            reduced = blocks.mean(axis=(1, 3), dtype=mean_dtype)
         reduced.setflags(write=False)
         self._pyramid[level] = reduced
         return reduced
