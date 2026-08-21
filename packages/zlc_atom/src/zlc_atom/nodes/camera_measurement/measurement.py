@@ -156,6 +156,7 @@ def frames_snapshot(
     generation: object,
     revision: int,
     working_point: "CameraWorkingPoint | None" = None,
+    value_unit: str | None,
 ):
     """Cycles of frames as one dataset: (cycle) x (frame) x (y, x).
 
@@ -188,6 +189,7 @@ def frames_snapshot(
             producer=producer,
         ),
         point_columns={READOUT_EVENT: _frame_point_column(producer, len(frames[0]))},
+        value_unit=value_unit,
         generation=str(getattr(generation, "value", generation)),
         revision=int(revision),
     )
@@ -206,6 +208,7 @@ def _finite_cycle_output(
         generation=node.generation,
         revision=index + 1,
         working_point=node.actual_working_point,
+        value_unit=node.frame_value_unit,
     )
     canonical = replace(
         event.block.schema,
@@ -236,6 +239,7 @@ def _monitor_cycle_output(
         generation=node.generation,
         revision=revision,
         working_point=node.actual_working_point,
+        value_unit=node.frame_value_unit,
     )
     frames = node.frames_per_cycle
     return LiveDatasetOutput(
@@ -330,9 +334,9 @@ class CameraMeasurementRequest:
     frames_per_cycle: int
     #: Read the camera in photoelectrons instead of counts, through the
     #: conversion the CAMERA's configuration states.  A camera that states
-    #: none refuses rather than inventing one; the choice rides in the run
-    #: record, so every later reader knows which numbers it got.
-    photoelectrons: bool = False
+    #: none falls back to raw counts rather than inventing a conversion; the
+    #: effective choice rides in the run record.
+    photoelectrons: bool = True
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
@@ -461,6 +465,7 @@ class CameraCycleSource:
                 generation=self._generation,
                 revision=self._taken,
                 working_point=self.camera_node.actual_working_point,
+                value_unit=self.camera_node.frame_value_unit,
             ),
             MonitorCoverage(written_cells=len(records), total_cells=len(records)),
             run_record=self.camera_node.run_record,
@@ -810,6 +815,23 @@ class CameraMeasurementNode:
         return self._actual_working_point
 
     @property
+    def reads_photoelectrons(self) -> bool:
+        point = self._actual_working_point
+        if point is None:
+            raise RuntimeError("camera working point is not frozen")
+        return bool(
+            self.request.photoelectrons
+            and point.electrons_per_count is not None
+        )
+
+    @property
+    def frame_value_unit(self) -> str | None:
+        point = self._actual_working_point
+        if point is None:
+            raise RuntimeError("camera working point is not frozen")
+        return None if self.reads_photoelectrons else point.count_unit
+
+    @property
     def generation(self) -> object:
         if self._generation is None:
             raise RuntimeError("camera acquisition has no active generation")
@@ -919,7 +941,7 @@ class CameraMeasurementNode:
         records = tuple(
             self.camera.read_frame_records(int(count), timeout=timeout, exact=exact)
         )
-        if not self.request.photoelectrons:
+        if not self.reads_photoelectrons:
             return records
         point = self._actual_working_point
         assert point is not None and point.electrons_per_count is not None
@@ -936,11 +958,8 @@ class CameraMeasurementNode:
     def _freeze_working_point(self, point: CameraWorkingPoint) -> None:
         if not isinstance(point, CameraWorkingPoint):
             raise TypeError("camera working_point must return CameraWorkingPoint")
-        if self.request.photoelectrons and point.electrons_per_count is None:
-            raise ValueError(
-                f"camera {self.request.camera_key!r} states no photoelectron "
-                "conversion, so its counts cannot be published as electrons"
-            )
+        self._actual_working_point = point
+        photoelectrons = self.reads_photoelectrons
         record = {
             "node": self.instance_id,
             "parameters": {
@@ -952,14 +971,13 @@ class CameraMeasurementNode:
                 ),
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
-                PHOTOELECTRONS: self.request.photoelectrons,
+                PHOTOELECTRONS: photoelectrons,
             },
             "named_devices": {"camera": self.request.camera_key},
             "device_snapshots": {
                 "camera": _camera_working_point_snapshot(point),
             },
         }
-        self._actual_working_point = point
         self._run_record = record
 
     @property

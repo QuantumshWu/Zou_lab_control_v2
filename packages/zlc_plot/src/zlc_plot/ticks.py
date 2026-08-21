@@ -23,6 +23,7 @@ from numbers import Integral
 import types
 from typing import Any
 
+from matplotlib import rcParams
 import matplotlib.ticker as ticker
 import numpy as np
 
@@ -121,6 +122,7 @@ class SmartOffsetLocator(ticker.Locator):
         #: shared this policy.  Only the caller knows which it is.
         self.prune_edges = bool(prune_edges)
         self._settled: tuple[int, int] | None = None
+        self._tick_cache_key: tuple[object, ...] | None = None
         self.k = 0
         self.m = 0
         self.C = 0
@@ -365,6 +367,17 @@ class SmartOffsetLocator(ticker.Locator):
         self.axis.axes.tick_params(axis=name, labelsize=float(size_pt))
 
     def tick_values(self, vmin: float, vmax: float) -> list[float]:
+        axis = self.axis
+        axes = getattr(axis, "axes", None)
+        cache_key = (
+            float(vmin), float(vmax), id(axis),
+            id(getattr(axes, "figure", None)), getattr(axis, "axis_name", None),
+            self._extent_pt(), self.steps, self.max_ticks, self.oom,
+            self.label_pt, self.prune_edges, id(self.measure),
+            tuple(rcParams.get("font.sans-serif", ())),
+        )
+        if self._tick_cache_key == cache_key:
+            return self.ticks
         lower, upper = sorted((float(vmin), float(vmax)))
         if not np.isfinite((lower, upper)).all() or lower == upper:
             self.k = self.m = self.C_int = self.C_exp = 0
@@ -372,6 +385,7 @@ class SmartOffsetLocator(ticker.Locator):
             self.step = 1
             self.ticks = []
             self.n_array = []
+            self._tick_cache_key = cache_key
             return self.ticks
 
         step, decade, size_pt = self._unit(lower, upper)
@@ -446,6 +460,7 @@ class SmartOffsetLocator(ticker.Locator):
         if vmin > vmax:
             self.n_array.reverse()
             self.ticks.reverse()
+        self._tick_cache_key = cache_key
         return self.ticks
 
     def __call__(self) -> list[float]:

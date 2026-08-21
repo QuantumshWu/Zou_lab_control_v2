@@ -298,7 +298,8 @@ class LogicNodeDescriptor:
     #: ``{field name: why not}`` for the settings this bench cannot take --
     #: a fact about the DEVICES this draft has bound, not about the node.
     #: Called with the resolved devices by argument name once a draft is
-    #: finalized, so one answer disables the control and refuses Start.
+    #: finalized.  One answer disables the control; an unavailable boolean is
+    #: effectively False, while a truthy unavailable non-boolean refuses Start.
     resolve_field_availability: (
         Callable[[Mapping[str, object]], Mapping[str, str]] | None
     ) = None

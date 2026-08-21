@@ -68,6 +68,7 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
                 roi_xywh=(2, 3, 20, 16),
                 repeat=0,
                 frames_per_cycle=3,
+                photoelectrons=False,
             ),
             signal_plane=plane,
         )

@@ -68,7 +68,8 @@ class LogicDraftFinalization:
     resources: Mapping[str, object]
     #: ``{field name: why not}`` for settings this draft's bound devices
     #: cannot take.  The form disables those controls and shows the reason;
-    #: the issues above are what happens when one is switched on anyway.
+    #: unavailable booleans project an effective ``False`` while other
+    #: unavailable truthy values remain start issues.
     field_availability: Mapping[str, str]
     issues: tuple[str, ...]
 
@@ -290,10 +291,9 @@ def finalize_logic_draft(
 
     # What the bound devices cannot do, asked once the devices are known.  A
     # setting like "read this camera in photoelectrons" cannot be checked
-    # against the schema alone: it is legal on a camera whose conversion is
-    # configured and impossible on one whose is not, and an operator finds
-    # that out here -- with the switch disabled and Start refused -- rather
-    # than after pressing Start.
+    # against the schema alone.  An unavailable boolean has one neutral
+    # effective value, False; the raw draft stays untouched so selecting a
+    # capable device restores its authored/default value.
     field_availability: dict[str, str] = {}
     resolve_availability = getattr(descriptor, "resolve_field_availability", None)
     if (
@@ -314,8 +314,13 @@ def finalize_logic_draft(
                 f"{descriptor.api_name} resolves availability for undeclared "
                 f"fields {sorted(unknown_fields)!r}"
             )
+        fields = {
+            field.name: field for field in descriptor.authoring_schema.fields
+        }
         for name, reason in field_availability.items():
-            if values.get(name):
+            if fields[name].value_type == "bool":
+                values[name] = False
+            elif values.get(name):
                 issues.append(reason)
 
     wants_source = dataset_inputs(descriptor)

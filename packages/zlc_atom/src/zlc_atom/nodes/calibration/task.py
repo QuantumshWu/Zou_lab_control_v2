@@ -138,7 +138,7 @@ class CalibrationRequest:
     #: Read the camera in photoelectrons instead of counts.  Calibration
     #: keeps no conversion of its own -- it asks the measurement for the
     #: frames it wants -- and the thresholds it fits are in whatever it got.
-    photoelectrons: bool = False
+    photoelectrons: bool = True
     #: Whether every acquired sample is written to disk as it arrives.
     save_frames: bool = False
     #: Where the frames come from: the camera, or a folder of saved samples.
@@ -286,12 +286,16 @@ class SampleWriter:
         working_point: CameraWorkingPoint,
         run_record: Mapping[str, object],
         generation: object,
+        photoelectrons: bool,
     ) -> None:
         self.folder = Path(folder)
         durable_makedirs(self.folder)
         self._point = working_point
         self._run_record = dict(run_record)
         self._generation = generation
+        self._value_unit = (
+            None if photoelectrons else working_point.count_unit
+        )
         self._samples: dict[int, Path] = {}
 
     def _paths(self, index: int) -> tuple[Path, Path]:
@@ -315,6 +319,7 @@ class SampleWriter:
             binning_yx=self._point.binning_yx,
             generation=self._generation,
             revision=int(index) + 1,
+            value_unit=self._value_unit,
         )
         image_path, archive_path = self._paths(index)
         atomic_write_file(
@@ -1092,12 +1097,15 @@ class CalibrationTask:
             armed = True
             actual = measurement.actual_working_point
             self._actual_working_point = actual
+            photoelectrons = measurement.reads_photoelectrons
+            value_unit = measurement.frame_value_unit
             arm_sequencer(self.sequencer, pulse)
             sequencer_snapshot = _sequencer_snapshot(self.sequencer)
             run_record = self._run_record(
                 actual,
                 sequencer_snapshot,
                 pulse_facts,
+                photoelectrons=photoelectrons,
             )
             if context is not None:
                 context.report_progress(
@@ -1155,6 +1163,7 @@ class CalibrationTask:
                                 if context is not None
                                 else self.request.camera_key
                             ),
+                            photoelectrons=photoelectrons,
                         )
                     writer.write(len(cycles) - 1, cycle)
                 if context is not None:
@@ -1166,6 +1175,7 @@ class CalibrationTask:
                         generation=context.generation,
                         revision=len(cycles),
                         run_record=run_record,
+                        value_unit=value_unit,
                     )
                     context.commit_live(
                         {CAPTURE_PREVIEW_DECLARATION.name: output}
@@ -1250,6 +1260,11 @@ class CalibrationTask:
             readout_mode=camera.get("readout_mode"),
         )
         if context is not None:
+            value_unit = (
+                None
+                if bool(saved_request.get(PHOTOELECTRONS, False))
+                else camera.get("count_unit")
+            )
             for index, cycle in enumerate(cycles):
                 if context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
@@ -1263,6 +1278,7 @@ class CalibrationTask:
                     generation=context.generation,
                     revision=index + 1,
                     run_record=run_record,
+                    value_unit=value_unit,
                 )
                 context.commit_live(
                     {CAPTURE_PREVIEW_DECLARATION.name: output}
@@ -1303,9 +1319,13 @@ class CalibrationTask:
         actual: CameraWorkingPoint,
         sequencer_snapshot: Mapping[str, object],
         pulse_facts: Mapping[str, object],
+        *,
+        photoelectrons: bool,
     ) -> dict[str, object]:
+        request = self.request.to_dict()
+        request[PHOTOELECTRONS] = bool(photoelectrons)
         return {
-            "request": self.request.to_dict(),
+            "request": request,
             "actual_devices": {
                 self.request.camera_key: _camera_snapshot(actual),
                 self.request.sequencer_key: dict(sequencer_snapshot),

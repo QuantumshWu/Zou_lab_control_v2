@@ -4053,7 +4053,12 @@ class ConsolePresenter:
         }
         form_values = {}
         for field in binding.descriptor.authoring_schema.fields:
-            value = binding.draft.values.get(field.name, field.default)
+            value = (
+                finalization.values[field.name]
+                if field.name in finalization.field_availability
+                and field.name in finalization.values
+                else binding.draft.values.get(field.name, field.default)
+            )
             if field.name in resource_fields and value:
                 selected = Path(str(value)).expanduser()
                 if not selected.is_absolute():

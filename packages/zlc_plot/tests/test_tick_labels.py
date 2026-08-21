@@ -16,7 +16,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from zlc_plot.ticks import apply_smart_ticks
+from zlc_plot.ticks import SmartOffsetLocator, apply_smart_ticks
 
 
 #: Ranges this bench actually produces.  Each is (name, low, high).
@@ -163,6 +163,40 @@ def test_a_caller_says_where_it_draws_and_how_big_never_how_many() -> None:
             apply_smart_ticks(axes, label_pt=0.0)
         with pytest.raises(ValueError, match="which"):
             apply_smart_ticks(axes, "diagonal", label_pt=LABEL_PT)
+    finally:
+        plt.close(figure)
+
+
+def test_identical_tick_input_reuses_layout_but_range_and_extent_do_not(
+    monkeypatch,
+) -> None:
+    figure = plt.figure(figsize=(4.0, 3.0), dpi=100)
+    try:
+        axes = figure.add_subplot(111)
+        axes.set_xlim(0.0, 10.0)
+        apply_smart_ticks(axes, "x", label_pt=LABEL_PT)
+        locator = axes.xaxis.get_major_locator()
+        assert isinstance(locator, SmartOffsetLocator)
+        native = locator._unit
+        calls = 0
+
+        def counted(low: float, high: float):
+            nonlocal calls
+            calls += 1
+            return native(low, high)
+
+        monkeypatch.setattr(locator, "_unit", counted)
+        forward = locator.tick_values(0.0, 10.0)
+        assert locator.tick_values(0.0, 10.0) is forward
+        assert calls == 1
+
+        reverse = locator.tick_values(10.0, 0.0)
+        assert reverse == list(reversed(forward))
+        assert calls == 2
+
+        axes.set_position((0.2, 0.2, 0.35, 0.6))
+        locator.tick_values(10.0, 0.0)
+        assert calls == 3
     finally:
         plt.close(figure)
 

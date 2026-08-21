@@ -67,10 +67,11 @@ def project_logic_schema(
 ) -> FormSpec:
     """Project a logic schema, rooting resource pickers in the workspace.
 
-    ``field_availability`` disables the settings this draft's bound devices
-    cannot take, with the reason on the control -- the same answer Start
-    admission was decided from, so an operator reads it there rather than
-    discovering it from a refusal.
+    ``field_availability`` disables settings this draft's bound devices cannot
+    take and puts the reason on the control.  An unavailable boolean is shown
+    at its neutral effective value, False, without mutating the authored
+    draft; other unavailable authored values still participate in Start
+    admission.
     """
 
     schema = getattr(descriptor, "authoring_schema", None)

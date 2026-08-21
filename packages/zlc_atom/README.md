@@ -152,14 +152,24 @@ opens those report files, and no calibration object/report blob is put on the
 signal plane. Each classifier grid binds every finite threshold to the
 canonical `calibration.site` coordinate that measured it rather than to the
 current facet index.
+
+Camera Measurement and camera-backed Calibration request photoelectrons by
+default. A camera with a complete configured offset/scale publishes converted
+`float32` values; a camera with no conversion makes the switch unavailable and
+falls back effectively to its native raw counts. The immutable Dataset and run
+record carry that effective truth: raw values retain the camera's `count` unit,
+photoelectron values are dimensionless, and live preview, saved samples,
+replay and downstream processors all use the same choice.
+
 `OccupancyProcessor` consumes an explicit frames signal plus the typed saved
 calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
-It publishes three same-publication Dataset siblings: per-site photoelectron
-`counts`; per-site boolean `occupied`, whose component validity is the sole
-truth for whether each site was readable; and `frame_judged`, the exact source
-camera-frame snapshot that was classified. `frame_judged` preserves the source
-bytes, axes, and validity rather than creating a second image truth. There is
-no separate validity signal and no occupancy-rate output. The generic
+It publishes three same-publication Dataset siblings: per-site numeric
+`counts` in the source frame's effective unit; per-site boolean `occupied`,
+whose component validity is the sole truth for whether each site was readable;
+and `frame_judged`, the exact source camera-frame snapshot that was classified.
+`frame_judged` preserves the source bytes, axes, and validity rather than
+creating a second image truth. There is no separate validity signal and no
+occupancy-rate output. The generic
 `zlc_plot` overlay declaration and same-run geometry document let any
 compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. The concrete Temperature Task reuses the occupied values and

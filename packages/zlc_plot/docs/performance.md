@@ -56,6 +56,47 @@
   would add roughly 300--500 lines despite zero observed busy misses. None has
   enough benefit to justify its complexity.
 
+## SmartOffset steady-frame memo (2026-08-21)
+
+The locator now memoizes a completed layout only when its complete input is
+unchanged: directed limits, axis/figure identity, drawn point extent/orientation,
+locator policy, label size, measurement function and font family. Range direction,
+resize, font or policy changes remain misses. The A/B used two clean
+`55d6ee7` worktrees, with only the 15-line locator cut applied to the candidate;
+each side ran three independent processes in alternating order and 60 steady
+updates per case (Rolling first warmed 110 revisions). Each table entry is the
+median of the three runs' own P50/P95, in milliseconds.
+
+| Case | Complete update, old → memoized | Compose, old → memoized |
+|---|---:|---:|
+| Image 96×128 `uint16` | 12.47955/14.41273 → 11.91770/13.73864 | 8.55010/10.225685 → 7.92430/10.122235 |
+| ROI Image 26×26 `uint16` | 11.47305/13.118625 → 10.76450/12.59024 | 7.83830/9.770585 → 6.93355/9.05635 |
+| Curve, 120 scalars | 2.52675/3.54965 → 1.92755/3.474205 | 1.65015/2.54599 → 1.07115/2.088035 |
+| Histogram, 1000 scalars | 12.63590/25.625325 → 9.08785/23.71979 | 11.42575/23.980615 → 8.17395/20.862275 |
+| Rolling, window 100 | 15.27245/25.151425 → 12.51480/25.565915 | 13.79970/23.572395 → 11.08160/24.294440 |
+| FacetGrid ×4, 26×26 cells | 10.22625/21.88321 → 7.53110/14.39510 | 6.31940/15.82574 → 3.75645/7.25682 |
+
+Independent 20-frame instrumentation counted the outer `tick_values` call on
+every draw; `_unit` and `_lay_out` counted only real cache misses. Values below
+are calls/frame and cumulative milliseconds/frame.
+
+| Case | `tick_values`, old → memoized | `_unit`, old → memoized | `_lay_out`, old → memoized | Hits/misses per frame |
+|---|---:|---:|---:|---:|
+| Image | 4/0.585545 → 4/0.026715 | 4/0.450570 → 0/0 | 42/0.329300 → 0/0 | 0/4 → 4/0 |
+| ROI Image | 4/0.696065 → 4/0.025945 | 4/0.540975 → 0/0 | 40/0.382150 → 0/0 | 0/4 → 4/0 |
+| Curve | 4/0.580430 → 4/0.019165 | 4/0.442020 → 0/0 | 42/0.338165 → 0/0 | 0/4 → 4/0 |
+| Histogram | 16/2.598680 → 16/0.288865 | 16/1.931810 → 1/0.161680 | 152/1.488330 → 9/0.115840 | 0/16 → 15/1 |
+| Rolling | 16/2.282030 → 16/0.244830 | 16/1.679395 → 1/0.126180 | 144/1.348515 → 8/0.091440 | 0/16 → 15/1 |
+| FacetGrid ×4 | 16/2.010510 → 16/0.059955 | 16/1.504710 → 0/0 | 144/1.049140 → 0/0 | 0/16 → 16/0 |
+
+Every case improved P50 in every process. Rolling alone had a small median P95
+tail change of +0.41449 ms complete / +0.722045 ms compose while its independent
+process tails ranged 22--28 ms; its P50 improved by 2.75765 / 2.71810 ms. The
+style-only Image fit change was separately rendered as standalone and four-cell
+Facet surfaces at DPR 1/2 and `2x2`/`8x8`: the occupied-style hollow ring and
+`2.25 pt²` center remained visible, and the existing DPR1/2 compose check stayed
+pixel-identical to a full draw.
+
 The older tables below remain dated numeric references for projection and
 render costs. Their former queue/lifecycle policies are not product contracts;
 the closure above is authoritative.

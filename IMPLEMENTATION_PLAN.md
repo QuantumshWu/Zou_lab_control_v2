@@ -7,7 +7,8 @@
 更新时间：2026-08-21
 启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
-用户执行边界：Milestone 1–6及各自post-milestone residual sweep均已完成；M4 cleanup、performance、M5与M6均为独立commit。M5于2026-08-20 14:31 PDT完成验证，满足用户15:30门并进入M6；M6以`Converge USB SLM context, feedback, and simulation truth`单独提交。2026-08-21用户已完成Plot projection/fit baseline手工验收并授权其独立commit；当前只收口该baseline，不自动进入M7，不得访问真实SLM或其它hardware。
+当前HEAD：`55d6ee7 Optimize dense plot projection and regular image fits`
+用户执行边界：Milestone 1–6及各自post-milestone residual sweep均已完成；M4 cleanup、performance、M5与M6均为独立commit。Plot projection/fit baseline已由`55d6ee7`提交。随后获批的Axis memo、camera effective-unit fallback和Image fit style也已完成冻结验证；当前只待本follow-up提交，不自动进入M7，不得访问真实SLM或其它hardware。
 
 ### 当前状态
 
@@ -23,7 +24,8 @@ Branch：`master`
 - Milestone 5：`COMPLETE / SWEEP COMPLETE` — Pulse执行词汇、camera cadence、Remote takeover、Stop/SAFE、RTL/build与strict transport均闭合。
 - Milestone 6：`COMPLETE / SWEEP COMPLETE` — USB-only SLM、command truth、Science Context、robust Feedback与immutable Simulation已闭合。
 - Plot performance closure：`COMPLETE / SWEEP COMPLETE` — active+latest solve timeout、live FitEvent/raster解耦、renderer/fit直接热路径、重复测试及冻结树残余均已闭合。
-- Plot projection/fit baseline：`READY TO COMMIT / SWEEP COMPLETE` — 用户手工验收已完成；large projection、Histogram/Rolling pool、regular-image bounds/exact retry与最终两处first-frame copy均闭合，当前冻结candidate等待独立baseline commit。
+- Plot projection/fit baseline：`COMPLETE / SWEEP COMPLETE` — commit `55d6ee7`；large projection、Histogram/Rolling pool、regular-image bounds/exact retry与最终两处first-frame copy均闭合。
+- Axis/camera/style follow-up：`COMPLETE / SWEEP COMPLETE` — SmartOffset steady memo、capability-dependent camera unit、Calibration/Occupancy unit lineage与Image fit occupied-ring style均已闭合；全树验证green。
 - Milestone 7：`PENDING`；single distribution、wheel/fresh install、evidence lanes和final docs等待用户后续指令。
 
 ### Milestone 3完成边界
@@ -32,7 +34,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 6与Plot performance closure已完成；Plot projection/fit baseline已获用户手工验收并只待commit。本轮不自动进入M7，不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
+Milestone 6、Plot performance closure与commit `55d6ee7` baseline均已完成；当前follow-up冻结验证完成并只待提交。本轮不自动进入M7，不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -286,7 +288,17 @@ Performance commit：`Make derived history continuous and presentation capacity-
 - Regular-image默认radius lower改为native sampling resolution/2，moment bounds仍拥有upper与其它参数，显式bounds最终覆盖。Full-image cold candidate已经在exact objective成功时，若随后retry只以相同cost返回failure，不再把成功FitResult/FitEvent误写成invalid；只有无实质cost改善时保留原成功，规则由separable kernel metadata共享，不按model id特判。
 - 同一fresh-process 10-case A/B中，2048² Image complete P50/P95为35.42/38.05→21.60/22.39 ms，Facet×4为183.48/191.71→24.05/27.13 ms，Facet×8为366.48/377.69→45.24/46.98 ms，Histogram为175.79/178.02→33.13/34.80 ms，Rolling为111.80/112.77→15.14/17.30 ms；完整矩阵与allocation peak见`packages/zlc_plot/docs/performance.md`。R=1 2048² initial pool为11.02/12.79→0.117/0.130 ms、32.01→0.005 MiB；4×1200×1920 Histogram facet为50.43/51.13→40.15/41.26 ms、19.79→17.59 MiB，numeric parity exact。
 - 当前验证：Plot全套`418 passed`；跨层定向`5 passed`；最终fit gate focused `50 passed`，data/facet/history focused `96 passed`；全树`1535 passed, 4 skipped, 6 warnings`，warnings仍仅既有vendor SWIG deprecation。独立随机矩阵为194个dense/sparse/grid/validity/group/reduction projection checks、954个Histogram fast/fallback cases、21个Fit parity/success cases，另有repeat 2/3/7与primary-index exact parity；`uint64 > int64.max` fallback blocker已回修。`git diff --check`、AST与active old-name scan均green。
-- Gate 17最终分类：新增9个test functions与1个shared fixture helper全部KEEP；唯一重复dense-facet proof已先并入existing route test并净删11行，之后MERGE/DELETE为0。`_all_positions`、`_flat_cache`、`_masked_leading_reduce`、`_histogram_from_positions`、generic grouped/repeat/primary paths和moment bounds均有可达fallback consumer，不存在待删dead branch。用户验收前刻意未提交、未把pending baseline冒充HEAD；本次active docs同步完成后唯一下一步是baseline commit。
+- Gate 17最终分类：新增9个test functions与1个shared fixture helper全部KEEP；唯一重复dense-facet proof已先并入existing route test并净删11行，之后MERGE/DELETE为0。`_all_positions`、`_flat_cache`、`_masked_leading_reduce`、`_histogram_from_positions`、generic grouped/repeat/primary paths和moment bounds均有可达fallback consumer，不存在待删dead branch。该冻结baseline已由commit `55d6ee7`落盘。
+
+### Axis/Camera/Fit-style follow-up（2026-08-21）
+
+- 本次active docs同步前的冻结candidate为16 files `+349/-94`（净增255）：production 8 files `+90/-29`（净增61），tests 8 files `+259/-65`（净增194）。无新增file/class/plot-kind/model/device lane。Production只增加Camera Measurement的2个derived properties、SmartOffset locator的1个cache key与SampleWriter的1个unit state；Image fit同时删除2个重复ring style字段。
+- `SmartOffsetLocator`只对完全相同的directed range、axis/figure、以point表示的drawn extent与orientation、locator policy、label size、measure与font输入复用完成的tick layout；range direction、resize、font或policy变化仍重算。三进程A/B的Image、ROI、Curve、Histogram、Rolling与FacetGrid完整P50均改善；精确P50/P95、`_unit`/`_lay_out` call reductions和唯一Rolling P95 tail变化见`packages/zlc_plot/docs/performance.md`。
+- Camera Measurement与camera-backed Calibration默认请求photoelectrons；有完整device conversion时发布dimensionless `float32`，无conversion时control unavailable、effective False并发布native raw `count`，authored draft保持不变。Snapshot、run record、Calibration preview/archive/replay与Occupancy numeric counts继承同一effective unit。三条Dataset translator和SampleWriter都要求调用方显式传unit/effective mode，不保留能生成错误unit truth的默认值。
+- Image fit ellipse在standalone与Facet中复用`point_occupied`的`#D07850`、alpha 0.58、0.85 pt hollow ring；fit-coloured center从50降至2.25 pt²，ellipse geometry、center coordinate和annotation不变。DPR1/2、`2x2`/`8x8`与four-cell Facet视觉矩阵确认center仍清楚且不遮峰；persisted style/Facet assertions与DPR1/2 full-draw compose分别守住style truth和pixel path。
+- 当前证据：合并focused回归`482 passed`，camera effective-unit定向`64 passed`；Axis parity matrix `67 passed`；Image fit style/golden/Facet focused `40 passed`及最终style+compose `4 passed`；最终全树`1538 passed, 4 skipped, 6 warnings`，warnings仍仅既有vendor SWIG deprecation。
+- Gate 17：changed tests净增3个functions（Axis unit/integration 2、Image fit standalone/Facet style 1），其余为existing tests强化；全部KEEP。旧camera refusal test已合并进counts/electrons/fallback三模式live-monitor纵向证明，重复test为0。Axis cache consumer、camera effective-unit owner、Workbench unavailable-bool投影与Calibration/Occupancy unit consumer graph均已闭合；active旧行为文字与baseline pending checkpoint在本次docs cut删除。
+- 最终post-doc冻结树为26 files `+428/-125`（净增303）：production 11 files `+110/-42`（净增68）、tests 10 files `+237/-67`（净增170）、active docs 5 files `+81/-16`（净增65）。无新增file/class/lane；最终test functions净增2（Axis locator与Image fit style），重复Axis private call-count test及旧camera refusal test均已删除/合并。全树`1538 passed, 4 skipped, 6 warnings`，warnings仍仅既有vendor SWIG deprecation。
 
 ## 10. Milestone 5完成证据
 

@@ -284,13 +284,14 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
             "roi_xywh": None,
             "repeat": 1,
             "frames_per_cycle": windows,
-            "photoelectrons": False,
+            "photoelectrons": True,
         }
         assert record["named_devices"] == {"camera": "camera"}
         actual = record["device_snapshots"]["camera"]
         assert actual["exposure_seconds"] == 0.02
         assert tuple(actual["frame_shape_yx"]) == tuple(frames.shape[-2:])
-        assert actual["dtype"] == frames.dtype.str
+        assert actual["dtype"] == np.dtype("<u2").str
+        assert frames.dtype == np.dtype("<f4")
     finally:
         if host is not None:
             host.shutdown()
@@ -551,6 +552,7 @@ def test_repeat_100_builds_only_one_cycle_per_camera_commit() -> None:
         repeat=100,
         frames_per_cycle=1,
         actual_working_point=None,
+        frame_value_unit=None,
         run_record={},
     )
     payload = 0

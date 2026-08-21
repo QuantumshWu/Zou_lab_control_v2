@@ -6,13 +6,11 @@ because it is a fact about that sensor rather than about any one run.  Read
 back from a camera it would only be knowable once something is open, and a
 form has to be able to offer the unit before anything has been armed.
 
-So a measurement offers the two units its bound camera can answer for, with
-that camera's own numbers in the option that uses them, and a bench that has
-written none down cannot start a run in photoelectrons at all.  The
-conversion itself is applied at the one read every frame comes through, so a
-run is in one unit everywhere or in none.  It is affine, so it moves no
-decision: what it buys is numbers a physicist can read, and what it costs is
-float32 frames, which is why it is a choice and not a rule.
+So a measurement requests photoelectrons by default.  A camera with no
+complete conversion resolves that request effectively to raw counts; a
+capable one converts at the one read every frame comes through.  A run is in
+one unit everywhere, recorded as what actually happened.  The conversion is
+affine, so it moves no decision; what it costs is float32 frames.
 """
 
 from __future__ import annotations
@@ -124,7 +122,9 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
     conversion.
     """
 
-    request = _calibration_request(repeats=10)
+    request = replace(
+        _calibration_request(repeats=10), photoelectrons=False
+    )
     counts = _task(request, tmp_path).run()
     electrons = _task(
         replace(request, photoelectrons=True), tmp_path
@@ -132,6 +132,21 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
 
     assert electrons.capture.frames[0].image.dtype == np.float32
     assert counts.capture.frames[0].image.dtype == np.uint16
+    from zlc_atom.nodes.calibration.outputs import cycle_snapshot
+
+    raw_source = cycle_snapshot(
+        counts.capture.cycles[0],
+        frame_shape=counts.capture.frames[0].image.shape,
+        origin_yx=(0, 0),
+        binning_yx=(1, 1),
+        generation="raw-count-derivation",
+        revision=1,
+        value_unit="count",
+    )
+    count_schema = OccupancyProcessor(counts.calibration)._output_schemas(
+        raw_source.block.schema
+    )["counts"]
+    assert count_schema.cell_schema.value_unit == "count"
     assert (
         electrons.calibration.site_map.n_sites
         == counts.calibration.site_map.n_sites
@@ -204,40 +219,7 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
     assert np.asarray(published.occupied).shape[-1] == calibration.calibration.n_sites
 
 
-def test_the_conversion_is_refused_when_the_camera_states_none() -> None:
-    """A number nobody measured is not a number: the run stops instead."""
-
-    from zlc_atom.nodes.camera_measurement.measurement import (
-        CameraMeasurementNode,
-        CameraMeasurementRequest,
-    )
-
-    installation = create_installation("virtual")
-    try:
-        node = CameraMeasurementNode(
-            camera=installation.capability("camera.adapter"),
-            request=CameraMeasurementRequest(
-                camera_key="camera",
-                exposure_seconds=0.005,
-                roi_xywh=None,
-                repeat=1,
-                frames_per_cycle=1,
-                photoelectrons=True,
-            ),
-            signal_plane=FakePlane(),
-            producer="units",
-        )
-        point = installation.device("camera").working_point()
-        node._freeze_working_point(point)
-        with pytest.raises(ValueError, match="states no photoelectron"):
-            node._freeze_working_point(
-                replace(point, offset_counts=None, electrons_per_count=None)
-            )
-    finally:
-        installation.close()
-
-
-def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
+def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
     """The picture an operator watches, not just the one a run files away.
 
     The finite read converted and the monitor read did not, so a live panel
@@ -256,12 +238,19 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
 
     dark = 205  # counts: an ordinary dark corner, above the sensor's offset
 
-    def _published(units: bool) -> np.ndarray:
+    def _published(units: bool, *, conversion: bool = True):
         installation = create_installation("virtual")
         plane = FakePlane()
         try:
+            camera = installation.device("camera")
+            if not conversion:
+                camera.config = replace(
+                    camera.config,
+                    offset_counts=None,
+                    electrons_per_count=None,
+                )
             node = CameraMeasurementNode(
-                camera=installation.device("camera"),
+                camera=camera,
                 request=CameraMeasurementRequest(
                     camera_key="camera",
                     exposure_seconds=0.02,
@@ -273,8 +262,9 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
                 signal_plane=plane,
                 producer="monitor-units",
             )
+            if not conversion:
+                assert node.request.photoelectrons is True
             capture = node.monitor()
-            camera = installation.device("camera")
             sensor = camera.working_point().sensor_shape_yx
             camera.trigger(4, frame=np.full(sensor, dark, dtype=np.uint16))
             deadline = time.monotonic() + 5.0
@@ -287,14 +277,17 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
             assert publication is not None, "the monitor published nothing"
             value = publication.value(signal)
             assert value is not None
-            return np.asarray(value.snapshot.block.values[0, 0])
+            return value.snapshot, node.run_record
         finally:
             plane.close()
             installation.close()
 
-    counts = _published(False)
+    counts_snapshot, counts_record = _published(False)
+    counts = np.asarray(counts_snapshot.block.values[0, 0])
     assert counts.dtype == np.uint16
     assert counts.min() == counts.max() == dark
+    assert counts_snapshot.block.schema.cell_schema.value_unit == "count"
+    assert counts_record["parameters"][PHOTOELECTRONS] is False
 
     installation = create_installation("virtual")
     try:
@@ -302,11 +295,21 @@ def test_a_live_monitor_publishes_the_unit_the_run_asked_for() -> None:
         scale = installation.world.conversion_e_per_count
     finally:
         installation.close()
-    electrons = _published(True)
+    electron_snapshot, electron_record = _published(True)
+    electrons = np.asarray(electron_snapshot.block.values[0, 0])
     assert electrons.dtype == np.float32
+    assert electron_snapshot.block.schema.cell_schema.value_unit is None
+    assert electron_record["parameters"][PHOTOELECTRONS] is True
     np.testing.assert_allclose(
         electrons, np.float32((dark - offset) * scale), rtol=1e-6
     )
+
+    fallback_snapshot, fallback_record = _published(True, conversion=False)
+    fallback = np.asarray(fallback_snapshot.block.values[0, 0])
+    assert fallback.dtype == np.uint16
+    assert fallback.min() == fallback.max() == dark
+    assert fallback_snapshot.block.schema.cell_schema.value_unit == "count"
+    assert fallback_record["parameters"][PHOTOELECTRONS] is False
 
 
 def test_the_camera_is_read_in_exactly_one_place() -> None:
@@ -346,6 +349,59 @@ def test_the_camera_is_read_in_exactly_one_place() -> None:
     assert owner.name == "read_records"
 
 
+def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
+    tmp_path: Path,
+) -> None:
+    from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
+    from zlc_atom.nodes.calibration.outputs import capture_preview_output
+    from zlc_atom.nodes.calibration.task import SampleWriter
+    from zlc_data.figure_archive import read_archive, read_dataset
+
+    point = CameraWorkingPoint(
+        "EXTERNAL_TRIGGERED",
+        (2, 2),
+        (2, 2),
+        (0, 0),
+        (2, 2),
+        (1, 1),
+        np.dtype("<u2"),
+        "count",
+        0.005,
+        0.006,
+        0.0,
+        1.0,
+        "raw-count-test",
+    )
+    cycle = tuple(
+        CameraFrameRecord(np.full((2, 2), 200 + index, dtype="<u2"), index)
+        for index in range(3)
+    )
+    run_record = {"request": {PHOTOELECTRONS: False}}
+    preview = capture_preview_output(
+        cycle,
+        frame_shape=point.frame_shape_yx,
+        origin_yx=point.roi_origin_yx,
+        binning_yx=point.binning_yx,
+        generation="preview-count-unit",
+        revision=1,
+        run_record=run_record,
+        value_unit=point.count_unit,
+    )
+    assert preview.snapshot.block.schema.cell_schema.value_unit == "count"
+
+    writer = SampleWriter(
+        tmp_path,
+        working_point=point,
+        run_record=run_record,
+        generation="saved-count-unit",
+        photoelectrons=False,
+    )
+    archive = writer.write(0, cycle).with_suffix(".npz")
+    info, arrays = read_archive(archive)
+    saved = read_dataset(info, arrays, "data")
+    assert saved.block.schema.cell_schema.value_unit == "count"
+
+
 def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
     tmp_path: Path,
 ) -> None:
@@ -378,7 +434,9 @@ def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
     assert samples, "save_frames must leave the samples it paid for"
     for path in samples:
         info, arrays = read_archive(path)
-        values = np.asarray(read_dataset(info, arrays, "data").block.values)
+        saved = read_dataset(info, arrays, "data")
+        assert saved.block.schema.cell_schema.value_unit is None
+        values = np.asarray(saved.block.values)
         assert values.dtype == np.float32, f"{path.name} was re-quantised"
         assert values.min() < 0.0
         assert not np.any(values == 65535), f"{path.name} wrapped a negative pixel"

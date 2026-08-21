@@ -4160,6 +4160,7 @@ class MatplotlibRenderer:
             self._fit_artists.append(diagnostic)
             return
         if family == "ellipse":
+            ring_token = self.style.artists.point_occupied
             center = axis.scatter(
                 (),
                 (),
@@ -4172,10 +4173,10 @@ class MatplotlibRenderer:
                 (0.0, 0.0),
                 width=0.0,
                 height=0.0,
-                edgecolor=self.style.artists.fit_ellipse_color,
+                edgecolor=ring_token.color,
                 facecolor="none",
-                linewidth=self.style.artists.fit_ellipse_ring_linewidth,
-                alpha=self.style.artists.fit_ellipse_ring_alpha,
+                linewidth=ring_token.linewidth,
+                alpha=ring_token.alpha,
                 clip_on=True,
                 zorder=self.style.artists.fit_ellipse_zorder,
             )

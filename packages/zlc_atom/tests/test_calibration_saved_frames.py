@@ -66,6 +66,7 @@ def _sample_writer(folder: Path, *, run: str, generation: str) -> SampleWriter:
         working_point=point,
         run_record={"run": run},
         generation=StreamGenerationId(generation),
+        photoelectrons=False,
     )
 
 

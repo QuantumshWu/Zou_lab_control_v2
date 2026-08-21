@@ -7,8 +7,11 @@ frame whose numbers a physicist reads directly; what it costs is float32.
 
 The two numbers are the camera's, written down on the DEVICE beside its ROI
 and its exposure, because they are a fact about that sensor rather than about
-any one run.  A camera that has none cannot be read this way, and says so
-before a run is started rather than after.
+any one run.  Photoelectrons are requested by default.  A camera that states
+no complete conversion exposes the switch as unavailable and resolves that
+request effectively to raw counts; the Dataset unit and run record say what
+actually happened.  Half a conversion remains an invalid device
+configuration rather than a fallback.
 """
 
 from __future__ import annotations
@@ -29,10 +32,11 @@ def photoelectron_switch(
 ) -> AuthoringField:
     """Read this camera in photoelectrons instead of counts: on or off.
 
-    On by default.  Counts are an artefact of the converter, and every level
-    an operator reads -- a threshold, a histogram, a dark corner -- means
-    something only in electrons; a bench whose camera states no conversion
-    says so on the switch instead of quietly handing over ADU.
+    On by default.  A capable camera converts through its own stated offset
+    and scale.  For a camera with no conversion, the disabled control shows
+    the reason while its effective value is False; the authored value is kept
+    so selecting a capable camera restores it.  Direct requests use the same
+    raw-count fallback and record the effective choice.
     """
 
     return AuthoringField(
@@ -92,7 +96,7 @@ def resolve_photoelectron_availability(
 
     Empty means it can.  Answered from the device's own configuration, so it
     is knowable with the camera shut -- which is what lets a form disable the
-    switch before anything has been armed.
+    switch and show its effective raw-count fallback before anything is armed.
     """
 
     if photoelectron_conversion_of(devices.get("camera")) is not None:

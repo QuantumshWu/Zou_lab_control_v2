@@ -135,6 +135,7 @@ def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
         generation="geometry-run",
         revision=1,
         working_point=point,
+        value_unit=point.count_unit,
     )
     geometry = image_point_overlay_geometry(
         frame,

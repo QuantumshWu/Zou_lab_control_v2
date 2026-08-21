@@ -316,8 +316,6 @@ class ArtistStyleConfig:
     fit_failure_color: str
     fit_ellipse_color: str
     fit_ellipse_center_area_pt2: float
-    fit_ellipse_ring_linewidth: float
-    fit_ellipse_ring_alpha: float
     side_distribution_linewidth: float
     pulse_scan_region_color: str
     #: An API slot is written one row at a time by whoever is driving the
@@ -368,7 +366,6 @@ class ArtistStyleConfig:
         for field in (
             "curve_marker_size_pt",
             "fit_ellipse_center_area_pt2",
-            "fit_ellipse_ring_linewidth",
             "side_distribution_linewidth",
             "selector_line_width",
             "selector_handle_size_pt",
@@ -381,7 +378,6 @@ class ArtistStyleConfig:
             object.__setattr__(self, field, _finite(getattr(self, field), field, positive=True))
         for field in (
             "histogram_fill_alpha",
-            "fit_ellipse_ring_alpha",
             "selector_alpha",
         ):
             object.__setattr__(self, field, _unit_interval(getattr(self, field), field))
@@ -815,9 +811,7 @@ def build_plot_style() -> PlotStyleConfig:
         ),
         fit_failure_color="#CD7380",
         fit_ellipse_color=palette.fit_right,
-        fit_ellipse_center_area_pt2=50.0,
-        fit_ellipse_ring_linewidth=2.0,
-        fit_ellipse_ring_alpha=0.5,
+        fit_ellipse_center_area_pt2=2.25,
         side_distribution_linewidth=3.25,
         pulse_scan_region_color="#D69A6E",
         pulse_api_region_color="#B08BD6",

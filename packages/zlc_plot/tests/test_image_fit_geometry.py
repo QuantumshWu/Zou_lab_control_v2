@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, ImagePlot, PlotSession, Reduction
+from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession, Reduction
 
 
 def _image_snapshot(*, x_unit: str = "m", y_unit: str = "m") -> DatasetSnapshot:
@@ -66,6 +67,62 @@ def test_equivalent_image_keeps_radial_catalogue_entry() -> None:
         assert "radial_gaussian_center" in {
             model.model_id for model in session.fit_models
         }
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("faceted", (False, True))
+def test_image_fit_ring_uses_the_occupied_point_ring_style(faceted: bool) -> None:
+    """Standalone and Facet image fits share the occupied-ring visual token."""
+
+    from matplotlib.colors import to_rgba
+
+    cell = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
+    spec = FacetGridPlot(AxisRef.repeat(), cell) if faceted else cell
+    session = PlotSession(_image_snapshot(), spec)
+    try:
+        result = session.fit("radial_gaussian_center", live=False)
+        assert result.success
+        accepted = session._accepted_fit
+        assert accepted is not None and len(accepted.overlays) == 1
+        glyph = accepted.overlays[0].ellipse_glyph
+        assert glyph is not None
+        renderer = session._renderer
+        slots = (
+            renderer._facet_fit_topologies[0][3]
+            if faceted
+            else renderer._fit_slots
+        )
+        ring = slots["ring"]
+        center = slots["center"]
+        annotation = slots["annotation"]
+        token = renderer.style.artists.point_occupied
+
+        assert ring.get_edgecolor() == pytest.approx(
+            to_rgba(token.color, token.alpha)
+        )
+        assert (ring.get_alpha(), ring.get_linewidth()) == (
+            token.alpha,
+            token.linewidth,
+        )
+        assert ring.get_visible() and center.get_visible()
+        assert ring.get_facecolor()[3] == 0.0
+        assert ring.get_center() == pytest.approx(
+            (glyph.center_x, glyph.center_y), rel=0.0, abs=0.0
+        )
+        assert (ring.get_width(), ring.get_height()) == pytest.approx(
+            (2.0 * glyph.radius_x, 2.0 * glyph.radius_y), rel=0.0, abs=0.0
+        )
+        assert center.get_offsets()[0] == pytest.approx(
+            (glyph.center_x, glyph.center_y), rel=0.0, abs=0.0
+        )
+        assert center.get_facecolors()[0] == pytest.approx(
+            to_rgba(renderer.style.artists.fit_ellipse_color)
+        )
+        center_area = renderer.style.artists.fit_ellipse_center_area_pt2
+        assert center_area == 2.25
+        assert tuple(center.get_sizes()) == (center_area,)
+        assert annotation.get_visible() and annotation.get_text()
     finally:
         session.close()
 

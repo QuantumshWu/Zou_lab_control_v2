@@ -1607,7 +1607,9 @@ def test_public_repeat_reduction_exposes_the_planted_trap_depth_contrast() -> No
 
         measurement = CameraMeasurementNode(
             camera=camera,
-            request=CameraMeasurementRequest("camera", 0.02, None, repeats, 3),
+            request=CameraMeasurementRequest(
+                "camera", 0.02, None, repeats, 3, photoelectrons=False
+            ),
             signal_plane=plane,
         )
         pulse = resolve_pulse(

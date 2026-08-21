@@ -1081,11 +1081,10 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
 def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(
     presenter,
 ) -> None:
-    """The switch is a device fact: disabled with the reason, and Start obeys it.
+    """Unavailable is an effective Off, without erasing the operator's draft.
 
-    Whether this camera can be read that way is answered from its own
-    configuration -- knowable with the camera shut -- so the control says so
-    before a run, rather than a run failing after Start.
+    The default returns when a capable camera is selected again; an explicit
+    Off remains Off.  Workbench needs no camera-type branch to do either.
     """
 
     from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
@@ -1096,22 +1095,35 @@ def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(
         item for item in projection["form_spec"].fields if item.key == PHOTOELECTRONS
     )
     assert field.kind == "bool" and not field.unavailable
-    presenter.update_logic_draft(node_id, values={PHOTOELECTRONS: True})
+    assert projection["form_values"][PHOTOELECTRONS] is True
     assert presenter.logic_editor_projection(node_id)["can_start"] is True
 
-    camera = presenter.session.installation.device("camera")
-    camera.config = replace(
-        camera.config, offset_counts=None, electrons_per_count=None
+    presenter.update_logic_draft(
+        node_id, device_keys={"camera": "mot_camera"}
     )
-    presenter.update_logic_draft(node_id, values={PHOTOELECTRONS: True})
     projection = presenter.logic_editor_projection(node_id)
     field = next(
         item for item in projection["form_spec"].fields if item.key == PHOTOELECTRONS
     )
     assert field.unavailable
     assert "states no photoelectron conversion" in field.unavailable_reason
-    assert projection["can_start"] is False
-    assert presenter.start_logic(node_id) is False
+    assert projection["form_values"][PHOTOELECTRONS] is False
+    assert projection["can_start"] is True
+    assert presenter.logic[node_id].draft.values[PHOTOELECTRONS] is True
+
+    presenter.update_logic_draft(node_id, device_keys={"camera": "camera"})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"][PHOTOELECTRONS] is True
+    assert projection["can_start"] is True
 
     presenter.update_logic_draft(node_id, values={PHOTOELECTRONS: False})
-    assert presenter.logic_editor_projection(node_id)["can_start"] is True
+    presenter.update_logic_draft(
+        node_id, device_keys={"camera": "mot_camera"}
+    )
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"][PHOTOELECTRONS] is False
+    assert projection["can_start"] is True
+    presenter.update_logic_draft(node_id, device_keys={"camera": "camera"})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"][PHOTOELECTRONS] is False
+    assert projection["can_start"] is True

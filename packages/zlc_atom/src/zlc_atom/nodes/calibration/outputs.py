@@ -208,6 +208,7 @@ def cycle_snapshot(
     binning_yx: tuple[int, int],
     generation: object,
     revision: int,
+    value_unit: str | None,
 ) -> OwnedSnapshot:
     """One acquired cycle, as the dataset it is.
 
@@ -232,6 +233,7 @@ def cycle_snapshot(
             binning_yx=binning_yx,
         ),
         point_columns={READOUT_EVENT: _frame_point_column(_PREVIEW_FRAMES)},
+        value_unit=value_unit,
         generation=generation,
         revision=revision,
     )
@@ -246,6 +248,7 @@ def capture_preview_output(
     generation: object,
     revision: int,
     run_record: Mapping[str, object],
+    value_unit: str | None,
 ) -> LiveDatasetOutput:
     """Translate one complete long/readout/long cycle into its live event.
 
@@ -262,6 +265,7 @@ def capture_preview_output(
         binning_yx=binning_yx,
         generation=generation,
         revision=revision,
+        value_unit=value_unit,
     )
     return LiveDatasetOutput(
         CAPTURE_PREVIEW_DECLARATION,
