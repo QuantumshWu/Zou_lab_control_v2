@@ -299,6 +299,28 @@ module zlc_edge_streamer #(
     reg [TICK_WIDTH-1:0] bus_ramp_denom [0:BUS_COUNT-1];
     reg [TICK_WIDTH+BUS_WIDTH:0] bus_ramp_accum [0:BUS_COUNT-1];
 
+    // Exact reciprocal table for the only variable division in the real-time path.
+    // A STEEP ramp has 0 < span < delta < 2^BUS_WIDTH.  For S=2^(2*BUS_WIDTH),
+    // magic(span)=ceil(S/span) gives
+    //
+    //   floor(delta * magic(span) / S) == floor(delta / span)
+    //
+    // over that complete input domain: the reciprocal error is < delta/S and
+    // delta*span < S, so it cannot cross the next integer boundary.  The
+    // remainder is then delta - quotient*span.  Vivado maps each read port to a
+    // compact distributed ROM and the two products to DSP48s, replacing the old
+    // eleven serial compare/subtract stages without approximation or latency.
+    localparam integer RAMP_RECIP_BITS = 2 * BUS_WIDTH;
+    localparam integer RAMP_RECIP_SIZE = (1 << BUS_WIDTH);
+    localparam integer RAMP_RECIP_SCALE = (1 << RAMP_RECIP_BITS);
+    (* rom_style = "distributed" *) reg [RAMP_RECIP_BITS:0] ramp_reciprocal [0:RAMP_RECIP_SIZE-1];
+    integer ramp_recip_i;
+    initial begin
+        ramp_reciprocal[0] = {(RAMP_RECIP_BITS+1){1'b0}};
+        for (ramp_recip_i = 1; ramp_recip_i < RAMP_RECIP_SIZE; ramp_recip_i = ramp_recip_i + 1)
+            ramp_reciprocal[ramp_recip_i] = (RAMP_RECIP_SCALE + ramp_recip_i - 1) / ramp_recip_i;
+    end
+
     // ----- per-bus SEGMENT-DESCRIPTOR delay capture (raised by zlc_bus_apply_segment) -------------
     // DAC delay is INSTRUCTION-LEVEL: each RESOLVED segment the engine
     // applies is captured as ONE descriptor and RE-RUN d ticks later by a per-bus delayed player
@@ -717,26 +739,24 @@ module zlc_edge_streamer #(
     // the whole engine evaluates only ~2 affine ticks per bus per cycle instead of
     // recomputing the same segment 3x in each branch.  Values + cycle timing are
     // identical to recomputing in-line (this is a pure resource dedup).
-    // Quotient + remainder of delta/span for a STEEP ramp (span < delta <= 2^BUS_WIDTH-1,
-    // so both operands fit BUS_WIDTH+1 bits).  Restoring division, fully combinational:
-    // BUS_WIDTH+1 subtract/compare stages, evaluated once per segment APPLY (not per tick)
-    // and comfortably within a 20 ns cycle.  For gentle ramps (delta <= span) the caller
-    // skips it (step = 0, rem = delta -- the historic 0/1-steps-per-tick behaviour).
+    // Quotient + remainder of delta/span for a STEEP ramp.  The reciprocal-ROM
+    // identity above is exact for every legal BUS_WIDTH-bit operand; this is not
+    // a fixed-point approximation.  Gentle ramps skip the divider entirely
+    // (step=0, rem=delta, the historic 0/1-step-per-tick behaviour).
     function [2*BUS_WIDTH+1:0] zlc_bus_ramp_divmod;
         input [BUS_WIDTH:0] num;
         input [BUS_WIDTH:0] den;
-        reg [BUS_WIDTH:0] q, r;
-        integer k;
+        reg [RAMP_RECIP_BITS:0] magic;
+        (* use_dsp = "yes" *) reg [BUS_WIDTH+RAMP_RECIP_BITS:0] scaled_num;
+        reg [BUS_WIDTH:0] q;
+        (* use_dsp = "yes" *) reg [2*BUS_WIDTH:0] scaled_den;
+        reg [BUS_WIDTH:0] r;
         begin
-            q = {(BUS_WIDTH+1){1'b0}};
-            r = {(BUS_WIDTH+1){1'b0}};
-            for (k = BUS_WIDTH; k >= 0; k = k - 1) begin
-                r = {r[BUS_WIDTH-1:0], num[k]};
-                if (r >= den) begin
-                    r = r - den;
-                    q[k] = 1'b1;
-                end
-            end
+            magic = ramp_reciprocal[den[BUS_WIDTH-1:0]];
+            scaled_num = num[BUS_WIDTH-1:0] * magic;
+            q = scaled_num[BUS_WIDTH+RAMP_RECIP_BITS:RAMP_RECIP_BITS];
+            scaled_den = q * den[BUS_WIDTH-1:0];
+            r = num - scaled_den[BUS_WIDTH:0];
             zlc_bus_ramp_divmod = {q, r};
         end
     endfunction
