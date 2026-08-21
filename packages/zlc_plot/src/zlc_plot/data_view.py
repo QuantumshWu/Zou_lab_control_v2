@@ -8,7 +8,7 @@ tensor dimension here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 import math
 from numbers import Integral
@@ -364,10 +364,43 @@ class _ResolvedAxis:
     dimension: int
 
 
-@dataclass(frozen=True, slots=True)
 class _Domain:
-    values: tuple[AxisValue, ...]
-    codes: NDArray[np.int64]
+    """Grouping codes plus the domain's canonical/display value planes.
+
+    ``values`` -- the labelled AxisValue objects -- materializes on first
+    access.  Group and facet consumers read a handful of them; a continuous
+    curve axis has one distinct value PER POINT, and building a Python
+    scalar pair plus a formatted label for each of 100k points every frame
+    was the hottest loop of the whole curve payload path.  The arrays carry
+    everything the hot consumers actually use.
+    """
+
+    __slots__ = ("canonical", "display", "codes", "_build_values", "_values")
+
+    def __init__(
+        self,
+        canonical: NDArray[Any],
+        display: NDArray[Any],
+        codes: NDArray[np.int64],
+        build_values: Callable[[], tuple[AxisValue, ...]],
+    ) -> None:
+        self.canonical = canonical
+        self.display = display
+        self.codes = codes
+        self._build_values = build_values
+        self._values: tuple[AxisValue, ...] | None = None
+
+    @property
+    def size(self) -> int:
+        return int(self.canonical.size)
+
+    @property
+    def values(self) -> tuple[AxisValue, ...]:
+        cached = self._values
+        if cached is None:
+            cached = self._build_values()
+            self._values = cached
+        return cached
 
 
 class DataView:
@@ -646,14 +679,14 @@ class DataView:
                 flat_values[group_positions],
                 usable,
                 x_domain.codes,
-                len(x_domain.values),
+                x_domain.size,
                 aggregation,
             )
             y_display = self._samples.value.canonical_unit.convert_value_to(
                 y, self._samples.value.display_unit
             )
-            x_canonical = _domain_canonical(x_domain)
-            x_display = _domain_display(x_domain)
+            x_canonical = x_domain.canonical
+            x_display = x_domain.display
             valid = (counts > 0) & np.isfinite(y)
             label = self._samples.value.label if not key else ", ".join(
                 item.label for item in key
@@ -874,10 +907,10 @@ class DataView:
     ) -> ImageData:
         x_domain = self._domain(x, positions)
         y_domain = self._domain(y, positions)
-        x_canonical = _domain_canonical(x_domain)
-        y_canonical = _domain_canonical(y_domain)
-        nx = len(x_domain.values)
-        ny = len(y_domain.values)
+        x_canonical = x_domain.canonical
+        y_canonical = y_domain.canonical
+        nx = x_domain.size
+        ny = y_domain.size
         usable = (
             self._samples.valid_mask.reshape(-1)[positions]
             & (x_domain.codes >= 0)
@@ -906,14 +939,14 @@ class DataView:
             y_ref=y,
             x=QuantityArray(
                 x_canonical,
-                _domain_display(x_domain),
+                x_domain.display,
                 x_resolved.canonical_unit,
                 x_resolved.display_unit,
                 x_resolved.label,
             ),
             y=QuantityArray(
                 y_canonical,
-                _domain_display(y_domain),
+                y_domain.display,
                 y_resolved.canonical_unit,
                 y_resolved.display_unit,
                 y_resolved.label,
@@ -997,7 +1030,7 @@ class DataView:
                     flat_valid[positions] & (primary.codes == index)
                 ]
             ]
-            for index in range(len(primary.values))
+            for index in range(primary.size)
         )
 
     def histogram_of(
@@ -1312,7 +1345,7 @@ class DataView:
                 return len({cell[position] for cell in topology.row_to_cell})
             return int(resolved.domain_canonical.size)
         positions = self._all_positions()
-        return len(self._domain(spec.facet, positions).values)
+        return self._domain(spec.facet, positions).size
 
     def facet(
         self,
@@ -1561,7 +1594,7 @@ class DataView:
             sorted_codes = selected_codes[order]
             counts = np.bincount(
                 sorted_codes,
-                minlength=len(domain.values),
+                minlength=domain.size,
             )
             start = 0
             for code in np.flatnonzero(counts):
@@ -1639,7 +1672,8 @@ class DataView:
             if valid_local.size == 0:
                 codes = np.full(positions.shape, -1, dtype=np.int64)
                 codes.setflags(write=False)
-                return _Domain((), codes)
+                empty = _readonly(np.empty(0))
+                return _Domain(empty, empty, codes, tuple)
             declared = (
                 selected_indices[valid_local]
                 if resolved.declared_domain
@@ -1657,62 +1691,76 @@ class DataView:
             inverse = remap[declared]
             canonical_values = resolved.domain_canonical[used_indices]
             display_values = resolved.domain_display[used_indices]
-            indices: tuple[int | None, ...] = tuple(int(index) for index in used_indices)
-            coordinate_labels = (
-                (None,) * len(indices)
-                if resolved.coordinate_labels is None
-                else tuple(
-                    resolved.coordinate_labels[int(index)] for index in used_indices
-                )
-            )
         else:
+            used_indices = None
             canonical_values, inverse = np.unique(selected[valid_local], return_inverse=True)
             display_values = resolved.coordinate.canonical_unit.convert_value_to(
                 canonical_values, resolved.coordinate.display_unit
             )
-            indices = (None,) * int(canonical_values.size)
-            if resolved.coordinate_labels is None:
-                coordinate_labels = (None,) * int(canonical_values.size)
-            else:
-                label_by_coordinate = dict(
-                    zip(
-                        map(_python_scalar, resolved.domain_canonical),
-                        resolved.coordinate_labels,
-                        strict=True,
-                    )
-                )
-                coordinate_labels = tuple(
-                    label_by_coordinate[_python_scalar(value)]
-                    for value in canonical_values
-                )
         if valid_local is None:
             codes = inverse
         else:
             codes = np.full(positions.shape, -1, dtype=np.int64)
             codes[valid_local] = inverse
         codes.setflags(write=False)
-        values = tuple(
-            AxisValue(
-                ref=ref,
-                index=index,
-                canonical=_python_scalar(canonical_value),
-                display=_python_scalar(display_value),
-                label=_axis_value_label(
-                    resolved.coordinate.label,
-                    display_value,
-                    resolved.coordinate.display_unit,
-                    coordinate_label,
-                ),
+
+        def build_values() -> tuple[AxisValue, ...]:
+            if used_indices is not None:
+                indices: tuple[int | None, ...] = tuple(
+                    int(index) for index in used_indices
+                )
+                coordinate_labels = (
+                    (None,) * len(indices)
+                    if resolved.coordinate_labels is None
+                    else tuple(
+                        resolved.coordinate_labels[int(index)]
+                        for index in used_indices
+                    )
+                )
+            else:
+                indices = (None,) * int(canonical_values.size)
+                if resolved.coordinate_labels is None:
+                    coordinate_labels = (None,) * int(canonical_values.size)
+                else:
+                    label_by_coordinate = dict(
+                        zip(
+                            map(_python_scalar, resolved.domain_canonical),
+                            resolved.coordinate_labels,
+                            strict=True,
+                        )
+                    )
+                    coordinate_labels = tuple(
+                        label_by_coordinate[_python_scalar(value)]
+                        for value in canonical_values
+                    )
+            return tuple(
+                AxisValue(
+                    ref=ref,
+                    index=index,
+                    canonical=_python_scalar(canonical_value),
+                    display=_python_scalar(display_value),
+                    label=_axis_value_label(
+                        resolved.coordinate.label,
+                        display_value,
+                        resolved.coordinate.display_unit,
+                        coordinate_label,
+                    ),
+                )
+                for index, canonical_value, display_value, coordinate_label in zip(
+                    indices,
+                    canonical_values,
+                    display_values,
+                    coordinate_labels,
+                    strict=True,
+                )
             )
-            for index, canonical_value, display_value, coordinate_label in zip(
-                indices,
-                canonical_values,
-                display_values,
-                coordinate_labels,
-                strict=True,
-            )
+
+        return _Domain(
+            _readonly(_scalar_kind_array(canonical_values)),
+            _readonly(_scalar_kind_array(display_values)),
+            codes,
+            build_values,
         )
-        return _Domain(values, codes)
 
     def _resolve(self, ref: AxisRef) -> _ResolvedAxis:
         if not isinstance(ref, AxisRef):
@@ -2136,12 +2184,20 @@ def _aggregate_by_codes(
     return output, counts
 
 
-def _domain_canonical(domain: _Domain) -> NDArray[Any]:
-    return _readonly(np.asarray([value.canonical for value in domain.values]))
+def _scalar_kind_array(values: NDArray[Any]) -> NDArray[Any]:
+    """The dtype the per-value ``_python_scalar`` materialization produced.
 
+    Building these planes from Python scalars promoted narrow floats and
+    integers to float64/int64; the direct array path keeps that contract so
+    downstream consumers see identical dtypes either way.
+    """
 
-def _domain_display(domain: _Domain) -> NDArray[Any]:
-    return _readonly(np.asarray([value.display for value in domain.values]))
+    array = np.asarray(values)
+    if array.dtype.kind == "f" and array.dtype != np.float64:
+        return array.astype(np.float64)
+    if array.dtype.kind in "iu" and array.dtype != np.int64:
+        return array.astype(np.int64)
+    return array
 
 
 def _python_scalar(value: Any) -> Any:
