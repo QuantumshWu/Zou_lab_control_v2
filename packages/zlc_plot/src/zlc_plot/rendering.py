@@ -477,6 +477,75 @@ def _compact_engineering(value: float, *, length: int | None = None) -> str:
     return normalized(f"{numeric:.0e}")
 
 
+_ENVELOPE_MIN_POINTS_PER_COLUMN = 4
+_ENVELOPE_MIN_COLUMNS = 64
+_ENVELOPE_MAX_COLUMNS = 4096
+
+
+def _envelope_decimated(
+    x: np.ndarray,
+    y: np.ndarray,
+    window: tuple[float, float],
+    columns: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Per-column min/max envelope of a dense polyline, or None to draw raw.
+
+    Past a few samples per pixel column a stroked polyline is visually
+    defined by each column's extremes alone; the envelope hands Agg exactly
+    those extremes (three vertices per column: minimum, maximum, and a
+    separator that becomes NaN wherever the column holds an invalid sample,
+    so gaps stay gaps at pixel resolution) instead of one vertex per sample.
+    Sparse windows -- a deep zoom, a short trace -- return None and the
+    caller draws every point, which keeps the picture exact where the
+    envelope has nothing to save.  ``x`` must be finite and sorted; gaps
+    travel in ``y`` as NaN.
+    """
+
+    low, high = float(window[0]), float(window[1])
+    if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+        return None
+    start = int(np.searchsorted(x, low, side="left"))
+    stop = int(np.searchsorted(x, high, side="right"))
+    if stop - start < columns * _ENVELOPE_MIN_POINTS_PER_COLUMN:
+        return None
+    x_view = x[start:stop]
+    y_view = y[start:stop]
+    edges = np.linspace(low, high, columns + 1)
+    starts = np.searchsorted(x_view, edges[:-1], side="left")
+    counts = np.diff(np.append(starts, x_view.size))
+    finite = np.isfinite(y_view)
+    guarded_min = np.where(finite, y_view, np.inf)
+    guarded_max = np.where(finite, y_view, -np.inf)
+    with np.errstate(invalid="ignore"):
+        col_min = np.minimum.reduceat(guarded_min, np.minimum(starts, x_view.size - 1))
+        col_max = np.maximum.reduceat(guarded_max, np.minimum(starts, x_view.size - 1))
+        finite_counts = np.add.reduceat(
+            finite.astype(np.int64), np.minimum(starts, x_view.size - 1)
+        )
+    empty = counts == 0
+    finite_counts = np.where(empty, 0, finite_counts)
+    gap = finite_counts < counts
+    blank = finite_counts == 0
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    out_x = np.repeat(centers, 3)
+    out_y = np.empty(columns * 3, dtype=np.float64)
+    out_y[0::3] = np.where(blank, np.nan, col_min)
+    out_y[1::3] = np.where(blank, np.nan, col_max)
+    # The separator repeats the maximum (a zero-length segment) except where
+    # the column carried an invalid sample: there it breaks the stroke.
+    out_y[2::3] = np.where(gap, np.nan, out_y[1::3])
+    # One raw neighbour on each side keeps the entering/leaving segment at
+    # the window edge instead of clipping it a column early.
+    prefix_x = x[start - 1 : start]
+    prefix_y = y[start - 1 : start]
+    suffix_x = x[stop : stop + 1]
+    suffix_y = y[stop : stop + 1]
+    return (
+        np.concatenate((prefix_x, out_x, suffix_x)),
+        np.concatenate((prefix_y, out_y, suffix_y)),
+    )
+
+
 def _facet_cell_title(cell: Any, fallback: int) -> str:
     """Use the projected facet identity with a compact numeric coordinate."""
 
@@ -631,6 +700,21 @@ class MatplotlibRenderer:
             tuple[float, float], tuple[float, float]
         ] | None = None
         self._chrome_dirty_axes: set[Any] = set()
+        #: Per-axes boundary chrome (ticks, gridlines, spines) collected for
+        #: the dynamic compose, cached under the same two facts the chrome
+        #: itself depends on: the axes' view limits (chrome-dirty tracking)
+        #: and the canvas signature (size/DPR).  ``_update_ticks`` runs the
+        #: locator and formatter, and a 35-cell facet paid for seventy such
+        #: runs per steady frame in which nothing had moved.
+        self._boundary_chrome_cache: dict[
+            int, tuple[tuple[Any, Any, float], ...]
+        ] = {}
+        self._boundary_chrome_signature: tuple[object, ...] | None = None
+        #: Dense polylines registered for display-resolution envelope
+        #: decimation: id(axes) -> {id(line): (line, sorted x, gapped y)}.
+        #: Re-applied whenever that axes' x window moves (data relimit, zoom,
+        #: pan, home) so a deep zoom falls back to the raw points.
+        self._envelope_lines: dict[int, dict[int, tuple[Any, np.ndarray, np.ndarray]]] = {}
         self._raster_generation = 0
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
@@ -1033,12 +1117,60 @@ class MatplotlibRenderer:
         for _key, axes, _index in self.painted_surfaces:
             self._capture_home_limits(axes)
 
+    def _apply_line_data(
+        self,
+        axes: Any,
+        line: Any,
+        x: np.ndarray,
+        y: np.ndarray,
+    ) -> None:
+        """Hand a polyline to its artist, enveloped when denser than pixels."""
+
+        entries = self._envelope_lines.setdefault(id(axes), {})
+        entries[id(line)] = (line, x, y)
+        self._set_enveloped_line(axes, line, x, y)
+
+    def _set_enveloped_line(
+        self,
+        axes: Any,
+        line: Any,
+        x: np.ndarray,
+        y: np.ndarray,
+    ) -> None:
+        columns = int(
+            min(
+                _ENVELOPE_MAX_COLUMNS,
+                max(_ENVELOPE_MIN_COLUMNS, float(axes.bbox.width) * 2.0),
+            )
+        )
+        window = tuple(map(float, axes.get_xlim()))
+        enveloped = (
+            _envelope_decimated(x, y, window, columns)
+            if x.size >= columns * _ENVELOPE_MIN_POINTS_PER_COLUMN
+            else None
+        )
+        if enveloped is None:
+            line.set_data(x, y)
+        else:
+            line.set_data(*enveloped)
+
+    def _refresh_enveloped_lines(self, axis: Any) -> None:
+        entries = self._envelope_lines.get(id(axis))
+        if not entries:
+            return
+        for line_id, (line, x, y) in tuple(entries.items()):
+            if getattr(line, "axes", None) is not axis:
+                del entries[line_id]
+                continue
+            self._set_enveloped_line(axis, line, x, y)
+
     def _set_xlim(self, axis: Any, low: float, high: float) -> None:
         previous = np.asarray(axis.get_xlim(), dtype=float)
         wanted = np.asarray((low, high), dtype=float)
         if not np.allclose(previous, wanted, rtol=1e-12, atol=1e-15):
             axis.set_xlim(float(low), float(high))
             self._mark_axes_chrome_dirty(axis)
+            self._refresh_enveloped_lines(axis)
 
     def _set_ylim(self, axis: Any, low: float, high: float) -> None:
         previous = np.asarray(axis.get_ylim(), dtype=float)
@@ -1156,11 +1288,30 @@ class MatplotlibRenderer:
             for _key, artist in collected
             if isinstance(artist, Axes)
         }
+        canvas = self._figure.canvas
+        signature = (
+            id(canvas),
+            int(round(float(self._figure.bbox.width))),
+            int(round(float(self._figure.bbox.height))),
+        )
+        if signature != self._boundary_chrome_signature:
+            self._boundary_chrome_cache.clear()
+            self._boundary_chrome_signature = signature
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
                 continue
             if id(axes) in dynamic_full_axes_ids:
                 continue
+            cached = (
+                None
+                if axes in self._chrome_dirty_axes
+                else self._boundary_chrome_cache.get(id(axes))
+            )
+            if cached is not None:
+                for artist, owner, zorder in cached:
+                    keyed(artist, owner, zorder)
+                continue
+            entries: list[tuple[Any, Any, float]] = []
             for axis in (axes.xaxis, axes.yaxis):
                 if id(axis) in dynamic_axis_ids:
                     continue
@@ -1169,13 +1320,20 @@ class MatplotlibRenderer:
                 # refreshed and clipped to the current view interval.  The
                 # raw ``majorTicks`` list keeps stale instances parked at
                 # out-of-view locations after a limit change, and painting
-                # those leaks mark segments outside the axes box.
+                # those leaks mark segments outside the axes box.  Tick
+                # geometry is a function of the view limits and canvas size
+                # alone, so the refresh runs when one of those moved (the
+                # axes is chrome-dirty, or the signature above changed) and
+                # the collected artists are replayed verbatim in between.
                 for tick in axis._update_ticks():
-                    keyed(tick.gridline, axes, axis_z)
-                    keyed(tick.tick1line, axes, axis_z)
-                    keyed(tick.tick2line, axes, axis_z)
+                    entries.append((tick.gridline, axes, axis_z))
+                    entries.append((tick.tick1line, axes, axis_z))
+                    entries.append((tick.tick2line, axes, axis_z))
             for spine in axes.spines.values():
-                keyed(spine, axes, spine.get_zorder())
+                entries.append((spine, axes, spine.get_zorder()))
+            self._boundary_chrome_cache[id(axes)] = tuple(entries)
+            for artist, owner, zorder in entries:
+                keyed(artist, owner, zorder)
         return collected
 
     def _compose_frame(self, *, chrome_stable: bool) -> None:
@@ -1200,13 +1358,20 @@ class MatplotlibRenderer:
             int(round(float(self._figure.bbox.width))),
             int(round(float(self._figure.bbox.height))),
         )
-        dynamics = self._dynamic_artists()
         reusable = (
             chrome_stable
             and self._background_region is not None
             and self._background_signature == signature
             and not self._chrome_dirty_axes
         )
+        if not reusable:
+            # Anything that invalidates the background (layout, text, chrome
+            # effects, limit moves) may also have moved tick geometry through
+            # a locator or formatter change, which the per-axes dirty set does
+            # not see.  The boundary cache is only ever trusted between two
+            # consecutive reusable frames.
+            self._boundary_chrome_cache.clear()
+        dynamics = self._dynamic_artists()
         ordered = sorted(dynamics, key=lambda entry: entry[0])
         # Where the gesture's own artists begin, in the one z-order a full
         # draw uses.  The frame below that point is captured on the way past,
@@ -1724,31 +1889,46 @@ class MatplotlibRenderer:
         paint_labels: bool = True,
     ) -> None:
         lines = self._ensure_lines(axes, len(series), key)
-        all_x: list[np.ndarray] = []
-        all_y: list[np.ndarray] = []
+        # Limits need only the valid extremes, and min/max are indifferent to
+        # element order: reducing each series in place is the same numbers as
+        # gathering and concatenating every valid sample (two full copies of
+        # a million-point trace per frame) and asking for the extremes then.
+        extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
         for index, item in enumerate(series):
             # NaNs preserve invalid runs as gaps instead of joining neighbours.
-            plotted_x = np.where(item.valid, item.x, np.nan)
             plotted_y = np.where(item.valid, item.y, np.nan)
-            lines[index].set_data(plotted_x, plotted_y)
+            self._apply_line_data(axes, lines[index], item.x, plotted_y)
             if lines[index].get_label() != item.label:
                 lines[index].set_label(item.label)
-            all_x.append(item.x[item.valid])
-            all_y.append(item.y[item.valid])
+            if limits is None and bool(np.any(item.valid)):
+                extremes[0] = min(
+                    extremes[0],
+                    float(np.min(item.x, where=item.valid, initial=np.inf)),
+                )
+                extremes[1] = max(
+                    extremes[1],
+                    float(np.max(item.x, where=item.valid, initial=-np.inf)),
+                )
+                extremes[2] = min(
+                    extremes[2],
+                    float(np.min(item.y, where=item.valid, initial=np.inf)),
+                )
+                extremes[3] = max(
+                    extremes[3],
+                    float(np.max(item.y, where=item.valid, initial=-np.inf)),
+                )
         if limits is not None:
             self._set_xlim(axes, *limits[0])
             self._set_ylim(axes, *limits[1])
         else:
-            usable_x = tuple(value for value in all_x if value.size)
-            usable_y = tuple(value for value in all_y if value.size)
             xlim = (
-                _curve_x_limits(np.concatenate(usable_x))
-                if usable_x
+                _curve_x_limits(extremes[0:2])
+                if math.isfinite(extremes[0])
                 else None
             )
             y_range = (
-                _data_limits(np.concatenate(usable_y))
-                if usable_y
+                _data_limits(extremes[2:4])
+                if math.isfinite(extremes[2])
                 else None
             )
             if xlim is not None:
@@ -3997,22 +4177,28 @@ class MatplotlibRenderer:
             self._fit_hidden_source_lines = tuple((line, True) for line in visible)
         else:
             active_lines = tuple(line for line, was_visible in hidden if was_visible)
-        point_groups: list[np.ndarray] = []
+        # Count before materializing: past the cap the scatter is refused
+        # anyway, and a large source (a million-point trace) should not pay
+        # for column stacks it will never draw.
+        pairs: list[tuple[np.ndarray, np.ndarray]] = []
         point_count = 0
+        cap = self.style.render.fit_source_scatter_max_points
         for line in active_lines:
             x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
             y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
             if x.shape != y.shape:
                 continue
+            pairs.append((x, y))
+            point_count += int(np.count_nonzero(np.isfinite(x) & np.isfinite(y)))
+            if point_count >= cap:
+                self._restore_fit_source_lines()
+                return
+        point_groups: list[np.ndarray] = []
+        for x, y in pairs:
             finite = np.isfinite(x) & np.isfinite(y)
             if bool(np.any(finite)):
-                points = np.column_stack((x[finite], y[finite]))
-                point_groups.append(points)
-                point_count += len(points)
-        if (
-            not point_groups
-            or point_count >= self.style.render.fit_source_scatter_max_points
-        ):
+                point_groups.append(np.column_stack((x[finite], y[finite])))
+        if not point_groups:
             self._restore_fit_source_lines()
             return
         scatter = self._fit_source_scatter
@@ -4235,10 +4421,9 @@ class MatplotlibRenderer:
         annotation.set_text(content)
         annotation.set_visible(bool(content))
 
-    @staticmethod
-    def _set_fit_line(line: Any, polyline: FitPolyline) -> None:
+    def _set_fit_line(self, line: Any, polyline: FitPolyline) -> None:
         order = np.argsort(polyline.x)
-        line.set_data(polyline.x[order], polyline.y[order])
+        self._apply_line_data(line.axes, line, polyline.x[order], polyline.y[order])
         line.set_visible(True)
 
     def _update_fit_primitives(self, family: str, overlay: FitOverlay) -> None:

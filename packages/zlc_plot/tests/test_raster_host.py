@@ -871,3 +871,78 @@ def test_raster_buffer_save_preserves_existing_file_when_replace_fails(
 
     assert target.read_bytes() == original
     assert tuple(tmp_path.iterdir()) == (target,)
+
+
+def test_envelope_preserves_column_extremes_and_gaps() -> None:
+    """The envelope is the drawing's contract: extremes and gaps survive."""
+
+    from zlc_plot.rendering import _envelope_decimated
+
+    n = 50_000
+    x = np.linspace(0.0, 1.0, n)
+    y = np.sin(x * 40.0)
+    y[12_345] = 9.0
+    y[34_567] = -7.0
+    y[20_000:20_400] = np.nan
+    columns = 256
+    enveloped = _envelope_decimated(x, y, (0.0, 1.0), columns)
+    assert enveloped is not None
+    out_x, out_y = enveloped
+    assert out_x.size <= columns * 3 + 2
+    finite = np.isfinite(out_y)
+    assert float(np.max(out_y[finite])) == 9.0
+    assert float(np.min(out_y[finite])) == -7.0
+    # The invalid run must still break the stroke: some separator in the gap
+    # columns is NaN.
+    gap_zone = (out_x >= x[20_000]) & (out_x <= x[20_399])
+    assert bool(np.any(~np.isfinite(out_y[gap_zone])))
+
+
+def test_envelope_declines_sparse_windows() -> None:
+    from zlc_plot.rendering import _envelope_decimated
+
+    x = np.linspace(0.0, 1.0, 1_000)
+    y = np.sin(x)
+    assert _envelope_decimated(x, y, (0.0, 1.0), 256) is None
+    dense_x = np.linspace(0.0, 1.0, 200_000)
+    dense_y = np.sin(dense_x)
+    # A deep zoom leaves fewer samples than the envelope needs: raw points.
+    assert _envelope_decimated(dense_x, dense_y, (0.5, 0.5005), 256) is None
+    assert _envelope_decimated(dense_x, dense_y, (0.0, 1.0), 256) is not None
+
+
+def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
+    n = 300_000
+    x = np.linspace(0.0, 1.0, n)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": x}),
+        dtype=np.float64,
+        generation="envelope-host",
+    )
+    values = np.sin(x * 20.0).reshape(1, -1)
+    host = RasterPlotHost.from_plot(
+        DatasetSnapshot(schema, values, revision=0),
+        CurvePlot(AxisRef.point("x")),
+    )
+    try:
+        host.wait_for_front(timeout=30)
+        host.update_data(
+            DatasetSnapshot(schema, values + 0.001, revision=1)
+        ).result(timeout=60)
+        renderer = host._session._renderer
+        lines = next(
+            (
+                value
+                for value in renderer._artists.values()
+                if isinstance(value, list)
+                and value
+                and hasattr(value[0], "get_xdata")
+            ),
+            None,
+        )
+        assert lines, "curve series artist must exist"
+        drawn = np.asarray(lines[0].get_xdata())
+        assert drawn.size < n / 10
+    finally:
+        host.close(timeout=30)

@@ -541,6 +541,11 @@ class FitOptions:
     loss: str = "linear"
     max_nfev: int = 5000
     deadline_seconds: float | None = None
+    #: Curve fits with more finite points than this iterate on an x-binned
+    #: sufficient-statistics compression (bin means weighted by counts) and
+    #: keep the final model evaluation, residuals and quality on the full
+    #: data.  ``None`` solves every point exactly at any size.
+    max_exact_points: int | None = 4096
 
     def __post_init__(self) -> None:
         loss = _text(self.loss, "fit loss")
@@ -556,6 +561,11 @@ class FitOptions:
             if deadline <= 0:
                 raise ValueError("deadline_seconds must be positive")
             object.__setattr__(self, "deadline_seconds", deadline)
+        if self.max_exact_points is not None:
+            max_exact = integer(self.max_exact_points, "max_exact_points")
+            if max_exact <= 0:
+                raise ValueError("max_exact_points must be a positive integer")
+            object.__setattr__(self, "max_exact_points", max_exact)
 
 
 def _readonly(array: np.ndarray) -> np.ndarray:
@@ -1283,8 +1293,22 @@ class FitEngine:
             raise ValueError("fit requires more finite observations than parameters")
         if _DOMAIN_ANCHORED in spec.capabilities:
             spec = spec.anchored_at(float(np.min(coords[0])))
+        counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
+        solver_coords, solver_values = coords, values
+        weight_roots: np.ndarray | None = None
+        if (
+            not counted_observations
+            and spec.independent_arity == 1
+            and opts.max_exact_points is not None
+            and values.size > 2 * opts.max_exact_points
+        ):
+            compressed = _binned_curve_statistics(
+                coords[0], values, opts.max_exact_points
+            )
+            if compressed is not None:
+                solver_coords, solver_values, weight_roots = compressed
         default_bounds = (
-            spec.bounds_initializer(coords, values)
+            spec.bounds_initializer(solver_coords, solver_values)
             if spec.bounds_initializer is not None
             else None
         )
@@ -1298,7 +1322,7 @@ class FitEngine:
             # at half a bin: they are the positive parameters measured along
             # the value axis, which is the sigmas and not a splitting or an
             # amplitude.
-            steps = np.diff(np.unique(coords[0]))
+            steps = np.diff(np.unique(solver_coords[0]))
             step = float(np.median(steps)) if steps.size else 0.0
             if step > 0.0:
                 floor = 0.5 * step
@@ -1309,7 +1333,9 @@ class FitEngine:
                         and lower[index] < floor < upper[index]
                     ):
                         lower[index] = floor
-        seeds = _initial_candidates(spec, coords, values, initial, warm_start)
+        seeds = _initial_candidates(
+            spec, solver_coords, solver_values, initial, warm_start
+        )
         low_inside = np.nextafter(lower, upper)
         high_inside = np.nextafter(upper, lower)
         seeds = tuple(np.minimum(np.maximum(seed, low_inside), high_inside) for seed in seeds)
@@ -1331,7 +1357,6 @@ class FitEngine:
         # quantity whose sum is what a Poisson maximum-likelihood fit
         # minimises, written as a signed square root so an ordinary
         # least-squares solver minimises it unchanged.
-        counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
 
         def check() -> None:
             if cancelled is not None and cancelled():
@@ -1345,38 +1370,50 @@ class FitEngine:
             expected = np.maximum(predicted, _COUNT_FLOOR)
             with np.errstate(divide="ignore", invalid="ignore"):
                 logarithm = np.where(
-                    values > 0.0, values * np.log(values / expected), 0.0
+                    solver_values > 0.0,
+                    solver_values * np.log(solver_values / expected),
+                    0.0,
                 )
-            deviance = 2.0 * np.maximum(expected - values + logarithm, 0.0)
-            return np.copysign(np.sqrt(deviance), expected - values)
+            deviance = 2.0 * np.maximum(
+                expected - solver_values + logarithm, 0.0
+            )
+            return np.copysign(np.sqrt(deviance), expected - solver_values)
 
         def residual(parameters: np.ndarray) -> np.ndarray:
             check()
-            predicted = spec.evaluate(coords, parameters).reshape(-1)
-            if predicted.shape != values.shape or not np.all(np.isfinite(predicted)):
-                return np.full(values.shape, invalid_residual)
-            if not counted_observations:
-                return predicted - values
-            return deviance_residual(predicted)
+            predicted = spec.evaluate(solver_coords, parameters).reshape(-1)
+            if predicted.shape != solver_values.shape or not np.all(
+                np.isfinite(predicted)
+            ):
+                return np.full(solver_values.shape, invalid_residual)
+            if counted_observations:
+                return deviance_residual(predicted)
+            delta = predicted - solver_values
+            return delta if weight_roots is None else delta * weight_roots
 
         def analytic_jacobian(parameters: np.ndarray) -> np.ndarray:
             check()
-            jacobian = spec.evaluate_jacobian(coords, parameters)
+            jacobian = spec.evaluate_jacobian(solver_coords, parameters)
             if not np.all(np.isfinite(jacobian)):
                 raise FloatingPointError("analytic fit jacobian is non-finite")
             if not counted_observations:
-                return jacobian
+                return (
+                    jacobian
+                    if weight_roots is None
+                    else jacobian * weight_roots[:, None]
+                )
             # d/dmu of the signed root, by the chain rule on the expression
             # above: |mu - n| / (mu * root), which is positive everywhere.
             # Where the model already matches the data both are zero; the
             # limit there is 1/sqrt(mu), since the root behaves as
             # (mu - n)/sqrt(n) in that neighbourhood.
-            predicted = spec.evaluate(coords, parameters).reshape(-1)
+            predicted = spec.evaluate(solver_coords, parameters).reshape(-1)
             expected = np.maximum(predicted, _COUNT_FLOOR)
             root = np.abs(deviance_residual(predicted))
             scale = np.where(
                 root > _COUNT_FLOOR,
-                np.abs(expected - values) / (expected * np.maximum(root, _COUNT_FLOOR)),
+                np.abs(expected - solver_values)
+                / (expected * np.maximum(root, _COUNT_FLOOR)),
                 1.0 / np.sqrt(expected),
             )
             return jacobian * scale[:, None]
@@ -1399,7 +1436,7 @@ class FitEngine:
                 check()
                 solver_residual = np.asarray(candidate.fun, dtype=np.float64).reshape(-1)
                 if (
-                    solver_residual.shape != values.shape
+                    solver_residual.shape != solver_values.shape
                     or not np.all(np.isfinite(solver_residual))
                     or bool(np.all(solver_residual == invalid_residual))
                 ):
@@ -1441,6 +1478,10 @@ class FitEngine:
             raise RuntimeError("winning fit evaluation is non-finite")
         residuals = values - fitted
         degrees = max(values.size - solved.x.size, 1)
+        if weight_roots is not None:
+            # The solver minimised the binned statistics; the reported quality
+            # is the full data's, from the evaluation above.
+            _rss = float(np.dot(residuals, residuals))
         reduced = float(_rss / degrees)
         covariance, covariance_valid = _covariance(solved.jac, reduced)
         errors = (
@@ -1472,6 +1513,40 @@ def _coordinate_arrays(coordinates: Sequence[np.ndarray], arity: int) -> ArrayTu
     if arrays and any(item.shape != arrays[0].shape for item in arrays):
         raise ValueError("coordinate arrays must have equal shape")
     return arrays
+
+
+def _binned_curve_statistics(
+    x: np.ndarray,
+    values: np.ndarray,
+    bins: int,
+) -> tuple[ArrayTuple, np.ndarray, np.ndarray] | None:
+    """X-binned means with count weights -- a curve's sufficient statistics.
+
+    Weighted least squares on (bin mean x, bin mean y, sqrt(count)) agrees
+    with the full-data solution up to second order in the model's curvature
+    within one bin; at the default 4096 bins that error sits far below the
+    solver's own tolerance for every registered curve model, including a
+    damped sine with hundreds of periods across the span.  The caller keeps
+    the final model evaluation, per-point residuals and quality numbers on
+    the FULL data, so the compression only decides where the solver iterates.
+    Returns None when the span is degenerate or the data barely compresses.
+    """
+
+    low = float(np.min(x))
+    high = float(np.max(x))
+    if not math.isfinite(low) or not math.isfinite(high) or low == high:
+        return None
+    scale = (bins - 1) / (high - low)
+    codes = ((x - low) * scale).astype(np.int64)
+    np.clip(codes, 0, bins - 1, out=codes)
+    counts = np.bincount(codes, minlength=bins)
+    used = np.flatnonzero(counts)
+    if used.size < 8 or used.size * 2 > x.size:
+        return None
+    weights = counts[used].astype(np.float64)
+    x_means = np.bincount(codes, weights=x, minlength=bins)[used] / weights
+    y_means = np.bincount(codes, weights=values, minlength=bins)[used] / weights
+    return (x_means,), y_means, np.sqrt(weights)
 
 
 def _solver_bounds(
