@@ -106,8 +106,16 @@ class UnitRegistry:
         self._units: dict[str, Unit] = {}
         self._canonical: dict[str, Unit] = {}
         self._lock = RLock()
+        self._revision = 0
         for unit in units:
             self.register(unit)
+
+    @property
+    def revision(self) -> int:
+        """Monotonic identity of the registry's current conversion truth."""
+
+        with self._lock:
+            return self._revision
 
     def register(self, unit: Unit, *, replace: bool = False) -> Unit:
         if not isinstance(unit, Unit):
@@ -140,6 +148,7 @@ class UnitRegistry:
                 self._units[name] = unit
             if unit.is_canonical:
                 self._canonical[unit.dimension] = unit
+            self._revision += 1
         return unit
 
     def resolve(self, unit: UnitLike) -> Unit:

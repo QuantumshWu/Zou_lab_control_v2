@@ -417,6 +417,7 @@ class DataView:
         "_pooled_cache",
         "_positions_cache",
         "_domain_carry",
+        "_unit_registry_revision",
     )
 
     def __init__(
@@ -472,6 +473,7 @@ class DataView:
         self._schema = schema
         self._axis_display_units = overrides
         self._unit_registry = registry
+        self._unit_registry_revision = registry.revision
         self._axis_cache: dict[AxisRef, _ResolvedAxis] = {}
         self._flat_cache: dict[
             AxisRef,
@@ -492,6 +494,8 @@ class DataView:
             and isinstance(inherit_domains_from, DataView)
             and inherit_domains_from._axis_display_units == overrides
             and inherit_domains_from._unit_registry is registry
+            and inherit_domains_from._unit_registry_revision
+            == self._unit_registry_revision
         ):
             self._domain_carry = inherit_domains_from._domain_carry
         self._samples = SampleProjection(
@@ -2234,8 +2238,20 @@ def _scalar_kind_array(values: NDArray[Any]) -> NDArray[Any]:
     array = np.asarray(values)
     if array.dtype.kind == "f" and array.dtype != np.float64:
         return array.astype(np.float64)
-    if array.dtype.kind in "iu" and array.dtype != np.int64:
+    if array.dtype.kind == "i" and array.dtype != np.int64:
         return array.astype(np.int64)
+    if array.dtype.kind == "u":
+        # The former AxisValue path first converted NumPy scalars to Python
+        # integers.  NumPy then chose int64 only while every value fit;
+        # uint64 values above INT64_MAX remained uint64.  Reproduce that
+        # lossless promotion without rebuilding one Python object per point.
+        if (
+            array.dtype.itemsize < 8
+            or not array.size
+            or int(np.max(array)) <= np.iinfo(np.int64).max
+        ):
+            return array.astype(np.int64)
+        return array.astype(np.uint64, copy=False)
     return array
 
 

@@ -710,11 +710,13 @@ class MatplotlibRenderer:
             int, tuple[tuple[Any, Any, float], ...]
         ] = {}
         self._boundary_chrome_signature: tuple[object, ...] | None = None
-        #: Dense polylines registered for display-resolution envelope
-        #: decimation: id(axes) -> {id(line): (line, sorted x, gapped y)}.
-        #: Re-applied whenever that axes' x window moves (data relimit, zoom,
-        #: pan, home) so a deep zoom falls back to the raw points.
-        self._envelope_lines: dict[int, dict[int, tuple[Any, np.ndarray, np.ndarray]]] = {}
+        #: Canonical raw data behind each displayed line.  The artist may hold
+        #: a display-resolution envelope, but fit-source presentation and any
+        #: future redraw read this one source truth.  Artist retirement and
+        #: relayout retire the matching entry in the same owner.
+        self._line_sources: dict[
+            int, tuple[Any, Any, np.ndarray, np.ndarray]
+        ] = {}
         self._raster_generation = 0
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
@@ -938,6 +940,9 @@ class MatplotlibRenderer:
             self.plan = plan
             self._axes = self._create_axes(figure, plan)
         self._artists.clear()
+        self._line_sources.clear()
+        self._boundary_chrome_cache.clear()
+        self._boundary_chrome_signature = None
         self._selector_artists.clear()
         self._selector_topologies.clear()
         self._forget_gesture_region()
@@ -1126,8 +1131,7 @@ class MatplotlibRenderer:
     ) -> None:
         """Hand a polyline to its artist, enveloped when denser than pixels."""
 
-        entries = self._envelope_lines.setdefault(id(axes), {})
-        entries[id(line)] = (line, x, y)
+        self._line_sources[id(line)] = (line, axes, x, y)
         self._set_enveloped_line(axes, line, x, y)
 
     def _set_enveloped_line(
@@ -1155,14 +1159,12 @@ class MatplotlibRenderer:
             line.set_data(*enveloped)
 
     def _refresh_enveloped_lines(self, axis: Any) -> None:
-        entries = self._envelope_lines.get(id(axis))
-        if not entries:
-            return
-        for line_id, (line, x, y) in tuple(entries.items()):
-            if getattr(line, "axes", None) is not axis:
-                del entries[line_id]
-                continue
-            self._set_enveloped_line(axis, line, x, y)
+        for line_id, (line, owner, x, y) in tuple(self._line_sources.items()):
+            attached = getattr(line, "axes", None)
+            if attached is None:
+                del self._line_sources[line_id]
+            elif owner is axis and attached is axis:
+                self._set_enveloped_line(axis, line, x, y)
 
     def _set_xlim(self, axis: Any, low: float, high: float) -> None:
         previous = np.asarray(axis.get_xlim(), dtype=float)
@@ -1845,6 +1847,8 @@ class MatplotlibRenderer:
             visible = index < count
             if line.get_visible() != visible:
                 line.set_visible(visible)
+            if not visible:
+                self._line_sources.pop(id(line), None)
         return lines
 
     def _update_curve(
@@ -3716,6 +3720,7 @@ class MatplotlibRenderer:
 
     def _remove_artists(self, artists: Iterable[Any]) -> None:
         for artist in tuple(artists):
+            self._line_sources.pop(id(artist), None)
             try:
                 artist.remove()
             except (ValueError, NotImplementedError):
@@ -4184,8 +4189,14 @@ class MatplotlibRenderer:
         point_count = 0
         cap = self.style.render.fit_source_scatter_max_points
         for line in active_lines:
-            x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
-            y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
+            registered = self._line_sources.get(id(line))
+            if registered is not None and registered[0] is line:
+                _line, _axis, raw_x, raw_y = registered
+                x = np.asarray(raw_x, dtype=float).reshape(-1)
+                y = np.asarray(raw_y, dtype=float).reshape(-1)
+            else:
+                x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
+                y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
             if x.shape != y.shape:
                 continue
             pairs.append((x, y))
