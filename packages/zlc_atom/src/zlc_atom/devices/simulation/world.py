@@ -392,7 +392,7 @@ class SimulationWorld:
             np.empty((0, height, width), dtype=float)
         )
         self._extra_occupancy = np.zeros(0, dtype=bool)
-        self._mot_population = 0.0
+        self._mot_population = 1.0
         self._dac_values = {"da_bias_x": 0, "da_bias_y": 0, "da_bias_z": 0}
         #: Read-only pixel coordinate vectors per MOT frame shape.  A frame
         #: shape is a configuration fact, so this holds one or two entries.
